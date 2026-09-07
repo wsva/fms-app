@@ -1,0 +1,175 @@
+@import "tailwindcss";
+@import "@heroui/react/styles";
+
+@theme {
+  --color-logo-primary: var(--accent);
+  --color-mid-gray: var(--gray-mid);
+  --color-bg-body: var(--bg-body);
+  --color-bg-card: var(--bg-card);
+  --color-bg-input: var(--bg-input);
+  --color-bg-elevated: var(--bg-elevated);
+  --color-bg-muted: var(--bg-muted);
+  --color-bg-hover: var(--bg-hover);
+  --color-bg-progress: var(--bg-progress);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-tertiary: var(--text-tertiary);
+  --color-border-default: var(--border-default);
+  --color-border-light: var(--border-light);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-success-bg: var(--success-bg);
+  --color-success-text: var(--success-text);
+  --color-error-bg: var(--error-bg);
+  --color-error-text: var(--error-text);
+  --color-info-bg: var(--info-bg);
+  --color-info-text: var(--info-text);
+}
+
+@layer base {
+  :root {
+    font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+    font-weight: 400;
+
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    -webkit-text-size-adjust: 100%;
+
+    --gray-mid: #808080;
+
+    /* ── Light (default) ─────────────────────────────────── */
+    --bg-body: #fbfbfb;
+    --bg-card: #ffffff;
+    --bg-input: #ffffff;
+    --bg-elevated: #ffffff;
+    --bg-muted: #f0f0f0;
+    --bg-hover: #f5f5f5;
+    --bg-progress: #e0e0e0;
+    --text-primary: #0f0f0f;
+    --text-secondary: #666666;
+    --text-tertiary: #555555;
+    --border-default: #e0e0e0;
+    --border-light: #cccccc;
+    --border-input: #cccccc;
+    --accent: #0EA89A;
+    --accent-hover: #0c9488;
+    --accent-bg: #396cd8;
+    --accent-bg-hover: #2d5bc0;
+    --success-bg: #e6f4ea;
+    --success-text: #1e7e34;
+    --error-bg: #fde8e8;
+    --error-text: #c62828;
+    --info-bg: #e3f2fd;
+    --info-text: #1565c0;
+    --brand-pink: #0EA89A;
+  }
+
+  /* ── Dark ──────────────────────────────────────────────── */
+  [data-theme="dark"] {
+    --bg-body: #1a1a1a;
+    --bg-card: #2a2a2a;
+    --bg-input: #1e1e1e;
+    --bg-elevated: #2a2a2a;
+    --bg-muted: #333333;
+    --bg-hover: #3a3a3a;
+    --bg-progress: #3a3a3a;
+    --text-primary: #f6f6f6;
+    --text-secondary: #999999;
+    --text-tertiary: #bbbbbb;
+    --border-default: #3a3a3a;
+    --border-light: #555555;
+    --border-input: #555555;
+    --accent: #1abfad;
+    --accent-hover: #17a999;
+    --accent-bg: #4a7ce8;
+    --accent-bg-hover: #3d6dd6;
+    --success-bg: #1e3a2a;
+    --success-text: #4caf50;
+    --error-bg: #3a1a1a;
+    --error-text: #ef5350;
+    --info-bg: #1a2a3a;
+    --info-text: #42a5f5;
+    --brand-pink: #f28cbb;
+    --gray-mid: #666666;
+  }
+
+  /* ── Solarized ─────────────────────────────────────────── */
+  [data-theme="solarized"] {
+    --bg-body: #fdf6e3;
+    --bg-card: #eee8d5;
+    --bg-input: #fdf6e3;
+    --bg-elevated: #eee8d5;
+    --bg-muted: #e8e1cc;
+    --bg-hover: #e8e1cc;
+    --bg-progress: #d3cbb7;
+    --text-primary: #586e75;
+    --text-secondary: #657b83;
+    --text-tertiary: #586e75;
+    --border-default: #d3cbb7;
+    --border-light: #c8c1ab;
+    --border-input: #c8c1ab;
+    --accent: #2aa198;
+    --accent-hover: #259189;
+    --accent-bg: #268bd2;
+    --accent-bg-hover: #1f7abf;
+    --success-bg: #d6ebc9;
+    --success-text: #546e3a;
+    --error-bg: #f5d6c7;
+    --error-text: #c65032;
+    --info-bg: #d6e4f0;
+    --info-text: #268bd2;
+    --brand-pink: #2aa198;
+    --gray-mid: #839496;
+  }
+
+  /* ── Gruvbox ───────────────────────────────────────────── */
+  [data-theme="gruvbox"] {
+    --bg-body: #282828;
+    --bg-card: #3c3836;
+    --bg-input: #32302f;
+    --bg-elevated: #3c3836;
+    --bg-muted: #504945;
+    --bg-hover: #504945;
+    --bg-progress: #504945;
+    --text-primary: #ebdbb2;
+    --text-secondary: #a89984;
+    --text-tertiary: #bdae93;
+    --border-default: #504945;
+    --border-light: #665c54;
+    --border-input: #665c54;
+    --accent: #8ec07c;
+    --accent-hover: #7daa6b;
+    --accent-bg: #458588;
+    --accent-bg-hover: #3b7477;
+    --success-bg: #323d2a;
+    --success-text: #b8bb26;
+    --error-bg: #3c2824;
+    --error-text: #fb4934;
+    --info-bg: #2e323d;
+    --info-text: #83a598;
+    --brand-pink: #8ec07c;
+    --gray-mid: #928374;
+  }
+
+  /* Thicker caret for input elements */
+  input, textarea {
+    caret-color: var(--accent);
+  }
+
+  /* Base body styles using variables */
+  :root,
+  [data-theme="light"] {
+    color: var(--text-primary);
+    background-color: var(--bg-body);
+  }
+  [data-theme="dark"],
+  [data-theme="solarized"],
+  [data-theme="gruvbox"] {
+    color: var(--text-primary);
+    background-color: var(--bg-body);
+  }
+}
