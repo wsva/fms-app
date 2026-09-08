@@ -4,7 +4,6 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
-use tauri_plugin_dialog::DialogExt;
 
 // ---------------------------------------------------------------------------
 // Settings struct
@@ -135,7 +134,7 @@ pub async fn settings_set(
 
 #[tauri::command]
 pub async fn settings_pick_folder(
-    app: AppHandle,
+    _app: AppHandle,
     field: String,
 ) -> Result<String, String> {
     let title = match field.as_str() {
