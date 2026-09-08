@@ -2,11 +2,15 @@ mod audio;
 mod auth;
 mod dataset;
 mod dictation;
+mod llm;
+mod llm_model_list;
+mod model;
 mod model_download;
 mod model_list;
 mod settings;
-mod model;
 mod tools;
+mod edge_tts;
+mod p2p;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -63,10 +67,29 @@ pub fn run() {
             auth::auth_login,
             auth::auth_get_user,
             auth::auth_logout,
+            llm::llm_check_connection,
+            llm::llm_list_models,
+            llm::llm_pull_model,
+            llm::llm_delete_model,
+            llm::llm_chat,
+            edge_tts::edge_tts_list_voices,
+            edge_tts::edge_tts_synthesize,
+            p2p::commands::p2p_init,
+            p2p::commands::p2p_get_status,
+            p2p::commands::p2p_get_peers,
+            p2p::commands::p2p_share_model,
+            p2p::commands::p2p_share_dataset,
+            p2p::commands::p2p_unshare,
+            p2p::commands::p2p_list_shared,
+            p2p::commands::p2p_browse_peer,
+            p2p::commands::p2p_download_file,
+            p2p::commands::p2p_connect,
+            p2p::commands::p2p_trust_peer,
         ])
         .manage(model::ModelState::new())
         .manage(settings::SettingsState::new())
         .manage(dataset::DatasetState::new())
+        .manage(p2p::P2PState::new())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

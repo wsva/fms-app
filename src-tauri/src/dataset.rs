@@ -867,14 +867,6 @@ fn create_db_schema(conn: &rusqlite::Connection) -> Result<(), String> {
             reference     TEXT
         );
 
-        CREATE TABLE IF NOT EXISTS listen_subtitle_reference (
-            uuid       TEXT PRIMARY KEY,
-            chunk_uuid TEXT NOT NULL,
-            order_num  INTEGER NOT NULL,
-            content    TEXT NOT NULL,
-            cue_uuid   TEXT
-        );
-
         CREATE TABLE IF NOT EXISTS listen_dictation (
             uuid          TEXT PRIMARY KEY,
             user_id       TEXT NOT NULL,

@@ -6,9 +6,9 @@ import { listen } from "@tauri-apps/api/event";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import { type ModelVersionInfo, type DownloadProgress, type ModelStatus } from "@/lib/models/types";
-import ModelCard from "@/components/models/ModelCard";
-import ModelDetailsDialog from "@/components/models/ModelDetailsDialog";
-import TestSection from "@/components/models/TestSection";
+import ModelCard from "./components/ModelCard";
+import ModelDetailsDialog from "./components/ModelDetailsDialog";
+import TestSection from "./components/TestSection";
 
 // ---------------------------------------------------------------------------
 // Component

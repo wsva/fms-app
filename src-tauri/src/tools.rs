@@ -76,7 +76,7 @@ pub async fn dataset_write_transcripts(
     )
 }
 
-/// Parse book.txt into sentence chunks and write to listen_subtitle_reference.
+/// Validate book.txt exists and can be parsed.
 #[tauri::command]
 pub async fn dataset_parse_book(
     app: AppHandle,
@@ -104,8 +104,8 @@ pub async fn dataset_parse_book(
     )
 }
 
-/// Align subtitle cues with reference text chunks.
-/// Auto-discovers all subtitles in the dataset's database and aligns each.
+/// Align subtitle cues with reference text from book.txt.
+/// Reads book.txt directly, writes matched text to listen_subtitle_cue.reference.
 #[tauri::command]
 pub async fn dataset_align_cues(
     app: AppHandle,

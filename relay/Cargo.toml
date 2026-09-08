@@ -1,0 +1,15 @@
+[package]
+name = "fms-relay"
+version = "0.1.0"
+edition = "2021"
+description = "P2P relay and bootstrap server for fms-app"
+
+[dependencies]
+libp2p = { version = "0.56", features = [
+    "tokio", "tcp", "noise", "yamux",
+    "relay", "identify", "kad", "macros",
+] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+env_logger = "0.11"
+log = "0.4"

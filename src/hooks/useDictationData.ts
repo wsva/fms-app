@@ -10,7 +10,7 @@ import { useImmer } from "use-immer";
 import { isAudio } from "@/lib/listen/utils";
 import { isTauri } from "@/lib/tauri";
 import type { Cue, ListenMedia, ListenSubtitle, ListenDictation } from "@/lib/types";
-import type { WaveformData } from "@/components/pages/listen/WaveformCanvas";
+import type { WaveformData } from "@/components/listen_speak/dictation/components/WaveformCanvas";
 
 const getUUID = () => crypto.randomUUID().replaceAll("-", "");
 

@@ -39,6 +39,14 @@ symphonia = { version = "0.5", features = ["all", "opt-simd"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 log = "0.4"
 tauri-plugin-fs = "2.5.2"
+edge-tts-rust = "0.1"
+libp2p = { version = "0.56", features = [
+    "tokio", "tcp", "noise", "yamux", "mdns",
+    "kad", "request-response", "identify", "macros",
+    "relay", "autonat", "dcutr",
+] }
+async-trait = "0.1"
+futures = "0.3"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

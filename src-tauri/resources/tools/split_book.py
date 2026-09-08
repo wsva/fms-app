@@ -1,14 +1,11 @@
 """
-Parse a book.txt file into sentence-level chunks and write them
-to the listen_subtitle_reference table in the dataset's SQLite database.
+Validate that book.txt exists and can be parsed into sentences.
 
 Usage:
     python split_book.py <db_path> <book_path>
 """
 
-import sqlite3
 import sys
-import uuid
 import re
 
 try:
@@ -27,7 +24,6 @@ def split_sentences_fallback(text):
         line = line.strip()
         if not line:
             continue
-        # Split on sentence-ending punctuation followed by space + uppercase
         parts = re.split(r'(?<=[.!?])\s+(?=[A-Z])', line)
         for part in parts:
             part = part.strip()
@@ -54,42 +50,20 @@ def main():
         print("Usage: python split_book.py <db_path> <book_path>")
         sys.exit(1)
 
-    db_path = sys.argv[1]
     book_path = sys.argv[2]
 
     # Read book text
     with open(book_path, "r", encoding="utf-8") as f:
         text = f.read()
 
-    # Split into sentences
+    if not text.strip():
+        print("Error: book.txt is empty.")
+        sys.exit(1)
+
+    # Split into sentences for counting
     sentences = split_sentences(text)
-    chunk_uuid = uuid.uuid4().hex
-
-    print(f"chunk_uuid:{chunk_uuid}")
     print(f"sentences:{len(sentences)}")
-
-    # Connect to SQLite database
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-
-    # Clear any existing rows for this chunk
-    cur.execute("DELETE FROM listen_subtitle_reference WHERE chunk_uuid = ?", (chunk_uuid,))
-
-    # Insert sentences
-    for order_num, sentence in enumerate(sentences, start=1):
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        row_uuid = uuid.uuid4().hex
-        cur.execute(
-            "INSERT INTO listen_subtitle_reference (uuid, chunk_uuid, order_num, content) VALUES (?, ?, ?, ?)",
-            (row_uuid, chunk_uuid, order_num, sentence),
-        )
-
-    conn.commit()
-    conn.close()
-
-    print("done")
+    print("Validation passed.")
 
 
 if __name__ == "__main__":

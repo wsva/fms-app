@@ -46,6 +46,9 @@ pub struct AppSettings {
     /// Whether the user has completed onboarding.
     #[serde(default)]
     pub onboarding_completed: bool,
+    /// Multiaddr of the P2P relay/bootstrap server (e.g. "/ip4/1.2.3.4/tcp/4001/p2p/12D3KooW...").
+    #[serde(default)]
+    pub p2p_relay_addr: String,
 }
 
 impl Default for AppSettings {
@@ -62,6 +65,7 @@ impl Default for AppSettings {
             selected_model: String::new(),
             model_unload_timeout: ModelUnloadTimeout::default(),
             onboarding_completed: false,
+            p2p_relay_addr: String::new(),
         }
     }
 }

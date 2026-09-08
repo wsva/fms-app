@@ -29,6 +29,7 @@ my_dataset/
 ```
 
 ### info.json
+parent_uuid: used to cooperate with online datasets
 
 ```json
 {
@@ -61,8 +62,9 @@ Stage 0 ──► Stage 1 ──► Stage 2 ──► Stage 3 ──► Stage 4
 | 2a | **Subtitles** | `media/*.mp3` + STT model | `subtitle/*.vtt` | `generate_subtitles.py` |
 | 2b | **Waveforms** | `media/*.mp3` + audiowaveform | `waveform/*.json` | `generate_waveforms.py` |
 | 3 | **Database** | `media/`, `subtitle/`, `transcript/` | `data.sqlite3` | `build_database.py` |
-| 4a | **Parse Book** | `book.txt` + `data.sqlite3` | `listen_subtitle_reference` rows | `parse_book.py` |
-| 4b | **Align Cues** | cues + references in DB | `cue_uuid` links in reference table | `align_cues.py` |
+| 4a | **Split Book** | `book.txt` | `book_sentences.txt` (one sentence per line) | `split_book.py` |
+| 4b | **Align Cues (Book)** | cues + `book_sentences.txt` cache | `reference` column in cue table | `align_cues_book.py` |
+| 4b | **Align Cues (Transcript)** | cues + `transcript/*.txt` | `reference` column in cue table | `align_cues_transcript.py` |
 | 4c | **Write Transcripts** | `transcript/*.txt` + DB | `listen_transcript` rows | `write_transcripts.py` |
 
 ### Stage Details
@@ -82,11 +84,14 @@ Calls `audiowaveform` (BBC tool) to produce waveform JSON for each media file. T
 **Stage 3 — Build Database**
 Parses all VTT subtitles, media file listings, and optional transcripts into a SQLite database (`data.sqlite3`). Creates the full schema (see below). This is the central data store consumed by the app.
 
-**Stage 4a — Parse Book**
-Splits `book.txt` into sentence-sized chunks and inserts them into `listen_subtitle_reference`. These chunks serve as the "ground truth" text for alignment.
+**Stage 4a — Split Book**
+Splits `book.txt` into sentences using NLTK (with regex fallback) and writes one sentence per line to `book_sentences.txt`. This serves as a cache for the alignment step.
 
-**Stage 4b — Align Cues**
-Uses dynamic programming to match each subtitle cue to its corresponding reference chunk (from the book or transcript). Writes the `cue_uuid` back into the reference table.
+**Stage 4b — Align Cues (Book)**
+Reads sentences from `book_sentences.txt` (cached) or falls back to splitting `book.txt` on-the-fly. Uses dynamic programming to match each subtitle cue to its corresponding reference sentence. Writes the matched reference text directly to `listen_subtitle_cue.reference`.
+
+**Stage 4b — Align Cues (Transcript)**
+For each subtitle, finds its corresponding transcript file (`transcript/{stem}.txt`), splits into sentences, and aligns cues with those sentences. This is more accurate than book-based alignment when transcripts are available, since each transcript is the exact text of one audio file.
 
 **Stage 4c — Write Transcripts**
 Imports plain-text transcript files into the `listen_transcript` table, linked to their corresponding media entry.
@@ -141,15 +146,6 @@ CREATE TABLE listen_subtitle_cue (
     reference     TEXT                -- matched reference text (after alignment)
 );
 
--- Reference text chunks (from book.txt or transcript)
-CREATE TABLE listen_subtitle_reference (
-    uuid       TEXT PRIMARY KEY,
-    chunk_uuid TEXT NOT NULL,         -- subtitle this reference belongs to
-    order_num  INTEGER NOT NULL,
-    content    TEXT NOT NULL,
-    cue_uuid   TEXT                   -- filled by alignment
-);
-
 -- Dictation progress tracking
 CREATE TABLE listen_dictation (
     uuid          TEXT PRIMARY KEY,
@@ -170,28 +166,40 @@ CREATE TABLE listen_dictation (
 
 ```
 dataset_studio/
-├── README.md
-├── requirements.txt           # Python dependencies
-├── config.py                  # Shared configuration (paths, defaults)
+├── README.md                      # User guide
+├── DESIGN.md                      # Technical design doc
+├── DESIGN_ADMIN.md                # Admin-only design doc
+├── environment.yml                # Conda environment definition
+├── config.py                      # Shared configuration (paths, defaults)
 │
-├── init_dataset.py            # Stage 0: create directory structure + info.json
-├── import_media.py            # Stage 1: copy/link audio files into media/
-├── generate_subtitles.py      # Stage 2a: STT → VTT files
-├── generate_waveforms.py      # Stage 2b: audiowaveform → JSON files
-├── build_database.py          # Stage 3: populate data.sqlite3
-├── parse_book.py              # Stage 4a: book.txt → reference chunks
-├── align_cues.py              # Stage 4b: DP alignment of cues ↔ references
-├── write_transcripts.py       # Stage 4c: transcript files → DB
+├── scripts/                       # Pipeline scripts
+│   ├── .env                       # Script configuration (gitignored)
+│   ├── init_dataset.py            # Stage 0: create directory structure + info.json
+│   ├── import_media.py            # Stage 1: copy/link audio files into media/
+│   ├── generate_subtitles.py      # Stage 2a: STT → VTT files
+│   ├── generate_waveforms.py      # Stage 2b: audiowaveform → JSON files
+│   ├── build_database.py          # Stage 3: populate data.sqlite3
+│   ├── parse_book.py              # Stage 4a: book.txt → reference chunks
+│   ├── align_cues.py              # Stage 4b: DP alignment of cues ↔ references
+│   └── write_transcripts.py       # Stage 4c: transcript files → DB
 │
-├── lib/                       # Shared library modules
+├── scripts_admin/                 # Admin-only scripts
+│   └── .env                       # Production DB credentials (gitignored)
+│
+├── lib/                           # Shared library modules
 │   ├── __init__.py
-│   ├── dataset.py             # Dataset discovery, info.json read/write
-│   ├── schema.py              # SQLite schema creation
-│   ├── vtt.py                 # VTT parser (timestamp parsing, cue extraction)
-│   ├── alignment.py           # DP alignment engine (reusable)
-│   └── text.py                # Text normalization, sentence splitting
+│   ├── dataset.py                 # Dataset discovery, info.json read/write
+│   ├── schema.py                  # SQLite schema creation
+│   ├── stt/                       # STT engine abstraction
+│   │   ├── __init__.py
+│   │   ├── base.py                # Abstract engine interface + data types
+│   │   ├── parakeet.py            # Parakeet CTC / TDT via onnxruntime
+│   │   └── common.py              # Audio loading (librosa)
+│   ├── vtt.py                     # VTT parser (timestamp parsing, cue extraction)
+│   ├── alignment.py               # DP alignment engine (reusable)
+│   └── text.py                    # Text normalization, sentence splitting
 │
-└── tests/                     # Unit tests
+└── tests/                         # Unit tests (future)
     ├── test_vtt.py
     ├── test_alignment.py
     └── test_text.py
@@ -207,46 +215,97 @@ dataset_studio/
 
 ---
 
-## External Dependencies
+## Environment & Dependencies
+
+All Python dependencies are managed through a **Miniconda3** environment named `dataset_studio`.
+
+### Setup
+
+```bash
+# Create the environment from the definition file
+conda env create -f environment.yml
+
+# Activate it
+conda activate dataset_studio
+```
+
+### STT Models (shared with fms-app)
+
+The Python scripts use **onnxruntime** to run the same ONNX models already downloaded by the fms-app desktop client. No need to download models twice.
+
+| fms-app Model | Engine | ONNX Files | Python Module |
+|---------------|--------|------------|---------------|
+| parakeet-v2 | Parakeet CTC | `model.onnx`, `model.onnx_data`, `tokenizer.json` | `lib/stt/parakeet.py` |
+| parakeet-v3 | Parakeet TDT | `encoder-model.onnx`, `encoder-model.onnx.data`, `decoder_joint-model.onnx`, `vocab.txt` | `lib/stt/parakeet.py` |
+| moonshine-base | Moonshine | ONNX encoder + config | `lib/stt/moonshine.py` |
+| moonshine-tiny/small/medium | Moonshine Streaming | ONNX encoder + config | `lib/stt/moonshine.py` |
+| sense-voice | SenseVoice | ONNX model + config | (future) |
+| canary-flash / canary-1b | Canary | ONNX encoder/decoder | (future) |
+| cohere | Cohere | ONNX model | (future) |
+
+> **Note**: Whisper GGUF models (`whisper-small/medium/turbo/large`) use a different format (GGML) and are not compatible with onnxruntime. For Whisper models, use separate tooling like `pywhispercpp`.
+
+### Model Directory
+
+fms-app stores downloaded models in the platform data directory. The Python scripts locate them automatically via `config.py`:
+
+| OS | Path |
+|----|------|
+| Windows | `%LOCALAPPDATA%\fms-app\models\<model-id>\` |
+| macOS | `~/Library/Application Support/fms-app/models/<model-id>/` |
+| Linux | `~/.local/share/fms-app/models/<model-id>/` |
+
+Override via environment variable or `config.py`:
+
+```python
+# config.py
+import os
+MODEL_DIR = os.environ.get("FMS_MODEL_DIR", default_model_dir())
+DEFAULT_MODEL = "parakeet-v3"  # fast, accurate, 25 European languages
+```
+
+### External Tools
 
 | Tool | Purpose | Required By |
 |------|---------|-------------|
 | [audiowaveform](https://github.com/bbc/audiowaveform) | Generate waveform JSON from audio | `generate_waveforms.py` |
-| STT model (e.g. Whisper via `transcribe_rs` or `faster-whisper`) | Speech-to-text transcription | `generate_subtitles.py` |
-| Python 3.10+ | Runtime | All scripts |
+
+`audiowaveform` is not a Python package — install it separately via your system package manager or from [pre-built binaries](https://github.com/bbc/audiowaveform/releases).
 
 ---
 
 ## Usage
 
+Make sure the conda environment is activated first:
+
 ```bash
-# 0. Initialize a new dataset
-python init_dataset.py /data/my_dataset --name "My Dataset" --description "..."
-
-# 1. Add media files
-python import_media.py /data/my_dataset /path/to/audio_files/
-
-# 2a. Generate subtitles (requires STT model)
-python generate_subtitles.py /data/my_dataset --model large-v3
-
-# 2b. Generate waveforms (requires audiowaveform)
-python generate_waveforms.py /data/my_dataset
-
-# 3. Build the database
-python build_database.py /data/my_dataset
-
-# 4a. Parse book (optional, requires book.txt in dataset dir)
-python parse_book.py /data/my_dataset
-
-# 4b. Align cues with references
-python align_cues.py /data/my_dataset
-
-# 4c. Import transcripts (optional)
-python write_transcripts.py /data/my_dataset
+conda activate dataset_studio
 ```
 
----
+Then run the pipeline scripts:
 
-## Export from Production
+```bash
+# 0. Initialize a new dataset
+python scripts/init_dataset.py /data/my_dataset --name "My Dataset" --description "..."
 
-Datasets can also be exported from the FMS website by connecting directly to the production database and extracting the relevant rows. This is a separate workflow not covered by the build pipeline scripts.
+# 1. Add media files
+python scripts/import_media.py /data/my_dataset /path/to/audio_files/
+
+# 2a. Generate subtitles (uses ONNX models from fms-app)
+python scripts/generate_subtitles.py /data/my_dataset --model parakeet-v3
+
+# 2b. Generate waveforms (requires audiowaveform)
+python scripts/generate_waveforms.py /data/my_dataset
+
+# 3. Build the database
+python scripts/build_database.py /data/my_dataset
+
+# 4a. Parse book (optional, requires book.txt in dataset dir)
+python scripts/parse_book.py /data/my_dataset
+
+# 4b. Align cues with references
+python scripts/align_cues.py /data/my_dataset
+
+# 4c. Import transcripts (optional)
+python scripts/write_transcripts.py /data/my_dataset
+```

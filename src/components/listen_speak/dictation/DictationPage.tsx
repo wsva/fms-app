@@ -7,9 +7,9 @@
 
 import { ProgressCircle, Input, Select, Tabs, ListBox, Label, TextField, Separator, Button } from "@heroui/react";
 import { MdCheckCircle } from "react-icons/md";
-import CueEditor from "./listen/CueEditor";
-import SubtitleItem from "./listen/Subtitle";
-import WaveformCanvas from "./listen/WaveformCanvas";
+import CueEditor from "./components/CueEditor";
+import SubtitleItem from "./components/Subtitle";
+import WaveformCanvas from "./components/WaveformCanvas";
 import type { Cue } from "@/lib/types";
 import { useDictationData } from "@/hooks/useDictationData";
 

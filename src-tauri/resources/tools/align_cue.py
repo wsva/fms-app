@@ -1,5 +1,6 @@
 """
-Align subtitle cues with reference text chunks using dynamic programming.
+Align subtitle cues with reference text from book.txt using dynamic programming.
+Reads book.txt directly, writes matched text to listen_subtitle_cue.reference.
 
 Usage:
     python align_cue.py <db_path> <subtitle_uuid>
@@ -10,6 +11,15 @@ import sqlite3
 import sys
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from pathlib import Path
+
+try:
+    import nltk
+    nltk.download("punkt", quiet=True)
+    from nltk.tokenize import sent_tokenize
+    HAS_NLTK = True
+except ImportError:
+    HAS_NLTK = False
 
 
 # ============================================================
@@ -50,10 +60,7 @@ def normalize(text: str) -> str:
 
 
 def similarity_score(cue_text: str, ref_text: str) -> float:
-    """
-    0~100
-    """
-
+    """0~100"""
     cue_text = normalize(cue_text)
     ref_text = normalize(ref_text)
 
@@ -64,8 +71,35 @@ def similarity_score(cue_text: str, ref_text: str) -> float:
         return 90
 
     ratio = SequenceMatcher(None, cue_text, ref_text).ratio()
-
     return ratio * 80
+
+
+def split_sentences_fallback(text):
+    """Simple sentence splitting without NLTK."""
+    sentences = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        parts = re.split(r'(?<=[.!?])\s+(?=[A-Z])', line)
+        for part in parts:
+            part = part.strip()
+            if part:
+                sentences.append(part)
+    return sentences
+
+
+def split_sentences(text):
+    if HAS_NLTK:
+        sentences = []
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            sentences.extend(sent_tokenize(line))
+        return sentences
+    else:
+        return split_sentences_fallback(text)
 
 
 # ============================================================
@@ -79,7 +113,6 @@ def build_cue_candidates(cues):
         cue[i]+cue[i+1]
         cue[i]+cue[i+1]+cue[i+2]
     """
-
     candidates = []
     n = len(cues)
     for i in range(n):
@@ -162,86 +195,40 @@ def align(cues, refs):
             j -= 1
 
     matches.reverse()
-
     return matches
-
-
-# ============================================================
-# Merge-cue matching
-# ============================================================
-
-def align_with_merges(cues, refs):
-    assignments = {}
-    candidates = build_cue_candidates(cues)
-    used_refs = set()
-
-    for candidate in candidates:
-        best_ref = None
-        best_score = 0
-
-        for ref in refs:
-            if ref.uuid in used_refs:
-                continue
-
-            score = similarity_score(candidate["content"], ref.content)
-
-            if score > best_score:
-                best_score = score
-                best_ref = ref
-
-        if best_ref and best_score >= 90:
-            for cue_uuid in candidate["uuids"]:
-                assignments[cue_uuid] = best_ref.uuid
-
-            used_refs.add(best_ref.uuid)
-
-    return assignments
 
 
 # ============================================================
 # Database
 # ============================================================
 
-def load_subtitle(conn, subtitle_uuid):
+def load_cues(conn, subtitle_uuid):
     cur = conn.cursor()
-
     cur.execute("""
-        SELECT uuid,
-               order_num,
-               content
+        SELECT uuid, order_num, content
         FROM listen_subtitle_cue
         WHERE subtitle_uuid=?
         ORDER BY order_num
     """, (subtitle_uuid,))
-
-    cues = [Cue(*row) for row in cur.fetchall()]
-
-    cur.execute("""
-        SELECT uuid,
-               order_num,
-               content
-        FROM listen_subtitle_reference
-        WHERE chunk_uuid=?
-        ORDER BY order_num
-    """, (subtitle_uuid,))
-
-    refs = [Ref(*row) for row in cur.fetchall()]
-
-    return cues, refs
+    return [Cue(*row) for row in cur.fetchall()]
 
 
-def update_matches(conn, matches):
+def load_refs_from_book(book_path):
+    """Read book.txt and split into sentence-level Ref objects."""
+    text = Path(book_path).read_text(encoding="utf-8")
+    sentences = split_sentences(text)
+    return [Ref(uuid=str(i), order_num=i, content=s) for i, s in enumerate(sentences)]
+
+
+def update_cue_references(conn, matches):
+    """Write matched reference text to listen_subtitle_cue.reference."""
     cur = conn.cursor()
     for cue, ref, score in matches:
         cur.execute("""
-            UPDATE listen_subtitle_reference
-            SET cue_uuid=?
+            UPDATE listen_subtitle_cue
+            SET reference=?
             WHERE uuid=?
-        """, (
-            cue.uuid,
-            ref.uuid
-        ))
-
+        """, (ref.content, cue.uuid))
     conn.commit()
 
 
@@ -249,12 +236,21 @@ def update_matches(conn, matches):
 # Main
 # ============================================================
 
-def process_subtitle(db_path, subtitle_uuid):
+def process_subtitle(db_path, subtitle_uuid, book_path):
     conn = sqlite3.connect(db_path)
     try:
-        cues, refs = load_subtitle(conn, subtitle_uuid)
+        cues = load_cues(conn, subtitle_uuid)
+        if not cues:
+            print(f"matched:0 (no cues found)")
+            return
+
+        refs = load_refs_from_book(book_path)
+        if not refs:
+            print(f"matched:0 (no sentences in book.txt)")
+            return
+
         matches = align(cues, refs)
-        update_matches(conn, matches)
+        update_cue_references(conn, matches)
         print(f"matched:{len(matches)}")
     finally:
         conn.close()
@@ -265,19 +261,13 @@ if __name__ == "__main__":
         print("Usage: python align_cue.py <db_path> <subtitle_uuid>")
         sys.exit(1)
 
-    # create reference text table
-    # init this table only for one media, clear after processing
-    conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS listen_subtitle_reference (
-            uuid TEXT PRIMARY KEY,
-            order_num INTEGER,
-            content TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-
     db_path = sys.argv[1]
     subtitle_uuid = sys.argv[2]
-    process_subtitle(db_path, subtitle_uuid)
+
+    # Derive book.txt path from db_path (same directory)
+    book_path = Path(db_path).parent / "book.txt"
+    if not book_path.exists():
+        print(f"Error: book.txt not found at {book_path}")
+        sys.exit(1)
+
+    process_subtitle(db_path, subtitle_uuid, str(book_path))

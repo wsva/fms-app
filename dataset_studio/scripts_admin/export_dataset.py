@@ -2,20 +2,24 @@
 Export dataset from PostgreSQL to SQLite3 format for the Tauri desktop app.
 """
 
-import json
 import os
 import re
 import sqlite3
-from datetime import datetime, timezone
-
 import psycopg
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load credentials from .env
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 DB_CONFIG = {
-    "dbname": "fmsdb",
-    "user": "postgres",
-    "password": "Umweltverschmutzung",
-    "host": "100.114.210.109",  # "100.114.210.109",
-    "port": "15432",
+    "dbname": os.environ["PROD_DB_NAME"],
+    "user": os.environ["PROD_DB_USER"],
+    "password": os.environ["PROD_DB_PASSWORD"],
+    "host": os.environ["PROD_DB_HOST"],
+    "port": os.environ["PROD_DB_PORT"],
 }
 
 DATASET_UUID = "67f077edcf584df88eea53696cde60f3"
@@ -51,18 +55,6 @@ CREATE TABLE IF NOT EXISTS listen_subtitle_cue (
     end_ms        INTEGER NOT NULL,
     content       TEXT NOT NULL,
     reference     TEXT
-);
-
-CREATE TABLE IF NOT EXISTS listen_dictation (
-    uuid          TEXT PRIMARY KEY,
-    user_id       TEXT NOT NULL,
-    media_uuid    TEXT NOT NULL,
-    subtitle_uuid TEXT NOT NULL,
-    status        TEXT NOT NULL DEFAULT '',
-    completed     TEXT NOT NULL DEFAULT '',
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(user_id, media_uuid, subtitle_uuid)
 );
 """
 
@@ -134,6 +126,9 @@ if __name__ == "__main__":
     media_title_map = {row[0]: row[2] for row in media_rows}
     for row in media_rows:
         media_uuid, uid, title, source, note, created_at, updated_at = row
+        # get the file name from a path
+        file_name = Path(source).name
+        print(f"  media: {file_name}")
         sqlite_cur.execute(
             "INSERT INTO listen_media (uuid, user_id, title, source, note, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -141,7 +136,7 @@ if __name__ == "__main__":
                 media_uuid,
                 uid,
                 title,
-                source,
+                file_name,
                 note or "",
                 ts_to_str(created_at),
                 ts_to_str(updated_at),

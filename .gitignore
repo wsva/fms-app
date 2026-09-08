@@ -10,9 +10,11 @@ lerna-debug.log*
 # Build output
 .next/
 out/
+tsconfig.tsbuildinfo
 
 # Rust
 src-tauri/target/
+relay/target/
 
 # Node
 node_modules
@@ -29,6 +31,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.env
 
 # Editor directories and files
 .vscode/*

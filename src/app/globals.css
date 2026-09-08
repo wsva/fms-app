@@ -18,6 +18,8 @@
   --color-border-light: var(--border-light);
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
+  --color-accent-bg: var(--accent-bg);
+  --color-accent-bg-hover: var(--accent-bg-hover);
   --color-success-bg: var(--success-bg);
   --color-success-text: var(--success-text);
   --color-error-bg: var(--error-bg);
