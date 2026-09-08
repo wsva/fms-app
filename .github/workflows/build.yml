@@ -10,7 +10,7 @@ on:
 
 jobs:
   # ──────────────────────────────────────────────
-  # Desktop builds (Windows, Linux, macOS)
+  # Desktop builds (Windows, Linux)
   # ──────────────────────────────────────────────
   build-desktop:
     name: ${{ matrix.label }}
@@ -22,8 +22,6 @@ jobs:
             label: Windows
           - os: ubuntu-22.04
             label: Linux
-          - os: macos-latest
-            label: macOS
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -46,10 +44,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-
-      - name: Install macOS dependencies
-        if: runner.os == 'macOS'
-        run: brew install cmake
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -78,50 +72,6 @@ jobs:
             src-tauri/target/release/bundle/**/*.deb
             src-tauri/target/release/bundle/**/*.rpm
             src-tauri/target/release/bundle/**/*.AppImage
-            src-tauri/target/release/bundle/**/*.dmg
-            src-tauri/target/release/bundle/**/*.app
-
-  # ──────────────────────────────────────────────
-  # iOS build (requires macOS runner + Xcode)
-  # ──────────────────────────────────────────────
-  build-ios:
-    name: iOS
-    runs-on: macos-latest
-    needs: build-desktop
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
-
-      - name: Install frontend dependencies
-        run: pnpm install
-
-      - name: Build iOS
-        run: pnpm tauri ios build --target aarch64-apple-ios
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: fms-app-ios
-          path: src-tauri/gen/apple/target/aarch64-apple-ios/release/bundle/**/*.ipa
 
   # ──────────────────────────────────────────────
   # Android build
@@ -129,7 +79,6 @@ jobs:
   build-android:
     name: Android
     runs-on: ubuntu-22.04
-    needs: build-desktop
     steps:
       - uses: actions/checkout@v4
 
