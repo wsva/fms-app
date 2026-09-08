@@ -38,9 +38,11 @@
       "icons/icon.icns",
       "icons/icon.ico",
       "icons/icon.png"
-    ],
-    "externalBin": [
-      "binaries/audiowaveform"
     ]
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
   }
 }

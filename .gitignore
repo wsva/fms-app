@@ -45,3 +45,4 @@ venv/
 *.sw?
 
 learning
+dataset_studio/dataset_exports
