@@ -79,7 +79,8 @@ if __name__ == "__main__":
     # ── Fetch all datasets ──────────────────────────────────────────────────
     pg_cur.execute(
         "SELECT uuid, user_id, tag, description, parent_uuid "
-        "FROM dataset_tag ORDER BY tag"
+        "FROM dataset_tag "
+        "WHERE exists (SELECT 1 FROM listen_media_tag WHERE tag_uuid = dataset_tag.uuid)"
     )
     dataset_rows = pg_cur.fetchall()
     if not dataset_rows:
