@@ -10,3 +10,4 @@ dependencies:
   - sqlite
   - nltk
   - python-dotenv
+  - psycopg
