@@ -122,6 +122,9 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
 
+      - name: Initialize Android project
+        run: pnpm tauri android init
+
       - name: Build Android
         env:
           NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
