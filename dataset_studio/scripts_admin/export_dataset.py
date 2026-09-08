@@ -22,8 +22,6 @@ DB_CONFIG = {
     "port": os.environ["PROD_DB_PORT"],
 }
 
-DATASET_UUID = "67f077edcf584df88eea53696cde60f3"
-
 # ── SQLite schema (must match src-tauri/src/dataset.rs) ─────────────────────
 
 SQLITE_SCHEMA = """
@@ -78,174 +76,179 @@ if __name__ == "__main__":
     pg_conn = psycopg.connect(**DB_CONFIG)
     pg_cur = pg_conn.cursor()
 
+    # ── Fetch all datasets ──────────────────────────────────────────────────
     pg_cur.execute(
         "SELECT uuid, user_id, tag, description, parent_uuid "
-        "FROM dataset_tag WHERE uuid = %s",
-        (DATASET_UUID,),
+        "FROM dataset_tag ORDER BY tag"
     )
     dataset_rows = pg_cur.fetchall()
-    if len(dataset_rows) < 1:
-        print("  no dataset found")
+    if not dataset_rows:
+        print("  no datasets found")
         os._exit(1)
 
-    dataset_uuid = str(dataset_rows[0][0])
-    user_id = str(dataset_rows[0][1])
-    dataset_name = str(dataset_rows[0][2])
-    dataset_description = str(dataset_rows[0][3])
-    dataset_parent_uuid = str(dataset_rows[0][4])
-    print(f"  dataset_name:   {dataset_name}")
+    print(f"  found {len(dataset_rows)} dataset(s)\n")
 
-    # ── Prepare output directory ─────────────────────────────────────────────
+    for ds_idx, ds_row in enumerate(dataset_rows, 1):
+        dataset_uuid = str(ds_row[0])
+        user_id = str(ds_row[1])
+        dataset_name = str(ds_row[2])
+        dataset_description = str(ds_row[3])
+        dataset_parent_uuid = str(ds_row[4])
+        print(f"\n[{ds_idx}/{len(dataset_rows)}] Exporting: {dataset_name} ({dataset_uuid})")
 
-    output_dir = os.path.join("dataset_exports", dataset_name.lower())
-    os.makedirs(output_dir, exist_ok=True)
-    media_dir = os.path.join(output_dir, "media")
-    transcript_dir = os.path.join(output_dir, "transcript")
-    os.makedirs(media_dir, exist_ok=True)
-    os.makedirs(transcript_dir, exist_ok=True)
+        # ── Prepare output directory ─────────────────────────────────────────
 
-    db_path = os.path.join(output_dir, "data.sqlite3")
-    if os.path.exists(db_path):
-        os.remove(db_path)
+        safe_dir = sanitize_filename(dataset_name).lower()
+        output_dir = os.path.join("dataset_exports", safe_dir)
+        os.makedirs(output_dir, exist_ok=True)
+        media_dir = os.path.join(output_dir, "media")
+        transcript_dir = os.path.join(output_dir, "transcript")
+        os.makedirs(media_dir, exist_ok=True)
+        os.makedirs(transcript_dir, exist_ok=True)
 
-    sqlite_conn = sqlite3.connect(db_path)
-    sqlite_cur = sqlite_conn.cursor()
-    sqlite_cur.executescript(SQLITE_SCHEMA)
-    sqlite_conn.commit()
-    print(f"Created SQLite database: {db_path}")
+        db_path = os.path.join(output_dir, "data.sqlite3")
+        if os.path.exists(db_path):
+            os.remove(db_path)
 
-    # ── 1. Export listen_media ───────────────────────────────────────────────
+        sqlite_conn = sqlite3.connect(db_path)
+        sqlite_cur = sqlite_conn.cursor()
+        sqlite_cur.executescript(SQLITE_SCHEMA)
+        sqlite_conn.commit()
+        print(f"  Created SQLite database: {db_path}")
 
-    pg_cur.execute(
-        "SELECT lm.uuid, lm.user_id, lm.title, lm.source, lm.note, lm.created_at, lm.updated_at "
-        "FROM listen_media lm, listen_media_tag lmt "
-        "WHERE lm.uuid = lmt.media_uuid and lmt.tag_uuid = %s ORDER BY title",
-        (dataset_uuid,),
-    )
-    media_rows = pg_cur.fetchall()
-    media_title_map = {row[0]: row[2] for row in media_rows}
-    for row in media_rows:
-        media_uuid, uid, title, source, note, created_at, updated_at = row
-        # get the file name from a path
-        file_name = Path(source).name
-        print(f"  media: {file_name}")
-        sqlite_cur.execute(
-            "INSERT INTO listen_media (uuid, user_id, title, source, note, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                media_uuid,
-                uid,
-                title,
-                file_name,
-                note or "",
-                ts_to_str(created_at),
-                ts_to_str(updated_at),
-            ),
-        )
+        # ── 1. Export listen_media ───────────────────────────────────────────
 
-        # export subtitle metadata
         pg_cur.execute(
-            "SELECT uuid, user_id, media_uuid, language, subtitle, format, created_at, updated_at "
-            "FROM listen_subtitle WHERE media_uuid = %s ORDER BY created_at",
-            (media_uuid,),
+            "SELECT lm.uuid, lm.user_id, lm.title, lm.source, lm.note, lm.created_at, lm.updated_at "
+            "FROM listen_media lm, listen_media_tag lmt "
+            "WHERE lm.uuid = lmt.media_uuid and lmt.tag_uuid = %s ORDER BY title",
+            (dataset_uuid,),
         )
-        subtitle_rows = pg_cur.fetchall()
-        for row in subtitle_rows:
-            (
-                subtitle_uuid,
-                uid,
-                media_uuid,
-                language,
-                subtitle_text,
-                fmt,
-                created_at,
-                updated_at,
-            ) = row
-            # Map PG columns → SQLite columns
-            name = f"default ({uid})"
-            note = ""
+        media_rows = pg_cur.fetchall()
+        media_title_map = {row[0]: row[2] for row in media_rows}
+        for row in media_rows:
+            media_uuid, uid, title, source, note, created_at, updated_at = row
+            # get the file name from a path
+            file_name = Path(source).name
+            print(f"  media: {file_name}")
             sqlite_cur.execute(
-                "INSERT INTO listen_subtitle (uuid, user_id, media_uuid, name, note, created_at, updated_at) "
+                "INSERT INTO listen_media (uuid, user_id, title, source, note, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
-                    subtitle_uuid,
-                    uid,
                     media_uuid,
-                    name,
-                    note,
+                    uid,
+                    title,
+                    file_name,
+                    note or "",
                     ts_to_str(created_at),
                     ts_to_str(updated_at),
                 ),
             )
 
-            # export cues
+            # export subtitle metadata
             pg_cur.execute(
-                "SELECT uuid, subtitle_uuid, order_num, start_ms, end_ms, content, reference "
-                "FROM listen_subtitle_cue WHERE subtitle_uuid = %s ORDER BY order_num",
-                (subtitle_uuid,),
+                "SELECT uuid, user_id, media_uuid, language, subtitle, format, created_at, updated_at "
+                "FROM listen_subtitle WHERE media_uuid = %s ORDER BY created_at",
+                (media_uuid,),
             )
-            cue_rows = pg_cur.fetchall()
-            for row in cue_rows:
-                uuid, subtitle_uuid, order_num, start_ms, end_ms, content, reference = (
-                    row
-                )
+            subtitle_rows = pg_cur.fetchall()
+            for row in subtitle_rows:
+                (
+                    subtitle_uuid,
+                    uid,
+                    media_uuid,
+                    language,
+                    subtitle_text,
+                    fmt,
+                    created_at,
+                    updated_at,
+                ) = row
+                # Map PG columns → SQLite columns
+                name = f"default ({uid})"
+                note = ""
                 sqlite_cur.execute(
-                    "INSERT INTO listen_subtitle_cue (uuid, subtitle_uuid, order_num, start_ms, end_ms, content, reference) "
+                    "INSERT INTO listen_subtitle (uuid, user_id, media_uuid, name, note, created_at, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
-                        uuid,
                         subtitle_uuid,
-                        order_num,
-                        start_ms,
-                        end_ms,
-                        content,
-                        reference,
+                        uid,
+                        media_uuid,
+                        name,
+                        note,
+                        ts_to_str(created_at),
+                        ts_to_str(updated_at),
                     ),
                 )
-            print(f"  listen_subtitle_cue:   {len(cue_rows)} rows")
-        print(f"  subtitle_rows:   {len(subtitle_rows)} rows")
 
-        # export transcripts
-        pg_cur.execute(
-            "SELECT uuid, user_id, media_uuid, transcript, created_at, updated_at "
-            "FROM listen_transcript WHERE media_uuid = %s ORDER BY created_at",
-            (media_uuid,),
-        )
-        transcript_rows = pg_cur.fetchall()
-        for row in transcript_rows:
-            uuid, uid, media_uuid, transcript_text, created_at, updated_at = row
-            # Write transcript text to file
-            if transcript_text:
-                media_title = media_title_map.get(media_uuid, media_uuid)
-                safe_name = sanitize_filename(media_title)
-                txt_path = os.path.join(transcript_dir, f"{safe_name}.txt")
-                with open(txt_path, "w", encoding="utf-8") as f:
-                    f.write(transcript_text)
-        print(f"  listen_transcript:     {len(transcript_rows)} rows")
+                # export cues
+                pg_cur.execute(
+                    "SELECT uuid, subtitle_uuid, order_num, start_ms, end_ms, content, reference "
+                    "FROM listen_subtitle_cue WHERE subtitle_uuid = %s ORDER BY order_num",
+                    (subtitle_uuid,),
+                )
+                cue_rows = pg_cur.fetchall()
+                for row in cue_rows:
+                    uuid, subtitle_uuid, order_num, start_ms, end_ms, content, reference = (
+                        row
+                    )
+                    sqlite_cur.execute(
+                        "INSERT INTO listen_subtitle_cue (uuid, subtitle_uuid, order_num, start_ms, end_ms, content, reference) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            uuid,
+                            subtitle_uuid,
+                            order_num,
+                            start_ms,
+                            end_ms,
+                            content,
+                            reference,
+                        ),
+                    )
+                print(f"  listen_subtitle_cue:   {len(cue_rows)} rows")
+            print(f"  subtitle_rows:   {len(subtitle_rows)} rows")
 
-    sqlite_conn.commit()
-    print(f"  listen_media:          {len(media_rows)} rows")
+            # export transcripts
+            pg_cur.execute(
+                "SELECT uuid, user_id, media_uuid, transcript, created_at, updated_at "
+                "FROM listen_transcript WHERE media_uuid = %s ORDER BY created_at",
+                (media_uuid,),
+            )
+            transcript_rows = pg_cur.fetchall()
+            for row in transcript_rows:
+                uuid, uid, media_uuid, transcript_text, created_at, updated_at = row
+                # Write transcript text to file
+                if transcript_text:
+                    media_title = media_title_map.get(media_uuid, media_uuid)
+                    safe_name = sanitize_filename(media_title)
+                    txt_path = os.path.join(transcript_dir, f"{safe_name}.txt")
+                    with open(txt_path, "w", encoding="utf-8") as f:
+                        f.write(transcript_text)
+            print(f"  listen_transcript:     {len(transcript_rows)} rows")
 
-    # ── Write info.json ──────────────────────────────────────────────────────
+        sqlite_conn.commit()
+        print(f"  listen_media:          {len(media_rows)} rows")
 
-    info = {
-        "name": dataset_name,
-        "uuid": dataset_uuid,
-        "description": dataset_description,
-        "parent_uuid": dataset_parent_uuid if dataset_parent_uuid != "None" else "",
-        "version": 1,
-        "structure": "dictation-v1",
-        "updated": datetime.now(timezone.utc).isoformat(),
-    }
-    info_path = os.path.join(output_dir, "info.json")
-    with open(info_path, "w", encoding="utf-8") as f:
-        json.dump(info, f, indent=2, ensure_ascii=False)
-    print(f"  info.json written")
+        # ── Write info.json ──────────────────────────────────────────────────
+
+        info = {
+            "name": dataset_name,
+            "uuid": dataset_uuid,
+            "description": dataset_description,
+            "parent_uuid": dataset_parent_uuid if dataset_parent_uuid != "None" else "",
+            "version": 1,
+            "structure": "dictation-v1",
+            "updated": datetime.now(timezone.utc).isoformat(),
+        }
+        info_path = os.path.join(output_dir, "info.json")
+        with open(info_path, "w", encoding="utf-8") as f:
+            json.dump(info, f, indent=2, ensure_ascii=False)
+        print(f"  info.json written")
+
+        sqlite_conn.close()
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
 
     pg_cur.close()
     pg_conn.close()
-    sqlite_conn.close()
 
-    print(f"\nDone! Exported to: {os.path.abspath(output_dir)}")
+    print(f"\nDone! Exported {len(dataset_rows)} dataset(s) to: {os.path.abspath('dataset_exports')}")
