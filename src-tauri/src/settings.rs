@@ -161,6 +161,7 @@ pub async fn settings_pick_folder(
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        Err("Folder selection is not supported on mobile platforms".into())
+        // Mobile platforms don't support native folder picker
+        Err("Folder selection is not supported on mobile platforms. Please configure paths manually.".into())
     }
 }
