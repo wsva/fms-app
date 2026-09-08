@@ -1,0 +1,183 @@
+name: Build FMS App
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Desktop builds (Windows, Linux, macOS)
+  # ──────────────────────────────────────────────
+  build-desktop:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+          - os: ubuntu-22.04
+            label: Linux
+          - os: macos-latest
+            label: macOS
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fms-app-${{ runner.os }}
+          path: |
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.deb
+            src-tauri/target/release/bundle/**/*.rpm
+            src-tauri/target/release/bundle/**/*.AppImage
+            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.app
+
+  # ──────────────────────────────────────────────
+  # iOS build (requires macOS runner + Xcode)
+  # ──────────────────────────────────────────────
+  build-ios:
+    name: iOS
+    runs-on: macos-latest
+    needs: build-desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build iOS
+        run: pnpm tauri ios build --target aarch64-apple-ios
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fms-app-ios
+          path: src-tauri/gen/apple/target/aarch64-apple-ios/release/bundle/**/*.ipa
+
+  # ──────────────────────────────────────────────
+  # Android build
+  # ──────────────────────────────────────────────
+  build-android:
+    name: Android
+    runs-on: ubuntu-22.04
+    needs: build-desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Build Android
+        env:
+          NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: pnpm tauri android build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fms-app-android
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk

@@ -1,0 +1,35 @@
+name: Build Relay Server
+
+on:
+  push:
+    tags:
+      - 'v*'
+    paths:
+      - 'relay/**'
+  workflow_dispatch:
+
+jobs:
+  build-relay-linux:
+    name: Build Relay (Linux x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: relay -> target
+
+      - name: Build relay
+        run: cd relay && cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fms-relay-linux-x86_64
+          path: relay/target/x86_64-unknown-linux-gnu/release/fms-relay
