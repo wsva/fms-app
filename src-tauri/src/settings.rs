@@ -145,17 +145,22 @@ pub async fn settings_pick_folder(
         _ => return Err(format!("Unknown field: {}", field)),
     };
 
-    let path = app
-        .dialog()
-        .file()
-        .set_title(title)
-        .blocking_pick_folder();
+    // Use rfd for folder picking since tauri-plugin-dialog doesn't support it on mobile
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        use rfd::FileDialog;
+        let path = FileDialog::new()
+            .set_title(title)
+            .pick_folder();
 
-    match path {
-        Some(p) => {
-            let path_buf = p.into_path().map_err(|e| format!("Invalid path: {:?}", e))?;
-            Ok(path_buf.to_string_lossy().into_owned())
+        match path {
+            Some(p) => Ok(p.to_string_lossy().into_owned()),
+            None => Err("No folder selected".into()),
         }
-        None => Err("No folder selected".into()),
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        Err("Folder selection is not supported on mobile platforms".into())
     }
 }

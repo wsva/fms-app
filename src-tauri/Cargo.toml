@@ -30,6 +30,7 @@ flate2 = "1.0"
 sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
+rfd = "0.15"
 dirs = "6"
 futures-util = "0.3"
 base64 = "0.22"
