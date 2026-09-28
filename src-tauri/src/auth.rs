@@ -130,6 +130,7 @@ pub async fn auth_login(
     nickname: String,
     password: String,
 ) -> Result<AuthUser, String> {
+    log::info!("auth_login: user={}", nickname);
     let client = reqwest::Client::new();
 
     let body = serde_json::json!({
@@ -154,6 +155,7 @@ pub async fn auth_login(
     let success = json["success"].as_bool().unwrap_or(false);
     if !success {
         let err = json["message"].as_str().unwrap_or("Login failed");
+        log::warn!("auth_login failed for '{}': {}", nickname, err);
         return Err(err.to_string());
     }
 
@@ -196,6 +198,7 @@ pub async fn auth_login(
 
     // Fetch user info
     let user = fetch_user_info(&tokens.access_token).await?;
+    log::info!("auth_login success: user={}, email={}", user.name, user.email);
 
     // Persist email in tokens
     let tokens = AuthTokens {
@@ -214,6 +217,7 @@ pub async fn auth_login(
 pub async fn auth_get_user(
     _settings: State<'_, SettingsState>,
 ) -> Result<Option<AuthUser>, String> {
+    log::debug!("auth_get_user: checking tokens");
     let tokens = match read_tokens()? {
         Some(t) => t,
         None => {
@@ -233,6 +237,7 @@ pub async fn auth_get_user(
 
 #[tauri::command]
 pub async fn auth_logout(_settings: State<'_, SettingsState>) -> Result<(), String> {
+    log::info!("auth_logout");
     let tokens = read_tokens()?;
 
     if let Some(ref t) = tokens {
@@ -262,6 +267,7 @@ async fn try_auto_login() -> Result<Option<AuthUser>, String> {
         Some(creds) => creds,
         None => return Ok(None),
     };
+    log::info!("try_auto_login: attempting auto-login for '{}'", nickname);
 
     let client = reqwest::Client::new();
     let body = serde_json::json!({

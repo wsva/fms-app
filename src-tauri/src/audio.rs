@@ -9,8 +9,11 @@ use symphonia::core::probe::Hint;
 
 /// Decode an audio file to 16 kHz mono f32 samples.
 ///
-/// Supports MP3, WAV, FLAC, and OGG via symphonia.
+/// Backed by symphonia (built with the `all` feature), so it handles the common
+/// audio containers/codecs (MP3, WAV, FLAC, OGG, AAC/MP4, Opus) and also extracts
+/// the audio track from video containers (MP4/MOV/MKV/WebM).
 pub fn decode_to_pcm(path: &Path) -> Result<Vec<f32>, String> {
+    log::debug!("Decoding audio file: {}", path.display());
     let file = std::fs::File::open(path)
         .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
 
@@ -87,6 +90,7 @@ pub fn decode_to_pcm(path: &Path) -> Result<Vec<f32>, String> {
     if sample_rate == 0 {
         return Err("No audio data decoded".into());
     }
+    log::debug!("Audio decoded: {} samples at {}Hz, {} channels", all_samples.len(), sample_rate, channels);
 
     // Mix down to mono if needed
     let mono = if channels > 1 {
@@ -103,6 +107,7 @@ pub fn decode_to_pcm(path: &Path) -> Result<Vec<f32>, String> {
     if sample_rate == 16000 {
         Ok(mono)
     } else {
+        log::debug!("Resampling from {}Hz to 16000Hz", sample_rate);
         Ok(resample_linear(&mono, sample_rate, 16000))
     }
 }
@@ -128,4 +133,68 @@ fn resample_linear(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     }
 
     out
+}
+
+/// Output sample rate produced by [`decode_to_pcm`] (it always resamples to this).
+const DECODED_SAMPLE_RATE: u32 = 16_000;
+
+/// Peak-envelope waveform in the audiowaveform v2 JSON layout: interleaved
+/// `[min, max]` signed 8-bit pairs, one pair per pixel bucket. Produced entirely
+/// in Rust via symphonia, replacing the external `audiowaveform` binary.
+pub struct WaveformPeaks {
+    pub version: u8,
+    pub channels: u8,
+    pub sample_rate: u32,
+    pub samples_per_pixel: u32,
+    pub bits: u8,
+    /// Interleaved min/max pairs; `data.len() == 2 * pixel_count`.
+    pub data: Vec<i8>,
+}
+
+/// Decode `path` and reduce it to a peak envelope at `pixels_per_second`.
+///
+/// The audio is decoded to 16 kHz mono f32 (see [`decode_to_pcm`]); every bucket
+/// of `sample_rate / pixels_per_second` consecutive samples collapses to its
+/// min/max, scaled into the signed 8-bit range used by audiowaveform. Consumers
+/// (`WaveformCanvas`, `adjust::load_waveform`) divide by 128 and derive
+/// `ms_per_pixel = samples_per_pixel / sample_rate * 1000`.
+pub fn generate_waveform(path: &Path, pixels_per_second: u32) -> Result<WaveformPeaks, String> {
+    log::debug!("Generating waveform for: {} ({} pps)", path.display(), pixels_per_second);
+    let pps = pixels_per_second.max(1);
+    let samples = decode_to_pcm(path)?;
+
+    let samples_per_pixel = (DECODED_SAMPLE_RATE / pps).max(1) as usize;
+
+    let mut data: Vec<i8> = Vec::with_capacity((samples.len() / samples_per_pixel + 1) * 2);
+    for chunk in samples.chunks(samples_per_pixel) {
+        let mut lo: f32 = 1.0;
+        let mut hi: f32 = -1.0;
+        for &s in chunk {
+            if s < lo {
+                lo = s;
+            }
+            if s > hi {
+                hi = s;
+            }
+        }
+        data.push(scale_to_i8(lo));
+        data.push(scale_to_i8(hi));
+    }
+
+    Ok(WaveformPeaks {
+        version: 2,
+        channels: 1,
+        sample_rate: DECODED_SAMPLE_RATE,
+        samples_per_pixel: samples_per_pixel as u32,
+        bits: 8,
+        data,
+    })
+}
+
+// Note: scale_to_i8 helper below
+
+/// Scale a normalised sample (-1.0..=1.0) into audiowaveform's signed 8-bit range.
+fn scale_to_i8(sample: f32) -> i8 {
+    let v = (sample.clamp(-1.0, 1.0) * 128.0).round();
+    v.clamp(-128.0, 127.0) as i8
 }

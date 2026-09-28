@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { Button, Chip, Input, InputGroup, TextArea, Tooltip } from "@heroui/react";
+import { Button, Input, InputGroup, TextArea, Tooltip } from "@heroui/react";
 import { formatVttTime, parseVttTime, validateVttTime } from "@/lib/listen/subtitle";
 import { hideWord, playMediaPart, pureContent, splitContent } from "@/lib/listen/utils";
 import {
@@ -16,20 +16,15 @@ import {
 } from "lucide-react";
 import { lcs } from "@/lib/listen/lcs";
 import type { Cue } from "@/lib/types";
-import { handleToggle, subscribe, getVoiceState, getVoiceError, type VoiceState } from "@/lib/voice-input";
+import { handleToggle, subscribe, getVoiceState, type VoiceState } from "@/lib/voice-input";
 
 // ── Mic Button ────────────────────────────────────────────────────────────────
 
 function MicButton() {
   const voiceState = useSyncExternalStore(subscribe, getVoiceState, getVoiceState);
-  const error = useSyncExternalStore(subscribe, getVoiceError, getVoiceError);
 
   return (
-    <div className="flex items-center gap-1">
-      {voiceState === "processing" && (
-        <span className="text-xs text-text-tertiary animate-pulse">Transcribing…</span>
-      )}
-      {error && <span className="text-xs text-red-500">{error}</span>}
+    <>
       <Tooltip>
         <Tooltip.Trigger>
           <Button
@@ -45,7 +40,7 @@ function MicButton() {
         </Tooltip.Trigger>
         <Tooltip.Content>Ctrl+C (no selection)</Tooltip.Content>
       </Tooltip>
-    </div>
+    </>
   );
 }
 
@@ -59,6 +54,7 @@ type DictationProps = {
   onSuccess?: (uuid: string, success: boolean) => void;
   onFocusInput?: () => void;
   mode: "compact" | "large";
+  adminMode: boolean;
 };
 
 function Dictation({
@@ -69,8 +65,13 @@ function Dictation({
   onSuccess,
   onFocusInput,
   mode,
+  adminMode,
 }: DictationProps) {
   const [stateInput, setStateInput] = useState<string>("");
+
+  useEffect(() => {
+    setStateInput("");
+  }, [cue.uuid]);
 
   const isSuccess = (answer: string) => {
     return (
@@ -147,7 +148,7 @@ function Dictation({
             {getTip(stateInput, cue.content)}
           </div>
           {!!cue.reference && cue.reference !== cue.content && (
-            <div className="bg-bg-muted rounded-sm px-1 mt-3 text-text-tertiary font-normal">
+            <div className="bg-bg-muted rounded-sm px-1 mt-1 text-text-tertiary font-normal w-full">
               {getTip(stateInput, cue.reference)}
             </div>
           )}
@@ -197,7 +198,7 @@ function Dictation({
             {getTip(stateInput, cue.content)}
           </div>
           {!!cue.reference && cue.reference !== cue.content && (
-            <div className="bg-bg-muted rounded-sm px-1 mt-3 text-text-tertiary text-2xl">
+            <div className="bg-bg-muted rounded-sm px-1 mt-1 text-text-tertiary text-2xl w-full">
               {getTip(stateInput, cue.reference)}
             </div>
           )}
@@ -215,6 +216,7 @@ export type CueEditorProps = {
 
   allowEdit: boolean;
   mode: "dictation" | "edit" | "dictation_edit" | "dictation_focus";
+  adminMode: boolean;
 
   isDisabled: boolean;
   onUpdate: (updated: Cue) => void;
@@ -236,6 +238,7 @@ export default function CueEditor({
   media,
   allowEdit,
   mode,
+  adminMode,
   isDisabled,
   onUpdate,
   onExpandStart,
@@ -263,7 +266,7 @@ export default function CueEditor({
 
   const timeEditorEl = () => {
     return (
-      <InputGroup className="w-xs shadow-none data-focus-within:border-x-2 data-focus-within:ring-0">
+      <InputGroup className="w-xs shadow-none rounded-xl bg-bg-muted data-focus-within:border-x-2 data-focus-within:ring-0">
         <InputGroup.Prefix className="p-0 bg-bg-muted">
           <Button
             isIconOnly
@@ -358,143 +361,117 @@ export default function CueEditor({
     return "flex flex-col gap-0.5 w-full";
   };
 
+  const isDictationMode = mode === "dictation" || mode === "dictation_focus";
+
   return (
     <div className={containerClass(cue)}>
-      <div className="flex flex-row items-center justify-start w-full gap-1">
-        <Tooltip isDisabled={mode !== "dictation"}>
-          <Tooltip.Trigger>
-            <Chip size="lg" variant="primary" color={stateSuccess ? "success" : undefined}>
-              <span className="text-sm font-medium">{cue.order_num}</span>
-            </Chip>
-          </Tooltip.Trigger>
-          <Tooltip.Content>turn green on success: punctuation does not matter</Tooltip.Content>
-        </Tooltip>
-        <div className="hidden lg:flex">{timeEditorEl()}</div>
-        <Tooltip isDisabled={mode !== "dictation"}>
-          <Tooltip.Trigger>
-            <Button
-              isIconOnly
-              variant="ghost"
-              size="sm"
-              onPress={() => {
-                if (!media) return;
-                if (media.paused) playMediaPart(cue, media, false);
-                else media.pause();
-              }}
-            >
-              <Play size={16} />
-            </Button>
-          </Tooltip.Trigger>
-          <Tooltip.Content>shortcut: Ctrl+S, Ctrl+D, or type two spaces at the end</Tooltip.Content>
-        </Tooltip>
-        {(mode === "dictation" || mode === "dictation_focus") && (
-          <MicButton />
-        )}
-        {(mode === "edit" || mode === "dictation_edit") && (
-          <MicButton />
-        )}
-        {(mode === "edit" || mode === "dictation_edit") && allowEdit && (
-          <>
-            <Tooltip>
-              <Tooltip.Trigger>
-                <Button
-                  isIconOnly
-                  variant="ghost"
-                  size="sm"
-                  isDisabled={isDisabled}
-                  onPress={() => onInsert(cue.order_num)}
-                >
-                  <div className="text-lg">#1</div>
-                </Button>
-              </Tooltip.Trigger>
-              <Tooltip.Content>insert before</Tooltip.Content>
-            </Tooltip>
-            <Tooltip>
-              <Tooltip.Trigger>
-                <Button
-                  isIconOnly
-                  variant="ghost"
-                  size="sm"
-                  isDisabled={isDisabled}
-                  onPress={() => onInsert(cue.order_num + 1)}
-                >
-                  <div className="text-lg">#2</div>
-                </Button>
-              </Tooltip.Trigger>
-              <Tooltip.Content>insert after</Tooltip.Content>
-            </Tooltip>
-            <Tooltip>
-              <Tooltip.Trigger>
-                <Button
-                  isIconOnly
-                  variant="ghost"
-                  size="sm"
-                  isDisabled={isDisabled}
-                  onPress={onMergeNext}
-                >
-                  <div className="text-lg">#3</div>
-                </Button>
-              </Tooltip.Trigger>
-              <Tooltip.Content>merge next</Tooltip.Content>
-            </Tooltip>
-            <Button isIconOnly variant="ghost" size="sm" isDisabled={isDisabled} onPress={onDelete}>
-              <Trash2 size={16} color="red" />
-            </Button>
-          </>
-        )}
-        <div className="ml-auto flex gap-1.5">
-          {mode === "dictation" && allowEdit && (
-            <div>
+      <div className="flex flex-row gap-1">
+        {/* Main content area */}
+        <div className="flex-1 flex flex-col gap-0.5 min-w-0">
+          {adminMode && <div>{timeEditorEl()}</div>}
+          {(mode === "edit" || mode === "dictation_edit") && allowEdit && (
+            <div className="flex items-center gap-1">
               <Tooltip>
                 <Tooltip.Trigger>
-                  <Button isIconOnly variant="ghost" size="sm" onPress={onEdit}>
-                    <Pencil size={16} />
+                  <Button isIconOnly variant="ghost" size="sm" isDisabled={isDisabled} onPress={() => onInsert(cue.order_num)}>
+                    <div className="text-lg">#1</div>
                   </Button>
                 </Tooltip.Trigger>
-                <Tooltip.Content>edit subtitle</Tooltip.Content>
+                <Tooltip.Content>insert before</Tooltip.Content>
               </Tooltip>
-            </div>
-          )}
-          {mode === "dictation_edit" && allowEdit && (
-            <div>
-              <Button isIconOnly variant="ghost" size="sm" onPress={onDone}>
-                <X size={16} />
+              <Tooltip>
+                <Tooltip.Trigger>
+                  <Button isIconOnly variant="ghost" size="sm" isDisabled={isDisabled} onPress={() => onInsert(cue.order_num + 1)}>
+                    <div className="text-lg">#2</div>
+                  </Button>
+                </Tooltip.Trigger>
+                <Tooltip.Content>insert after</Tooltip.Content>
+              </Tooltip>
+              <Tooltip>
+                <Tooltip.Trigger>
+                  <Button isIconOnly variant="ghost" size="sm" isDisabled={isDisabled} onPress={onMergeNext}>
+                    <div className="text-lg">#3</div>
+                  </Button>
+                </Tooltip.Trigger>
+                <Tooltip.Content>merge next</Tooltip.Content>
+              </Tooltip>
+              <Button isIconOnly variant="ghost" size="sm" isDisabled={isDisabled} onPress={onDelete}>
+                <Trash2 size={16} color="red" />
               </Button>
             </div>
           )}
+          <div className={isDictationMode ? "" : "hidden"}>
+            <Dictation
+              cue={cue}
+              media={media}
+              stateSuccess={stateSuccess}
+              setStateSuccess={setStateSuccess}
+              onSuccess={onSuccess}
+              onFocusInput={onFocusInput}
+              mode={mode === "dictation_focus" ? "large" : "compact"}
+              adminMode={adminMode}
+            />
+          </div>
+          <div className={mode === "edit" || mode === "dictation_edit" ? "w-full" : "hidden"}>
+            <TextArea
+              aria-label="text"
+              autoComplete="one-time-code"
+              ref={editAreaRef}
+              className="w-full text-xl font-bold border-2 border-border-light flex-1"
+              disabled={isDisabled || cue.deleted}
+              value={cue.content}
+              onChange={(e) =>
+                onUpdate({
+                  ...cue,
+                  content: e.target.value,
+                  modified: e.target.value !== cue.content_original,
+                })
+              }
+            />
+            {adminMode && !!cue.reference && <div>{cue.reference}</div>}
+          </div>
         </div>
-      </div>
-      <div className="lg:hidden flex">{timeEditorEl()}</div>
-      <div className={mode === "dictation" || mode === "dictation_focus" ? "" : "hidden"}>
-        <Dictation
-          cue={cue}
-          media={media}
-          stateSuccess={stateSuccess}
-          setStateSuccess={setStateSuccess}
-          onSuccess={onSuccess}
-          onFocusInput={onFocusInput}
-          mode={mode === "dictation_focus" ? "large" : "compact"}
-        />
-      </div>
-      <div className={mode === "edit" || mode === "dictation_edit" ? "w-full" : "hidden"}>
-        <div className="flex items-start gap-2">
-          <TextArea
-            aria-label="text"
-            autoComplete="one-time-code"
-            ref={editAreaRef}
-            className="w-full text-xl font-bold border-2 border-border-light flex-1"
-            disabled={isDisabled || cue.deleted}
-            value={cue.content}
-            onChange={(e) =>
-              onUpdate({
-                ...cue,
-                content: e.target.value,
-                modified: e.target.value !== cue.content_original,
-              })
-            }
-          />
+
+        {/* Right sidebar — icon buttons */}
+        <div
+          className={`flex flex-col items-center gap-1 py-1 overflow-y-auto shrink-0 no-scrollbar transition-colors rounded-lg ${stateSuccess && isDictationMode ? "bg-success-bg" : "bg-transparent"}`}
+          style={{ width: 36 }}
+        >
+          {adminMode && mode === "dictation" && allowEdit && (
+            <Tooltip>
+              <Tooltip.Trigger>
+                <Button isIconOnly variant="ghost" size="sm" onPress={onEdit}>
+                  <Pencil size={16} />
+                </Button>
+              </Tooltip.Trigger>
+              <Tooltip.Content>edit subtitle</Tooltip.Content>
+            </Tooltip>
+          )}
+          {adminMode && mode === "dictation_edit" && allowEdit && (
+            <Button isIconOnly variant="ghost" size="sm" onPress={onDone}>
+              <X size={16} />
+            </Button>
+          )}
+          <Tooltip isDisabled={!isDictationMode}>
+            <Tooltip.Trigger>
+              <Button
+                isIconOnly
+                variant="ghost"
+                size="sm"
+                onPress={() => {
+                  if (!media) return;
+                  if (media.paused) playMediaPart(cue, media, false);
+                  else media.pause();
+                }}
+              >
+                <Play size={16} />
+              </Button>
+            </Tooltip.Trigger>
+            <Tooltip.Content>shortcut: Ctrl+S, Ctrl+D, or type two spaces at the end</Tooltip.Content>
+          </Tooltip>
+          {isDictationMode && <MicButton />}
+          {(mode === "edit" || mode === "dictation_edit") && <MicButton />}
         </div>
-        {!!cue.reference && <div>{cue.reference}</div>}
       </div>
     </div>
   );

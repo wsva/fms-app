@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Send, Bot, User, Loader2, Mic, Square } from "lucide-react";
+import { Send, Bot, User, Loader2, Mic, Square, ChevronDown, ChevronUp, Wand2, ZoomIn, ZoomOut } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import { startRecording, stopRecording, type VoiceState } from "@/lib/voice-input";
 import {
@@ -10,6 +10,12 @@ import {
   type OllamaModelInfo,
   type LlmChatResponse,
 } from "@/lib/llm/types";
+import {
+  PROMPT_TEMPLATES,
+  PROMPT_LANGUAGES,
+  type PromptLanguage,
+  buildPrompt,
+} from "@/lib/llm/prompt-templates";
 
 // ---------------------------------------------------------------------------
 // Component
@@ -18,13 +24,39 @@ import {
 export default function LLMChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [selectedModel, setSelectedModel] = useState("");
+  const [selectedModel, setSelectedModelState] = useState("");
+
+  // Wrap setter to persist to localStorage.
+  const setSelectedModel = useCallback((model: string) => {
+    setSelectedModelState(model);
+    if (typeof window !== "undefined" && model) {
+      localStorage.setItem("llm_selected_model", model);
+    }
+  }, []);
+
+  // Restore cached model on mount (client-side only).
+  useEffect(() => {
+    const cached = localStorage.getItem("llm_selected_model");
+    if (cached) setSelectedModelState(cached);
+  }, []);
   const [availableModels, setAvailableModels] = useState<OllamaModelInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
   const [voiceError, setVoiceError] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // ---- Font zoom ----
+  const [fontSize, setFontSize] = useState(14);
+
+  // ---- Temperature ----
+  const [temperature, setTemperature] = useState(0.7);
+
+  // ---- Prompt builder state ----
+  const [showPromptBuilder, setShowPromptBuilder] = useState(false);
+  const [promptLanguage, setPromptLanguage] = useState<PromptLanguage>("en");
+  const [selectedTemplate, setSelectedTemplate] = useState("");
+  const [promptContent, setPromptContent] = useState("");
 
   // ---- Fetch installed models ----
 
@@ -37,9 +69,13 @@ export default function LLMChatPage() {
         installed: OllamaModelInfo[];
       }>("llm_list_models");
       setAvailableModels(res.installed);
-      // Auto-select first model if none selected
-      if (res.installed.length > 0 && !selectedModel) {
-        setSelectedModel(res.installed[0].name);
+      // Prefer cached model if it's still installed; otherwise first model.
+      if (res.installed.length > 0) {
+        const cached = localStorage.getItem("llm_selected_model");
+        const stillInstalled = cached && res.installed.some((m) => m.name === cached);
+        if (!selectedModel && !stillInstalled) {
+          setSelectedModel(res.installed[0].name);
+        }
       }
     } catch (e) {
       console.error("Failed to list models:", e);
@@ -71,6 +107,7 @@ export default function LLMChatPage() {
       const response = await invoke<LlmChatResponse>("llm_chat", {
         model: selectedModel,
         messages: newMessages,
+        temperature,
       });
       setMessages([
         ...newMessages,
@@ -139,21 +176,65 @@ export default function LLMChatPage() {
     <main className="flex-1 flex flex-col h-full">
       {/* Header */}
       <div className="p-4 border-b border-border-default flex items-center gap-4">
-        <h1 className="text-lg font-semibold flex-1">LLM Chat</h1>
-        <select
-          className="px-3 py-1.5 text-sm rounded-lg bg-bg-muted border border-border-default text-text-primary cursor-pointer"
-          value={selectedModel}
-          onChange={(e) => setSelectedModel(e.target.value)}
-        >
-          {availableModels.length === 0 && (
-            <option value="">No models installed</option>
-          )}
-          {availableModels.map((m) => (
-            <option key={m.name} value={m.name}>
-              {m.name}
-            </option>
-          ))}
-        </select>
+        <h1 className="text-lg font-semibold flex-1">LLM Chat (Ollama)</h1>
+        <div className="flex items-center gap-3">
+          {/* Temperature control */}
+          <div className="flex items-center gap-2" title="Temperature: controls response randomness">
+            <span className="text-xs text-text-tertiary">Temp:</span>
+            <div className="flex gap-0.5">
+              {[0, 0.3, 0.7, 1.0].map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setTemperature(t)}
+                  className={`px-2 py-1 text-xs rounded transition-colors ${
+                    temperature === t
+                      ? "bg-accent text-white"
+                      : "bg-bg-muted text-text-secondary hover:bg-bg-hover"
+                  }`}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* Font zoom controls */}
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setFontSize((s) => Math.max(10, s - 2))}
+              disabled={fontSize <= 10}
+              className="p-1.5 rounded-lg bg-bg-muted border border-border-default text-text-secondary hover:bg-bg-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Zoom out"
+            >
+              <ZoomOut size={14} />
+            </button>
+            <span className="text-xs text-text-tertiary w-8 text-center">{fontSize}</span>
+            <button
+              type="button"
+              onClick={() => setFontSize((s) => Math.min(32, s + 2))}
+              disabled={fontSize >= 32}
+              className="p-1.5 rounded-lg bg-bg-muted border border-border-default text-text-secondary hover:bg-bg-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Zoom in"
+            >
+              <ZoomIn size={14} />
+            </button>
+          </div>
+          <select
+            className="px-3 py-1.5 text-sm rounded-lg bg-bg-muted border border-border-default text-text-primary cursor-pointer"
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+          >
+            {availableModels.length === 0 && (
+              <option value="">No models installed</option>
+            )}
+            {availableModels.map((m) => (
+              <option key={m.name} value={m.name}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {/* Messages area */}
@@ -164,7 +245,7 @@ export default function LLMChatPage() {
             <p className="text-sm">
               {availableModels.length > 0
                 ? "Start a conversation with your local AI model."
-                : "Install a model from the Models tab to start chatting."}
+                : "Need to install and start Ollama first."}
             </p>
           </div>
         )}
@@ -180,11 +261,12 @@ export default function LLMChatPage() {
               </div>
             )}
             <div
-              className={`max-w-[70%] px-4 py-2.5 rounded-2xl text-sm whitespace-pre-wrap ${
+              className={`max-w-[70%] px-4 py-2.5 rounded-2xl whitespace-pre-wrap ${
                 msg.role === "user"
                   ? "bg-accent-bg text-white"
                   : "bg-bg-muted text-text-primary"
               }`}
+              style={{ fontSize: `${fontSize}px` }}
             >
               {msg.content}
             </div>
@@ -212,6 +294,81 @@ export default function LLMChatPage() {
 
       {/* Input area */}
       <div className="p-4 border-t border-border-default">
+        {/* Prompt builder toggle */}
+        <button
+          type="button"
+          onClick={() => setShowPromptBuilder(!showPromptBuilder)}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 mb-3 rounded-lg bg-bg-muted border border-border-default text-xs font-medium text-text-secondary hover:bg-bg-hover transition-colors"
+        >
+          <Wand2 size={14} />
+          Prompt Builder
+          {showPromptBuilder ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </button>
+
+        {/* Prompt builder panel */}
+        {showPromptBuilder && (
+          <div className="mb-3 p-3 rounded-lg bg-bg-muted border border-border-default space-y-3">
+            {/* Language + Template row */}
+            <div className="flex flex-wrap gap-2">
+              <select
+                value={promptLanguage}
+                onChange={(e) => setPromptLanguage(e.target.value as PromptLanguage)}
+                className="px-2 py-1.5 rounded-md bg-bg-input border border-border-default text-xs text-text-primary"
+              >
+                {PROMPT_LANGUAGES.map((lang) => (
+                  <option key={lang.value} value={lang.value}>
+                    {lang.label}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={selectedTemplate}
+                onChange={(e) => setSelectedTemplate(e.target.value)}
+                className="flex-1 px-2 py-1.5 rounded-md bg-bg-input border border-border-default text-xs text-text-primary"
+              >
+                <option value="">Select a template...</option>
+                {PROMPT_TEMPLATES.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name[promptLanguage]}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Content input */}
+            <textarea
+              value={promptContent}
+              onChange={(e) => setPromptContent(e.target.value)}
+              placeholder="Paste or type your content here..."
+              className="w-full px-3 py-2 rounded-md bg-bg-input border border-border-default text-sm text-text-primary resize-none focus:outline-none focus:border-accent"
+              rows={3}
+            />
+
+            {/* Preview + Insert button */}
+            {selectedTemplate && promptContent && (
+              <div className="space-y-2">
+                <p className="text-xs text-text-tertiary">Preview:</p>
+                <div className="p-2 rounded-md bg-bg-card border border-border-default text-xs text-text-secondary max-h-24 overflow-y-auto whitespace-pre-wrap">
+                  {buildPrompt(selectedTemplate, promptLanguage, promptContent)}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const prompt = buildPrompt(selectedTemplate, promptLanguage, promptContent);
+                    if (prompt) {
+                      setInput(prompt);
+                      inputRef.current?.focus();
+                    }
+                  }}
+                  className="w-full px-3 py-1.5 rounded-md bg-accent text-white text-xs font-medium hover:opacity-90 transition-opacity"
+                >
+                  Insert into chat
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         {voiceError && (
           <p className="text-xs text-error-text mb-2">{voiceError}</p>
         )}

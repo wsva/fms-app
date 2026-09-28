@@ -15,6 +15,11 @@ interface AppSettings {
   model_dir: string;
   recordings_dir: string;
   datasets_dir: string;
+  books_dir: string;
+  ocr_engine: string;
+  logics_parsing_repo: string;
+  logics_parsing_model: string;
+  logics_parsing_env: string;
 }
 
 interface AuthUser {
@@ -334,6 +339,11 @@ export default function SettingsPage() {
                 label="Datasets Directory"
                 description="Where training and evaluation datasets are located."
                 field="datasets_dir"
+              />
+              <FolderField
+                label="Books Library Directory"
+                description="Where reading books (Read a Book) are stored."
+                field="books_dir"
               />
 
               <div className="flex items-center gap-3 mt-6">

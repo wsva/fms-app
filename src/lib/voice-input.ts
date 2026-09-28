@@ -22,7 +22,7 @@ export type VoiceCallbacks = {
 // WAV encoder (16kHz, mono, 16-bit PCM)
 // ---------------------------------------------------------------------------
 
-function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
+export function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
   const numChannels = 1;
   const bitsPerSample = 16;
   const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
@@ -66,7 +66,7 @@ function writeString(view: DataView, offset: number, str: string) {
 // Resample to 16kHz mono using OfflineAudioContext
 // ---------------------------------------------------------------------------
 
-async function resampleTo16k(audioBuffer: AudioBuffer): Promise<Float32Array> {
+export async function resampleTo16k(audioBuffer: AudioBuffer): Promise<Float32Array> {
   const targetRate = 16000;
   if (audioBuffer.sampleRate === targetRate && audioBuffer.numberOfChannels === 1) {
     return audioBuffer.getChannelData(0);
@@ -88,7 +88,7 @@ async function resampleTo16k(audioBuffer: AudioBuffer): Promise<Float32Array> {
 // Blob → Float32Array (16kHz mono) via AudioContext
 // ---------------------------------------------------------------------------
 
-async function blobToSamples(blob: Blob): Promise<Float32Array> {
+export async function blobToSamples(blob: Blob): Promise<Float32Array> {
   const arrayBuffer = await blob.arrayBuffer();
   const audioContext = new AudioContext();
   const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
@@ -100,7 +100,7 @@ async function blobToSamples(blob: Blob): Promise<Float32Array> {
 // ArrayBuffer → base64
 // ---------------------------------------------------------------------------
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
+export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let binary = "";
   for (let i = 0; i < bytes.byteLength; i++) {
@@ -214,6 +214,7 @@ export async function handleToggle() {
       }
     } catch {
       setError("Failed to load model");
+      setVoiceState("idle");
       return;
     }
   }
@@ -334,4 +335,9 @@ export function getVoiceState(): VoiceState {
 
 export function getVoiceError(): string {
   return currentError;
+}
+
+export function clearVoiceError(): void {
+  currentError = "";
+  notifySubscribers();
 }

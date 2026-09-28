@@ -5,54 +5,192 @@
  * this file only handles rendering.
  */
 
-import { ProgressCircle, Input, Select, Tabs, ListBox, Label, TextField, Separator, Button } from "@heroui/react";
-import { MdCheckCircle } from "react-icons/md";
+import { useState, useEffect, useSyncExternalStore } from "react";
+
+import { ProgressCircle, Input, Select, Tabs, ListBox, Label, TextField, Separator, Button, Tooltip } from "@heroui/react";
+import { RefreshCw, Trash2, Database, Shield, Target, CheckCircle } from "lucide-react";
 import CueEditor from "./components/CueEditor";
 import SubtitleItem from "./components/Subtitle";
 import WaveformCanvas from "./components/WaveformCanvas";
+import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 import type { Cue } from "@/lib/types";
 import { useDictationData } from "@/hooks/useDictationData";
+import { isAudio } from "@/lib/listen/utils";
+import { subscribe, getVoiceError, clearVoiceError } from "@/lib/voice-input";
 
 const getUUID = () => crypto.randomUUID().replaceAll("-", "");
 
 export default function DictationPage() {
     const d = useDictationData();
+    const [adminMode, setAdminMode] = useState(false);
+    const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
+    const voiceError = useSyncExternalStore(subscribe, getVoiceError, getVoiceError);
+
+    const selectedMedia = d.mediaList.find((m) => m.uuid === d.stateMediaUUID);
+    const selectedMediaTitle = selectedMedia?.title || d.stateMedia.title || "...";
+
+    useEffect(() => {
+        if (voiceError) {
+            setConfirmReq({ title: "Voice input error", message: voiceError });
+            clearVoiceError();
+        }
+    }, [voiceError]);
 
     return (
         <div className="flex flex-col flex-1 min-h-0 p-4 overflow-hidden">
-            {/* Dataset + Media selection bar */}
-            <div className="flex flex-row items-center justify-start gap-4 mb-4">
-                <select
-                    className="px-3 py-2 border border-border-light rounded-lg bg-bg-card text-sm min-w-[200px]"
-                    value={d.selectedDatasetUuid}
-                    onChange={(e) => {
-                        if (e.target.value === "__refresh__") { d.loadDatasets(); return; }
-                        d.setSelectedDatasetUuid(e.target.value);
-                    }}
-                >
-                    <option value="">Select a dataset...</option>
-                    <option value="__refresh__">↻ Refresh datasets</option>
-                    {d.datasets.map((ds) => (
-                        <option key={ds.info.uuid} value={ds.info.uuid}>{ds.info.name}</option>
-                    ))}
-                </select>
+            {/* Toolbar */}
+            <div className="@container flex flex-row items-center gap-3 w-full px-3 py-2 mb-4 rounded-lg bg-bg-card border border-border-light">
+                {/* ── Dataset section ── */}
+                <div className="flex items-center gap-1">
+                    <span className="select-none @max-lg:hidden text-xs font-medium text-text-tertiary mr-1">Dataset</span>
+                    <Tooltip>
+                        <Tooltip.Trigger>
+                            <Button isIconOnly variant="ghost" size="sm" aria-label="Refresh datasets" isDisabled={d.stateLoading} onPress={d.loadDatasets}>
+                                <RefreshCw size={16} />
+                            </Button>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Refresh datasets</Tooltip.Content>
+                    </Tooltip>
+                    <Tooltip>
+                        <Tooltip.Trigger>
+                            <Button isIconOnly variant="ghost" size="sm" aria-label="Reload database" isDisabled={!d.selectedDatasetUuid || d.stateLoading} onPress={d.handleReload}>
+                                <Database size={16} />
+                            </Button>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Reload dataset database</Tooltip.Content>
+                    </Tooltip>
+                </div>
 
-                {d.selectedDatasetUuid && (
-                    <select
-                        className="px-3 py-2 border border-border-light rounded-lg bg-bg-card text-sm min-w-[200px]"
-                        value={d.stateMediaUUID}
-                        onChange={(e) => d.setStateMediaUUID(e.target.value)}
-                        disabled={d.stateLoading}
-                    >
-                        <option value="">Select media...</option>
-                        {d.mediaList.map((m) => (
-                            <option key={m.uuid} value={m.uuid}>{m.title}</option>
-                        ))}
-                    </select>
-                )}
+                {/* split marker */}
+                <div className="h-6 w-px bg-border-light" />
 
-                {d.stateLoading && <ProgressCircle size="sm" aria-label="Loading" />}
+                {/* ── Media section ── */}
+                <div className="flex items-center gap-1">
+                    <span className="select-none @max-lg:hidden text-xs font-medium text-text-tertiary mr-1">Media</span>
+                    <Tooltip>
+                        <Tooltip.Trigger>
+                            <Button isIconOnly variant="ghost" size="sm" aria-label="Remove media" className="text-error-text" isDisabled={!d.stateMediaUUID || d.stateSaving || d.stateLoading} onPress={() => setConfirmReq({
+                                title: "Remove media",
+                                message: `Remove "${d.stateMedia.title || "this media"}" and all related data and files? This cannot be undone.`,
+                                confirmLabel: "Remove",
+                                onConfirm: d.handleDeleteMedia,
+                            })}>
+                                <Trash2 size={16} />
+                            </Button>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Remove media and all related data</Tooltip.Content>
+                    </Tooltip>
+                </div>
+
+                {/* split marker */}
+                <div className="h-6 w-px bg-border-light" />
+
+                {/* ── Dictation section ── */}
+                <div className="flex items-center gap-1">
+                    <span className="select-none @max-lg:hidden text-xs font-medium text-text-tertiary mr-1">Dictation</span>
+                    <Tooltip>
+                        <Tooltip.Trigger>
+                            <Button isIconOnly size="sm" variant={adminMode ? "primary" : "ghost"} aria-label="Toggle admin mode" isDisabled={d.stateCues.length === 0} onPress={() => setAdminMode(!adminMode)}>
+                                <Shield size={16} />
+                            </Button>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>{adminMode ? "Normal mode" : "Admin mode"}</Tooltip.Content>
+                    </Tooltip>
+                    <Tooltip>
+                        <Tooltip.Trigger>
+                            <Button isIconOnly size="sm" variant={d.stateDictMode === "focus" ? "primary" : "ghost"} aria-label="Toggle focus mode" isDisabled={d.stateCues.length === 0} onPress={() => {
+                                if (d.stateDictMode === "focus") { d.setStateDictMode("full"); }
+                                else {
+                                    const cueList = d.stateCues.filter((cue) => !d.stateDictSuccessSet.has(cue.uuid));
+                                    d.setStateDictCue(cueList.length > 0 ? cueList[0] : undefined);
+                                    d.setStateDictMode("focus");
+                                }
+                            }}>
+                                <Target size={16} />
+                            </Button>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>{d.stateDictMode === "full" ? "Focus mode" : "Full view"}</Tooltip.Content>
+                    </Tooltip>
+                    <Tooltip>
+                        <Tooltip.Trigger>
+                            <Button isIconOnly size="sm" variant={d.stateDictStatus === "complete" ? "primary" : "ghost"} aria-label="Mark complete" isDisabled={d.stateCues.length === 0} onPress={d.handleDictStatusToggle}>
+                                <CheckCircle size={16} />
+                            </Button>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>{d.stateDictStatus === "complete" ? "Complete" : "Mark complete"}</Tooltip.Content>
+                    </Tooltip>
+                </div>
             </div>
+
+            {/* Breadcrumb navigation */}
+            <nav className="flex flex-row items-center gap-2 mb-4 text-sm select-none">
+                <button
+                    className={`cursor-pointer hover:underline ${d.selectedDatasetUuid ? "text-accent" : "text-text-primary font-medium"}`}
+                    onClick={() => d.setSelectedDatasetUuid("")}
+                >
+                    Datasets
+                </button>
+                {d.selectedDataset && (
+                    <>
+                        <span className="text-text-tertiary">&rsaquo;</span>
+                        <button
+                            className={`cursor-pointer hover:underline truncate max-w-[240px] ${d.stateMediaUUID ? "text-accent" : "text-text-primary font-medium"}`}
+                            onClick={() => d.setStateMediaUUID("")}
+                        >
+                            {d.selectedDataset.info.name}
+                        </button>
+                    </>
+                )}
+                {d.selectedDataset && d.stateMediaUUID && (
+                    <>
+                        <span className="text-text-tertiary">&rsaquo;</span>
+                        <span className="text-text-primary font-medium truncate max-w-[240px]">{selectedMediaTitle}</span>
+                    </>
+                )}
+                {d.stateLoading && <ProgressCircle size="sm" aria-label="Loading" />}
+            </nav>
+
+            {/* Datasets view (initial) */}
+            {!d.selectedDatasetUuid && (
+                <div className="flex flex-col gap-2 flex-1 min-h-0 overflow-y-auto">
+                    {d.datasets.length === 0 ? (
+                        <p className="text-text-secondary">No datasets available. Generate a database for a dataset on the Datasets page first.</p>
+                    ) : d.datasets.map((ds) => (
+                        <button
+                            key={ds.path}
+                            className="text-left p-4 border border-border-default rounded-lg hover:bg-bg-hover cursor-pointer transition-colors"
+                            onClick={() => d.setSelectedDatasetUuid(ds.info.uuid)}
+                        >
+                            <div className="font-medium text-text-primary">{ds.info.name}</div>
+                            <div className="text-xs text-text-tertiary truncate" title={ds.path}>{ds.path}</div>
+                        </button>
+                    ))}
+                </div>
+            )}
+
+            {/* Media list view */}
+            {d.selectedDatasetUuid && !d.stateMediaUUID && (
+                <div className="flex flex-col gap-3 flex-1 min-h-0 overflow-y-auto">
+                    {d.mediaList.length === 0 && !d.stateLoading ? (
+                        <p className="text-text-secondary">No media in this dataset.</p>
+                    ) : d.mediaList.map((m) => {
+                        const src = d.getMediaSrc(m.source);
+                        return (
+                            <div key={m.uuid} className="p-4 border border-border-default rounded-lg flex flex-col gap-2">
+                                <button
+                                    className="text-left font-medium text-accent hover:underline cursor-pointer"
+                                    onClick={() => d.setStateMediaUUID(m.uuid)}
+                                >
+                                    {m.title || m.source}
+                                </button>
+                                {src && (isAudio(m.source)
+                                    ? <audio controls preload="none" src={src} className="w-full" />
+                                    : <video controls preload="none" src={src} className="w-full max-h-64" />)}
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
 
             {/* Main content area */}
             {d.stateMediaUUID && (
@@ -155,24 +293,8 @@ export default function DictationPage() {
                                 )}
 
                                 {d.stateCues.length > 0 && (
-                                    <div className="flex items-center justify-between px-1">
+                                    <div className="flex items-center px-1">
                                         <span className="flex-1 text-sm text-foreground-500">{d.stateDictSuccessSet.size} / {d.stateCues.length} ✓</span>
-                                        <div className="flex flex-row items-center justify-center gap-2">
-                                            <Button size="sm" variant="secondary" onPress={() => {
-                                                if (d.stateDictMode === "focus") { d.setStateDictMode("full"); }
-                                                else {
-                                                    const cueList = d.stateCues.filter((cue) => !d.stateDictSuccessSet.has(cue.uuid));
-                                                    d.setStateDictCue(cueList.length > 0 ? cueList[0] : undefined);
-                                                    d.setStateDictMode("focus");
-                                                }
-                                            }}>
-                                                {d.stateDictMode === "full" ? "Focus Mode" : "Full View"}
-                                            </Button>
-                                            <Button size="sm" variant={d.stateDictStatus === "complete" ? "primary" : "secondary"} onPress={d.handleDictStatusToggle}>
-                                                {d.stateDictStatus === "complete" && <MdCheckCircle size={16} />}
-                                                {d.stateDictStatus === "complete" ? "Complete" : "Mark Complete"}
-                                            </Button>
-                                        </div>
                                     </div>
                                 )}
 
@@ -193,13 +315,14 @@ export default function DictationPage() {
 
                                 {d.stateDictMode === "full" ? (
                                     d.stateCues.map((cue, i) => (
-                                        <div key={i} className={`rounded-xl border-2 py-1.5 px-2 transition-colors ${cue.active ? "border-success-text" : "border-border-light"} ${cue.deleted ? "bg-error-bg" : cue.modified ? "bg-accent-bg/20" : "bg-bg-body"}`}>
+                                        <div key={i} className={`rounded-xl border-2 py-1.5 px-2 transition-colors border-border-light ${cue.deleted ? "bg-error-bg" : cue.modified ? "bg-accent-bg/20" : "bg-bg-body"}`}>
                                             <CueEditor
                                                 cue={cue}
                                                 media={d.videoRef.current}
                                                 allowEdit={true}
                                                 mode={d.stateEditingCue !== cue.uuid ? "dictation" : "dictation_edit"}
                                                 isDisabled={d.stateSaving}
+                                                adminMode={adminMode}
                                                 onUpdate={(updated) => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === updated.uuid); if (idx !== -1) { draft[idx] = { ...updated, content_original: draft[idx].content_original }; if (updated.modified) d.setStateNeedSave(true); } })}
                                                 onExpandStart={() => d.handleExpandStart(cue)}
                                                 onExpandEnd={() => d.handleExpandEnd(cue)}
@@ -225,6 +348,7 @@ export default function DictationPage() {
                                                 allowEdit={true}
                                                 mode="dictation_focus"
                                                 isDisabled={d.stateSaving}
+                                                adminMode={adminMode}
                                                 onUpdate={(updated) => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === updated.uuid); if (idx !== -1) draft[idx] = updated; })}
                                                 onExpandStart={() => d.handleExpandStart(d.stateDictCue!)}
                                                 onExpandEnd={() => d.handleExpandEnd(d.stateDictCue!)}
@@ -244,7 +368,7 @@ export default function DictationPage() {
                                                     for (const cue of d.stateCues) {
                                                         if (cue.order_num > d.stateDictCue!.order_num && !d.stateDictSuccessSet.has(cue.uuid)) { d.setStateDictCue(cue); return; }
                                                     }
-                                                    alert("finished!");
+                                                    setConfirmReq({ message: "finished!" });
                                                 }}>Next</Button>
                                             </div>
                                         )}
@@ -256,14 +380,7 @@ export default function DictationPage() {
                 </div>
             )}
 
-            {/* Empty state */}
-            {!d.stateMediaUUID && !d.stateLoading && (
-                <div className="text-xl text-text-secondary mt-8">
-                    <p>1. Select a dataset with a generated database</p>
-                    <p>2. Select a media file from the dataset</p>
-                    <p>3. Edit subtitles, practice dictation, manage transcripts and notes</p>
-                </div>
-            )}
+            <ConfirmDialog request={confirmReq} onClose={() => setConfirmReq(null)} />
         </div>
     );
 }

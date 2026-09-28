@@ -13,7 +13,7 @@ use transcribe_rs::onnx::{
     cohere::CohereModel,
     gigaam::GigaAMModel,
     moonshine::{MoonshineModel, MoonshineVariant, StreamingModel},
-    parakeet::ParakeetModel,
+    parakeet::{ParakeetModel, ParakeetParams, TimestampGranularity},
     sense_voice::SenseVoiceModel,
     Quantization,
 };
@@ -98,6 +98,8 @@ pub struct ModelStatusResponse {
     pub active_version: Option<String>,
     pub active_status: ModelStatus,
     pub download_progress: Option<DownloadProgress>,
+    pub downloaded_versions: Vec<String>,
+    pub hint: String,
 }
 
 impl ModelState {
@@ -186,12 +188,16 @@ pub async fn model_get_status(state: State<'_, ModelState>) -> Result<ModelStatu
     let active = state.active_version.lock().unwrap().clone();
 
     let progress = state.download_progress.lock().unwrap().clone();
-    let is_downloading = state
-        .download_status
-        .lock()
-        .unwrap()
-        .values()
-        .any(|s| *s == ModelStatus::Downloading);
+    let statuses = state.download_status.lock().unwrap();
+    let is_downloading = statuses.values().any(|s| *s == ModelStatus::Downloading);
+
+    // Collect downloaded model versions
+    let downloaded_versions: Vec<String> = statuses
+        .iter()
+        .filter(|(_, s)| **s == ModelStatus::Downloaded)
+        .map(|(v, _)| v.clone())
+        .collect();
+    drop(statuses);
 
     let active_status = if is_downloading {
         ModelStatus::Downloading
@@ -199,6 +205,25 @@ pub async fn model_get_status(state: State<'_, ModelState>) -> Result<ModelStatu
         ModelStatus::Running
     } else {
         ModelStatus::Stopped
+    };
+
+    // Generate actionable hint for AI agents
+    let hint = if active.is_some() {
+        format!("Model '{}' is loaded and ready for transcription.", active.as_ref().unwrap())
+    } else if !downloaded_versions.is_empty() {
+        let preferred = if downloaded_versions.contains(&"parakeet-v3".to_string()) {
+            "parakeet-v3"
+        } else {
+            &downloaded_versions[0]
+        };
+        format!(
+            "No model loaded. {} model(s) downloaded: {}. Call model_load with version='{}' (or empty for auto-select) to load one.",
+            downloaded_versions.len(),
+            downloaded_versions.join(", "),
+            preferred
+        )
+    } else {
+        "No models downloaded. Call model_download with a version ID first. Use model_list to see available models.".to_string()
     };
 
     Ok(ModelStatusResponse {
@@ -211,6 +236,8 @@ pub async fn model_get_status(state: State<'_, ModelState>) -> Result<ModelStatu
         } else {
             None
         },
+        downloaded_versions,
+        hint,
     })
 }
 
@@ -240,6 +267,7 @@ pub async fn model_download_inner(
     let def = model_list::find_model(&version)
         .ok_or_else(|| format!("Unknown model version: {}", version))?;
 
+    log::info!("Starting download of model '{}' ({} MB)", version, def.size_mb);
     {
         let statuses = state.download_status.lock().unwrap();
         if statuses.values().any(|s| *s == ModelStatus::Downloading) {
@@ -293,6 +321,7 @@ pub async fn model_download_inner(
     {
         Ok(()) => {}
         Err(e) => {
+            log::error!("Model download failed for '{}': {}", version, e);
             let mut flags = state.cancel_flags.lock().unwrap();
             flags.remove(&version);
             let mut s = state.download_status.lock().unwrap();
@@ -303,9 +332,10 @@ pub async fn model_download_inner(
 
     {
         let mut s = state.download_status.lock().unwrap();
-        s.insert(version, ModelStatus::Downloaded);
+        s.insert(version.clone(), ModelStatus::Downloaded);
     }
 
+    log::info!("Model '{}' downloaded successfully", version);
     Ok(())
 }
 
@@ -324,6 +354,7 @@ pub async fn model_download(
 // ---------------------------------------------------------------------------
 
 pub fn load_model_core(state: &ModelState, version: &str) -> Result<String, String> {
+    log::info!("Loading model '{}'", version);
     {
         let active = state.active_version.lock().unwrap();
         if active.is_some() {
@@ -400,16 +431,19 @@ pub fn load_model_core(state: &ModelState, version: &str) -> Result<String, Stri
         *a = Some(version.to_string());
     }
 
+    log::info!("Model '{}' loaded successfully", version);
     Ok(version.to_string())
 }
 
 pub fn unload_model_core(state: &ModelState) -> Result<(), String> {
-    {
+    let active_name = {
         let active = state.active_version.lock().unwrap();
-        if active.is_none() {
-            return Err("No model is running".into());
+        match active.as_deref() {
+            Some(name) => name.to_string(),
+            None => return Err("No model is running".into()),
         }
-    }
+    };
+    log::info!("Unloading model '{}'", active_name);
 
     {
         let mut m = state.model.lock().unwrap();
@@ -424,6 +458,7 @@ pub fn unload_model_core(state: &ModelState) -> Result<(), String> {
 }
 
 pub fn delete_model_core(state: &ModelState, version: &str) -> Result<(), String> {
+    log::info!("Deleting model '{}'", version);
     {
         let active = state.active_version.lock().unwrap();
         if active.as_deref() == Some(version) {
@@ -496,6 +531,7 @@ pub async fn model_transcribe(
     state: State<'_, ModelState>,
     wav_base64: String,
 ) -> Result<String, String> {
+    log::debug!("model_transcribe: decoding WAV ({} bytes base64)", wav_base64.len());
     let wav_bytes = base64::engine::general_purpose::STANDARD
         .decode(&wav_base64)
         .map_err(|e| format!("Invalid base64: {}", e))?;
@@ -549,6 +585,7 @@ pub async fn model_transcribe(
         *m = Some(model);
     }
 
+    log::debug!("model_transcribe: result length={} chars", result.len());
     Ok(result)
 }
 
@@ -631,6 +668,7 @@ pub(crate) fn transcribe_file(
     state: &ModelState,
     file_path: &Path,
 ) -> Result<transcribe_rs::TranscriptionResult, String> {
+    log::info!("transcribe_file: {}", file_path.display());
     let samples = crate::audio::decode_to_pcm(file_path)?;
 
     let mut model = {
@@ -691,5 +729,140 @@ pub(crate) fn transcribe_file(
         *m = Some(model);
     }
 
+    log::info!("transcribe_file complete: {}", file_path.display());
     Ok(result)
+}
+
+/// Transcribe a file with word-level timestamps (Parakeet only).
+///
+/// Each segment in the result represents a single word with precise start/end times.
+/// Returns an error if the active model is not Parakeet.
+///
+/// ## Backend word-level timestamp support (transcribe-rs v0.3.11)
+///
+/// | Backend | Word-level | Notes |
+/// |---------|-----------|-------|
+/// | Parakeet (ONNX) | Yes | `TimestampGranularity::Word` via `transcribe_with()` |
+/// | Whisper (whisper.cpp/GGML) | Not exposed | whisper.cpp supports DTW word timestamps, but transcribe-rs does not expose the API |
+/// | Canary, SenseVoice, Moonshine (ONNX) | No | Only segment-level timestamps |
+/// | OpenAI Remote | Yes | `TimestampGranularity::Word` via API (cloud-only) |
+///
+/// To add Whisper word-level support, transcribe-rs needs to expose the DTW
+/// parameters from whisper.cpp, or we need to call whisper-rs directly.
+pub(crate) fn transcribe_file_word_level(
+    state: &ModelState,
+    file_path: &Path,
+) -> Result<transcribe_rs::TranscriptionResult, String> {
+    log::info!("transcribe_file_word_level: {}", file_path.display());
+    let samples = crate::audio::decode_to_pcm(file_path)?;
+
+    let mut model = {
+        let mut m = state.model.lock().unwrap();
+        m.take().ok_or_else(|| "No model is loaded".to_string())?
+    };
+
+    let result = match &mut model {
+        ActiveModel::Parakeet(m) => {
+            let params = ParakeetParams {
+                language: None,
+                timestamp_granularity: Some(TimestampGranularity::Word),
+            };
+            m.transcribe_with(&samples, &params)
+                .map_err(|e| format!("Parakeet word-level transcription failed: {}", e))?
+        }
+        _ => {
+            // Put model back before returning error
+            {
+                let mut m = state.model.lock().unwrap();
+                *m = Some(model);
+            }
+            return Err("Word-level timestamps are only supported by Parakeet models".to_string());
+        }
+    };
+
+    {
+        let mut m = state.model.lock().unwrap();
+        *m = Some(model);
+    }
+
+    log::info!("transcribe_file_word_level complete: {}", file_path.display());
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// Reusable helpers (used by the web service module)
+// ---------------------------------------------------------------------------
+
+/// Run text transcription against an already-loaded active model.
+fn run_transcribe_text(model: &mut ActiveModel, samples: &[f32]) -> Result<String, String> {
+    match model {
+        ActiveModel::TranscribeCpp(session) => {
+            let transcript = session
+                .run(samples, &CppRunOptions::default())
+                .map_err(|e| format!("Whisper transcription failed: {}", e))?;
+            Ok(transcript.text)
+        }
+        ActiveModel::Parakeet(m) => m
+            .transcribe(samples, &TranscribeOptions::default())
+            .map_err(|e| format!("Parakeet transcription failed: {}", e))
+            .map(|r| r.text),
+        ActiveModel::Moonshine(m) => m
+            .transcribe(samples, &TranscribeOptions::default())
+            .map_err(|e| format!("Moonshine transcription failed: {}", e))
+            .map(|r| r.text),
+        ActiveModel::MoonshineStreaming(m) => m
+            .transcribe(samples, &TranscribeOptions::default())
+            .map_err(|e| format!("Moonshine Streaming transcription failed: {}", e))
+            .map(|r| r.text),
+        ActiveModel::SenseVoice(m) => m
+            .transcribe(samples, &TranscribeOptions::default())
+            .map_err(|e| format!("SenseVoice transcription failed: {}", e))
+            .map(|r| r.text),
+        ActiveModel::GigaAM(m) => m
+            .transcribe(samples, &TranscribeOptions::default())
+            .map_err(|e| format!("GigaAM transcription failed: {}", e))
+            .map(|r| r.text),
+        ActiveModel::Canary(m) => m
+            .transcribe(samples, &TranscribeOptions::default())
+            .map_err(|e| format!("Canary transcription failed: {}", e))
+            .map(|r| r.text),
+        ActiveModel::Cohere(m) => m
+            .transcribe(samples, &TranscribeOptions::default())
+            .map_err(|e| format!("Cohere transcription failed: {}", e))
+            .map(|r| r.text),
+    }
+}
+
+/// Ensure a model is loaded, loading the currently selected version if needed.
+pub(crate) fn ensure_model_loaded(state: &ModelState) -> Result<(), String> {
+    {
+        let active = state.active_version.lock().unwrap();
+        if active.is_some() {
+            return Ok(());
+        }
+    }
+    let version = state.selected_version.lock().unwrap().clone();
+    log::info!("ensure_model_loaded: auto-loading selected model '{}'", version);
+    load_model_core(state, &version)?;
+    Ok(())
+}
+
+/// Transcribe raw 16kHz mono PCM WAV bytes, loading the model first if needed.
+pub(crate) fn transcribe_wav_bytes(state: &ModelState, wav: &[u8]) -> Result<String, String> {
+    ensure_model_loaded(state)?;
+    let samples = parse_wav_pcm(wav)?;
+
+    let mut model = {
+        let mut m = state.model.lock().unwrap();
+        m.take().ok_or_else(|| "No model is loaded".to_string())?
+    };
+
+    let result = run_transcribe_text(&mut model, &samples);
+
+    {
+        let mut m = state.model.lock().unwrap();
+        *m = Some(model);
+    }
+
+    result
 }

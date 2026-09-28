@@ -32,6 +32,9 @@ pub struct AppSettings {
     pub model_dir: String,
     pub recordings_dir: String,
     pub datasets_dir: String,
+    /// Root directory of the reading library (each book is a sub-directory).
+    #[serde(default)]
+    pub books_dir: String,
     /// Use Hugging Face mirror (hf-mirror.com) for faster downloads in China.
     /// false = use huggingface.co, true = use hf-mirror.com.
     #[serde(default)]
@@ -45,9 +48,6 @@ pub struct AppSettings {
     /// Whether the user has completed onboarding.
     #[serde(default)]
     pub onboarding_completed: bool,
-    /// Multiaddr of the P2P relay/bootstrap server (e.g. "/ip4/1.2.3.4/tcp/4001/p2p/12D3KooW...").
-    #[serde(default)]
-    pub p2p_relay_addr: String,
 }
 
 impl Default for AppSettings {
@@ -60,11 +60,11 @@ impl Default for AppSettings {
             model_dir: data_dir.join("models").to_string_lossy().into_owned(),
             recordings_dir: data_dir.join("recordings").to_string_lossy().into_owned(),
             datasets_dir: data_dir.join("datasets").to_string_lossy().into_owned(),
+            books_dir: data_dir.join("books").to_string_lossy().into_owned(),
             hf_mirror: false,
             selected_model: String::new(),
             model_unload_timeout: ModelUnloadTimeout::default(),
             onboarding_completed: false,
-            p2p_relay_addr: String::new(),
         }
     }
 }
@@ -90,12 +90,14 @@ impl SettingsState {
 
     fn load() -> Option<AppSettings> {
         let path = Self::config_path();
+        log::debug!("Loading settings from: {}", path.display());
         let data = fs::read_to_string(path).ok()?;
         serde_json::from_str(&data).ok()
     }
 
-    fn save(settings: &AppSettings) -> Result<(), String> {
+    pub fn save(settings: &AppSettings) -> Result<(), String> {
         let path = Self::config_path();
+        log::debug!("Saving settings to: {}", path.display());
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -123,6 +125,7 @@ pub async fn settings_set(
     settings: AppSettings,
 ) -> Result<(), String> {
     SettingsState::save(&settings)?;
+    log::info!("Settings updated");
     {
         let mut s = state.settings.lock().unwrap();
         *s = settings;
@@ -137,10 +140,13 @@ pub async fn settings_pick_folder(
     _app: AppHandle,
     field: String,
 ) -> Result<String, String> {
+    log::info!("settings_pick_folder: field={}", field);
     let title = match field.as_str() {
         "model_dir" => "Select Model Directory",
         "recordings_dir" => "Select Recordings Directory",
         "datasets_dir" => "Select Datasets Directory",
+        "books_dir" => "Select Books Library Directory",
+        "dataset_location" => "Select Datasets Location",
         _ => return Err(format!("Unknown field: {}", field)),
     };
 

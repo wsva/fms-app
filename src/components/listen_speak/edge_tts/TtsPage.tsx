@@ -3,22 +3,33 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Volume2, Loader2, Search, Play } from "lucide-react";
+import { Volume2, Loader2, Play } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
-import { type TtsVoice, type TtsSynthesizeResult } from "@/lib/edge_tts/types";
+import { type TtsVoice, type TtsSynthesizeResult, type TtsPreviewResult } from "@/lib/edge_tts/types";
+
+// Popular European languages with their locale prefixes
+const EUROPEAN_LANGUAGES: { code: string; label: string; prefix: string }[] = [
+  { code: "en", label: "English", prefix: "en-" },
+  { code: "de", label: "Deutsch", prefix: "de-" },
+  { code: "fr", label: "Fran\u00e7ais", prefix: "fr-" },
+  { code: "es", label: "Espa\u00f1ol", prefix: "es-" },
+  { code: "it", label: "Italiano", prefix: "it-" },
+];
 
 export default function TtsPage() {
   const [voices, setVoices] = useState<TtsVoice[]>([]);
+  const [selectedLang, setSelectedLang] = useState("en");
   const [selectedVoice, setSelectedVoice] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
   const [text, setText] = useState("");
   const [rate, setRate] = useState("+0%");
   const [volume, setVolume] = useState("+0%");
   const [pitch, setPitch] = useState("+0Hz");
   const [loading, setLoading] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [loadingVoices, setLoadingVoices] = useState(false);
   const [error, setError] = useState("");
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [lastOutputPath, setLastOutputPath] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
 
@@ -31,43 +42,68 @@ export default function TtsPage() {
     try {
       const result = await invoke<TtsVoice[]>("edge_tts_list_voices");
       setVoices(result);
-      // Auto-select first English voice if none selected
-      if (result.length > 0 && !selectedVoice) {
-        const enVoice = result.find((v) => v.locale.startsWith("en-"));
-        setSelectedVoice(enVoice?.short_name ?? result[0].short_name);
-      }
     } catch (e) {
       setError(`Failed to load voices: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLoadingVoices(false);
     }
-  }, [selectedVoice]);
+  }, []);
 
   useEffect(() => {
     fetchVoices();
   }, [fetchVoices]);
 
-  // ---- Filter voices ----
+  // ---- Filter voices by selected language ----
 
-  const filteredVoices = voices.filter((v) => {
-    if (!searchQuery) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      v.short_name.toLowerCase().includes(q) ||
-      v.locale.toLowerCase().includes(q) ||
-      v.name.toLowerCase().includes(q) ||
-      v.gender.toLowerCase().includes(q)
-    );
-  });
+  const langPrefix = EUROPEAN_LANGUAGES.find((l) => l.code === selectedLang)?.prefix ?? "en-";
+  const langVoices = voices.filter((v) => v.locale.startsWith(langPrefix));
 
-  // Group filtered voices by locale
-  const groupedVoices: Record<string, TtsVoice[]> = {};
-  for (const v of filteredVoices) {
-    const locale = v.locale;
-    if (!groupedVoices[locale]) groupedVoices[locale] = [];
-    groupedVoices[locale].push(v);
+  // Auto-select first voice when language changes
+  useEffect(() => {
+    if (langVoices.length > 0) {
+      setSelectedVoice(langVoices[0].short_name);
+    } else {
+      setSelectedVoice("");
+    }
+  }, [selectedLang, voices]);
+
+  // ---- Preview audio (fetch and play without saving) ----
+
+  async function handlePreview() {
+    if (!text.trim() || !selectedVoice || previewLoading) return;
+    setError("");
+    setPreviewLoading(true);
+    try {
+      const result = await invoke<TtsPreviewResult>("edge_tts_preview", {
+        args: {
+          text: text.trim(),
+          voice: selectedVoice,
+          rate,
+          volume,
+          pitch,
+          output_path: "", // not used for preview
+        },
+      });
+      // Convert base64 to blob URL
+      const binaryStr = atob(result.audio_base64);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) {
+        bytes[i] = binaryStr.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: "audio/mpeg" });
+      // Revoke previous preview URL
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      const url = URL.createObjectURL(blob);
+      setPreviewUrl(url);
+      // Play the audio
+      const audio = new Audio(url);
+      audio.play();
+    } catch (e) {
+      setError(`Preview failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setPreviewLoading(false);
+    }
   }
-  const sortedLocales = Object.keys(groupedVoices).sort();
 
   // ---- Generate audio ----
 
@@ -128,40 +164,36 @@ export default function TtsPage() {
             </div>
           )}
 
-          {/* Voice selector */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-text-secondary">Voice</label>
-            <div className="relative">
-              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
-              <input
-                type="text"
-                className="w-full pl-9 pr-3 py-2 rounded-lg bg-bg-muted border border-border-default text-sm text-text-primary focus:outline-none focus:border-accent"
-                placeholder="Search voices by name, locale, or gender..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
+          {/* Language + Voice selectors */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-text-secondary">Language</label>
+              <select
+                className="w-full px-3 py-2 rounded-lg bg-bg-muted border border-border-default text-sm text-text-primary cursor-pointer focus:outline-none focus:border-accent"
+                value={selectedLang}
+                onChange={(e) => setSelectedLang(e.target.value)}
+              >
+                {EUROPEAN_LANGUAGES.map((lang) => (
+                  <option key={lang.code} value={lang.code}>
+                    {lang.label}
+                  </option>
+                ))}
+              </select>
             </div>
-            <select
-              className="w-full px-3 py-2 rounded-lg bg-bg-muted border border-border-default text-sm text-text-primary cursor-pointer focus:outline-none focus:border-accent"
-              value={selectedVoice}
-              onChange={(e) => setSelectedVoice(e.target.value)}
-              size={8}
-            >
-              {sortedLocales.map((locale) => (
-                <optgroup key={locale} label={locale}>
-                  {groupedVoices[locale].map((v) => (
-                    <option key={v.short_name} value={v.short_name}>
-                      {v.short_name.replace(/^[^-]+-/, "")} ({v.gender})
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-            {selectedVoice && (
-              <p className="text-xs text-text-tertiary">
-                Selected: {voices.find((v) => v.short_name === selectedVoice)?.name ?? selectedVoice}
-              </p>
-            )}
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-text-secondary">Voice</label>
+              <select
+                className="w-full px-3 py-2 rounded-lg bg-bg-muted border border-border-default text-sm text-text-primary cursor-pointer focus:outline-none focus:border-accent"
+                value={selectedVoice}
+                onChange={(e) => setSelectedVoice(e.target.value)}
+              >
+                {langVoices.map((v) => (
+                  <option key={v.short_name} value={v.short_name}>
+                    {v.short_name.replace(/^[^-]+-/, "")} ({v.gender})
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
           {/* Controls */}
@@ -225,8 +257,25 @@ export default function TtsPage() {
             <p className="text-xs text-text-tertiary">{text.length} characters</p>
           </div>
 
-          {/* Generate button */}
+          {/* Preview + Generate buttons */}
           <div className="flex items-center gap-3">
+            <button
+              className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-bg-muted border border-border-default text-sm font-medium hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              onClick={handlePreview}
+              disabled={!text.trim() || !selectedVoice || previewLoading}
+            >
+              {previewLoading ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" />
+                  Loading...
+                </>
+              ) : (
+                <>
+                  <Play size={16} />
+                  Preview
+                </>
+              )}
+            </button>
             <button
               className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-accent-bg text-white text-sm font-medium hover:opacity-90 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
               onClick={handleGenerate}
@@ -240,7 +289,7 @@ export default function TtsPage() {
               ) : (
                 <>
                   <Volume2 size={16} />
-                  Generate Audio
+                  Save
                 </>
               )}
             </button>

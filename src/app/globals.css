@@ -61,7 +61,7 @@
     --accent-hover: #0c9488;
     --accent-bg: #396cd8;
     --accent-bg-hover: #2d5bc0;
-    --success-bg: #e6f4ea;
+    --success-bg: #c6f0d0;
     --success-text: #1e7e34;
     --error-bg: #fde8e8;
     --error-text: #c62828;
@@ -89,7 +89,7 @@
     --accent-hover: #17a999;
     --accent-bg: #4a7ce8;
     --accent-bg-hover: #3d6dd6;
-    --success-bg: #1e3a2a;
+    --success-bg: #1a4a2e;
     --success-text: #4caf50;
     --error-bg: #3a1a1a;
     --error-text: #ef5350;
@@ -118,7 +118,7 @@
     --accent-hover: #259189;
     --accent-bg: #268bd2;
     --accent-bg-hover: #1f7abf;
-    --success-bg: #d6ebc9;
+    --success-bg: #c4e8b4;
     --success-text: #546e3a;
     --error-bg: #f5d6c7;
     --error-text: #c65032;
@@ -147,7 +147,7 @@
     --accent-hover: #7daa6b;
     --accent-bg: #458588;
     --accent-bg-hover: #3b7477;
-    --success-bg: #323d2a;
+    --success-bg: #3d5232;
     --success-text: #b8bb26;
     --error-bg: #3c2824;
     --error-text: #fb4934;
@@ -174,4 +174,13 @@
     color: var(--text-primary);
     background-color: var(--bg-body);
   }
+}
+
+/* Hide scrollbar while keeping scroll functionality */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }

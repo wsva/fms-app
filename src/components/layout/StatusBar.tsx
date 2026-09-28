@@ -3,7 +3,7 @@
 import { useModelStatus } from "@/hooks/useModelStatus";
 
 export default function StatusBar() {
-  const { activeModel, isRunning, toggle } = useModelStatus();
+  const { activeModel, isRunning } = useModelStatus();
 
   return (
     <div className="flex items-center justify-between px-4 py-1.5 border-t border-border-default bg-bg-card text-xs shrink-0">
@@ -23,12 +23,6 @@ export default function StatusBar() {
           )}
         </span>
       </div>
-      <button
-        className="px-2 py-0.5 rounded text-xs cursor-pointer transition-colors bg-bg-hover hover:bg-bg-muted text-text-secondary"
-        onClick={toggle}
-      >
-        {activeModel ? "Stop" : "Start"}
-      </button>
     </div>
   );
 }

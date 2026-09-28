@@ -564,6 +564,7 @@ pub async fn download_blob_model(
     cancel_flag: &Arc<AtomicBool>,
     model_id: &str,
 ) -> Result<(), String> {
+    log::info!("download_blob_model: id={}, url={}, is_dir={}", model_id, blob_url, is_directory);
     let partial_path = model_dir.join(format!("{}.partial", model_id));
     
     // Download the file using the existing retry/resume logic
@@ -579,12 +580,14 @@ pub async fn download_blob_model(
 
     // Verify SHA256 if provided
     if let Some(expected_hash) = expected_sha256 {
+        log::info!("Verifying SHA256 for model '{}'", model_id);
         verify_sha256(&partial_path, expected_hash)?;
     }
 
     // Post-download processing
     if is_directory {
         // Extract tar.gz archive
+        log::info!("Extracting tar.gz archive for model '{}'", model_id);
         extract_tar_gz(&partial_path, model_dir, model_id)?;
         // Remove the archive after successful extraction
         let _ = std::fs::remove_file(&partial_path);
@@ -902,6 +905,7 @@ async fn download_single_url(
 /// Verify SHA256 hash of a file.
 fn verify_sha256(file_path: &Path, expected_hash: &str) -> Result<(), String> {
     use std::io::Read;
+    log::debug!("Verifying SHA256 of: {}", file_path.display());
     
     let mut file = std::fs::File::open(file_path)
         .map_err(|e| format!("Failed to open file for SHA256 verification: {}", e))?;
@@ -921,6 +925,7 @@ fn verify_sha256(file_path: &Path, expected_hash: &str) -> Result<(), String> {
     let actual_hash = format!("{:x}", hasher.finalize());
     
     if actual_hash != expected_hash {
+        log::error!("SHA256 mismatch: expected {}, got {}", expected_hash, actual_hash);
         let _ = std::fs::remove_file(file_path);
         return Err(format!(
             "SHA256 mismatch: expected {}, got {}",
@@ -928,6 +933,7 @@ fn verify_sha256(file_path: &Path, expected_hash: &str) -> Result<(), String> {
         ));
     }
     
+    log::debug!("SHA256 verified successfully");
     Ok(())
 }
 

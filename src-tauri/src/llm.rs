@@ -214,6 +214,7 @@ pub async fn llm_delete_model(model: String) -> Result<(), String> {
 pub async fn llm_chat(
     model: String,
     messages: Vec<ChatMessage>,
+    temperature: Option<f32>,
 ) -> Result<LlmChatResponse, String> {
     let client = ollama_client();
     let req = ChatRequest {
@@ -221,7 +222,7 @@ pub async fn llm_chat(
         messages,
         stream: false,
         options: ChatOptions {
-            temperature: 0.7,
+            temperature: temperature.unwrap_or(0.7),
             num_predict: 2048,
         },
     };

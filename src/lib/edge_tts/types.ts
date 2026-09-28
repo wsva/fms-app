@@ -11,3 +11,8 @@ export interface TtsSynthesizeResult {
   audio_len: number;
   output_path: string;
 }
+
+/** Result of a TTS preview operation (audio data as base64). */
+export interface TtsPreviewResult {
+  audio_base64: string;
+}

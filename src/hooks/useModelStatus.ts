@@ -6,6 +6,7 @@
 
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,11 @@ function ensurePolling() {
   pollingStarted = true;
   fetchStatus();
   setInterval(fetchStatus, 3000);
+
+  // Listen for immediate updates from MCP operations
+  if (isTauri()) {
+    listen("model-status-changed", () => fetchStatus());
+  }
 }
 
 function subscribe(fn: () => void) {

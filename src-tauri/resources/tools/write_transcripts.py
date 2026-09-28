@@ -1,7 +1,9 @@
 """
 Write transcript files to the listen_transcript table in the dataset's SQLite database.
 
-Matches transcript files (transcript/{stem}.txt) to existing listen_media entries by title.
+Matches transcript files to existing listen_media entries by their `source`
+(the media-relative path), mirroring sub-directories: a media `a/b.mp3` maps to
+`transcript/a/b.txt`.
 
 Usage:
     python write_transcripts.py <db_path> <transcript_dir>
@@ -32,13 +34,15 @@ def main():
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    # Get all media entries
-    cursor.execute("SELECT uuid, title FROM listen_media")
+    # Get all media entries. `source` is the media-relative path (e.g. "a/b.mp3"),
+    # so transcripts mirror the media sub-directory: transcript/a/b.txt
+    cursor.execute("SELECT uuid, source FROM listen_media")
     media_rows = cursor.fetchall()
 
     written = 0
-    for media_uuid, title in media_rows:
-        transcript_path = os.path.join(transcript_dir, f"{title}.txt")
+    for media_uuid, source in media_rows:
+        rel_stem = os.path.splitext(source)[0]
+        transcript_path = os.path.join(transcript_dir, f"{rel_stem}.txt")
         if os.path.exists(transcript_path):
             with open(transcript_path, "r", encoding="utf-8") as f:
                 text = f.read()

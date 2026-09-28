@@ -27,16 +27,6 @@ export default function ModelsPage() {
   const [detailsModel, setDetailsModel] = useState<ModelVersionInfo | null>(null);
   const [showAvailable, setShowAvailable] = useState(false);
 
-  // ---- Event listeners ----
-
-  useEffect(() => {
-    if (!isTauri()) return;
-    const unlisten = listen<DownloadProgress>("model-download-progress", (event) => {
-      setDownloadProgress(event.payload);
-    });
-    return () => { unlisten.then((fn) => fn()); };
-  }, []);
-
   // ---- Fetch status ----
 
   const fetchStatus = useCallback(async () => {
@@ -58,6 +48,22 @@ export default function ModelsPage() {
       console.error("Failed to get model status:", e);
     }
   }, []);
+
+  // ---- Event listeners ----
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const unlistenProgress = listen<DownloadProgress>("model-download-progress", (event) => {
+      setDownloadProgress(event.payload);
+    });
+    const unlistenChanged = listen("model-status-changed", () => {
+      fetchStatus();
+    });
+    return () => {
+      unlistenProgress.then((fn) => fn());
+      unlistenChanged.then((fn) => fn());
+    };
+  }, [fetchStatus]);
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);
 

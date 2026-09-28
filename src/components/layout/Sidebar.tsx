@@ -1,29 +1,39 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Box,
-  LayoutDashboard,
   Database,
+  Table,
+  Folder,
+  SlidersHorizontal,
   Settings,
   Headphones,
   PanelLeftClose,
   PanelLeftOpen,
   MessageSquare,
-  Languages,
   Volume2,
   Wrench,
-  Share2,
+  BookOpen,
+  Globe,
+  Layers,
+  ScanText,
+  FileText,
 } from "lucide-react";
 
 export type TabId =
-  | "dashboard"
   | "dictation"
+  | "read-book"
+  | "cards"
   | "datasets"
+  | "dictation-dataset"
+  | "studio"
   | "models"
   | "edge-tts"
   | "llm-chat"
-  | "p2p-share"
+  | "web-service"
+  | "ocr"
+  | "logs"
   | "settings";
 
 type TabDef = {
@@ -42,22 +52,13 @@ type NavGroup = {
 // Navigation structure with groups
 const navGroups: NavGroup[] = [
   {
-    id: "listen-speak",
-    label: "Listen & Speak",
-    icon: Languages,
+    id: "datasets",
+    label: "Datasets",
+    icon: Database,
     tabs: [
-      { id: "dictation", label: "Dictation", icon: Headphones },
-      { id: "edge-tts", label: "TTS", icon: Volume2 },
-      { id: "datasets", label: "Datasets", icon: Database },
-      { id: "models", label: "Models", icon: Box },
-    ],
-  },
-  {
-    id: "llm",
-    label: "LLM",
-    icon: MessageSquare,
-    tabs: [
-      { id: "llm-chat", label: "Chat", icon: MessageSquare },
+      { id: "datasets", label: "Location", icon: Folder },
+      { id: "dictation-dataset", label: "Modify", icon: Table },
+      { id: "studio", label: "Studio", icon: SlidersHorizontal },
     ],
   },
   {
@@ -65,32 +66,97 @@ const navGroups: NavGroup[] = [
     label: "Tools",
     icon: Wrench,
     tabs: [
-      { id: "p2p-share", label: "P2P Share", icon: Share2 },
+      { id: "models", label: "STT Models", icon: Box },
+      { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
+      { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
+      { id: "web-service", label: "Web Service", icon: Globe },
+      { id: "ocr", label: "OCR", icon: ScanText },
+      { id: "logs", label: "Logs", icon: FileText },
     ],
   },
 ];
 
 // Root-level tabs (not in any group)
 const rootTabs: TabDef[] = [
-  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { id: "dictation", label: "Dictation", icon: Headphones },
+  { id: "read-book", label: "Read a Book", icon: BookOpen },
+  { id: "cards", label: "Cards", icon: Layers },
   { id: "settings", label: "Settings", icon: Settings },
 ];
+
+const SIDEBAR_WIDTH_KEY = "sidebar-width";
+const DEFAULT_EXPANDED_WIDTH = 176; // w-44 = 11rem = 176px
+const MIN_WIDTH = 120;
+const MAX_WIDTH = 320;
+const COLLAPSED_WIDTH = 48; // w-12 = 3rem = 48px
 
 export default function Sidebar({
   activeTab,
   onTabChange,
   onCollapseChange,
+  onWidthChange,
 }: {
   activeTab: TabId;
   onTabChange: (id: TabId) => void;
   onCollapseChange?: (collapsed: boolean) => void;
+  onWidthChange?: (width: number) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
+  const [expandedWidth, setExpandedWidth] = useState(DEFAULT_EXPANDED_WIDTH);
+  const [isDragging, setIsDragging] = useState(false);
+  const startXRef = useRef(0);
+  const startWidthRef = useRef(0);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
-    "listen-speak": true,
-    llm: true,
     tools: true,
   });
+
+  // Load saved width from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    if (saved) {
+      const w = parseInt(saved, 10);
+      if (w >= MIN_WIDTH && w <= MAX_WIDTH) setExpandedWidth(w);
+    }
+  }, []);
+
+  // Notify parent of width changes
+  useEffect(() => {
+    const currentWidth = collapsed ? COLLAPSED_WIDTH : expandedWidth;
+    onWidthChange?.(currentWidth);
+  }, [collapsed, expandedWidth, onWidthChange]);
+
+  // Handle resize drag
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (collapsed) return;
+    e.preventDefault();
+    startXRef.current = e.clientX;
+    startWidthRef.current = expandedWidth;
+    setIsDragging(true);
+  }, [collapsed, expandedWidth]);
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const delta = e.clientX - startXRef.current;
+      const newWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidthRef.current + delta));
+      setExpandedWidth(newWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, String(expandedWidth));
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isDragging, expandedWidth]);
+
+  const sidebarWidth = collapsed ? COLLAPSED_WIDTH : expandedWidth;
 
   const handleToggle = () => {
     const next = !collapsed;
@@ -176,20 +242,23 @@ export default function Sidebar({
   };
 
   return (
-    <aside
-      className={`fixed left-0 top-0 flex flex-col h-screen border-r border-border-default items-center px-2 z-10 bg-bg-card transition-all duration-200 ${
-        collapsed ? "w-12" : "w-44"
-      }`}
-    >
+    <>
+      <aside
+        className="fixed left-0 top-0 flex flex-col h-screen border-r border-border-default items-center px-2 z-10 bg-bg-card"
+        style={{
+          width: sidebarWidth,
+          transition: isDragging ? "none" : "width 200ms",
+        }}
+      >
       <nav className="flex flex-col w-full items-center gap-1 pt-4">
-        {/* Root tabs */}
-        {rootTabs.slice(0, 1).map((tab) => renderTab(tab, false))} {/* Dashboard first */}
+        {/* Root tabs above groups: Dictation, Read a Book, Cards */}
+        {rootTabs.slice(0, 3).map((tab) => renderTab(tab, false))}
 
         {/* Navigation groups */}
         {navGroups.map(renderGroup)}
 
         {/* Settings at bottom of nav */}
-        {rootTabs.slice(1).map((tab) => renderTab(tab, false))}
+        {rootTabs.slice(3).map((tab) => renderTab(tab, false))}
       </nav>
 
       <div className="mt-auto pb-4 w-full">
@@ -204,9 +273,28 @@ export default function Sidebar({
           {!collapsed && <span className="text-sm">Collapse</span>}
         </button>
       </div>
+
+      {/* Resize handle */}
+      {!collapsed && (
+        <div
+          className="absolute top-0 right-0 h-full w-1 cursor-col-resize hover:bg-accent/50 active:bg-accent transition-colors"
+          onMouseDown={handleMouseDown}
+        />
+      )}
     </aside>
+
+      {/* Overlay to capture mouse events during drag */}
+      {isDragging && (
+        <div className="fixed inset-0 z-50 cursor-col-resize" />
+      )}
+    </>
   );
 }
 
-/** Width in px corresponding to the sidebar's current state — used for ml offset */
-export const SIDEBAR_WIDTH = { expanded: "ml-44", collapsed: "ml-12" } as const;
+/** Width constants for sidebar states */
+export const SIDEBAR_WIDTH = {
+  collapsed: COLLAPSED_WIDTH,
+  defaultExpanded: DEFAULT_EXPANDED_WIDTH,
+  min: MIN_WIDTH,
+  max: MAX_WIDTH,
+} as const;
