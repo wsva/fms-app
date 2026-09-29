@@ -76,7 +76,7 @@ impl DatasetState {
 /// common cases such as MP4/MOV (AAC), and MKV/WebM (Opus/Vorbis).
 const MEDIA_EXTENSIONS: &[&str] = &[
     // audio
-    "mp3", "wav", "flac", "ogg", "m4a", "aac", "opus",
+    "mp3", "wav", "flac", "ogg", "m4a", "m4b", "aac", "opus",
     // video (only the audio track is used)
     "mp4", "m4v", "mov", "mkv", "webm",
 ];

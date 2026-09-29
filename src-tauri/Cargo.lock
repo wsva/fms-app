@@ -1897,6 +1897,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "image",
+ "lazy_static",
  "log",
  "reqwest 0.12.28",
  "rfd 0.15.4",

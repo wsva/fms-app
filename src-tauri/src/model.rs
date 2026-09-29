@@ -17,10 +17,26 @@ use transcribe_rs::onnx::{
     sense_voice::SenseVoiceModel,
     Quantization,
 };
-use transcribe_rs::{SpeechModel, TranscribeOptions};
+use transcribe_rs::{SpeechModel, TranscribeOptions, TranscriptionResult, TranscriptionSegment};
 
-use crate::model_list::{self, EngineType};
+use crate::model_list_stt::{self, EngineType};
+use crate::model_index::{self, ModelIndexEntry, ModelIndexState};
 use crate::settings::SettingsState;
+
+// ---------------------------------------------------------------------------
+// Constants for chunked transcription of long audio files
+// ---------------------------------------------------------------------------
+
+/// Maximum audio duration (seconds) per STT chunk. Parakeet v3 struggles with
+/// audio longer than ~4-5 minutes, so we split long files into overlapping chunks.
+const MAX_CHUNK_DURATION_SECS: f64 = 240.0; // 4 minutes
+
+/// Overlap between consecutive chunks (seconds). Words near chunk boundaries
+/// may be missed, so overlap ensures they're captured in at least one chunk.
+const CHUNK_OVERLAP_SECS: f64 = 15.0;
+
+/// Audio sample rate used by decode_to_pcm (16 kHz).
+const STT_SAMPLE_RATE: u32 = 16000;
 
 // ---------------------------------------------------------------------------
 // State types
@@ -105,7 +121,7 @@ pub struct ModelStatusResponse {
 impl ModelState {
     pub fn new() -> Self {
         let mut download_status = HashMap::new();
-        for model_def in model_list::MODELS {
+        for model_def in model_list_stt::MODELS {
             let dir = Self::model_dir(model_def.id);
             let downloaded = if model_def.is_directory {
                 dir.as_ref().map(|d| d.exists()).unwrap_or(false)
@@ -125,7 +141,7 @@ impl ModelState {
             download_status.insert(model_def.id.to_string(), status);
         }
 
-        let selected = model_list::MODELS
+        let selected = model_list_stt::MODELS
             .first()
             .map(|m| m.id.to_string())
             .unwrap();
@@ -157,7 +173,7 @@ impl ModelState {
 
 #[tauri::command]
 pub async fn model_get_status(state: State<'_, ModelState>) -> Result<ModelStatusResponse, String> {
-    let models: Vec<ModelVersionInfo> = model_list::MODELS
+    let models: Vec<ModelVersionInfo> = model_list_stt::MODELS
         .iter()
         .map(|def| {
             let downloaded = state
@@ -246,7 +262,7 @@ pub async fn model_select_version(
     state: State<'_, ModelState>,
     version: String,
 ) -> Result<(), String> {
-    if model_list::find_model(&version).is_none() {
+    if model_list_stt::find_model(&version).is_none() {
         return Err(format!("Unknown model version: {}", version));
     }
     let mut sel = state.selected_version.lock().unwrap();
@@ -262,9 +278,10 @@ pub async fn model_download_inner(
     app: AppHandle,
     state: &ModelState,
     _settings: &SettingsState,
+    index: &ModelIndexState,
     version: String,
 ) -> Result<(), String> {
-    let def = model_list::find_model(&version)
+    let def = model_list_stt::find_model(&version)
         .ok_or_else(|| format!("Unknown model version: {}", version))?;
 
     log::info!("Starting download of model '{}' ({} MB)", version, def.size_mb);
@@ -335,6 +352,22 @@ pub async fn model_download_inner(
         s.insert(version.clone(), ModelStatus::Downloaded);
     }
 
+    // Update unified model index
+    let root = model_index::model_root();
+    let files = model_index::collect_files(&model_dir, &root);
+    let key = model_index::make_key("stt", &version);
+    let entry = ModelIndexEntry {
+        model_type: "stt".to_string(),
+        id: version.clone(),
+        name: def.name.to_string(),
+        downloaded_at: Some(chrono::Utc::now().to_rfc3339()),
+        provider: Some("cdn".to_string()),
+        files,
+    };
+    if let Err(e) = model_index::upsert_entry(index, key, entry) {
+        log::warn!("Failed to update model index after download: {}", e);
+    }
+
     log::info!("Model '{}' downloaded successfully", version);
     Ok(())
 }
@@ -344,9 +377,10 @@ pub async fn model_download(
     app: AppHandle,
     state: State<'_, ModelState>,
     settings: State<'_, SettingsState>,
+    index: State<'_, ModelIndexState>,
     version: String,
 ) -> Result<(), String> {
-    model_download_inner(app, &state, &settings, version).await
+    model_download_inner(app, &state, &settings, &index, version).await
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +396,7 @@ pub fn load_model_core(state: &ModelState, version: &str) -> Result<String, Stri
         }
     }
 
-    let def = model_list::find_model(version)
+    let def = model_list_stt::find_model(version)
         .ok_or_else(|| format!("Unknown model version: {}", version))?;
 
     {
@@ -457,7 +491,7 @@ pub fn unload_model_core(state: &ModelState) -> Result<(), String> {
     Ok(())
 }
 
-pub fn delete_model_core(state: &ModelState, version: &str) -> Result<(), String> {
+pub fn delete_model_core(state: &ModelState, index: &ModelIndexState, version: &str) -> Result<(), String> {
     log::info!("Deleting model '{}'", version);
     {
         let active = state.active_version.lock().unwrap();
@@ -477,6 +511,12 @@ pub fn delete_model_core(state: &ModelState, version: &str) -> Result<(), String
     {
         let mut s = state.download_status.lock().unwrap();
         s.insert(version.to_string(), ModelStatus::NotDownloaded);
+    }
+
+    // Remove from unified model index
+    let key = model_index::make_key("stt", version);
+    if let Err(e) = model_index::remove_entry(index, &key) {
+        log::warn!("Failed to update model index after delete: {}", e);
     }
 
     Ok(())
@@ -513,9 +553,10 @@ pub async fn model_stop(state: State<'_, ModelState>) -> Result<(), String> {
 #[tauri::command]
 pub async fn model_delete(
     state: State<'_, ModelState>,
+    index: State<'_, ModelIndexState>,
     version: String,
 ) -> Result<(), String> {
-    delete_model_core(&state, &version)
+    delete_model_core(&state, &index, &version)
 }
 
 #[tauri::command]
@@ -664,6 +705,12 @@ fn parse_wav_pcm(data: &[u8]) -> Result<Vec<f32>, String> {
 // File transcription (used by dataset module)
 // ---------------------------------------------------------------------------
 
+/// Transcribe an audio file for subtitle generation.
+///
+/// ## Long Audio Handling (Parakeet only)
+/// Parakeet models have a ~4-5 minute limit. For Parakeet, long audio is
+/// automatically split into overlapping chunks and results are combined.
+/// Other models (Whisper, Moonshine, etc.) can handle longer audio natively.
 pub(crate) fn transcribe_file(
     state: &ModelState,
     file_path: &Path,
@@ -671,6 +718,42 @@ pub(crate) fn transcribe_file(
     log::info!("transcribe_file: {}", file_path.display());
     let samples = crate::audio::decode_to_pcm(file_path)?;
 
+    let total_duration_secs = samples.len() as f64 / STT_SAMPLE_RATE as f64;
+    log::info!("Audio duration: {:.1}s ({:.1} min)", total_duration_secs, total_duration_secs / 60.0);
+
+    // Check if model is loaded
+    {
+        let m = state.model.lock().unwrap();
+        if m.is_none() {
+            return Err("No model is loaded".to_string());
+        }
+    }
+
+    // For Parakeet with long audio, use chunked transcription
+    let is_parakeet = {
+        let m = state.model.lock().unwrap();
+        matches!(&*m, Some(ActiveModel::Parakeet(_)))
+    };
+
+    if is_parakeet && total_duration_secs > MAX_CHUNK_DURATION_SECS {
+        log::info!(
+            "Parakeet: audio too long (>{:.0}s), splitting into chunks",
+            MAX_CHUNK_DURATION_SECS
+        );
+        return transcribe_file_chunked(state, &samples, total_duration_secs);
+    }
+
+    // Single-pass transcription for short audio or non-Parakeet models
+    transcribe_file_pass(state, &samples, 0.0)
+}
+
+/// Run a single pass of text transcription on a sample slice.
+/// `time_offset_secs` is added to all segment timestamps (for chunked processing).
+fn transcribe_file_pass(
+    state: &ModelState,
+    samples: &[f32],
+    time_offset_secs: f64,
+) -> Result<TranscriptionResult, String> {
     let mut model = {
         let mut m = state.model.lock().unwrap();
         m.take().ok_or_else(|| "No model is loaded".to_string())?
@@ -679,48 +762,57 @@ pub(crate) fn transcribe_file(
     let result = match &mut model {
         ActiveModel::TranscribeCpp(session) => {
             let transcript = session
-                .run(&samples, &CppRunOptions::default())
+                .run(samples, &CppRunOptions::default())
                 .map_err(|e| format!("Whisper transcription failed: {}", e))?;
-            let segments = if transcript.segments.is_empty() {
-                None
+            let segments: Vec<TranscriptionSegment> = if transcript.segments.is_empty() {
+                Vec::new()
             } else {
-                Some(
-                    transcript
-                        .segments
-                        .iter()
-                        .map(|s| transcribe_rs::TranscriptionSegment {
-                            start: s.t0_ms as f32 / 1000.0,
-                            end: s.t1_ms as f32 / 1000.0,
-                            text: s.text.clone(),
-                        })
-                        .collect(),
-                )
+                transcript
+                    .segments
+                    .iter()
+                    .map(|s| TranscriptionSegment {
+                        start: s.t0_ms as f32 / 1000.0 + time_offset_secs as f32,
+                        end: s.t1_ms as f32 / 1000.0 + time_offset_secs as f32,
+                        text: s.text.clone(),
+                    })
+                    .collect()
             };
-            transcribe_rs::TranscriptionResult {
+            TranscriptionResult {
                 text: transcript.text,
-                segments,
+                segments: if segments.is_empty() { None } else { Some(segments) },
             }
         }
-        ActiveModel::Parakeet(m) => m
-            .transcribe(&samples, &TranscribeOptions::default())
-            .map_err(|e| format!("Parakeet transcription failed: {}", e))?,
+        ActiveModel::Parakeet(m) => {
+            let mut r = m
+                .transcribe(samples, &TranscribeOptions::default())
+                .map_err(|e| format!("Parakeet transcription failed: {}", e))?;
+            if time_offset_secs > 0.0 {
+                if let Some(ref mut segs) = r.segments {
+                    for seg in segs.iter_mut() {
+                        seg.start += time_offset_secs as f32;
+                        seg.end += time_offset_secs as f32;
+                    }
+                }
+            }
+            r
+        }
         ActiveModel::Moonshine(m) => m
-            .transcribe(&samples, &TranscribeOptions::default())
+            .transcribe(samples, &TranscribeOptions::default())
             .map_err(|e| format!("Moonshine transcription failed: {}", e))?,
         ActiveModel::MoonshineStreaming(m) => m
-            .transcribe(&samples, &TranscribeOptions::default())
+            .transcribe(samples, &TranscribeOptions::default())
             .map_err(|e| format!("Moonshine Streaming transcription failed: {}", e))?,
         ActiveModel::SenseVoice(m) => m
-            .transcribe(&samples, &TranscribeOptions::default())
+            .transcribe(samples, &TranscribeOptions::default())
             .map_err(|e| format!("SenseVoice transcription failed: {}", e))?,
         ActiveModel::GigaAM(m) => m
-            .transcribe(&samples, &TranscribeOptions::default())
+            .transcribe(samples, &TranscribeOptions::default())
             .map_err(|e| format!("GigaAM transcription failed: {}", e))?,
         ActiveModel::Canary(m) => m
-            .transcribe(&samples, &TranscribeOptions::default())
+            .transcribe(samples, &TranscribeOptions::default())
             .map_err(|e| format!("Canary transcription failed: {}", e))?,
         ActiveModel::Cohere(m) => m
-            .transcribe(&samples, &TranscribeOptions::default())
+            .transcribe(samples, &TranscribeOptions::default())
             .map_err(|e| format!("Cohere transcription failed: {}", e))?,
     };
 
@@ -729,7 +821,92 @@ pub(crate) fn transcribe_file(
         *m = Some(model);
     }
 
-    log::info!("transcribe_file complete: {}", file_path.display());
+    Ok(result)
+}
+
+/// Chunked transcription for long audio files (Parakeet only).
+/// Splits audio into overlapping chunks, transcribes each, and combines results.
+fn transcribe_file_chunked(
+    state: &ModelState,
+    samples: &[f32],
+    total_duration_secs: f64,
+) -> Result<TranscriptionResult, String> {
+    log::info!(
+        "Splitting into chunks of {:.0}s with {:.0}s overlap",
+        MAX_CHUNK_DURATION_SECS, CHUNK_OVERLAP_SECS
+    );
+
+    let chunk_samples = (MAX_CHUNK_DURATION_SECS * STT_SAMPLE_RATE as f64) as usize;
+    let step_samples = ((MAX_CHUNK_DURATION_SECS - CHUNK_OVERLAP_SECS) * STT_SAMPLE_RATE as f64) as usize;
+
+    let mut all_segments: Vec<TranscriptionSegment> = Vec::new();
+    let mut combined_text = String::new();
+    let mut covered_until_secs: f64 = 0.0;
+    let mut chunk_index = 0;
+
+    loop {
+        let start_sample = chunk_index * step_samples;
+        if start_sample >= samples.len() {
+            break;
+        }
+        let end_sample = (start_sample + chunk_samples).min(samples.len());
+        let chunk = &samples[start_sample..end_sample];
+        let chunk_duration = chunk.len() as f64 / STT_SAMPLE_RATE as f64;
+        let offset_secs = start_sample as f64 / STT_SAMPLE_RATE as f64;
+
+        log::info!(
+            "Chunk {}: {:.1}s - {:.1}s ({:.1}s of audio)",
+            chunk_index, offset_secs, offset_secs + chunk_duration, chunk_duration
+        );
+
+        // Transcribe this chunk
+        let chunk_result = transcribe_file_pass(state, chunk, offset_secs)?;
+
+        // Add text with space separator
+        if !combined_text.is_empty() && !chunk_result.text.is_empty() {
+            combined_text.push(' ');
+        }
+        combined_text.push_str(&chunk_result.text);
+
+        // Add segments, deduplicating in overlap regions
+        if let Some(segments) = chunk_result.segments {
+            for seg in segments {
+                // Skip segments that fall in the already-covered region
+                let tolerance = 1.0_f32; // 1 second tolerance for segment boundaries
+                if seg.start < (covered_until_secs as f32) - tolerance {
+                    continue;
+                }
+                all_segments.push(seg);
+            }
+        }
+
+        // Update covered region
+        covered_until_secs = (offset_secs + chunk_duration - CHUNK_OVERLAP_SECS).max(covered_until_secs);
+
+        log::info!(
+            "Chunk {} done: {} total segments, covered_until={:.1}s",
+            chunk_index, all_segments.len(), covered_until_secs
+        );
+
+        chunk_index += 1;
+
+        // If this chunk reached the end of the audio, stop
+        if end_sample >= samples.len() {
+            break;
+        }
+    }
+
+    let result = TranscriptionResult {
+        text: combined_text,
+        segments: if all_segments.is_empty() { None } else { Some(all_segments) },
+    };
+
+    log::info!(
+        "transcribe_file complete (chunked): {} chunks, {} segments, {:.1}s audio",
+        chunk_index,
+        result.segments.as_ref().map(|s| s.len()).unwrap_or(0),
+        total_duration_secs
+    );
     Ok(result)
 }
 
@@ -749,6 +926,11 @@ pub(crate) fn transcribe_file(
 ///
 /// To add Whisper word-level support, transcribe-rs needs to expose the DTW
 /// parameters from whisper.cpp, or we need to call whisper-rs directly.
+///
+/// ## Long Audio Handling
+/// Parakeet v3 cannot process very long audio files (>4-5 min). This function
+/// automatically splits long audio into overlapping chunks, transcribes each
+/// chunk separately, and combines the results with deduplication.
 pub(crate) fn transcribe_file_word_level(
     state: &ModelState,
     file_path: &Path,
@@ -756,6 +938,104 @@ pub(crate) fn transcribe_file_word_level(
     log::info!("transcribe_file_word_level: {}", file_path.display());
     let samples = crate::audio::decode_to_pcm(file_path)?;
 
+    let total_duration_secs = samples.len() as f64 / STT_SAMPLE_RATE as f64;
+    log::info!("Audio duration: {:.1}s ({:.1} min)", total_duration_secs, total_duration_secs / 60.0);
+
+    // Check if model is Parakeet before proceeding
+    {
+        let m = state.model.lock().unwrap();
+        if m.is_none() {
+            return Err("No model is loaded".to_string());
+        }
+    }
+
+    // If audio is short enough, run single-pass (original behavior)
+    if total_duration_secs <= MAX_CHUNK_DURATION_SECS {
+        log::info!("Audio fits in single chunk, running single-pass transcription");
+        return transcribe_word_level_pass(state, &samples, 0.0);
+    }
+
+    // Long audio: split into overlapping chunks
+    log::info!(
+        "Audio too long (>{:.0}s), splitting into chunks of {:.0}s with {:.0}s overlap",
+        MAX_CHUNK_DURATION_SECS, MAX_CHUNK_DURATION_SECS, CHUNK_OVERLAP_SECS
+    );
+
+    let chunk_samples = (MAX_CHUNK_DURATION_SECS * STT_SAMPLE_RATE as f64) as usize;
+    let step_samples = ((MAX_CHUNK_DURATION_SECS - CHUNK_OVERLAP_SECS) * STT_SAMPLE_RATE as f64) as usize;
+
+    let mut all_words: Vec<TranscriptionSegment> = Vec::new();
+    let mut covered_until_secs: f64 = 0.0;
+    let mut chunk_index = 0;
+    let mut offset_secs: f64 = 0.0;
+
+    loop {
+        let start_sample = chunk_index * step_samples;
+        if start_sample >= samples.len() {
+            break;
+        }
+        let end_sample = (start_sample + chunk_samples).min(samples.len());
+        let chunk = &samples[start_sample..end_sample];
+        let chunk_duration = chunk.len() as f64 / STT_SAMPLE_RATE as f64;
+
+        log::info!(
+            "Chunk {}: {:.1}s - {:.1}s ({:.1}s of audio, {} samples)",
+            chunk_index, offset_secs, offset_secs + chunk_duration, chunk_duration, chunk.len()
+        );
+
+        // Transcribe this chunk
+        let chunk_result = transcribe_word_level_pass(state, chunk, offset_secs)?;
+
+        if let Some(words) = chunk_result.segments {
+            for word in words {
+                // Skip words that fall in the already-covered region (deduplication).
+                // Allow a small tolerance to avoid cutting words at the boundary.
+                let tolerance = 0.5_f32; // seconds
+                if word.start < (covered_until_secs as f32) - tolerance {
+                    continue;
+                }
+                all_words.push(word);
+            }
+        }
+
+        // Update covered region: everything up to (chunk_end - overlap) is covered
+        covered_until_secs = (offset_secs + chunk_duration - CHUNK_OVERLAP_SECS).max(covered_until_secs);
+
+        log::info!("Chunk {} done: {} total words, covered_until={:.1}s", chunk_index, all_words.len(), covered_until_secs);
+
+        // Move to next chunk
+        chunk_index += 1;
+        offset_secs = (chunk_index * step_samples) as f64 / STT_SAMPLE_RATE as f64;
+
+        // If this chunk reached the end of the audio, stop
+        if end_sample >= samples.len() {
+            break;
+        }
+    }
+
+    // Build combined result
+    let combined_text: String = all_words.iter().map(|w| w.text.as_str()).collect::<Vec<&str>>().join(" ");
+    let result = TranscriptionResult {
+        text: combined_text,
+        segments: if all_words.is_empty() { None } else { Some(all_words) },
+    };
+
+    log::info!(
+        "transcribe_file_word_level complete: {} chunks, {} words, {:.1}s audio",
+        chunk_index + 1,
+        result.segments.as_ref().map(|s| s.len()).unwrap_or(0),
+        total_duration_secs
+    );
+    Ok(result)
+}
+
+/// Run a single pass of word-level transcription on a sample slice.
+/// `time_offset_secs` is added to all timestamps (for chunked processing).
+fn transcribe_word_level_pass(
+    state: &ModelState,
+    samples: &[f32],
+    time_offset_secs: f64,
+) -> Result<TranscriptionResult, String> {
     let mut model = {
         let mut m = state.model.lock().unwrap();
         m.take().ok_or_else(|| "No model is loaded".to_string())?
@@ -767,8 +1047,18 @@ pub(crate) fn transcribe_file_word_level(
                 language: None,
                 timestamp_granularity: Some(TimestampGranularity::Word),
             };
-            m.transcribe_with(&samples, &params)
-                .map_err(|e| format!("Parakeet word-level transcription failed: {}", e))?
+            let mut r = m.transcribe_with(samples, &params)
+                .map_err(|e| format!("Parakeet word-level transcription failed: {}", e))?;
+            // Apply time offset if chunked
+            if time_offset_secs > 0.0 {
+                if let Some(ref mut segs) = r.segments {
+                    for seg in segs.iter_mut() {
+                        seg.start += time_offset_secs as f32;
+                        seg.end += time_offset_secs as f32;
+                    }
+                }
+            }
+            r
         }
         _ => {
             // Put model back before returning error
@@ -785,7 +1075,6 @@ pub(crate) fn transcribe_file_word_level(
         *m = Some(model);
     }
 
-    log::info!("transcribe_file_word_level complete: {}", file_path.display());
     Ok(result)
 }
 

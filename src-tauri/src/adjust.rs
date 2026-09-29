@@ -22,8 +22,7 @@ use crate::align::similarity_score;
 // Configuration (mirrors lib/adjust_session.py)
 // ---------------------------------------------------------------------------
 
-const SILENCE_THRESHOLD_FACTOR: f64 = 4.0;
-const MIN_SILENCE_MS: f64 = 300.0;
+const MIN_SILENCE_MS: f64 = 80.0;           // Ultra-aggressive: 80ms minimum (was 300ms, can detect short pauses)
 const MAX_SNAP_MS: i64 = 500;
 const MAX_SNAP_GAP_MS: i64 = 2000;
 const EXPAND_THRESHOLD_MS: i64 = 500;
@@ -32,6 +31,37 @@ const SPEECH_ENERGY_FRACTION: f64 = 0.10;
 const EXPAND_SEARCH_MS: i64 = 500;
 
 const TMP_SUBTITLE_NAME: &str = "tmp_for_adjust_time";
+
+/// Silence detection strategy.
+/// Different audio characteristics may benefit from different strategies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SilenceStrategy {
+    /// Noise floor based: threshold = noise_floor * factor.
+    /// Good for audio with consistent background noise.
+    #[default]
+    NoiseFloor,
+    /// Dual-bound: threshold = max(noise_floor * factor, peak * db_ratio).
+    /// Prevents over-detection on very clean audio by bounding against peak.
+    DualBound,
+    /// Peak-relative: threshold = peak * ratio.
+    /// Simple and predictable; good when noise floor estimation is unreliable.
+    PeakRelative,
+    /// Otsu's method: automatically finds optimal threshold by maximizing
+    /// between-class variance of energy histogram. No magic constants.
+    Otsu,
+}
+
+impl SilenceStrategy {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "noise_floor" | "noisefloor" => SilenceStrategy::NoiseFloor,
+            "dual_bound" | "dualbound" => SilenceStrategy::DualBound,
+            "peak_relative" | "peakrelative" => SilenceStrategy::PeakRelative,
+            "otsu" => SilenceStrategy::Otsu,
+            _ => SilenceStrategy::NoiseFloor,
+        }
+    }
+}
 
 // Word-level alignment configuration
 const WL_SKIP_STT: f64 = -15.0;       // Penalty for skipping an STT word (hallucination)
@@ -126,13 +156,84 @@ fn estimate_noise_floor(energy: &[f64]) -> f64 {
     avg.max(1.0)
 }
 
-/// Detect silence regions as (start_ms, end_ms) pairs.
-fn find_silence_regions(energy: &[f64], ms_per_pixel: f64) -> Vec<(i64, i64)> {
+/// Compute silence threshold based on the selected strategy.
+fn compute_silence_threshold(energy: &[f64], strategy: SilenceStrategy) -> f64 {
+    match strategy {
+        SilenceStrategy::NoiseFloor => {
+            let noise_floor = estimate_noise_floor(energy);
+            noise_floor * 2.0
+        }
+        SilenceStrategy::DualBound => {
+            let noise_floor = estimate_noise_floor(energy);
+            let peak = energy.iter().cloned().fold(0.0_f64, f64::max);
+            let noise_threshold = noise_floor * 4.0;
+            let peak_threshold = peak * 0.001; // -60dB relative to peak
+            noise_threshold.max(peak_threshold)
+        }
+        SilenceStrategy::PeakRelative => {
+            let peak = energy.iter().cloned().fold(0.0_f64, f64::max);
+            peak * 0.005 // -46dB relative to peak
+        }
+        SilenceStrategy::Otsu => {
+            compute_otsu_threshold(energy)
+        }
+    }
+}
+
+/// Otsu's method: find optimal threshold that maximizes between-class variance.
+/// Automatically separates energy into "silence" and "speech" groups.
+fn compute_otsu_threshold(energy: &[f64]) -> f64 {
+    if energy.is_empty() {
+        return 1.0;
+    }
+    let max_val = energy.iter().cloned().fold(0.0_f64, f64::max);
+    if max_val <= 0.0 {
+        return 1.0;
+    }
+    // Build histogram with 256 bins
+    const NUM_BINS: usize = 256;
+    let mut histogram = [0u64; NUM_BINS];
+    for &e in energy {
+        let bin = ((e / max_val) * (NUM_BINS - 1) as f64).round() as usize;
+        histogram[bin.min(NUM_BINS - 1)] += 1;
+    }
+    let total = energy.len() as f64;
+    // Otsu's algorithm: maximize between-class variance
+    let mut best_threshold = 0.0;
+    let mut best_variance = 0.0;
+    let sum_all = histogram.iter().enumerate().map(|(i, &c)| i as f64 * c as f64).sum::<f64>();
+    let mut sum_bg = 0.0;
+    let mut weight_bg = 0.0;
+    for (i, &count) in histogram.iter().enumerate() {
+        weight_bg += count as f64;
+        if weight_bg == 0.0 {
+            continue;
+        }
+        let weight_fg = total - weight_bg;
+        if weight_fg == 0.0 {
+            break;
+        }
+        sum_bg += i as f64 * count as f64;
+        let mean_bg = sum_bg / weight_bg;
+        let mean_fg = (sum_all - sum_bg) / weight_fg;
+        let variance = weight_bg * weight_fg * (mean_bg - mean_fg).powi(2);
+        if variance > best_variance {
+            best_variance = variance;
+            best_threshold = (i as f64 / (NUM_BINS - 1) as f64) * max_val;
+        }
+    }
+    // Use a fraction of Otsu threshold as the silence boundary
+    // (Otsu finds the boundary between silence and speech clusters)
+    best_threshold * 0.5
+}
+
+/// Detect silence regions as (start_ms, end_ms) pairs using the given strategy.
+fn find_silence_regions(energy: &[f64], ms_per_pixel: f64, strategy: SilenceStrategy) -> Vec<(i64, i64)> {
     if energy.is_empty() {
         return Vec::new();
     }
-    let noise_floor = estimate_noise_floor(energy);
-    let threshold = noise_floor * SILENCE_THRESHOLD_FACTOR;
+    let threshold = compute_silence_threshold(energy, strategy);
+    log::info!("[DEBUG] Silence strategy: {:?}, threshold: {:.4}", strategy, threshold);
 
     let mut regions: Vec<(usize, usize)> = Vec::new();
     let mut run_start: Option<usize> = None;
@@ -343,20 +444,189 @@ fn adjust_cues(
 }
 
 // ---------------------------------------------------------------------------
+// Parallel processing helpers
+// ---------------------------------------------------------------------------
+
+/// Result of processing one subtitle in parallel.
+#[derive(Clone)]
+struct SubtitleAdjustResult {
+    subtitle_uuid: String,
+    media_uuid: String,
+    name: String,
+    cues: Vec<Cue>,
+    adjusted: Vec<(Cue, i64, i64)>,
+    silence_count: usize,
+}
+
+/// Result of processing one media file in parallel.
+#[derive(Clone)]
+struct MediaProcessResult {
+    media_uuid: String,
+    media_source: String,
+    subtitle_results: Vec<SubtitleAdjustResult>,
+}
+
+/// Process a single media file: load waveform, compute energy/silences, adjust all subtitles.
+/// This runs in a worker thread. Does NOT access the database.
+fn process_media_file(
+    waveform_dir: &Path,
+    media_uuid: &str,
+    media_source: &str,
+    subtitle_cues: &[(String, String, Vec<Cue>)], // (subtitle_uuid, name, cues)
+    strategy: SilenceStrategy,
+) -> MediaProcessResult {
+    // Load waveform and compute energy/silences once per media file.
+    let (silences, ms_per_pixel) = match load_waveform(waveform_dir, media_source) {
+        Some((data, mpp)) => {
+            let energy = compute_energy(&data);
+            let sil = find_silence_regions(&energy, mpp, strategy);
+            (sil, mpp)
+        }
+        None => {
+            return MediaProcessResult {
+                media_uuid: media_uuid.to_string(),
+                media_source: media_source.to_string(),
+                subtitle_results: Vec::new(),
+            };
+        }
+    };
+
+    // Log all silence regions for debugging.
+    log::info!("[DEBUG] Media '{}': {} silence regions found, ms_per_pixel={:.4}", media_source, silences.len(), ms_per_pixel);
+    for (i, region) in silences.iter().enumerate() {
+        log::info!(
+            "[DEBUG]   silence[{}]: {} -> {} (duration: {}ms)",
+            i,
+            ms_to_timestamp(region.0),
+            ms_to_timestamp(region.1),
+            region.1 - region.0
+        );
+    }
+
+    let mut subtitle_results = Vec::new();
+
+    for (subtitle_uuid, name, cues) in subtitle_cues {
+        if cues.is_empty() {
+            continue;
+        }
+
+        // Log original cue timestamps before adjustment.
+        log::info!("[DEBUG] Subtitle '{}' ({}): {} cues BEFORE adjustment:", name, subtitle_uuid, cues.len());
+        for cue in cues {
+            log::info!(
+                "[DEBUG]   cue {:>3}: {} -> {}  \"{}\"",
+                cue.order_num,
+                ms_to_timestamp(cue.start_ms),
+                ms_to_timestamp(cue.end_ms),
+                if cue.content.len() > 60 { format!("{}...", cue.content.chars().take(60).collect::<String>()) } else { cue.content.clone() }
+            );
+        }
+
+        let adjusted = adjust_cues(cues, &silences, &[], ms_per_pixel);
+
+        // Log adjusted cue timestamps after adjustment.
+        log::info!("[DEBUG] Subtitle '{}' ({}): {} cues AFTER adjustment:", name, subtitle_uuid, adjusted.len());
+        for (cue, new_start, new_end) in &adjusted {
+            let start_changed = *new_start != cue.start_ms;
+            let end_changed = *new_end != cue.end_ms;
+            let marker = if start_changed || end_changed { " *CHANGED*" } else { "" };
+            log::info!(
+                "[DEBUG]   cue {:>3}: {} -> {}  \"{}\"{}",
+                cue.order_num,
+                ms_to_timestamp(*new_start),
+                ms_to_timestamp(*new_end),
+                if cue.content.len() > 60 { format!("{}...", cue.content.chars().take(60).collect::<String>()) } else { cue.content.clone() },
+                marker
+            );
+            if start_changed {
+                log::info!("[DEBUG]     start: {} -> {} (delta: {}ms)", ms_to_timestamp(cue.start_ms), ms_to_timestamp(*new_start), new_start - cue.start_ms);
+            }
+            if end_changed {
+                log::info!("[DEBUG]     end:   {} -> {} (delta: {}ms)", ms_to_timestamp(cue.end_ms), ms_to_timestamp(*new_end), new_end - cue.end_ms);
+            }
+        }
+
+        subtitle_results.push(SubtitleAdjustResult {
+            subtitle_uuid: subtitle_uuid.clone(),
+            media_uuid: media_uuid.to_string(),
+            name: name.clone(),
+            cues: cues.clone(),
+            adjusted,
+            silence_count: silences.len(),
+        });
+    }
+
+    MediaProcessResult {
+        media_uuid: media_uuid.to_string(),
+        media_source: media_source.to_string(),
+        subtitle_results,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tauri command
 // ---------------------------------------------------------------------------
 
 /// Adjust every subtitle's cue boundaries using waveform silence detection.
 /// `mode` is "new" (write an adjusted copy per subtitle) or "in_place"
 /// (overwrite original cues and remove leftover tmp working subtitles).
+/// `strategy` selects the silence detection method: "noise_floor" (default), "dual_bound", "peak_relative", "otsu".
 #[tauri::command]
-pub async fn dataset_adjust_cue_time(
+pub fn dataset_adjust_cue_time(
     settings: State<'_, SettingsState>,
     uuid: String,
     mode: String,
+    force: Option<bool>,
+    strategy: Option<String>,
 ) -> Result<String, String> {
-    log::info!("dataset_adjust_cue_time: dataset={}, mode={}", uuid, mode);
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let force = force.unwrap_or(false);
+    let strategy = SilenceStrategy::from_str(strategy.as_deref().unwrap_or("noise_floor"));
+    log::info!("dataset_adjust_cue_time: dataset={}, mode={}, force={}, strategy={:?}", uuid, mode, force, strategy);
+
+    // Prevent concurrent adjust operations on the same dataset.
+    // The RAII guard ensures cleanup even if the operation panics.
+    let _guard = match crate::db::AdjustmentGuard::try_acquire(&uuid) {
+        Some(g) => g,
+        None => return Err(format!("Dataset '{}' is already being adjusted. Please wait for the current operation to complete.", uuid)),
+    };
+
+    // Run the synchronous work directly.
+    // The guard will be held for the entire duration and dropped when this function returns.
+    dataset_adjust_cue_time_sync(&settings, &uuid, &mode, force, None, strategy)
+}
+
+/// Adjust cue time for a single media file within a dataset.
+/// `strategy` selects the silence detection method: "noise_floor" (default), "dual_bound", "peak_relative", "otsu".
+#[tauri::command]
+pub fn dataset_adjust_cue_time_single(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+    media_uuid: String,
+    mode: String,
+    force: Option<bool>,
+    strategy: Option<String>,
+) -> Result<String, String> {
+    let force = force.unwrap_or(false);
+    let strategy = SilenceStrategy::from_str(strategy.as_deref().unwrap_or("noise_floor"));
+    log::info!("dataset_adjust_cue_time_single: dataset={}, media={}, mode={}, force={}, strategy={:?}", uuid, media_uuid, mode, force, strategy);
+
+    let _guard = match crate::db::AdjustmentGuard::try_acquire(&uuid) {
+        Some(g) => g,
+        None => return Err(format!("Dataset '{}' is already being adjusted. Please wait for the current operation to complete.", uuid)),
+    };
+
+    dataset_adjust_cue_time_sync(&settings, &uuid, &mode, force, Some(media_uuid), strategy)
+}
+
+fn dataset_adjust_cue_time_sync(
+    settings: &State<'_, SettingsState>,
+    uuid: &str,
+    mode: &str,
+    force: bool,
+    media_uuid_filter: Option<String>,
+    strategy: SilenceStrategy,
+) -> Result<String, String> {
+    let dataset_dir = find_dataset_dir(settings, uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
     if !db_path.exists() {
         return Err("Database file not found. Please build the database first.".into());
@@ -364,163 +634,281 @@ pub async fn dataset_adjust_cue_time(
     let waveform_dir = dataset_dir.join("waveform");
     let in_place = mode == "in_place";
 
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let mut conn = crate::db::open_db_with_logging(&db_path, "adjust_cue_time")?;
 
-    // All subtitles except the tmp working subtitle.
-    let subtitles: Vec<(String, String, String)> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT uuid, media_uuid, name FROM listen_subtitle \
-                 WHERE name != ?1 ORDER BY media_uuid, created_at",
-            )
-            .map_err(|e| e.to_string())?;
-        let mapped = stmt
-            .query_map(rusqlite::params![TMP_SUBTITLE_NAME], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        mapped.filter_map(|r| r.ok()).collect()
+    // All subtitles except the tmp working subtitle, including note to check if already adjusted.
+    // Optionally filter by media_uuid for single-media operations.
+    let subtitles: Vec<(String, String, String, Option<String>)> = {
+        if let Some(ref media_uuid) = media_uuid_filter {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT uuid, media_uuid, name, note FROM listen_subtitle \
+                     WHERE name != ?1 AND media_uuid = ?2 ORDER BY created_at",
+                )
+                .map_err(|e| e.to_string())?;
+            let mapped = stmt
+                .query_map(rusqlite::params![TMP_SUBTITLE_NAME, media_uuid], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            mapped.filter_map(|r| r.ok()).collect()
+        } else {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT uuid, media_uuid, name, note FROM listen_subtitle \
+                     WHERE name != ?1 ORDER BY media_uuid, created_at",
+                )
+                .map_err(|e| e.to_string())?;
+            let mapped = stmt
+                .query_map(rusqlite::params![TMP_SUBTITLE_NAME], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            mapped.filter_map(|r| r.ok()).collect()
+        }
     };
 
     let mut processed = 0usize;
     let mut shifted_total = 0usize;
     let mut skipped = 0usize;
+    let mut skipped_adjusted = 0usize;
     let mut log_lines: Vec<String> = Vec::new();
 
     log::info!("Processing {} subtitles for cue time adjustment", subtitles.len());
 
-    for (subtitle_uuid, media_uuid, name) in subtitles.iter() {
-        // Resolve the media source path.
-        let source: Option<String> = conn
-            .query_row(
-                "SELECT source FROM listen_media WHERE uuid = ?1",
-                rusqlite::params![media_uuid],
-                |row| row.get::<_, String>(0),
-            )
-            .ok();
-        let Some(source) = source else {
-            skipped += 1;
-            continue;
-        };
+    // Group subtitles by media_uuid for parallel processing.
+    let mut media_groups: Vec<(String, Vec<(String, String)>)> = Vec::new(); // (media_uuid, [(subtitle_uuid, name)])
+    let mut media_source_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
-        let Some((data, ms_per_pixel)) = load_waveform(&waveform_dir, &source) else {
-            skipped += 1;
+    for (subtitle_uuid, media_uuid, name, note) in subtitles.iter() {
+        // Skip already-adjusted subtitles (unless force=true).
+        if !force && note.as_ref().map(|n| n.contains("adjusted using waveform")).unwrap_or(false) {
+            skipped_adjusted += 1;
+            log::info!("Skipping already adjusted subtitle: '{}' (uuid={})", name, subtitle_uuid);
             continue;
-        };
-        let energy = compute_energy(&data);
-        let silences = find_silence_regions(&energy, ms_per_pixel);
+        }
 
-        // Load cues for this subtitle.
-        let cues: Vec<Cue> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT uuid, order_num, start_ms, end_ms, content, reference \
-                     FROM listen_subtitle_cue WHERE subtitle_uuid = ?1 ORDER BY order_num",
+        if !media_source_map.contains_key(media_uuid) {
+            let source: Option<String> = conn
+                .query_row(
+                    "SELECT source FROM listen_media WHERE uuid = ?1",
+                    rusqlite::params![media_uuid],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok();
+            if let Some(src) = source {
+                media_source_map.insert(media_uuid.clone(), src);
+            }
+        }
+        if media_source_map.contains_key(media_uuid) {
+            if let Some(group) = media_groups.iter_mut().find(|(m, _)| m == media_uuid) {
+                group.1.push((subtitle_uuid.clone(), name.clone()));
+            } else {
+                media_groups.push((media_uuid.clone(), vec![(subtitle_uuid.clone(), name.clone())]));
+            }
+        } else {
+            skipped += 1;
+        }
+    }
+
+    log::info!("Found {} media files to process", media_groups.len());
+
+    // Load all cues from database before parallel processing.
+    // Structure: media_uuid -> [(subtitle_uuid, name, cues)]
+    let mut media_data: std::collections::HashMap<String, Vec<(String, String, Vec<Cue>)>> = std::collections::HashMap::new();
+
+    for (media_uuid, subtitle_list) in &media_groups {
+        let mut subtitle_cues = Vec::new();
+        for (subtitle_uuid, name) in subtitle_list {
+            let cues: Vec<Cue> = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT uuid, order_num, start_ms, end_ms, content, reference \
+                         FROM listen_subtitle_cue WHERE subtitle_uuid = ?1 ORDER BY order_num",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let mapped = stmt
+                    .query_map(rusqlite::params![subtitle_uuid], |row| {
+                        Ok(Cue {
+                            uuid: row.get::<_, String>(0)?,
+                            order_num: row.get::<_, i64>(1)?,
+                            start_ms: row.get::<_, i64>(2)?,
+                            end_ms: row.get::<_, i64>(3)?,
+                            content: row.get::<_, String>(4)?,
+                            reference: row.get::<_, Option<String>>(5)?,
+                        })
+                    })
+                    .map_err(|e| e.to_string())?;
+                mapped.filter_map(|r| r.ok()).collect()
+            };
+            if !cues.is_empty() {
+                subtitle_cues.push((subtitle_uuid.clone(), name.clone(), cues));
+            } else {
+                skipped += 1;
+            }
+        }
+        media_data.insert(media_uuid.clone(), subtitle_cues);
+    }
+
+    // Process media files in parallel using scoped threads.
+    let waveform_dir_clone = waveform_dir.clone();
+    let results: Vec<MediaProcessResult> = std::thread::scope(|s| {
+        let mut handles = Vec::new();
+
+        for (media_uuid, subtitle_cues) in &media_data {
+            let source = media_source_map.get(media_uuid).cloned();
+            let wf_dir = waveform_dir_clone.clone();
+            let subs = subtitle_cues.clone();
+            let media_id = media_uuid.clone();
+
+            let handle = s.spawn(move || {
+                match source {
+                    Some(src) => process_media_file(&wf_dir, &media_id, &src, &subs, strategy),
+                    None => MediaProcessResult {
+                        media_uuid: media_id,
+                        media_source: String::new(),
+                        subtitle_results: Vec::new(),
+                    },
+                }
+            });
+            handles.push(handle);
+        }
+
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+
+    // Process results: generate logs and write to database.
+    // Use one transaction per subtitle for resumability:
+    // if the operation fails, already-committed subtitles are kept
+    // and will be skipped on retry (since they are marked as adjusted).
+
+    for result in &results {
+        let filename = std::path::Path::new(&result.media_source)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| result.media_uuid.clone());
+
+        log_lines.push(format!("\nProcessing media: '{}'", filename));
+        log::info!("Processing media: '{}' (uuid={})", filename, result.media_uuid);
+
+        let mut media_subtitle_count = 0usize;
+        let mut media_shifted_count = 0usize;
+
+        log::info!("Media '{}' has {} subtitle results", filename, result.subtitle_results.len());
+
+        for sub_result in &result.subtitle_results {
+            log::info!("Processing subtitle '{}' (uuid={}) for media '{}'", sub_result.name, sub_result.subtitle_uuid, filename);
+            let shifted_items: Vec<&(Cue, i64, i64)> = sub_result
+                .adjusted
+                .iter()
+                .filter(|(c, ns, ne)| *ns != c.start_ms || *ne != c.end_ms)
+                .collect();
+            let shifted = shifted_items.len();
+
+            log_lines.push(format!(
+                "Subtitle '{}' ({} cues, {} shifted, {} silence regions):",
+                sub_result.name, sub_result.cues.len(), shifted, sub_result.silence_count
+            ));
+            for (cue, new_start, new_end) in &shifted_items {
+                log_lines.push(format!(
+                    "  cue {:>3}  {} -> {}  {} -> {}  \"{}\"",
+                    cue.order_num,
+                    ms_to_timestamp(cue.start_ms),
+                    ms_to_timestamp(*new_start),
+                    ms_to_timestamp(cue.end_ms),
+                    ms_to_timestamp(*new_end),
+                    if cue.content.chars().count() > 50 {
+                        format!("{}...", cue.content.chars().take(50).collect::<String>())
+                    } else {
+                        cue.content.clone()
+                    }
+                ));
+            }
+
+            // One transaction per subtitle for resumability.
+            let tx = crate::db::begin_transaction_with_logging(&mut conn, &format!("adjust_subtitle:{}", sub_result.subtitle_uuid))?;
+
+            // Write to database.
+            let now = Utc::now().to_rfc3339();
+            let target_uuid = if in_place {
+                tx.execute(
+                    "DELETE FROM listen_subtitle_cue WHERE subtitle_uuid = ?1",
+                    rusqlite::params![sub_result.subtitle_uuid],
                 )
                 .map_err(|e| e.to_string())?;
-            let mapped = stmt
-                .query_map(rusqlite::params![subtitle_uuid], |row| {
-                    Ok(Cue {
-                        uuid: row.get::<_, String>(0)?,
-                        order_num: row.get::<_, i64>(1)?,
-                        start_ms: row.get::<_, i64>(2)?,
-                        end_ms: row.get::<_, i64>(3)?,
-                        content: row.get::<_, String>(4)?,
-                        reference: row.get::<_, Option<String>>(5)?,
-                    })
-                })
+                sub_result.subtitle_uuid.clone()
+            } else {
+                let new_uuid = Uuid::new_v4().to_string();
+                tx.execute(
+                    "INSERT INTO listen_subtitle (uuid, media_uuid, name, note, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        new_uuid,
+                        sub_result.media_uuid,
+                        sub_result.name,
+                        "adjusted using waveform",
+                        now,
+                        now
+                    ],
+                )
                 .map_err(|e| e.to_string())?;
-            mapped.filter_map(|r| r.ok()).collect()
-        };
-        if cues.is_empty() {
-            skipped += 1;
-            continue;
-        }
+                new_uuid
+            };
 
-        let adjusted = adjust_cues(&cues, &silences, &energy, ms_per_pixel);
-        let shifted_items: Vec<&(Cue, i64, i64)> = adjusted
-            .iter()
-            .filter(|(c, ns, ne)| *ns != c.start_ms || *ne != c.end_ms)
-            .collect();
-        let shifted = shifted_items.len();
+            for (cue, new_start, new_end) in sub_result.adjusted.iter() {
+                tx.execute(
+                    "INSERT INTO listen_subtitle_cue (uuid, subtitle_uuid, order_num, start_ms, end_ms, content, reference, version_created) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
+                    rusqlite::params![
+                        Uuid::new_v4().to_string(),
+                        target_uuid,
+                        cue.order_num,
+                        new_start,
+                        new_end,
+                        cue.content,
+                        cue.reference
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+
+            if in_place {
+                // Mark as adjusted by updating note and updated_at.
+                let adjust_note = "adjusted using waveform (in-place)";
+                tx.execute(
+                    "UPDATE listen_subtitle SET updated_at = ?1, note = ?2 WHERE uuid = ?3",
+                    rusqlite::params![now, adjust_note, sub_result.subtitle_uuid],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+
+            // Commit this subtitle's transaction immediately.
+            crate::db::commit_transaction_with_logging(tx, &format!("adjust_subtitle:{}", sub_result.subtitle_uuid), 0)?;
+
+            processed += 1;
+            shifted_total += shifted;
+            media_subtitle_count += 1;
+            media_shifted_count += shifted;
+        }
 
         log_lines.push(format!(
-            "Subtitle '{}' ({} cues, {} shifted, {} silence regions):",
-            name, cues.len(), shifted, silences.len()
+            "  → Media '{}': {} subtitle(s) processed, {} cue(s) shifted",
+            filename, media_subtitle_count, media_shifted_count
         ));
-        for (cue, new_start, new_end) in &shifted_items {
-            log_lines.push(format!(
-                "  cue {:>3}  {} -> {}  {} -> {}  \"{}\"",
-                cue.order_num,
-                ms_to_timestamp(cue.start_ms),
-                ms_to_timestamp(*new_start),
-                ms_to_timestamp(cue.end_ms),
-                ms_to_timestamp(*new_end),
-                if cue.content.len() > 50 {
-                    format!("{}...", &cue.content[..50])
-                } else {
-                    cue.content.clone()
-                }
-            ));
-        }
-
-        let now = Utc::now().to_rfc3339();
-        let target_uuid = if in_place {
-            conn.execute(
-                "DELETE FROM listen_subtitle_cue WHERE subtitle_uuid = ?1",
-                rusqlite::params![subtitle_uuid],
-            )
-            .map_err(|e| e.to_string())?;
-            subtitle_uuid.clone()
-        } else {
-            let new_uuid = Uuid::new_v4().to_string();
-            conn.execute(
-                "INSERT INTO listen_subtitle (uuid, media_uuid, name, note, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    new_uuid,
-                    media_uuid,
-                    name,
-                    "adjusted using waveform",
-                    now,
-                    now
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            new_uuid
-        };
-
-        for (cue, new_start, new_end) in adjusted.iter() {
-            conn.execute(
-                "INSERT INTO listen_subtitle_cue (uuid, subtitle_uuid, order_num, start_ms, end_ms, content, reference, version_created) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
-                rusqlite::params![
-                    Uuid::new_v4().to_string(),
-                    target_uuid,
-                    cue.order_num,
-                    new_start,
-                    new_end,
-                    cue.content,
-                    cue.reference
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-
-        if in_place {
-            conn.execute(
-                "UPDATE listen_subtitle SET updated_at = ?1 WHERE uuid = ?2",
-                rusqlite::params![now, subtitle_uuid],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-
-        processed += 1;
-        shifted_total += shifted;
+        log::info!(
+            "Media '{}': {} subtitle(s), {} shifted",
+            filename, media_subtitle_count, media_shifted_count
+        );
     }
 
     // In-place runs finalise the dataset: remove leftover tmp working subtitles.
@@ -534,21 +922,21 @@ pub async fn dataset_adjust_cue_time(
             )
             .unwrap_or(0);
         if tmp_deleted > 0 {
-            conn.execute(
+            let tx = crate::db::begin_transaction_with_logging(&mut conn, "cleanup_tmp_subtitles")?;
+            tx.execute(
                 "DELETE FROM listen_subtitle_cue WHERE subtitle_uuid IN \
                  (SELECT uuid FROM listen_subtitle WHERE name = ?1)",
                 rusqlite::params![TMP_SUBTITLE_NAME],
             )
             .map_err(|e| e.to_string())?;
-            conn.execute(
+            tx.execute(
                 "DELETE FROM listen_subtitle WHERE name = ?1",
                 rusqlite::params![TMP_SUBTITLE_NAME],
             )
             .map_err(|e| e.to_string())?;
+            crate::db::commit_transaction_with_logging(tx, "cleanup_tmp_subtitles", 0)?;
         }
     }
-
-    drop(conn);
 
     log::info!("Adjust complete: {} subtitles processed, {} cues shifted", processed, shifted_total);
     let mut summary = String::new();
@@ -566,6 +954,9 @@ pub async fn dataset_adjust_cue_time(
     if skipped > 0 {
         summary.push_str(&format!("\nSkipped {} subtitle(s) without a waveform or cues", skipped));
     }
+    if skipped_adjusted > 0 {
+        summary.push_str(&format!("\nSkipped {} already adjusted subtitle(s)", skipped_adjusted));
+    }
     if in_place && tmp_deleted > 0 {
         summary.push_str(&format!("\nRemoved {} leftover tmp working subtitle(s)", tmp_deleted));
     }
@@ -580,6 +971,43 @@ pub async fn dataset_adjust_cue_time(
         }
     }
     Ok(summary)
+}
+
+// ---------------------------------------------------------------------------
+// Check if subtitle has been adjusted
+// ---------------------------------------------------------------------------
+
+/// Check if a subtitle has been adjusted by the cue time adjustment function.
+/// Returns true if the subtitle's note field indicates it was adjusted.
+#[tauri::command]
+pub async fn dataset_check_subtitle_adjusted(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+    subtitle_uuid: String,
+) -> Result<bool, String> {
+    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let db_path = dataset_dir.join("data.sqlite3");
+    if !db_path.exists() {
+        return Err("Database file not found.".into());
+    }
+
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+
+    let note: Option<String> = conn
+        .query_row(
+            "SELECT note FROM listen_subtitle WHERE uuid = ?1",
+            rusqlite::params![subtitle_uuid],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    // Check if note contains adjustment markers.
+    let is_adjusted = note
+        .map(|n| n.contains("adjusted using waveform"))
+        .unwrap_or(false);
+
+    Ok(is_adjusted)
 }
 
 // ---------------------------------------------------------------------------

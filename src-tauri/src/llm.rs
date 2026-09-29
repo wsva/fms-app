@@ -3,8 +3,6 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
-use crate::llm_model_list::{self, LlmModelDef};
-
 const OLLAMA_BASE_URL: &str = "http://localhost:11434";
 
 // ---------------------------------------------------------------------------
@@ -82,7 +80,6 @@ pub struct LlmChatResponse {
 #[derive(Serialize, Clone)]
 pub struct LlmInstalledModelsResponse {
     pub installed: Vec<OllamaModelInfo>,
-    pub recommended: Vec<LlmModelDef>,
 }
 
 // ---------------------------------------------------------------------------
@@ -127,7 +124,6 @@ pub async fn llm_list_models() -> Result<LlmInstalledModelsResponse, String> {
 
     Ok(LlmInstalledModelsResponse {
         installed: tags.models,
-        recommended: llm_model_list::MODELS.to_vec(),
     })
 }
 

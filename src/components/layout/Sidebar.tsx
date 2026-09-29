@@ -19,6 +19,7 @@ import {
   Layers,
   ScanText,
   FileText,
+  AudioLines,
 } from "lucide-react";
 
 export type TabId =
@@ -66,7 +67,7 @@ const navGroups: NavGroup[] = [
     label: "Tools",
     icon: Wrench,
     tabs: [
-      { id: "models", label: "STT Models", icon: Box },
+      { id: "models", label: "Models", icon: Box },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
       { id: "web-service", label: "Web Service", icon: Globe },

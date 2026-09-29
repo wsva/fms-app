@@ -39,6 +39,7 @@ chrono = { version = "0.4", features = ["serde"] }
 symphonia = { version = "0.5", features = ["all", "opt-simd"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 log = "0.4"
+lazy_static = "1.4"
 tauri-plugin-fs = "2.5.2"
 edge-tts-rust = "0.1"
 axum = { version = "0.8.9", features = ["multipart"] }
@@ -66,5 +67,3 @@ opt-level = 3
 panic = "abort"
 strip = true
 
-# The `ocr` crate uses ndarray/rayon which are fast enough in dev mode.
-# If OCR becomes slow in `tauri dev`, re-add opt-level = 2 overrides here.

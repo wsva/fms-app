@@ -4,13 +4,14 @@ mod align;
 mod auth;
 mod book;
 mod dataset;
+mod db;
 mod dictation;
 mod llm;
-mod llm_model_list;
 mod logger;
 mod model;
 mod model_download;
 mod model_list;
+mod model_list_stt;
 mod mcp;
 mod settings;
 mod tools;
@@ -18,6 +19,9 @@ mod edge_tts;
 mod web_service;
 mod capture;
 mod ocr;
+
+// Unified model index
+mod model_index;
 
 use tauri::Manager;
 
@@ -71,6 +75,8 @@ pub fn run() {
             align::dataset_align_cues,
             align::dataset_align_cues_transcript,
             adjust::dataset_adjust_cue_time,
+            adjust::dataset_adjust_cue_time_single,
+            adjust::dataset_check_subtitle_adjusted,
             adjust::dataset_sync_cue_times,
             adjust::dataset_sync_cue_times_word_level,
             dictation::dictation_list_media,
@@ -124,9 +130,12 @@ pub fn run() {
             web_service::web_service_start,
             web_service::web_service_stop,
             ocr::ocr_recognize,
+            model_index::model_index_get,
+            model_index::model_index_refresh,
             capture::capture_screenshot,
             logger::log_get_history,
             logger::log_clear,
+            logger::log_frontend_message,
         ])
         .manage(model::ModelState::new())
         .manage(settings::SettingsState::new())
@@ -137,6 +146,22 @@ pub fn run() {
             let log_buffer = logger::init_logger(app.handle().clone());
             app.handle().manage(log_buffer);
             log::info!("Application starting up");
+
+            // Initialize unified model index (scan filesystem on first run)
+            let model_root = model_index::model_root();
+            let index_state = model_index::ModelIndexState::new(&model_root);
+            {
+                let idx = index_state.index.lock().unwrap();
+                if idx.models.is_empty() {
+                    drop(idx);
+                    log::info!("[ModelIndex] Empty index, running initial scan...");
+                    let scanned = model_index::scan_models(&model_root);
+                    let mut idx = index_state.index.lock().unwrap();
+                    *idx = scanned;
+                    let _ = model_index::ModelIndexState::save(&*idx, &index_state.index_path);
+                }
+            }
+            app.handle().manage(index_state);
 
             // Auto-start web service (MCP + HTTP API) on port 8787
             let handle = app.handle().clone();

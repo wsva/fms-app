@@ -42,29 +42,32 @@ export default function StudioPage() {
 
   // Adjust form
   const [adjustMode, setAdjustMode] = useState<AdjustMode>("new");
+  const [forceAdjust, setForceAdjust] = useState(false);
+  const [silenceStrategy, setSilenceStrategy] = useState<string>("noise_floor");
 
   // Split-book engine
   const [splitBookMode, setSplitBookMode] = useState<SplitBookMode>("rust");
 
-  // Run state + log
+  // Run state
   const [running, setRunning] = useState(false);
   const [runningStage, setRunningStage] = useState<string>("");
   const [rescanning, setRescanning] = useState(false);
-  const [log, setLog] = useState<string[]>([]);
-  const logRef = useRef<HTMLPreElement>(null);
 
   const appendLog = useCallback((text: string) => {
-    const stamp = new Date().toLocaleTimeString();
-    setLog((prev) => [...prev, ...text.split("\n").map((l) => `[${stamp}] ${l}`)]);
+    if (!isTauri()) return;
+    const lines = text.split("\n");
+    for (const line of lines) {
+      invoke("log_frontend_message", {
+        message: line,
+        level: "INFO",
+        module: "studio",
+      }).catch(() => {});
+    }
   }, []);
 
   useEffect(() => {
     setMounted(true);
   }, []);
-
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [log]);
 
   // ---- Data loading ----
 
@@ -635,6 +638,8 @@ export default function StudioPage() {
                         invoke<string>("dataset_adjust_cue_time", {
                           uuid: selectedUuid,
                           mode: adjustMode,
+                          force: forceAdjust,
+                          strategy: silenceStrategy,
                         })
                       )
                     }
@@ -660,30 +665,34 @@ export default function StudioPage() {
                         />
                         In place
                       </label>
+                      <label className="flex items-center gap-1 cursor-pointer ml-2">
+                        <input
+                          type="checkbox"
+                          checked={forceAdjust}
+                          onChange={(e) => setForceAdjust(e.target.checked)}
+                          disabled={running}
+                        />
+                        Force re-adjust
+                      </label>
+                      <label className="flex items-center gap-1 ml-2">
+                        Strategy:
+                        <select
+                          value={silenceStrategy}
+                          onChange={(e) => setSilenceStrategy(e.target.value)}
+                          disabled={running}
+                          className="ml-1 px-1 py-0.5 text-xs bg-bg-input border border-border-primary rounded"
+                        >
+                          <option value="noise_floor">Noise Floor</option>
+                          <option value="dual_bound">Dual Bound</option>
+                          <option value="peak_relative">Peak Relative</option>
+                          <option value="otsu">Otsu (Auto)</option>
+                        </select>
+                      </label>
                     </div>
                   </StageRow>
                 </section>
               </>
             )}
-          </div>
-
-          {/* Output log */}
-          <div className="w-[380px] shrink-0 flex flex-col min-h-0 border border-border-default rounded-lg">
-            <div className="flex items-center justify-between px-3 py-2 border-b border-border-default shrink-0">
-              <span className="text-sm font-medium text-text-secondary">Output</span>
-              <button
-                className={`${btnSmSecondary} inline-flex items-center gap-1`}
-                onClick={() => setLog([])}
-              >
-                <Trash2 size={14} /> Clear
-              </button>
-            </div>
-            <pre
-              ref={logRef}
-              className="flex-1 min-h-0 overflow-auto p-3 text-xs font-mono text-text-secondary whitespace-pre-wrap break-words"
-            >
-              {log.length === 0 ? "Output will appear here." : log.join("\n")}
-            </pre>
           </div>
         </div>
       )}

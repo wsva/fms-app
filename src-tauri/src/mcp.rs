@@ -116,6 +116,29 @@ struct AdjustCueTimeParam {
     uuid: String,
     #[serde(default = "default_adjust_mode")]
     mode: String,
+    /// Force re-adjustment of already-adjusted subtitles (default: false, skips them).
+    #[serde(default)]
+    force: bool,
+    /// Silence detection strategy: "noise_floor" (default), "dual_bound", "peak_relative", "otsu".
+    #[serde(default)]
+    strategy: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct AdjustCueTimeSingleParam {
+    /// Dataset UUID.
+    uuid: String,
+    /// Media UUID to adjust cues for.
+    media_uuid: String,
+    /// Mode: 'new' (create adjusted copy) or 'in_place' (overwrite original cues).
+    #[serde(default = "default_adjust_mode")]
+    mode: String,
+    /// Force re-adjustment of already-adjusted subtitles (default: false).
+    #[serde(default)]
+    force: bool,
+    /// Silence detection strategy: "noise_floor" (default), "dual_bound", "peak_relative", "otsu".
+    #[serde(default)]
+    strategy: Option<String>,
 }
 
 fn default_adjust_mode() -> String {
@@ -718,14 +741,23 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"media": items, "count": items.len()}).to_string())
     }
 
-    #[tool(name = "dataset_adjust_cue_time", description = "Adjust cue timestamps based on silence detection in the audio. Use mode='new' for first adjustment or 'in_place' to overwrite original cues.")]
+    #[tool(name = "dataset_adjust_cue_time", description = "Adjust cue timestamps based on silence detection in the audio. Use mode='new' for first adjustment or 'in_place' to overwrite original cues. Already-adjusted subtitles are skipped by default; set force=true to re-process them. Strategy options: 'noise_floor' (default, good for consistent noise), 'dual_bound' (prevents over-detection on clean audio), 'peak_relative' (simple peak-based), 'otsu' (automatic optimal threshold).")]
     async fn dataset_adjust_cue_time(
         &self,
         Parameters(param): Parameters<AdjustCueTimeParam>,
     ) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
-        let result = adjust::dataset_adjust_cue_time(settings, param.uuid, param.mode)
-            .await?;
+        let result: String = adjust::dataset_adjust_cue_time(settings, param.uuid, param.mode, Some(param.force), param.strategy)?;
+        Ok(serde_json::json!({"status": "ok", "result": result}).to_string())
+    }
+
+    #[tool(name = "dataset_adjust_cue_time_single", description = "Adjust cue timestamps for a SINGLE media file based on silence detection. Use mode='new' for first adjustment or 'in_place' to overwrite original cues. Already-adjusted subtitles are skipped by default; set force=true to re-process them. Strategy options: 'noise_floor' (default), 'dual_bound', 'peak_relative', 'otsu' (automatic optimal threshold).")]
+    async fn dataset_adjust_cue_time_single(
+        &self,
+        Parameters(param): Parameters<AdjustCueTimeSingleParam>,
+    ) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let result: String = adjust::dataset_adjust_cue_time_single(settings, param.uuid, param.media_uuid, param.mode, Some(param.force), param.strategy)?;
         Ok(serde_json::json!({"status": "ok", "result": result}).to_string())
     }
 
@@ -816,7 +848,8 @@ impl DatasetMcpServer {
         let app = self.app.clone();
         let state = self.app.state::<ModelState>();
         let settings = self.app.state::<SettingsState>();
-        crate::model::model_download_inner(app.clone(), &state, &settings, param.version).await?;
+        let index = self.app.state::<crate::model_index::ModelIndexState>();
+        crate::model::model_download_inner(app.clone(), &state, &settings, &index, param.version).await?;
         let _ = app.emit("model-status-changed", ());
         Ok(serde_json::json!({"status": "ok", "message": "Model downloaded successfully"}).to_string())
     }
@@ -862,7 +895,8 @@ impl DatasetMcpServer {
     async fn model_delete(&self, Parameters(param): Parameters<ModelVersionParam>) -> Result<String, String> {
         log::info!("[MCP] model_delete: version={}", param.version);
         let state = self.app.state::<ModelState>();
-        crate::model::delete_model_core(&state, &param.version)?;
+        let index = self.app.state::<crate::model_index::ModelIndexState>();
+        crate::model::delete_model_core(&state, &index, &param.version)?;
         let _ = self.app.emit("model-status-changed", ());
         Ok(serde_json::json!({"status": "ok", "deleted": param.version}).to_string())
     }

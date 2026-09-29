@@ -27,12 +27,28 @@ pub struct LogEntry {
 #[derive(Clone)]
 pub struct LogBuffer {
     pub entries: Arc<Mutex<VecDeque<LogEntry>>>,
+    pub app: Arc<Mutex<Option<AppHandle>>>,
 }
 
 impl LogBuffer {
     pub fn new() -> Self {
         Self {
             entries: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_BUFFER_SIZE))),
+            app: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Set the app handle for event emission.
+    pub fn set_app(&self, app: AppHandle) {
+        let mut handle = self.app.lock().unwrap();
+        *handle = Some(app);
+    }
+
+    /// Emit a log entry to the frontend.
+    fn emit_entry(&self, entry: &LogEntry) {
+        let handle = self.app.lock().unwrap();
+        if let Some(app) = handle.as_ref() {
+            let _ = app.emit("app-log", entry);
         }
     }
 
@@ -94,6 +110,7 @@ impl Log for AppLogger {
 /// so it can be stored as Tauri state for command access.
 pub fn init_logger(app: AppHandle) -> LogBuffer {
     let buffer = LogBuffer::new();
+    buffer.set_app(app.clone());
     let logger = AppLogger {
         app,
         buffer: buffer.entries.clone(),
@@ -116,4 +133,32 @@ pub fn log_get_history(buffer: tauri::State<'_, LogBuffer>) -> Vec<LogEntry> {
 #[tauri::command]
 pub fn log_clear(buffer: tauri::State<'_, LogBuffer>) {
     buffer.clear();
+}
+
+/// Tauri command: log a message from the frontend.
+#[tauri::command]
+pub fn log_frontend_message(
+    buffer: tauri::State<'_, LogBuffer>,
+    message: String,
+    level: Option<String>,
+    module: Option<String>,
+) {
+    let now = chrono::Local::now();
+    let entry = LogEntry {
+        timestamp: now.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+        level: level.unwrap_or_else(|| "INFO".to_string()),
+        message,
+        module: module.unwrap_or_else(|| "frontend".to_string()),
+    };
+
+    // Buffer the entry
+    let mut buf = buffer.entries.lock().unwrap();
+    if buf.len() >= MAX_BUFFER_SIZE {
+        buf.pop_front();
+    }
+    buf.push_back(entry.clone());
+    drop(buf);
+
+    // Emit to frontend for real-time display
+    buffer.emit_entry(&entry);
 }

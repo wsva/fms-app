@@ -20,20 +20,9 @@ export interface OllamaModelInfo {
   } | null;
 }
 
-/** Recommended model definition from our static catalog. */
-export interface RecommendedModel {
-  ollama_name: string;
-  display_name: string;
-  description: string;
-  parameters: string;
-  size_mb: number;
-  languages: string[];
-}
-
 /** Response from llm_list_models. */
 export interface LlmInstalledModelsResponse {
   installed: OllamaModelInfo[];
-  recommended: RecommendedModel[];
 }
 
 /** Progress event emitted during llm_pull_model. */
