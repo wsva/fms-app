@@ -25,6 +25,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Get tag name
+        id: tag
+        shell: bash
+        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
@@ -67,13 +72,60 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Rename artifacts with tag
+        shell: bash
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          OUT="src-tauri/target/release/bundle"
+
+          for f in "$OUT"/nsis/*.exe "$OUT"/msi/*.msi \
+                   "$OUT"/appimage/*.AppImage "$OUT"/deb/*.deb "$OUT"/rpm/*.rpm; do
+            [ -f "$f" ] || continue
+            base="$(basename "$f")"
+            name="${base%.*}"
+            ext="${base##*.}"
+            mv "$f" "$OUT/${name}-${TAG}.${ext}"
+          done
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: fms-app-${{ runner.os }}
+          name: fms-app-${{ runner.os }}-${{ steps.tag.outputs.tag }}
           path: |
-            src-tauri/target/release/bundle/**/*.exe
-            src-tauri/target/release/bundle/**/*.msi
-            src-tauri/target/release/bundle/**/*.deb
-            src-tauri/target/release/bundle/**/*.rpm
-            src-tauri/target/release/bundle/**/*.AppImage
+            src-tauri/target/release/bundle/*.exe
+            src-tauri/target/release/bundle/*.msi
+            src-tauri/target/release/bundle/*.deb
+            src-tauri/target/release/bundle/*.rpm
+            src-tauri/target/release/bundle/*.AppImage
+
+  # ──────────────────────────────────────────────
+  # Create GitHub Release
+  # ──────────────────────────────────────────────
+  release:
+    name: Create Release
+    needs: build-desktop
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: FMS App ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.exe
+            artifacts/**/*.msi
+            artifacts/**/*.AppImage
+            artifacts/**/*.deb
+            artifacts/**/*.rpm
