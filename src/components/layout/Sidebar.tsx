@@ -11,8 +11,6 @@ import {
   SlidersHorizontal,
   Settings,
   Headphones,
-  PanelLeftClose,
-  PanelLeftOpen,
   MessageSquare,
   Volume2,
   Wrench,
@@ -21,8 +19,9 @@ import {
   ScanText,
   FileText,
   AudioLines,
-  LogIn,
+  User,
   LogOut,
+  Star,
 } from "lucide-react";
 
 function isTauri(): boolean {
@@ -32,6 +31,20 @@ function isTauri(): boolean {
 interface AuthUser {
   name: string;
   email: string;
+}
+
+interface XpUser {
+  user_id: string;
+  lifetime_xp: number;
+  level: number;
+  updated_at: string;
+}
+
+interface XpAwardResult {
+  xp_awarded: number;
+  lifetime_xp: number;
+  level: number;
+  is_new: boolean;
 }
 
 export type TabId =
@@ -123,12 +136,20 @@ export default function Sidebar({
 
   // ---- Auth state ----
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [xpUser, setXpUser] = useState<XpUser | null>(null);
+  const [xpFlash, setXpFlash] = useState<number | null>(null);
 
   const checkAuth = useCallback(async () => {
     if (!isTauri()) return;
     try {
       const user = await invoke<AuthUser | null>("auth_get_user");
       setAuthUser(user);
+      if (user) {
+        const xp = await invoke<XpUser | null>("xp_get_user");
+        setXpUser(xp);
+      } else {
+        setXpUser(null);
+      }
     } catch {
       /* ignore */
     }
@@ -139,13 +160,27 @@ export default function Sidebar({
     if (!isTauri()) return;
     const unlistenLogin = listen<AuthUser>("auth-login-success", (event) => {
       setAuthUser(event.payload);
+      // Fetch XP after login.
+      invoke<XpUser | null>("xp_get_user").then(setXpUser).catch(() => {});
     });
     const unlistenLogout = listen("auth-logout", () => {
       setAuthUser(null);
+      setXpUser(null);
+    });
+    const unlistenXp = listen<XpAwardResult>("xp-earned", (event) => {
+      setXpUser((prev) =>
+        prev
+          ? { ...prev, lifetime_xp: event.payload.lifetime_xp, level: event.payload.level }
+          : { user_id: "", lifetime_xp: event.payload.lifetime_xp, level: event.payload.level, updated_at: new Date().toISOString() }
+      );
+      // Flash the XP gain.
+      setXpFlash(event.payload.xp_awarded);
+      setTimeout(() => setXpFlash(null), 2000);
     });
     return () => {
       unlistenLogin.then((fn) => fn());
       unlistenLogout.then((fn) => fn());
+      unlistenXp.then((fn) => fn());
     };
   }, [checkAuth]);
 
@@ -302,24 +337,29 @@ export default function Sidebar({
   return (
     <>
       <aside
-        className="fixed left-0 top-0 flex flex-col h-screen border-r border-border-default items-center px-2 z-10 bg-bg-card"
+        className="fixed left-0 top-0 flex flex-col h-screen border-r border-border-default items-center px-2 z-10 bg-bg-card select-none"
         style={{
           width: sidebarWidth,
           transition: isDragging ? "none" : "width 200ms",
+        }}
+        onDoubleClick={(e) => {
+          // Only toggle when double-clicking blank space (not buttons/tabs).
+          const target = e.target as HTMLElement;
+          if (target.closest("button, a, input, select, [role='tab']")) return;
+          handleToggle();
         }}
       >
       <nav className="flex flex-col w-full items-center gap-1 pt-2">
         {/* Auth button at top */}
         {authUser ? (
-          <div
-            className={`flex items-center w-full rounded-lg px-2 py-1.5 gap-2 ${
-              collapsed ? "justify-center" : ""
-            }`}
-            title={collapsed ? `${authUser.name} (click to logout)` : "Click to logout"}
-          >
+          <div className="flex flex-col w-full items-center gap-0.5">
+            {/* Logout button */}
             <button
               onClick={handleLogout}
-              className="flex items-center gap-2 w-full rounded-md px-1.5 py-1 hover:bg-mid-gray/20 transition-colors cursor-pointer"
+              className={`flex items-center w-full rounded-lg px-2 py-1 hover:bg-mid-gray/20 transition-colors cursor-pointer gap-2 ${
+                collapsed ? "justify-center" : ""
+              }`}
+              title={collapsed ? `${authUser.name} (click to logout)` : "Click to logout"}
             >
               <span className="w-6 h-6 rounded-full bg-accent-bg text-white flex items-center justify-center text-xs font-bold shrink-0">
                 {authUser.name.charAt(0).toUpperCase()}
@@ -333,6 +373,28 @@ export default function Sidebar({
                 </>
               )}
             </button>
+            {/* XP status */}
+            {!collapsed && (
+              <div className="flex items-center justify-center gap-2 px-2 py-0.5 text-[10px] leading-none text-text-tertiary">
+                <span className="flex items-center gap-0.5 leading-none">
+                  Lv.{xpUser?.level ?? 1}
+                </span>
+                <span className="flex items-center gap-0.5 leading-none">
+                  <Star size={10} className="text-yellow-500" />
+                  {xpUser?.lifetime_xp ?? 0} XP
+                </span>
+                {xpFlash !== null && (
+                  <span className="text-yellow-500 font-bold animate-bounce">
+                    +{xpFlash}
+                  </span>
+                )}
+              </div>
+            )}
+            {collapsed && xpFlash !== null && (
+              <span className="text-[9px] text-yellow-500 font-bold text-center animate-bounce">
+                +{xpFlash}
+              </span>
+            )}
           </div>
         ) : (
           <button
@@ -342,7 +404,7 @@ export default function Sidebar({
             }`}
             title={collapsed ? "Login" : "Login in browser"}
           >
-            <LogIn size={18} className="text-text-tertiary shrink-0" />
+            <User size={18} className="text-text-tertiary shrink-0" />
             {!collapsed && <span className="text-xs font-medium text-text-secondary">Login</span>}
           </button>
         )}
@@ -359,26 +421,11 @@ export default function Sidebar({
         {rootTabs.slice(3).map((tab) => renderTab(tab, false))}
       </nav>
 
-      <div className="mt-auto pb-4 w-full">
-        <button
-          className={`flex items-center p-2 w-full rounded-lg cursor-pointer transition-colors text-text-tertiary hover:bg-mid-gray/20 ${
-            collapsed ? "justify-center" : "gap-2"
-          }`}
-          onClick={handleToggle}
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-        >
-          {collapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
-          {!collapsed && <span className="text-sm">Collapse</span>}
-        </button>
-      </div>
-
       {/* Resize handle */}
-      {!collapsed && (
-        <div
-          className="absolute top-0 right-0 h-full w-1 cursor-col-resize hover:bg-accent/50 active:bg-accent transition-colors"
-          onMouseDown={handleMouseDown}
-        />
-      )}
+      <div
+        className={`absolute top-0 right-0 h-full ${collapsed ? "w-2" : "w-1 cursor-col-resize hover:bg-accent/50 active:bg-accent"} transition-colors`}
+        onMouseDown={!collapsed ? handleMouseDown : undefined}
+      />
     </aside>
 
       {/* Overlay to capture mouse events during drag */}

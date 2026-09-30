@@ -19,6 +19,7 @@ mod edge_tts;
 mod web_service;
 mod capture;
 mod ocr;
+mod xp;
 
 // Unified model index
 mod model_index;
@@ -188,6 +189,13 @@ pub fn run() {
             web_service::web_service_stop,
             ocr::ocr_recognize,
             ocr::ocr_list_languages,
+            xp::xp_get_user,
+            xp::xp_get_history,
+            xp::xp_award_dictation_cue,
+            xp::xp_award_dictation_subtitle,
+            xp::xp_award_dictation_media,
+            xp::xp_award_reading_sentence,
+            xp::xp_award_reading_chapter,
             model_index::model_index_get,
             model_index::model_index_refresh,
             capture::capture_screenshot,

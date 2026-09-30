@@ -223,6 +223,11 @@ export default function ReadingView({ books }: Props) {
 
       await invoke("book_save_sentence", { bookUuid: bookUUID, sentence: toDbSentence(newSentence) });
 
+      // Award XP for typing a sentence.
+      if (isTauri()) {
+        invoke("xp_award_reading_sentence", { sentenceId: newSentence.uuid }).catch(() => {});
+      }
+
       // Persist reordering of existing sentences shifted by the insert.
       if (insertIndex < data.length) {
         const shifted = data
@@ -269,6 +274,12 @@ export default function ReadingView({ books }: Props) {
         modified: sentence.modified,
       };
       await invoke("book_save_sentence", { bookUuid: bookUUID, sentence: toDbSentence(updated) });
+
+      // Award XP for editing a sentence (first time only, backend deduplicates).
+      if (isTauri()) {
+        invoke("xp_award_reading_sentence", { sentenceId: updated.uuid }).catch(() => {});
+      }
+
       updateData((d) => {
         const idx = d.findIndex((s) => s.uuid === sentence.uuid);
         if (idx !== -1) d[idx] = updated;

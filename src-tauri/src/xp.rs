@@ -1,0 +1,359 @@
+//! XP (Experience Points) system — tracks permanent learning progress.
+//!
+//! XP is earned through learning activities (dictation, reading) and is
+//! non-spendable, non-transferable, and permanent.
+//!
+//! Tables stored in the app-level SQLite (`dirs::data_dir()/fms-app/app.sqlite3`).
+
+use rusqlite::Connection;
+use serde::Serialize;
+use std::path::PathBuf;
+use tauri::{Emitter, State};
+
+use crate::auth::get_current_user_email;
+use crate::settings::SettingsState;
+
+// ============================================================
+// Types
+// ============================================================
+
+#[derive(Debug, Clone, Serialize)]
+pub struct XpUser {
+    pub user_id: String,
+    pub lifetime_xp: i64,
+    pub level: i64,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct XpLedgerEntry {
+    pub id: i64,
+    pub amount: i64,
+    pub source: String,
+    pub reference_id: Option<String>,
+    pub dataset_uuid: Option<String>,
+    pub created_at: String,
+}
+
+/// Result of an XP award operation.
+#[derive(Debug, Clone, Serialize)]
+pub struct XpAwardResult {
+    /// XP actually awarded (0 if duplicate).
+    pub xp_awarded: i64,
+    /// Total lifetime XP after the award.
+    pub lifetime_xp: i64,
+    /// Level after the award.
+    pub level: i64,
+    /// Whether this was a new award (false = already earned).
+    pub is_new: bool,
+}
+
+// ============================================================
+// Helpers
+// ============================================================
+
+/// Open the app-level SQLite and ensure XP tables exist.
+fn open_app_db() -> Result<Connection, String> {
+    let db_dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("fms-app");
+    std::fs::create_dir_all(&db_dir).map_err(|e| e.to_string())?;
+    let db_path = db_dir.join("app.sqlite3");
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS xp_user (
+            user_id     TEXT PRIMARY KEY,
+            lifetime_xp INTEGER NOT NULL DEFAULT 0,
+            level       INTEGER NOT NULL DEFAULT 1,
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS xp_ledger (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id      TEXT NOT NULL,
+            amount       INTEGER NOT NULL,
+            source       TEXT NOT NULL,
+            reference_id TEXT,
+            dataset_uuid TEXT,
+            created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS xp_earned (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id      TEXT NOT NULL,
+            source       TEXT NOT NULL,
+            reference_id TEXT NOT NULL,
+            dataset_uuid TEXT,
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(user_id, source, reference_id, dataset_uuid)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_xp_ledger_user ON xp_ledger(user_id, created_at DESC);
+        ",
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
+/// Ensure a user row exists in xp_user.
+fn ensure_user_row(conn: &Connection, user_id: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR IGNORE INTO xp_user (user_id, lifetime_xp, level, updated_at) \
+         VALUES (?1, 0, 1, datetime('now'))",
+        [user_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ============================================================
+// Internal award function (called from other modules)
+// ============================================================
+
+/// Award XP for a learning activity.
+///
+/// Returns `XpAwardResult` with `is_new = false` if this exact activity has
+/// already earned XP (prevents duplicates via UNIQUE constraint).
+///
+/// This function is called internally by dictation and reading commands.
+pub fn xp_award_internal(
+    user_id: &str,
+    amount: i64,
+    source: &str,
+    reference_id: &str,
+    dataset_uuid: Option<&str>,
+) -> Result<XpAwardResult, String> {
+    let conn = open_app_db()?;
+    ensure_user_row(&conn, user_id)?;
+
+    // Try to insert into xp_earned (unique constraint prevents duplicates).
+    let inserted = conn
+        .execute(
+            "INSERT OR IGNORE INTO xp_earned (user_id, source, reference_id, dataset_uuid) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![user_id, source, reference_id, dataset_uuid],
+        )
+        .map_err(|e| e.to_string())?;
+
+    if inserted == 0 {
+        // Already earned — return current state without awarding.
+        let (lifetime_xp, level) = get_user_xp_from_db(&conn, user_id)?;
+        return Ok(XpAwardResult {
+            xp_awarded: 0,
+            lifetime_xp,
+            level,
+            is_new: false,
+        });
+    }
+
+    // Award XP: update xp_user.
+    // Compute level in Rust (SQLite may not have sqrt/floor).
+    let new_xp = get_user_xp_from_db(&conn, user_id).unwrap_or((0, 1)).0 + amount;
+    let new_level = (new_xp as f64 / 100.0).sqrt().floor() as i64 + 1;
+    conn.execute(
+        "UPDATE xp_user SET lifetime_xp = ?1, level = ?2, updated_at = datetime('now') WHERE user_id = ?3",
+        rusqlite::params![new_xp, new_level, user_id],
+    )
+    .map_err(|e| {
+        log::error!("[XP] Failed to update xp_user for {}: {}", user_id, e);
+        e.to_string()
+    })?;
+
+    // Log to ledger.
+    conn.execute(
+        "INSERT INTO xp_ledger (user_id, amount, source, reference_id, dataset_uuid) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![user_id, amount, source, reference_id, dataset_uuid],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let (lifetime_xp, level) = get_user_xp_from_db(&conn, user_id)?;
+
+    Ok(XpAwardResult {
+        xp_awarded: amount,
+        lifetime_xp,
+        level,
+        is_new: true,
+    })
+}
+
+fn get_user_xp_from_db(conn: &Connection, user_id: &str) -> Result<(i64, i64), String> {
+    conn.query_row(
+        "SELECT lifetime_xp, level FROM xp_user WHERE user_id = ?1",
+        [user_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .map_err(|e| e.to_string())
+}
+
+// ============================================================
+// Tauri commands
+// ============================================================
+
+/// Get the current user's XP summary.
+#[tauri::command]
+pub async fn xp_get_user(
+    _settings: State<'_, SettingsState>,
+) -> Result<Option<XpUser>, String> {
+    let user_id = get_current_user_email();
+    if user_id.is_empty() {
+        return Ok(None);
+    }
+    let conn = open_app_db()?;
+    ensure_user_row(&conn, &user_id)?;
+
+    let result = conn
+        .query_row(
+            "SELECT user_id, lifetime_xp, level, updated_at FROM xp_user WHERE user_id = ?1",
+            [&user_id],
+            |row| {
+                Ok(XpUser {
+                    user_id: row.get(0)?,
+                    lifetime_xp: row.get(1)?,
+                    level: row.get(2)?,
+                    updated_at: row.get(3)?,
+                })
+            },
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(Some(result))
+}
+
+/// Get recent XP history for the current user.
+#[tauri::command]
+pub async fn xp_get_history(
+    _settings: State<'_, SettingsState>,
+    limit: Option<i64>,
+) -> Result<Vec<XpLedgerEntry>, String> {
+    let user_id = get_current_user_email();
+    if user_id.is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = open_app_db()?;
+    let limit = limit.unwrap_or(50).min(200);
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, amount, source, reference_id, dataset_uuid, created_at \
+             FROM xp_ledger WHERE user_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let entries = stmt
+        .query_map(rusqlite::params![&user_id, limit], |row| {
+            Ok(XpLedgerEntry {
+                id: row.get(0)?,
+                amount: row.get(1)?,
+                source: row.get(2)?,
+                reference_id: row.get(3)?,
+                dataset_uuid: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(entries)
+}
+
+/// Award XP for a dictation cue completion.
+/// Called from the frontend after successfully completing a cue dictation.
+#[tauri::command]
+pub async fn xp_award_dictation_cue(
+    app: tauri::AppHandle,
+    _settings: State<'_, SettingsState>,
+    cue_id: String,
+    dataset_uuid: String,
+) -> Result<XpAwardResult, String> {
+    let user_id = get_current_user_email();
+    if user_id.is_empty() {
+        return Err("Not logged in".into());
+    }
+    log::info!("xp_award_dictation_cue: user={}, cue={}", user_id, cue_id);
+    let result = xp_award_internal(&user_id, 1, "dictation_cue", &cue_id, Some(&dataset_uuid))?;
+    if result.is_new {
+        let _ = app.emit("xp-earned", &result);
+    }
+    Ok(result)
+}
+
+/// Award XP for completing all cues in a subtitle.
+#[tauri::command]
+pub async fn xp_award_dictation_subtitle(
+    app: tauri::AppHandle,
+    _settings: State<'_, SettingsState>,
+    subtitle_id: String,
+    dataset_uuid: String,
+) -> Result<XpAwardResult, String> {
+    let user_id = get_current_user_email();
+    if user_id.is_empty() {
+        return Err("Not logged in".into());
+    }
+    log::info!("xp_award_dictation_subtitle: user={}, subtitle={}", user_id, subtitle_id);
+    let result = xp_award_internal(&user_id, 2, "dictation_subtitle", &subtitle_id, Some(&dataset_uuid))?;
+    if result.is_new {
+        let _ = app.emit("xp-earned", &result);
+    }
+    Ok(result)
+}
+
+/// Award XP for completing all subtitles of a media file.
+#[tauri::command]
+pub async fn xp_award_dictation_media(
+    app: tauri::AppHandle,
+    _settings: State<'_, SettingsState>,
+    media_id: String,
+    dataset_uuid: String,
+) -> Result<XpAwardResult, String> {
+    let user_id = get_current_user_email();
+    if user_id.is_empty() {
+        return Err("Not logged in".into());
+    }
+    log::info!("xp_award_dictation_media: user={}, media={}", user_id, media_id);
+    let result = xp_award_internal(&user_id, 5, "dictation_media", &media_id, Some(&dataset_uuid))?;
+    if result.is_new {
+        let _ = app.emit("xp-earned", &result);
+    }
+    Ok(result)
+}
+
+/// Award XP for typing a sentence in reading.
+#[tauri::command]
+pub async fn xp_award_reading_sentence(
+    app: tauri::AppHandle,
+    _settings: State<'_, SettingsState>,
+    sentence_id: String,
+) -> Result<XpAwardResult, String> {
+    let user_id = get_current_user_email();
+    if user_id.is_empty() {
+        return Err("Not logged in".into());
+    }
+    log::info!("xp_award_reading_sentence: user={}, sentence={}", user_id, sentence_id);
+    let result = xp_award_internal(&user_id, 1, "reading_sentence", &sentence_id, None)?;
+    if result.is_new {
+        let _ = app.emit("xp-earned", &result);
+    }
+    Ok(result)
+}
+
+/// Award XP for completing all sentences in a chapter.
+#[tauri::command]
+pub async fn xp_award_reading_chapter(
+    app: tauri::AppHandle,
+    _settings: State<'_, SettingsState>,
+    chapter_id: String,
+) -> Result<XpAwardResult, String> {
+    let user_id = get_current_user_email();
+    if user_id.is_empty() {
+        return Err("Not logged in".into());
+    }
+    log::info!("xp_award_reading_chapter: user={}, chapter={}", user_id, chapter_id);
+    let result = xp_award_internal(&user_id, 5, "reading_chapter", &chapter_id, None)?;
+    if result.is_new {
+        let _ = app.emit("xp-earned", &result);
+    }
+    Ok(result)
+}

@@ -195,7 +195,16 @@ export function useDictationData() {
         if (success) newSet.add(uuid); else newSet.delete(uuid);
         setStateDictSuccessSet(newSet);
         scheduleDictSave(newSet, stateDictStatus);
-    }, [stateDictSuccessSet, stateDictStatus, scheduleDictSave]);
+
+        // Award XP for cue completion.
+        if (success && isTauri() && selectedDatasetUuid && stateSubtitle?.uuid) {
+            invoke("xp_award_dictation_cue", { cueId: uuid, datasetUuid: selectedDatasetUuid }).catch(() => {});
+            // Check if all cues are now completed → subtitle bonus.
+            if (newSet.size === stateCues.length && stateCues.length > 0) {
+                invoke("xp_award_dictation_subtitle", { subtitleId: stateSubtitle.uuid, datasetUuid: selectedDatasetUuid }).catch(() => {});
+            }
+        }
+    }, [stateDictSuccessSet, stateDictStatus, scheduleDictSave, selectedDatasetUuid, stateSubtitle?.uuid, stateCues.length]);
 
     const handleDictStatusToggle = useCallback(async () => {
         if (!selectedDatasetUuid || !stateSubtitle?.uuid) return;

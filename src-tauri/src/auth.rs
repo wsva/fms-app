@@ -206,13 +206,21 @@ async fn fetch_user_info(access_token: &str) -> Result<AuthUser, String> {
     Ok(AuthUser { name, email })
 }
 
-/// Get the current logged-in user's email (for use by other modules).
+/// Get the current logged-in user's identifier (email preferred, fallback to user_id).
+/// Used by other modules (e.g., XP, dictation) to identify the user.
 pub(crate) fn get_current_user_email() -> String {
-    read_tokens()
-        .ok()
-        .flatten()
-        .map(|t| t.email)
-        .unwrap_or_default()
+    let tokens = match read_tokens().ok().flatten() {
+        Some(t) => t,
+        None => return String::new(),
+    };
+    // Prefer email, fall back to user_id if email is empty.
+    if !tokens.email.is_empty() {
+        tokens.email
+    } else if !tokens.user_id.is_empty() {
+        tokens.user_id
+    } else {
+        tokens.username
+    }
 }
 
 /// Open a URL in the default browser.
