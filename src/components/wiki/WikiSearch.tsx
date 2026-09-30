@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Search, X, FileText } from "lucide-react";
+import { Search, X, FileText, CircleHelp } from "lucide-react";
 
 interface WikiSearchResult {
   file_path: string;
@@ -26,6 +26,7 @@ export default function WikiSearch({ wikiDir, onResultClick }: WikiSearchProps) 
   const [results, setResults] = useState<WikiSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [showResults, setShowResults] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
 
   const performSearch = useCallback(async (keyword: string) => {
     if (!isTauri() || !keyword.trim()) {
@@ -91,6 +92,49 @@ export default function WikiSearch({ wikiDir, onResultClick }: WikiSearchProps) 
         {isSearching && (
           <span className="text-xs text-text-tertiary">Searching...</span>
         )}
+        <div className="relative">
+          <button
+            onClick={() => setShowHelp(!showHelp)}
+            className="text-text-tertiary hover:text-text-primary transition-colors"
+            title="Search syntax help"
+          >
+            <CircleHelp size={14} />
+          </button>
+          {showHelp && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setShowHelp(false)} />
+              <div className="absolute right-0 top-full mt-2 w-72 bg-bg-card border border-border-default rounded-lg shadow-lg p-3 z-50">
+                <h4 className="text-sm font-semibold text-text-primary mb-2">Search Syntax</h4>
+                <div className="space-y-1.5 text-xs text-text-secondary">
+                  <div>
+                    <span className="text-text-primary font-medium">hello world</span>
+                    <span className="ml-2">AND search (both terms)</span>
+                  </div>
+                  <div>
+                    <span className="text-text-primary font-medium">hello*</span>
+                    <span className="ml-2">prefix matching</span>
+                  </div>
+                  <div>
+                    <span className="text-text-primary font-medium">&quot;hello world&quot;</span>
+                    <span className="ml-2">exact phrase</span>
+                  </div>
+                  <div>
+                    <span className="text-text-primary font-medium">hello OR world</span>
+                    <span className="ml-2">either term</span>
+                  </div>
+                  <div>
+                    <span className="text-text-primary font-medium">hello NOT world</span>
+                    <span className="ml-2">exclude term</span>
+                  </div>
+                  <div>
+                    <span className="text-text-primary font-medium">hello NEAR world</span>
+                    <span className="ml-2">terms near each other</span>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Search results dropdown */}
