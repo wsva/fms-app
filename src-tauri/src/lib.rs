@@ -24,6 +24,44 @@ mod ocr;
 mod model_index;
 
 use tauri::Manager;
+use tauri_plugin_deep_link::DeepLinkExt;
+
+// ---------------------------------------------------------------------------
+// Deep link handler for OAuth login callback
+// ---------------------------------------------------------------------------
+
+/// Parse `fms-app://login?access_token=...&user_id=...&username=...&refresh_token=...`
+/// and store the tokens via auth_process_token.
+async fn handle_deep_link_login(app: tauri::AppHandle, url: &str) -> Result<(), String> {
+    // Parse query parameters from the URL.
+    let query = url.split('?').nth(1).unwrap_or("");
+    let params: std::collections::HashMap<String, String> = query
+        .split('&')
+        .filter_map(|pair| {
+            let mut kv = pair.splitn(2, '=');
+            let key = kv.next()?.to_string();
+            let raw = kv.next().unwrap_or("");
+            let val = match urlencoding::decode(raw) {
+                Ok(cow) => cow.into_owned(),
+                Err(_) => raw.to_string(),
+            };
+            Some((key, val))
+        })
+        .collect();
+
+    let access_token = params.get("access_token").cloned().unwrap_or_default();
+    let refresh_token = params.get("refresh_token").cloned().unwrap_or_default();
+    let user_id = params.get("user_id").cloned().unwrap_or_default();
+    let username = params.get("username").cloned().unwrap_or_default();
+
+    if access_token.is_empty() {
+        return Err("No access_token in deep link URL".to_string());
+    }
+
+    log::info!("[DeepLink] Processing login for user={}, id={}", username, user_id);
+    auth::auth_process_token(app, access_token, refresh_token, user_id, username).await?;
+    Ok(())
+}
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -37,6 +75,25 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // Second instance launched (e.g., via fms-app:// deep link from browser).
+            // Instead of starting a new app, forward the URL to the existing instance.
+            log::info!("[SingleInstance] Second instance launched with args: {:?}", argv);
+            // Find the deep link URL in args (Windows passes it as a command line arg)
+            for arg in &argv {
+                if arg.starts_with("fms-app://") {
+                    let app_handle = app.clone();
+                    let url = arg.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = handle_deep_link_login(app_handle, &url).await {
+                            log::error!("[SingleInstance] Deep link handling failed: {}", e);
+                        }
+                    });
+                    break;
+                }
+            }
+        }))
         .invoke_handler(tauri::generate_handler![
             greet,
             model::model_get_status,
@@ -98,7 +155,7 @@ pub fn run() {
             dictation::subtitle_get_versions,
             dictation::subtitle_get_cues_at_version,
             dictation::subtitle_rollback_to_version,
-            auth::auth_login,
+            auth::auth_open_login,
             auth::auth_get_user,
             auth::auth_logout,
             llm::llm_check_connection,
@@ -130,6 +187,7 @@ pub fn run() {
             web_service::web_service_start,
             web_service::web_service_stop,
             ocr::ocr_recognize,
+            ocr::ocr_list_languages,
             model_index::model_index_get,
             model_index::model_index_refresh,
             capture::capture_screenshot,
@@ -168,6 +226,52 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 web_service::auto_start(handle).await;
             });
+
+            // Register deep link handler for OAuth login callback.
+            // Register the fms-app:// scheme with the OS so the browser can redirect to it.
+            match app.deep_link().register_all() {
+                Ok(_) => log::info!("[DeepLink] Successfully registered all schemes"),
+                Err(e) => log::error!("[DeepLink] Failed to register schemes: {}", e),
+            }
+            // Also explicitly register fms-app scheme
+            if let Err(e) = app.deep_link().register("fms-app") {
+                log::error!("[DeepLink] Failed to register fms-app scheme: {}", e);
+            } else {
+                log::info!("[DeepLink] Registered fms-app:// protocol handler");
+            }
+
+            let dl_handle = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    let url_str = url.to_string();
+                    log::info!("[DeepLink] Received URL: {}", url_str);
+                    if url_str.starts_with("fms-app://login") {
+                        let handle = dl_handle.clone();
+                        let url_str = url_str.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = handle_deep_link_login(handle, &url_str).await {
+                                log::error!("[DeepLink] Login failed: {}", e);
+                            }
+                        });
+                    }
+                }
+            });
+
+            // Also check if the app was launched via a deep link.
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                for url in urls {
+                    let url_str = url.to_string();
+                    if url_str.starts_with("fms-app://login") {
+                        let handle = app.handle().clone();
+                        let url_str = url_str.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = handle_deep_link_login(handle, &url_str).await {
+                                log::error!("[DeepLink] Login failed: {}", e);
+                            }
+                        });
+                    }
+                }
+            }
 
             Ok(())
         })

@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   Box,
   Database,
@@ -15,12 +17,22 @@ import {
   Volume2,
   Wrench,
   BookOpen,
-  Globe,
   Layers,
   ScanText,
   FileText,
   AudioLines,
+  LogIn,
+  LogOut,
 } from "lucide-react";
+
+function isTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+interface AuthUser {
+  name: string;
+  email: string;
+}
 
 export type TabId =
   | "dictation"
@@ -32,7 +44,6 @@ export type TabId =
   | "models"
   | "edge-tts"
   | "llm-chat"
-  | "web-service"
   | "ocr"
   | "logs"
   | "settings";
@@ -70,7 +81,6 @@ const navGroups: NavGroup[] = [
       { id: "models", label: "Models", icon: Box },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
-      { id: "web-service", label: "Web Service", icon: Globe },
       { id: "ocr", label: "OCR", icon: ScanText },
       { id: "logs", label: "Logs", icon: FileText },
     ],
@@ -110,6 +120,53 @@ export default function Sidebar({
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
     tools: true,
   });
+
+  // ---- Auth state ----
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+
+  const checkAuth = useCallback(async () => {
+    if (!isTauri()) return;
+    try {
+      const user = await invoke<AuthUser | null>("auth_get_user");
+      setAuthUser(user);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    checkAuth();
+    if (!isTauri()) return;
+    const unlistenLogin = listen<AuthUser>("auth-login-success", (event) => {
+      setAuthUser(event.payload);
+    });
+    const unlistenLogout = listen("auth-logout", () => {
+      setAuthUser(null);
+    });
+    return () => {
+      unlistenLogin.then((fn) => fn());
+      unlistenLogout.then((fn) => fn());
+    };
+  }, [checkAuth]);
+
+  async function handleLogin() {
+    if (!isTauri()) return;
+    try {
+      await invoke("auth_open_login");
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function handleLogout() {
+    if (!isTauri()) return;
+    try {
+      await invoke("auth_logout");
+      setAuthUser(null);
+    } catch {
+      /* ignore */
+    }
+  }
 
   // Load saved width from localStorage
   useEffect(() => {
@@ -251,7 +308,47 @@ export default function Sidebar({
           transition: isDragging ? "none" : "width 200ms",
         }}
       >
-      <nav className="flex flex-col w-full items-center gap-1 pt-4">
+      <nav className="flex flex-col w-full items-center gap-1 pt-2">
+        {/* Auth button at top */}
+        {authUser ? (
+          <div
+            className={`flex items-center w-full rounded-lg px-2 py-1.5 gap-2 ${
+              collapsed ? "justify-center" : ""
+            }`}
+            title={collapsed ? `${authUser.name} (click to logout)` : "Click to logout"}
+          >
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-2 w-full rounded-md px-1.5 py-1 hover:bg-mid-gray/20 transition-colors cursor-pointer"
+            >
+              <span className="w-6 h-6 rounded-full bg-accent-bg text-white flex items-center justify-center text-xs font-bold shrink-0">
+                {authUser.name.charAt(0).toUpperCase()}
+              </span>
+              {!collapsed && (
+                <>
+                  <span className="text-xs font-medium text-text-primary truncate flex-1 text-left">
+                    {authUser.name}
+                  </span>
+                  <LogOut size={14} className="text-text-tertiary shrink-0" />
+                </>
+              )}
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={handleLogin}
+            className={`flex items-center w-full rounded-lg px-2 py-1.5 hover:bg-mid-gray/20 transition-colors cursor-pointer ${
+              collapsed ? "justify-center" : "gap-2"
+            }`}
+            title={collapsed ? "Login" : "Login in browser"}
+          >
+            <LogIn size={18} className="text-text-tertiary shrink-0" />
+            {!collapsed && <span className="text-xs font-medium text-text-secondary">Login</span>}
+          </button>
+        )}
+
+        <div className="w-full border-b border-border-default my-1" />
+
         {/* Root tabs above groups: Dictation, Read a Book, Cards */}
         {rootTabs.slice(0, 3).map((tab) => renderTab(tab, false))}
 

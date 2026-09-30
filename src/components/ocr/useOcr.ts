@@ -138,8 +138,10 @@ export function useOcr() {
 3. Preserve intentional paragraph breaks (double newlines)
 4. Fix obvious OCR errors if context makes them clear
 5. Do NOT change the meaning or add content
+6. Do NOT use LaTeX, MathJax, or any markup (no $, \\text{}, \\mathrm{}, etc.)
+7. Output plain text only — no formatting of any kind
 
-Return ONLY the corrected text, no explanations.`,
+Return ONLY the corrected plain text, no explanations.`,
           },
           {
             role: "user",

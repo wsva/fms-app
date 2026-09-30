@@ -46,6 +46,9 @@
   "plugins": {
     "shell": {
       "open": true
+    },
+    "deep-link": {
+      "schemes": ["fms-app"]
     }
   }
 }

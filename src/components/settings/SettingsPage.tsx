@@ -22,11 +22,6 @@ interface AppSettings {
   logics_parsing_env: string;
 }
 
-interface AuthUser {
-  name: string;
-  email: string;
-}
-
 type ThemeId = "light" | "dark" | "solarized" | "gruvbox";
 
 const themes: { id: ThemeId; label: string; preview: string }[] = [
@@ -71,14 +66,7 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [currentTheme, setCurrentTheme] = useState<ThemeId>("light");
 
-  // ---- Auth state ----
-  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
-  const [loginIdentity, setLoginIdentity] = useState("");
-  const [loginPassword, setLoginPassword] = useState("");
-  const [loginError, setLoginError] = useState("");
-  const [loginLoading, setLoginLoading] = useState(false);
-
-  // ---- Load settings & check auth ----
+  // ---- Load settings ----
 
   const fetchSettings = useCallback(async () => {
     if (!isTauri()) return;
@@ -90,58 +78,10 @@ export default function SettingsPage() {
     }
   }, []);
 
-  const checkAuth = useCallback(async () => {
-    if (!isTauri()) return;
-    try {
-      const user = await invoke<AuthUser | null>("auth_get_user");
-      setAuthUser(user);
-    } catch (e) {
-      console.error("Failed to check auth:", e);
-    }
-  }, []);
-
   useEffect(() => {
     fetchSettings();
-    checkAuth();
     setCurrentTheme(getStoredTheme());
-  }, [fetchSettings, checkAuth]);
-
-  // ---- Auth handlers ----
-
-  async function handleLogin() {
-    if (!isTauri() || !loginIdentity || !loginPassword) return;
-    setLoginLoading(true);
-    setLoginError("");
-    try {
-      const user = await invoke<AuthUser>("auth_login", {
-        nickname: loginIdentity,
-        password: loginPassword,
-      });
-      setAuthUser(user);
-      setLoginIdentity("");
-      setLoginPassword("");
-    } catch (e) {
-      setLoginError(typeof e === "string" ? e : String(e));
-    } finally {
-      setLoginLoading(false);
-    }
-  }
-
-  async function handleLogout() {
-    if (!isTauri()) return;
-    try {
-      await invoke("auth_logout");
-      setAuthUser(null);
-    } catch (e) {
-      console.error("Failed to logout:", e);
-    }
-  }
-
-  function handleLoginKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter" && !loginLoading) {
-      handleLogin();
-    }
-  }
+  }, [fetchSettings]);
 
   // ---- Theme change ----
 
@@ -226,69 +166,6 @@ export default function SettingsPage() {
     <>
       <main className="flex-1 p-8 overflow-y-auto">
         <h1 className="text-[1.8em] font-bold mb-6">Settings</h1>
-
-        {/* ── Account section ─────────────────────────────────────── */}
-        <section className="mb-8">
-          <h2 className="text-[1.3em] font-semibold mb-2">Account</h2>
-          {authUser ? (
-            <div className="flex items-center gap-4">
-              <div>
-                <p className="font-medium">
-                  Logged in as: <span className="text-accent">{authUser.name}</span>
-                  {authUser.email && (
-                    <span className="text-text-secondary"> ({authUser.email})</span>
-                  )}
-                </p>
-              </div>
-              <button
-                className={`${btnBase} border border-border-light text-text-secondary hover:text-text-primary hover:border-accent`}
-                onClick={handleLogout}
-              >
-                Logout
-              </button>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-3 max-w-md">
-              <p className="text-text-secondary text-sm">
-                Sign in to your account.
-              </p>
-              <div className="flex gap-2 items-end">
-                <div className="flex-1">
-                  <label className="block text-sm font-medium mb-1">Nickname / Email</label>
-                  <input
-                    type="text"
-                    className="w-full px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
-                    value={loginIdentity}
-                    onChange={(e) => setLoginIdentity(e.target.value)}
-                    onKeyDown={handleLoginKeyDown}
-                    placeholder="Enter nickname or email"
-                  />
-                </div>
-                <div className="flex-1">
-                  <label className="block text-sm font-medium mb-1">Password</label>
-                  <input
-                    type="password"
-                    className="w-full px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
-                    value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
-                    onKeyDown={handleLoginKeyDown}
-                    placeholder="Enter password"
-                  />
-                </div>
-                <button
-                  className={`${btnPrimary} whitespace-nowrap`}
-                  onClick={handleLogin}
-                  disabled={loginLoading || !loginIdentity || !loginPassword}
-                >
-                  {loginLoading ? "Signing in..." : "Login"}
-                </button>
-              </div>
-              {loginError && (
-                <p className="text-sm text-red-500">{loginError}</p>
-              )}
-            </div>
-          )}
-        </section>
 
         {/* ── Theme section ──────────────────────────────────────── */}
         <section className="mb-8">

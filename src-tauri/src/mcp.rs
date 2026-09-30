@@ -1315,13 +1315,21 @@ impl DatasetMcpServer {
     // OCR & Capture tools
     // -------------------------------------------------------------------------
 
-    #[tool(name = "ocr_recognize", description = "Recognize text in an image using Tesseract OCR. Pass image as base64 (with or without data URL prefix) and optional language code (default: 'eng').")]
+    #[tool(name = "ocr_recognize", description = "Recognize text in an image using Tesseract OCR. Pass image as base64 (with or without data URL prefix) and optional language code (default: 'eng'). Use ocr_list_languages to see available languages.")]
     async fn ocr_recognize(&self, Parameters(param): Parameters<OcrRecognizeParam>) -> Result<String, String> {
         log::info!("[MCP] ocr_recognize: lang={:?}", param.lang);
         let state = self.app.state::<OcrState>();
         let lang = if param.lang.is_empty() { None } else { Some(param.lang) };
         let text = ocr::ocr_recognize(state, param.image_base64, lang).await?;
         Ok(serde_json::json!({"status": "ok", "text": text}).to_string())
+    }
+
+    #[tool(name = "ocr_list_languages", description = "List available Tesseract OCR languages installed on the system. Returns language codes that can be used with ocr_recognize (e.g., 'eng', 'deu', 'eng+deu' for multi-language).")]
+    async fn ocr_list_languages(&self) -> Result<String, String> {
+        log::info!("[MCP] ocr_list_languages");
+        let state = self.app.state::<OcrState>();
+        let langs = ocr::ocr_list_languages(state).await?;
+        Ok(serde_json::json!({"status": "ok", "languages": langs}).to_string())
     }
 
     #[tool(name = "capture_screenshot", description = "Minimize the app window and capture a screenshot using the native snipping tool (Windows) or full-screen capture (other platforms). Returns a data:image/png;base64 URL.")]

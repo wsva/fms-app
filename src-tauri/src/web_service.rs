@@ -278,65 +278,268 @@ fn build_router(app: AppHandle, config: WebServiceConfig) -> Router {
 }
 
 // ---------------------------------------------------------------------------
-// Index
+// Index — rich dashboard
 // ---------------------------------------------------------------------------
 
 async fn index_handler(State(s): State<AppState>) -> Response {
     let c = &s.config;
-    let mut rows = String::new();
+    let port = s.app.state::<WebServiceState>().bound_port.lock().unwrap().unwrap_or(DEFAULT_PORT);
+
+    // Fetch datasets for the dashboard.
+    let settings = s.app.state::<SettingsState>();
+    let datasets = dataset::list_datasets(&settings);
+
+    // --- Build sections dynamically based on enabled services ---
+    let mut services_html = String::new();
+
     if c.stt {
-        rows.push_str(&endpoint_row(
-            "STT",
-            "POST /stt",
-            "multipart/form-data field <code>file</code> = 16kHz mono PCM WAV &rarr; JSON <code>{ \"text\": ... }</code>. Open <a href=\"/stt\">/stt</a> for a browser test form.",
-        ));
-    }
-    if c.dataset {
-        rows.push_str(&endpoint_row(
-            "Datasets",
-            "GET /datasets",
-            "JSON list of datasets. Then <code>/datasets/{uuid}</code> (HTML index), <code>/datasets/{uuid}/list</code> (JSON files), <code>/datasets/{uuid}/file/{path}</code> (download).",
-        ));
+        services_html.push_str(STT_SECTION_HTML);
     }
     if c.tts {
-        rows.push_str(&endpoint_row(
-            "TTS",
-            "GET/POST /tts",
-            "Params <code>text</code>, <code>voice</code> (+optional <code>rate</code>, <code>volume</code>, <code>pitch</code>) &rarr; audio/mpeg. Voices: <a href=\"/tts/voices\">/tts/voices</a>.",
-        ));
+        services_html.push_str(TTS_SECTION_HTML);
     }
-    rows.push_str(&endpoint_row(
-        "MCP",
-        "POST /mcp",
-        "Built-in MCP server (rmcp v3.4) for Goose integration. Connect via Streamable HTTP at <code>/mcp</code>. Tools: dataset_list, dataset_get, dataset_read_file, dataset_list_files, dataset_list_subtitles, dataset_list_cues, dataset_get_summary, dataset_delete_subtitles, dataset_delete_waveforms, dataset_delete_database, dataset_write_subtitles_to_db."
-    ));
-    if rows.is_empty() {
-        rows.push_str("<tr><td colspan=\"3\" style=\"padding:12px;color:#888\">No services enabled.</td></tr>");
+    if c.dataset {
+        let mut ds_rows = String::new();
+        for d in &datasets {
+            ds_rows.push_str(&format!(
+                "<tr><td><a href=\"/datasets/{}\">{}</a></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                html_escape(&d.info.uuid),
+                html_escape(&d.info.name),
+                html_escape(&d.info.description),
+                d.status,
+                d.media_count,
+            ));
+        }
+        if ds_rows.is_empty() {
+            ds_rows = "<tr><td colspan=\"4\" class=\"muted\">No datasets found.</td></tr>".to_string();
+        }
+        services_html.push_str(&DATASET_SECTION_HTML.replace("{}", &ds_rows));
     }
 
+    // MCP section (always shown).
+    services_html.push_str(MCP_SECTION_HTML);
+
+    // --- Endpoint reference table ---
+    let mut endpoint_rows = String::new();
+    if c.stt {
+        endpoint_rows.push_str(&ep_row("STT", "GET", "/stt", "Browser test form for uploading WAV audio"));
+        endpoint_rows.push_str(&ep_row("STT", "POST", "/stt", "multipart <code>file</code> = 16kHz mono WAV &rarr; JSON <code>{ text }</code>"));
+    }
+    if c.dataset {
+        endpoint_rows.push_str(&ep_row("Dataset", "GET", "/datasets", "JSON list of all datasets"));
+        endpoint_rows.push_str(&ep_row("Dataset", "GET", "/datasets/{uuid}", "HTML file browser for a dataset"));
+        endpoint_rows.push_str(&ep_row("Dataset", "GET", "/datasets/{uuid}/list", "JSON recursive file listing"));
+        endpoint_rows.push_str(&ep_row("Dataset", "GET", "/datasets/{uuid}/file/{path}", "Download / stream a file"));
+    }
+    if c.tts {
+        endpoint_rows.push_str(&ep_row("TTS", "GET", "/tts?text=...&voice=...", "Synthesize speech &rarr; audio/mpeg"));
+        endpoint_rows.push_str(&ep_row("TTS", "POST", "/tts", "JSON <code>{ text, voice, rate?, volume?, pitch? }</code> &rarr; audio/mpeg"));
+        endpoint_rows.push_str(&ep_row("TTS", "GET", "/tts/voices", "JSON list of all Edge TTS voices"));
+    }
+    endpoint_rows.push_str(&ep_row("MCP", "POST", "/mcp", "Streamable HTTP MCP endpoint (rmcp v3.4)"));
+
     let html = format!(
-        r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>fms-app Web Service</title>
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>fms-app</title>
 <style>
-body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:32px;background:#0f1115;color:#e6e6e6}}
-h1{{font-size:20px;margin:0 0 4px}} p.sub{{color:#9aa0a6;margin:0 0 24px;font-size:13px}}
-table{{border-collapse:collapse;width:100%;max-width:860px}} th,td{{text-align:left;padding:10px 12px;border-bottom:1px solid #23262d;font-size:13px;vertical-align:top}}
-th{{color:#9aa0a6;font-weight:600}} code{{background:#1b1e24;padding:2px 5px;border-radius:4px}} a{{color:#6cb6ff}}
-</style></head><body>
-<h1>fms-app Web Service</h1>
-<p class="sub">Services currently exposed by this server.</p>
-<table><thead><tr><th>Service</th><th>Endpoint</th><th>Description</th></tr></thead><tbody>{rows}</tbody></table>
-</body></html>"#
+:root{{--bg:#0f1115;--card:#161920;--border:#23262d;--text:#e6e6e6;--muted:#9aa0a6;--accent:#6cb6ff;--green:#4ade80;--code-bg:#1b1e24}}
+*{{box-sizing:border-box}}
+body{{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;padding:0;background:var(--bg);color:var(--text);line-height:1.6}}
+.container{{max-width:960px;margin:0 auto;padding:32px 24px}}
+header{{margin-bottom:32px}}
+h1{{font-size:24px;margin:0 0 4px;display:flex;align-items:center;gap:10px}}
+h1 .badge{{font-size:11px;padding:2px 8px;border-radius:10px;background:var(--green);color:#000;font-weight:600}}
+.subtitle{{color:var(--muted);font-size:14px;margin:4px 0 0}}
+h2{{font-size:16px;margin:0 0 12px;color:var(--text)}}
+.card{{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:20px}}
+.card h2{{display:flex;align-items:center;gap:8px}}
+table{{border-collapse:collapse;width:100%;font-size:13px}}
+th,td{{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}}
+th{{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px}}
+code{{background:var(--code-bg);padding:2px 5px;border-radius:4px;font-size:12px}}
+a{{color:var(--accent);text-decoration:none}}a:hover{{text-decoration:underline}}
+.muted{{color:var(--muted)}}
+.method{{display:inline-block;font-family:monospace;font-size:11px;font-weight:600;padding:2px 6px;border-radius:4px;background:var(--code-bg);border:1px solid var(--border);color:var(--muted)}}
+.method.get{{color:#4ade80;border-color:#4ade8040}}
+.method.post{{color:#f59e0b;border-color:#f59e0b40}}
+.tag{{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);color:var(--muted);margin-right:4px}}
+.tag.on{{border-color:var(--green);color:var(--green)}}
+form label{{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}}
+form input[type=file],form input[type=text],form textarea,form select{{width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--code-bg);color:var(--text);font-size:13px}}
+form button{{margin-top:12px;padding:8px 20px;border-radius:6px;border:0;background:#2563eb;color:#fff;font-size:13px;font-weight:600;cursor:pointer}}
+form button:hover{{opacity:.9}}
+pre{{background:var(--code-bg);padding:12px;border-radius:6px;white-space:pre-wrap;font-size:13px;max-height:300px;overflow-y:auto;border:1px solid var(--border)}}
+.tool-list{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px;margin-top:8px}}
+.tool-item{{padding:8px 10px;border-radius:6px;border:1px solid var(--border);font-size:12px}}
+.tool-item .name{{font-weight:600;color:var(--accent);margin-bottom:2px}}
+.tool-item .desc{{color:var(--muted);font-size:11px}}
+.status-bar{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:20px}}
+section+section{{margin-top:24px}}
+.footer{{text-align:center;color:var(--muted);font-size:12px;margin-top:40px;padding-top:20px;border-top:1px solid var(--border)}}
+</style>
+</head>
+<body>
+<div class="container">
+<header>
+<h1>fms-app <span class="badge">v2</span></h1>
+<p class="subtitle">Desktop language-learning app &mdash; HTTP API running on port <strong>{port}</strong></p>
+</header>
+
+<div class="status-bar">
+<span class="tag {stt_tag}">STT</span>
+<span class="tag {dataset_tag}">Datasets</span>
+<span class="tag {tts_tag}">TTS</span>
+<span class="tag on">MCP</span>
+</div>
+
+{services_html}
+
+<div class="card">
+<h2>API Reference</h2>
+<table>
+<thead><tr><th>Service</th><th>Method</th><th>Path</th><th>Description</th></tr></thead>
+<tbody>{endpoint_rows}</tbody>
+</table>
+</div>
+
+<div class="footer">
+<p>fms-app &mdash; built with Tauri, axum, and Rust</p>
+</div>
+</div>
+</body>
+</html>"#,
+        port = port,
+        stt_tag = if c.stt { "tag on" } else { "tag" },
+        dataset_tag = if c.dataset { "tag on" } else { "tag" },
+        tts_tag = if c.tts { "tag on" } else { "tag" },
+        services_html = services_html,
+        endpoint_rows = endpoint_rows,
     );
     Html(html).into_response()
 }
 
-fn endpoint_row(service: &str, endpoint: &str, desc: &str) -> String {
+fn ep_row(service: &str, method: &str, path: &str, desc: &str) -> String {
+    let mclass = match method {
+        "GET" => "method get",
+        "POST" => "method post",
+        _ => "method",
+    };
     format!(
-        "<tr><td><strong>{}</strong></td><td><code>{}</code></td><td>{}</td></tr>",
-        service, endpoint, desc
+        "<tr><td><strong>{}</strong></td><td><span class=\"{}\">{}</span></td><td><code>{}</code></td><td>{}</td></tr>",
+        service, mclass, method, path, desc
     )
 }
+
+// --- Static HTML fragments for interactive sections ---
+
+const STT_SECTION_HTML: &str = r#"
+<div class="card">
+<h2>&#x1f3a4; Speech-to-Text</h2>
+<p class="muted" style="margin:0 0 12px;font-size:13px">Upload a 16kHz mono PCM WAV file. The downloaded STT model is loaded automatically.</p>
+<form id="stt-form">
+<label>Audio file (WAV)</label>
+<input type="file" name="file" accept=".wav,audio/wav" required>
+<button type="submit">Transcribe</button>
+</form>
+<pre id="stt-out" style="margin-top:12px">Result will appear here.</pre>
+<script>
+document.getElementById('stt-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const out=document.getElementById('stt-out');
+  const fd=new FormData(e.target);
+  out.textContent='Transcribing...';
+  try{const r=await fetch('/stt',{method:'POST',body:fd});const j=await r.json();out.textContent=j.text||j.error||JSON.stringify(j);}
+  catch(err){out.textContent='Error: '+err;}
+});
+</script>
+</div>"#;
+
+const TTS_SECTION_HTML: &str = r#"
+<div class="card">
+<h2>&#x1f50a; Text-to-Speech</h2>
+<p class="muted" style="margin:0 0 12px;font-size:13px">Type text and pick a voice to synthesize speech via Edge TTS.</p>
+<form id="tts-form">
+<label>Text</label>
+<textarea name="text" rows="3" placeholder="Hello, world!" required></textarea>
+<label>Voice</label>
+<select name="voice" id="tts-voice"><option value="">Loading voices...</option></select>
+<button type="submit">Synthesize &amp; Play</button>
+</form>
+<pre id="tts-out" style="margin-top:12px;display:none"></pre>
+<script>
+(async()=>{
+  try{const r=await fetch('/tts/voices');const v=await r.json();
+    const sel=document.getElementById('tts-voice');sel.innerHTML='';
+    const groups={};v.forEach(x=>{const loc=x.Locale||x.locale||'other';(groups[loc]=groups[loc]||[]).push(x);});
+    Object.keys(groups).sort().forEach(loc=>{
+      const og=document.createElement('optgroup');og.label=loc;
+      groups[loc].forEach(x=>{const o=document.createElement('option');o.value=x.ShortName||x.short_name;o.textContent=(x.ShortName||x.short_name)+' ('+( x.Gender||x.gender||'')+ ')';og.appendChild(o);});
+      sel.appendChild(og);
+    });
+  }catch(e){document.getElementById('tts-voice').innerHTML='<option>Failed to load</option>';}
+})();
+document.getElementById('tts-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const out=document.getElementById('tts-out');
+  const fd=new FormData(e.target);
+  const text=fd.get('text'),voice=fd.get('voice');
+  out.style.display='block';out.textContent='Synthesizing...';
+  try{
+    const r=await fetch('/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,voice})});
+    if(!r.ok)throw new Error(await r.text());
+    const blob=await r.blob();const url=URL.createObjectURL(blob);
+    out.innerHTML='<audio controls src="'+url+'" autoplay></audio>';
+  }catch(err){out.textContent='Error: '+err;}
+});
+</script>
+</div>"#;
+
+const DATASET_SECTION_HTML: &str = r#"
+<div class="card">
+<h2>&#x1f4c2; Datasets</h2>
+<p class="muted" style="margin:0 0 12px;font-size:13px">Browse dataset files. Click a dataset name to see its contents.</p>
+<table>
+<thead><tr><th>Name</th><th>Description</th><th>Status</th><th>Media</th></tr></thead>
+<tbody>{}</tbody>
+</table>
+</div>"#;
+
+const MCP_SECTION_HTML: &str = r#"
+<div class="card">
+<h2>&#x1f916; MCP (Model Context Protocol)</h2>
+<p class="muted" style="margin:0 0 12px;font-size:13px">
+Connect AI agents via Streamable HTTP at <code>/mcp</code>. Built with <strong>rmcp v3.4</strong>.
+</p>
+<div class="tool-list">
+<div class="tool-item"><div class="name">dataset_list</div><div class="desc">List all datasets with UUID, name, status</div></div>
+<div class="tool-item"><div class="name">dataset_get</div><div class="desc">Get detailed dataset info and artifacts</div></div>
+<div class="tool-item"><div class="name">dataset_read_file</div><div class="desc">Read a file from a dataset directory</div></div>
+<div class="tool-item"><div class="name">dataset_list_files</div><div class="desc">Recursive file listing with sizes</div></div>
+<div class="tool-item"><div class="name">dataset_list_subtitles</div><div class="desc">List subtitles with cue counts</div></div>
+<div class="tool-item"><div class="name">dataset_list_cues</div><div class="desc">List cues for a subtitle</div></div>
+<div class="tool-item"><div class="name">dataset_get_summary</div><div class="desc">Per-media breakdown summary</div></div>
+<div class="tool-item"><div class="name">dataset_generate_subtitles</div><div class="desc">Generate subtitles via STT model</div></div>
+<div class="tool-item"><div class="name">dataset_generate_waveforms</div><div class="desc">Generate waveform JSON files</div></div>
+<div class="tool-item"><div class="name">dataset_write_subtitles_to_db</div><div class="desc">Re-import VTT into SQLite</div></div>
+<div class="tool-item"><div class="name">dataset_delete_subtitles</div><div class="desc">Delete subtitles (VTT + DB)</div></div>
+<div class="tool-item"><div class="name">dataset_delete_waveforms</div><div class="desc">Delete waveform files</div></div>
+<div class="tool-item"><div class="name">dataset_delete_database</div><div class="desc">Delete dataset SQLite database</div></div>
+<div class="tool-item"><div class="name">tts_list_voices</div><div class="desc">List all Edge TTS voices</div></div>
+<div class="tool-item"><div class="name">tts_synthesize</div><div class="desc">Synthesize text to audio file</div></div>
+<div class="tool-item"><div class="name">ocr_recognize</div><div class="desc">Tesseract OCR on base64 image</div></div>
+<div class="tool-item"><div class="name">ocr_list_languages</div><div class="desc">List installed Tesseract languages</div></div>
+<div class="tool-item"><div class="name">capture_screenshot</div><div class="desc">Capture screen via native snipping tool</div></div>
+<div class="tool-item"><div class="name">web_service_get_status</div><div class="desc">Get web service status and URLs</div></div>
+<div class="tool-item"><div class="name">web_service_start</div><div class="desc">Start web service with config</div></div>
+<div class="tool-item"><div class="name">web_service_stop</div><div class="desc">Stop the web service</div></div>
+<div class="tool-item"><div class="name">log_get_history</div><div class="desc">Get recent log entries</div></div>
+<div class="tool-item"><div class="name">log_clear</div><div class="desc">Clear the log buffer</div></div>
+</div>
+</div>"#;
 
 // ---------------------------------------------------------------------------
 // STT

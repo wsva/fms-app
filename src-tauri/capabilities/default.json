@@ -16,6 +16,7 @@
       ]
     },
     "dialog:default",
+    "deep-link:default",
     "fs:default",
     {
       "identifier": "fs:allow-read-file",

@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::State;
+use tauri::{Emitter, State};
 
-use crate::dictation::open_app_db;
 use crate::settings::SettingsState;
 
 const BASE_URL: &str = "https://lusworkshop.site";
+
+/// Deep link scheme used for login callback.
+const DEEP_LINK_SCHEME: &str = "fms-app";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -68,121 +70,38 @@ fn delete_tokens() -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// Credential persistence (app database)
-// ---------------------------------------------------------------------------
-
-fn save_credentials(nickname: &str, password: &str) -> Result<(), String> {
-    let conn = open_app_db()?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS auth_credentials (
-            id       INTEGER PRIMARY KEY CHECK (id = 1),
-            nickname TEXT NOT NULL,
-            password TEXT NOT NULL
-        );",
-    )
-    .map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT OR REPLACE INTO auth_credentials (id, nickname, password) VALUES (1, ?1, ?2)",
-        rusqlite::params![nickname, password],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn load_credentials() -> Result<Option<(String, String)>, String> {
-    let conn = open_app_db()?;
-    // Table might not exist yet
-    let exists: bool = conn
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='auth_credentials'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|c| c > 0)
-        .unwrap_or(false);
-    if !exists {
-        return Ok(None);
-    }
-    let result = conn
-        .query_row(
-            "SELECT nickname, password FROM auth_credentials WHERE id = 1",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .ok();
-    Ok(result)
-}
-
-fn delete_credentials() -> Result<(), String> {
-    let conn = open_app_db()?;
-    conn.execute("DELETE FROM auth_credentials", [])
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
+/// Open the browser to the login page. After login, the server redirects to
+/// `fms-app://login?access_token=...&user_id=...&username=...&refresh_token=...`
+/// which is handled by the deep link handler in lib.rs.
 #[tauri::command]
-pub async fn auth_login(
-    _settings: State<'_, SettingsState>,
-    nickname: String,
-    password: String,
+pub async fn auth_open_login() -> Result<String, String> {
+    log::info!("auth_open_login: opening browser");
+    let callback = format!("{}://login", DEEP_LINK_SCHEME);
+    let login_url = format!(
+        "{}/oauth2/login?desktop_callback={}",
+        BASE_URL,
+        urlencoding::encode(&callback)
+    );
+    log::info!("auth_open_login: url={}", login_url);
+
+    // Open the URL in the default browser.
+    open_url(&login_url)?;
+    Ok(login_url)
+}
+
+/// Process tokens received from the deep link callback.
+/// Called by the deep link handler when `fms-app://login?access_token=...` is received.
+pub async fn auth_process_token(
+    app: tauri::AppHandle,
+    access_token: String,
+    refresh_token: String,
+    user_id: String,
+    username: String,
 ) -> Result<AuthUser, String> {
-    log::info!("auth_login: user={}", nickname);
-    let client = reqwest::Client::new();
-
-    let body = serde_json::json!({
-        "data": {
-            "Nickname": nickname,
-            "Password": password
-        }
-    });
-
-    let resp = client
-        .post(format!("{}/api/oauth2/signin", BASE_URL))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Login request failed: {}", e))?;
-
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse login response: {}", e))?;
-
-    let success = json["success"].as_bool().unwrap_or(false);
-    if !success {
-        let err = json["message"].as_str().unwrap_or("Login failed");
-        log::warn!("auth_login failed for '{}': {}", nickname, err);
-        return Err(err.to_string());
-    }
-
-    let list = json["data"]["list"]
-        .as_array()
-        .ok_or("Invalid login response: missing list")?;
-
-    if list.len() < 4 {
-        return Err("Invalid login response: list too short".to_string());
-    }
-
-    let access_token = list[0]
-        .as_str()
-        .ok_or("Invalid access token")?
-        .to_string();
-    let user_id = list[1]
-        .as_str()
-        .ok_or("Invalid user id")?
-        .to_string();
-    let username = list[2]
-        .as_str()
-        .ok_or("Invalid username")?
-        .to_string();
-    let refresh_token = list[3]
-        .as_str()
-        .ok_or("Invalid refresh token")?
-        .to_string();
+    log::info!("auth_process_token: user={}, id={}", username, user_id);
 
     let tokens = AuthTokens {
         access_token,
@@ -193,14 +112,11 @@ pub async fn auth_login(
     };
     write_tokens(&tokens)?;
 
-    // Save credentials for auto-re-login
-    save_credentials(&nickname, &password)?;
-
-    // Fetch user info
+    // Fetch user info (includes email).
     let user = fetch_user_info(&tokens.access_token).await?;
-    log::info!("auth_login success: user={}, email={}", user.name, user.email);
+    log::info!("auth_process_token success: user={}, email={}", user.name, user.email);
 
-    // Persist email in tokens
+    // Persist email in tokens.
     let tokens = AuthTokens {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
@@ -210,33 +126,38 @@ pub async fn auth_login(
     };
     let _ = write_tokens(&tokens);
 
+    // Notify frontend that login succeeded.
+    let _ = app.emit("auth-login-success", &user);
+
     Ok(user)
 }
 
+/// Get the currently logged-in user, or None if not logged in.
 #[tauri::command]
 pub async fn auth_get_user(
     _settings: State<'_, SettingsState>,
 ) -> Result<Option<AuthUser>, String> {
-    log::debug!("auth_get_user: checking tokens");
     let tokens = match read_tokens()? {
         Some(t) => t,
-        None => {
-            // No tokens -- try auto-login from stored credentials
-            return try_auto_login().await;
-        }
+        None => return Ok(None),
     };
 
     match fetch_user_info(&tokens.access_token).await {
         Ok(user) => Ok(Some(user)),
-        Err(_) => {
-            // Token expired -- try auto-login from stored credentials
-            try_auto_login().await
+        Err(e) => {
+            log::warn!("auth_get_user: token invalid, clearing: {}", e);
+            let _ = delete_tokens();
+            Ok(None)
         }
     }
 }
 
+/// Log out: clear tokens and notify the server.
 #[tauri::command]
-pub async fn auth_logout(_settings: State<'_, SettingsState>) -> Result<(), String> {
+pub async fn auth_logout(
+    app: tauri::AppHandle,
+    _settings: State<'_, SettingsState>,
+) -> Result<(), String> {
     log::info!("auth_logout");
     let tokens = read_tokens()?;
 
@@ -253,88 +174,13 @@ pub async fn auth_logout(_settings: State<'_, SettingsState>) -> Result<(), Stri
     }
 
     delete_tokens()?;
-    delete_credentials()?;
+    let _ = app.emit("auth-logout", ());
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Internal
 // ---------------------------------------------------------------------------
-
-/// Try to login using stored credentials (for auto-login on app restart / token expiry).
-async fn try_auto_login() -> Result<Option<AuthUser>, String> {
-    let (nickname, password) = match load_credentials()? {
-        Some(creds) => creds,
-        None => return Ok(None),
-    };
-    log::info!("try_auto_login: attempting auto-login for '{}'", nickname);
-
-    let client = reqwest::Client::new();
-    let body = serde_json::json!({
-        "data": {
-            "Nickname": nickname,
-            "Password": password
-        }
-    });
-
-    let resp = match client
-        .post(format!("{}/api/oauth2/signin", BASE_URL))
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(_) => return Ok(None),
-    };
-
-    let json: serde_json::Value = match resp.json().await {
-        Ok(j) => j,
-        Err(_) => return Ok(None),
-    };
-
-    if !json["success"].as_bool().unwrap_or(false) {
-        return Ok(None);
-    }
-
-    let list = match json["data"]["list"].as_array() {
-        Some(l) if l.len() >= 4 => l,
-        _ => return Ok(None),
-    };
-
-    let access_token = list[0].as_str().unwrap_or("").to_string();
-    let user_id = list[1].as_str().unwrap_or("").to_string();
-    let username = list[2].as_str().unwrap_or("").to_string();
-    let refresh_token = list[3].as_str().unwrap_or("").to_string();
-
-    if access_token.is_empty() {
-        return Ok(None);
-    }
-
-    let tokens = AuthTokens {
-        access_token,
-        refresh_token,
-        user_id,
-        username,
-        email: String::new(),
-    };
-    let _ = write_tokens(&tokens);
-
-    match fetch_user_info(&tokens.access_token).await {
-        Ok(user) => {
-            // Persist email in tokens
-            let tokens = AuthTokens {
-                access_token: tokens.access_token,
-                refresh_token: tokens.refresh_token,
-                user_id: tokens.user_id,
-                username: tokens.username,
-                email: user.email.clone(),
-            };
-            let _ = write_tokens(&tokens);
-            Ok(Some(user))
-        }
-        Err(_) => Ok(None),
-    }
-}
 
 async fn fetch_user_info(access_token: &str) -> Result<AuthUser, String> {
     let client = reqwest::Client::new();
@@ -367,4 +213,30 @@ pub(crate) fn get_current_user_email() -> String {
         .flatten()
         .map(|t| t.email)
         .unwrap_or_default()
+}
+
+/// Open a URL in the default browser.
+fn open_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+    }
+    Ok(())
 }

@@ -25,6 +25,53 @@ impl OcrState {
 // Commands
 // ---------------------------------------------------------------------------
 
+/// List available Tesseract languages (from `tesseract --list-langs`).
+#[tauri::command]
+pub async fn ocr_list_languages(state: State<'_, OcrState>) -> Result<Vec<String>, String> {
+    // Find tesseract executable.
+    let tesseract_exe = {
+        let mut path_guard = state.tesseract_path.lock().unwrap();
+        if let Some(ref path) = *path_guard {
+            path.clone()
+        } else {
+            let path = find_tesseract()?;
+            *path_guard = Some(path.clone());
+            path
+        }
+    };
+
+    // Run `tesseract --list-langs`.
+    let langs = tokio::task::spawn_blocking({
+        let tesseract_exe = tesseract_exe.clone();
+        move || {
+            let output = Command::new(&tesseract_exe)
+                .arg("--list-langs")
+                .output()
+                .map_err(|e| format!("Failed to run tesseract: {}", e))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("Tesseract failed: {}", stderr.trim()));
+            }
+
+            // Parse output: first line is header, rest are language codes.
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let langs: Vec<String> = stdout
+                .lines()
+                .skip(1) // Skip "List of available languages in traineddata models:"
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+
+            Ok(langs)
+        }
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?;
+
+    langs
+}
+
 /// Recognize text in a base64-encoded image using Tesseract OCR.
 #[tauri::command]
 pub async fn ocr_recognize(

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ScanText,
   ImagePlus,
@@ -12,6 +12,8 @@ import {
   ZoomIn,
   ZoomOut,
   Wand2,
+  ChevronDown,
+  Check,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
@@ -37,8 +39,65 @@ export default function OcrPage() {
   // The editor's current PNG (after rotate/crop) — what we send to recognize.
   const [editedImage, setEditedImage] = useState<string | null>(null);
 
-  // Selected OCR language for Tesseract.
-  const [language, setLanguage] = useState("eng");
+  // Selected OCR languages for Tesseract (multi-select, combined with '+').
+  // Friendly labels for common languages; unknown codes shown as-is.
+  const LANG_LABELS: Record<string, string> = {
+    eng: "English",
+    deu: "Deutsch",
+    fra: "Français",
+    spa: "Español",
+    ita: "Italiano",
+    por: "Português",
+    nld: "Nederlands",
+    chi_sim: "中文简体",
+    chi_tra: "中文繁體",
+    jpn: "日本語",
+    kor: "한국어",
+    rus: "Русский",
+    ara: "العربية",
+  };
+  const [availableLangs, setAvailableLangs] = useState<string[]>([]);
+  const [selectedLangs, setSelectedLangs] = useState<string[]>([]);
+  const [langDropdownOpen, setLangDropdownOpen] = useState(false);
+  const langDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Fetch available Tesseract languages on mount.
+  useEffect(() => {
+    if (!isTauri()) return;
+    invoke<string[]>("ocr_list_languages")
+      .then((langs) => {
+        setAvailableLangs(langs);
+        // Default to eng+deu if available, otherwise first two.
+        setSelectedLangs((prev) => {
+          if (prev.length > 0) return prev;
+          const defaults = ["eng", "deu"].filter((l) => langs.includes(l));
+          if (defaults.length > 0) return defaults;
+          return langs.slice(0, Math.min(2, langs.length));
+        });
+      })
+      .catch(() => {
+        // Tesseract not found — leave list empty.
+      });
+  }, []);
+
+  // Close language dropdown on outside click.
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (langDropdownRef.current && !langDropdownRef.current.contains(e.target as Node)) {
+        setLangDropdownOpen(false);
+      }
+    };
+    if (langDropdownOpen) document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [langDropdownOpen]);
+
+  const toggleLang = useCallback((code: string) => {
+    setSelectedLangs((prev) =>
+      prev.includes(code) ? prev.filter((l) => l !== code) : [...prev, code]
+    );
+  }, []);
+
+  const langString = selectedLangs.join("+");
 
   // Font size for result textarea (in px).
   const [fontSize, setFontSize] = useState(24);
@@ -141,32 +200,55 @@ export default function OcrPage() {
               {/* Action bar: Recognize + Language + LLM fix */}
               <div className="flex flex-wrap items-center gap-2 mb-3">
                 <h2 className="text-sm font-semibold text-text-primary flex-1">Result</h2>
-                <div className="relative">
-                  <Languages size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary pointer-events-none" />
-                  <select
-                    value={language}
-                    onChange={(e) => setLanguage(e.target.value)}
-                    className="pl-9 pr-3 py-2 rounded-lg bg-bg-muted border border-border-default text-sm font-medium text-text-primary hover:bg-bg-hover transition-colors appearance-none cursor-pointer"
-                    title="OCR language"
+                <div className="relative" ref={langDropdownRef}>
+                  <button
+                    type="button"
+                    onClick={() => setLangDropdownOpen((o) => !o)}
+                    className="inline-flex items-center gap-2 pl-3 pr-2 py-2 rounded-lg bg-bg-muted border border-border-default text-sm font-medium text-text-primary hover:bg-bg-hover transition-colors cursor-pointer"
+                    title="OCR languages"
                   >
-                    <option value="eng">English</option>
-                    <option value="deu">Deutsch</option>
-                    <option value="fra">Français</option>
-                    <option value="spa">Español</option>
-                    <option value="ita">Italiano</option>
-                    <option value="por">Português</option>
-                    <option value="nld">Nederlands</option>
-                    <option value="chi_sim">中文简体</option>
-                    <option value="chi_tra">中文繁體</option>
-                    <option value="jpn">日本語</option>
-                    <option value="kor">한국어</option>
-                    <option value="rus">Русский</option>
-                    <option value="ara">العربية</option>
-                  </select>
+                    <Languages size={16} className="text-text-tertiary shrink-0" />
+                    <span className="max-w-[120px] truncate">
+                      {selectedLangs.length === 0
+                        ? "None"
+                        : selectedLangs.join("+")}
+                    </span>
+                    <ChevronDown size={14} className="text-text-tertiary shrink-0" />
+                  </button>
+                  {langDropdownOpen && (
+                    <div className="absolute right-0 top-full mt-1 z-50 w-48 max-h-64 overflow-y-auto rounded-lg border border-border-default bg-bg-card shadow-lg">
+                      {availableLangs.length === 0 && (
+                        <div className="px-3 py-2 text-xs text-text-tertiary">No languages found</div>
+                      )}
+                      {availableLangs.map((code) => {
+                        const checked = selectedLangs.includes(code);
+                        return (
+                          <button
+                            key={code}
+                            type="button"
+                            onClick={() => toggleLang(code)}
+                            className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-text-primary hover:bg-bg-hover transition-colors cursor-pointer"
+                          >
+                            <span
+                              className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
+                                checked
+                                  ? "bg-accent border-accent"
+                                  : "border-border-default"
+                              }`}
+                            >
+                              {checked && <Check size={12} className="text-white" />}
+                            </span>
+                            <span className="flex-1 text-left">{LANG_LABELS[code] ?? code}</span>
+                            <span className="text-xs text-text-tertiary">{code}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
                 <button
                   type="button"
-                  onClick={() => editedImage && recognize(editedImage, language)}
+                  onClick={() => editedImage && recognize(editedImage, langString)}
                   disabled={!canRecognize}
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
                   title={
