@@ -245,8 +245,12 @@ pub fn run() {
             wiki::wiki_list_dirs,
             wiki::wiki_list_dir,
             wiki::wiki_read_file,
+            wiki::wiki_write_file,
+            wiki::wiki_delete_file,
             wiki::wiki_search,
             wiki::wiki_index,
+            wiki::wiki_add_dir,
+            wiki::wiki_remove_dir,
         ])
         .manage(model::ModelState::new())
         .manage(settings::SettingsState::new())

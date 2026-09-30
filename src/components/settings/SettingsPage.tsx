@@ -193,59 +193,6 @@ export default function SettingsPage() {
             ))}
           </div>
         </section>
-
-        {/* ── Directories section ────────────────────────────────── */}
-        <section className="mb-8">
-          <h2 className="text-[1.3em] font-semibold mb-2">Directories</h2>
-          <p className="text-text-secondary text-sm mb-4">
-            Configure the default directories used by the application.
-          </p>
-
-          {settings ? (
-            <>
-              <FolderField
-                label="Model Directory"
-                description="Where downloaded models are stored."
-                field="model_dir"
-              />
-              <FolderField
-                label="Recordings Directory"
-                description="Where recorded audio files are saved."
-                field="recordings_dir"
-              />
-              <FolderField
-                label="Datasets Directory"
-                description="Where training and evaluation datasets are located."
-                field="datasets_dir"
-              />
-              <FolderField
-                label="Books Library Directory"
-                description="Where reading books (Read a Book) are stored."
-                field="books_dir"
-              />
-              <FolderField
-                label="Wiki Directory"
-                description="Where wiki markdown documents are stored."
-                field="wiki_dir"
-              />
-
-              <div className="flex items-center gap-3 mt-6">
-                <button
-                  className={btnPrimary}
-                  onClick={handleSave}
-                  disabled={saving}
-                >
-                  {saving ? "Saving..." : "Save"}
-                </button>
-                {saved && (
-                  <span className="text-sm text-success-text">Settings saved!</span>
-                )}
-              </div>
-            </>
-          ) : (
-            <p className="text-text-secondary">Loading settings...</p>
-          )}
-        </section>
       </main>
     </>
   );

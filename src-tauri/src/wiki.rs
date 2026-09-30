@@ -17,7 +17,20 @@ pub struct WikiEntry {
     pub name: String,
     pub path: String,
     pub is_dir: bool,
+    pub is_linked: bool,
     pub modified: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct WikiLinkedDir {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+struct WikiMeta {
+    #[serde(default)]
+    linked_dirs: Vec<WikiLinkedDir>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -46,6 +59,27 @@ fn get_modified_time(path: &Path) -> Option<String> {
         })
 }
 
+fn wiki_meta_path(wiki_dir: &str) -> PathBuf {
+    PathBuf::from(wiki_dir).join("meta.json")
+}
+
+fn read_wiki_meta(wiki_dir: &str) -> WikiMeta {
+    let meta_path = wiki_meta_path(wiki_dir);
+    if !meta_path.exists() {
+        return WikiMeta::default();
+    }
+    fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_default()
+}
+
+fn write_wiki_meta(wiki_dir: &str, meta: &WikiMeta) -> Result<(), String> {
+    let meta_path = wiki_meta_path(wiki_dir);
+    let data = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
+    fs::write(&meta_path, data).map_err(|e| e.to_string())
+}
+
 fn list_directory(dir_path: &Path) -> Result<Vec<WikiEntry>, String> {
     let entries = fs::read_dir(dir_path).map_err(|e| e.to_string())?;
     let mut result = Vec::new();
@@ -66,6 +100,7 @@ fn list_directory(dir_path: &Path) -> Result<Vec<WikiEntry>, String> {
             name: entry.file_name().to_string_lossy().into_owned(),
             path: path.to_string_lossy().into_owned(),
             is_dir: metadata.is_dir(),
+            is_linked: false,
             modified: get_modified_time(&path),
         };
         result.push(wiki_entry);
@@ -179,7 +214,7 @@ fn collect_markdown_files(dir: &Path, wiki_root: &Path) -> Result<Vec<(PathBuf, 
 // Tauri commands
 // ---------------------------------------------------------------------------
 
-/// List contents of the wiki root directory
+/// List top-level wiki roots (default wiki directory + linked directories)
 #[tauri::command]
 pub async fn wiki_list_dirs(
     state: State<'_, SettingsState>,
@@ -190,11 +225,38 @@ pub async fn wiki_list_dirs(
     };
 
     let wiki_path = PathBuf::from(&wiki_dir);
-    if !wiki_path.exists() {
-        return Ok(Vec::new());
+    let mut entries = Vec::new();
+
+    // Add default wiki directory as "wiki" entry
+    if wiki_path.exists() && wiki_path.is_dir() {
+        entries.push(WikiEntry {
+            name: "wiki".to_string(),
+            path: wiki_dir.clone(),
+            is_dir: true,
+            is_linked: false,
+            modified: get_modified_time(&wiki_path),
+        });
     }
 
-    list_directory(&wiki_path)
+    // Add linked directories
+    let meta = read_wiki_meta(&wiki_dir);
+    for linked in meta.linked_dirs {
+        let linked_path = PathBuf::from(&linked.path);
+        if linked_path.exists() && linked_path.is_dir() {
+            entries.push(WikiEntry {
+                name: linked.name,
+                path: linked.path,
+                is_dir: true,
+                is_linked: true,
+                modified: get_modified_time(&linked_path),
+            });
+        }
+    }
+
+    // Sort alphabetically
+    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    Ok(entries)
 }
 
 /// List contents of a specific wiki directory
@@ -211,6 +273,68 @@ pub async fn wiki_list_dir(path: String) -> Result<Vec<WikiEntry>, String> {
     list_directory(&dir_path)
 }
 
+/// Add a linked directory to the wiki
+#[tauri::command]
+pub async fn wiki_add_dir(
+    state: State<'_, SettingsState>,
+    name: String,
+    path: String,
+) -> Result<(), String> {
+    let wiki_dir = {
+        let settings = state.settings.lock().unwrap();
+        settings.wiki_dir.clone()
+    };
+
+    // Verify the path exists and is a directory
+    let target_path = PathBuf::from(&path);
+    if !target_path.exists() {
+        return Err(format!("Directory does not exist: {}", path));
+    }
+    if !target_path.is_dir() {
+        return Err(format!("Path is not a directory: {}", path));
+    }
+
+    let mut meta = read_wiki_meta(&wiki_dir);
+
+    // Check if already linked
+    if meta.linked_dirs.iter().any(|d| d.path == path) {
+        return Err(format!("Directory already linked: {}", path));
+    }
+
+    meta.linked_dirs.push(WikiLinkedDir {
+        name: name.clone(),
+        path: path.clone(),
+    });
+
+    write_wiki_meta(&wiki_dir, &meta)?;
+    log::info!("[Wiki] Linked directory '{}' -> {}", name, path);
+    Ok(())
+}
+
+/// Remove a linked directory from the wiki
+#[tauri::command]
+pub async fn wiki_remove_dir(
+    state: State<'_, SettingsState>,
+    path: String,
+) -> Result<(), String> {
+    let wiki_dir = {
+        let settings = state.settings.lock().unwrap();
+        settings.wiki_dir.clone()
+    };
+
+    let mut meta = read_wiki_meta(&wiki_dir);
+    let initial_len = meta.linked_dirs.len();
+    meta.linked_dirs.retain(|d| d.path != path);
+
+    if meta.linked_dirs.len() == initial_len {
+        return Err(format!("Directory not found in linked directories: {}", path));
+    }
+
+    write_wiki_meta(&wiki_dir, &meta)?;
+    log::info!("[Wiki] Unlinked directory: {}", path);
+    Ok(())
+}
+
 /// Read markdown file content
 #[tauri::command]
 pub async fn wiki_read_file(path: String) -> Result<String, String> {
@@ -225,7 +349,60 @@ pub async fn wiki_read_file(path: String) -> Result<String, String> {
     fs::read_to_string(&file_path).map_err(|e| e.to_string())
 }
 
-/// Index all markdown files in the wiki directory
+/// Write/create a markdown file at the specified path
+#[tauri::command]
+pub async fn wiki_write_file(
+    _state: State<'_, SettingsState>,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let file_path = PathBuf::from(&path);
+
+    // Ensure parent directory exists
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+    }
+
+    fs::write(&file_path, &content).map_err(|e| format!("Failed to write file: {}", e))?;
+    log::info!("[Wiki] Wrote file: {}", path);
+    Ok(())
+}
+
+/// Delete a markdown file (moves to trash)
+#[tauri::command]
+pub async fn wiki_delete_file(
+    _state: State<'_, SettingsState>,
+    path: String,
+) -> Result<(), String> {
+    let file_path = PathBuf::from(&path);
+    if !file_path.exists() {
+        return Err(format!("File does not exist: {}", path));
+    }
+    if !file_path.is_file() {
+        return Err(format!("Path is not a file: {}", path));
+    }
+
+    // Move to trash instead of deleting
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("fms-app")
+        .join("trash");
+    fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create trash directory: {}", e))?;
+
+    let file_name = file_path
+        .file_name()
+        .ok_or("Invalid file name")?
+        .to_string_lossy();
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let trash_name = format!("{}_{}", timestamp, file_name);
+    let trash_path = data_dir.join(&trash_name);
+
+    fs::rename(&file_path, &trash_path).map_err(|e| format!("Failed to move to trash: {}", e))?;
+    log::info!("[Wiki] Deleted file (moved to trash): {} -> {}", path, trash_path.display());
+    Ok(())
+}
+
+/// Index all markdown files in the wiki directory and linked directories
 #[tauri::command]
 pub async fn wiki_index(
     state: State<'_, SettingsState>,
@@ -242,20 +419,36 @@ pub async fn wiki_index(
 
     let conn = open_wiki_db(&wiki_dir)?;
 
-    // Collect all markdown files
-    let files = collect_markdown_files(&wiki_path, &wiki_path)?;
+    // Collect roots: main wiki dir + linked dirs
+    let mut roots: Vec<(PathBuf, PathBuf)> = vec![(wiki_path.clone(), wiki_path.clone())];
+
+    let meta = read_wiki_meta(&wiki_dir);
+    for linked in &meta.linked_dirs {
+        let linked_path = PathBuf::from(&linked.path);
+        if linked_path.exists() && linked_path.is_dir() {
+            roots.push((linked_path.clone(), linked_path.clone()));
+        }
+    }
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
 
     let mut count = 0u32;
+    let mut all_files: Vec<(PathBuf, String, String)> = Vec::new();
+
+    // Collect files from all roots
+    for (dir, root) in &roots {
+        let files = collect_markdown_files(dir, root)?;
+        all_files.extend(files);
+    }
 
     // Use transaction for bulk insert
     {
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
 
-        for (file_path, file_name, relative_path) in &files {
+        for (file_path, file_name, relative_path) in &all_files {
             let content = fs::read_to_string(file_path).unwrap_or_default();
             let modified = fs::metadata(file_path)
                 .ok()
@@ -293,7 +486,7 @@ pub async fn wiki_index(
         }
 
         // Remove entries for files that no longer exist
-        let current_paths: Vec<String> = files
+        let current_paths: Vec<String> = all_files
             .iter()
             .map(|(p, _, _)| p.to_string_lossy().into_owned())
             .collect();
@@ -318,7 +511,7 @@ pub async fn wiki_index(
         tx.commit().map_err(|e| e.to_string())?;
     }
 
-    log::info!("[Wiki] Indexed {} markdown files", count);
+    log::info!("[Wiki] Indexed {} markdown files from {} roots", count, roots.len());
     Ok(count)
 }
 
