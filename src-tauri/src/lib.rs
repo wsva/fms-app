@@ -20,6 +20,7 @@ mod web_service;
 mod capture;
 mod ocr;
 mod xp;
+mod wiki;
 
 // Unified model index
 mod model_index;
@@ -64,6 +65,39 @@ async fn handle_deep_link_login(app: tauri::AppHandle, url: &str) -> Result<(), 
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Deep link handler for wiki navigation
+// ---------------------------------------------------------------------------
+
+/// Parse `fms-app://wiki/path/to/file.md` and emit event to navigate to that wiki page.
+fn handle_deep_link_wiki(app: tauri::AppHandle, url: &str) -> Result<(), String> {
+    use tauri::Emitter;
+
+    // Extract path after "fms-app://wiki/"
+    let wiki_prefix = "fms-app://wiki/";
+    if !url.starts_with(wiki_prefix) {
+        return Err("Invalid wiki deep link URL".to_string());
+    }
+
+    let relative_path = &url[wiki_prefix.len()..];
+    if relative_path.is_empty() {
+        return Err("No file path in wiki deep link URL".to_string());
+    }
+
+    // URL-decode the path
+    let decoded_path = urlencoding::decode(relative_path)
+        .map(|cow| cow.into_owned())
+        .unwrap_or_else(|_| relative_path.to_string());
+
+    log::info!("[DeepLink] Wiki navigation to: {}", decoded_path);
+
+    // Emit event for frontend to handle
+    app.emit("wiki-navigate", &decoded_path)
+        .map_err(|e| format!("Failed to emit wiki-navigate event: {}", e))?;
+
+    Ok(())
+}
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -87,8 +121,14 @@ pub fn run() {
                     let app_handle = app.clone();
                     let url = arg.clone();
                     tauri::async_runtime::spawn(async move {
-                        if let Err(e) = handle_deep_link_login(app_handle, &url).await {
-                            log::error!("[SingleInstance] Deep link handling failed: {}", e);
+                        if url.starts_with("fms-app://login") {
+                            if let Err(e) = handle_deep_link_login(app_handle, &url).await {
+                                log::error!("[SingleInstance] Deep link handling failed: {}", e);
+                            }
+                        } else if url.starts_with("fms-app://wiki") {
+                            if let Err(e) = handle_deep_link_wiki(app_handle, &url) {
+                                log::error!("[SingleInstance] Wiki deep link handling failed: {}", e);
+                            }
                         }
                     });
                     break;
@@ -202,6 +242,11 @@ pub fn run() {
             logger::log_get_history,
             logger::log_clear,
             logger::log_frontend_message,
+            wiki::wiki_list_dirs,
+            wiki::wiki_list_dir,
+            wiki::wiki_read_file,
+            wiki::wiki_search,
+            wiki::wiki_index,
         ])
         .manage(model::ModelState::new())
         .manage(settings::SettingsState::new())
@@ -261,6 +306,12 @@ pub fn run() {
                                 log::error!("[DeepLink] Login failed: {}", e);
                             }
                         });
+                    } else if url_str.starts_with("fms-app://wiki") {
+                        let handle = dl_handle.clone();
+                        let url_str = url_str.clone();
+                        if let Err(e) = handle_deep_link_wiki(handle, &url_str) {
+                            log::error!("[DeepLink] Wiki navigation failed: {}", e);
+                        }
                     }
                 }
             });
@@ -277,6 +328,12 @@ pub fn run() {
                                 log::error!("[DeepLink] Login failed: {}", e);
                             }
                         });
+                    } else if url_str.starts_with("fms-app://wiki") {
+                        let handle = app.handle().clone();
+                        let url_str = url_str.clone();
+                        if let Err(e) = handle_deep_link_wiki(handle, &url_str) {
+                            log::error!("[DeepLink] Wiki navigation failed: {}", e);
+                        }
                     }
                 }
             }

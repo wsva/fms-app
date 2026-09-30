@@ -15,6 +15,7 @@ import {
   Volume2,
   Wrench,
   BookOpen,
+  BookOpenText,
   Layers,
   ScanText,
   FileText,
@@ -58,6 +59,7 @@ export type TabId =
   | "edge-tts"
   | "llm-chat"
   | "ocr"
+  | "wiki"
   | "logs"
   | "settings";
 
@@ -95,6 +97,7 @@ const navGroups: NavGroup[] = [
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
       { id: "ocr", label: "OCR", icon: ScanText },
+      { id: "wiki", label: "Wiki", icon: BookOpenText },
       { id: "logs", label: "Logs", icon: FileText },
     ],
   },

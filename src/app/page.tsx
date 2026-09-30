@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { listen } from "@tauri-apps/api/event";
 import Sidebar, { type TabId } from "@/components/layout/Sidebar";
 import StatusBar from "@/components/layout/StatusBar";
 import ModelsPage from "@/components/listen_speak/models/ModelsPage";
@@ -15,11 +16,22 @@ import TtsPage from "@/components/listen_speak/edge_tts/TtsPage";
 import SettingsPage from "@/components/settings/SettingsPage";
 import LLMChatPage from "@/components/llm/chat/ChatPage";
 import OcrPage from "@/components/ocr/OcrPage";
+import WikiPage from "@/components/wiki/WikiPage";
 import LogPage from "@/components/tools/LogPage";
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<TabId>("dictation");
   const [sidebarWidth, setSidebarWidth] = useState(176); // default expanded width
+
+  // Listen for wiki deep link navigation (fms-app://wiki/path/to/file.md)
+  useEffect(() => {
+    const unlisten = listen<string>("wiki-navigate", () => {
+      setActiveTab("wiki");
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   return (
     <div className="flex h-screen">
@@ -65,6 +77,9 @@ export default function Home() {
         </div>
         <div style={{ display: activeTab === "ocr" ? "flex" : "none" }} className="flex-1 min-h-0">
           <OcrPage />
+        </div>
+        <div style={{ display: activeTab === "wiki" ? "flex" : "none" }} className="flex-1 min-h-0">
+          <WikiPage />
         </div>
         <div style={{ display: activeTab === "logs" ? "flex" : "none" }} className="flex-1 min-h-0">
           <LogPage />

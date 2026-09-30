@@ -35,6 +35,9 @@ pub struct AppSettings {
     /// Root directory of the reading library (each book is a sub-directory).
     #[serde(default)]
     pub books_dir: String,
+    /// Root directory of the wiki (markdown documents).
+    #[serde(default)]
+    pub wiki_dir: String,
     /// Use Hugging Face mirror (hf-mirror.com) for faster downloads in China.
     /// false = use huggingface.co, true = use hf-mirror.com.
     #[serde(default)]
@@ -61,6 +64,7 @@ impl Default for AppSettings {
             recordings_dir: data_dir.join("recordings").to_string_lossy().into_owned(),
             datasets_dir: data_dir.join("datasets").to_string_lossy().into_owned(),
             books_dir: data_dir.join("books").to_string_lossy().into_owned(),
+            wiki_dir: data_dir.join("wiki").to_string_lossy().into_owned(),
             hf_mirror: false,
             selected_model: String::new(),
             model_unload_timeout: ModelUnloadTimeout::default(),
@@ -146,6 +150,7 @@ pub async fn settings_pick_folder(
         "recordings_dir" => "Select Recordings Directory",
         "datasets_dir" => "Select Datasets Directory",
         "books_dir" => "Select Books Library Directory",
+        "wiki_dir" => "Select Wiki Directory",
         "dataset_location" => "Select Datasets Location",
         _ => return Err(format!("Unknown field: {}", field)),
     };

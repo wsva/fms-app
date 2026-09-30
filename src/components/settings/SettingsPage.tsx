@@ -16,6 +16,7 @@ interface AppSettings {
   recordings_dir: string;
   datasets_dir: string;
   books_dir: string;
+  wiki_dir: string;
   ocr_engine: string;
   logics_parsing_repo: string;
   logics_parsing_model: string;
@@ -221,6 +222,11 @@ export default function SettingsPage() {
                 label="Books Library Directory"
                 description="Where reading books (Read a Book) are stored."
                 field="books_dir"
+              />
+              <FolderField
+                label="Wiki Directory"
+                description="Where wiki markdown documents are stored."
+                field="wiki_dir"
               />
 
               <div className="flex items-center gap-3 mt-6">
