@@ -24,7 +24,7 @@ export default function DictationPage() {
     const d = useDictationData();
     const [adminMode, setAdminMode] = useState(false);
     const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
-    // Media-list view/edit mode toggle (view mode hides players, edit mode mirrors Datasets > Modify).
+    // Media-list view/edit mode toggle (view mode hides players, edit mode shows source/note fields).
     const [mediaEditMode, setMediaEditMode] = useState(false);
     // Keyboard-shortcut help tip: shown on hover, and also on click (controlled).
     const [helpOpen, setHelpOpen] = useState(false);
@@ -484,7 +484,7 @@ export default function DictationPage() {
 
                                 {mediaEditMode && (
                                     <>
-                                        {/* Source / note edit fields + row actions (mirrors Datasets > Modify) */}
+                                        {/* Source / note edit fields + row actions */}
                                         <div className="grid grid-cols-[1fr_1fr_auto] gap-3 items-center">
                                             <label className="flex items-center gap-2">
                                                 <span className="shrink-0 text-xs text-text-tertiary w-12">Source</span>

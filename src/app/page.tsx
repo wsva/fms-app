@@ -8,7 +8,6 @@ import StatusBar from "@/components/layout/StatusBar";
 import WorkspaceChooser from "@/components/workspace/WorkspaceChooser";
 import ModelsPage from "@/components/listen_speak/models/ModelsPage";
 import DictationPage from "@/components/listen_speak/dictation/DictationPage";
-import DictationDatasetPage from "@/components/listen_speak/dictation_dataset/DictationDatasetPage";
 import StudioPage from "@/components/listen_speak/studio/StudioPage";
 import ReadBookPage from "@/components/read_book/ReadBookPage";
 import CardsPage from "@/components/cards/CardsPage";
@@ -106,9 +105,6 @@ export default function Home() {
       >
         <div style={{ display: activeTab === "dictation" ? "flex" : "none" }} className="flex-1 min-h-0">
           <DictationPage />
-        </div>
-        <div style={{ display: activeTab === "dictation-dataset" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <DictationDatasetPage />
         </div>
         <div style={{ display: activeTab === "studio" ? "flex" : "none" }} className="flex-1 min-h-0">
           <StudioPage />

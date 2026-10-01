@@ -5,8 +5,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   Box,
-  Database,
-  Table,
   SlidersHorizontal,
   Settings,
   Headphones,
@@ -52,7 +50,6 @@ export type TabId =
   | "dictation"
   | "read-book"
   | "cards"
-  | "dictation-dataset"
   | "studio"
   | "models"
   | "edge-tts"
@@ -79,25 +76,17 @@ type NavGroup = {
 // Navigation structure with groups
 const navGroups: NavGroup[] = [
   {
-    id: "datasets",
-    label: "Datasets",
-    icon: Database,
-    tabs: [
-      { id: "dictation-dataset", label: "Modify", icon: Table },
-      { id: "studio", label: "Studio", icon: SlidersHorizontal },
-    ],
-  },
-  {
     id: "tools",
     label: "Tools",
     icon: Wrench,
     tabs: [
-      { id: "models", label: "Models", icon: Box },
+      { id: "workspaces", label: "Workspaces", icon: FolderKanban },
+      { id: "studio", label: "Dataset Studio", icon: SlidersHorizontal },
+      { id: "wiki", label: "Wiki", icon: BookOpenText },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
       { id: "ocr", label: "OCR", icon: ScanText },
-      { id: "wiki", label: "Wiki", icon: BookOpenText },
-      { id: "workspaces", label: "Workspaces", icon: FolderKanban },
+      { id: "models", label: "Models", icon: Box },
       { id: "logs", label: "Logs", icon: FileText },
     ],
   },
