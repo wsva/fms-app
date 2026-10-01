@@ -53,11 +53,11 @@ export default function ReadBookPage() {
       </div>
 
       {/* Content — both views stay mounted to preserve state */}
-      <div className="flex-1 overflow-y-auto p-4 min-h-0 w-full">
-        <div style={{ display: view === "read" ? "block" : "none" }}>
+      <div className="flex-1 min-h-0 w-full flex flex-col">
+        <div style={{ display: view === "read" ? "flex" : "none" }} className="flex-1 min-h-0 overflow-hidden">
           <ReadingView books={books} />
         </div>
-        <div style={{ display: view === "manage" ? "block" : "none" }}>
+        <div style={{ display: view === "manage" ? "block" : "none" }} className="flex-1 min-h-0 overflow-y-auto p-4">
           <BookManager books={books} onBooksChanged={loadBooks} />
         </div>
       </div>

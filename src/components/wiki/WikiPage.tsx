@@ -30,9 +30,27 @@ export default function WikiPage() {
   const [error, setError] = useState<string | null>(null);
   const [isIndexing, setIsIndexing] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
-  const [isDragging, setIsDragging] = useState(false);
-  const startXRef = useRef(0);
-  const startWidthRef = useRef(0);
+  const handleSidebarDrag = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startWidth = sidebarWidth;
+      const onMove = (ev: MouseEvent) =>
+        setSidebarWidth(Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, startWidth + ev.clientX - startX)));
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        localStorage.setItem(WIKI_SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+      };
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    },
+    [sidebarWidth]
+  );
 
   // Navigation history
   const [history, setHistory] = useState<string[]>([]);
@@ -207,36 +225,6 @@ export default function WikiPage() {
     }
   }, []);
 
-  // Handle resize drag
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    startXRef.current = e.clientX;
-    startWidthRef.current = sidebarWidth;
-    setIsDragging(true);
-  }, [sidebarWidth]);
-
-  useEffect(() => {
-    if (!isDragging) return;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      const delta = e.clientX - startXRef.current;
-      const newWidth = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, startWidthRef.current + delta));
-      setSidebarWidth(newWidth);
-    };
-
-    const handleMouseUp = () => {
-      setIsDragging(false);
-      localStorage.setItem(WIKI_SIDEBAR_WIDTH_KEY, String(sidebarWidth));
-    };
-
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
-    };
-  }, [isDragging, sidebarWidth]);
-
   return (
     <div className="flex h-full w-full bg-bg-body">
       {/* Sidebar - file tree */}
@@ -251,15 +239,12 @@ export default function WikiPage() {
         />
         {/* Resize handle */}
         <div
-          className="absolute top-0 right-0 h-full w-1 cursor-col-resize hover:bg-accent/50 active:bg-accent transition-colors z-10"
-          onMouseDown={handleMouseDown}
-        />
+          className="absolute top-0 right-0 h-full w-3 cursor-col-resize flex items-center justify-center group z-10"
+          onMouseDown={handleSidebarDrag}
+        >
+          <div className="w-0.5 h-12 rounded-full bg-border-default group-hover:bg-accent transition-colors" />
+        </div>
       </div>
-
-      {/* Overlay to capture mouse events during drag */}
-      {isDragging && (
-        <div className="fixed inset-0 z-50 cursor-col-resize" />
-      )}
 
       {/* Main content area */}
       <div className="flex-1 flex flex-col min-h-0 min-w-0">

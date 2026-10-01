@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useImmer } from "use-immer";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Library, AlignLeft, AlignJustify, BookOpen } from "lucide-react";
+import { Library, AlignLeft, AlignJustify, BookOpen, RotateCcw } from "lucide-react";
 import type {
   BookMeta,
   BookChapter,
@@ -48,27 +48,27 @@ export default function ReadingView({ books }: Props) {
   const [drawerBgColor, setDrawerBgColor] = useState<string | null>(null);
   const [drawerAudio, setDrawerAudio] = useState<{ rel: string; url: string } | null>(null);
 
-  // resizable library selector
-  const [selectorHeight, setSelectorHeight] = useState(200);
-  const handleSelectorDrag = useCallback(
+  // resizable sidebar (TOC)
+  const [sidebarWidth, setSidebarWidth] = useState(260);
+  const handleSidebarDrag = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
-      const startY = e.clientY;
-      const startHeight = selectorHeight;
+      const startX = e.clientX;
+      const startWidth = sidebarWidth;
       const onMove = (ev: MouseEvent) =>
-        setSelectorHeight(Math.min(600, Math.max(80, startHeight + ev.clientY - startY)));
+        setSidebarWidth(Math.min(window.innerWidth * 0.8, Math.max(160, startWidth + ev.clientX - startX)));
       const onUp = () => {
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
         document.body.style.cursor = "";
         document.body.style.userSelect = "";
       };
-      document.body.style.cursor = "row-resize";
+      document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
     },
-    [selectorHeight]
+    [sidebarWidth]
   );
 
   const flatChapters = useMemo(() => flattenChapters(chaptersFlat), [chaptersFlat]);
@@ -170,6 +170,23 @@ export default function ReadingView({ books }: Props) {
       }
     }
     setDrawer(null);
+    setDrawerContent("");
+    setDrawerRecognized("");
+    setDrawerBgColor(null);
+    setDrawerAudio(null);
+  };
+
+  const clearDrawer = async () => {
+    if (drawer?.mode !== "add") return;
+    // Discard orphan audio before resetting.
+    if (drawerAudio && isTauri()) {
+      try {
+        await invoke("book_delete_audio", { bookUuid: bookUUID, relPath: drawerAudio.rel });
+      } catch {
+        /* ignore */
+      }
+    }
+    setDrawerUUID(getUUID());
     setDrawerContent("");
     setDrawerRecognized("");
     setDrawerBgColor(null);
@@ -528,11 +545,11 @@ export default function ReadingView({ books }: Props) {
   const currentChapter = chaptersFlat.find((c) => c.uuid === chapterUUID);
 
   const bookBtnClass = (active: boolean) =>
-    `w-full text-left px-2 py-1.5 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 cursor-pointer ${
+    `w-full text-left px-2 py-1.5 rounded-lg text-base font-medium transition-colors flex items-center gap-2 cursor-pointer ${
       active ? "bg-accent-bg text-white" : "hover:bg-bg-hover text-text-primary"
     }`;
   const chapterBtnClass = (active: boolean, completed: boolean) =>
-    `w-full text-left px-2 py-1 rounded text-sm transition-colors cursor-pointer ${
+    `w-full text-left px-2 py-1 rounded text-base transition-colors cursor-pointer ${
       active
         ? "bg-accent-bg text-white font-semibold"
         : completed
@@ -541,13 +558,13 @@ export default function ReadingView({ books }: Props) {
     }`;
 
   return (
-    <div className="flex flex-col w-full gap-4">
-      {/* Library selector */}
+    <div className="flex flex-row w-full h-full gap-4">
+      {/* TOC sidebar */}
       <div
-        className="bg-bg-card border border-border-default rounded-xl flex flex-col shadow-sm"
-        style={{ height: `${selectorHeight}px` }}
+        className="bg-bg-card border border-border-default rounded-xl flex flex-row shadow-sm flex-shrink-0 h-full"
+        style={{ width: `${sidebarWidth}px` }}
       >
-        <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-0.5">
+        <div className="flex-1 min-w-0 overflow-y-auto p-3 flex flex-col gap-0.5">
           <div className="flex flex-row items-center justify-start px-1 mb-2 gap-2">
             <Library size={16} className="text-text-tertiary" />
             <span className="text-xs font-semibold text-text-tertiary tracking-wider">Library</span>
@@ -579,18 +596,20 @@ export default function ReadingView({ books }: Props) {
           ))}
           {books.length === 0 && (
             <div className="text-center text-text-tertiary py-4 text-sm">
-              No books yet. Use “Manage” to create one.
+              No books yet. Use "Manage" to create one.
             </div>
           )}
         </div>
         <div
-          className="flex-shrink-0 h-3 cursor-row-resize flex items-center justify-center group"
-          onMouseDown={handleSelectorDrag}
+          className="flex-shrink-0 w-3 cursor-col-resize flex items-center justify-center group self-stretch"
+          onMouseDown={handleSidebarDrag}
         >
-          <div className="h-0.5 w-12 rounded-full bg-border-default group-hover:bg-accent transition-colors" />
+          <div className="w-0.5 h-12 rounded-full bg-border-default group-hover:bg-accent transition-colors" />
         </div>
       </div>
-
+  
+      {/* Main content */}
+      <div className="flex-1 min-w-0 min-h-0 flex flex-col gap-4 overflow-y-auto p-4 pb-[50vh]">
       {/* Error banner */}
       {error && (
         <div className="px-3 py-2 rounded-lg bg-red-500/15 text-red-500 text-sm flex items-center justify-between">
@@ -716,6 +735,7 @@ export default function ReadingView({ books }: Props) {
         recording={recorder.recording}
         processing={recorder.processing}
         onClose={closeDrawer}
+        onClear={clearDrawer}
         onPlay={playDrawerAudio}
         onToggleRecording={recorder.toggle}
         onSaveAdd={handleSaveAdd}
@@ -739,6 +759,7 @@ export default function ReadingView({ books }: Props) {
         }
         onClose={() => setConfirmDeleteSentence(false)}
       />
+      </div>
     </div>
   );
 }
