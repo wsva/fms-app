@@ -293,6 +293,9 @@ pub fn run() {
             // Card sync
             cards::card_sync_status,
             cards::card_sync_get_changes,
+            // Card FTS search
+            cards::card_search,
+            cards::card_fts_rebuild,
             // Card dataset sync (bidirectional)
             cards_sync::card_sync_full,
             cards_sync::card_sync_all,

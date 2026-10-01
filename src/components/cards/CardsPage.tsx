@@ -30,7 +30,7 @@ import type {
 import { CARD_BASE_URL, CARD_LINKS, openCardUrl } from "@/lib/cards";
 import { useCardEditor } from "./CardEditorContext";
 
-type TabId = "cards" | "review" | "tags" | "online" | "advanced";
+type TabId = "cards" | "search" | "review" | "tags" | "online" | "advanced";
 
 export default function CardsPage() {
   // Dataset state
@@ -59,6 +59,13 @@ export default function CardsPage() {
 
   // Tags
   const [tags, setTags] = useState<CardTag[]>([]);
+
+  // Global search state
+  const [globalSearchQuery, setGlobalSearchQuery] = useState("");
+  const [globalSearchResults, setGlobalSearchResults] = useState<
+    { dataset_uuid: string; dataset_name: string; card_uuid: string; question: string; answer: string; note: string; location: string }[]
+  >([]);
+  const [searching, setSearching] = useState(false);
 
   // Online links
   const [error, setError] = useState<string | null>(null);
@@ -195,6 +202,35 @@ export default function CardsPage() {
     }
   }
 
+  // Global FTS search across all datasets
+  async function handleGlobalSearch() {
+    if (!globalSearchQuery.trim()) {
+      setGlobalSearchResults([]);
+      return;
+    }
+    setSearching(true);
+    try {
+      const results = await invoke<
+        { dataset_uuid: string; dataset_name: string; card_uuid: string; question: string; answer: string; note: string; location: string }[]
+      >("card_search", { query: globalSearchQuery });
+      setGlobalSearchResults(results);
+    } catch (e) {
+      setError(`Search failed: ${e}`);
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  // Rebuild FTS index
+  async function handleRebuildIndex() {
+    try {
+      const count = await invoke<number>("card_fts_rebuild", { location: null });
+      alert(`Search index rebuilt! ${count} cards indexed.`);
+    } catch (e) {
+      setError(`Failed to rebuild index: ${e}`);
+    }
+  }
+
   const selectedDataset = datasets.find((d) => d.info.uuid === selectedDatasetUuid);
   const totalPages = Math.ceil(totalCards / pageSize);
 
@@ -273,7 +309,7 @@ export default function CardsPage() {
 
         {/* Tabs */}
         <div className="flex gap-1 mt-3">
-          {(["cards", "review", "tags", "online", "advanced"] as TabId[]).map((tab) => (
+          {(["cards", "search", "review", "tags", "online", "advanced"] as TabId[]).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -284,6 +320,7 @@ export default function CardsPage() {
               }`}
             >
               {tab === "cards" && "Cards"}
+              {tab === "search" && "Search"}
               {tab === "review" && "Review"}
               {tab === "tags" && "Tags"}
               {tab === "online" && "Online"}
@@ -404,6 +441,116 @@ export default function CardsPage() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Search tab - FTS5 global search */}
+        {activeTab === "search" && (
+          <div className="flex flex-col h-full">
+            {/* Search bar */}
+            <div className="px-6 py-3 flex items-center gap-2 border-b border-border-default">
+              <div className="relative flex-1 max-w-md">
+                <Search
+                  size={16}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary"
+                />
+                <input
+                  type="text"
+                  placeholder="Search across all datasets... (FTS5)"
+                  value={globalSearchQuery}
+                  onChange={(e) => setGlobalSearchQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleGlobalSearch();
+                  }}
+                  className="w-full pl-9 pr-3 py-2 rounded-lg border border-border-default bg-bg-card text-sm"
+                />
+              </div>
+              <button
+                onClick={handleGlobalSearch}
+                disabled={searching}
+                className="px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 disabled:opacity-50"
+              >
+                {searching ? "Searching..." : "Search"}
+              </button>
+              <button
+                onClick={handleRebuildIndex}
+                className="px-3 py-2 rounded-lg border border-border-default text-xs hover:bg-mid-gray/20"
+                title="Rebuild search index"
+              >
+                <RefreshCw size={14} />
+              </button>
+            </div>
+
+            {/* Search results */}
+            <div className="flex-1 overflow-y-auto px-6 py-3">
+              {globalSearchResults.length === 0 ? (
+                <div className="text-center py-12">
+                  <Search size={32} className="mx-auto text-text-tertiary mb-3" />
+                  <p className="text-text-secondary">
+                    {globalSearchQuery ? "No results found." : "Enter a search term to find cards across all datasets."}
+                  </p>
+                  <p className="text-xs text-text-tertiary mt-2">
+                    Supports FTS5 syntax: "word1 word2" (AND), "word1 OR word2" (OR)
+                  </p>
+                  <button
+                    onClick={handleRebuildIndex}
+                    className="mt-4 px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20"
+                  >
+                    Rebuild Search Index
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-xs text-text-tertiary mb-2">
+                    {globalSearchResults.length} result{globalSearchResults.length !== 1 ? "s" : ""}
+                  </p>
+                  {globalSearchResults.map((result) => (
+                    <div
+                      key={`${result.dataset_uuid}-${result.card_uuid}`}
+                      className="p-3 rounded-lg border border-border-default bg-bg-card hover:bg-mid-gray/10 cursor-pointer"
+                      onClick={() => {
+                        // Switch to the dataset and open the card editor
+                        setSelectedDatasetUuid(result.dataset_uuid);
+                        setActiveTab("cards");
+                        // Load the card and open editor
+                        invoke<Card>("card_get", {
+                          datasetUuid: result.dataset_uuid,
+                          cardUuid: result.card_uuid,
+                        })
+                          .then((card) => {
+                            openCardEditor(result.dataset_uuid, card, () => {
+                              // Refresh search after edit
+                              handleGlobalSearch();
+                            });
+                          })
+                          .catch((e) => setError(`Failed to load card: ${e}`));
+                      }}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-lg font-medium truncate">
+                            {result.question || "(empty question)"}
+                          </p>
+                          {result.answer && (
+                            <p className="text-sm text-text-secondary truncate mt-1">
+                              {result.answer}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3 mt-2 text-xs text-text-tertiary">
+                        <span className="font-medium text-text-secondary">
+                          {result.dataset_name}
+                        </span>
+                        <span className="font-mono text-[10px]">
+                          {result.card_uuid.slice(0, 8)}…
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 

@@ -526,6 +526,17 @@ struct CardSetTagsParam {
     tag_uuids: Vec<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct CardSearchParam {
+    query: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct CardFtsRebuildParam {
+    #[serde(default)]
+    location: String,
+}
+
 // ---------------------------------------------------------------------------
 // Tool definitions — #[tool_router(server_handler)] generates ServerHandler impl
 // ---------------------------------------------------------------------------
@@ -1718,6 +1729,38 @@ impl DatasetMcpServer {
             "source_card_uuid": result.source_card_uuid,
             "source_dataset_uuid": result.source_dataset_uuid,
         }}).to_string())
+    }
+
+    // -------------------------------------------------------------------------
+    // Card FTS search tools
+    // -------------------------------------------------------------------------
+
+    #[tool(name = "card_search", description = "Search cards across all datasets using FTS5 full-text search. Returns matching cards with dataset info. Supports FTS5 query syntax (e.g., 'word1 word2' for AND, 'word1 OR word2' for OR).")]
+    async fn card_search(&self, Parameters(param): Parameters<CardSearchParam>) -> Result<String, String> {
+        log::info!("[MCP] card_search: query='{}'", param.query);
+        let settings = self.app.state::<SettingsState>();
+        let results = cards::card_search(settings, param.query).await?;
+        let items: Vec<serde_json::Value> = results.iter().map(|r| {
+            serde_json::json!({
+                "dataset_uuid": r.dataset_uuid,
+                "dataset_name": r.dataset_name,
+                "card_uuid": r.card_uuid,
+                "question": r.question,
+                "answer": r.answer,
+                "note": r.note,
+                "location": r.location,
+            })
+        }).collect();
+        Ok(serde_json::json!({"results": items, "count": items.len()}).to_string())
+    }
+
+    #[tool(name = "card_fts_rebuild", description = "Rebuild the FTS5 full-text search index for card datasets. Optionally specify a location path to rebuild only that location's index. Returns the number of cards indexed.")]
+    async fn card_fts_rebuild(&self, Parameters(param): Parameters<CardFtsRebuildParam>) -> Result<String, String> {
+        log::info!("[MCP] card_fts_rebuild: location='{}'", param.location);
+        let settings = self.app.state::<SettingsState>();
+        let location = if param.location.is_empty() { None } else { Some(param.location) };
+        let count = cards::card_fts_rebuild(settings, location).await?;
+        Ok(serde_json::json!({"status": "ok", "cards_indexed": count}).to_string())
     }
 
     // -------------------------------------------------------------------------

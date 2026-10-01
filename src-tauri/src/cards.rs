@@ -164,12 +164,295 @@ pub(crate) fn find_card_dataset_dir(settings: &SettingsState, uuid: &str) -> Res
     Err(format!("Card dataset with UUID {} not found", uuid))
 }
 
+/// Read card dataset info from a dataset directory.
+fn read_card_dataset_info(dataset_dir: &Path) -> Result<CardDatasetInfo, String> {
+    let info_path = dataset_dir.join("info.json");
+    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&data).map_err(|e| e.to_string())
+}
+
 /// Open the card dataset SQLite database, ensuring the schema exists.
 pub(crate) fn open_card_db(dataset_dir: &Path) -> Result<Connection, String> {
     let db_path = dataset_dir.join("data.sqlite3");
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     create_card_schema(&conn)?;
     Ok(conn)
+}
+
+/// Open or create the FTS search database for a location.
+pub(crate) fn open_search_db(location: &Path) -> Result<Connection, String> {
+    let db_path = location.join("search.sqlite3");
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    create_fts_schema(&conn)?;
+    Ok(conn)
+}
+
+/// Create the FTS5 virtual table schema for card search.
+fn create_fts_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE VIRTUAL TABLE IF NOT EXISTS card_fts USING fts5(
+            dataset_uuid,
+            card_uuid,
+            dataset_name,
+            question,
+            answer,
+            note,
+            suggestion
+        );
+        ",
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Index a card in the FTS search database.
+fn index_card_in_fts(
+    conn: &Connection,
+    dataset_uuid: &str,
+    card_uuid: &str,
+    dataset_name: &str,
+    question: &str,
+    answer: &str,
+    note: &str,
+    suggestion: &str,
+) -> Result<(), String> {
+    // Delete existing entry first (if any)
+    conn.execute(
+        "DELETE FROM card_fts WHERE dataset_uuid = ?1 AND card_uuid = ?2",
+        rusqlite::params![dataset_uuid, card_uuid],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Insert new entry
+    conn.execute(
+        "INSERT INTO card_fts (dataset_uuid, card_uuid, dataset_name, question, answer, note, suggestion) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![dataset_uuid, card_uuid, dataset_name, question, answer, note, suggestion],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Remove a card from the FTS search database.
+fn remove_card_from_fts(conn: &Connection, dataset_uuid: &str, card_uuid: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM card_fts WHERE dataset_uuid = ?1 AND card_uuid = ?2",
+        rusqlite::params![dataset_uuid, card_uuid],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Remove all cards from a dataset in the FTS search database.
+fn remove_dataset_from_fts(conn: &Connection, dataset_uuid: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM card_fts WHERE dataset_uuid = ?1",
+        rusqlite::params![dataset_uuid],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Search cards using FTS5 across all locations.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CardSearchResult {
+    pub dataset_uuid: String,
+    pub dataset_name: String,
+    pub card_uuid: String,
+    pub question: String,
+    pub answer: String,
+    pub note: String,
+    pub suggestion: String,
+    pub location: String,
+}
+
+pub(crate) fn search_cards_fts(
+    settings: &SettingsState,
+    query: &str,
+) -> Result<Vec<CardSearchResult>, String> {
+    let mut results = Vec::new();
+
+    for root in dataset_roots(settings, crate::dataset::DatasetType::Card) {
+        let search_db_path = root.join("search.sqlite3");
+        if !search_db_path.exists() {
+            continue;
+        }
+
+        let conn = match open_search_db(&root) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("[Cards] Failed to open search DB at {:?}: {}", root, e);
+                continue;
+            }
+        };
+
+        // Use FTS5 match syntax
+        let fts_query = query.replace("'", "''"); // Escape single quotes
+        let sql = format!(
+            "SELECT dataset_uuid, card_uuid, dataset_name, question, answer, note, suggestion 
+             FROM card_fts 
+             WHERE card_fts MATCH '{}'
+             ORDER BY rank",
+            fts_query
+        );
+
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("[Cards] FTS query failed: {}", e);
+                continue;
+            }
+        };
+
+        let rows = match stmt.query_map([], |row| {
+            Ok(CardSearchResult {
+                dataset_uuid: row.get(0)?,
+                card_uuid: row.get(1)?,
+                dataset_name: row.get(2)?,
+                question: row.get(3)?,
+                answer: row.get(4)?,
+                note: row.get(5)?,
+                suggestion: row.get(6)?,
+                location: root.to_string_lossy().into_owned(),
+            })
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("[Cards] FTS query map failed: {}", e);
+                continue;
+            }
+        };
+
+        for row in rows {
+            match row {
+                Ok(result) => results.push(result),
+                Err(e) => log::warn!("[Cards] Failed to read FTS result: {}", e),
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Rebuild the FTS index for a specific location or all locations.
+pub(crate) fn rebuild_fts_index(
+    settings: &SettingsState,
+    location: Option<String>,
+) -> Result<usize, String> {
+    let mut total_indexed = 0;
+
+    let roots = if let Some(loc) = location {
+        vec![PathBuf::from(loc)]
+    } else {
+        dataset_roots(settings, crate::dataset::DatasetType::Card)
+    };
+
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+
+        // Open search DB (creates if needed)
+        let search_conn = open_search_db(&root)?;
+
+        // Clear existing index for this location
+        search_conn
+            .execute("DELETE FROM card_fts", [])
+            .map_err(|e| e.to_string())?;
+
+        // Iterate through all datasets in this location
+        let entries = match fs::read_dir(&root) {
+            Ok(e) => e,
+            Err(e) => {
+                log::warn!("[Cards] Failed to read directory {:?}: {}", root, e);
+                continue;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let info_path = path.join("info.json");
+            if !info_path.exists() {
+                continue;
+            }
+
+            // Read dataset info
+            let data = match fs::read_to_string(&info_path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            let info: CardDatasetInfo = match serde_json::from_str(&data) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+
+            // Open dataset DB
+            let card_conn = match open_card_db(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("[Cards] Failed to open card DB at {:?}: {}", path, e);
+                    continue;
+                }
+            };
+
+            // Index all cards in this dataset
+            let mut stmt = match card_conn.prepare(
+                "SELECT uuid, question, answer, note, suggestion FROM card WHERE deleted_at IS NULL",
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("[Cards] Failed to prepare card query: {}", e);
+                    continue;
+                }
+            };
+
+            let cards = match stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            }) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("[Cards] Failed to query cards: {}", e);
+                    continue;
+                }
+            };
+
+            for card in cards {
+                match card {
+                    Ok((uuid, question, answer, note, suggestion)) => {
+                        if let Err(e) = index_card_in_fts(
+                            &search_conn,
+                            &info.uuid,
+                            &uuid,
+                            &info.name,
+                            &question,
+                            &answer,
+                            &note,
+                            &suggestion,
+                        ) {
+                            log::warn!("[Cards] Failed to index card {}: {}", uuid, e);
+                        } else {
+                            total_indexed += 1;
+                        }
+                    }
+                    Err(e) => log::warn!("[Cards] Failed to read card: {}", e),
+                }
+            }
+        }
+    }
+
+    Ok(total_indexed)
 }
 
 /// Create the card dataset SQLite schema.
@@ -580,6 +863,17 @@ pub async fn card_dataset_delete(
 ) -> Result<(), String> {
     let path = find_card_dataset_dir(&settings, &uuid)?;
     log::info!("[Cards] Deleting dataset at '{}'", path.display());
+    
+    // Remove all cards in this dataset from the FTS index
+    for root in dataset_roots(&settings, crate::dataset::DatasetType::Card) {
+        if path.starts_with(&root) {
+            if let Ok(search_conn) = open_search_db(&root) {
+                let _ = remove_dataset_from_fts(&search_conn, &uuid);
+            }
+            break;
+        }
+    }
+    
     fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -825,6 +1119,28 @@ pub async fn card_save(
     // Update dataset timestamp
     update_dataset_timestamp(&path)?;
 
+    // Update FTS index
+    if let Ok(info) = read_card_dataset_info(&path) {
+        // Find the location (root) for this dataset
+        for root in dataset_roots(&settings, crate::dataset::DatasetType::Card) {
+            if path.starts_with(&root) {
+                if let Ok(search_conn) = open_search_db(&root) {
+                    let _ = index_card_in_fts(
+                        &search_conn,
+                        &dataset_uuid,
+                        &uuid,
+                        &info.name,
+                        &card.question,
+                        &card.answer,
+                        &card.note,
+                        &card.suggestion,
+                    );
+                }
+                break;
+            }
+        }
+    }
+
     log::info!("[Cards] Saved card '{}' in dataset '{}'", uuid, dataset_uuid);
     Ok(Card {
         uuid,
@@ -860,6 +1176,17 @@ pub async fn card_delete(
     .map_err(|e| e.to_string())?;
 
     update_dataset_timestamp(&path)?;
+
+    // Remove from FTS index
+    for root in dataset_roots(&settings, crate::dataset::DatasetType::Card) {
+        if path.starts_with(&root) {
+            if let Ok(search_conn) = open_search_db(&root) {
+                let _ = remove_card_from_fts(&search_conn, &dataset_uuid, &card_uuid);
+            }
+            break;
+        }
+    }
+
     log::info!("[Cards] Deleted card '{}' in dataset '{}'", card_uuid, dataset_uuid);
     Ok(())
 }
@@ -892,6 +1219,33 @@ pub async fn card_fork(
     };
 
     card_save(settings, target_dataset_uuid, new_card).await
+}
+
+// ---------------------------------------------------------------------------
+// Commands: FTS Search
+// ---------------------------------------------------------------------------
+
+/// Search cards across all datasets using FTS5 full-text search.
+#[tauri::command]
+pub async fn card_search(
+    settings: State<'_, SettingsState>,
+    query: String,
+) -> Result<Vec<CardSearchResult>, String> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    log::info!("[Cards] Searching for: '{}'", query);
+    search_cards_fts(&settings, &query)
+}
+
+/// Rebuild the FTS search index for one or all locations.
+#[tauri::command]
+pub async fn card_fts_rebuild(
+    settings: State<'_, SettingsState>,
+    location: Option<String>,
+) -> Result<usize, String> {
+    log::info!("[Cards] Rebuilding FTS index (location: {:?})", location);
+    rebuild_fts_index(&settings, location)
 }
 
 // ---------------------------------------------------------------------------
