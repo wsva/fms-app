@@ -57,11 +57,16 @@ type TipToggleProps = {
 
 function TipToggle({ tip, content, showContent, onToggle, size = "small", className = "" }: TipToggleProps) {
   const sizeClasses = size === "large" ? "text-2xl" : "font-normal";
-  
+
   return (
-    <div 
-      className={`bg-bg-muted rounded-sm px-1 text-text-tertiary ${sizeClasses} w-full cursor-pointer select-none ${className}`}
-      onDoubleClick={onToggle}
+    <div
+      className={`bg-bg-muted rounded-sm px-1 text-text-tertiary ${sizeClasses} w-full cursor-pointer select-text ${className}`}
+      onDoubleClick={(e) => {
+        // Suppress the default double-click word-selection so it doesn't fight
+        // with the toggle; users can still click-drag to select the text.
+        e.preventDefault();
+        onToggle();
+      }}
       title="Double-click to toggle content/tip"
     >
       {showContent ? content : tip}
@@ -159,6 +164,13 @@ function Dictation({
                 }
               }}
               onKeyDown={(e) => {
+                // Ctrl+←/→ toggles the content/reference tips of this focused cue.
+                if (e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+                  setStateShowContent((v) => !v);
+                  setStateShowReference((v) => !v);
+                  e.preventDefault();
+                  return;
+                }
                 if (!media) return;
                 if (e.ctrlKey && "sS".includes(e.key)) {
                   if (media.paused) playMediaPart(cue, media, false);
@@ -173,7 +185,7 @@ function Dictation({
               }}
             />
           </div>
-          <TipToggle 
+          <TipToggle
             tip={getTip(stateInput, cue.content)}
             content={cue.content}
             showContent={stateShowContent}
@@ -181,7 +193,7 @@ function Dictation({
             size="small"
           />
           {!!cue.reference && cue.reference !== cue.content && (
-            <TipToggle 
+            <TipToggle
               tip={getTip(stateInput, cue.reference)}
               content={cue.reference}
               showContent={stateShowReference}
@@ -218,6 +230,13 @@ function Dictation({
                 }
               }}
               onKeyDown={(e) => {
+                // Ctrl+←/→ toggles the content/reference tips of this focused cue.
+                if (e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+                  setStateShowContent((v) => !v);
+                  setStateShowReference((v) => !v);
+                  e.preventDefault();
+                  return;
+                }
                 if (!media) return;
                 if (e.ctrlKey && "sS".includes(e.key)) {
                   if (media.paused) playMediaPart(cue, media, false);
@@ -232,7 +251,7 @@ function Dictation({
               }}
             />
           </div>
-          <TipToggle 
+          <TipToggle
             tip={getTip(stateInput, cue.content)}
             content={cue.content}
             showContent={stateShowContent}
@@ -240,7 +259,7 @@ function Dictation({
             size="large"
           />
           {!!cue.reference && cue.reference !== cue.content && (
-            <TipToggle 
+            <TipToggle
               tip={getTip(stateInput, cue.reference)}
               content={cue.reference}
               showContent={stateShowReference}
@@ -345,13 +364,12 @@ export default function CueEditor({
         <InputGroup.Input
           aria-label="start time"
           autoComplete="one-time-code"
-          className={`text-center font-normal bg-bg-muted w-min ${
-            !(!!(validateVttTime(stateStart) && !!validateVttTime(stateEnd))
+          className={`text-center font-normal bg-bg-muted w-min ${!(!!(validateVttTime(stateStart) && !!validateVttTime(stateEnd))
               ? true
               : false)
               ? "text-error-text"
               : ""
-          }`}
+            }`}
           value={`${stateStart} ➔ ${stateEnd}`}
           disabled={isDisabled}
           onChange={(e) => {
@@ -484,7 +502,7 @@ export default function CueEditor({
           className={`flex flex-col items-center gap-1 py-1 overflow-y-auto shrink-0 no-scrollbar transition-colors rounded-lg ${stateSuccess && isDictationMode ? "bg-success-bg" : "bg-transparent"}`}
           style={{ width: 36 }}
         >
-          {adminMode && mode === "dictation" && allowEdit && (
+          {adminMode && isDictationMode && allowEdit && (
             <Tooltip>
               <Tooltip.Trigger>
                 <Button isIconOnly variant="ghost" size="sm" onPress={onEdit}>

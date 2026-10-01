@@ -44,8 +44,13 @@ pub struct ListenCue {
     pub end_ms: i64,
     pub content: String,
     pub reference: Option<String>,
+    // The frontend `Cue` type omits these; they round-trip for existing cues but
+    // are absent for newly inserted ones, so default them during deserialization.
+    #[serde(default)]
     pub confidence: Option<f64>,
+    #[serde(default)]
     pub version_created: i64,
+    #[serde(default)]
     pub version_superseded: Option<i64>,
 }
 
@@ -380,6 +385,11 @@ pub async fn listen_rename_media(
 }
 
 /// Save/update a subtitle cue.
+///
+/// Uses an UPSERT so that editing an existing cue preserves its version
+/// metadata (`version_created`, `confidence`, `version_superseded`, `created_at`),
+/// while a brand-new cue is inserted at version 1. A plain `INSERT OR REPLACE`
+/// would drop `version_created` (NOT NULL, no default) and fail the constraint.
 #[tauri::command]
 pub async fn listen_save_cue(
     settings: State<'_, SettingsState>,
@@ -389,12 +399,19 @@ pub async fn listen_save_cue(
     log::debug!("listen_save_cue: dataset={}, cue={}, order={}", dataset_uuid, cue.uuid, cue.order_num);
     let conn = open_db(&settings, &dataset_uuid)?;
     conn.execute(
-        "INSERT OR REPLACE INTO listen_subtitle_cue \
-         (uuid, subtitle_uuid, order_num, start_ms, end_ms, content, reference) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO listen_subtitle_cue \
+         (uuid, subtitle_uuid, order_num, start_ms, end_ms, content, reference, confidence, version_created, version_superseded) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, NULL) \
+         ON CONFLICT(uuid) DO UPDATE SET \
+         subtitle_uuid = excluded.subtitle_uuid, \
+         order_num = excluded.order_num, \
+         start_ms = excluded.start_ms, \
+         end_ms = excluded.end_ms, \
+         content = excluded.content, \
+         reference = excluded.reference",
         rusqlite::params![
             cue.uuid, cue.subtitle_uuid, cue.order_num, cue.start_ms, cue.end_ms,
-            cue.content, cue.reference
+            cue.content, cue.reference, cue.confidence
         ],
     )
     .map_err(|e| e.to_string())?;

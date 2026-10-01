@@ -8,7 +8,7 @@
 import { useState, useEffect, useMemo, useSyncExternalStore } from "react";
 
 import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui/react";
-import { RefreshCw, Trash2, Database, Shield, Target, CheckCircle, FolderPlus, Folder, Link2, X, Pencil, Save, HelpCircle } from "lucide-react";
+import { RefreshCw, Trash2, Database, SquarePen, Target, CheckCircle, FolderPlus, Folder, Link2, X, Pencil, Save, HelpCircle } from "lucide-react";
 import CueEditor from "./components/CueEditor";
 import WaveformCanvas from "./components/WaveformCanvas";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
@@ -260,7 +260,7 @@ export default function DictationPage() {
                     <Tooltip>
                         <Tooltip.Trigger>
                             <Button isIconOnly size="sm" variant={adminMode ? "primary" : "ghost"} aria-label="Toggle admin mode" isDisabled={d.stateCues.length === 0} onPress={() => setAdminMode(!adminMode)}>
-                                <Shield size={16} />
+                                <SquarePen size={16} />
                             </Button>
                         </Tooltip.Trigger>
                         <Tooltip.Content>{adminMode ? "Normal mode" : "Admin mode"}</Tooltip.Content>
@@ -298,8 +298,8 @@ export default function DictationPage() {
                             <div className="flex flex-col gap-0.5">
                                 <span>Play Audio: Ctrl+s, Ctrl+d or double space at the end</span>
                                 <span>Voice Input: Ctrl+c</span>
-                                <span>Previous: Ctrl+⬆</span>
-                                <span>Next: Ctrl+⬇</span>
+                                <span>Go to Previous/Next: Ctrl+⬆/⬇</span>
+                                <span>Show Content/Reference: Ctrl+⬅/➡</span>
                             </div>
                         </Tooltip.Content>
                     </Tooltip>
@@ -633,7 +633,7 @@ export default function DictationPage() {
                                                 cue={d.stateDictCue}
                                                 media={d.videoRef.current}
                                                 allowEdit={true}
-                                                mode="dictation_focus"
+                                                mode={d.stateEditingCue === d.stateDictCue.uuid ? "dictation_edit" : "dictation_focus"}
                                                 isDisabled={d.stateSaving}
                                                 adminMode={adminMode}
                                                 onUpdate={(updated) => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === updated.uuid); if (idx !== -1) draft[idx] = updated; })}
