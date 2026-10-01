@@ -16,16 +16,21 @@ import {
   Settings2,
 } from "lucide-react";
 import type { DrawerState, BookSentenceWord } from "@/lib/read/types";
-import type { LlmChatResponse, OllamaModelInfo } from "@/lib/llm/types";
+import type { LlmChatResponse } from "@/lib/llm/types";
 import { isTauri } from "@/lib/tauri";
 import { BG_COLORS } from "./utils";
 import { getUUID } from "./utils";
 import { highlightDifferences } from "./diff";
+import WordGenSettings from "./WordGenSettings";
+import {
+  DEFAULT_WORD_GEN_PROMPT,
+  parseWordGenResponse,
+  loadWordGenSettings,
+  saveWordGenSetting,
+} from "./wordGen";
+import type { WordGenSettings as WordGenSettingsType } from "./wordGen";
 
 const LS_KEY = "read_auto_replace_rules";
-const LS_WORD_GEN_MODEL = "read_word_gen_model";
-const LS_WORD_GEN_PROMPT = "read_word_gen_prompt";
-const LS_WORD_GEN_TEMP = "read_word_gen_temp";
 const LS_DRAWER_FONT_SCALE = "read_drawer_font_scale";
 
 const DRAWER_FONT_SCALES = [
@@ -35,18 +40,6 @@ const DRAWER_FONT_SCALES = [
   { label: "Large x2", size: "1.5rem", weight: "bold" },
   { label: "Large x3", size: "1.875rem", weight: "bold" },
 ];
-
-const DEFAULT_WORD_GEN_PROMPT = `You are a German language NLP assistant. Analyze the given German sentence and extract all meaningful words. For each word provide: the lemma (base/dictionary form), the part of speech, and whether it carries useful semantic meaning.
-Rules:
-- Restore separable verb parts to their base infinitive (e.g. 'steht auf' → 'aufstehen').
-- Restore perfect/pluperfect forms to the base infinitive (e.g. 'ist gegangen' → 'gehen').
-- Restore adjective declensions to the masculine nominative base form (e.g. 'guten' → 'gut').
-- For nouns (Nomen), always include the definite article (der/die/das) in the lemma, e.g. 'Hunde' → 'der Hund', 'Katze' → 'die Katze', 'Haus' → 'das Haus'.
-- Set keep=true for nouns, verbs, adjectives, adverbs with real meaning.
-- Set keep=false for articles, prepositions, conjunctions, pronouns, auxiliary verbs, and other function words.
-- Set keep=false for proper names of people (especially historical figures), places, and organizations — these are not vocabulary words to learn.
-Respond ONLY with a JSON array, no other text. Each element: {"surface":"...","lemma":"...","pos":"...","keep":true/false}`;
-const DEFAULT_WORD_GEN_MODEL = "gemma4:e4b";
 
 const WORD_TYPE_OPTIONS = [
   "Noun", "Verb", "Adjective", "Adverb", "Other",
@@ -157,31 +150,18 @@ export default function SentenceDrawer({
   const [newWordType, setNewWordType] = useState("");
   const [generatingWords, setGeneratingWords] = useState(false);
   const [wordGenError, setWordGenError] = useState("");
-  const [wordGenModel, setWordGenModel] = useState(DEFAULT_WORD_GEN_MODEL);
-  const [wordGenPrompt, setWordGenPrompt] = useState(DEFAULT_WORD_GEN_PROMPT);
-  const [wordGenTemp, setWordGenTemp] = useState(0);
-  const [showWordGenSettings, setShowWordGenSettings] = useState(false);
+  const [wordGenSettings, setWordGenSettings] = useState<WordGenSettingsType>(loadWordGenSettings());
   const [wordGenResponse, setWordGenResponse] = useState("");
   const [drawerFontScale, setDrawerFontScale] = useState(1);
-  const [availableModels, setAvailableModels] = useState<OllamaModelInfo[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const editUUID = drawer?.mode === "edit" ? drawer.sentence.uuid : null;
 
   useEffect(() => {
     setRulesText(loadRulesText());
-    const m = localStorage.getItem(LS_WORD_GEN_MODEL);
-    if (m) setWordGenModel(m);
-    const p = localStorage.getItem(LS_WORD_GEN_PROMPT);
-    if (p) setWordGenPrompt(p);
-    const t = localStorage.getItem(LS_WORD_GEN_TEMP);
-    if (t !== null) setWordGenTemp(parseFloat(t) || 0);
+    setWordGenSettings(loadWordGenSettings());
     const fs = localStorage.getItem(LS_DRAWER_FONT_SCALE);
     if (fs !== null) setDrawerFontScale(parseInt(fs) || 1);
-    // Fetch installed Ollama models
-    invoke<{ installed: OllamaModelInfo[] }>("llm_list_models")
-      .then((res) => setAvailableModels(res.installed))
-      .catch(() => {/* Ollama not running */ });
   }, []);
 
   // Load vocabulary words when editing a sentence.
@@ -285,31 +265,28 @@ export default function SentenceDrawer({
     setWordGenResponse("");
     try {
       const res = await invoke<LlmChatResponse>("llm_chat", {
-        model: wordGenModel,
+        model: wordGenSettings.model,
         messages: [
           {
             role: "system",
-            content: wordGenPrompt,
+            content: wordGenSettings.prompt,
           },
           {
             role: "user",
             content: content.trim(),
           },
         ],
-        temperature: wordGenTemp,
+        temperature: wordGenSettings.temperature,
       });
 
       // Extract JSON array from the response (LLM may wrap it in markdown code blocks)
       const raw = res.content;
       setWordGenResponse(raw);
-      const jsonMatch = raw.match(/\[[\s\S]*\]/);
-      if (!jsonMatch) {
+      const parsed = parseWordGenResponse(raw);
+      if (!parsed) {
         setWordGenError("Could not parse LLM response");
         return;
       }
-
-      const parsed: { surface: string; lemma: string; pos: string; keep: boolean }[] =
-        JSON.parse(jsonMatch[0]);
 
       // Get existing word lemmas to avoid duplicates
       const existingLemmas = new Set(words.map((w) => w.word.toLowerCase()));
@@ -618,107 +595,54 @@ export default function SentenceDrawer({
           </div>
 
           {/* AI Generate Words - always visible */}
-          <div className="flex flex-row items-center justify-end gap-2">
-            <button
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-text-tertiary hover:bg-bg-hover cursor-pointer transition-colors"
-              onClick={() => setShowWordGenSettings((v) => !v)}
-            >
-              <Settings2 size={14} /> Settings
-            </button>
-            <button
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-accent-bg/15 text-accent hover:bg-accent-bg/25 disabled:opacity-50 cursor-pointer transition-colors"
-              disabled={generatingWords || !content.trim() || drawer.mode !== "edit"}
-              onClick={generateWords}
-              title={drawer.mode !== "edit" ? "Save the sentence first" : undefined}
-            >
-              {generatingWords ? (
-                <Loader2 size={14} className="animate-spin" />
-              ) : (
-                <Sparkles size={14} />
-              )}
-              {generatingWords ? "Generating\u2026" : "Generate Words"}
-            </button>
-            {wordGenError && (
-              <span className="text-xs text-red-500 flex items-center gap-1">
-                {wordGenError}
-                <button className="hover:text-red-400 cursor-pointer" onClick={() => setWordGenError("")}>
-                  <X size={12} />
-                </button>
-              </span>
-            )}
-          </div>
-
-          {/* Collapsible settings */}
-          {showWordGenSettings && (
-            <div className="flex flex-col gap-2 p-2 rounded-lg bg-bg-muted border border-border-default text-xs">
-              <div className="flex flex-row gap-2">
-                <div className="flex flex-col gap-1 max-w-48">
-                  <label className="text-text-secondary font-medium">Model</label>
-                  <select
-                    className="px-2 py-1 rounded bg-bg-input border border-border-default text-xs text-text-primary focus:outline-none focus:border-accent cursor-pointer"
-                    value={wordGenModel}
-                    onChange={(e) => {
-                      setWordGenModel(e.target.value);
-                      localStorage.setItem(LS_WORD_GEN_MODEL, e.target.value);
-                    }}
-                  >
-                    {availableModels.length === 0 && (
-                      <option value="">No models found</option>
-                    )}
-                    {availableModels.map((m) => (
-                      <option key={m.name} value={m.name}>{m.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="flex flex-col gap-1 w-20">
-                  <label className="text-text-secondary font-medium">Temp</label>
-                  <select
-                    value={wordGenTemp}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      setWordGenTemp(v);
-                      localStorage.setItem(LS_WORD_GEN_TEMP, String(v));
-                    }}
-                    className="px-2 py-1 rounded-md bg-bg-muted border border-border-default text-text-primary text-xs cursor-pointer"
-                  >
-                    {[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0].map((v) => (
-                      <option key={v} value={v}>{v.toFixed(1)}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div className="flex flex-col gap-1">
-                <div className="flex items-center justify-between">
-                  <label className="text-text-secondary font-medium">System Prompt</label>
+          <WordGenSettings disabled={generatingWords}>
+            {({ settings, showSettings, setShowSettings }) => (
+              <>
+                <div className="flex flex-row items-center justify-end gap-2">
                   <button
-                    className="text-text-tertiary hover:text-accent cursor-pointer"
-                    onClick={() => {
-                      setWordGenPrompt(DEFAULT_WORD_GEN_PROMPT);
-                      localStorage.setItem(LS_WORD_GEN_PROMPT, DEFAULT_WORD_GEN_PROMPT);
-                    }}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-text-tertiary hover:bg-bg-hover cursor-pointer transition-colors"
+                    onClick={() => setShowSettings(!showSettings)}
                   >
-                    Reset
+                    <Settings2 size={14} /> Settings
                   </button>
+                  <button
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-accent-bg/15 text-accent hover:bg-accent-bg/25 disabled:opacity-50 cursor-pointer transition-colors"
+                    disabled={generatingWords || !content.trim() || drawer.mode !== "edit"}
+                    onClick={() => {
+                      setWordGenSettings(settings);
+                      generateWords();
+                    }}
+                    title={drawer.mode !== "edit" ? "Save the sentence first" : undefined}
+                  >
+                    {generatingWords ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Sparkles size={14} />
+                    )}
+                    {generatingWords ? "Generating\u2026" : "Generate Words"}
+                  </button>
+                  {wordGenError && (
+                    <span className="text-xs text-red-500 flex items-center gap-1">
+                      {wordGenError}
+                      <button className="hover:text-red-400 cursor-pointer" onClick={() => setWordGenError("")}>
+                        <X size={12} />
+                      </button>
+                    </span>
+                  )}
                 </div>
-                <textarea
-                  className="w-full h-32 px-2 py-1 rounded bg-bg-input border border-border-default text-2xl font-bold text-text-primary resize-y focus:outline-none focus:border-accent"
-                  value={wordGenPrompt}
-                  onChange={(e) => {
-                    setWordGenPrompt(e.target.value);
-                    localStorage.setItem(LS_WORD_GEN_PROMPT, e.target.value);
-                  }}
-                />
-              </div>
-              {wordGenResponse && (
-                <div className="flex flex-col gap-1">
-                  <label className="text-text-secondary font-medium">Response</label>
-                  <pre className="w-full max-h-48 overflow-auto px-2 py-1 rounded bg-bg-input border border-border-default text-2xl font-bold text-text-primary whitespace-pre-wrap break-all">
-                    {wordGenResponse}
-                  </pre>
-                </div>
-              )}
-            </div>
-          )}
+
+                {/* Response preview (inside settings) */}
+                {showSettings && wordGenResponse && (
+                  <div className="flex flex-col gap-1 p-3 rounded-lg bg-bg-muted border border-border-default text-xs">
+                    <label className="text-text-secondary font-medium">Response</label>
+                    <pre className="w-full max-h-48 overflow-auto px-2 py-1 rounded bg-bg-input border border-border-default text-2xl font-bold text-text-primary whitespace-pre-wrap break-all">
+                      {wordGenResponse}
+                    </pre>
+                  </div>
+                )}
+              </>
+            )}
+          </WordGenSettings>
 
           {/* Words - edit mode only */}
           {drawer.mode === "edit" && (

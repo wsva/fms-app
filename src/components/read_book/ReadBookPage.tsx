@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { BookOpen, Library, Settings2 } from "lucide-react";
+import { BookOpen, Library, Settings2, Zap } from "lucide-react";
 import type { BookMeta } from "@/lib/read/types";
 import { isTauri } from "@/lib/tauri";
 import ReadingView from "./ReadingView";
 import BookManager from "./BookManager";
+import BookAdvanced from "./BookAdvanced";
 
-type View = "read" | "manage";
+type View = "read" | "manage" | "advanced";
 
 export default function ReadBookPage() {
   const [books, setBooks] = useState<BookMeta[]>([]);
@@ -49,6 +50,9 @@ export default function ReadBookPage() {
           <button className={tabClass(view === "manage")} onClick={() => setView("manage")}>
             <Settings2 size={16} /> Manage
           </button>
+          <button className={tabClass(view === "advanced")} onClick={() => setView("advanced")}>
+            <Zap size={16} /> Advanced
+          </button>
         </div>
       </div>
 
@@ -59,6 +63,9 @@ export default function ReadBookPage() {
         </div>
         <div style={{ display: view === "manage" ? "block" : "none" }} className="flex-1 min-h-0 overflow-y-auto p-4">
           <BookManager books={books} onBooksChanged={loadBooks} />
+        </div>
+        <div style={{ display: view === "advanced" ? "flex" : "none" }} className="flex-1 min-h-0 overflow-y-auto p-4">
+          <BookAdvanced books={books} />
         </div>
       </div>
     </main>
