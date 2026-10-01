@@ -193,6 +193,23 @@ export default function ReadingView({ books }: Props) {
     setDrawerAudio(null);
   };
 
+  const discardDrawer = async () => {
+    if (drawer?.mode === "edit") {
+      // Revert to original sentence values
+      const s = drawer.sentence;
+      setDrawerContent(s.content ?? "");
+      setDrawerRecognized(s.recognized ?? "");
+      setDrawerBgColor(s.bg_color ?? null);
+      setDrawerAudio(
+        s.audio_path && s.audio_url
+          ? { rel: s.audio_path, url: s.audio_url }
+          : null
+      );
+    } else if (drawer?.mode === "add") {
+      await clearDrawer();
+    }
+  };
+
   const playDrawerAudio = () => {
     if (drawerAudio?.url) new Audio(convertFileSrc(drawerAudio.url)).play();
   };
@@ -736,6 +753,7 @@ export default function ReadingView({ books }: Props) {
         processing={recorder.processing}
         onClose={closeDrawer}
         onClear={clearDrawer}
+        onDiscard={discardDrawer}
         onPlay={playDrawerAudio}
         onToggleRecording={recorder.toggle}
         onSaveAdd={handleSaveAdd}

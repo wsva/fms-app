@@ -19,12 +19,12 @@ export function nowIso(): string {
 }
 
 /** Highlight background colors for sentences. */
-export const BG_COLORS: { key: string; label: string; swatch: string; bg: string }[] = [
-  { key: "yellow", label: "Yellow", swatch: "bg-yellow-300", bg: "bg-yellow-200/70" },
-  { key: "green", label: "Green", swatch: "bg-green-300", bg: "bg-green-200/70" },
-  { key: "blue", label: "Blue", swatch: "bg-blue-300", bg: "bg-blue-200/70" },
-  { key: "pink", label: "Pink", swatch: "bg-pink-300", bg: "bg-pink-200/70" },
-  { key: "orange", label: "Orange", swatch: "bg-orange-300", bg: "bg-orange-200/70" },
+export const BG_COLORS: { key: string; label: string; description: string; swatch: string; bg: string }[] = [
+  { key: "yellow", label: "Yellow", description: "New vocabulary", swatch: "bg-yellow-300", bg: "bg-yellow-200/70" },
+  { key: "green", label: "Green", description: "Mastered", swatch: "bg-green-300", bg: "bg-green-200/70" },
+  { key: "blue", label: "Blue", description: "Grammar note", swatch: "bg-blue-300", bg: "bg-blue-200/70" },
+  { key: "pink", label: "Pink", description: "Key expression", swatch: "bg-pink-300", bg: "bg-pink-200/70" },
+  { key: "orange", label: "Orange", description: "Needs review", swatch: "bg-orange-300", bg: "bg-orange-200/70" },
 ];
 
 /** Map a stored bg_color key to a Tailwind background class. */
