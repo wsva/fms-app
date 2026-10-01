@@ -109,8 +109,8 @@ fn ensure_locations_table(conn: &rusqlite::Connection) -> Result<(), String> {
 }
 
 /// Load all stored dataset location paths, ordered by insertion.
-fn load_locations() -> Vec<String> {
-    let Ok(conn) = open_app_db() else { return Vec::new(); };
+fn load_locations(settings: &SettingsState) -> Vec<String> {
+    let Ok(conn) = open_app_db(settings) else { return Vec::new(); };
     if ensure_locations_table(&conn).is_err() {
         return Vec::new();
     }
@@ -126,8 +126,8 @@ fn load_locations() -> Vec<String> {
 }
 
 /// Persist a new dataset location path (ignores duplicates).
-fn insert_location(path: &str) -> Result<(), String> {
-    let conn = open_app_db().map_err(|e| e.to_string())?;
+fn insert_location(settings: &SettingsState, path: &str) -> Result<(), String> {
+    let conn = open_app_db(settings).map_err(|e| e.to_string())?;
     ensure_locations_table(&conn)?;
     conn.execute(
         "INSERT OR IGNORE INTO dataset_locations (path) VALUES (?1)",
@@ -138,8 +138,8 @@ fn insert_location(path: &str) -> Result<(), String> {
 }
 
 /// Remove a stored dataset location path.
-fn delete_location(path: &str) -> Result<(), String> {
-    let conn = open_app_db().map_err(|e| e.to_string())?;
+fn delete_location(settings: &SettingsState, path: &str) -> Result<(), String> {
+    let conn = open_app_db(settings).map_err(|e| e.to_string())?;
     ensure_locations_table(&conn)?;
     conn.execute(
         "DELETE FROM dataset_locations WHERE path = ?1",
@@ -163,7 +163,7 @@ fn locations_table_exists(conn: &rusqlite::Connection) -> bool {
 /// configured default `datasets_dir` is seeded so existing setups keep working.
 /// Afterwards the stored list is authoritative, even when empty.
 fn dataset_roots(settings: &SettingsState) -> Vec<PathBuf> {
-    if let Ok(conn) = open_app_db() {
+    if let Ok(conn) = open_app_db(settings) {
         if !locations_table_exists(&conn) && ensure_locations_table(&conn).is_ok() {
             let default_dir = datasets_dir(settings).to_string_lossy().into_owned();
             let _ = conn.execute(
@@ -172,7 +172,7 @@ fn dataset_roots(settings: &SettingsState) -> Vec<PathBuf> {
             );
         }
     }
-    load_locations().into_iter().map(PathBuf::from).collect()
+    load_locations(settings).into_iter().map(PathBuf::from).collect()
 }
 
 fn list_media_files(media_dir: &PathBuf) -> Vec<MediaFile> {
@@ -382,7 +382,7 @@ pub async fn dataset_add_location(
     if !p.exists() || !p.is_dir() {
         return Err("Selected path is not a valid directory".into());
     }
-    insert_location(&path)?;
+    insert_location(&settings, &path)?;
     log::info!("Added dataset location: {}", path);
     dataset_list_locations(settings).await
 }
@@ -393,7 +393,7 @@ pub async fn dataset_remove_location(
     settings: State<'_, SettingsState>,
     path: String,
 ) -> Result<Vec<String>, String> {
-    delete_location(&path)?;
+    delete_location(&settings, &path)?;
     log::info!("Removed dataset location: {}", path);
     dataset_list_locations(settings).await
 }

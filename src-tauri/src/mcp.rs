@@ -953,7 +953,8 @@ impl DatasetMcpServer {
         let state = self.app.state::<SettingsState>();
         let new_settings: crate::settings::AppSettings = serde_json::from_value(param.settings.into())
             .map_err(|e| format!("Invalid settings JSON: {}", e))?;
-        crate::settings::SettingsState::save(&new_settings)?;
+        let ws_dir = state.workspace_dir.lock().unwrap().clone();
+        crate::settings::SettingsState::save(&new_settings, ws_dir.as_ref())?;
         {
             let mut s = state.settings.lock().unwrap();
             *s = new_settings;

@@ -75,33 +75,58 @@ impl Default for AppSettings {
 
 pub struct SettingsState {
     pub settings: Mutex<AppSettings>,
+    /// Current workspace directory. When set, settings are loaded/saved here.
+    /// When None, falls back to the global app data directory.
+    pub workspace_dir: Mutex<Option<PathBuf>>,
 }
 
 impl SettingsState {
     pub fn new() -> Self {
-        let settings = Self::load().unwrap_or_default();
+        let settings = Self::load(None).unwrap_or_default();
         Self {
             settings: Mutex::new(settings),
+            workspace_dir: Mutex::new(None),
         }
     }
 
-    fn config_path() -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("fms-app")
-            .join("settings.json")
+    /// Set the workspace directory for settings storage.
+    /// Reloads settings from the new workspace directory.
+    pub fn set_workspace_dir(&self, dir: Option<PathBuf>) {
+        log::info!("[Settings] Setting workspace dir: {:?}", dir);
+        {
+            let mut ws_dir = self.workspace_dir.lock().unwrap();
+            *ws_dir = dir.clone();
+        }
+        // Reload settings from the new location
+        if let Some(settings) = Self::load(dir.as_ref()) {
+            let mut s = self.settings.lock().unwrap();
+            *s = settings;
+            log::info!("[Settings] Reloaded settings from workspace directory");
+        } else {
+            log::info!("[Settings] No settings found in workspace directory, using current settings");
+        }
     }
 
-    fn load() -> Option<AppSettings> {
-        let path = Self::config_path();
-        log::debug!("Loading settings from: {}", path.display());
+    fn config_path(workspace_dir: Option<&PathBuf>) -> PathBuf {
+        match workspace_dir {
+            Some(dir) => dir.join("settings.json"),
+            None => dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("fms-app")
+                .join("settings.json"),
+        }
+    }
+
+    fn load(workspace_dir: Option<&PathBuf>) -> Option<AppSettings> {
+        let path = Self::config_path(workspace_dir);
+        log::debug!("[Settings] Loading settings from: {}", path.display());
         let data = fs::read_to_string(path).ok()?;
         serde_json::from_str(&data).ok()
     }
 
-    pub fn save(settings: &AppSettings) -> Result<(), String> {
-        let path = Self::config_path();
-        log::debug!("Saving settings to: {}", path.display());
+    pub fn save(settings: &AppSettings, workspace_dir: Option<&PathBuf>) -> Result<(), String> {
+        let path = Self::config_path(workspace_dir);
+        log::debug!("[Settings] Saving settings to: {}", path.display());
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -128,8 +153,9 @@ pub async fn settings_set(
     state: State<'_, SettingsState>,
     settings: AppSettings,
 ) -> Result<(), String> {
-    SettingsState::save(&settings)?;
-    log::info!("Settings updated");
+    let ws_dir = state.workspace_dir.lock().unwrap().clone();
+    SettingsState::save(&settings, ws_dir.as_ref())?;
+    log::info!("[Settings] Settings updated");
     {
         let mut s = state.settings.lock().unwrap();
         *s = settings;

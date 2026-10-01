@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 use crate::settings::SettingsState;
+use crate::workspace::WorkspaceState;
 
 const BASE_URL: &str = "https://lusworkshop.site";
 
@@ -106,7 +107,7 @@ pub async fn auth_process_token(
     let tokens = AuthTokens {
         access_token,
         refresh_token,
-        user_id,
+        user_id: user_id.clone(),
         username,
         email: String::new(),
     };
@@ -125,6 +126,50 @@ pub async fn auth_process_token(
         email: user.email.clone(),
     };
     let _ = write_tokens(&tokens);
+
+    // Try to claim the current workspace with the user's email.
+    let ws_state = app.state::<WorkspaceState>();
+    let ws_current = ws_state.current.lock().unwrap().clone();
+    if let Some(ws) = ws_current {
+        if ws.user_id.is_empty() || ws.user_id == "local" {
+            let email_to_claim = if !user.email.is_empty() {
+                user.email.clone()
+            } else {
+                user_id.clone()
+            };
+            log::info!("[Auth] Claiming workspace '{}' for user '{}'", ws.uuid, email_to_claim);
+            
+            // Update registry
+            {
+                let mut registry = ws_state.registry.lock().unwrap();
+                if let Some(ws_mut) = registry.workspaces.iter_mut().find(|w| w.uuid == ws.uuid) {
+                    ws_mut.user_id = email_to_claim.clone();
+                }
+                let _ = crate::workspace::WorkspaceState::save_registry(&registry);
+            }
+            
+            // Update workspace.json
+            {
+                let registry = ws_state.registry.lock().unwrap();
+                if let Some(ws_to_save) = registry.workspaces.iter().find(|w| w.uuid == ws.uuid) {
+                    let _ = crate::workspace::save_workspace_json(ws_to_save);
+                }
+            }
+            
+            // Update current workspace state
+            {
+                let mut current = ws_state.current.lock().unwrap();
+                if let Some(ref mut ws) = *current {
+                    ws.user_id = email_to_claim;
+                }
+            }
+        } else if ws.user_id != user.email && ws.user_id != user_id {
+            log::warn!(
+                "[Auth] Workspace '{}' belongs to '{}', but user '{}' logged in",
+                ws.uuid, ws.user_id, user.email
+            );
+        }
+    }
 
     // Notify frontend that login succeeded.
     let _ = app.emit("auth-login-success", &user);

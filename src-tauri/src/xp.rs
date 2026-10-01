@@ -3,7 +3,7 @@
 //! XP is earned through learning activities (dictation, reading) and is
 //! non-spendable, non-transferable, and permanent.
 //!
-//! Tables stored in the app-level SQLite (`dirs::data_dir()/fms-app/app.sqlite3`).
+//! Tables stored in the app-level SQLite (`{workspace_dir}/app.sqlite3`).
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -53,12 +53,17 @@ pub struct XpAwardResult {
 // ============================================================
 
 /// Open the app-level SQLite and ensure XP tables exist.
-fn open_app_db() -> Result<Connection, String> {
-    let db_dir = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("fms-app");
+/// Uses the current workspace directory if set, otherwise falls back to global app data dir.
+fn open_app_db(settings: &SettingsState) -> Result<Connection, String> {
+    let db_dir = match settings.workspace_dir.lock().unwrap().as_ref() {
+        Some(ws_dir) => ws_dir.clone(),
+        None => dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("fms-app"),
+    };
     std::fs::create_dir_all(&db_dir).map_err(|e| e.to_string())?;
     let db_path = db_dir.join("app.sqlite3");
+    log::debug!("[XP] Opening app DB: {}", db_path.display());
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     conn.execute_batch(
         "
@@ -118,13 +123,14 @@ fn ensure_user_row(conn: &Connection, user_id: &str) -> Result<(), String> {
 ///
 /// This function is called internally by dictation and reading commands.
 pub fn xp_award_internal(
+    settings: &SettingsState,
     user_id: &str,
     amount: i64,
     source: &str,
     reference_id: &str,
     dataset_uuid: Option<&str>,
 ) -> Result<XpAwardResult, String> {
-    let conn = open_app_db()?;
+    let conn = open_app_db(settings)?;
     ensure_user_row(&conn, user_id)?;
 
     // Try to insert into xp_earned (unique constraint prevents duplicates).
@@ -200,7 +206,7 @@ pub async fn xp_get_user(
     if user_id.is_empty() {
         return Ok(None);
     }
-    let conn = open_app_db()?;
+    let conn = open_app_db(&_settings)?;
     ensure_user_row(&conn, &user_id)?;
 
     let result = conn
@@ -231,7 +237,7 @@ pub async fn xp_get_history(
     if user_id.is_empty() {
         return Ok(Vec::new());
     }
-    let conn = open_app_db()?;
+    let conn = open_app_db(&_settings)?;
     let limit = limit.unwrap_or(50).min(200);
 
     let mut stmt = conn
@@ -273,7 +279,7 @@ pub async fn xp_award_dictation_cue(
         return Err("Not logged in".into());
     }
     log::info!("xp_award_dictation_cue: user={}, cue={}", user_id, cue_id);
-    let result = xp_award_internal(&user_id, 1, "dictation_cue", &cue_id, Some(&dataset_uuid))?;
+    let result = xp_award_internal(&_settings, &user_id, 1, "dictation_cue", &cue_id, Some(dataset_uuid.as_str()))?;
     if result.is_new {
         let _ = app.emit("xp-earned", &result);
     }
@@ -293,7 +299,7 @@ pub async fn xp_award_dictation_subtitle(
         return Err("Not logged in".into());
     }
     log::info!("xp_award_dictation_subtitle: user={}, subtitle={}", user_id, subtitle_id);
-    let result = xp_award_internal(&user_id, 2, "dictation_subtitle", &subtitle_id, Some(&dataset_uuid))?;
+    let result = xp_award_internal(&_settings, &user_id, 2, "dictation_subtitle", &subtitle_id, Some(dataset_uuid.as_str()))?;
     if result.is_new {
         let _ = app.emit("xp-earned", &result);
     }
@@ -313,7 +319,7 @@ pub async fn xp_award_dictation_media(
         return Err("Not logged in".into());
     }
     log::info!("xp_award_dictation_media: user={}, media={}", user_id, media_id);
-    let result = xp_award_internal(&user_id, 5, "dictation_media", &media_id, Some(&dataset_uuid))?;
+    let result = xp_award_internal(&_settings, &user_id, 5, "dictation_media", &media_id, Some(dataset_uuid.as_str()))?;
     if result.is_new {
         let _ = app.emit("xp-earned", &result);
     }
@@ -332,7 +338,7 @@ pub async fn xp_award_reading_sentence(
         return Err("Not logged in".into());
     }
     log::info!("xp_award_reading_sentence: user={}, sentence={}", user_id, sentence_id);
-    let result = xp_award_internal(&user_id, 1, "reading_sentence", &sentence_id, None)?;
+    let result = xp_award_internal(&_settings, &user_id, 1, "reading_sentence", &sentence_id, None)?;
     if result.is_new {
         let _ = app.emit("xp-earned", &result);
     }
@@ -351,7 +357,7 @@ pub async fn xp_award_reading_chapter(
         return Err("Not logged in".into());
     }
     log::info!("xp_award_reading_chapter: user={}, chapter={}", user_id, chapter_id);
-    let result = xp_award_internal(&user_id, 5, "reading_chapter", &chapter_id, None)?;
+    let result = xp_award_internal(&_settings, &user_id, 5, "reading_chapter", &chapter_id, None)?;
     if result.is_new {
         let _ = app.emit("xp-earned", &result);
     }

@@ -2,8 +2,10 @@
 
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import Sidebar, { type TabId } from "@/components/layout/Sidebar";
 import StatusBar from "@/components/layout/StatusBar";
+import WorkspaceChooser from "@/components/workspace/WorkspaceChooser";
 import ModelsPage from "@/components/listen_speak/models/ModelsPage";
 import DatasetsPage from "@/components/listen_speak/datasets/DatasetsPage";
 import DictationPage from "@/components/listen_speak/dictation/DictationPage";
@@ -19,9 +21,49 @@ import OcrPage from "@/components/ocr/OcrPage";
 import WikiPage from "@/components/wiki/WikiPage";
 import LogPage from "@/components/tools/LogPage";
 
+interface Workspace {
+  uuid: string;
+  name: string;
+  user_id: string;
+  avatar: string;
+  created_at: string;
+  last_accessed: string;
+  auto_login: boolean;
+}
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState<TabId>("dictation");
   const [sidebarWidth, setSidebarWidth] = useState(176); // default expanded width
+  const [showWorkspaceChooser, setShowWorkspaceChooser] = useState(false);
+  const [currentWorkspace, setCurrentWorkspace] = useState<Workspace | null>(null);
+
+  // Check workspace state on mount
+  useEffect(() => {
+    async function checkWorkspace() {
+      try {
+        const ws = await invoke<Workspace | null>("workspace_get_current");
+        if (ws) {
+          setCurrentWorkspace(ws);
+        } else {
+          // No workspace selected, show chooser
+          setShowWorkspaceChooser(true);
+        }
+      } catch (e) {
+        console.error("Failed to get current workspace:", e);
+        setShowWorkspaceChooser(true);
+      }
+    }
+    checkWorkspace();
+
+    // Listen for workspace chooser event from backend
+    const unlistenChooser = listen("workspace-show-chooser", () => {
+      setShowWorkspaceChooser(true);
+    });
+
+    return () => {
+      unlistenChooser.then((fn) => fn());
+    };
+  }, []);
 
   // Listen for wiki deep link navigation (fms-app://wiki/path/to/file.md)
   useEffect(() => {
@@ -32,6 +74,16 @@ export default function Home() {
       unlisten.then((fn) => fn());
     };
   }, []);
+
+  function handleWorkspaceSelect(ws: Workspace) {
+    setCurrentWorkspace(ws);
+    setShowWorkspaceChooser(false);
+  }
+
+  // Show workspace chooser if needed
+  if (showWorkspaceChooser) {
+    return <WorkspaceChooser onSelect={handleWorkspaceSelect} />;
+  }
 
   return (
     <div className="flex h-screen">

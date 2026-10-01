@@ -73,13 +73,17 @@ fn open_db(settings: &SettingsState, dataset_uuid: &str) -> Result<Connection, S
 }
 
 /// Open the app-level database (for dictation progress, etc.).
-pub(crate) fn open_app_db() -> Result<Connection, String> {
-    let db_dir = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("fms-app");
+/// Uses the current workspace directory if set, otherwise falls back to global app data dir.
+pub(crate) fn open_app_db(settings: &SettingsState) -> Result<Connection, String> {
+    let db_dir = match settings.workspace_dir.lock().unwrap().as_ref() {
+        Some(ws_dir) => ws_dir.clone(),
+        None => dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("fms-app"),
+    };
     std::fs::create_dir_all(&db_dir).map_err(|e| e.to_string())?;
     let db_path = db_dir.join("app.sqlite3");
-    log::debug!("Opening app DB: {}", db_path.display());
+    log::debug!("[Dictation] Opening app DB: {}", db_path.display());
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS listen_dictation (
@@ -231,7 +235,7 @@ pub async fn listen_get_dictation(
     subtitle_uuid: String,
 ) -> Result<Option<ListenDictation>, String> {
     log::debug!("listen_get_dictation: media={}, subtitle={}", media_uuid, subtitle_uuid);
-    let conn = open_app_db()?;
+    let conn = open_app_db(&_settings)?;
     let user_id = get_current_user_email();
     let mut stmt = conn
         .prepare("SELECT media_uuid, subtitle_uuid, status, completed FROM listen_dictation WHERE user_id = ?1 AND media_uuid = ?2 AND subtitle_uuid = ?3")
@@ -256,7 +260,7 @@ pub async fn listen_get_dataset_dictation_status(
     _dataset_uuid: String,
 ) -> Result<Vec<String>, String> {
     log::debug!("listen_get_dataset_dictation_status");
-    let conn = open_app_db()?;
+    let conn = open_app_db(&_settings)?;
     let user_id = get_current_user_email();
     let mut stmt = conn
         .prepare("SELECT DISTINCT media_uuid FROM listen_dictation WHERE user_id = ?1 AND status = 'complete'")
@@ -468,7 +472,7 @@ pub async fn listen_delete_media(
     drop(conn);
 
     // Delete dictation progress from the app-level database.
-    if let Ok(app_conn) = open_app_db() {
+    if let Ok(app_conn) = open_app_db(&settings) {
         let _ = app_conn.execute(
             "DELETE FROM listen_dictation WHERE media_uuid = ?1",
             [&media_uuid],
@@ -503,7 +507,7 @@ pub async fn listen_save_dictation(
     dictation: ListenDictation,
 ) -> Result<(), String> {
     log::info!("listen_save_dictation: media={}, subtitle={}, status={}", dictation.media_uuid, dictation.subtitle_uuid, dictation.status);
-    let conn = open_app_db()?;
+    let conn = open_app_db(&_settings)?;
     let user_id = get_current_user_email();
     // Delete existing row first, then insert fresh
     conn.execute(

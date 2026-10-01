@@ -21,11 +21,12 @@ mod capture;
 mod ocr;
 mod xp;
 mod wiki;
+mod workspace;
 
 // Unified model index
 mod model_index;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 // ---------------------------------------------------------------------------
@@ -253,7 +254,17 @@ pub fn run() {
             wiki::wiki_index,
             wiki::wiki_add_dir,
             wiki::wiki_remove_dir,
+            // Workspace management
+            workspace::workspace_list,
+            workspace::workspace_get_current,
+            workspace::workspace_create,
+            workspace::workspace_select,
+            workspace::workspace_delete,
+            workspace::workspace_rename,
+            workspace::workspace_claim,
+            workspace::workspace_set_auto_login,
         ])
+        .manage(workspace::WorkspaceState::new())
         .manage(model::ModelState::new())
         .manage(settings::SettingsState::new())
         .manage(dataset::DatasetState::new())
@@ -263,6 +274,27 @@ pub fn run() {
             let log_buffer = logger::init_logger(app.handle().clone());
             app.handle().manage(log_buffer);
             log::info!("Application starting up");
+
+            // ── Initialize workspaces ──
+            {
+                let ws_state = app.handle().state::<workspace::WorkspaceState>();
+                match workspace::init_workspaces(&*ws_state) {
+                    Ok(count) => {
+                        log::info!("[Startup] {} workspace(s) initialized", count);
+                        // Try to auto-select a workspace
+                        if let Some(ws) = workspace::auto_select_workspace(&*ws_state) {
+                            log::info!("[Startup] Auto-selected workspace: '{}' (uuid={})", ws.name, ws.uuid);
+                        } else {
+                            // Multiple workspaces, need chooser
+                            log::info!("[Startup] Showing workspace chooser");
+                            let _ = app.emit("workspace-show-chooser", ());
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("[Startup] Failed to initialize workspaces: {}", e);
+                    }
+                }
+            }
 
             // Initialize unified model index (scan filesystem on first run)
             let model_root = model_index::model_root();
