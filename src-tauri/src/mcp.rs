@@ -529,6 +529,8 @@ struct CardSetTagsParam {
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct CardSearchParam {
     query: String,
+    #[serde(default)]
+    mode: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -1735,11 +1737,12 @@ impl DatasetMcpServer {
     // Card FTS search tools
     // -------------------------------------------------------------------------
 
-    #[tool(name = "card_search", description = "Search cards across all datasets using FTS5 full-text search. Returns matching cards with dataset info. Supports FTS5 query syntax (e.g., 'word1 word2' for AND, 'word1 OR word2' for OR).")]
+    #[tool(name = "card_search", description = "Search cards across all datasets using FTS5 full-text search. Returns matching cards with dataset info. Supports FTS5 query syntax (e.g., 'word1 word2' for AND, 'word1 OR word2' for OR). Mode: 'question' searches only questions, 'fulltext' (default) searches all fields.")]
     async fn card_search(&self, Parameters(param): Parameters<CardSearchParam>) -> Result<String, String> {
-        log::info!("[MCP] card_search: query='{}'", param.query);
+        log::info!("[MCP] card_search: query='{}', mode='{}'", param.query, param.mode);
         let settings = self.app.state::<SettingsState>();
-        let results = cards::card_search(settings, param.query).await?;
+        let mode = if param.mode.is_empty() { None } else { Some(param.mode) };
+        let results = cards::card_search(settings, param.query, mode).await?;
         let items: Vec<serde_json::Value> = results.iter().map(|r| {
             serde_json::json!({
                 "dataset_uuid": r.dataset_uuid,

@@ -66,6 +66,7 @@ export default function CardsPage() {
     { dataset_uuid: string; dataset_name: string; card_uuid: string; question: string; answer: string; note: string; location: string }[]
   >([]);
   const [searching, setSearching] = useState(false);
+  const [searchMode, setSearchMode] = useState<"question" | "fulltext">("fulltext");
 
   // Online links
   const [error, setError] = useState<string | null>(null);
@@ -212,7 +213,7 @@ export default function CardsPage() {
     try {
       const results = await invoke<
         { dataset_uuid: string; dataset_name: string; card_uuid: string; question: string; answer: string; note: string; location: string }[]
-      >("card_search", { query: globalSearchQuery });
+      >("card_search", { query: globalSearchQuery, mode: searchMode });
       setGlobalSearchResults(results);
     } catch (e) {
       setError(`Search failed: ${e}`);
@@ -465,6 +466,15 @@ export default function CardsPage() {
                   className="w-full pl-9 pr-3 py-2 rounded-lg border border-border-default bg-bg-card text-sm"
                 />
               </div>
+              <select
+                value={searchMode}
+                onChange={(e) => setSearchMode(e.target.value as "question" | "fulltext")}
+                className="px-3 py-2 rounded-lg border border-border-default bg-bg-card text-sm"
+                title="Search mode"
+              >
+                <option value="fulltext">Full text</option>
+                <option value="question">Questions only</option>
+              </select>
               <button
                 onClick={handleGlobalSearch}
                 disabled={searching}

@@ -267,9 +267,25 @@ pub struct CardSearchResult {
     pub location: String,
 }
 
+/// Search mode for FTS5 queries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Search only in questions
+    Question,
+    /// Search in all fields (question, answer, note, suggestion)
+    FullText,
+}
+
+impl Default for SearchMode {
+    fn default() -> Self {
+        Self::FullText
+    }
+}
+
 pub(crate) fn search_cards_fts(
     settings: &SettingsState,
     query: &str,
+    mode: SearchMode,
 ) -> Result<Vec<CardSearchResult>, String> {
     let mut results = Vec::new();
 
@@ -287,15 +303,24 @@ pub(crate) fn search_cards_fts(
             }
         };
 
-        // Use FTS5 match syntax
-        let fts_query = query.replace("'", "''"); // Escape single quotes
-        let sql = format!(
-            "SELECT dataset_uuid, card_uuid, dataset_name, question, answer, note, suggestion 
-             FROM card_fts 
-             WHERE card_fts MATCH '{}'
-             ORDER BY rank",
-            fts_query
-        );
+        // Use FTS5 match syntax with column-specific search
+        let escaped_query = query.replace("'", "''"); // Escape single quotes
+        let sql = match mode {
+            SearchMode::Question => format!(
+                "SELECT dataset_uuid, card_uuid, dataset_name, question, answer, note, suggestion 
+                 FROM card_fts 
+                 WHERE question MATCH '{}'
+                 ORDER BY rank",
+                escaped_query
+            ),
+            SearchMode::FullText => format!(
+                "SELECT dataset_uuid, card_uuid, dataset_name, question, answer, note, suggestion 
+                 FROM card_fts 
+                 WHERE card_fts MATCH '{}'
+                 ORDER BY rank",
+                escaped_query
+            ),
+        };
 
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
@@ -1230,12 +1255,17 @@ pub async fn card_fork(
 pub async fn card_search(
     settings: State<'_, SettingsState>,
     query: String,
+    mode: Option<String>,
 ) -> Result<Vec<CardSearchResult>, String> {
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
-    log::info!("[Cards] Searching for: '{}'", query);
-    search_cards_fts(&settings, &query)
+    let search_mode = match mode.as_deref() {
+        Some("question") => SearchMode::Question,
+        _ => SearchMode::FullText,
+    };
+    log::info!("[Cards] Searching for: '{}' (mode: {:?})", query, search_mode);
+    search_cards_fts(&settings, &query, search_mode)
 }
 
 /// Rebuild the FTS search index for one or all locations.
