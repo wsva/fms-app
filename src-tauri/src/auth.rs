@@ -202,6 +202,12 @@ pub async fn auth_process_token(
                 }
             }
             
+            // Fold any progress/XP recorded while logged out ("local"/"") into the owner.
+            crate::xp::migrate_identity_to_owner(
+                &crate::workspace::workspace_dir(&ws.uuid),
+                &email_to_claim,
+            );
+
             // Update current workspace state
             {
                 let mut current = ws_state.current.lock().unwrap();
@@ -326,6 +332,37 @@ pub(crate) fn get_current_user_email(settings: &SettingsState) -> String {
         tokens.user_id
     } else {
         tokens.username
+    }
+}
+
+/// Stable identity used to key per-workspace progress and XP data.
+///
+/// Unlike [`get_current_user_email`], this NEVER returns an empty string, so
+/// logged-out practice in an unclaimed workspace is still recorded (and earns
+/// XP) under a stable per-workspace sentinel instead of being silently dropped.
+///
+/// Resolution:
+/// 1. Claimed workspace (`workspace.json` -> `user_id`) → the owner email. This
+///    is stable across login/logout, so progress/XP never move out from under it.
+/// 2. Selected but unclaimed workspace → the sentinel `"local"`. On claim,
+///    [`crate::xp::migrate_identity_to_owner`] folds these rows into the owner.
+/// 3. No workspace selected (legacy global DB) → the auth identity, else `"local"`.
+pub(crate) fn workspace_identity(settings: &SettingsState) -> String {
+    // Selected workspace: owner email when claimed, else a stable sentinel.
+    if let Some(ws_dir) = settings.workspace_dir.lock().unwrap().as_ref() {
+        if let Some(ws) = crate::workspace::load_workspace_json(ws_dir) {
+            if !ws.user_id.is_empty() && ws.user_id != "local" {
+                return ws.user_id;
+            }
+        }
+        return "local".to_string();
+    }
+    // No workspace selected (legacy global DB): fall back to the auth identity.
+    let id = get_current_user_email(settings);
+    if id.is_empty() {
+        "local".to_string()
+    } else {
+        id
     }
 }
 

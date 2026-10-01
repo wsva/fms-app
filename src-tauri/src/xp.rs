@@ -7,10 +7,10 @@
 
 use rusqlite::Connection;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{Emitter, State};
 
-use crate::auth::get_current_user_email;
+use crate::auth::workspace_identity;
 use crate::settings::SettingsState;
 
 // ============================================================
@@ -193,6 +193,95 @@ fn get_user_xp_from_db(conn: &Connection, user_id: &str) -> Result<(i64, i64), S
     .map_err(|e| e.to_string())
 }
 
+/// Fold progress/XP rows recorded under a transient identity (`""` or `"local"`)
+/// into the permanent owner identity. Called when a workspace is claimed so that
+/// practice done while logged out is neither lost nor left invisible.
+///
+/// Tolerant of missing tables (each statement's error is ignored), and safe to
+/// call repeatedly (idempotent once no transient rows remain).
+pub(crate) fn migrate_identity_to_owner(ws_dir: &Path, owner_id: &str) {
+    // Nothing permanent to fold into for an unclaimed identity.
+    if owner_id.is_empty() || owner_id == "local" {
+        return;
+    }
+    let db_path = ws_dir.join("app.sqlite3");
+    if !db_path.exists() {
+        return;
+    }
+    let conn = match Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!(
+                "[XP] migrate_identity_to_owner: cannot open {}: {}",
+                db_path.display(),
+                e
+            );
+            return;
+        }
+    };
+    log::info!(
+        "[XP] Migrating transient progress/XP identity (''/'local') -> '{}' in {}",
+        owner_id,
+        db_path.display()
+    );
+
+    // listen_dictation: UNIQUE(user_id, media_uuid, subtitle_uuid) — keep the owner row on conflict.
+    let _ = conn.execute(
+        "UPDATE OR IGNORE listen_dictation SET user_id = ?1 WHERE user_id IN ('', 'local')",
+        [owner_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM listen_dictation WHERE user_id IN ('', 'local')",
+        [],
+    );
+
+    // xp_ledger: append-only, no uniqueness — plain reassign.
+    let _ = conn.execute(
+        "UPDATE xp_ledger SET user_id = ?1 WHERE user_id IN ('', 'local')",
+        [owner_id],
+    );
+
+    // xp_earned: UNIQUE(user_id, source, reference_id, dataset_uuid) — keep the owner row on conflict.
+    let _ = conn.execute(
+        "UPDATE OR IGNORE xp_earned SET user_id = ?1 WHERE user_id IN ('', 'local')",
+        [owner_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM xp_earned WHERE user_id IN ('', 'local')",
+        [],
+    );
+
+    // xp_user: user_id is PRIMARY KEY — merge lifetime XP and recompute level in Rust.
+    let transient_xp: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(lifetime_xp), 0) FROM xp_user WHERE user_id IN ('', 'local')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if transient_xp > 0 {
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO xp_user (user_id, lifetime_xp, level, updated_at) \
+             VALUES (?1, 0, 1, datetime('now'))",
+            [owner_id],
+        );
+        let owner_xp: i64 = conn
+            .query_row(
+                "SELECT lifetime_xp FROM xp_user WHERE user_id = ?1",
+                [owner_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let new_xp = owner_xp + transient_xp;
+        let new_level = (new_xp as f64 / 100.0).sqrt().floor() as i64 + 1;
+        let _ = conn.execute(
+            "UPDATE xp_user SET lifetime_xp = ?1, level = ?2, updated_at = datetime('now') WHERE user_id = ?3",
+            rusqlite::params![new_xp, new_level, owner_id],
+        );
+    }
+    let _ = conn.execute("DELETE FROM xp_user WHERE user_id IN ('', 'local')", []);
+}
+
 // ============================================================
 // Tauri commands
 // ============================================================
@@ -202,7 +291,7 @@ fn get_user_xp_from_db(conn: &Connection, user_id: &str) -> Result<(i64, i64), S
 pub async fn xp_get_user(
     _settings: State<'_, SettingsState>,
 ) -> Result<Option<XpUser>, String> {
-    let user_id = get_current_user_email(&_settings);
+    let user_id = workspace_identity(&_settings);
     if user_id.is_empty() {
         return Ok(None);
     }
@@ -233,7 +322,7 @@ pub async fn xp_get_history(
     _settings: State<'_, SettingsState>,
     limit: Option<i64>,
 ) -> Result<Vec<XpLedgerEntry>, String> {
-    let user_id = get_current_user_email(&_settings);
+    let user_id = workspace_identity(&_settings);
     if user_id.is_empty() {
         return Ok(Vec::new());
     }
@@ -274,10 +363,7 @@ pub async fn xp_award_dictation_cue(
     cue_id: String,
     dataset_uuid: String,
 ) -> Result<XpAwardResult, String> {
-    let user_id = get_current_user_email(&_settings);
-    if user_id.is_empty() {
-        return Err("Not logged in".into());
-    }
+    let user_id = workspace_identity(&_settings);
     log::info!("xp_award_dictation_cue: user={}, cue={}", user_id, cue_id);
     let result = xp_award_internal(&_settings, &user_id, 1, "dictation_cue", &cue_id, Some(dataset_uuid.as_str()))?;
     if result.is_new {
@@ -294,10 +380,7 @@ pub async fn xp_award_dictation_subtitle(
     subtitle_id: String,
     dataset_uuid: String,
 ) -> Result<XpAwardResult, String> {
-    let user_id = get_current_user_email(&_settings);
-    if user_id.is_empty() {
-        return Err("Not logged in".into());
-    }
+    let user_id = workspace_identity(&_settings);
     log::info!("xp_award_dictation_subtitle: user={}, subtitle={}", user_id, subtitle_id);
     let result = xp_award_internal(&_settings, &user_id, 2, "dictation_subtitle", &subtitle_id, Some(dataset_uuid.as_str()))?;
     if result.is_new {
@@ -314,10 +397,7 @@ pub async fn xp_award_dictation_media(
     media_id: String,
     dataset_uuid: String,
 ) -> Result<XpAwardResult, String> {
-    let user_id = get_current_user_email(&_settings);
-    if user_id.is_empty() {
-        return Err("Not logged in".into());
-    }
+    let user_id = workspace_identity(&_settings);
     log::info!("xp_award_dictation_media: user={}, media={}", user_id, media_id);
     let result = xp_award_internal(&_settings, &user_id, 5, "dictation_media", &media_id, Some(dataset_uuid.as_str()))?;
     if result.is_new {
@@ -333,10 +413,7 @@ pub async fn xp_award_reading_sentence(
     _settings: State<'_, SettingsState>,
     sentence_id: String,
 ) -> Result<XpAwardResult, String> {
-    let user_id = get_current_user_email(&_settings);
-    if user_id.is_empty() {
-        return Err("Not logged in".into());
-    }
+    let user_id = workspace_identity(&_settings);
     log::info!("xp_award_reading_sentence: user={}, sentence={}", user_id, sentence_id);
     let result = xp_award_internal(&_settings, &user_id, 1, "reading_sentence", &sentence_id, None)?;
     if result.is_new {
@@ -352,10 +429,7 @@ pub async fn xp_award_reading_chapter(
     _settings: State<'_, SettingsState>,
     chapter_id: String,
 ) -> Result<XpAwardResult, String> {
-    let user_id = get_current_user_email(&_settings);
-    if user_id.is_empty() {
-        return Err("Not logged in".into());
-    }
+    let user_id = workspace_identity(&_settings);
     log::info!("xp_award_reading_chapter: user={}, chapter={}", user_id, chapter_id);
     let result = xp_award_internal(&_settings, &user_id, 5, "reading_chapter", &chapter_id, None)?;
     if result.is_new {

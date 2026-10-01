@@ -651,6 +651,9 @@ pub async fn workspace_claim(
         WorkspaceState::save_registry(&registry)?;
     }
 
+    // Fold any progress/XP recorded while logged out ("local"/"") into the owner.
+    crate::xp::migrate_identity_to_owner(&workspace_dir(&uuid), &user_id);
+
     log::info!("[Workspace] Claimed workspace '{}' for user '{}'", uuid, user_id);
 
     // Notify frontend
