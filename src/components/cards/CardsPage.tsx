@@ -7,7 +7,6 @@ import {
   Plus,
   RefreshCw,
   Search,
-  Filter,
   ChevronLeft,
   ChevronRight,
   FlipHorizontal,
@@ -21,7 +20,6 @@ import {
   FolderOpen,
   FolderPlus,
   MapPin,
-  MoveRight,
 } from "lucide-react";
 import type {
   CardDatasetSummary,
@@ -661,29 +659,19 @@ export default function CardsPage() {
         {activeTab === "advanced" && (
           <AdvancedTab
             dataset={selectedDataset}
+            selectedDatasetUuid={selectedDatasetUuid}
             allDatasets={datasets}
-            onSync={selectedDataset ? async () => {
+            onDeleteDataset={async (uuid: string) => {
               try {
-                setError(null);
-                const result = await invoke<{ pulled: number; pushed: number; conflicts: number; server_time: string }>("card_sync_full", {
-                  datasetUuid: selectedDatasetUuid,
-                });
-                alert(`Sync complete!\nPulled: ${result.pulled}\nPushed: ${result.pushed}\nConflicts: ${result.conflicts}`);
-              } catch (e) {
-                setError(`Sync failed: ${e}`);
-              }
-            } : undefined}
-            onDelete={selectedDataset ? async () => {
-              const confirmed = await ask(`Delete dataset "${selectedDataset.info.name}"? This is irreversible.`, { title: "Delete Dataset" });
-              if (!confirmed) return;
-              try {
-                await invoke("card_dataset_delete", { uuid: selectedDatasetUuid });
-                setDatasets((prev) => prev.filter((d) => d.info.uuid !== selectedDatasetUuid));
-                setSelectedDatasetUuid("");
+                await invoke("card_dataset_delete", { uuid });
+                setDatasets((prev) => prev.filter((d) => d.info.uuid !== uuid));
+                if (uuid === selectedDatasetUuid) {
+                  setSelectedDatasetUuid("");
+                }
               } catch (e) {
                 setError(`Failed to delete dataset: ${e}`);
               }
-            } : undefined}
+            }}
             onRefresh={loadDatasets}
             onError={setError}
           />
@@ -710,47 +698,24 @@ export default function CardsPage() {
 
 function AdvancedTab({
   dataset,
+  selectedDatasetUuid,
   allDatasets,
-  onSync,
-  onDelete,
+  onDeleteDataset,
   onRefresh,
   onError,
 }: {
   dataset: CardDatasetSummary | undefined;
+  selectedDatasetUuid: string;
   allDatasets: CardDatasetSummary[];
-  onSync?: () => Promise<void>;
-  onDelete?: () => Promise<void>;
+  onDeleteDataset: (uuid: string) => Promise<void>;
   onRefresh: () => void;
   onError: (msg: string) => void;
 }) {
-  const [syncing, setSyncing] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<{
-    last_synced_at: string | null;
-    pending_push: number;
-  } | null>(null);
-  const [editing, setEditing] = useState(false);
-  const [name, setName] = useState(dataset?.info.name || "");
-  const [description, setDescription] = useState(dataset?.info.description || "");
-  const [syncUrl, setSyncUrl] = useState(dataset?.info.sync_url || "");
-  const [visibility, setVisibility] = useState((dataset?.info.visibility || "private") as string);
-
   // Locations state
   const [dirs, setDirs] = useState<{ name: string; path: string; is_linked: boolean }[]>([]);
   const [showAddDir, setShowAddDir] = useState(false);
   const [newDirName, setNewDirName] = useState("");
   const [newDirPath, setNewDirPath] = useState("");
-  const [moving, setMoving] = useState(false);
-
-  // Load sync status
-  useEffect(() => {
-    if (!dataset) return;
-    invoke<{ last_synced_at: string | null; pending_push: number } | null>(
-      "card_sync_status",
-      { datasetUuid: dataset.info.uuid }
-    )
-      .then((status) => setSyncStatus(status))
-      .catch(() => {});
-  }, [dataset?.info.uuid]);
 
   // Load dataset directories (locations)
   const loadDirs = useCallback(async () => {
@@ -766,186 +731,9 @@ function AdvancedTab({
     loadDirs();
   }, [loadDirs]);
 
-  async function handleSync() {
-    if (!dataset || !onSync) return;
-    setSyncing(true);
-    try {
-      await onSync();
-      // Refresh sync status
-      const status = await invoke<{ last_synced_at: string | null; pending_push: number } | null>(
-        "card_sync_status",
-        { datasetUuid: dataset.info.uuid }
-      );
-      setSyncStatus(status);
-    } finally {
-      setSyncing(false);
-    }
-  }
-
-  async function handleSaveMetadata() {
-    if (!dataset) return;
-    try {
-      await invoke("card_dataset_update", {
-        uuid: dataset.info.uuid,
-        name: name !== dataset.info.name ? name : null,
-        description: description !== dataset.info.description ? description : null,
-        syncUrl: syncUrl !== dataset.info.sync_url ? syncUrl : null,
-        visibility: visibility !== dataset.info.visibility ? visibility : null,
-      });
-      setEditing(false);
-    } catch (e) {
-      onError(`Failed to update dataset: ${e}`);
-    }
-  }
-
   return (
     <div className="p-6 overflow-y-auto h-full space-y-6">
-      {/* Dataset Info - only when dataset selected */}
-      {dataset && (
-      <section>
-        <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
-          <Settings size={18} />
-          Dataset Info
-        </h2>
-        {editing ? (
-          <div className="space-y-3 p-4 rounded-lg border border-border-default bg-bg-card">
-            <div>
-              <label className="block text-sm font-medium mb-1">Name</label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full px-3 py-1.5 rounded border border-border-default bg-bg-surface text-sm"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Description</label>
-              <textarea
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                rows={2}
-                className="w-full px-3 py-1.5 rounded border border-border-default bg-bg-surface text-sm"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Sync URL</label>
-              <input
-                type="text"
-                value={syncUrl}
-                onChange={(e) => setSyncUrl(e.target.value)}
-                placeholder="https://lusworkshop.site"
-                className="w-full px-3 py-1.5 rounded border border-border-default bg-bg-surface text-sm"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Visibility</label>
-              <select
-                value={visibility}
-                onChange={(e) => setVisibility(e.target.value)}
-                className="px-3 py-1.5 rounded border border-border-default bg-bg-surface text-sm"
-              >
-                <option value="private">Private</option>
-                <option value="shared">Shared</option>
-                <option value="public">Public</option>
-              </select>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={handleSaveMetadata}
-                className="px-3 py-1.5 rounded bg-accent-blue text-white text-sm"
-              >
-                Save
-              </button>
-              <button
-                onClick={() => setEditing(false)}
-                className="px-3 py-1.5 rounded border border-border-default text-sm"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="p-4 rounded-lg border border-border-default bg-bg-card space-y-1 text-sm">
-            <div className="flex justify-between">
-              <span className="text-text-secondary">UUID:</span>
-              <span className="font-mono text-xs">{dataset.info.uuid}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-text-secondary">Name:</span>
-              <span>{dataset.info.name}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-text-secondary">Description:</span>
-              <span>{dataset.info.description || "—"}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-text-secondary">Visibility:</span>
-              <span>{dataset.info.visibility}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-text-secondary">Owner:</span>
-              <span>{dataset.info.owner_id || "—"}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-text-secondary">Sync URL:</span>
-              <span>{dataset.info.sync_url || "—"}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-text-secondary">Location:</span>
-              <span className="text-xs">{dataset.path}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-text-secondary">Subscribers:</span>
-              <span>{dataset.info.subscribers?.length || 0}</span>
-            </div>
-            <button
-              onClick={() => setEditing(true)}
-              className="mt-2 px-3 py-1.5 rounded border border-border-default text-sm hover:bg-mid-gray/20"
-            >
-              Edit Metadata
-            </button>
-          </div>
-        )}
-      </section>
-      )}
-
-      {/* Sync - only when dataset selected */}
-      {dataset && onSync && (
-      <section>
-        <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
-          <RefreshCcw size={18} />
-          Sync
-        </h2>
-        <div className="p-4 rounded-lg border border-border-default bg-bg-card space-y-2 text-sm">
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Last synced:</span>
-            <span>
-              {syncStatus?.last_synced_at
-                ? new Date(syncStatus.last_synced_at).toLocaleString()
-                : "Never"}
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Pending changes:</span>
-            <span>{syncStatus?.pending_push ?? 0}</span>
-          </div>
-          <button
-            onClick={handleSync}
-            disabled={syncing || !dataset.info.sync_url}
-            className="mt-2 px-3 py-1.5 rounded bg-accent-blue text-white text-sm disabled:opacity-50"
-          >
-            {syncing ? "Syncing..." : "Sync Now"}
-          </button>
-          {!dataset.info.sync_url && (
-            <p className="text-xs text-text-tertiary mt-1">
-              Set a sync URL in the dataset metadata to enable syncing.
-            </p>
-          )}
-        </div>
-      </section>
-      )}
-
-      {/* Locations */}
+      {/* Locations - moved to top */}
       <section>
         <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
           <FolderOpen size={18} />
@@ -973,6 +761,9 @@ function AdvancedTab({
                         default
                       </span>
                     )}
+                    <span className="text-xs text-text-tertiary">
+                      {datasetsInDir.length} dataset{datasetsInDir.length !== 1 ? "s" : ""}
+                    </span>
                   </div>
                   {dir.is_linked && (
                     <button
@@ -994,27 +785,7 @@ function AdvancedTab({
                     </button>
                   )}
                 </div>
-                <p className="text-xs text-text-tertiary mb-2 font-mono">{dir.path}</p>
-                {datasetsInDir.length > 0 && (
-                  <div className="space-y-1">
-                    {datasetsInDir.map((d) => (
-                      <div
-                        key={d.info.uuid}
-                        className={`flex items-center justify-between text-xs px-2 py-1 rounded ${
-                          dataset && d.info.uuid === dataset.info.uuid
-                            ? "bg-accent-blue/10 text-accent-blue font-medium"
-                            : "text-text-secondary"
-                        }`}
-                      >
-                        <span>{d.info.name}</span>
-                        <span>{d.card_count} cards</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {datasetsInDir.length === 0 && (
-                  <p className="text-xs text-text-tertiary italic">No card datasets here</p>
-                )}
+                <p className="text-xs text-text-tertiary font-mono">{dir.path}</p>
               </div>
             );
           })}
@@ -1097,74 +868,196 @@ function AdvancedTab({
             Add Linked Directory
           </button>
         )}
+      </section>
 
-        {/* Move current dataset */}
-        {dataset && dirs.length > 1 && (
-          <div className="mt-4 p-3 rounded-lg border border-border-default bg-bg-card">
-            <div className="flex items-center gap-2 mb-2">
-              <MoveRight size={14} className="text-text-tertiary" />
-              <span className="text-sm font-medium">Move this dataset</span>
-            </div>
-            <p className="text-xs text-text-secondary mb-2">
-              Current location: <span className="font-mono">{dataset.location}</span>
-            </p>
-            <select
-              disabled={moving}
-              onChange={async (e) => {
-                const target = e.target.value;
-                if (!target || target === dataset.location) return;
-                setMoving(true);
-                try {
-                  await invoke("card_dataset_move", {
-                    uuid: dataset.info.uuid,
-                    targetLocation: target,
-                  });
-                  onRefresh();
-                  loadDirs();
-                } catch (e) {
-                  onError(`Failed to move dataset: ${e}`);
-                } finally {
-                  setMoving(false);
-                  e.target.value = "";
-                }
-              }}
-              defaultValue=""
-              className="px-2 py-1 rounded border border-border-default bg-bg-surface text-sm"
-            >
-              <option value="" disabled>
-                {moving ? "Moving..." : "Move to..."}
-              </option>
-              {dirs
-                .filter((d) => d.path !== dataset.location)
-                .map((d) => (
-                  <option key={d.path} value={d.path}>
-                    {d.name} ({d.path})
-                  </option>
-                ))}
-            </select>
+      {/* Datasets - card list */}
+      <section>
+        <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
+          <Settings size={18} />
+          Datasets
+        </h2>
+        {allDatasets.length === 0 ? (
+          <p className="text-sm text-text-secondary">No card datasets found.</p>
+        ) : (
+          <div className="space-y-3">
+            {allDatasets.map((ds) => (
+              <DatasetCard
+                key={ds.info.uuid}
+                dataset={ds}
+                isSelected={ds.info.uuid === selectedDatasetUuid}
+                onDelete={async () => {
+                  const confirmed = await ask(`Delete dataset "${ds.info.name}"? This is irreversible.`, { title: "Delete Dataset" });
+                  if (!confirmed) return;
+                  await onDeleteDataset(ds.info.uuid);
+                }}
+                onError={onError}
+              />
+            ))}
           </div>
         )}
       </section>
+    </div>
+  );
+}
 
-      {/* Danger Zone - only when dataset selected */}
-      {dataset && onDelete && (
-      <section>
-        <h2 className="text-lg font-semibold mb-3 text-red-500">Danger Zone</h2>
-        <div className="p-4 rounded-lg border border-red-500/20 bg-red-500/5">
-          <p className="text-sm text-text-secondary mb-3">
-            Deleting a dataset permanently removes all cards, tags, and review
-            history. This cannot be undone.
-          </p>
-          <button
-            onClick={onDelete}
-            className="px-3 py-1.5 rounded bg-red-500/10 border border-red-500/20 text-red-500 text-sm hover:bg-red-500/20"
+// ── Dataset Card (for Advanced tab) ──────────────────────────────────────────
+
+function DatasetCard({
+  dataset,
+  isSelected,
+  onDelete,
+  onError,
+}: {
+  dataset: CardDatasetSummary;
+  isSelected: boolean;
+  onDelete: () => Promise<void>;
+  onError: (msg: string) => void;
+}) {
+  const [syncing, setSyncing] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<{
+    last_synced_at: string | null;
+    pending_push: number;
+  } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  // Load sync status on mount
+  useEffect(() => {
+    invoke<{ last_synced_at: string | null; pending_push: number } | null>(
+      "card_sync_status",
+      { datasetUuid: dataset.info.uuid }
+    )
+      .then((status) => setSyncStatus(status))
+      .catch(() => {});
+  }, [dataset.info.uuid]);
+
+  async function handleSync() {
+    if (!dataset.info.sync_url) return;
+    setSyncing(true);
+    try {
+      const result = await invoke<{ pulled: number; pushed: number; conflicts: number; server_time: string }>(
+        "card_sync_full",
+        { datasetUuid: dataset.info.uuid }
+      );
+      alert(`Sync complete!\nPulled: ${result.pulled}\nPushed: ${result.pushed}\nConflicts: ${result.conflicts}`);
+      // Refresh sync status
+      const status = await invoke<{ last_synced_at: string | null; pending_push: number } | null>(
+        "card_sync_status",
+        { datasetUuid: dataset.info.uuid }
+      );
+      setSyncStatus(status);
+    } catch (e) {
+      onError(`Sync failed: ${e}`);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  async function handleDelete() {
+    setDeleting(true);
+    try {
+      await onDelete();
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  const dirName = dataset.location;
+
+  return (
+    <div
+      className={`p-4 rounded-xl border bg-bg-card transition-colors ${
+        isSelected
+          ? "border-accent-blue/40 ring-1 ring-accent-blue/20"
+          : "border-border-default hover:border-border-default/80"
+      }`}
+    >
+      {/* Header: name + visibility badge */}
+      <div className="flex items-start justify-between gap-3 mb-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <h3 className="text-sm font-semibold truncate">{dataset.info.name}</h3>
+          <span
+            className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${
+              dataset.info.visibility === "public"
+                ? "bg-green-500/10 text-green-600"
+                : dataset.info.visibility === "shared"
+                  ? "bg-amber-500/10 text-amber-600"
+                  : "bg-mid-gray/20 text-text-tertiary"
+            }`}
           >
-            <Trash2 size={14} className="inline mr-1" />
-            Delete Dataset
-          </button>
+            {dataset.info.visibility}
+          </span>
+          {isSelected && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-blue/10 text-accent-blue shrink-0">
+              active
+            </span>
+          )}
         </div>
-      </section>
+        <span className="text-xs text-text-tertiary shrink-0">
+          {dataset.card_count} card{dataset.card_count !== 1 ? "s" : ""}
+        </span>
+      </div>
+
+      {/* Description */}
+      {dataset.info.description && (
+        <p className="text-xs text-text-secondary mb-3 line-clamp-2">
+          {dataset.info.description}
+        </p>
       )}
+
+      {/* Meta row: location + UUID */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-tertiary mb-3">
+        <span className="flex items-center gap-1">
+          <MapPin size={11} />
+          {dirName}
+        </span>
+        <span className="font-mono text-[10px]">{dataset.info.uuid.slice(0, 8)}…</span>
+      </div>
+
+      {/* Sync section */}
+      <div className="flex items-center flex-wrap gap-x-4 gap-y-1 text-xs mb-3">
+        {dataset.info.sync_url ? (
+          <>
+            <span className="text-text-secondary">
+              Sync: <span className="font-mono text-text-tertiary">{dataset.info.sync_url}</span>
+            </span>
+            <span className="text-text-secondary">
+              Last synced:{" "}
+              {syncStatus?.last_synced_at
+                ? new Date(syncStatus.last_synced_at).toLocaleString()
+                : "Never"}
+            </span>
+            {(syncStatus?.pending_push ?? 0) > 0 && (
+              <span className="text-amber-500">
+                {syncStatus!.pending_push} pending
+              </span>
+            )}
+          </>
+        ) : (
+          <span className="text-text-tertiary italic">No sync URL configured</span>
+        )}
+      </div>
+
+      {/* Action buttons */}
+      <div className="flex items-center gap-2">
+        {dataset.info.sync_url && (
+          <button
+            onClick={handleSync}
+            disabled={syncing}
+            className="px-3 py-1 rounded bg-accent-blue text-white text-xs hover:opacity-90 disabled:opacity-50 flex items-center gap-1"
+          >
+            <RefreshCcw size={12} className={syncing ? "animate-spin" : ""} />
+            {syncing ? "Syncing..." : "Sync"}
+          </button>
+        )}
+        <button
+          onClick={handleDelete}
+          disabled={deleting}
+          className="ml-auto px-3 py-1 rounded bg-red-500/10 border border-red-500/20 text-red-500 text-xs hover:bg-red-500/20 disabled:opacity-50 flex items-center gap-1"
+        >
+          <Trash2 size={12} />
+          {deleting ? "Deleting..." : "Remove"}
+        </button>
+      </div>
     </div>
   );
 }
