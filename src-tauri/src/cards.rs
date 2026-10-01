@@ -304,21 +304,23 @@ pub(crate) fn search_cards_fts(
         };
 
         // Use FTS5 match syntax with column-specific search
+        // Add prefix matching with * for better search results
         let escaped_query = query.replace("'", "''"); // Escape single quotes
+        let fts_query = format!("{}*", escaped_query); // Add prefix matching
         let sql = match mode {
             SearchMode::Question => format!(
                 "SELECT dataset_uuid, card_uuid, dataset_name, question, answer, note, suggestion 
                  FROM card_fts 
                  WHERE question MATCH '{}'
                  ORDER BY rank",
-                escaped_query
+                fts_query
             ),
             SearchMode::FullText => format!(
                 "SELECT dataset_uuid, card_uuid, dataset_name, question, answer, note, suggestion 
                  FROM card_fts 
                  WHERE card_fts MATCH '{}'
                  ORDER BY rank",
-                escaped_query
+                fts_query
             ),
         };
 

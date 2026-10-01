@@ -67,6 +67,7 @@ export default function CardsPage() {
   >([]);
   const [searching, setSearching] = useState(false);
   const [searchMode, setSearchMode] = useState<"question" | "fulltext">("fulltext");
+  const [rebuildingIndex, setRebuildingIndex] = useState(false);
 
   // Online links
   const [error, setError] = useState<string | null>(null);
@@ -224,11 +225,14 @@ export default function CardsPage() {
 
   // Rebuild FTS index
   async function handleRebuildIndex() {
+    setRebuildingIndex(true);
     try {
       const count = await invoke<number>("card_fts_rebuild", { location: null });
       alert(`Search index rebuilt! ${count} cards indexed.`);
     } catch (e) {
       setError(`Failed to rebuild index: ${e}`);
+    } finally {
+      setRebuildingIndex(false);
     }
   }
 
@@ -399,7 +403,10 @@ export default function CardsPage() {
                     <div
                       key={card.uuid}
                       className={`w-full flex items-center gap-3 p-3 rounded-lg hover:bg-mid-gray/10 cursor-pointer ${familiarityColor(card.familiarity)}`}
-                      onClick={() => openCardEditor(selectedDatasetUuid, card, () => loadCards())}
+                      onClick={() => {
+                        const selectedDataset = datasets.find((ds) => ds.info.uuid === selectedDatasetUuid);
+                        openCardEditor(selectedDatasetUuid, card, () => loadCards(), undefined, selectedDataset?.info.name);
+                      }}
                     >
                       <div className="flex-1 min-w-0">
                         <p className="text-2xl font-medium truncate">
@@ -484,10 +491,11 @@ export default function CardsPage() {
               </button>
               <button
                 onClick={handleRebuildIndex}
-                className="px-3 py-2 rounded-lg border border-border-default text-xs hover:bg-mid-gray/20"
-                title="Rebuild search index"
+                disabled={rebuildingIndex}
+                className="px-3 py-2 rounded-lg border border-border-default text-xs hover:bg-mid-gray/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                title={rebuildingIndex ? "Rebuilding index..." : "Rebuild search index"}
               >
-                <RefreshCw size={14} />
+                <RefreshCw size={14} className={rebuildingIndex ? "animate-spin" : ""} />
               </button>
             </div>
 
@@ -504,9 +512,10 @@ export default function CardsPage() {
                   </p>
                   <button
                     onClick={handleRebuildIndex}
-                    className="mt-4 px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20"
+                    disabled={rebuildingIndex}
+                    className="mt-4 px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    Rebuild Search Index
+                    {rebuildingIndex ? "Rebuilding..." : "Rebuild Search Index"}
                   </button>
                 </div>
               ) : (
@@ -531,7 +540,7 @@ export default function CardsPage() {
                             openCardEditor(result.dataset_uuid, card, () => {
                               // Refresh search after edit
                               handleGlobalSearch();
-                            });
+                            }, undefined, result.dataset_name);
                           })
                           .catch((e) => setError(`Failed to load card: ${e}`));
                       }}

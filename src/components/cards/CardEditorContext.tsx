@@ -136,6 +136,7 @@ export type CardEditorState = {
   isOpen: boolean;
   card: Card | null;
   datasetUuid: string;
+  datasetName?: string;
   datasets: CardDatasetSummary[];
   onSave?: (card: Card) => void;
   onDelete?: () => void;
@@ -146,7 +147,8 @@ export type CardEditorContextType = {
     datasetUuid: string,
     card?: Card | null,
     onSave?: (card: Card) => void,
-    onDelete?: () => void
+    onDelete?: () => void,
+    datasetName?: string
   ) => void;
   closeCardEditor: () => void;
 };
@@ -193,16 +195,36 @@ export function CardEditorProvider({
     datasetUuid: string,
     card?: Card | null,
     onSave?: (card: Card) => void,
-    onDelete?: () => void
+    onDelete?: () => void,
+    datasetName?: string
   ) {
-    setState((prev) => ({
-      ...prev,
-      isOpen: true,
-      card: card || null,
-      datasetUuid,
-      onSave,
-      onDelete,
-    }));
+    // Reload datasets to ensure we have the latest card counts
+    loadDatasets().then(() => {
+      setState((prev) => {
+        // Check if the dataset is already in the list
+        const datasetExists = prev.datasets.some((ds) => ds.info.uuid === datasetUuid);
+        
+        // If dataset doesn't exist but we have a name, add a placeholder
+        let datasets = prev.datasets;
+        if (!datasetExists && datasetName && datasetUuid) {
+          datasets = [
+            { info: { uuid: datasetUuid, name: datasetName }, card_count: 0 } as CardDatasetSummary,
+            ...prev.datasets,
+          ];
+        }
+        
+        return {
+          ...prev,
+          isOpen: true,
+          card: card || null,
+          datasetUuid,
+          datasetName,
+          datasets,
+          onSave,
+          onDelete,
+        };
+      });
+    });
   }
 
   function closeCardEditor() {

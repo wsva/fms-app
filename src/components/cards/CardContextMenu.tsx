@@ -1,18 +1,23 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Plus } from "lucide-react";
+import { Plus, Search, X } from "lucide-react";
 import { useCardEditor } from "./CardEditorContext";
 import { invoke } from "@tauri-apps/api/core";
+import type { Card } from "@/lib/types";
 
 /**
  * Global text-selection context menu for cards.
  *
  * Ported from the website's CardContextMenu: whenever the user selects text
  * anywhere in the app (including inside <input>/<textarea>), a small floating
- * menu appears offering to create a card from the selection. Per the current
- * integration, "Add to Card" opens the prefilled /card/add page on the card
- * website in the OS default browser (no API key or login setup required).
+ * menu appears offering to create a card from the selection.
+ *
+ * The menu now includes:
+ * - An editable input showing the selected text
+ * - A search button to find existing cards with matching questions
+ * - Search results displayed as clickable links to jump to existing cards
+ * - An "Add to Card" button to create a new card
  *
  * Mounted once in the app shell. Renders nothing until a selection is made, so
  * the initial server/client trees match (no hydration mismatch).
@@ -20,15 +25,31 @@ import { invoke } from "@tauri-apps/api/core";
 
 type MenuAnchor = { x: number; top: number; bottom: number };
 
+type CardSearchResult = {
+  dataset_uuid: string;
+  dataset_name: string;
+  card_uuid: string;
+  question: string;
+  answer: string;
+  note: string;
+  suggestion: string;
+  location: string;
+};
+
 // Flip the menu below the selection when it would clip the top edge.
 const TOP_MARGIN = 56;
 // Rough half-width used to keep the menu inside the viewport.
-const EDGE_MARGIN = 90;
+const EDGE_MARGIN = 160;
 
 export default function CardContextMenu() {
   const [anchor, setAnchor] = useState<MenuAnchor | null>(null);
   const [selectedText, setSelectedText] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<CardSearchResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [showSearchPanel, setShowSearchPanel] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const { openCardEditor } = useCardEditor();
 
   useEffect(() => {
@@ -42,6 +63,9 @@ export default function CardContextMenu() {
         const rect = sel.getRangeAt(0).getBoundingClientRect();
         if (rect.width || rect.height) {
           setSelectedText(selText);
+          setSearchQuery(selText);
+          setSearchResults([]);
+          setShowSearchPanel(false);
           setAnchor({ x: rect.left + rect.width / 2, top: rect.top, bottom: rect.bottom });
           return;
         }
@@ -58,6 +82,9 @@ export default function CardContextMenu() {
           if (text) {
             const rect = active.getBoundingClientRect();
             setSelectedText(text);
+            setSearchQuery(text);
+            setSearchResults([]);
+            setShowSearchPanel(false);
             setAnchor({ x: rect.left + rect.width / 2, top: rect.top, bottom: rect.bottom });
             return;
           }
@@ -82,8 +109,64 @@ export default function CardContextMenu() {
     };
   }, []);
 
+  // Focus the input when the search panel opens
+  useEffect(() => {
+    if (showSearchPanel && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [showSearchPanel]);
+
+  async function handleSearch() {
+    if (!searchQuery.trim()) {
+      setSearchResults([]);
+      return;
+    }
+
+    setIsSearching(true);
+    try {
+      const results = await invoke<CardSearchResult[]>("card_search", {
+        query: searchQuery,
+        mode: "question",
+      });
+      setSearchResults(results);
+    } catch (err) {
+      console.error("Search failed:", err);
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  }
+
+  function handleSelectCard(result: CardSearchResult) {
+    setAnchor(null);
+    // Open the card editor with the selected card
+    openCardEditor(
+      result.dataset_uuid,
+      {
+        uuid: result.card_uuid,
+        question: result.question,
+        answer: result.answer,
+        suggestion: result.suggestion,
+        note: result.note,
+        familiarity: 0,
+        question_hash: null,
+        source_card_uuid: null,
+        source_dataset_uuid: null,
+        deleted_at: null,
+        created_at: "",
+        updated_at: "",
+      },
+      (savedCard) => {
+        console.log("Card saved from context menu search:", savedCard);
+      },
+      undefined,
+      result.dataset_name
+    );
+  }
+
   async function handleAddCard() {
-    const text = selectedText;
+    const text = searchQuery || selectedText;
     setAnchor(null);
     if (!text) return;
 
@@ -124,6 +207,16 @@ export default function CardContextMenu() {
     }
   }
 
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleSearch();
+    } else if (e.key === "Escape") {
+      setShowSearchPanel(false);
+      setSearchResults([]);
+    }
+  }
+
   if (!anchor) return null;
 
   const flip = anchor.top < TOP_MARGIN;
@@ -139,21 +232,90 @@ export default function CardContextMenu() {
     <div
       ref={menuRef}
       style={style}
-      className="bg-bg-card border border-border-default rounded-md shadow-lg py-1 min-w-40"
+      className="bg-bg-card border border-border-default rounded-lg shadow-lg min-w-[300px] max-w-[400px]"
     >
-      <div
-        className="px-3 py-1 text-xs text-text-tertiary truncate max-w-[220px]"
-        title={selectedText}
-      >
-        {selectedText}
+      {/* Search Input Section */}
+      <div className="p-3 border-b border-border-default">
+        <input
+          ref={inputRef}
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Search cards..."
+          className="w-full px-3 py-1.5 text-sm rounded border border-border-default bg-bg-surface text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent"
+        />
       </div>
-      <button
-        onClick={handleAddCard}
-        className="w-full text-left px-3 py-1.5 text-sm text-text-primary hover:bg-mid-gray/20 transition-colors cursor-pointer flex items-center gap-2"
-      >
-        <Plus size={14} className="shrink-0" />
-        Add to Card
-      </button>
+
+      {/* Search Results Section */}
+      {showSearchPanel && (
+        <div className="max-h-[200px] overflow-y-auto border-b border-border-default">
+          {isSearching ? (
+            <div className="px-3 py-2 text-sm text-text-tertiary text-center">
+              Searching...
+            </div>
+          ) : searchResults.length > 0 ? (
+            <div className="py-1">
+              <div className="px-3 py-1 text-xs text-text-tertiary font-medium">
+                Found {searchResults.length} card{searchResults.length !== 1 ? "s" : ""}
+              </div>
+              {searchResults.map((result) => (
+                <button
+                  key={result.card_uuid}
+                  onClick={() => handleSelectCard(result)}
+                  className="w-full text-left px-3 py-2 hover:bg-mid-gray/20 transition-colors cursor-pointer group"
+                >
+                  <div className="text-sm text-text-primary truncate group-hover:text-accent transition-colors">
+                    {result.question}
+                  </div>
+                  <div className="text-xs text-text-tertiary truncate">
+                    {result.dataset_name}
+                  </div>
+                </button>
+              ))}
+            </div>
+          ) : searchQuery.trim() ? (
+            <div className="px-3 py-2 text-sm text-text-tertiary text-center">
+              No matching cards found
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {/* Action Buttons */}
+      <div className="p-1">
+        {!showSearchPanel ? (
+          <button
+            onClick={() => {
+              setShowSearchPanel(true);
+              handleSearch();
+            }}
+            disabled={isSearching || !searchQuery.trim()}
+            className="w-full text-left px-3 py-1.5 text-sm text-text-primary hover:bg-mid-gray/20 transition-colors cursor-pointer flex items-center gap-2 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Search size={14} className="shrink-0" />
+            Search existing cards
+          </button>
+        ) : (
+          <button
+            onClick={() => {
+              setShowSearchPanel(false);
+              setSearchResults([]);
+            }}
+            className="w-full text-left px-3 py-1.5 text-sm text-text-secondary hover:bg-mid-gray/20 transition-colors cursor-pointer flex items-center gap-2 rounded"
+          >
+            <X size={14} className="shrink-0" />
+            Close search
+          </button>
+        )}
+        <button
+          onClick={handleAddCard}
+          className="w-full text-left px-3 py-1.5 text-sm text-text-primary hover:bg-mid-gray/20 transition-colors cursor-pointer flex items-center gap-2 rounded"
+        >
+          <Plus size={14} className="shrink-0" />
+          Add as new card
+        </button>
+      </div>
     </div>
   );
 }
