@@ -2,7 +2,10 @@
 
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Eye, Pencil, X } from "lucide-react";
 import type { Card, CardDatasetSummary } from "@/lib/types";
+import MarkdownViewer from "@/components/wiki/markdown/markdown";
+import "./CardEditor.css";
 
 function CardEditModal({
   card,
@@ -24,16 +27,46 @@ function CardEditModal({
   const [answer, setAnswer] = useState(card?.answer || "");
   const [note, setNote] = useState(card?.note || "");
   const [suggestion, setSuggestion] = useState(card?.suggestion || "");
+  // Editing an existing card defaults to view mode; new cards start in edit mode.
+  const [viewMode, setViewMode] = useState(!!card?.uuid);
+
+  const selectedDatasetName =
+    datasets.find((ds) => ds.info.uuid === selectedDataset)?.info.name || "";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-bg-card rounded-xl border border-border-default p-8 w-[80vw] h-[80vh] flex flex-col">
+      <div className="relative bg-bg-card rounded-xl border border-border-default p-8 w-[80vw] h-[80vh] flex flex-col">
+        {/* Close button (top-right corner) */}
+        <button
+          onClick={onClose}
+          className="absolute top-4 right-4 p-1.5 rounded-lg text-text-tertiary hover:text-text-primary hover:bg-mid-gray/20 transition-colors"
+          title="Close"
+        >
+          <X size={20} />
+        </button>
         {/* Header with title and buttons */}
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-semibold">
-            {card ? "Edit Card" : "New Card"}
+            {viewMode ? "View Card" : card ? "Edit Card" : "New Card"}
           </h2>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 pr-10">
+            <button
+              onClick={() => setViewMode((v) => !v)}
+              className="px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 flex items-center gap-2"
+              title={viewMode ? "Switch to edit mode" : "Switch to view mode"}
+            >
+              {viewMode ? (
+                <>
+                  <Pencil size={14} />
+                  Edit
+                </>
+              ) : (
+                <>
+                  <Eye size={14} />
+                  View
+                </>
+              )}
+            </button>
             {onDelete && (
               <button
                 onClick={onDelete}
@@ -42,91 +75,125 @@ function CardEditModal({
                 Delete
               </button>
             )}
-            <button
-              onClick={onClose}
-              className="px-4 py-2 rounded-lg border border-border-default text-sm"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={() =>
-                onSave(selectedDataset, {
-                  uuid: card?.uuid || "",
-                  question,
-                  answer,
-                  note,
-                  suggestion,
-                  familiarity: card?.familiarity || 0,
-                })
-              }
-              disabled={!question.trim()}
-              className="px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 disabled:opacity-50"
-            >
-              Save
-            </button>
+            {!viewMode && (
+              <button
+                onClick={() =>
+                  onSave(selectedDataset, {
+                    uuid: card?.uuid || "",
+                    question,
+                    answer,
+                    note,
+                    suggestion,
+                    familiarity: card?.familiarity || 0,
+                  })
+                }
+                disabled={!question.trim()}
+                className="px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 disabled:opacity-50"
+              >
+                Save
+              </button>
+            )}
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto space-y-6">
-          <div>
-            <label className="block text-lg font-medium mb-2">Dataset</label>
-            <select
-              value={selectedDataset}
-              onChange={(e) => setSelectedDataset(e.target.value)}
-              className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-lg"
-            >
-              {datasets.map((ds) => (
-                <option key={ds.info.uuid} value={ds.info.uuid}>
-                  {ds.info.name} ({ds.card_count} cards)
-                </option>
-              ))}
-            </select>
+        {viewMode ? (
+          <div className="flex-1 overflow-y-auto space-y-6">
+            <div>
+              <div className="text-sm text-text-tertiary mb-2">
+                Dataset: {selectedDatasetName || "(unknown)"}
+              </div>
+            </div>
+            <div>
+              <div className="text-3xl font-semibold">
+                {question || "(empty question)"}
+              </div>
+            </div>
+            <div>
+              {answer.trim() ? (
+                <div className="card-md relative px-4 py-3 rounded-lg border border-border-default bg-bg-surface">
+                  <MarkdownViewer content={answer} withTOC={true} />
+                </div>
+              ) : (
+                <div className="text-text-tertiary italic">(no answer)</div>
+              )}
+            </div>
+            {suggestion.trim() && (
+              <div>
+                <div className="text-sm text-text-tertiary mb-2">Suggestion</div>
+                <div className="text-lg">{suggestion}</div>
+              </div>
+            )}
+            {note.trim() && (
+              <div>
+                <div className="text-sm text-text-tertiary mb-2">Note</div>
+                <div className="px-4 py-3 rounded-lg border border-border-default bg-bg-surface">
+                  <MarkdownViewer content={note} />
+                </div>
+              </div>
+            )}
           </div>
-          <div>
-            <label className="block text-lg font-medium mb-2">Question</label>
-            <textarea
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              rows={1}
-              className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl"
-              placeholder="What do you want to learn?"
-            />
+        ) : (
+          <div className="flex-1 overflow-y-auto space-y-6">
+            <div>
+              <label className="block text-lg font-medium mb-2">Dataset</label>
+              <select
+                value={selectedDataset}
+                onChange={(e) => setSelectedDataset(e.target.value)}
+                className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-lg"
+              >
+                {datasets.map((ds) => (
+                  <option key={ds.info.uuid} value={ds.info.uuid}>
+                    {ds.info.name} ({ds.card_count} cards)
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-lg font-medium mb-2">Question</label>
+              <textarea
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                rows={1}
+                className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl"
+                placeholder="What do you want to learn?"
+              />
+            </div>
+            <div>
+              <label className="block text-lg font-medium mb-2">Answer</label>
+              <textarea
+                value={answer}
+                onChange={(e) => setAnswer(e.target.value)}
+                rows={6}
+                className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl"
+                placeholder="The answer or explanation (Markdown supported)"
+              />
+            </div>
+            <div>
+              <label className="block text-lg font-medium mb-2">
+                Suggestion (optional)
+              </label>
+              <input
+                type="text"
+                value={suggestion}
+                onChange={(e) => setSuggestion(e.target.value)}
+                className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl"
+                placeholder="AI suggestion or hint"
+              />
+            </div>
+            <div>
+              <label className="block text-lg font-medium mb-2">
+                Note (optional)
+              </label>
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                rows={3}
+                className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl"
+                placeholder="Additional notes (Markdown supported)"
+              />
+            </div>
           </div>
-          <div>
-            <label className="block text-lg font-medium mb-2">Answer</label>
-            <textarea
-              value={answer}
-              onChange={(e) => setAnswer(e.target.value)}
-              rows={6}
-              className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl"
-              placeholder="The answer or explanation"
-            />
-          </div>
-          <div>
-            <label className="block text-lg font-medium mb-2">
-              Suggestion (optional)
-            </label>
-            <input
-              type="text"
-              value={suggestion}
-              onChange={(e) => setSuggestion(e.target.value)}
-              className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl"
-              placeholder="AI suggestion or hint"
-            />
-          </div>
-          <div>
-            <label className="block text-lg font-medium mb-2">
-              Note (optional)
-            </label>
-            <textarea
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              rows={3}
-              className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl"
-              placeholder="Additional notes"
-            />
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );

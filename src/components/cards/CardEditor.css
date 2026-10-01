@@ -1,0 +1,18 @@
+/* ─── Card editor markdown scope ────────────────────────────────
+ * Overrides for the shared MarkdownViewer (src/components/wiki/markdown)
+ * when rendered inside the card editor. Kept separate from markdown.css so
+ * the wiki page's TOC behaviour (fixed to the viewport) is unaffected.
+ *
+ * The `.card-md` scope has higher specificity than the global
+ * `#table-of-contents` rule, so this wins regardless of CSS load order.
+ */
+
+/* Anchor the answer TOC inside the editor instead of the viewport corner. */
+.card-md #table-of-contents {
+    position: absolute;
+    right: 0.5rem;
+    top: 0.5rem;
+    z-index: 10;
+    max-height: calc(100% - 1rem);
+    max-width: 60%;
+}
