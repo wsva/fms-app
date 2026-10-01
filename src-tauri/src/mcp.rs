@@ -252,6 +252,16 @@ struct DictationSaveCueParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct AddCueToFavoritesParam {
+    dataset_uuid: String,
+    media_uuid: String,
+    cue_uuid: String,
+    /// Optional padding (ms) added before/after the cue bounds. Default 150.
+    #[serde(default)]
+    padding_ms: Option<i64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct DictationDeleteCueParam {
     dataset_uuid: String,
     cue_uuid: String,
@@ -1101,6 +1111,35 @@ impl DatasetMcpServer {
             .map_err(|e| format!("Invalid cue JSON: {}", e))?;
         dictation::listen_save_cue(settings, param.dataset_uuid, cue).await?;
         Ok(serde_json::json!({"status": "ok", "message": "Cue saved"}).to_string())
+    }
+
+    #[tool(name = "dataset_add_cue_to_favorites", description = "Cut a cue's audio into a WAV clip and add it to the Favorites dataset (created on demand). Optionally pass padding_ms (default 150) to extend the clip beyond the cue bounds. Returns JSON with the new favorites dataset/media/subtitle/cue UUIDs and clip duration.")]
+    async fn dataset_add_cue_to_favorites(&self, Parameters(param): Parameters<AddCueToFavoritesParam>) -> Result<String, String> {
+        log::info!(
+            "[MCP] dataset_add_cue_to_favorites: dataset={}, media={}, cue={}",
+            param.dataset_uuid,
+            param.media_uuid,
+            param.cue_uuid
+        );
+        let settings = self.app.state::<SettingsState>();
+        let result = dictation::dictation_add_cue_to_favorites(
+            self.app.clone(),
+            settings,
+            param.dataset_uuid,
+            param.media_uuid,
+            param.cue_uuid,
+            param.padding_ms,
+        )
+        .await?;
+        Ok(result.to_string())
+    }
+
+    #[tool(name = "dataset_list_favorite_cues", description = "List the cue UUIDs currently in the Favorites dataset. Favorite clips reuse their source cue's UUID as the cue key, so this set identifies which cues (in any dataset) are already favorited. Returns JSON {status, count, cue_uuids}.")]
+    async fn dataset_list_favorite_cues(&self) -> Result<String, String> {
+        log::info!("[MCP] dataset_list_favorite_cues");
+        let settings = self.app.state::<SettingsState>();
+        let uuids = dictation::dictation_list_favorite_cues(settings).await?;
+        Ok(serde_json::json!({ "status": "ok", "count": uuids.len(), "cue_uuids": uuids }).to_string())
     }
 
     #[tool(name = "dictation_delete_cue", description = "Delete a cue from a dataset by its UUID.")]

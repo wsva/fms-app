@@ -23,6 +23,10 @@ pub struct DatasetInfo {
     pub version: u32,
     pub structure: String,
     pub updated: String,
+    /// Marks the special "Favorites" dataset that cue audio clips are cut into.
+    /// Serde default keeps existing info.json files valid.
+    #[serde(default)]
+    pub is_favorites: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -403,6 +407,7 @@ fn scan_dataset_dir(path: &Path, location: &str) -> Option<DatasetSummary> {
         version: 0,
         structure: "dictation-v1".into(),
         updated: String::new(),
+        is_favorites: false,
     };
     Some(DatasetSummary {
         info,
@@ -509,6 +514,7 @@ pub async fn dataset_import(
         version: 1,
         structure: "dictation-v1".into(),
         updated: now,
+        is_favorites: false,
     };
 
     // Write info.json
@@ -670,6 +676,7 @@ pub async fn dataset_create(
         version: 1,
         structure: "dictation-v1".into(),
         updated: now,
+        is_favorites: false,
     };
     let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
     fs::write(dst.join("info.json"), data).map_err(|e| e.to_string())?;
@@ -682,6 +689,89 @@ pub async fn dataset_create(
         location: root.to_string_lossy().into_owned(),
         status: "not_ready".into(),
     })
+}
+
+/// Locate the special "Favorites" dataset directory (the one whose `info.json`
+/// has `is_favorites == true`) WITHOUT creating it. Returns `None` when it does
+/// not exist yet. Used for read-only lookups such as de-duplicating favorites.
+pub(crate) fn find_favorites_dataset(settings: &SettingsState) -> Option<(PathBuf, String)> {
+    for root in &dataset_roots(settings) {
+        if !root.exists() {
+            continue;
+        }
+        let entries = match fs::read_dir(root) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            let info_path = dir.join("info.json");
+            if !info_path.is_file() {
+                continue;
+            }
+            let data = match fs::read_to_string(&info_path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if let Ok(info) = serde_json::from_str::<DatasetInfo>(&data) {
+                if info.is_favorites {
+                    return Some((dir, info.uuid));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the special "Favorites" dataset, creating it on first use.
+///
+/// Scans all configured dataset roots for a directory whose `info.json` has
+/// `is_favorites == true`. If none exists, creates the standard skeleton
+/// (media/subtitle/waveform/transcript + info.json) named "Favorites" under the
+/// first root. Returns `(dataset_dir, dataset_uuid)`.
+pub(crate) fn ensure_favorites_dataset(settings: &SettingsState) -> Result<(PathBuf, String), String> {
+    if let Some(found) = find_favorites_dataset(settings) {
+        log::debug!("Found Favorites dataset at '{}'", found.0.display());
+        return Ok(found);
+    }
+
+    // None found -- create one under the first configured root.
+    let root = dataset_roots(settings)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| datasets_dir(settings));
+    fs::create_dir_all(&root).map_err(|e| format!("Failed to create datasets dir: {}", e))?;
+
+    let uuid = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let dir_name = sanitize_dir_name("Favorites").unwrap_or_else(|| uuid.clone());
+    // Avoid clobbering an existing unrelated "Favorites" directory.
+    let mut dst = root.join(&dir_name);
+    let mut n = 2;
+    while dst.exists() {
+        dst = root.join(format!("{}-{}", dir_name, n));
+        n += 1;
+    }
+
+    for sub in ["media", "subtitle", "waveform", "transcript"] {
+        fs::create_dir_all(dst.join(sub)).map_err(|e| e.to_string())?;
+    }
+
+    let info = DatasetInfo {
+        name: "Favorites".to_string(),
+        uuid: uuid.clone(),
+        description: "Clips cut from favorited cues".to_string(),
+        parent_uuid: String::new(),
+        version: 1,
+        structure: "dictation-v1".into(),
+        updated: now,
+        is_favorites: true,
+    };
+    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
+    fs::write(dst.join("info.json"), data).map_err(|e| e.to_string())?;
+
+    log::info!("Created Favorites dataset '{}' at '{}'", uuid, dst.display());
+    Ok((dst, uuid))
 }
 
 /// Copy (or symlink) audio/video files from a source directory into a dataset's
@@ -1071,7 +1161,7 @@ struct WaveformJson<'a> {
 
 /// Write waveform peaks data into the `listen_waveform` table of the dataset DB.
 /// Looks up the media_uuid by matching the relative source path.
-fn write_waveform_to_db(
+pub(crate) fn write_waveform_to_db(
     conn: &Connection,
     media_dir: &Path,
     media_path: &Path,
@@ -1361,7 +1451,7 @@ fn parse_vtt_timestamp(s: &str) -> Option<i64> {
 }
 
 /// Create the SQLite database schema (v2 with versioning).
-fn create_db_schema(conn: &rusqlite::Connection) -> Result<(), String> {
+pub(crate) fn create_db_schema(conn: &rusqlite::Connection) -> Result<(), String> {
     conn.execute_batch(
         "
         -- Media files (audio/video)

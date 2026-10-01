@@ -15,7 +15,7 @@ import type { WaveformData } from "@/components/listen_speak/dictation/component
 const getUUID = () => crypto.randomUUID().replaceAll("-", "");
 
 interface DatasetSummary {
-    info: { uuid: string; name: string };
+    info: { uuid: string; name: string; is_favorites?: boolean };
     path: string;
     /** Root location directory this dataset was found under. */
     location: string;
@@ -73,6 +73,9 @@ export function useDictationData() {
     const [stateDictMode, setStateDictMode] = useState<"full" | "focus">("full");
     const [stateDictCue, setStateDictCue] = useState<Cue | undefined>();
     const [completedMediaUuids, setCompletedMediaUuids] = useState<Set<string>>(new Set());
+    // Cue UUIDs already present in the Favorites dataset (favorite clips reuse the
+    // source cue's uuid). Used to mark/disable the "add to favorites" button.
+    const [favoriteCueUuids, setFavoriteCueUuids] = useState<Set<string>>(new Set());
     const dictSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Player
@@ -94,6 +97,19 @@ export function useDictationData() {
     }, []);
 
     useEffect(() => { loadDatasets(); }, [loadDatasets]);
+
+    // ── Favorites (cue UUIDs already cut into the Favorites dataset) ──
+
+    const loadFavoriteCues = useCallback(() => {
+        if (!isTauri()) return;
+        invoke<string[]>("dictation_list_favorite_cues")
+            .then((res) => setFavoriteCueUuids(new Set(res)))
+            .catch(() => setFavoriteCueUuids(new Set()));
+    }, []);
+
+    // Refresh when the viewed dataset/media changes (and on mount) so the Star
+    // buttons reflect the current Favorites dataset contents.
+    useEffect(() => { loadFavoriteCues(); }, [loadFavoriteCues, selectedDatasetUuid, stateMediaUUID, reloadToken]);
 
     // ── Dataset locations ──
 
@@ -478,6 +494,8 @@ export function useDictationData() {
         stateDictSuccessSet, stateDictStatus, stateDictMode, setStateDictMode,
         stateDictCue, setStateDictCue, completedMediaUuids,
         handleDictSuccess, handleDictStatusToggle,
+        // Favorites
+        favoriteCueUuids, reloadFavorites: loadFavoriteCues,
         // Player
         videoRef, stateFocusedCueUUID, setStateFocusedCueUUID,
         stateWaveformPeaks, audioSrc, audioMode, hasMedia,

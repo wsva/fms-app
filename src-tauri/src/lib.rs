@@ -193,6 +193,8 @@ pub fn run() {
             dictation::listen_delete_media,
             dictation::listen_save_dictation,
             dictation::listen_get_waveform,
+            dictation::dictation_add_cue_to_favorites,
+            dictation::dictation_list_favorite_cues,
             // Version management
             dictation::subtitle_create_version,
             dictation::subtitle_finalize_version,

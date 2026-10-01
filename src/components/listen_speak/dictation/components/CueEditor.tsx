@@ -11,6 +11,7 @@ import {
   Mic,
   Pencil,
   Play,
+  Star,
   Trash2,
   X,
 } from "lucide-react";
@@ -297,6 +298,13 @@ export type CueEditorProps = {
   initialSuccess?: boolean;
   onSuccess?: (uuid: string, success: boolean) => void;
   onFocusInput?: () => void;
+  onAddToFavorites?: () => void;
+  /** When true, the "add to favorites" button is shown but disabled (e.g. the
+   *  current dataset already IS the Favorites dataset). */
+  favoritesDisabled?: boolean;
+  /** When true, this cue is already in the Favorites dataset: the Star renders
+   *  filled and disabled (one-way add — remove clips from the Favorites dataset). */
+  isFavorited?: boolean;
 };
 
 export default function CueEditor({
@@ -317,6 +325,9 @@ export default function CueEditor({
   initialSuccess,
   onSuccess,
   onFocusInput,
+  onAddToFavorites,
+  favoritesDisabled,
+  isFavorited,
 }: CueEditorProps) {
   const [stateStart, setStateStart] = useState(formatVttTime(cue.start_ms));
   const [stateEnd, setStateEnd] = useState(formatVttTime(cue.end_ms));
@@ -427,6 +438,11 @@ export default function CueEditor({
   };
 
   const isDictationMode = mode === "dictation" || mode === "dictation_focus";
+  // End (right) column buttons: edit / done / add-favorites.
+  const showEditButton = adminMode && isDictationMode && allowEdit;
+  const showDoneButton = adminMode && mode === "dictation_edit" && allowEdit;
+  const showFavoriteButton = isDictationMode && !!onAddToFavorites;
+  const hasEndButtons = showEditButton || showDoneButton || showFavoriteButton;
 
   return (
     <div className={containerClass(cue)}>
@@ -497,32 +513,52 @@ export default function CueEditor({
           </div>
         </div>
 
-        {/* Right sidebar — icon buttons */}
+        {/* End sidebar 1 — edit + favorites, one column */}
+        {hasEndButtons && (
+          <div
+            className={`flex flex-col items-center gap-1 py-1 shrink-0 transition-colors rounded-lg ${stateSuccess && isDictationMode ? "bg-success-bg" : "bg-transparent"}`}
+            style={{ width: 36 }}
+          >
+            {showEditButton && (
+              <Tooltip>
+                <Tooltip.Trigger>
+                  <Button isIconOnly variant="ghost" size="sm" onPress={onEdit}>
+                    <Pencil size={16} />
+                  </Button>
+                </Tooltip.Trigger>
+                <Tooltip.Content>edit subtitle</Tooltip.Content>
+              </Tooltip>
+            )}
+            {showDoneButton && (
+              <Button isIconOnly variant="ghost" size="sm" onPress={onDone}>
+                <X size={16} />
+              </Button>
+            )}
+            {showFavoriteButton && (
+              <Tooltip>
+                <Tooltip.Trigger>
+                  <Button isIconOnly variant="ghost" size="sm" aria-label="Add to favorites" isDisabled={favoritesDisabled || isFavorited} onPress={() => onAddToFavorites?.()}>
+                    <Star size={16} fill={isFavorited ? "currentColor" : "none"} />
+                  </Button>
+                </Tooltip.Trigger>
+                <Tooltip.Content>{favoritesDisabled ? "already in the Favorites dataset" : isFavorited ? "already in Favorites" : "add to favorites"}</Tooltip.Content>
+              </Tooltip>
+            )}
+          </div>
+        )}
+
+        {/* End sidebar 2 — playback + voice input, one column */}
         <div
-          className={`flex flex-col items-center gap-1 py-1 overflow-y-auto shrink-0 no-scrollbar transition-colors rounded-lg ${stateSuccess && isDictationMode ? "bg-success-bg" : "bg-transparent"}`}
+          className={`flex flex-col items-center gap-1 py-1 shrink-0 transition-colors rounded-lg ${stateSuccess && isDictationMode ? "bg-success-bg" : "bg-transparent"}`}
           style={{ width: 36 }}
         >
-          {adminMode && isDictationMode && allowEdit && (
-            <Tooltip>
-              <Tooltip.Trigger>
-                <Button isIconOnly variant="ghost" size="sm" onPress={onEdit}>
-                  <Pencil size={16} />
-                </Button>
-              </Tooltip.Trigger>
-              <Tooltip.Content>edit subtitle</Tooltip.Content>
-            </Tooltip>
-          )}
-          {adminMode && mode === "dictation_edit" && allowEdit && (
-            <Button isIconOnly variant="ghost" size="sm" onPress={onDone}>
-              <X size={16} />
-            </Button>
-          )}
           <Tooltip isDisabled={!isDictationMode}>
             <Tooltip.Trigger>
               <Button
                 isIconOnly
                 variant="ghost"
                 size="sm"
+                aria-label="Play"
                 onPress={() => {
                   if (!media) return;
                   if (media.paused) playMediaPart(cue, media, false);

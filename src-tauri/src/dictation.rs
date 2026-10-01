@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::auth::workspace_identity;
@@ -957,4 +957,232 @@ pub async fn subtitle_rollback_to_version(
     .map_err(|e| e.to_string())?;
     
     Ok(new_version)
+}
+
+/// Cut a cue's audio range from its source media into a WAV clip and add it to
+/// the special "Favorites" dataset (created on demand). Registers matching
+/// media/subtitle/cue rows plus a waveform so the clip is immediately playable
+/// and dictatable. Returns JSON describing the newly created rows.
+#[tauri::command]
+pub async fn dictation_add_cue_to_favorites(
+    app: AppHandle,
+    settings: State<'_, SettingsState>,
+    dataset_uuid: String,
+    media_uuid: String,
+    cue_uuid: String,
+    padding_ms: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    log::info!(
+        "dictation_add_cue_to_favorites: dataset={}, media={}, cue={}, padding={:?}",
+        dataset_uuid,
+        media_uuid,
+        cue_uuid,
+        padding_ms
+    );
+
+    // 1. Read the source cue + media from the source dataset DB.
+    let src_dir = find_dataset_dir(&settings, &dataset_uuid)?;
+    let src_db_path = src_dir.join("data.sqlite3");
+    if !src_db_path.exists() {
+        return Err("Source dataset database not found. Please generate the database first.".into());
+    }
+    let src_conn = Connection::open(&src_db_path).map_err(|e| e.to_string())?;
+
+    let (start_ms, end_ms, content, reference): (i64, i64, String, Option<String>) = src_conn
+        .query_row(
+            "SELECT start_ms, end_ms, content, reference FROM listen_subtitle_cue WHERE uuid = ?1",
+            [&cue_uuid],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|e| format!("Cue not found ({}): {}", cue_uuid, e))?;
+
+    let source_rel: String = src_conn
+        .query_row(
+            "SELECT source FROM listen_media WHERE uuid = ?1",
+            [&media_uuid],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Media not found ({}): {}", media_uuid, e))?;
+
+    // 2. Resolve the absolute source media path (`source` is relative to media/).
+    let src_media_path = src_dir.join("media").join(&source_rel);
+    if !src_media_path.exists() {
+        return Err(format!(
+            "Source media file not found: {}",
+            src_media_path.display()
+        ));
+    }
+
+    // 3. Resolve (or create) the Favorites dataset and open its DB + schema.
+    let (fav_dir, fav_uuid) = crate::dataset::ensure_favorites_dataset(&settings)?;
+    let fav_db_path = fav_dir.join("data.sqlite3");
+    let db_existed = fav_db_path.exists();
+    let fav_conn = Connection::open(&fav_db_path).map_err(|e| e.to_string())?;
+    if !db_existed {
+        crate::dataset::create_db_schema(&fav_conn)?;
+    }
+
+    // 4. De-duplicate. The favorite cue REUSES the source cue's uuid as its primary
+    //    key, so a row with that uuid already present means this cue was favorited
+    //    before. Deleting the clip removes that row, which re-enables adding it.
+    let already: bool = fav_conn
+        .query_row(
+            "SELECT 1 FROM listen_subtitle_cue WHERE uuid = ?1",
+            [&cue_uuid],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if already {
+        log::info!(
+            "Cue {} already in Favorites (dataset {}); skipping duplicate",
+            cue_uuid,
+            fav_uuid
+        );
+        return Ok(serde_json::json!({
+            "status": "duplicate",
+            "favorites_dataset_uuid": fav_uuid,
+            "cue_uuid": cue_uuid,
+            "message": "This cue is already in your Favorites dataset.",
+        }));
+    }
+
+    // 5. Compute the padded clip range.
+    let pad = padding_ms.unwrap_or(150).max(0);
+    let clip_start = (start_ms - pad).max(0);
+    let clip_end = end_ms + pad;
+
+    // 6. Decode + slice the clip at the source's native rate/channels.
+    let pcm = crate::audio::decode_range_native(&src_media_path, clip_start, clip_end)?;
+    if pcm.samples.is_empty() {
+        return Err("Decoded clip is empty (range may be beyond the end of the media).".into());
+    }
+    let channels = pcm.channels.max(1) as usize;
+    let frames = pcm.samples.len() / channels;
+    let clip_dur_ms = if pcm.sample_rate > 0 {
+        (frames as i64 * 1000) / pcm.sample_rate as i64
+    } else {
+        0
+    };
+
+    // 7. Write the WAV clip into the Favorites media/ dir.
+    let new_media_uuid = Uuid::new_v4().to_string();
+    let wav_file_name = format!("{}.wav", new_media_uuid);
+    let fav_media_dir = fav_dir.join("media");
+    let wav_path = fav_media_dir.join(&wav_file_name);
+    crate::audio::write_wav(&wav_path, &pcm.samples, pcm.sample_rate, pcm.channels)?;
+
+    // 8. Insert media/subtitle/cue rows. `source` is media-relative (matches the
+    //    waveform lookup and the frontend `${dataset}/media/${source}` playback URL).
+    //    The favorite CUE reuses the source `cue_uuid` as its PK for de-duplication.
+    let now = chrono::Utc::now().to_rfc3339();
+    let subtitle_uuid = Uuid::new_v4().to_string();
+
+    fav_conn
+        .execute(
+            "INSERT OR REPLACE INTO listen_media (uuid, source, duration_ms, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![new_media_uuid, wav_file_name, clip_dur_ms, now, now],
+        )
+        .map_err(|e| format!("Failed to insert favorite media: {}", e))?;
+
+    fav_conn
+        .execute(
+            "INSERT INTO listen_subtitle (uuid, media_uuid, name, track_type, version, is_active, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, 1, 1, ?5, ?6)",
+            rusqlite::params![subtitle_uuid, new_media_uuid, "Favorite", "stt", now, now],
+        )
+        .map_err(|e| format!("Failed to insert favorite subtitle: {}", e))?;
+
+    fav_conn
+        .execute(
+            "INSERT INTO listen_subtitle_cue (uuid, subtitle_uuid, order_num, start_ms, end_ms, content, reference, version_created) \
+             VALUES (?1, ?2, 0, 0, ?3, ?4, ?5, 1)",
+            rusqlite::params![cue_uuid, subtitle_uuid, clip_dur_ms, content, reference],
+        )
+        .map_err(|e| format!("Failed to insert favorite cue: {}", e))?;
+
+    // 9. Generate + persist the clip waveform (best-effort; parity with normal media).
+    match crate::audio::generate_waveform(&wav_path, 100) {
+        Ok(peaks) => {
+            let peaks_json = serde_json::json!({
+                "version": peaks.version,
+                "channels": peaks.channels,
+                "sample_rate": peaks.sample_rate,
+                "samples_per_pixel": peaks.samples_per_pixel,
+                "bits": peaks.bits,
+                "length": peaks.data.len() / 2,
+                "data": peaks.data,
+            })
+            .to_string();
+            let wf_path = fav_dir
+                .join("waveform")
+                .join(format!("{}.json", new_media_uuid));
+            if let Some(parent) = wf_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(&wf_path, &peaks_json) {
+                log::warn!("[favorites] waveform file write failed: {}", e);
+            }
+            if let Err(e) = crate::dataset::write_waveform_to_db(
+                &fav_conn,
+                &fav_media_dir,
+                &wav_path,
+                &peaks_json,
+                peaks.sample_rate,
+            ) {
+                log::warn!("[favorites] waveform DB write failed: {}", e);
+            }
+        }
+        Err(e) => log::warn!("[favorites] waveform generation failed: {}", e),
+    }
+
+    // 10. Notify listeners + return the new identifiers.
+    let _ = app.emit("dataset-list-changed", ());
+    log::info!(
+        "Added favorite clip: dataset={}, media={}, cue={}, duration={}ms",
+        fav_uuid,
+        new_media_uuid,
+        cue_uuid,
+        clip_dur_ms
+    );
+    Ok(serde_json::json!({
+        "status": "ok",
+        "favorites_dataset_uuid": fav_uuid,
+        "media_uuid": new_media_uuid,
+        "subtitle_uuid": subtitle_uuid,
+        "cue_uuid": cue_uuid,
+        "duration_ms": clip_dur_ms,
+        "wav_rel_path": format!("media/{}", wav_file_name),
+    }))
+}
+
+/// List the cue UUIDs currently stored in the Favorites dataset.
+///
+/// Favorite clips reuse their SOURCE cue's uuid as the cue primary key, so the
+/// returned set can be matched against any dataset's cues to mark which ones are
+/// already favorited. Returns an empty list when no Favorites dataset exists yet
+/// (it is created lazily on first add, so this lookup never creates it).
+#[tauri::command]
+pub async fn dictation_list_favorite_cues(
+    settings: State<'_, SettingsState>,
+) -> Result<Vec<String>, String> {
+    let found = match crate::dataset::find_favorites_dataset(&settings) {
+        Some(f) => f,
+        None => return Ok(Vec::new()),
+    };
+    let (fav_dir, _fav_uuid) = found;
+    let db_path = fav_dir.join("data.sqlite3");
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT uuid FROM listen_subtitle_cue")
+        .map_err(|e| e.to_string())?;
+    let uuids = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(uuids)
 }

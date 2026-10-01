@@ -12,6 +12,8 @@ export interface DatasetInfo {
   version: number;
   structure: string;
   updated: string;
+  /** Marks the special "Favorites" dataset that cue clips are cut into. */
+  is_favorites?: boolean;
 }
 
 export interface DatasetSummary {

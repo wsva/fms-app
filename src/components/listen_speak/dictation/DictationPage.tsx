@@ -17,6 +17,9 @@ import { useDictationData } from "@/hooks/useDictationData";
 import { isAudio } from "@/lib/listen/utils";
 import { datasetStatusLabel, datasetStatusBadgeClasses, type DatasetStatus } from "@/lib/datasets/types";
 import { subscribe, getVoiceError, clearVoiceError } from "@/lib/voice-input";
+import { invoke } from "@tauri-apps/api/core";
+import { isTauri } from "@/lib/tauri";
+import { logInfo, logError } from "@/lib/logger";
 
 const getUUID = () => crypto.randomUUID().replaceAll("-", "");
 
@@ -29,6 +32,8 @@ export default function DictationPage() {
     // Keyboard-shortcut help tip: shown on hover, and also on click (controlled).
     const [helpOpen, setHelpOpen] = useState(false);
     const voiceError = useSyncExternalStore(subscribe, getVoiceError, getVoiceError);
+    // Guards against double-submits while a favorite clip is being cut.
+    const [addingFavorite, setAddingFavorite] = useState(false);
 
     // Group ready datasets by their root location for the datasets view.
     type DatasetItem = (typeof d.datasets)[number];
@@ -74,6 +79,9 @@ export default function DictationPage() {
     const selectedMedia = d.mediaList.find((m) => m.uuid === d.stateMediaUUID);
     // Media no longer has an editable title; use the source filename as its label.
     const selectedMediaLabel = selectedMedia?.source || d.stateMedia.source || "...";
+    // The Favorites dataset is where cue clips are cut INTO; adding a cue from it
+    // back to itself is meaningless, so the button is disabled while viewing it.
+    const inFavoritesDataset = !!d.selectedDataset?.info.is_favorites;
 
     useEffect(() => {
         if (voiceError) {
@@ -81,6 +89,40 @@ export default function DictationPage() {
             clearVoiceError();
         }
     }, [voiceError]);
+
+    // Cut the cue's audio into a WAV clip and add it to the Favorites dataset.
+    const handleAddToFavorites = async (cue: Cue) => {
+        if (!isTauri() || addingFavorite) return;
+        if (!d.selectedDatasetUuid || !d.stateMediaUUID) {
+            setConfirmReq({ title: "Add to favorites", message: "Select a dataset and media first." });
+            return;
+        }
+        setAddingFavorite(true);
+        try {
+            const res = await invoke<{ status?: string; duration_ms?: number }>("dictation_add_cue_to_favorites", {
+                datasetUuid: d.selectedDatasetUuid,
+                mediaUuid: d.stateMediaUUID,
+                cueUuid: cue.uuid,
+            });
+            // Refresh the favorited-cue set so the Star fills in immediately.
+            d.reloadFavorites();
+            if (res?.status === "duplicate") {
+                logInfo(`Cue ${cue.uuid} already in favorites; skipped duplicate`, "dictation");
+                setConfirmReq({ title: "Already in Favorites", message: "This cue is already in your Favorites dataset." });
+                return;
+            }
+            const secs = Math.round((res?.duration_ms ?? 0) / 100) / 10;
+            logInfo(`Added cue ${cue.uuid} to favorites (${res?.duration_ms ?? 0}ms clip)`, "dictation");
+            d.loadDatasets();
+            setConfirmReq({ title: "Added to favorites", message: `Clip (${secs}s) added to your Favorites dataset.` });
+        } catch (e) {
+            const msg = String(e);
+            logError(`Failed to add cue to favorites: ${msg}`, "dictation");
+            setConfirmReq({ title: "Add to favorites failed", message: msg });
+        } finally {
+            setAddingFavorite(false);
+        }
+    };
 
     // ── Arrow key navigation for cues ──
     useEffect(() => {
@@ -621,6 +663,9 @@ export default function DictationPage() {
                                                 initialSuccess={d.stateDictSuccessSet.has(cue.uuid)}
                                                 onSuccess={d.handleDictSuccess}
                                                 onFocusInput={() => d.setStateFocusedCueUUID(cue.uuid)}
+                                                onAddToFavorites={() => handleAddToFavorites(cue)}
+                                                favoritesDisabled={inFavoritesDataset}
+                                                isFavorited={d.favoriteCueUuids.has(cue.uuid)}
                                             />
                                         </div>
                                     ))
@@ -647,6 +692,9 @@ export default function DictationPage() {
                                                 initialSuccess={d.stateDictSuccessSet.has(d.stateDictCue.uuid)}
                                                 onSuccess={d.handleDictSuccess}
                                                 onFocusInput={() => d.setStateFocusedCueUUID(d.stateDictCue!.uuid)}
+                                                onAddToFavorites={() => handleAddToFavorites(d.stateDictCue!)}
+                                                favoritesDisabled={inFavoritesDataset}
+                                                isFavorited={d.favoriteCueUuids.has(d.stateDictCue!.uuid)}
                                             />
                                         )}
                                         {!!d.stateDictCue && (
