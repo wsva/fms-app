@@ -34,7 +34,14 @@ pub struct AuthUser {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn auth_file_path() -> Result<PathBuf, String> {
+/// Auth file path: `<workspace>/auth.json` when a workspace is selected,
+/// otherwise the legacy global path `{app-data}/fms-app/auth.json`.
+fn auth_file_path(settings: &SettingsState) -> Result<PathBuf, String> {
+    if let Some(ws_dir) = settings.workspace_dir.lock().unwrap().as_ref() {
+        std::fs::create_dir_all(ws_dir)
+            .map_err(|e| format!("Failed to create workspace dir: {}", e))?;
+        return Ok(ws_dir.join("auth.json"));
+    }
     let dir = dirs::data_dir()
         .ok_or("Could not determine data directory")?
         .join("fms-app");
@@ -42,30 +49,65 @@ fn auth_file_path() -> Result<PathBuf, String> {
     Ok(dir.join("auth.json"))
 }
 
-fn read_tokens() -> Result<Option<AuthTokens>, String> {
-    let path = auth_file_path()?;
+/// Legacy global auth file path (used for one-time migration into a workspace).
+fn legacy_auth_file_path() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("fms-app").join("auth.json"))
+}
+
+/// Migrate the legacy global auth.json into the workspace (once).
+/// The global tokens belonged to the pre-workspace single user, so the first
+/// workspace that reads them claims them; later workspaces start logged out.
+fn migrate_legacy_auth(settings: &SettingsState) {
+    let ws_auth = match auth_file_path(settings) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    // Only migrate when a workspace is selected and its auth.json is absent.
+    if settings.workspace_dir.lock().unwrap().is_none() || ws_auth.exists() {
+        return;
+    }
+    let Some(legacy) = legacy_auth_file_path() else { return; };
+    if !legacy.exists() {
+        return;
+    }
+    match std::fs::rename(&legacy, &ws_auth) {
+        Ok(_) => log::info!(
+            "[Auth] Migrated legacy auth.json into workspace: {}",
+            ws_auth.display()
+        ),
+        Err(e) => log::warn!("[Auth] Failed to migrate legacy auth.json: {}", e),
+    }
+}
+
+fn read_tokens(settings: &SettingsState) -> Result<Option<AuthTokens>, String> {
+    migrate_legacy_auth(settings);
+    let path = auth_file_path(settings)?;
     if !path.exists() {
         return Ok(None);
     }
     let content =
         std::fs::read_to_string(&path).map_err(|e| format!("Failed to read auth file: {}", e))?;
+    // Tolerate a UTF-8 BOM (Windows editors/PowerShell often add one).
+    let content = content.trim_start_matches('\u{FEFF}');
     let tokens: AuthTokens =
-        serde_json::from_str(&content).map_err(|e| format!("Failed to parse auth file: {}", e))?;
+        serde_json::from_str(content).map_err(|e| format!("Failed to parse auth file: {}", e))?;
     Ok(Some(tokens))
 }
 
-fn write_tokens(tokens: &AuthTokens) -> Result<(), String> {
-    let path = auth_file_path()?;
+fn write_tokens(settings: &SettingsState, tokens: &AuthTokens) -> Result<(), String> {
+    let path = auth_file_path(settings)?;
     let json = serde_json::to_string_pretty(tokens)
         .map_err(|e| format!("Failed to serialize tokens: {}", e))?;
     std::fs::write(&path, json).map_err(|e| format!("Failed to write auth file: {}", e))?;
+    log::info!("[Auth] Tokens written to {}", path.display());
     Ok(())
 }
 
-fn delete_tokens() -> Result<(), String> {
-    let path = auth_file_path()?;
+fn delete_tokens(settings: &SettingsState) -> Result<(), String> {
+    let path = auth_file_path(settings)?;
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| format!("Failed to delete auth file: {}", e))?;
+        log::info!("[Auth] Tokens deleted from {}", path.display());
     }
     Ok(())
 }
@@ -104,6 +146,10 @@ pub async fn auth_process_token(
 ) -> Result<AuthUser, String> {
     log::info!("auth_process_token: user={}, id={}", username, user_id);
 
+    // Tokens are stored in the currently selected workspace's auth.json
+    // (workspace must be selected before login; otherwise legacy global path).
+    let settings = app.state::<SettingsState>();
+
     let tokens = AuthTokens {
         access_token,
         refresh_token,
@@ -111,7 +157,7 @@ pub async fn auth_process_token(
         username,
         email: String::new(),
     };
-    write_tokens(&tokens)?;
+    write_tokens(&settings, &tokens)?;
 
     // Fetch user info (includes email).
     let user = fetch_user_info(&tokens.access_token).await?;
@@ -125,7 +171,7 @@ pub async fn auth_process_token(
         username: tokens.username,
         email: user.email.clone(),
     };
-    let _ = write_tokens(&tokens);
+    let _ = write_tokens(&settings, &tokens);
 
     // Try to claim the current workspace with the user's email.
     let ws_state = app.state::<WorkspaceState>();
@@ -180,9 +226,9 @@ pub async fn auth_process_token(
 /// Get the currently logged-in user, or None if not logged in.
 #[tauri::command]
 pub async fn auth_get_user(
-    _settings: State<'_, SettingsState>,
+    settings: State<'_, SettingsState>,
 ) -> Result<Option<AuthUser>, String> {
-    let tokens = match read_tokens()? {
+    let tokens = match read_tokens(&settings)? {
         Some(t) => t,
         None => return Ok(None),
     };
@@ -191,7 +237,7 @@ pub async fn auth_get_user(
         Ok(user) => Ok(Some(user)),
         Err(e) => {
             log::warn!("auth_get_user: token invalid, clearing: {}", e);
-            let _ = delete_tokens();
+            let _ = delete_tokens(&settings);
             Ok(None)
         }
     }
@@ -201,10 +247,10 @@ pub async fn auth_get_user(
 #[tauri::command]
 pub async fn auth_logout(
     app: tauri::AppHandle,
-    _settings: State<'_, SettingsState>,
+    settings: State<'_, SettingsState>,
 ) -> Result<(), String> {
     log::info!("auth_logout");
-    let tokens = read_tokens()?;
+    let tokens = read_tokens(&settings)?;
 
     if let Some(ref t) = tokens {
         let client = reqwest::Client::new();
@@ -218,7 +264,7 @@ pub async fn auth_logout(
             .await;
     }
 
-    delete_tokens()?;
+    delete_tokens(&settings)?;
     let _ = app.emit("auth-logout", ());
     Ok(())
 }
@@ -251,10 +297,25 @@ async fn fetch_user_info(access_token: &str) -> Result<AuthUser, String> {
     Ok(AuthUser { name, email })
 }
 
-/// Get the current logged-in user's identifier (email preferred, fallback to user_id).
+/// Get the current user's identifier (email preferred, fallback to user_id).
 /// Used by other modules (e.g., XP, dictation) to identify the user.
-pub(crate) fn get_current_user_email() -> String {
-    let tokens = match read_tokens().ok().flatten() {
+///
+/// Resolution order:
+/// 1. The current workspace's owner (`workspace.json` -> `user_id`), so that
+///    per-workspace progress data is always attributed to the workspace owner
+///    even if a different user is logged in globally.
+/// 2. The workspace's `auth.json` tokens (unclaimed workspace / no workspace).
+pub(crate) fn get_current_user_email(settings: &SettingsState) -> String {
+    // Prefer the workspace owner from workspace.json.
+    if let Some(ws_dir) = settings.workspace_dir.lock().unwrap().as_ref() {
+        if let Some(ws) = crate::workspace::load_workspace_json(ws_dir) {
+            if !ws.user_id.is_empty() && ws.user_id != "local" {
+                return ws.user_id;
+            }
+        }
+    }
+    // Fallback: auth tokens of the current workspace (or legacy global).
+    let tokens = match read_tokens(settings).ok().flatten() {
         Some(t) => t,
         None => return String::new(),
     };

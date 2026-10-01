@@ -96,16 +96,9 @@ const BOOK_STRUCTURE: &str = "reading-v1";
 // ============================================================
 
 /// Root directory of the reading library.
+/// Workspace-derived: `<workspace>/books` when a workspace is selected.
 fn books_root(settings: &SettingsState) -> PathBuf {
-    let dir = settings.settings.lock().unwrap().books_dir.clone();
-    if dir.is_empty() {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("fms-app")
-            .join("books")
-    } else {
-        PathBuf::from(dir)
-    }
+    settings.books_dir()
 }
 
 /// Find a book directory by UUID.

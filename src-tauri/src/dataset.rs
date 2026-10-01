@@ -9,7 +9,6 @@ use uuid::Uuid;
 
 use crate::settings::SettingsState;
 use crate::model::ModelState;
-use crate::dictation::open_app_db;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -88,91 +87,182 @@ fn is_media_file(name: &str) -> bool {
         .any(|ext| lower.ends_with(&format!(".{}", ext)))
 }
 
+/// Resolve the default datasets directory.
+///
+/// When a workspace is selected, datasets always live in `<workspace>/datasets`
+/// (derived from the workspace directory, not from settings.json). Linked
+/// directories are read from `<workspace>/datasets/meta.json`. Without a
+/// workspace, fall back to the configured/global default.
 fn datasets_dir(settings: &SettingsState) -> PathBuf {
-    PathBuf::from(settings.settings.lock().unwrap().datasets_dir.clone())
+    settings.datasets_dir()
 }
 
 // ---------------------------------------------------------------------------
-// Dataset locations (stored in the app-level database)
+// Dataset locations (stored in meta.json like wiki)
 // ---------------------------------------------------------------------------
 
-/// Create the dataset_locations table if it does not exist.
-fn ensure_locations_table(conn: &rusqlite::Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS dataset_locations (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            path       TEXT NOT NULL UNIQUE,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );",
-    )
-    .map_err(|e| e.to_string())
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct DatasetLinkedDir {
+    pub name: String,
+    pub path: String,
 }
 
-/// Load all stored dataset location paths, ordered by insertion.
-fn load_locations(settings: &SettingsState) -> Vec<String> {
-    let Ok(conn) = open_app_db(settings) else { return Vec::new(); };
-    if ensure_locations_table(&conn).is_err() {
-        return Vec::new();
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+struct DatasetMeta {
+    #[serde(default)]
+    linked_dirs: Vec<DatasetLinkedDir>,
+}
+
+#[derive(Clone, Serialize, Debug)]
+pub struct DatasetDirEntry {
+    pub name: String,
+    pub path: String,
+    pub is_linked: bool,
+}
+
+fn dataset_meta_path(datasets_dir: &str) -> PathBuf {
+    PathBuf::from(datasets_dir).join("meta.json")
+}
+
+fn read_dataset_meta(datasets_dir: &str) -> DatasetMeta {
+    let meta_path = dataset_meta_path(datasets_dir);
+    if !meta_path.exists() {
+        return DatasetMeta::default();
     }
-    let mut stmt = match conn.prepare("SELECT path FROM dataset_locations ORDER BY id") {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
-        Ok(rows) => rows,
-        Err(_) => return Vec::new(),
-    };
-    rows.filter_map(|r| r.ok()).collect()
+    fs::read_to_string(&meta_path)
+        .ok()
+        .map(|data| data.trim_start_matches('\u{FEFF}').to_string())
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_default()
 }
 
-/// Persist a new dataset location path (ignores duplicates).
-fn insert_location(settings: &SettingsState, path: &str) -> Result<(), String> {
-    let conn = open_app_db(settings).map_err(|e| e.to_string())?;
-    ensure_locations_table(&conn)?;
-    conn.execute(
-        "INSERT OR IGNORE INTO dataset_locations (path) VALUES (?1)",
-        rusqlite::params![path],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+fn write_dataset_meta(datasets_dir: &str, meta: &DatasetMeta) -> Result<(), String> {
+    let meta_path = dataset_meta_path(datasets_dir);
+    // Ensure the datasets directory exists
+    fs::create_dir_all(datasets_dir).map_err(|e| e.to_string())?;
+    let data = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
+    fs::write(&meta_path, data).map_err(|e| e.to_string())
 }
 
-/// Remove a stored dataset location path.
-fn delete_location(settings: &SettingsState, path: &str) -> Result<(), String> {
-    let conn = open_app_db(settings).map_err(|e| e.to_string())?;
-    ensure_locations_table(&conn)?;
-    conn.execute(
-        "DELETE FROM dataset_locations WHERE path = ?1",
-        rusqlite::params![path],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// Whether the dataset_locations table already exists in the app database.
-fn locations_table_exists(conn: &rusqlite::Connection) -> bool {
-    conn.query_row(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dataset_locations'",
-        [],
-        |_| Ok(()),
-    )
-    .is_ok()
-}
-
-/// Resolve all dataset root directories. On first run (table absent) the
-/// configured default `datasets_dir` is seeded so existing setups keep working.
-/// Afterwards the stored list is authoritative, even when empty.
+/// Resolve all dataset root directories: default datasets_dir + linked dirs from meta.json
 fn dataset_roots(settings: &SettingsState) -> Vec<PathBuf> {
-    if let Ok(conn) = open_app_db(settings) {
-        if !locations_table_exists(&conn) && ensure_locations_table(&conn).is_ok() {
-            let default_dir = datasets_dir(settings).to_string_lossy().into_owned();
-            let _ = conn.execute(
-                "INSERT OR IGNORE INTO dataset_locations (path) VALUES (?1)",
-                rusqlite::params![default_dir],
-            );
+    let default_dir = datasets_dir(settings);
+    let default_str = default_dir.to_string_lossy().to_string();
+    
+    let mut roots = Vec::new();
+    
+    // Add default datasets directory if it exists
+    if default_dir.exists() && default_dir.is_dir() {
+        roots.push(default_dir);
+    }
+    
+    // Add linked directories from meta.json
+    let meta = read_dataset_meta(&default_str);
+    for linked in &meta.linked_dirs {
+        let linked_path = PathBuf::from(&linked.path);
+        if linked_path.exists() && linked_path.is_dir() {
+            roots.push(linked_path);
         }
     }
-    load_locations(settings).into_iter().map(PathBuf::from).collect()
+    
+    roots
+}
+
+/// List all dataset directories (default + linked)
+#[tauri::command]
+pub async fn dataset_list_dirs(
+    settings: State<'_, SettingsState>,
+) -> Result<Vec<DatasetDirEntry>, String> {
+    let default_dir = datasets_dir(&settings);
+    let default_str = default_dir.to_string_lossy().to_string();
+    
+    let mut entries = Vec::new();
+    
+    // Add default datasets directory as "datasets" entry
+    if default_dir.exists() && default_dir.is_dir() {
+        entries.push(DatasetDirEntry {
+            name: "datasets".to_string(),
+            path: default_str.clone(),
+            is_linked: false,
+        });
+    }
+    
+    // Add linked directories from meta.json
+    let meta = read_dataset_meta(&default_str);
+    for linked in &meta.linked_dirs {
+        let linked_path = PathBuf::from(&linked.path);
+        if linked_path.exists() && linked_path.is_dir() {
+            entries.push(DatasetDirEntry {
+                name: linked.name.clone(),
+                path: linked.path.clone(),
+                is_linked: true,
+            });
+        }
+    }
+    
+    // Sort alphabetically
+    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    
+    log::info!("[Dataset] Listed {} dataset directories", entries.len());
+    Ok(entries)
+}
+
+/// Add a linked directory for datasets
+#[tauri::command]
+pub async fn dataset_add_dir(
+    settings: State<'_, SettingsState>,
+    name: String,
+    path: String,
+) -> Result<(), String> {
+    let default_dir = datasets_dir(&settings);
+    let default_str = default_dir.to_string_lossy().to_string();
+    
+    // Verify the path exists and is a directory
+    let target_path = PathBuf::from(&path);
+    if !target_path.exists() {
+        return Err(format!("Directory does not exist: {}", path));
+    }
+    if !target_path.is_dir() {
+        return Err(format!("Path is not a directory: {}", path));
+    }
+    
+    let mut meta = read_dataset_meta(&default_str);
+    
+    // Check if already linked
+    if meta.linked_dirs.iter().any(|d| d.path == path) {
+        return Err(format!("Directory already linked: {}", path));
+    }
+    
+    meta.linked_dirs.push(DatasetLinkedDir {
+        name: name.clone(),
+        path: path.clone(),
+    });
+    
+    write_dataset_meta(&default_str, &meta)?;
+    log::info!("[Dataset] Linked directory '{}' -> {}", name, path);
+    Ok(())
+}
+
+/// Remove a linked directory from datasets
+#[tauri::command]
+pub async fn dataset_remove_dir(
+    settings: State<'_, SettingsState>,
+    path: String,
+) -> Result<(), String> {
+    let default_dir = datasets_dir(&settings);
+    let default_str = default_dir.to_string_lossy().to_string();
+    
+    let mut meta = read_dataset_meta(&default_str);
+    let initial_len = meta.linked_dirs.len();
+    meta.linked_dirs.retain(|d| d.path != path);
+    
+    if meta.linked_dirs.len() == initial_len {
+        return Err(format!("Directory not found in linked directories: {}", path));
+    }
+    
+    write_dataset_meta(&default_str, &meta)?;
+    log::info!("[Dataset] Unlinked directory: {}", path);
+    Ok(())
 }
 
 fn list_media_files(media_dir: &PathBuf) -> Vec<MediaFile> {
@@ -359,43 +449,6 @@ pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<DatasetSummary> {
     datasets.sort_by(|a, b| a.info.name.cmp(&b.info.name));
     log::info!("Found {} dataset(s)", datasets.len());
     datasets
-}
-
-/// List all configured dataset location paths.
-#[tauri::command]
-pub async fn dataset_list_locations(
-    settings: State<'_, SettingsState>,
-) -> Result<Vec<String>, String> {
-    Ok(dataset_roots(&settings)
-        .into_iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect())
-}
-
-/// Add a new dataset location and return the updated list of locations.
-#[tauri::command]
-pub async fn dataset_add_location(
-    settings: State<'_, SettingsState>,
-    path: String,
-) -> Result<Vec<String>, String> {
-    let p = PathBuf::from(&path);
-    if !p.exists() || !p.is_dir() {
-        return Err("Selected path is not a valid directory".into());
-    }
-    insert_location(&settings, &path)?;
-    log::info!("Added dataset location: {}", path);
-    dataset_list_locations(settings).await
-}
-
-/// Remove a dataset location and return the updated list of locations.
-#[tauri::command]
-pub async fn dataset_remove_location(
-    settings: State<'_, SettingsState>,
-    path: String,
-) -> Result<Vec<String>, String> {
-    delete_location(&settings, &path)?;
-    log::info!("Removed dataset location: {}", path);
-    dataset_list_locations(settings).await
 }
 
 /// Import a dataset from a source directory. The directory must contain a `media/`

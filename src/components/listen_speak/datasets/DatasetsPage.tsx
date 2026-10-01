@@ -14,6 +14,13 @@ import {
 import DatasetDetailPanel from "./components/DatasetDetailPanel";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 
+// Directory entry returned by `dataset_list_dirs` (mirrors DatasetDirEntry in Rust).
+interface DatasetDirEntry {
+  name: string;
+  path: string;
+  is_linked: boolean;
+}
+
 // Group datasets by non-empty uuid and return the groups that collide.
 function findUuidConflicts(list: DatasetSummary[]): [string, DatasetSummary[]][] {
   const byUuid = new Map<string, DatasetSummary[]>();
@@ -29,7 +36,7 @@ function findUuidConflicts(list: DatasetSummary[]): [string, DatasetSummary[]][]
 
 export default function DatasetsPage() {
   const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
-  const [locations, setLocations] = useState<string[]>([]);
+  const [locations, setLocations] = useState<DatasetDirEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
@@ -38,6 +45,7 @@ export default function DatasetsPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmRemoveLocation, setConfirmRemoveLocation] = useState<string | null>(null);
+  const [locationError, setLocationError] = useState<string | null>(null);
   const [uuidConflict, setUuidConflict] = useState<ConfirmRequest | null>(null);
 
   // ---- Fetch dataset list ----
@@ -58,10 +66,10 @@ export default function DatasetsPage() {
   const fetchLocations = useCallback(async () => {
     if (!isTauri()) return;
     try {
-      const res = await invoke<string[]>("dataset_list_locations");
+      const res = await invoke<DatasetDirEntry[]>("dataset_list_dirs");
       setLocations(res);
     } catch (e) {
-      console.error("Failed to list dataset locations:", e);
+      setLocationError(`Failed to list dataset directories: ${e}`);
     }
   }, []);
 
@@ -114,27 +122,31 @@ export default function DatasetsPage() {
   async function handleAddLocation() {
     if (!isTauri()) return;
     setImportError(null);
+    setLocationError(null);
     try {
       const path = await invoke<string>("settings_pick_folder", { field: "dataset_location" });
-      const updated = await invoke<string[]>("dataset_add_location", { path });
-      setLocations(updated);
+      // Derive display name from the folder name (last path segment).
+      const name = path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+      await invoke("dataset_add_dir", { name, path });
+      await fetchLocations();
       await fetchDatasets();
     } catch (e) {
       // Ignore folder-picker cancellation.
       if (String(e).includes("No folder selected")) return;
-      setImportError(String(e));
+      setLocationError(String(e));
     }
   }
 
   async function handleRemoveLocation(path: string) {
     if (!isTauri()) return;
     try {
-      const updated = await invoke<string[]>("dataset_remove_location", { path });
-      setLocations(updated);
+      await invoke("dataset_remove_dir", { path });
       setConfirmRemoveLocation(null);
+      setLocationError(null);
+      await fetchLocations();
       await fetchDatasets();
     } catch (e) {
-      setImportError(String(e));
+      setLocationError(String(e));
     }
   }
 
@@ -259,33 +271,41 @@ export default function DatasetsPage() {
             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /><line x1="12" y1="11" x2="12" y2="17" /><line x1="9" y1="14" x2="15" y2="14" /></svg>
           </button>
         </div>
+        {locationError && <div className="p-3 bg-error-bg text-error-text rounded-md mb-3 text-sm">{locationError}</div>}
         {locations.length === 0 ? (
           <p className="text-sm text-text-tertiary">No locations configured. Click the add button to add a directory containing datasets.</p>
         ) : (
           <div className="flex flex-col gap-2">
             {locations.map((loc) => (
-              <div key={loc} className="flex items-center justify-between gap-2 p-3 border border-border-default rounded-lg">
+              <div key={loc.path} className="flex items-center justify-between gap-2 p-3 border border-border-default rounded-lg">
                 <div className="flex items-center gap-2 min-w-0">
-                  <svg className="shrink-0 text-text-tertiary" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
-                  <span className="text-sm truncate" title={loc}>{loc}</span>
+                  {loc.is_linked ? (
+                    <svg className="shrink-0 text-accent" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
+                  ) : (
+                    <svg className="shrink-0 text-text-tertiary" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
+                  )}
+                  <span className="text-sm font-medium shrink-0">{loc.name}</span>
+                  <span className="text-xs text-text-tertiary truncate" title={loc.path}>{loc.path}</span>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
-                  <button className="p-1 rounded cursor-pointer transition-colors text-text-tertiary hover:text-accent hover:bg-info-bg" onClick={() => handleOpenLocation(loc)} title="Open location">
+                  <button className="p-1 rounded cursor-pointer transition-colors text-text-tertiary hover:text-accent hover:bg-info-bg" onClick={() => handleOpenLocation(loc.path)} title="Open location">
                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
                   </button>
-                  {confirmRemoveLocation === loc ? (
-                    <>
-                      <button className="px-2 py-0.5 text-xs rounded cursor-pointer bg-error-text text-white hover:bg-error-hover" onClick={() => handleRemoveLocation(loc)}>
-                        Remove
+                  {loc.is_linked && (
+                    confirmRemoveLocation === loc.path ? (
+                      <>
+                        <button className="px-2 py-0.5 text-xs rounded cursor-pointer bg-error-text text-white hover:bg-error-hover" onClick={() => handleRemoveLocation(loc.path)}>
+                          Remove
+                        </button>
+                        <button className="px-2 py-0.5 text-xs rounded cursor-pointer bg-transparent border border-border-light text-text-secondary hover:bg-bg-hover" onClick={() => setConfirmRemoveLocation(null)}>
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button className="p-1 rounded cursor-pointer transition-colors text-text-tertiary hover:text-error-text hover:bg-error-bg" onClick={() => setConfirmRemoveLocation(loc.path)} title="Remove location">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
                       </button>
-                      <button className="px-2 py-0.5 text-xs rounded cursor-pointer bg-transparent border border-border-light text-text-secondary hover:bg-bg-hover" onClick={() => setConfirmRemoveLocation(null)}>
-                        Cancel
-                      </button>
-                    </>
-                  ) : (
-                    <button className="p-1 rounded cursor-pointer transition-colors text-text-tertiary hover:text-error-text hover:bg-error-bg" onClick={() => setConfirmRemoveLocation(loc)} title="Remove location">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-                    </button>
+                    )
                   )}
                 </div>
               </div>

@@ -150,9 +150,9 @@ pub fn run() {
             settings::settings_set,
             settings::settings_pick_folder,
             dataset::dataset_list,
-            dataset::dataset_list_locations,
-            dataset::dataset_add_location,
-            dataset::dataset_remove_location,
+            dataset::dataset_list_dirs,
+            dataset::dataset_add_dir,
+            dataset::dataset_remove_dir,
             dataset::dataset_import,
             dataset::dataset_get,
             dataset::dataset_update,
@@ -284,6 +284,9 @@ pub fn run() {
                         // Try to auto-select a workspace
                         if let Some(ws) = workspace::auto_select_workspace(&*ws_state) {
                             log::info!("[Startup] Auto-selected workspace: '{}' (uuid={})", ws.name, ws.uuid);
+                            // Point settings state at the workspace (reloads workspace settings.json)
+                            let settings_state = app.handle().state::<settings::SettingsState>();
+                            settings_state.set_workspace_dir(Some(workspace::workspace_dir(&ws.uuid)));
                         } else {
                             // Multiple workspaces, need chooser
                             log::info!("[Startup] Showing workspace chooser");

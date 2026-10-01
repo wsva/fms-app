@@ -117,11 +117,55 @@ impl SettingsState {
         }
     }
 
+    /// Resolve a workspace-scoped data sub-directory: `<workspace>/<name>`.
+    /// When a workspace is selected it is authoritative; otherwise fall back
+    /// to the configured value (or the global app-data default when empty).
+    pub fn workspace_subdir(&self, name: &str, configured: &str) -> PathBuf {
+        if let Some(ws_dir) = self.workspace_dir.lock().unwrap().as_ref() {
+            return ws_dir.join(name);
+        }
+        if configured.is_empty() {
+            return dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("fms-app")
+                .join(name);
+        }
+        PathBuf::from(configured)
+    }
+
+    /// Effective datasets directory (workspace-derived).
+    pub fn datasets_dir(&self) -> PathBuf {
+        let configured = self.settings.lock().unwrap().datasets_dir.clone();
+        self.workspace_subdir("datasets", &configured)
+    }
+
+    /// Effective recordings directory (workspace-derived).
+    pub fn recordings_dir(&self) -> PathBuf {
+        let configured = self.settings.lock().unwrap().recordings_dir.clone();
+        self.workspace_subdir("recordings", &configured)
+    }
+
+    /// Effective books directory (workspace-derived).
+    pub fn books_dir(&self) -> PathBuf {
+        let configured = self.settings.lock().unwrap().books_dir.clone();
+        self.workspace_subdir("books", &configured)
+    }
+
+    /// Effective wiki directory (workspace-derived).
+    pub fn wiki_dir(&self) -> PathBuf {
+        let configured = self.settings.lock().unwrap().wiki_dir.clone();
+        self.workspace_subdir("wiki", &configured)
+    }
+
     fn load(workspace_dir: Option<&PathBuf>) -> Option<AppSettings> {
         let path = Self::config_path(workspace_dir);
         log::debug!("[Settings] Loading settings from: {}", path.display());
         let data = fs::read_to_string(path).ok()?;
-        serde_json::from_str(&data).ok()
+        // Tolerate a UTF-8 BOM (Windows editors/PowerShell often add one).
+        let data = data.trim_start_matches('\u{FEFF}');
+        serde_json::from_str(data).map_err(|e| {
+            log::warn!("[Settings] Failed to parse settings.json: {} - using defaults", e)
+        }).ok()
     }
 
     pub fn save(settings: &AppSettings, workspace_dir: Option<&PathBuf>) -> Result<(), String> {
@@ -144,7 +188,14 @@ impl SettingsState {
 pub async fn settings_get(
     state: State<'_, SettingsState>,
 ) -> Result<AppSettings, String> {
-    Ok(state.settings.lock().unwrap().clone())
+    let mut s = state.settings.lock().unwrap().clone();
+    // Report the effective (workspace-derived) data directories so the
+    // frontend always sees the paths the backend actually uses.
+    s.datasets_dir = state.datasets_dir().to_string_lossy().into_owned();
+    s.recordings_dir = state.recordings_dir().to_string_lossy().into_owned();
+    s.books_dir = state.books_dir().to_string_lossy().into_owned();
+    s.wiki_dir = state.wiki_dir().to_string_lossy().into_owned();
+    Ok(s)
 }
 
 #[tauri::command]

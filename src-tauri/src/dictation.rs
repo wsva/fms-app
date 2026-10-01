@@ -236,7 +236,7 @@ pub async fn listen_get_dictation(
 ) -> Result<Option<ListenDictation>, String> {
     log::debug!("listen_get_dictation: media={}, subtitle={}", media_uuid, subtitle_uuid);
     let conn = open_app_db(&_settings)?;
-    let user_id = get_current_user_email();
+    let user_id = get_current_user_email(&_settings);
     let mut stmt = conn
         .prepare("SELECT media_uuid, subtitle_uuid, status, completed FROM listen_dictation WHERE user_id = ?1 AND media_uuid = ?2 AND subtitle_uuid = ?3")
         .map_err(|e| e.to_string())?;
@@ -261,7 +261,7 @@ pub async fn listen_get_dataset_dictation_status(
 ) -> Result<Vec<String>, String> {
     log::debug!("listen_get_dataset_dictation_status");
     let conn = open_app_db(&_settings)?;
-    let user_id = get_current_user_email();
+    let user_id = get_current_user_email(&_settings);
     let mut stmt = conn
         .prepare("SELECT DISTINCT media_uuid FROM listen_dictation WHERE user_id = ?1 AND status = 'complete'")
         .map_err(|e| e.to_string())?;
@@ -508,7 +508,7 @@ pub async fn listen_save_dictation(
 ) -> Result<(), String> {
     log::info!("listen_save_dictation: media={}, subtitle={}, status={}", dictation.media_uuid, dictation.subtitle_uuid, dictation.status);
     let conn = open_app_db(&_settings)?;
-    let user_id = get_current_user_email();
+    let user_id = get_current_user_email(&_settings);
     // Delete existing row first, then insert fresh
     conn.execute(
         "DELETE FROM listen_dictation WHERE user_id = ?1 AND media_uuid = ?2 AND subtitle_uuid = ?3",

@@ -23,6 +23,7 @@ import {
   User,
   LogOut,
   Star,
+  FolderKanban,
 } from "lucide-react";
 
 function isTauri(): boolean {
@@ -60,6 +61,7 @@ export type TabId =
   | "llm-chat"
   | "ocr"
   | "wiki"
+  | "workspaces"
   | "logs"
   | "settings";
 
@@ -98,6 +100,7 @@ const navGroups: NavGroup[] = [
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
       { id: "ocr", label: "OCR", icon: ScanText },
       { id: "wiki", label: "Wiki", icon: BookOpenText },
+      { id: "workspaces", label: "Workspaces", icon: FolderKanban },
       { id: "logs", label: "Logs", icon: FileText },
     ],
   },
@@ -170,6 +173,13 @@ export default function Sidebar({
       setAuthUser(null);
       setXpUser(null);
     });
+    // Auth is per-workspace: on workspace switch, clear the old user and
+    // reload auth/XP from the newly selected workspace's auth.json.
+    const unlistenWorkspace = listen("workspace-selected", () => {
+      setAuthUser(null);
+      setXpUser(null);
+      checkAuth();
+    });
     const unlistenXp = listen<XpAwardResult>("xp-earned", (event) => {
       setXpUser((prev) =>
         prev
@@ -183,6 +193,7 @@ export default function Sidebar({
     return () => {
       unlistenLogin.then((fn) => fn());
       unlistenLogout.then((fn) => fn());
+      unlistenWorkspace.then((fn) => fn());
       unlistenXp.then((fn) => fn());
     };
   }, [checkAuth]);

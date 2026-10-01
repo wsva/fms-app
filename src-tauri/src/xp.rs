@@ -202,7 +202,7 @@ fn get_user_xp_from_db(conn: &Connection, user_id: &str) -> Result<(i64, i64), S
 pub async fn xp_get_user(
     _settings: State<'_, SettingsState>,
 ) -> Result<Option<XpUser>, String> {
-    let user_id = get_current_user_email();
+    let user_id = get_current_user_email(&_settings);
     if user_id.is_empty() {
         return Ok(None);
     }
@@ -233,7 +233,7 @@ pub async fn xp_get_history(
     _settings: State<'_, SettingsState>,
     limit: Option<i64>,
 ) -> Result<Vec<XpLedgerEntry>, String> {
-    let user_id = get_current_user_email();
+    let user_id = get_current_user_email(&_settings);
     if user_id.is_empty() {
         return Ok(Vec::new());
     }
@@ -274,7 +274,7 @@ pub async fn xp_award_dictation_cue(
     cue_id: String,
     dataset_uuid: String,
 ) -> Result<XpAwardResult, String> {
-    let user_id = get_current_user_email();
+    let user_id = get_current_user_email(&_settings);
     if user_id.is_empty() {
         return Err("Not logged in".into());
     }
@@ -294,7 +294,7 @@ pub async fn xp_award_dictation_subtitle(
     subtitle_id: String,
     dataset_uuid: String,
 ) -> Result<XpAwardResult, String> {
-    let user_id = get_current_user_email();
+    let user_id = get_current_user_email(&_settings);
     if user_id.is_empty() {
         return Err("Not logged in".into());
     }
@@ -314,7 +314,7 @@ pub async fn xp_award_dictation_media(
     media_id: String,
     dataset_uuid: String,
 ) -> Result<XpAwardResult, String> {
-    let user_id = get_current_user_email();
+    let user_id = get_current_user_email(&_settings);
     if user_id.is_empty() {
         return Err("Not logged in".into());
     }
@@ -333,7 +333,7 @@ pub async fn xp_award_reading_sentence(
     _settings: State<'_, SettingsState>,
     sentence_id: String,
 ) -> Result<XpAwardResult, String> {
-    let user_id = get_current_user_email();
+    let user_id = get_current_user_email(&_settings);
     if user_id.is_empty() {
         return Err("Not logged in".into());
     }
@@ -352,7 +352,7 @@ pub async fn xp_award_reading_chapter(
     _settings: State<'_, SettingsState>,
     chapter_id: String,
 ) -> Result<XpAwardResult, String> {
-    let user_id = get_current_user_email();
+    let user_id = get_current_user_email(&_settings);
     if user_id.is_empty() {
         return Err("Not logged in".into());
     }

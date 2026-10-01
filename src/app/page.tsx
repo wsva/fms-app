@@ -20,6 +20,7 @@ import LLMChatPage from "@/components/llm/chat/ChatPage";
 import OcrPage from "@/components/ocr/OcrPage";
 import WikiPage from "@/components/wiki/WikiPage";
 import LogPage from "@/components/tools/LogPage";
+import WorkspacesPage from "@/components/workspace/WorkspacesPage";
 
 interface Workspace {
   uuid: string;
@@ -60,8 +61,15 @@ export default function Home() {
       setShowWorkspaceChooser(true);
     });
 
+    // Keep the shell in sync when the workspace is switched (e.g. from the
+    // Workspaces page) so the current-workspace state stays fresh.
+    const unlistenSelected = listen<Workspace>("workspace-selected", (event) => {
+      setCurrentWorkspace(event.payload);
+    });
+
     return () => {
       unlistenChooser.then((fn) => fn());
+      unlistenSelected.then((fn) => fn());
     };
   }, []);
 
@@ -135,6 +143,9 @@ export default function Home() {
         </div>
         <div style={{ display: activeTab === "logs" ? "flex" : "none" }} className="flex-1 min-h-0">
           <LogPage />
+        </div>
+        <div style={{ display: activeTab === "workspaces" ? "flex" : "none" }} className="flex-1 min-h-0">
+          <WorkspacesPage />
         </div>
 
         <StatusBar />

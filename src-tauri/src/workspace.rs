@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -81,25 +81,6 @@ fn registry_path() -> PathBuf {
     app_data_dir().join("workspaces.json")
 }
 
-/// Get the current workspace's data directory.
-/// Falls back to the global app data dir if no workspace is selected.
-pub fn workspace_data_dir(state: &WorkspaceState) -> PathBuf {
-    let current = state.current.lock().unwrap();
-    match current.as_ref() {
-        Some(ws) => workspace_dir(&ws.uuid),
-        None => {
-            // Fallback: use global app data dir (before workspace selection)
-            app_data_dir()
-        }
-    }
-}
-
-/// Get the current workspace's data directory as a String.
-/// Convenience function for use in other modules.
-pub fn workspace_data_dir_string(state: &WorkspaceState) -> String {
-    workspace_data_dir(state).to_string_lossy().into_owned()
-}
-
 // ---------------------------------------------------------------------------
 // Registry I/O
 // ---------------------------------------------------------------------------
@@ -109,8 +90,10 @@ impl WorkspaceState {
         let path = registry_path();
         log::debug!("[Workspace] Loading registry from: {}", path.display());
         let data = fs::read_to_string(&path).ok()?;
+        // Tolerate a UTF-8 BOM (Windows editors/PowerShell often add one).
+        let data = data.trim_start_matches('\u{FEFF}');
         let registry: WorkspaceRegistry =
-            serde_json::from_str(&data).ok()?;
+            serde_json::from_str(data).ok()?;
         log::debug!("[Workspace] Loaded {} workspaces", registry.workspaces.len());
         Some(registry)
     }
@@ -157,6 +140,21 @@ pub fn save_workspace_json(ws: &Workspace) -> Result<(), String> {
     })?;
     log::debug!("[Workspace] Saved workspace.json: {}", path.display());
     Ok(())
+}
+
+/// Load workspace.json metadata from a workspace directory.
+/// Returns None if the file is missing or cannot be parsed.
+pub fn load_workspace_json(ws_dir: &Path) -> Option<Workspace> {
+    let path = ws_dir.join("workspace.json");
+    let data = fs::read_to_string(&path).ok()?;
+    // Tolerate a UTF-8 BOM (Windows editors/PowerShell often add one).
+    let data = data.trim_start_matches('\u{FEFF}');
+    serde_json::from_str(data)
+        .map_err(|e| {
+            log::warn!("[Workspace] Failed to parse {}: {}", path.display(), e);
+            e
+        })
+        .ok()
 }
 
 // ---------------------------------------------------------------------------

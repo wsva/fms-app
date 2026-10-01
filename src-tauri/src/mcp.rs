@@ -197,6 +197,12 @@ struct PathParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct DatasetAddDirParam {
+    name: String,
+    path: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct DatasetImportParam {
     source_dir: String,
 }
@@ -978,30 +984,30 @@ impl DatasetMcpServer {
     // Dataset management tools
     // -------------------------------------------------------------------------
 
-    #[tool(name = "dataset_list_locations", description = "List all configured dataset root directories. Datasets are searched in these locations.")]
-    async fn dataset_list_locations(&self) -> String {
-        log::info!("[MCP] dataset_list_locations");
+    #[tool(name = "dataset_list_dirs", description = "List all dataset directories (default datasets directory + linked directories). Returns entries with name, path, and is_linked flag.")]
+    async fn dataset_list_dirs(&self) -> String {
+        log::info!("[MCP] dataset_list_dirs");
         let settings = self.app.state::<SettingsState>();
-        match dataset::dataset_list_locations(settings).await {
-            Ok(locations) => serde_json::json!({"locations": locations}).to_string(),
+        match dataset::dataset_list_dirs(settings).await {
+            Ok(entries) => serde_json::json!({"directories": entries}).to_string(),
             Err(e) => serde_json::json!({"error": e}).to_string(),
         }
     }
 
-    #[tool(name = "dataset_add_location", description = "Add a root directory where datasets are stored. The path must exist and be a directory.")]
-    async fn dataset_add_location(&self, Parameters(param): Parameters<PathParam>) -> Result<String, String> {
-        log::info!("[MCP] dataset_add_location: path={}", param.path);
+    #[tool(name = "dataset_add_dir", description = "Add a linked directory for datasets. The path must exist and be a directory. Requires a name for display.")]
+    async fn dataset_add_dir(&self, Parameters(param): Parameters<DatasetAddDirParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_add_dir: name={}, path={}", param.name, param.path);
         let settings = self.app.state::<SettingsState>();
-        let locations = dataset::dataset_add_location(settings, param.path.clone()).await?;
-        Ok(serde_json::json!({"status": "ok", "locations": locations}).to_string())
+        dataset::dataset_add_dir(settings, param.name.clone(), param.path.clone()).await?;
+        Ok(serde_json::json!({"status": "ok", "message": format!("Linked directory '{}' -> {}", param.name, param.path)}).to_string())
     }
 
-    #[tool(name = "dataset_remove_location", description = "Remove a dataset root directory. Datasets in that location are no longer visible.")]
-    async fn dataset_remove_location(&self, Parameters(param): Parameters<PathParam>) -> Result<String, String> {
-        log::info!("[MCP] dataset_remove_location: path={}", param.path);
+    #[tool(name = "dataset_remove_dir", description = "Remove a linked directory from datasets. Datasets in that directory are no longer visible.")]
+    async fn dataset_remove_dir(&self, Parameters(param): Parameters<PathParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_remove_dir: path={}", param.path);
         let settings = self.app.state::<SettingsState>();
-        let locations = dataset::dataset_remove_location(settings, param.path.clone()).await?;
-        Ok(serde_json::json!({"status": "ok", "locations": locations}).to_string())
+        dataset::dataset_remove_dir(settings, param.path.clone()).await?;
+        Ok(serde_json::json!({"status": "ok", "message": format!("Unlinked directory: {}", param.path)}).to_string())
     }
 
     #[tool(name = "dataset_import", description = "Import an existing dataset directory. The directory must contain an info.json file. Returns the dataset summary with UUID.")]

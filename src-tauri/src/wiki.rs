@@ -70,6 +70,7 @@ fn read_wiki_meta(wiki_dir: &str) -> WikiMeta {
     }
     fs::read_to_string(&meta_path)
         .ok()
+        .map(|data| data.trim_start_matches('\u{FEFF}').to_string())
         .and_then(|data| serde_json::from_str(&data).ok())
         .unwrap_or_default()
 }
@@ -219,10 +220,7 @@ fn collect_markdown_files(dir: &Path, wiki_root: &Path) -> Result<Vec<(PathBuf, 
 pub async fn wiki_list_dirs(
     state: State<'_, SettingsState>,
 ) -> Result<Vec<WikiEntry>, String> {
-    let wiki_dir = {
-        let settings = state.settings.lock().unwrap();
-        settings.wiki_dir.clone()
-    };
+    let wiki_dir = state.wiki_dir().to_string_lossy().into_owned();
 
     let wiki_path = PathBuf::from(&wiki_dir);
     let mut entries = Vec::new();
@@ -280,10 +278,7 @@ pub async fn wiki_add_dir(
     name: String,
     path: String,
 ) -> Result<(), String> {
-    let wiki_dir = {
-        let settings = state.settings.lock().unwrap();
-        settings.wiki_dir.clone()
-    };
+    let wiki_dir = state.wiki_dir().to_string_lossy().into_owned();
 
     // Verify the path exists and is a directory
     let target_path = PathBuf::from(&path);
@@ -317,10 +312,7 @@ pub async fn wiki_remove_dir(
     state: State<'_, SettingsState>,
     path: String,
 ) -> Result<(), String> {
-    let wiki_dir = {
-        let settings = state.settings.lock().unwrap();
-        settings.wiki_dir.clone()
-    };
+    let wiki_dir = state.wiki_dir().to_string_lossy().into_owned();
 
     let mut meta = read_wiki_meta(&wiki_dir);
     let initial_len = meta.linked_dirs.len();
@@ -407,10 +399,7 @@ pub async fn wiki_delete_file(
 pub async fn wiki_index(
     state: State<'_, SettingsState>,
 ) -> Result<u32, String> {
-    let wiki_dir = {
-        let settings = state.settings.lock().unwrap();
-        settings.wiki_dir.clone()
-    };
+    let wiki_dir = state.wiki_dir().to_string_lossy().into_owned();
 
     let wiki_path = PathBuf::from(&wiki_dir);
     if !wiki_path.exists() {
@@ -521,10 +510,7 @@ pub async fn wiki_search(
     state: State<'_, SettingsState>,
     keyword: String,
 ) -> Result<Vec<WikiSearchResult>, String> {
-    let wiki_dir = {
-        let settings = state.settings.lock().unwrap();
-        settings.wiki_dir.clone()
-    };
+    let wiki_dir = state.wiki_dir().to_string_lossy().into_owned();
 
     let wiki_path = PathBuf::from(&wiki_dir);
     if !wiki_path.exists() {
