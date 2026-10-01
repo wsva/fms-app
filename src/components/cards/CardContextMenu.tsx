@@ -140,7 +140,7 @@ export default function CardContextMenu() {
 
   function handleSelectCard(result: CardSearchResult) {
     setAnchor(null);
-    // Open the card editor with the selected card
+    // Open the card editor with the selected card, starting in edit mode
     openCardEditor(
       result.dataset_uuid,
       {
@@ -161,7 +161,8 @@ export default function CardContextMenu() {
         console.log("Card saved from context menu search:", savedCard);
       },
       undefined,
-      result.dataset_name
+      result.dataset_name,
+      false
     );
   }
 

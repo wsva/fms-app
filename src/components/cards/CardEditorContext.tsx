@@ -1,11 +1,20 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Eye, Pencil, X } from "lucide-react";
+import { Eye, Pencil, X, Type } from "lucide-react";
 import type { Card, CardDatasetSummary } from "@/lib/types";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import "./CardEditor.css";
+
+type FontScaleKey = "normal" | "large" | "x2";
+
+// Font size options: each step renders the content bigger and bolder.
+const FONT_SCALE_MAP: Record<FontScaleKey, { zoom: number; weight: number }> = {
+  normal: { zoom: 1, weight: 400 },
+  large: { zoom: 1.3, weight: 500 },
+  x2: { zoom: 1.6, weight: 600 },
+};
 
 function CardEditModal({
   card,
@@ -14,6 +23,7 @@ function CardEditModal({
   onSave,
   onDelete,
   onClose,
+  initialViewMode,
 }: {
   card: Card | null;
   datasetUuid: string;
@@ -21,6 +31,7 @@ function CardEditModal({
   onSave: (datasetUuid: string, card: Partial<Card>) => void;
   onDelete?: () => void;
   onClose: () => void;
+  initialViewMode?: boolean;
 }) {
   const [selectedDataset, setSelectedDataset] = useState(datasetUuid);
   const [question, setQuestion] = useState(card?.question || "");
@@ -28,7 +39,37 @@ function CardEditModal({
   const [note, setNote] = useState(card?.note || "");
   const [suggestion, setSuggestion] = useState(card?.suggestion || "");
   // Editing an existing card defaults to view mode; new cards start in edit mode.
-  const [viewMode, setViewMode] = useState(!!card?.uuid);
+  // If initialViewMode is explicitly provided, use that instead.
+  const [viewMode, setViewMode] = useState(
+    initialViewMode !== undefined ? initialViewMode : !!card?.uuid
+  );
+  const [fontScale, setFontScale] = useState<FontScaleKey>("normal");
+  const answerRef = useRef<HTMLTextAreaElement>(null);
+
+  // Callback ref that resizes the textarea when it's mounted
+  const setAnswerRef = useCallback((el: HTMLTextAreaElement | null) => {
+    answerRef.current = el;
+    if (el) {
+      el.style.height = "0px";
+      el.style.height = `${el.scrollHeight}px`;
+    }
+  }, []);
+
+  // Applied to an inner content wrapper (not the scroll container) so text
+  // renders bigger and bolder per level without overflowing the modal.
+  const scaleStyle: React.CSSProperties = {
+    zoom: FONT_SCALE_MAP[fontScale].zoom,
+    fontWeight: FONT_SCALE_MAP[fontScale].weight,
+  };
+
+  // Auto-resize the answer textarea to fit its content.
+  // useLayoutEffect ensures it runs on initial mount before paint.
+  useLayoutEffect(() => {
+    const el = answerRef.current;
+    if (!el) return;
+    el.style.height = "0px"; // Reset to force recalculation of actual content height
+    el.style.height = `${el.scrollHeight}px`;
+  }, [answer]);
 
   const selectedDatasetName =
     datasets.find((ds) => ds.info.uuid === selectedDataset)?.info.name || "";
@@ -50,6 +91,21 @@ function CardEditModal({
             {viewMode ? "View Card" : card ? "Edit Card" : "New Card"}
           </h2>
           <div className="flex items-center gap-2 pr-10">
+            <div
+              className="flex items-center gap-1.5 px-2 rounded-lg border border-border-default bg-bg-surface"
+              title="Font size"
+            >
+              <Type size={15} className="text-text-tertiary shrink-0" />
+              <select
+                value={fontScale}
+                onChange={(e) => setFontScale(e.target.value as FontScaleKey)}
+                className="py-2 pr-1 bg-transparent text-sm cursor-pointer outline-none text-text-primary"
+              >
+                <option value="normal">Normal</option>
+                <option value="large">Large</option>
+                <option value="x2">Large x2</option>
+              </select>
+            </div>
             <button
               onClick={() => setViewMode((v) => !v)}
               className="px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 flex items-center gap-2"
@@ -97,7 +153,8 @@ function CardEditModal({
         </div>
 
         {viewMode ? (
-          <div className="flex-1 overflow-y-auto space-y-6">
+          <div className="flex-1 overflow-y-auto">
+            <div className="space-y-6" style={scaleStyle}>
             <div>
               <div className="text-sm text-text-tertiary mb-2">
                 Dataset: {selectedDatasetName || "(unknown)"}
@@ -131,9 +188,11 @@ function CardEditModal({
                 </div>
               </div>
             )}
+            </div>
           </div>
         ) : (
-          <div className="flex-1 overflow-y-auto space-y-6">
+          <div className="flex-1 overflow-y-auto">
+            <div className="space-y-6" style={scaleStyle}>
             <div>
               <label className="block text-lg font-medium mb-2">Dataset</label>
               <select
@@ -161,10 +220,10 @@ function CardEditModal({
             <div>
               <label className="block text-lg font-medium mb-2">Answer</label>
               <textarea
+                ref={setAnswerRef}
                 value={answer}
                 onChange={(e) => setAnswer(e.target.value)}
-                rows={6}
-                className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl"
+                className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl resize-none overflow-hidden min-h-[15rem]"
                 placeholder="The answer or explanation (Markdown supported)"
               />
             </div>
@@ -192,6 +251,7 @@ function CardEditModal({
                 placeholder="Additional notes (Markdown supported)"
               />
             </div>
+            </div>
           </div>
         )}
       </div>
@@ -207,6 +267,7 @@ export type CardEditorState = {
   datasets: CardDatasetSummary[];
   onSave?: (card: Card) => void;
   onDelete?: () => void;
+  initialViewMode?: boolean;
 };
 
 export type CardEditorContextType = {
@@ -215,7 +276,8 @@ export type CardEditorContextType = {
     card?: Card | null,
     onSave?: (card: Card) => void,
     onDelete?: () => void,
-    datasetName?: string
+    datasetName?: string,
+    initialViewMode?: boolean
   ) => void;
   closeCardEditor: () => void;
 };
@@ -263,7 +325,8 @@ export function CardEditorProvider({
     card?: Card | null,
     onSave?: (card: Card) => void,
     onDelete?: () => void,
-    datasetName?: string
+    datasetName?: string,
+    initialViewMode?: boolean
   ) {
     // Reload datasets to ensure we have the latest card counts
     loadDatasets().then(() => {
@@ -289,6 +352,7 @@ export function CardEditorProvider({
           datasets,
           onSave,
           onDelete,
+          initialViewMode,
         };
       });
     });
@@ -369,6 +433,7 @@ export function CardEditorProvider({
           onSave={handleSave}
           onDelete={state.card?.uuid ? handleDelete : undefined}
           onClose={closeCardEditor}
+          initialViewMode={state.initialViewMode}
         />
       )}
     </CardEditorContext.Provider>
