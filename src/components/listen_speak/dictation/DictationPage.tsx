@@ -7,10 +7,9 @@
 
 import { useState, useEffect, useMemo, useSyncExternalStore } from "react";
 
-import { ProgressCircle, Input, Select, Tabs, ListBox, Label, TextField, Separator, Button, Tooltip } from "@heroui/react";
-import { RefreshCw, Trash2, Database, Shield, Target, CheckCircle, FolderPlus, Folder, Link2, X } from "lucide-react";
+import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui/react";
+import { RefreshCw, Trash2, Database, Shield, Target, CheckCircle, FolderPlus, Folder, Link2, X, Pencil, Save, HelpCircle } from "lucide-react";
 import CueEditor from "./components/CueEditor";
-import SubtitleItem from "./components/Subtitle";
 import WaveformCanvas from "./components/WaveformCanvas";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 import type { Cue } from "@/lib/types";
@@ -25,6 +24,10 @@ export default function DictationPage() {
     const d = useDictationData();
     const [adminMode, setAdminMode] = useState(false);
     const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
+    // Media-list view/edit mode toggle (view mode hides players, edit mode mirrors Datasets > Modify).
+    const [mediaEditMode, setMediaEditMode] = useState(false);
+    // Keyboard-shortcut help tip: shown on hover, and also on click (controlled).
+    const [helpOpen, setHelpOpen] = useState(false);
     const voiceError = useSyncExternalStore(subscribe, getVoiceError, getVoiceError);
 
     // Group ready datasets by their root location for the datasets view.
@@ -69,7 +72,8 @@ export default function DictationPage() {
     };
 
     const selectedMedia = d.mediaList.find((m) => m.uuid === d.stateMediaUUID);
-    const selectedMediaTitle = selectedMedia?.title || d.stateMedia.title || "...";
+    // Media no longer has an editable title; use the source filename as its label.
+    const selectedMediaLabel = selectedMedia?.source || d.stateMedia.source || "...";
 
     useEffect(() => {
         if (voiceError) {
@@ -92,8 +96,8 @@ export default function DictationPage() {
                 return;
             }
             
-            // Must have cues and be on dictation tab with media selected
-            if (d.stateCues.length === 0 || !d.stateMediaUUID || d.stateActiveTab !== "dictation") return;
+            // Must have cues with media selected
+            if (d.stateCues.length === 0 || !d.stateMediaUUID) return;
             
             e.preventDefault();
             
@@ -149,12 +153,54 @@ export default function DictationPage() {
         
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [d.stateCues, d.stateDictCue, d.stateFocusedCueUUID, d.stateDictMode, d.stateMediaUUID, d.stateActiveTab]);
+    }, [d.stateCues, d.stateDictCue, d.stateFocusedCueUUID, d.stateDictMode, d.stateMediaUUID]);
+
+    // ── Media playback shortcut ──
+    // Ctrl/Cmd + S or Ctrl/Cmd + D toggles playback of the current media.
+    // (Voice input is Ctrl/Cmd + C, handled globally in lib/voice-input; prev/next
+    // cue is Ctrl/Cmd + ↑/↓, handled by the navigation effect above.)
+    useEffect(() => {
+        const handleMediaKeys = (e: KeyboardEvent) => {
+            if (!e.ctrlKey && !e.metaKey) return;
+            const key = e.key.toLowerCase();
+            if (key !== "s" && key !== "d") return;
+            const media = d.videoRef.current;
+            if (!d.hasMedia || !media) return;
+            e.preventDefault();
+            if (media.paused) void media.play(); else media.pause();
+        };
+        window.addEventListener("keydown", handleMediaKeys);
+        return () => window.removeEventListener("keydown", handleMediaKeys);
+    }, [d.videoRef, d.hasMedia]);
 
     return (
         <div className="flex flex-col flex-1 min-h-0 p-4 overflow-hidden">
             {/* Toolbar */}
             <div className="@container flex flex-row items-center gap-3 w-full px-3 py-2 mb-4 rounded-lg bg-bg-card border border-border-light">
+                {/* ── Location section ── */}
+                <div className="flex items-center gap-1">
+                    <span className="select-none @max-lg:hidden text-xs font-medium text-text-tertiary mr-1">Location</span>
+                    <Tooltip>
+                        <Tooltip.Trigger>
+                            <Button isIconOnly variant="ghost" size="sm" aria-label="Refresh locations" isDisabled={d.stateLoading} onPress={d.loadLocations}>
+                                <RefreshCw size={16} />
+                            </Button>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Refresh locations</Tooltip.Content>
+                    </Tooltip>
+                    <Tooltip>
+                        <Tooltip.Trigger>
+                            <Button isIconOnly variant="ghost" size="sm" aria-label="Add location" isDisabled={d.stateLoading} onPress={d.handleAddLocation}>
+                                <FolderPlus size={16} />
+                            </Button>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Add dataset location</Tooltip.Content>
+                    </Tooltip>
+                </div>
+
+                {/* split marker */}
+                <div className="h-6 w-px bg-border-light" />
+
                 {/* ── Dataset section ── */}
                 <div className="flex items-center gap-1">
                     <span className="select-none @max-lg:hidden text-xs font-medium text-text-tertiary mr-1">Dataset</span>
@@ -168,19 +214,19 @@ export default function DictationPage() {
                     </Tooltip>
                     <Tooltip>
                         <Tooltip.Trigger>
-                            <Button isIconOnly variant="ghost" size="sm" aria-label="Add location" isDisabled={d.stateLoading} onPress={d.handleAddLocation}>
-                                <FolderPlus size={16} />
-                            </Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>Add dataset location</Tooltip.Content>
-                    </Tooltip>
-                    <Tooltip>
-                        <Tooltip.Trigger>
                             <Button isIconOnly variant="ghost" size="sm" aria-label="Reload database" isDisabled={!d.selectedDatasetUuid || d.stateLoading} onPress={d.handleReload}>
                                 <Database size={16} />
                             </Button>
                         </Tooltip.Trigger>
                         <Tooltip.Content>Reload dataset database</Tooltip.Content>
+                    </Tooltip>
+                    <Tooltip>
+                        <Tooltip.Trigger>
+                            <Button isIconOnly size="sm" variant={mediaEditMode ? "primary" : "ghost"} aria-label="Toggle edit mode" isDisabled={!d.selectedDatasetUuid} onPress={() => setMediaEditMode((v) => !v)}>
+                                <Pencil size={16} />
+                            </Button>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>{mediaEditMode ? "View mode" : "Edit mode"}</Tooltip.Content>
                     </Tooltip>
                 </div>
 
@@ -194,7 +240,7 @@ export default function DictationPage() {
                         <Tooltip.Trigger>
                             <Button isIconOnly variant="ghost" size="sm" aria-label="Remove media" className="text-error-text" isDisabled={!d.stateMediaUUID || d.stateSaving || d.stateLoading} onPress={() => setConfirmReq({
                                 title: "Remove media",
-                                message: `Remove "${d.stateMedia.title || "this media"}" and all related data and files? This cannot be undone.`,
+                                message: `Remove "${d.stateMedia.source || "this media"}" and all related data and files? This cannot be undone.`,
                                 confirmLabel: "Remove",
                                 onConfirm: d.handleDeleteMedia,
                             })}>
@@ -242,23 +288,39 @@ export default function DictationPage() {
                         </Tooltip.Trigger>
                         <Tooltip.Content>{d.stateDictStatus === "complete" ? "Complete" : "Mark complete"}</Tooltip.Content>
                     </Tooltip>
+                    <Tooltip isOpen={helpOpen} onOpenChange={setHelpOpen}>
+                        <Tooltip.Trigger>
+                            <Button isIconOnly size="sm" variant="ghost" aria-label="Keyboard shortcuts" onPress={() => setHelpOpen(true)}>
+                                <HelpCircle size={16} />
+                            </Button>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>
+                            <div className="flex flex-col gap-0.5">
+                                <span>Play Audio: Ctrl+s, Ctrl+d or double space at the end</span>
+                                <span>Voice Input: Ctrl+c</span>
+                                <span>Previous: Ctrl+⬆</span>
+                                <span>Next: Ctrl+⬇</span>
+                            </div>
+                        </Tooltip.Content>
+                    </Tooltip>
                 </div>
             </div>
 
             {/* Breadcrumb navigation */}
-            <nav className="flex flex-row items-center gap-2 mb-4 text-sm select-none">
+            <nav className="flex flex-row items-center gap-2 mb-4 text-sm select-none min-w-0">
                 <button
-                    className={`cursor-pointer hover:underline ${d.selectedDatasetUuid ? "text-accent" : "text-text-primary font-medium"}`}
+                    className={`shrink-0 cursor-pointer hover:underline ${d.selectedDatasetUuid ? "text-accent" : "text-text-primary font-medium"}`}
                     onClick={() => d.setSelectedDatasetUuid("")}
                 >
                     Datasets
                 </button>
                 {d.selectedDataset && (
                     <>
-                        <span className="text-text-tertiary">&rsaquo;</span>
+                        <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
                         <button
-                            className={`cursor-pointer hover:underline truncate max-w-[240px] ${d.stateMediaUUID ? "text-accent" : "text-text-primary font-medium"}`}
+                            className={`cursor-pointer hover:underline truncate min-w-0 max-w-[240px] ${d.stateMediaUUID ? "text-accent" : "text-text-primary font-medium"}`}
                             onClick={() => d.setStateMediaUUID("")}
+                            title={d.selectedDataset.info.name}
                         >
                             {d.selectedDataset.info.name}
                         </button>
@@ -266,8 +328,25 @@ export default function DictationPage() {
                 )}
                 {d.selectedDataset && d.stateMediaUUID && (
                     <>
-                        <span className="text-text-tertiary">&rsaquo;</span>
-                        <span className="text-text-primary font-medium truncate max-w-[240px]">{selectedMediaTitle}</span>
+                        <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                        <button
+                            className={`cursor-pointer hover:underline truncate min-w-0 max-w-[240px] ${d.stateSubtitle ? "text-accent" : "text-text-primary font-medium"}`}
+                            onClick={() => d.setStateMediaUUID("")}
+                            title={selectedMediaLabel}
+                        >
+                            {selectedMediaLabel}
+                        </button>
+                    </>
+                )}
+                {d.selectedDataset && d.stateMediaUUID && d.stateSubtitle && (
+                    <>
+                        <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                        <span
+                            className="text-text-primary font-medium truncate min-w-0 max-w-[320px]"
+                            title={d.stateSubtitle.name || d.stateSubtitle.uuid}
+                        >
+                            {d.stateSubtitle.name || d.stateSubtitle.uuid}
+                        </span>
                     </>
                 )}
                 {d.stateLoading && <ProgressCircle size="sm" aria-label="Loading" />}
@@ -354,22 +433,100 @@ export default function DictationPage() {
             {/* Media list view */}
             {d.selectedDatasetUuid && !d.stateMediaUUID && (
                 <div className="flex flex-col gap-3 flex-1 min-h-0 overflow-y-auto">
+                    {/* Edit-mode header: media count + Save all */}
+                    {mediaEditMode && d.mediaList.length > 0 && (
+                        <div className="flex items-center gap-2">
+                            <span className="text-sm text-text-secondary">{d.mediaList.length} media</span>
+                            {d.mediaDirtyCount > 0 && (
+                                <Button className="ml-auto" size="sm" variant="primary" isDisabled={d.stateSaving} onPress={d.handleSaveAllMedia}>
+                                    <Save size={14} /> Save all ({d.mediaDirtyCount})
+                                </Button>
+                            )}
+                        </div>
+                    )}
                     {d.mediaList.length === 0 && !d.stateLoading ? (
                         <p className="text-text-secondary">No media in this dataset.</p>
                     ) : d.mediaList.map((m) => {
-                        const src = d.getMediaSrc(m.source);
                         const isCompleted = d.completedMediaUuids.has(m.uuid);
+                        const dirty = mediaEditMode && d.isMediaDirty(m);
+                        const source = mediaEditMode ? d.mediaFieldOf(m, "source") : m.source;
+                        const src = mediaEditMode ? d.getMediaSrc(source) : "";
                         return (
-                            <div key={m.uuid} className={`p-4 border rounded-lg flex flex-col gap-2 ${isCompleted ? "bg-success-bg/50 border-accent" : "border-border-default"}`}>
+                            <div
+                                key={m.uuid}
+                                className={`p-4 border rounded-lg flex flex-col gap-2 ${dirty ? "border-accent bg-accent-bg/10" : isCompleted ? "bg-success-bg/50 border-accent" : "border-border-default"}`}
+                            >
                                 <button
                                     className="text-left font-medium text-accent hover:underline cursor-pointer"
                                     onClick={() => d.setStateMediaUUID(m.uuid)}
                                 >
-                                    {m.title || m.source}
+                                    {m.source}
                                 </button>
-                                {src && (isAudio(m.source)
-                                    ? <audio controls preload="none" src={src} className="w-full" />
-                                    : <video controls preload="none" src={src} className="w-full max-h-64" />)}
+
+                                {/* Subtitle links — click to jump into that subtitle's dictation */}
+                                {(d.mediaSubtitles[m.uuid]?.length ?? 0) > 0 && (
+                                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                                        <span className="text-xs text-text-tertiary">Subtitles:</span>
+                                        {d.mediaSubtitles[m.uuid].map((s) => (
+                                            <span key={s.uuid} className="inline-flex items-center gap-1">
+                                                <button
+                                                    className="text-xs text-accent hover:underline cursor-pointer"
+                                                    title={`Open dictation for "${s.name || s.uuid}"`}
+                                                    onClick={() => d.selectMediaSubtitle(m.uuid, s.uuid)}
+                                                >
+                                                    {s.name || s.uuid}
+                                                </button>
+                                                <span className="text-xs text-text-tertiary font-mono">(uuid: {s.uuid})</span>
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {mediaEditMode && (
+                                    <>
+                                        {/* Source / note edit fields + row actions (mirrors Datasets > Modify) */}
+                                        <div className="grid grid-cols-[1fr_1fr_auto] gap-3 items-center">
+                                            <label className="flex items-center gap-2">
+                                                <span className="shrink-0 text-xs text-text-tertiary w-12">Source</span>
+                                                <input
+                                                    className="w-full px-2 py-1 text-sm rounded-md bg-bg-body border border-border-light text-text-primary focus:border-accent outline-none"
+                                                    value={source}
+                                                    placeholder="(source)"
+                                                    disabled={d.stateSaving}
+                                                    onChange={(e) => d.setMediaField(m, "source", e.target.value)}
+                                                />
+                                            </label>
+                                            <label className="flex items-center gap-2">
+                                                <span className="shrink-0 text-xs text-text-tertiary w-12">Note</span>
+                                                <input
+                                                    className="w-full px-2 py-1 text-sm rounded-md bg-bg-body border border-border-light text-text-primary focus:border-accent outline-none"
+                                                    value={d.mediaFieldOf(m, "note")}
+                                                    placeholder="—"
+                                                    disabled={d.stateSaving}
+                                                    onChange={(e) => d.setMediaField(m, "note", e.target.value)}
+                                                />
+                                            </label>
+                                            <div className="flex flex-row items-center justify-end gap-1">
+                                                <Tooltip>
+                                                    <Tooltip.Trigger>
+                                                        <Button isIconOnly size="sm" variant="ghost" aria-label="Remove media" className="text-error-text" isDisabled={d.stateSaving} onPress={() => setConfirmReq({
+                                                            title: "Remove media",
+                                                            message: `Remove "${m.source || "this media"}" and all related data and files? This cannot be undone.`,
+                                                            confirmLabel: "Remove",
+                                                            onConfirm: () => d.handleDeleteMediaRow(m),
+                                                        })}>
+                                                            <Trash2 size={14} />
+                                                        </Button>
+                                                    </Tooltip.Trigger>
+                                                    <Tooltip.Content>Remove media and all related data</Tooltip.Content>
+                                                </Tooltip>
+                                            </div>
+                                        </div>
+                                        {src && (isAudio(source)
+                                            ? <audio controls preload="none" src={src} className="w-full" />
+                                            : <video controls preload="none" src={src} className="w-full max-h-64" />)}
+                                    </>
+                                )}
                             </div>
                         );
                     })}
@@ -404,62 +561,10 @@ export default function DictationPage() {
                                 />
                             </div>
                         )}
-
-                        {/* Active cue */}
-                        {d.stateCues.length > 0 && d.stateActiveTab !== "dictation" && (
-                            <div className="flex flex-row items-center justify-center w-full py-3">
-                                <div className="transition-all duration-300 text-xl font-semibold leading-snug">
-                                    {d.stateActiveCue || "..."}
-                                </div>
-                            </div>
-                        )}
                     </div>
 
-                    {/* Tabs */}
-                    <Tabs className="font-bold w-full flex-1 min-h-0 overflow-hidden" variant="secondary" selectedKey={d.stateActiveTab} onSelectionChange={(v) => d.setStateActiveTab(String(v))}>
-                        <Tabs.ListContainer>
-                            <Tabs.List aria-label="Media tabs" className="w-fit *:h-6 *:w-fit *:px-3 *:text-sm *:font-normal *:data-[selected=true]:font-bold">
-                                <Tabs.Tab id="media">Media</Tabs.Tab>
-                                <Tabs.Tab id="dictation">Dictation</Tabs.Tab>
-                            </Tabs.List>
-                        </Tabs.ListContainer>
-
-                        <Tabs.Panel id="media" className="flex flex-col w-full gap-3">
-                            {/* ── Media tab ── */}
-                            <div>
-                                <div className="flex flex-row items-center justify-start gap-2">
-                                    <span className="flex-1 text-xl font-bold text-blue-500">Media</span>
-                                </div>
-                                <Separator className="my-4" />
-                                <TextField className="w-full">
-                                    <Label>Title</Label>
-                                    <Input value={d.stateMedia.title} onChange={(e) => d.setStateMedia({ ...d.stateMedia, title: e.target.value })} />
-                                </TextField>
-                                <TextField className="w-full mt-2">
-                                    <Label>Source</Label>
-                                    <Input value={d.stateMedia.source} readOnly />
-                                </TextField>
-                                <TextField className="w-full mt-2">
-                                    <Label>Note</Label>
-                                    <Input value={d.stateMedia.note} onChange={(e) => d.setStateMedia({ ...d.stateMedia, note: e.target.value })} />
-                                </TextField>
-                                <div className="flex justify-end gap-2 pt-3 mt-1">
-                                    <Button variant="primary" size="sm" isDisabled={d.stateSaving} onPress={d.handleSaveMedia}>Save</Button>
-                                </div>
-                            </div>
-
-                            <div>
-                                <div className="flex flex-row items-center justify-start gap-2">
-                                    <span className="flex-1 text-xl font-bold text-blue-500">Subtitle</span>
-                                </div>
-                                <Separator className="my-4" />
-                                {d.stateSubtitleList.map((v) => (
-                                    <SubtitleItem key={v.uuid} item={v} datasetUuid={d.selectedDatasetUuid} isActive={d.stateSubtitle?.uuid === v.uuid} onSelect={() => d.setStateSubtitle(v)} />
-                                ))}
-                            </div>
-                        </Tabs.Panel>
-
-                        <Tabs.Panel id="dictation" className="flex flex-col w-full gap-3 flex-1 min-h-0">
+                    {/* Dictation */}
+                    <div className="flex flex-col w-full gap-3 flex-1 min-h-0 overflow-hidden">
                             {/* ── Fixed header ── */}
                             <div className="shrink-0 flex flex-col gap-3">
                                 {d.stateSubtitleList.length > 1 && (
@@ -481,8 +586,6 @@ export default function DictationPage() {
                                         <span className="flex-1 text-sm text-foreground-500">{d.stateDictSuccessSet.size} / {d.stateCues.length} ✓</span>
                                     </div>
                                 )}
-
-                                {!!d.stateSubtitle && <span className="text-xs text-gray-300">UUID: {d.stateSubtitle.uuid}</span>}
                             </div>
 
                             {/* ── Scrollable cue cards ── */}
@@ -499,7 +602,7 @@ export default function DictationPage() {
 
                                 {d.stateDictMode === "full" ? (
                                     d.stateCues.map((cue, i) => (
-                                        <div key={i} data-cue-index={i} className={`rounded-xl border-2 py-1.5 px-2 transition-colors border-border-light ${cue.deleted ? "bg-error-bg" : cue.modified ? "bg-accent-bg/20" : "bg-bg-body"}`}>
+                                        <div key={i} data-cue-index={i} className={`rounded-xl border-2 py-1.5 px-2 transition-colors ${d.stateFocusedCueUUID === cue.uuid ? "border-accent" : "border-border-light"} ${cue.deleted ? "bg-error-bg" : d.stateFocusedCueUUID === cue.uuid ? "bg-accent-bg/40" : cue.modified ? "bg-accent-bg/20" : "bg-bg-body"}`}>
                                             <CueEditor
                                                 cue={cue}
                                                 media={d.videoRef.current}
@@ -559,8 +662,7 @@ export default function DictationPage() {
                                     </div>
                                 )}
                             </div>
-                        </Tabs.Panel>
-                    </Tabs>
+                    </div>
                 </div>
             )}
 

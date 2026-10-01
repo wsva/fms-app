@@ -45,6 +45,10 @@ export function useDictationData() {
     const [locationError, setLocationError] = useState<string | null>(null);
     const [selectedDatasetUuid, setSelectedDatasetUuid] = useState<string>("");
     const [mediaList, setMediaList] = useState<ListenMedia[]>([]);
+    // Per-media pending edits (source/note) for the media-list edit mode.
+    const [mediaEdits, setMediaEdits] = useState<Record<string, { note: string; source: string }>>({});
+    // Subtitles per media (media uuid -> subtitle list), loaded for the media-list cards.
+    const [mediaSubtitles, setMediaSubtitles] = useState<Record<string, ListenSubtitle[]>>({});
     const [stateMediaUUID, setStateMediaUUID] = useState<string>("");
     const [stateMedia, setStateMedia] = useState<ListenMedia>(newMedia());
     const [stateSaving, setStateSaving] = useState(false);
@@ -55,6 +59,9 @@ export function useDictationData() {
     // Subtitles / cues
     const [stateSubtitleList, setStateSubtitleList] = useState<ListenSubtitle[]>([]);
     const [stateSubtitle, setStateSubtitle] = useState<ListenSubtitle | undefined>();
+    // When set, the subtitle-loading effect selects this subtitle instead of the first
+    // (used by media-card subtitle links to deep-link into a specific dictation).
+    const pendingSubtitleUuid = useRef<string | null>(null);
     const [stateCues, updateStateCues] = useImmer<Cue[]>([]);
     const [stateActiveCue, setStateActiveCue] = useState("");
     const [stateNeedSave, setStateNeedSave] = useState(false);
@@ -70,7 +77,6 @@ export function useDictationData() {
 
     // Player
     const videoRef = useRef<HTMLVideoElement>(null);
-    const [stateActiveTab, setStateActiveTab] = useState("dictation");
     const [stateFocusedCueUUID, setStateFocusedCueUUID] = useState<string | null>(null);
     const [stateWaveformPeaks, setStateWaveformPeaks] = useState<WaveformData | null>(null);
 
@@ -134,7 +140,7 @@ export function useDictationData() {
     // ── Load media list when dataset changes ──
 
     useEffect(() => {
-        if (!selectedDatasetUuid) { setMediaList([]); setStateMediaUUID(""); setCompletedMediaUuids(new Set()); return; }
+        if (!selectedDatasetUuid) { setMediaList([]); setMediaEdits({}); setStateMediaUUID(""); setCompletedMediaUuids(new Set()); return; }
         setStateLoading(true);
         Promise.all([
             invoke<ListenMedia[]>("listen_list_media", { datasetUuid: selectedDatasetUuid }),
@@ -142,6 +148,7 @@ export function useDictationData() {
         ])
             .then(([mediaRes, completedRes]) => {
                 setMediaList(mediaRes);
+                setMediaEdits({});
                 setCompletedMediaUuids(new Set(completedRes));
                 // Keep the current selection if it still exists (e.g. on reload),
                 // otherwise reset (e.g. on dataset switch or after deletion).
@@ -150,6 +157,21 @@ export function useDictationData() {
             .catch(console.error)
             .finally(() => setStateLoading(false));
     }, [selectedDatasetUuid, reloadToken]);
+
+    // ── Load subtitles for each media in the list (for card links) ──
+
+    useEffect(() => {
+        if (!selectedDatasetUuid || mediaList.length === 0) { setMediaSubtitles({}); return; }
+        let cancelled = false;
+        Promise.all(
+            mediaList.map((m) =>
+                invoke<ListenSubtitle[]>("listen_get_subtitles", { datasetUuid: selectedDatasetUuid, mediaUuid: m.uuid })
+                    .then((subs) => [m.uuid, subs] as [string, ListenSubtitle[]])
+                    .catch((e) => { console.error(e); return [m.uuid, []] as [string, ListenSubtitle[]]; })
+            )
+        ).then((entries) => { if (!cancelled) setMediaSubtitles(Object.fromEntries(entries)); });
+        return () => { cancelled = true; };
+    }, [selectedDatasetUuid, mediaList, reloadToken]);
 
     // ── Load media details ──
 
@@ -167,7 +189,13 @@ export function useDictationData() {
     useEffect(() => {
         if (!selectedDatasetUuid || !stateMediaUUID) { setStateSubtitleList([]); setStateSubtitle(undefined); return; }
         invoke<ListenSubtitle[]>("listen_get_subtitles", { datasetUuid: selectedDatasetUuid, mediaUuid: stateMediaUUID })
-            .then((res) => { setStateSubtitleList(res); setStateSubtitle(res[0]); })
+            .then((res) => {
+                setStateSubtitleList(res);
+                const pending = pendingSubtitleUuid.current;
+                pendingSubtitleUuid.current = null;
+                const match = pending ? res.find((s) => s.uuid === pending) : undefined;
+                setStateSubtitle(match ?? res[0]);
+            })
             .catch(console.error);
     }, [selectedDatasetUuid, stateMediaUUID, reloadToken]);
 
@@ -224,7 +252,11 @@ export function useDictationData() {
 
     // ── Resolve audio src ──
 
-    const selectedDataset = datasets.find((d) => d.info.uuid === selectedDatasetUuid);
+    // Guard against empty-uuid datasets (raw folders without info.json): an empty
+    // selectedDatasetUuid means "nothing selected" and must not resolve to them.
+    const selectedDataset = selectedDatasetUuid
+        ? datasets.find((d) => d.info.uuid === selectedDatasetUuid)
+        : undefined;
     const audioFullPath = selectedDataset && stateMedia.source ? `${selectedDataset.path}/media/${stateMedia.source}` : "";
     const audioSrc = audioFullPath && isTauri() ? convertFileSrc(audioFullPath) : "";
     const audioMode = isAudio(stateMedia.source);
@@ -235,6 +267,12 @@ export function useDictationData() {
         if (!selectedDataset || !source || !isTauri()) return "";
         return convertFileSrc(`${selectedDataset.path}/media/${source}`);
     }, [selectedDataset]);
+
+    /// Select a media and jump straight into a specific subtitle's dictation view.
+    const selectMediaSubtitle = useCallback((mediaUuid: string, subtitleUuid: string) => {
+        pendingSubtitleUuid.current = subtitleUuid;
+        setStateMediaUUID(mediaUuid);
+    }, []);
 
     // ── Dictation handlers ──
 
@@ -350,13 +388,88 @@ export function useDictationData() {
         } finally { setStateSaving(false); }
     }, [selectedDatasetUuid, stateMediaUUID]);
 
+    // ── Media list editing (edit mode on the media list view) ──
+
+    /// Number of media rows with unsaved source/note edits.
+    const mediaDirtyCount = Object.keys(mediaEdits).length;
+
+    const isMediaDirty = useCallback((m: ListenMedia) => {
+        const e = mediaEdits[m.uuid];
+        return !!e && (e.note !== m.note || e.source !== m.source);
+    }, [mediaEdits]);
+
+    /// Current (possibly edited) value of a media field.
+    const mediaFieldOf = useCallback(
+        (m: ListenMedia, key: "note" | "source") => mediaEdits[m.uuid]?.[key] ?? m[key],
+        [mediaEdits]
+    );
+
+    /// Stage an edit for a media row; drops the entry when it matches the stored value.
+    const setMediaField = useCallback((m: ListenMedia, key: "note" | "source", value: string) => {
+        setMediaEdits((prev) => {
+            const base = prev[m.uuid] ?? { note: m.note, source: m.source };
+            const next = { ...base, [key]: value };
+            if (next.note === m.note && next.source === m.source) {
+                const { [m.uuid]: _removed, ...rest } = prev;
+                void _removed;
+                return rest;
+            }
+            return { ...prev, [m.uuid]: next };
+        });
+    }, []);
+
+    const persistMediaRow = useCallback(async (m: ListenMedia, edit: { note: string; source: string }) => {
+        const newSource = edit.source.trim();
+        // If the source (filename) changed, rename the physical files on disk first
+        // (media/subtitle/waveform/transcript + DB source), then persist note & fields.
+        if (newSource && newSource !== m.source) {
+            await invoke("listen_rename_media", {
+                datasetUuid: selectedDatasetUuid,
+                mediaUuid: m.uuid,
+                newSource,
+            });
+        }
+        await invoke("listen_save_media", {
+            datasetUuid: selectedDatasetUuid,
+            media: { ...m, source: newSource || m.source, note: edit.note, updated_at: new Date().toISOString() },
+        });
+    }, [selectedDatasetUuid]);
+
+    /// Save every pending media row edit at once.
+    const handleSaveAllMedia = useCallback(async () => {
+        const entries = Object.entries(mediaEdits);
+        if (entries.length === 0) return;
+        setStateSaving(true);
+        try {
+            await Promise.all(entries.map(([uuid, edit]) => {
+                const m = mediaList.find((x) => x.uuid === uuid);
+                return m ? persistMediaRow(m, edit) : Promise.resolve();
+            }));
+            setMediaList((prev) => prev.map((x) => (mediaEdits[x.uuid] ? { ...x, ...mediaEdits[x.uuid] } : x)));
+            setMediaEdits({});
+        } catch (e) { console.error(e); }
+        finally { setStateSaving(false); }
+    }, [mediaEdits, mediaList, persistMediaRow]);
+
+    /// Remove a specific media row (and its related data/files) from the list.
+    const handleDeleteMediaRow = useCallback(async (m: ListenMedia) => {
+        setStateSaving(true);
+        try {
+            await invoke("listen_delete_media", { datasetUuid: selectedDatasetUuid, mediaUuid: m.uuid });
+            setMediaList((prev) => prev.filter((x) => x.uuid !== m.uuid));
+            setMediaEdits((prev) => { const { [m.uuid]: _r, ...rest } = prev; void _r; return rest; });
+            setCompletedMediaUuids((prev) => { const next = new Set(prev); next.delete(m.uuid); return next; });
+        } catch (e) { console.error(e); }
+        finally { setStateSaving(false); }
+    }, [selectedDatasetUuid]);
+
     return {
         // Dataset / media
         datasets, selectedDatasetUuid, setSelectedDatasetUuid, mediaList, stateMediaUUID, setStateMediaUUID,
         stateMedia, setStateMedia, stateSaving, stateLoading, loadDatasets,
-        selectedDataset, getMediaSrc,
+        selectedDataset, getMediaSrc, mediaSubtitles, selectMediaSubtitle,
         // Dataset locations
-        locations, locationError, handleAddLocation, handleRemoveLocation,
+        locations, locationError, loadLocations, handleAddLocation, handleRemoveLocation,
         // Subtitles / cues
         stateSubtitleList, setStateSubtitleList, stateSubtitle, setStateSubtitle,
         stateCues, updateStateCues, stateActiveCue, stateNeedSave, setStateNeedSave,
@@ -366,10 +479,13 @@ export function useDictationData() {
         stateDictCue, setStateDictCue, completedMediaUuids,
         handleDictSuccess, handleDictStatusToggle,
         // Player
-        videoRef, stateActiveTab, setStateActiveTab, stateFocusedCueUUID, setStateFocusedCueUUID,
+        videoRef, stateFocusedCueUUID, setStateFocusedCueUUID,
         stateWaveformPeaks, audioSrc, audioMode, hasMedia,
         // Handlers
         handleExpandStart, handleExpandEnd, handleSaveSubtitle, handleSaveMedia,
         handleReload, handleDeleteMedia,
+        // Media list editing
+        mediaEdits, mediaDirtyCount, isMediaDirty, mediaFieldOf, setMediaField,
+        handleSaveAllMedia, handleDeleteMediaRow,
     };
 }
