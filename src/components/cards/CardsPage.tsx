@@ -28,6 +28,7 @@ import type {
   CardTag,
 } from "@/lib/types";
 import { CARD_BASE_URL, CARD_LINKS, openCardUrl } from "@/lib/cards";
+import { useCardEditor } from "./CardEditorContext";
 
 type TabId = "cards" | "review" | "tags" | "online" | "advanced";
 
@@ -48,9 +49,8 @@ export default function CardsPage() {
   // Active tab
   const [activeTab, setActiveTab] = useState<TabId>("cards");
 
-  // Card detail/edit
-  const [editingCard, setEditingCard] = useState<Card | null>(null);
-  const [showAddCard, setShowAddCard] = useState(false);
+  // Use global card editor
+  const { openCardEditor } = useCardEditor();
 
   // Review state
   const [reviewCard, setReviewCard] = useState<Card | null>(null);
@@ -165,50 +165,6 @@ export default function CardsPage() {
       setTimeout(() => loadNextReview(), 800);
     } catch (e) {
       setError(`Failed to submit review: ${e}`);
-    }
-  }
-
-  // Save card
-  async function saveCard(card: Partial<Card>) {
-    if (!selectedDatasetUuid) return;
-    try {
-      const fullCard: Card = {
-        uuid: card.uuid || "",
-        question: card.question || "",
-        suggestion: card.suggestion || "",
-        answer: card.answer || "",
-        note: card.note || "",
-        familiarity: card.familiarity || 0,
-        question_hash: null,
-        source_card_uuid: card.source_card_uuid || null,
-        source_dataset_uuid: card.source_dataset_uuid || null,
-        deleted_at: null,
-        created_at: "",
-        updated_at: "",
-      };
-      await invoke<Card>("card_save", {
-        datasetUuid: selectedDatasetUuid,
-        card: fullCard,
-      });
-      setEditingCard(null);
-      setShowAddCard(false);
-      loadCards();
-    } catch (e) {
-      setError(`Failed to save card: ${e}`);
-    }
-  }
-
-  // Delete card
-  async function deleteCard(cardUuid: string) {
-    if (!selectedDatasetUuid) return;
-    try {
-      await invoke("card_delete", {
-        datasetUuid: selectedDatasetUuid,
-        cardUuid,
-      });
-      loadCards();
-    } catch (e) {
-      setError(`Failed to delete card: ${e}`);
     }
   }
 
@@ -384,9 +340,9 @@ export default function CardsPage() {
               </select>
               <button
                 onClick={() => {
-                  setShowAddCard(true);
+                  openCardEditor(selectedDatasetUuid, null, () => loadCards());
                 }}
-                className="ml-auto px-3 py-1 rounded bg-accent-blue text-white text-sm hover:opacity-90"
+                className="ml-auto px-3 py-1 rounded border border-border-default text-sm hover:bg-mid-gray/20"
               >
                 <Plus size={14} className="inline mr-1" />
                 Add Card
@@ -404,15 +360,12 @@ export default function CardsPage() {
                   {cards.map((card) => (
                     <div
                       key={card.uuid}
-                      className={`flex items-center gap-3 p-2 rounded-lg hover:bg-mid-gray/10 cursor-pointer ${familiarityColor(card.familiarity)}`}
-                      onClick={() => setEditingCard(card)}
+                      className={`w-full flex items-center gap-3 p-3 rounded-lg hover:bg-mid-gray/10 cursor-pointer ${familiarityColor(card.familiarity)}`}
+                      onClick={() => openCardEditor(selectedDatasetUuid, card, () => loadCards())}
                     >
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium truncate">
+                        <p className="text-2xl font-medium truncate">
                           {card.question || "(empty question)"}
-                        </p>
-                        <p className="text-xs text-text-secondary truncate">
-                          {card.answer || "(empty answer)"}
                         </p>
                       </div>
                       <span className="text-xs text-text-tertiary shrink-0">
@@ -520,7 +473,7 @@ export default function CardsPage() {
                         <button
                           key={btn.q}
                           onClick={() => submitReview(btn.q)}
-                          className={`px-4 py-2 rounded-lg ${btn.color} text-white text-sm hover:opacity-90`}
+                          className={`px-4 py-2 rounded-lg border border-border-default ${btn.color} text-sm hover:opacity-90`}
                         >
                           {btn.label}
                         </button>
@@ -552,7 +505,7 @@ export default function CardsPage() {
                 </p>
                 <button
                   onClick={loadNextReview}
-                  className="mt-4 px-4 py-2 rounded-lg bg-accent-blue text-white text-sm"
+                  className="mt-4 px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20"
                 >
                   Check again
                 </button>
@@ -580,7 +533,7 @@ export default function CardsPage() {
                     setError(`Failed to create tag: ${e}`);
                   }
                 }}
-                className="px-3 py-1 rounded bg-accent-blue text-white text-sm"
+                className="px-3 py-1 rounded border border-border-default text-sm hover:bg-mid-gray/20"
               >
                 <Plus size={14} className="inline mr-1" />
                 Add Tag
@@ -677,19 +630,6 @@ export default function CardsPage() {
           />
         )}
       </div>
-
-      {/* Card edit modal */}
-      {(editingCard || showAddCard) && (
-        <CardEditModal
-          card={editingCard}
-          onSave={saveCard}
-          onDelete={editingCard ? () => { deleteCard(editingCard.uuid); setEditingCard(null); } : undefined}
-          onClose={() => {
-            setEditingCard(null);
-            setShowAddCard(false);
-          }}
-        />
-      )}
     </main>
   );
 }
@@ -843,7 +783,7 @@ function AdvancedTab({
                     onError(`Failed to add directory: ${e}`);
                   }
                 }}
-                className="px-3 py-1 rounded bg-accent-blue text-white text-sm hover:opacity-90"
+                className="px-3 py-1 rounded bg-accent-blue text-sm hover:opacity-90"
               >
                 Add
               </button>
@@ -1043,7 +983,7 @@ function DatasetCard({
           <button
             onClick={handleSync}
             disabled={syncing}
-            className="px-3 py-1 rounded bg-accent-blue text-white text-xs hover:opacity-90 disabled:opacity-50 flex items-center gap-1"
+            className="px-3 py-1 rounded border border-border-default text-xs hover:bg-mid-gray/20 disabled:opacity-50 flex items-center gap-1"
           >
             <RefreshCcw size={12} className={syncing ? "animate-spin" : ""} />
             {syncing ? "Syncing..." : "Sync"}
@@ -1062,115 +1002,4 @@ function DatasetCard({
   );
 }
 
-// ── Card Edit Modal ─────────────────────────────────────────────────────────
 
-function CardEditModal({
-  card,
-  onSave,
-  onDelete,
-  onClose,
-}: {
-  card: Card | null;
-  onSave: (card: Partial<Card>) => void;
-  onDelete?: () => void;
-  onClose: () => void;
-}) {
-  const [question, setQuestion] = useState(card?.question || "");
-  const [answer, setAnswer] = useState(card?.answer || "");
-  const [note, setNote] = useState(card?.note || "");
-  const [suggestion, setSuggestion] = useState(card?.suggestion || "");
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-bg-card rounded-xl border border-border-default p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto">
-        <h2 className="text-lg font-semibold mb-4">
-          {card ? "Edit Card" : "New Card"}
-        </h2>
-
-        <div className="space-y-3">
-          <div>
-            <label className="block text-sm font-medium mb-1">Question</label>
-            <textarea
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              rows={3}
-              className="w-full px-3 py-2 rounded border border-border-default bg-bg-surface text-sm"
-              placeholder="What do you want to learn?"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-1">Answer</label>
-            <textarea
-              value={answer}
-              onChange={(e) => setAnswer(e.target.value)}
-              rows={3}
-              className="w-full px-3 py-2 rounded border border-border-default bg-bg-surface text-sm"
-              placeholder="The answer or explanation"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              Suggestion (optional)
-            </label>
-            <input
-              type="text"
-              value={suggestion}
-              onChange={(e) => setSuggestion(e.target.value)}
-              className="w-full px-3 py-2 rounded border border-border-default bg-bg-surface text-sm"
-              placeholder="AI suggestion or hint"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              Note (optional)
-            </label>
-            <textarea
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              rows={2}
-              className="w-full px-3 py-2 rounded border border-border-default bg-bg-surface text-sm"
-              placeholder="Additional notes"
-            />
-          </div>
-        </div>
-
-        <div className="flex justify-between mt-6">
-          <div>
-            {onDelete && (
-              <button
-                onClick={onDelete}
-                className="px-4 py-2 rounded bg-red-500/10 text-red-500 text-sm hover:bg-red-500/20"
-              >
-                Delete
-              </button>
-            )}
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 rounded border border-border-default text-sm"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={() =>
-                onSave({
-                  uuid: card?.uuid || "",
-                  question,
-                  answer,
-                  note,
-                  suggestion,
-                  familiarity: card?.familiarity || 0,
-                })
-              }
-              disabled={!question.trim()}
-              className="px-4 py-2 rounded bg-accent-blue text-white text-sm hover:opacity-90 disabled:opacity-50"
-            >
-              Save
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}

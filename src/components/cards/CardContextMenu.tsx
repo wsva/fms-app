@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
-import { buildAddCardPath, openCardUrl } from "@/lib/cards";
+import { useCardEditor } from "./CardEditorContext";
+import { invoke } from "@tauri-apps/api/core";
 
 /**
  * Global text-selection context menu for cards.
@@ -28,6 +29,7 @@ export default function CardContextMenu() {
   const [anchor, setAnchor] = useState<MenuAnchor | null>(null);
   const [selectedText, setSelectedText] = useState("");
   const menuRef = useRef<HTMLDivElement>(null);
+  const { openCardEditor } = useCardEditor();
 
   useEffect(() => {
     const onMouseUp = (e: MouseEvent) => {
@@ -84,10 +86,41 @@ export default function CardContextMenu() {
     const text = selectedText;
     setAnchor(null);
     if (!text) return;
+
     try {
-      await openCardUrl(buildAddCardPath({ question: text }));
+      // Get the first available dataset
+      const datasets = await invoke<any[]>("card_dataset_list");
+      if (datasets.length === 0) {
+        alert("No card datasets found. Please create one first.");
+        return;
+      }
+
+      const datasetUuid = datasets[0].info.uuid;
+
+      // Open card editor with pre-filled question
+      openCardEditor(
+        datasetUuid,
+        {
+          uuid: "",
+          question: text,
+          answer: "",
+          suggestion: "",
+          note: "",
+          familiarity: 0,
+          question_hash: null,
+          source_card_uuid: null,
+          source_dataset_uuid: null,
+          deleted_at: null,
+          created_at: "",
+          updated_at: "",
+        },
+        (savedCard) => {
+          console.log("Card saved from context menu:", savedCard);
+        }
+      );
     } catch (err) {
-      console.error("Failed to open card page:", err);
+      console.error("Failed to open card editor:", err);
+      alert(`Failed to open card editor: ${err}`);
     }
   }
 
