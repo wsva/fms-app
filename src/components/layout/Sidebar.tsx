@@ -7,7 +7,6 @@ import {
   Box,
   Database,
   Table,
-  Folder,
   SlidersHorizontal,
   Settings,
   Headphones,
@@ -53,7 +52,6 @@ export type TabId =
   | "dictation"
   | "read-book"
   | "cards"
-  | "datasets"
   | "dictation-dataset"
   | "studio"
   | "models"
@@ -85,7 +83,6 @@ const navGroups: NavGroup[] = [
     label: "Datasets",
     icon: Database,
     tabs: [
-      { id: "datasets", label: "Location", icon: Folder },
       { id: "dictation-dataset", label: "Modify", icon: Table },
       { id: "studio", label: "Studio", icon: SlidersHorizontal },
     ],

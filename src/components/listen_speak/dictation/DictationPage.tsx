@@ -5,10 +5,10 @@
  * this file only handles rendering.
  */
 
-import { useState, useEffect, useSyncExternalStore } from "react";
+import { useState, useEffect, useMemo, useSyncExternalStore } from "react";
 
 import { ProgressCircle, Input, Select, Tabs, ListBox, Label, TextField, Separator, Button, Tooltip } from "@heroui/react";
-import { RefreshCw, Trash2, Database, Shield, Target, CheckCircle } from "lucide-react";
+import { RefreshCw, Trash2, Database, Shield, Target, CheckCircle, FolderPlus, Folder, Link2, X } from "lucide-react";
 import CueEditor from "./components/CueEditor";
 import SubtitleItem from "./components/Subtitle";
 import WaveformCanvas from "./components/WaveformCanvas";
@@ -16,6 +16,7 @@ import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/Confi
 import type { Cue } from "@/lib/types";
 import { useDictationData } from "@/hooks/useDictationData";
 import { isAudio } from "@/lib/listen/utils";
+import { datasetStatusLabel, datasetStatusBadgeClasses, type DatasetStatus } from "@/lib/datasets/types";
 import { subscribe, getVoiceError, clearVoiceError } from "@/lib/voice-input";
 
 const getUUID = () => crypto.randomUUID().replaceAll("-", "");
@@ -25,6 +26,47 @@ export default function DictationPage() {
     const [adminMode, setAdminMode] = useState(false);
     const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
     const voiceError = useSyncExternalStore(subscribe, getVoiceError, getVoiceError);
+
+    // Group ready datasets by their root location for the datasets view.
+    type DatasetItem = (typeof d.datasets)[number];
+    const datasetsByLocation = useMemo(() => {
+        const map = new Map<string, DatasetItem[]>();
+        for (const ds of d.datasets) {
+            const key = ds.location || "";
+            const arr = map.get(key);
+            if (arr) arr.push(ds);
+            else map.set(key, [ds]);
+        }
+        return map;
+    }, [d.datasets]);
+    // Datasets whose location is missing from the dir list (e.g. list fetch failed).
+    const orphanLocations = useMemo(
+        () => Array.from(datasetsByLocation.keys()).filter((k) => k && !d.locations.some((l) => l.path === k)),
+        [datasetsByLocation, d.locations]
+    );
+    const readyCount = useMemo(() => d.datasets.filter((ds) => ds.status === "ready").length, [d.datasets]);
+
+    // Dataset card with a Ready / Not Ready mark; not-ready datasets cannot be
+    // selected until their database is generated on the Datasets page.
+    const renderDatasetCard = (ds: DatasetItem) => {
+        const ready = ds.status === "ready";
+        const status = ds.status as DatasetStatus;
+        return (
+            <button
+                key={ds.path}
+                className={`text-left p-4 border border-border-default rounded-lg transition-colors ${ready ? "hover:bg-bg-hover cursor-pointer" : "opacity-70 cursor-not-allowed"}`}
+                disabled={!ready}
+                onClick={() => ready && d.setSelectedDatasetUuid(ds.info.uuid)}
+                title={ready ? undefined : "Not ready — generate the database in Datasets > Studio first"}
+            >
+                <div className="flex items-center gap-2">
+                    <span className="font-medium text-text-primary">{ds.info.name}</span>
+                    <span className={datasetStatusBadgeClasses(status)}>{datasetStatusLabel(status)}</span>
+                </div>
+                <div className="text-xs text-text-tertiary truncate" title={ds.path}>{ds.path}</div>
+            </button>
+        );
+    };
 
     const selectedMedia = d.mediaList.find((m) => m.uuid === d.stateMediaUUID);
     const selectedMediaTitle = selectedMedia?.title || d.stateMedia.title || "...";
@@ -126,6 +168,14 @@ export default function DictationPage() {
                     </Tooltip>
                     <Tooltip>
                         <Tooltip.Trigger>
+                            <Button isIconOnly variant="ghost" size="sm" aria-label="Add location" isDisabled={d.stateLoading} onPress={d.handleAddLocation}>
+                                <FolderPlus size={16} />
+                            </Button>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Add dataset location</Tooltip.Content>
+                    </Tooltip>
+                    <Tooltip>
+                        <Tooltip.Trigger>
                             <Button isIconOnly variant="ghost" size="sm" aria-label="Reload database" isDisabled={!d.selectedDatasetUuid || d.stateLoading} onPress={d.handleReload}>
                                 <Database size={16} />
                             </Button>
@@ -223,21 +273,81 @@ export default function DictationPage() {
                 {d.stateLoading && <ProgressCircle size="sm" aria-label="Loading" />}
             </nav>
 
-            {/* Datasets view (initial) */}
+            {/* Datasets view (initial) — grouped by location */}
             {!d.selectedDatasetUuid && (
-                <div className="flex flex-col gap-2 flex-1 min-h-0 overflow-y-auto">
-                    {d.datasets.length === 0 ? (
-                        <p className="text-text-secondary">No datasets available. Generate a database for a dataset on the Datasets page first.</p>
-                    ) : d.datasets.map((ds) => (
-                        <button
-                            key={ds.path}
-                            className="text-left p-4 border border-border-default rounded-lg hover:bg-bg-hover cursor-pointer transition-colors"
-                            onClick={() => d.setSelectedDatasetUuid(ds.info.uuid)}
-                        >
-                            <div className="font-medium text-text-primary">{ds.info.name}</div>
-                            <div className="text-xs text-text-tertiary truncate" title={ds.path}>{ds.path}</div>
-                        </button>
-                    ))}
+                <div className="flex flex-col gap-4 flex-1 min-h-0 overflow-y-auto">
+                    {/* Location summary */}
+                    <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-text-tertiary">
+                            {d.locations.length} location{d.locations.length !== 1 ? "s" : ""} · {readyCount} ready / {d.datasets.length} dataset{d.datasets.length !== 1 ? "s" : ""}
+                        </span>
+                    </div>
+
+                    {d.locationError && (
+                        <div className="p-3 bg-error-bg text-error-text rounded-md text-sm">{d.locationError}</div>
+                    )}
+
+                    {d.locations.length === 0 && d.datasets.length === 0 ? (
+                        <p className="text-text-secondary">No datasets available. Use the &quot;Add dataset location&quot; button in the toolbar to link a directory containing datasets, or generate a database in Datasets &gt; Studio first.</p>
+                    ) : (
+                        <>
+                            {d.locations.map((loc) => {
+                                const items = datasetsByLocation.get(loc.path) ?? [];
+                                return (
+                                    <section key={loc.path} className="flex flex-col gap-2">
+                                        {/* Location header */}
+                                        <div className="flex items-center gap-2 px-1">
+                                            {loc.is_linked ? (
+                                                <Link2 size={14} className="text-accent shrink-0" />
+                                            ) : (
+                                                <Folder size={14} className="text-text-tertiary shrink-0" />
+                                            )}
+                                            <span className="text-sm font-semibold text-text-primary shrink-0">{loc.name}</span>
+                                            <span className="text-xs text-text-tertiary truncate flex-1" title={loc.path}>{loc.path}</span>
+                                            <span className="text-xs text-text-tertiary shrink-0">{items.length}</span>
+                                            {loc.is_linked && (
+                                                <Tooltip>
+                                                    <Tooltip.Trigger>
+                                                        <Button
+                                                            isIconOnly
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            aria-label="Remove location"
+                                                            className="text-text-tertiary hover:text-error-text"
+                                                            onPress={() => setConfirmReq({
+                                                                title: "Remove location",
+                                                                message: `Remove "${loc.name}" from dataset locations? Its datasets will no longer be listed here, but files on disk are untouched.`,
+                                                                confirmLabel: "Remove",
+                                                                onConfirm: () => d.handleRemoveLocation(loc.path),
+                                                            })}
+                                                        >
+                                                            <X size={14} />
+                                                        </Button>
+                                                    </Tooltip.Trigger>
+                                                    <Tooltip.Content>Remove this location</Tooltip.Content>
+                                                </Tooltip>
+                                            )}
+                                        </div>
+                                        {/* Datasets under this location */}
+                                        {items.length === 0 ? (
+                                            <p className="text-xs text-text-tertiary px-1">No datasets in this location.</p>
+                                        ) : items.map(renderDatasetCard)}
+                                    </section>
+                                );
+                            })}
+
+                            {/* Datasets from locations missing in the dir list (safety net) */}
+                            {orphanLocations.map((locPath) => (
+                                <section key={locPath} className="flex flex-col gap-2">
+                                    <div className="flex items-center gap-2 px-1">
+                                        <Folder size={14} className="text-text-tertiary shrink-0" />
+                                        <span className="text-xs text-text-tertiary truncate flex-1" title={locPath}>{locPath}</span>
+                                    </div>
+                                    {(datasetsByLocation.get(locPath) ?? []).map(renderDatasetCard)}
+                                </section>
+                            ))}
+                        </>
+                    )}
                 </div>
             )}
 

@@ -7,7 +7,6 @@ import Sidebar, { type TabId } from "@/components/layout/Sidebar";
 import StatusBar from "@/components/layout/StatusBar";
 import WorkspaceChooser from "@/components/workspace/WorkspaceChooser";
 import ModelsPage from "@/components/listen_speak/models/ModelsPage";
-import DatasetsPage from "@/components/listen_speak/datasets/DatasetsPage";
 import DictationPage from "@/components/listen_speak/dictation/DictationPage";
 import DictationDatasetPage from "@/components/listen_speak/dictation_dataset/DictationDatasetPage";
 import StudioPage from "@/components/listen_speak/studio/StudioPage";
@@ -105,9 +104,6 @@ export default function Home() {
         className="flex-1 flex flex-col overflow-hidden transition-[margin] duration-200"
         style={{ marginLeft: sidebarWidth }}
       >
-        <div style={{ display: activeTab === "datasets" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <DatasetsPage />
-        </div>
         <div style={{ display: activeTab === "dictation" ? "flex" : "none" }} className="flex-1 min-h-0">
           <DictationPage />
         </div>

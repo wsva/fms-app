@@ -17,7 +17,16 @@ const getUUID = () => crypto.randomUUID().replaceAll("-", "");
 interface DatasetSummary {
     info: { uuid: string; name: string };
     path: string;
+    /** Root location directory this dataset was found under. */
+    location: string;
     status: string;
+}
+
+// Directory entry returned by `dataset_list_dirs` (mirrors DatasetDirEntry in Rust).
+export interface DatasetDirEntry {
+    name: string;
+    path: string;
+    is_linked: boolean;
 }
 
 const newMedia = (): ListenMedia => ({
@@ -32,6 +41,8 @@ const newMedia = (): ListenMedia => ({
 export function useDictationData() {
     // Dataset / media selection
     const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
+    const [locations, setLocations] = useState<DatasetDirEntry[]>([]);
+    const [locationError, setLocationError] = useState<string | null>(null);
     const [selectedDatasetUuid, setSelectedDatasetUuid] = useState<string>("");
     const [mediaList, setMediaList] = useState<ListenMedia[]>([]);
     const [stateMediaUUID, setStateMediaUUID] = useState<string>("");
@@ -68,13 +79,57 @@ export function useDictationData() {
     const loadDatasets = useCallback(() => {
         if (!isTauri()) return;
         setStateLoading(true);
+        // Keep not-ready datasets too so the page can display them with a
+        // "Not Ready" mark; selection is blocked in the UI instead.
         invoke<DatasetSummary[]>("dataset_list")
-            .then((res) => setDatasets(res.filter((d) => d.status === "ready")))
+            .then((res) => setDatasets(res))
             .catch(console.error)
             .finally(() => setStateLoading(false));
     }, []);
 
     useEffect(() => { loadDatasets(); }, [loadDatasets]);
+
+    // ── Dataset locations ──
+
+    const loadLocations = useCallback(() => {
+        if (!isTauri()) return;
+        invoke<DatasetDirEntry[]>("dataset_list_dirs")
+            .then((res) => setLocations(res))
+            .catch((e) => setLocationError(`Failed to list dataset directories: ${e}`));
+    }, []);
+
+    useEffect(() => { loadLocations(); }, [loadLocations]);
+
+    /// Pick a folder and add it as a linked dataset location.
+    const handleAddLocation = useCallback(async () => {
+        if (!isTauri()) return;
+        setLocationError(null);
+        try {
+            const path = await invoke<string>("settings_pick_folder", { field: "dataset_location" });
+            // Derive display name from the folder name (last path segment).
+            const name = path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+            await invoke("dataset_add_dir", { name, path });
+            loadLocations();
+            loadDatasets();
+        } catch (e) {
+            // Ignore folder-picker cancellation.
+            if (String(e).includes("No folder selected")) return;
+            setLocationError(String(e));
+        }
+    }, [loadLocations, loadDatasets]);
+
+    /// Unlink a linked dataset location (files on disk are untouched).
+    const handleRemoveLocation = useCallback(async (path: string) => {
+        if (!isTauri()) return;
+        setLocationError(null);
+        try {
+            await invoke("dataset_remove_dir", { path });
+            loadLocations();
+            loadDatasets();
+        } catch (e) {
+            setLocationError(String(e));
+        }
+    }, [loadLocations, loadDatasets]);
 
     // ── Load media list when dataset changes ──
 
@@ -300,6 +355,8 @@ export function useDictationData() {
         datasets, selectedDatasetUuid, setSelectedDatasetUuid, mediaList, stateMediaUUID, setStateMediaUUID,
         stateMedia, setStateMedia, stateSaving, stateLoading, loadDatasets,
         selectedDataset, getMediaSrc,
+        // Dataset locations
+        locations, locationError, handleAddLocation, handleRemoveLocation,
         // Subtitles / cues
         stateSubtitleList, setStateSubtitleList, stateSubtitle, setStateSubtitle,
         stateCues, updateStateCues, stateActiveCue, stateNeedSave, setStateNeedSave,
