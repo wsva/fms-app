@@ -361,7 +361,7 @@ export default function DictationPage() {
                         <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
                         <button
                             className={`cursor-pointer hover:underline truncate min-w-0 max-w-[240px] ${d.stateMediaUUID ? "text-accent" : "text-text-primary font-medium"}`}
-                            onClick={() => d.setStateMediaUUID("")}
+                            onClick={() => { d.setStateMediaUUID(""); d.handleReload(); }}
                             title={d.selectedDataset.info.name}
                         >
                             {d.selectedDataset.info.name}
@@ -371,24 +371,21 @@ export default function DictationPage() {
                 {d.selectedDataset && d.stateMediaUUID && (
                     <>
                         <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-                        <button
-                            className={`cursor-pointer hover:underline truncate min-w-0 max-w-[240px] ${d.stateSubtitle ? "text-accent" : "text-text-primary font-medium"}`}
-                            onClick={() => d.setStateMediaUUID("")}
-                            title={selectedMediaLabel}
-                        >
-                            {selectedMediaLabel}
-                        </button>
-                    </>
-                )}
-                {d.selectedDataset && d.stateMediaUUID && d.stateSubtitle && (
-                    <>
-                        <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-                        <span
-                            className="text-text-primary font-medium truncate min-w-0 max-w-[320px]"
-                            title={d.stateSubtitle.name || d.stateSubtitle.uuid}
-                        >
-                            {d.stateSubtitle.name || d.stateSubtitle.uuid}
-                        </span>
+                        {d.stateSubtitle ? (
+                            <span
+                                className="text-text-primary font-medium truncate min-w-0 max-w-[320px]"
+                                title={`${selectedMediaLabel} — ${d.stateSubtitle.name || d.stateSubtitle.uuid}`}
+                            >
+                                {selectedMediaLabel} <span className="text-text-tertiary font-normal">&rsaquo;</span> {d.stateSubtitle.name || d.stateSubtitle.uuid}
+                            </span>
+                        ) : (
+                            <span
+                                className="text-text-primary font-medium truncate min-w-0 max-w-[320px]"
+                                title={selectedMediaLabel}
+                            >
+                                {selectedMediaLabel}
+                            </span>
+                        )}
                     </>
                 )}
                 {d.stateLoading && <ProgressCircle size="sm" aria-label="Loading" />}

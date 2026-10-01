@@ -252,12 +252,11 @@ export default function WaveformCanvas({ peaks, videoRef, selection }: Props) {
     }, [draw, scheduleDraw, videoRef]);
 
     const seek = useCallback(
-        (e: React.MouseEvent<HTMLCanvasElement>) => {
+        (clientX: number, rect: DOMRect) => {
             const video = videoRef.current;
             if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
 
-            const rect = e.currentTarget.getBoundingClientRect();
-            const ratio = (e.clientX - rect.left) / rect.width;
+            const ratio = (clientX - rect.left) / rect.width;
             const { visibleStart, visibleEnd } = getVisibleRange(
                 video.duration,
                 startRef.current,
@@ -270,8 +269,12 @@ export default function WaveformCanvas({ peaks, videoRef, selection }: Props) {
 
     const throttledSeek = useCallback(
         (e: React.MouseEvent<HTMLCanvasElement>) => {
+            // Capture event values synchronously — e.currentTarget is null
+            // inside the rAF callback because the synthetic event is recycled.
+            const clientX = e.clientX;
+            const rect = e.currentTarget.getBoundingClientRect();
             cancelAnimationFrame(seekRafRef.current!);
-            seekRafRef.current = requestAnimationFrame(() => seek(e));
+            seekRafRef.current = requestAnimationFrame(() => seek(clientX, rect));
         },
         [seek],
     );
@@ -282,7 +285,7 @@ export default function WaveformCanvas({ peaks, videoRef, selection }: Props) {
                 ref={canvasRef}
                 className="w-full cursor-pointer rounded"
                 style={{ height: "44px", display: "block" }}
-                onClick={seek}
+                onClick={(e) => seek(e.clientX, e.currentTarget.getBoundingClientRect())}
                 onMouseMove={(e) => {
                     const rect = e.currentTarget.getBoundingClientRect();
                     hoverXRef.current = e.clientX - rect.left;

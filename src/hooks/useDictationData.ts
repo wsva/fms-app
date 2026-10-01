@@ -308,17 +308,35 @@ export function useDictationData() {
         const newSet = new Set(stateDictSuccessSet);
         if (success) newSet.add(uuid); else newSet.delete(uuid);
         setStateDictSuccessSet(newSet);
-        scheduleDictSave(newSet, stateDictStatus);
+
+        // When all cues are completed, auto-mark the media as "complete".
+        const allDone = newSet.size === stateCues.length && stateCues.length > 0;
+        const effectiveStatus = allDone ? "complete" : stateDictStatus;
+        if (allDone && stateDictStatus !== "complete") {
+            setStateDictStatus("complete");
+            // Immediately reflect in the media list so the bg-color updates.
+            if (stateMediaUUID) {
+                setCompletedMediaUuids((prev) => { const next = new Set(prev); next.add(stateMediaUUID); return next; });
+            }
+        } else if (!allDone && stateDictStatus === "complete") {
+            // If a cue was un-marked, revert to in_progress.
+            setStateDictStatus("in_progress");
+            if (stateMediaUUID) {
+                setCompletedMediaUuids((prev) => { const next = new Set(prev); next.delete(stateMediaUUID); return next; });
+            }
+        }
+
+        scheduleDictSave(newSet, effectiveStatus);
 
         // Award XP for cue completion.
         if (success && isTauri() && selectedDatasetUuid && stateSubtitle?.uuid) {
             invoke("xp_award_dictation_cue", { cueId: uuid, datasetUuid: selectedDatasetUuid }).catch(() => {});
             // Check if all cues are now completed → subtitle bonus.
-            if (newSet.size === stateCues.length && stateCues.length > 0) {
+            if (allDone) {
                 invoke("xp_award_dictation_subtitle", { subtitleId: stateSubtitle.uuid, datasetUuid: selectedDatasetUuid }).catch(() => {});
             }
         }
-    }, [stateDictSuccessSet, stateDictStatus, scheduleDictSave, selectedDatasetUuid, stateSubtitle?.uuid, stateCues.length]);
+    }, [stateDictSuccessSet, stateDictStatus, scheduleDictSave, selectedDatasetUuid, stateSubtitle?.uuid, stateCues.length, stateMediaUUID]);
 
     const handleDictStatusToggle = useCallback(async () => {
         if (!selectedDatasetUuid || !stateSubtitle?.uuid) return;
