@@ -9,7 +9,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { RefreshCw, Trash2, Save } from "lucide-react";
+import { RefreshCw, Trash2, Save, Edit3 } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import { isAudio } from "@/lib/listen/utils";
 import type { ListenMedia } from "@/lib/types";
@@ -21,7 +21,7 @@ import {
 } from "@/lib/datasets/types";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 
-type Edit = { title: string; note: string; source: string };
+type Edit = { note: string; source: string };
 
 export default function DictationDatasetPage() {
   const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
@@ -31,6 +31,7 @@ export default function DictationDatasetPage() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
+  const [renameReq, setRenameReq] = useState<{ media: ListenMedia; newName: string } | null>(null);
 
   const selectedDataset = datasets.find((d) => d.info.uuid === selectedDatasetUuid);
 
@@ -62,16 +63,16 @@ export default function DictationDatasetPage() {
   const dirtyCount = Object.keys(edits).length;
   const isDirty = (m: ListenMedia) => {
     const e = edits[m.uuid];
-    return !!e && (e.title !== m.title || e.note !== m.note || e.source !== m.source);
+    return !!e && (e.note !== m.note || e.source !== m.source);
   };
-  const fieldOf = (m: ListenMedia, key: "title" | "note" | "source") => edits[m.uuid]?.[key] ?? m[key];
+  const fieldOf = (m: ListenMedia, key: "note" | "source") => edits[m.uuid]?.[key] ?? m[key];
 
-  const setField = (m: ListenMedia, key: "title" | "note" | "source", value: string) => {
+  const setField = (m: ListenMedia, key: "note" | "source", value: string) => {
     setEdits((prev) => {
-      const base = prev[m.uuid] ?? { title: m.title, note: m.note, source: m.source };
+      const base = prev[m.uuid] ?? { note: m.note, source: m.source };
       const next = { ...base, [key]: value };
       // Drop the entry entirely when it matches the stored value again.
-      if (next.title === m.title && next.note === m.note && next.source === m.source) {
+      if (next.note === m.note && next.source === m.source) {
         const { [m.uuid]: _removed, ...rest } = prev;
         void _removed;
         return rest;
@@ -90,7 +91,7 @@ export default function DictationDatasetPage() {
   const saveMedia = useCallback(async (m: ListenMedia, edit: Edit) => {
     await invoke("listen_save_media", {
       datasetUuid: selectedDatasetUuid,
-      media: { ...m, title: edit.title, source: edit.source, note: edit.note, updated_at: new Date().toISOString() },
+      media: { ...m, source: edit.source, note: edit.note, updated_at: new Date().toISOString() },
     });
   }, [selectedDatasetUuid]);
 
@@ -100,7 +101,7 @@ export default function DictationDatasetPage() {
     setSaving(true);
     try {
       await saveMedia(m, edit);
-      setMediaList((prev) => prev.map((x) => (x.uuid === m.uuid ? { ...x, title: edit.title, source: edit.source, note: edit.note } : x)));
+      setMediaList((prev) => prev.map((x) => (x.uuid === m.uuid ? { ...x, source: edit.source, note: edit.note } : x)));
       setEdits((prev) => { const { [m.uuid]: _r, ...rest } = prev; void _r; return rest; });
     } catch (e) {
       setConfirmReq({ title: "Save failed", message: String(e) });
@@ -131,6 +132,26 @@ export default function DictationDatasetPage() {
       setEdits((prev) => { const { [m.uuid]: _r, ...rest } = prev; void _r; return rest; });
     } catch (e) {
       setConfirmReq({ title: "Remove failed", message: String(e) });
+    } finally { setSaving(false); }
+  }, [selectedDatasetUuid]);
+
+  const handleRename = useCallback(async (m: ListenMedia, newSource: string) => {
+    if (!newSource.trim() || newSource === m.source) {
+      setRenameReq(null);
+      return;
+    }
+    setSaving(true);
+    try {
+      await invoke("listen_rename_media", {
+        datasetUuid: selectedDatasetUuid,
+        mediaUuid: m.uuid,
+        newSource: newSource.trim(),
+      });
+      setMediaList((prev) => prev.map((x) => (x.uuid === m.uuid ? { ...x, source: newSource.trim() } : x)));
+      setEdits((prev) => { const { [m.uuid]: _r, ...rest } = prev; void _r; return rest; });
+      setRenameReq(null);
+    } catch (e) {
+      setConfirmReq({ title: "Rename failed", message: String(e) });
     } finally { setSaving(false); }
   }, [selectedDatasetUuid]);
 
@@ -190,8 +211,7 @@ export default function DictationDatasetPage() {
           </div>
 
           {/* Table header */}
-          <div className="grid grid-cols-[1fr_1fr_1fr_auto] gap-3 px-3 text-xs font-medium text-text-tertiary select-none shrink-0">
-            <span>Title</span>
+          <div className="grid grid-cols-[1fr_1fr_auto] gap-3 px-3 text-xs font-medium text-text-tertiary select-none shrink-0">
             <span>Source</span>
             <span>Note</span>
             <span className="w-24 text-right">Actions</span>
@@ -210,14 +230,7 @@ export default function DictationDatasetPage() {
                   key={m.uuid}
                   className={`flex flex-col gap-2 px-3 py-2 border rounded-lg transition-colors ${dirty ? "border-accent bg-accent-bg/10" : "border-border-default"}`}
                 >
-                  <div className="grid grid-cols-[1fr_1fr_1fr_auto] gap-3 items-center">
-                  <input
-                    className="w-full px-2 py-1 text-sm rounded-md bg-bg-body border border-border-light text-text-primary focus:border-accent outline-none"
-                    value={fieldOf(m, "title")}
-                    placeholder="(untitled)"
-                    disabled={saving}
-                    onChange={(e) => setField(m, "title", e.target.value)}
-                  />
+                  <div className="grid grid-cols-[1fr_1fr_auto] gap-3 items-center">
                   <input
                     className="w-full px-2 py-1 text-sm rounded-md bg-bg-body border border-border-light text-text-primary focus:border-accent outline-none"
                     value={source}
@@ -232,7 +245,7 @@ export default function DictationDatasetPage() {
                     disabled={saving}
                     onChange={(e) => setField(m, "note", e.target.value)}
                   />
-                  <div className="flex flex-row items-center justify-end gap-1 w-24">
+                  <div className="flex flex-row items-center justify-end gap-1 w-32">
                     <button
                       className={btnSmPrimary}
                       disabled={!dirty || saving}
@@ -240,6 +253,14 @@ export default function DictationDatasetPage() {
                       onClick={() => handleSaveRow(m)}
                     >
                       <Save size={14} />
+                    </button>
+                    <button
+                      className={btnSmSecondary}
+                      disabled={saving}
+                      title="Rename media file"
+                      onClick={() => setRenameReq({ media: m, newName: m.source })}
+                    >
+                      <Edit3 size={14} />
                     </button>
                     <button
                       className={btnSmDanger}
@@ -267,6 +288,43 @@ export default function DictationDatasetPage() {
       )}
 
       <ConfirmDialog request={confirmReq} onClose={() => setConfirmReq(null)} />
+
+      {/* Rename dialog */}
+      {renameReq && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setRenameReq(null)}>
+          <div className="bg-bg-card border border-border-default rounded-lg p-6 min-w-96 max-w-lg" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold mb-4">Rename Media</h3>
+            <p className="text-sm text-text-secondary mb-2">Current name: <span className="font-mono">{renameReq.media.source}</span></p>
+            <input
+              type="text"
+              className="w-full px-3 py-2 text-sm rounded-md bg-bg-body border border-border-light text-text-primary focus:border-accent outline-none mb-4"
+              value={renameReq.newName}
+              onChange={(e) => setRenameReq({ ...renameReq, newName: e.target.value })}
+              placeholder="Enter new filename"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleRename(renameReq.media, renameReq.newName);
+                if (e.key === "Escape") setRenameReq(null);
+              }}
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                className={btnSmSecondary}
+                onClick={() => setRenameReq(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className={btnSmPrimary}
+                disabled={saving || !renameReq.newName.trim() || renameReq.newName.trim() === renameReq.media.source}
+                onClick={() => handleRename(renameReq.media, renameReq.newName)}
+              >
+                Rename
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

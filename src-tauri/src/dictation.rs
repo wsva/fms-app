@@ -249,6 +249,26 @@ pub async fn listen_get_dictation(
     Ok(result)
 }
 
+/// Get dictation status for all media in a dataset (returns media_uuids with complete status).
+#[tauri::command]
+pub async fn listen_get_dataset_dictation_status(
+    _settings: State<'_, SettingsState>,
+    _dataset_uuid: String,
+) -> Result<Vec<String>, String> {
+    log::debug!("listen_get_dataset_dictation_status");
+    let conn = open_app_db()?;
+    let user_id = get_current_user_email();
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT media_uuid FROM listen_dictation WHERE user_id = ?1 AND status = 'complete'")
+        .map_err(|e| e.to_string())?;
+    let media_uuids: Vec<String> = stmt
+        .query_map([&user_id], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(media_uuids)
+}
+
 // ============================================================
 // Write commands
 // ============================================================
@@ -271,6 +291,87 @@ pub async fn listen_save_media(
         ],
     )
     .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Rename a media file and all related files (subtitle, waveform, transcript).
+///
+/// Updates the `source` field in the database and renames the corresponding files
+/// on disk in the media/, subtitle/, waveform/, and transcript/ directories.
+#[tauri::command]
+pub async fn listen_rename_media(
+    settings: State<'_, SettingsState>,
+    dataset_uuid: String,
+    media_uuid: String,
+    new_source: String,
+) -> Result<(), String> {
+    log::info!("listen_rename_media: dataset={}, media={}, new_source={}", dataset_uuid, media_uuid, new_source);
+    let dataset_dir = find_dataset_dir(&settings, &dataset_uuid)?;
+    let db_path = dataset_dir.join("data.sqlite3");
+    if !db_path.exists() {
+        return Err("Database file not found. Please generate the database first.".into());
+    }
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+
+    // Get the old source filename
+    let old_source: String = conn
+        .query_row(
+            "SELECT source FROM listen_media WHERE uuid = ?1",
+            [&media_uuid],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Media not found: {}", e))?;
+
+    if old_source == new_source {
+        return Ok(()); // No change needed
+    }
+
+    // Check if new source already exists
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM listen_media WHERE source = ?1 AND uuid != ?2",
+            rusqlite::params![&new_source, &media_uuid],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .map_err(|e| e.to_string())?;
+
+    if exists {
+        return Err(format!("A media with source '{}' already exists", new_source));
+    }
+
+    // Rename files on disk
+    let old_rel = Path::new(&old_source);
+    let new_rel = Path::new(&new_source);
+
+    let files_to_rename = [
+        ("media", old_rel.to_path_buf(), new_rel.to_path_buf()),
+        ("subtitle", old_rel.with_extension("vtt"), new_rel.with_extension("vtt")),
+        ("waveform", old_rel.with_extension("json"), new_rel.with_extension("json")),
+        ("transcript", old_rel.with_extension("txt"), new_rel.with_extension("txt")),
+    ];
+
+    for (subdir, old_file, new_file) in files_to_rename {
+        let old_path = dataset_dir.join(subdir).join(&old_file);
+        let new_path = dataset_dir.join(subdir).join(&new_file);
+
+        if old_path.exists() {
+            // Ensure parent directory exists
+            if let Some(parent) = new_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+            }
+            std::fs::rename(&old_path, &new_path)
+                .map_err(|e| format!("Failed to rename {}/{}: {}", subdir, old_file.display(), e))?;
+        }
+    }
+
+    // Update database
+    conn.execute(
+        "UPDATE listen_media SET source = ?1, updated_at = ?2 WHERE uuid = ?3",
+        rusqlite::params![&new_source, chrono::Utc::now().to_rfc3339(), &media_uuid],
+    )
+    .map_err(|e| format!("Failed to update database: {}", e))?;
+
     Ok(())
 }
 

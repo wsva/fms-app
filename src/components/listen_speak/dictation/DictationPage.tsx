@@ -175,8 +175,9 @@ export default function DictationPage() {
                         <p className="text-text-secondary">No media in this dataset.</p>
                     ) : d.mediaList.map((m) => {
                         const src = d.getMediaSrc(m.source);
+                        const isCompleted = d.completedMediaUuids.has(m.uuid);
                         return (
-                            <div key={m.uuid} className="p-4 border border-border-default rounded-lg flex flex-col gap-2">
+                            <div key={m.uuid} className={`p-4 border rounded-lg flex flex-col gap-2 ${isCompleted ? "bg-success-bg/50 border-accent" : "border-border-default"}`}>
                                 <button
                                     className="text-left font-medium text-accent hover:underline cursor-pointer"
                                     onClick={() => d.setStateMediaUUID(m.uuid)}

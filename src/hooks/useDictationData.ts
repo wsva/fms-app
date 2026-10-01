@@ -54,6 +54,7 @@ export function useDictationData() {
     const [stateDictStatus, setStateDictStatus] = useState<"in_progress" | "complete">("in_progress");
     const [stateDictMode, setStateDictMode] = useState<"full" | "focus">("full");
     const [stateDictCue, setStateDictCue] = useState<Cue | undefined>();
+    const [completedMediaUuids, setCompletedMediaUuids] = useState<Set<string>>(new Set());
     const dictSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Player
@@ -78,14 +79,18 @@ export function useDictationData() {
     // ── Load media list when dataset changes ──
 
     useEffect(() => {
-        if (!selectedDatasetUuid) { setMediaList([]); setStateMediaUUID(""); return; }
+        if (!selectedDatasetUuid) { setMediaList([]); setStateMediaUUID(""); setCompletedMediaUuids(new Set()); return; }
         setStateLoading(true);
-        invoke<ListenMedia[]>("listen_list_media", { datasetUuid: selectedDatasetUuid })
-            .then((res) => {
-                setMediaList(res);
+        Promise.all([
+            invoke<ListenMedia[]>("listen_list_media", { datasetUuid: selectedDatasetUuid }),
+            invoke<string[]>("listen_get_dataset_dictation_status", { datasetUuid: selectedDatasetUuid }),
+        ])
+            .then(([mediaRes, completedRes]) => {
+                setMediaList(mediaRes);
+                setCompletedMediaUuids(new Set(completedRes));
                 // Keep the current selection if it still exists (e.g. on reload),
                 // otherwise reset (e.g. on dataset switch or after deletion).
-                setStateMediaUUID((prev) => (res.some((m) => m.uuid === prev) ? prev : ""));
+                setStateMediaUUID((prev) => (mediaRes.some((m) => m.uuid === prev) ? prev : ""));
             })
             .catch(console.error)
             .finally(() => setStateLoading(false));
@@ -301,7 +306,7 @@ export function useDictationData() {
         stateEditingCue, setStateEditingCue,
         // Dictation
         stateDictSuccessSet, stateDictStatus, stateDictMode, setStateDictMode,
-        stateDictCue, setStateDictCue,
+        stateDictCue, setStateDictCue, completedMediaUuids,
         handleDictSuccess, handleDictStatusToggle,
         // Player
         videoRef, stateActiveTab, setStateActiveTab, stateFocusedCueUUID, setStateFocusedCueUUID,
