@@ -71,6 +71,9 @@ pub struct ModelState {
     model: Mutex<Option<ActiveModel>>,
     pub active_version: Mutex<Option<String>>,
     pub cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Semaphore to serialize transcription requests and prevent race conditions
+    /// where the model is temporarily unavailable during an ongoing transcription.
+    transcribe_lock: Mutex<()>,
 }
 
 #[derive(Clone, Serialize)]
@@ -159,6 +162,7 @@ impl ModelState {
             model: Mutex::new(None),
             active_version: Mutex::new(None),
             cancel_flags: Mutex::new(HashMap::new()),
+            transcribe_lock: Mutex::new(()),
         }
     }
 
@@ -479,6 +483,11 @@ pub fn unload_model_core(state: &ModelState) -> Result<(), String> {
     };
     log::info!("Unloading model '{}'", active_name);
 
+    // Wait for any in-progress transcription to finish before unloading.
+    // This ensures clean state and prevents the transcription from putting
+    // the model back after we've unloaded it.
+    let _transcribe_guard = state.transcribe_lock.lock().unwrap();
+
     {
         let mut m = state.model.lock().unwrap();
         *m = None;
@@ -488,6 +497,7 @@ pub fn unload_model_core(state: &ModelState) -> Result<(), String> {
         *a = None;
     }
 
+    log::info!("Model '{}' unloaded successfully", active_name);
     Ok(())
 }
 
@@ -579,9 +589,31 @@ pub async fn model_transcribe(
 
     let samples = parse_wav_pcm(&wav_bytes)?;
 
+    // Acquire the transcription lock to serialize requests.
+    // This prevents race conditions where the model is temporarily unavailable
+    // during an ongoing transcription.
+    let _transcribe_guard = state.transcribe_lock.lock().unwrap();
+    log::debug!("model_transcribe: acquired transcribe_lock");
+
     let mut model = {
         let mut m = state.model.lock().unwrap();
-        m.take().ok_or_else(|| "No model is loaded".to_string())?
+        match m.take() {
+            Some(model) => {
+                log::debug!("model_transcribe: model acquired, starting transcription");
+                model
+            }
+            None => {
+                let active = state.active_version.lock().unwrap();
+                let err_msg = if active.is_some() {
+                    log::warn!("model_transcribe: model is None but active_version is set to {:?}", active);
+                    "Model is busy (another transcription in progress) or not loaded".to_string()
+                } else {
+                    log::warn!("model_transcribe: no model loaded (active_version is None)");
+                    "No model is loaded".to_string()
+                };
+                return Err(err_msg);
+            }
+        }
     };
 
     let result = match &mut model {
@@ -624,6 +656,7 @@ pub async fn model_transcribe(
     {
         let mut m = state.model.lock().unwrap();
         *m = Some(model);
+        log::debug!("model_transcribe: model returned to state");
     }
 
     log::debug!("model_transcribe: result length={} chars", result.len());
