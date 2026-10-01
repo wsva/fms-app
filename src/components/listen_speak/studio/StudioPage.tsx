@@ -84,7 +84,7 @@ export default function StudioPage() {
   const fetchLocations = useCallback(async () => {
     if (!isTauri()) return;
     try {
-      const res = await invoke<{ name: string; path: string; is_linked: boolean }[]>("dataset_list_dirs");
+      const res = await invoke<{ name: string; path: string; is_linked: boolean }[]>("dataset_list_dirs", { datasetType: "dictation" });
       const paths = res.map((d) => d.path);
       setLocations(paths);
       setCreateLocation((cur) => cur || paths[0] || "");

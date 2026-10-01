@@ -1,20 +1,25 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Card } from "@/lib/types";
+import type { Card, CardDatasetSummary } from "@/lib/types";
 
 function CardEditModal({
   card,
+  datasetUuid,
+  datasets,
   onSave,
   onDelete,
   onClose,
 }: {
   card: Card | null;
-  onSave: (card: Partial<Card>) => void;
+  datasetUuid: string;
+  datasets: CardDatasetSummary[];
+  onSave: (datasetUuid: string, card: Partial<Card>) => void;
   onDelete?: () => void;
   onClose: () => void;
 }) {
+  const [selectedDataset, setSelectedDataset] = useState(datasetUuid);
   const [question, setQuestion] = useState(card?.question || "");
   const [answer, setAnswer] = useState(card?.answer || "");
   const [note, setNote] = useState(card?.note || "");
@@ -45,7 +50,7 @@ function CardEditModal({
             </button>
             <button
               onClick={() =>
-                onSave({
+                onSave(selectedDataset, {
                   uuid: card?.uuid || "",
                   question,
                   answer,
@@ -63,6 +68,20 @@ function CardEditModal({
         </div>
 
         <div className="flex-1 overflow-y-auto space-y-6">
+          <div>
+            <label className="block text-lg font-medium mb-2">Dataset</label>
+            <select
+              value={selectedDataset}
+              onChange={(e) => setSelectedDataset(e.target.value)}
+              className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-lg"
+            >
+              {datasets.map((ds) => (
+                <option key={ds.info.uuid} value={ds.info.uuid}>
+                  {ds.info.name} ({ds.card_count} cards)
+                </option>
+              ))}
+            </select>
+          </div>
           <div>
             <label className="block text-lg font-medium mb-2">Question</label>
             <textarea
@@ -117,6 +136,7 @@ export type CardEditorState = {
   isOpen: boolean;
   card: Card | null;
   datasetUuid: string;
+  datasets: CardDatasetSummary[];
   onSave?: (card: Card) => void;
   onDelete?: () => void;
 };
@@ -152,7 +172,22 @@ export function CardEditorProvider({
     isOpen: false,
     card: null,
     datasetUuid: "",
+    datasets: [],
   });
+
+  // Load datasets on mount
+  useEffect(() => {
+    loadDatasets();
+  }, []);
+
+  async function loadDatasets() {
+    try {
+      const result = await invoke<CardDatasetSummary[]>("card_dataset_list");
+      setState((prev) => ({ ...prev, datasets: result }));
+    } catch (e) {
+      console.error("Failed to load datasets:", e);
+    }
+  }
 
   function openCardEditor(
     datasetUuid: string,
@@ -160,25 +195,27 @@ export function CardEditorProvider({
     onSave?: (card: Card) => void,
     onDelete?: () => void
   ) {
-    setState({
+    setState((prev) => ({
+      ...prev,
       isOpen: true,
       card: card || null,
       datasetUuid,
       onSave,
       onDelete,
-    });
+    }));
   }
 
   function closeCardEditor() {
-    setState({
+    setState((prev) => ({
+      ...prev,
       isOpen: false,
       card: null,
       datasetUuid: "",
-    });
+    }));
   }
 
-  async function handleSave(cardData: Partial<Card>) {
-    if (!state.datasetUuid) return;
+  async function handleSave(datasetUuid: string, cardData: Partial<Card>) {
+    if (!datasetUuid) return;
 
     try {
       const fullCard: Card = {
@@ -197,7 +234,7 @@ export function CardEditorProvider({
       };
 
       const savedCard = await invoke<Card>("card_save", {
-        datasetUuid: state.datasetUuid,
+        datasetUuid,
         card: fullCard,
       });
 
@@ -238,6 +275,8 @@ export function CardEditorProvider({
       {state.isOpen && (
         <CardEditModal
           card={state.card}
+          datasetUuid={state.datasetUuid}
+          datasets={state.datasets}
           onSave={handleSave}
           onDelete={state.card?.uuid ? handleDelete : undefined}
           onClose={closeCardEditor}

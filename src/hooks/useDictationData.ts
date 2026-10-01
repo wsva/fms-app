@@ -115,7 +115,7 @@ export function useDictationData() {
 
     const loadLocations = useCallback(() => {
         if (!isTauri()) return;
-        invoke<DatasetDirEntry[]>("dataset_list_dirs")
+        invoke<DatasetDirEntry[]>("dataset_list_dirs", { datasetType: "dictation" })
             .then((res) => setLocations(res))
             .catch((e) => setLocationError(`Failed to list dataset directories: ${e}`));
     }, []);

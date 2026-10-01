@@ -149,19 +149,35 @@ fn write_dataset_meta(datasets_dir: &str, meta: &DatasetMeta) -> Result<(), Stri
 }
 
 /// Resolve all dataset root directories: default datasets_dir + linked dirs from meta.json
-pub(crate) fn dataset_roots(settings: &SettingsState) -> Vec<PathBuf> {
-    let default_dir = datasets_dir(settings);
-    let default_str = default_dir.to_string_lossy().to_string();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DatasetType {
+    Card,
+    Dictation,
+}
+
+impl DatasetType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            DatasetType::Card => "card",
+            DatasetType::Dictation => "dictation",
+        }
+    }
+}
+
+pub(crate) fn dataset_roots(settings: &SettingsState, dataset_type: DatasetType) -> Vec<PathBuf> {
+    let base_dir = datasets_dir(settings);
+    let type_dir = base_dir.join(dataset_type.as_str());
+    let type_dir_str = type_dir.to_string_lossy().to_string();
     
     let mut roots = Vec::new();
     
-    // Add default datasets directory if it exists
-    if default_dir.exists() && default_dir.is_dir() {
-        roots.push(default_dir);
+    // Add type-specific subdirectory if it exists
+    if type_dir.exists() && type_dir.is_dir() {
+        roots.push(type_dir.clone());
     }
     
-    // Add linked directories from meta.json
-    let meta = read_dataset_meta(&default_str);
+    // Add linked directories from meta.json in the type-specific directory
+    let meta = read_dataset_meta(&type_dir_str);
     for linked in &meta.linked_dirs {
         let linked_path = PathBuf::from(&linked.path);
         if linked_path.exists() && linked_path.is_dir() {
@@ -172,27 +188,35 @@ pub(crate) fn dataset_roots(settings: &SettingsState) -> Vec<PathBuf> {
     roots
 }
 
-/// List all dataset directories (default + linked)
+/// List all dataset directories (default + linked) for a specific dataset type
 #[tauri::command]
 pub async fn dataset_list_dirs(
     settings: State<'_, SettingsState>,
+    dataset_type: String,
 ) -> Result<Vec<DatasetDirEntry>, String> {
-    let default_dir = datasets_dir(&settings);
-    let default_str = default_dir.to_string_lossy().to_string();
+    let ds_type = match dataset_type.as_str() {
+        "card" => DatasetType::Card,
+        "dictation" => DatasetType::Dictation,
+        _ => return Err(format!("Invalid dataset type: {}", dataset_type)),
+    };
+    
+    let base_dir = datasets_dir(&settings);
+    let type_dir = base_dir.join(ds_type.as_str());
+    let type_dir_str = type_dir.to_string_lossy().to_string();
     
     let mut entries = Vec::new();
     
-    // Add default datasets directory as "datasets" entry
-    if default_dir.exists() && default_dir.is_dir() {
+    // Add type-specific subdirectory as default entry
+    if type_dir.exists() && type_dir.is_dir() {
         entries.push(DatasetDirEntry {
-            name: "datasets".to_string(),
-            path: default_str.clone(),
+            name: format!("{} datasets", ds_type.as_str()),
+            path: type_dir_str.clone(),
             is_linked: false,
         });
     }
     
-    // Add linked directories from meta.json
-    let meta = read_dataset_meta(&default_str);
+    // Add linked directories from meta.json in the type-specific directory
+    let meta = read_dataset_meta(&type_dir_str);
     for linked in &meta.linked_dirs {
         let linked_path = PathBuf::from(&linked.path);
         if linked_path.exists() && linked_path.is_dir() {
@@ -207,7 +231,7 @@ pub async fn dataset_list_dirs(
     // Sort alphabetically
     entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     
-    log::info!("[Dataset] Listed {} dataset directories", entries.len());
+    log::info!("[Dataset] Listed {} {} dataset directories", entries.len(), ds_type.as_str());
     Ok(entries)
 }
 
@@ -430,7 +454,7 @@ pub async fn dataset_list(
 
 /// Core dataset listing logic, reusable without Tauri `State` (e.g. web service).
 pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<DatasetSummary> {
-    let roots = dataset_roots(settings);
+    let roots = dataset_roots(settings, DatasetType::Dictation);
     log::debug!("Scanning {} dataset location(s)", roots.len());
 
     let mut datasets = Vec::new();
@@ -479,7 +503,7 @@ pub async fn dataset_import(
         return Err("No audio files found in 'media' directory".into());
     }
 
-    let dir = dataset_roots(&settings)
+    let dir = dataset_roots(&settings, DatasetType::Dictation)
         .into_iter()
         .next()
         .unwrap_or_else(|| datasets_dir(&settings));
@@ -640,7 +664,7 @@ pub async fn dataset_create(
         return Err("Dataset name must not be empty".into());
     }
 
-    let roots = dataset_roots(&settings);
+    let roots = dataset_roots(&settings, DatasetType::Dictation);
     let root = match location {
         Some(loc) if !loc.trim().is_empty() => {
             let p = PathBuf::from(loc.trim());
@@ -695,7 +719,7 @@ pub async fn dataset_create(
 /// has `is_favorites == true`) WITHOUT creating it. Returns `None` when it does
 /// not exist yet. Used for read-only lookups such as de-duplicating favorites.
 pub(crate) fn find_favorites_dataset(settings: &SettingsState) -> Option<(PathBuf, String)> {
-    for root in &dataset_roots(settings) {
+    for root in &dataset_roots(settings, DatasetType::Dictation) {
         if !root.exists() {
             continue;
         }
@@ -736,7 +760,7 @@ pub(crate) fn ensure_favorites_dataset(settings: &SettingsState) -> Result<(Path
     }
 
     // None found -- create one under the first configured root.
-    let root = dataset_roots(settings)
+    let root = dataset_roots(settings, DatasetType::Dictation)
         .into_iter()
         .next()
         .unwrap_or_else(|| datasets_dir(settings));
@@ -915,7 +939,7 @@ fn segments_to_vtt(segments: &[transcribe_rs::TranscriptionSegment]) -> String {
 
 /// Find the dataset directory by UUID across all configured locations.
 pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
-    for root in dataset_roots(settings) {
+    for root in dataset_roots(settings, DatasetType::Dictation) {
         if !root.exists() {
             continue;
         }

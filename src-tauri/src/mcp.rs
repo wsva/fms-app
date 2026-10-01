@@ -199,6 +199,11 @@ struct PathParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct DatasetListDirsParam {
+    dataset_type: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct DatasetAddDirParam {
     name: String,
     path: String,
@@ -1080,11 +1085,11 @@ impl DatasetMcpServer {
     // Dataset management tools
     // -------------------------------------------------------------------------
 
-    #[tool(name = "dataset_list_dirs", description = "List all dataset directories (default datasets directory + linked directories). Returns entries with name, path, and is_linked flag.")]
-    async fn dataset_list_dirs(&self) -> String {
-        log::info!("[MCP] dataset_list_dirs");
+    #[tool(name = "dataset_list_dirs", description = "List all dataset directories (default datasets directory + linked directories) for a specific dataset type. Returns entries with name, path, and is_linked flag.")]
+    async fn dataset_list_dirs(&self, Parameters(param): Parameters<DatasetListDirsParam>) -> String {
+        log::info!("[MCP] dataset_list_dirs: dataset_type={}", param.dataset_type);
         let settings = self.app.state::<SettingsState>();
-        match dataset::dataset_list_dirs(settings).await {
+        match dataset::dataset_list_dirs(settings, param.dataset_type).await {
             Ok(entries) => serde_json::json!({"directories": entries}).to_string(),
             Err(e) => serde_json::json!({"error": e}).to_string(),
         }

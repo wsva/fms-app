@@ -126,7 +126,7 @@ impl Default for CardFilter {
 
 /// Find a card dataset directory by UUID across all configured locations.
 pub(crate) fn find_card_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
-    for root in dataset_roots(settings) {
+    for root in dataset_roots(settings, crate::dataset::DatasetType::Card) {
         if !root.exists() {
             continue;
         }
@@ -279,7 +279,7 @@ fn compute_question_hash(question: &str) -> String {
 
 /// List all card datasets across every configured location.
 pub(crate) fn list_card_datasets(settings: &SettingsState) -> Vec<CardDatasetSummary> {
-    let roots = dataset_roots(settings);
+    let roots = dataset_roots(settings, crate::dataset::DatasetType::Card);
     let mut datasets = Vec::new();
 
     for root in roots {
@@ -419,7 +419,7 @@ pub async fn card_dataset_create(
         return Err("Dataset name must not be empty".into());
     }
 
-    let roots = dataset_roots(&settings);
+    let roots = dataset_roots(&settings, crate::dataset::DatasetType::Card);
     let root = match location {
         Some(loc) if !loc.trim().is_empty() => {
             let p = PathBuf::from(loc.trim());
@@ -600,7 +600,7 @@ pub async fn card_dataset_move(
     }
 
     // Verify target is a known dataset root
-    let roots = dataset_roots(&settings);
+    let roots = dataset_roots(&settings, crate::dataset::DatasetType::Card);
     let target_root_canonical = target_root.canonicalize().map_err(|e| e.to_string())?;
     let is_known_root = roots.iter().any(|r| {
         r.canonicalize().map(|c| c == target_root_canonical).unwrap_or(false)

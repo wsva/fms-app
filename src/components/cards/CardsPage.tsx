@@ -660,7 +660,7 @@ function AdvancedTab({
   // Load dataset directories (locations)
   const loadDirs = useCallback(async () => {
     try {
-      const result = await invoke<{ name: string; path: string; is_linked: boolean }[]>("dataset_list_dirs");
+      const result = await invoke<{ name: string; path: string; is_linked: boolean }[]>("dataset_list_dirs", { datasetType: "card" });
       setDirs(result);
     } catch {
       // Ignore
