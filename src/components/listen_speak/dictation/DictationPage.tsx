@@ -36,6 +36,79 @@ export default function DictationPage() {
         }
     }, [voiceError]);
 
+    // ── Arrow key navigation for cues ──
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            // Only handle Ctrl/Cmd + arrow keys
+            if (!e.ctrlKey && !e.metaKey) return;
+            if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+            
+            // Don't interfere with contenteditable (rich text editing)
+            // Allow in inputs and textareas since Ctrl+Arrow is intentional
+            const activeEl = document.activeElement;
+            if (activeEl && activeEl.getAttribute("contenteditable") === "true") {
+                return;
+            }
+            
+            // Must have cues and be on dictation tab with media selected
+            if (d.stateCues.length === 0 || !d.stateMediaUUID || d.stateActiveTab !== "dictation") return;
+            
+            e.preventDefault();
+            
+            if (d.stateDictMode === "focus") {
+                // Focus mode: navigate between cues
+                const currentDictCue = d.stateDictCue;
+                const currentIndex = currentDictCue ? d.stateCues.findIndex(c => c.uuid === currentDictCue.uuid) : -1;
+                let newIndex = currentIndex;
+                
+                if (e.key === "ArrowUp") {
+                    newIndex = currentIndex > 0 ? currentIndex - 1 : d.stateCues.length - 1;
+                } else if (e.key === "ArrowDown") {
+                    newIndex = currentIndex < d.stateCues.length - 1 ? currentIndex + 1 : 0;
+                }
+                
+                if (newIndex >= 0 && newIndex < d.stateCues.length) {
+                    const newCue = d.stateCues[newIndex];
+                    d.setStateDictCue(newCue);
+                    // Focus the input field of the new cue
+                    setTimeout(() => {
+                        const inputEl = document.getElementById(`d-s-i-${newCue.uuid}`) as HTMLInputElement | HTMLTextAreaElement;
+                        if (inputEl) inputEl.focus();
+                    }, 0);
+                }
+            } else {
+                // Full mode: navigate and focus on cue
+                const currentIndex = d.stateFocusedCueUUID ? d.stateCues.findIndex(c => c.uuid === d.stateFocusedCueUUID) : -1;
+                let newIndex = currentIndex;
+                
+                if (e.key === "ArrowUp") {
+                    newIndex = currentIndex > 0 ? currentIndex - 1 : d.stateCues.length - 1;
+                } else if (e.key === "ArrowDown") {
+                    newIndex = currentIndex < d.stateCues.length - 1 ? currentIndex + 1 : 0;
+                }
+                
+                if (newIndex >= 0 && newIndex < d.stateCues.length) {
+                    const newCue = d.stateCues[newIndex];
+                    d.setStateFocusedCueUUID(newCue.uuid);
+                    // Focus the input field of the new cue
+                    setTimeout(() => {
+                        const inputEl = document.getElementById(`d-s-i-${newCue.uuid}`) as HTMLInputElement | HTMLTextAreaElement;
+                        if (inputEl) inputEl.focus();
+                    }, 0);
+                    // Scroll the cue into view
+                    const cueElements = document.querySelectorAll('[data-cue-index]');
+                    const targetElement = cueElements[newIndex] as HTMLElement;
+                    if (targetElement) {
+                        targetElement.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                    }
+                }
+            }
+        };
+        
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [d.stateCues, d.stateDictCue, d.stateFocusedCueUUID, d.stateDictMode, d.stateMediaUUID, d.stateActiveTab]);
+
     return (
         <div className="flex flex-col flex-1 min-h-0 p-4 overflow-hidden">
             {/* Toolbar */}
@@ -316,7 +389,7 @@ export default function DictationPage() {
 
                                 {d.stateDictMode === "full" ? (
                                     d.stateCues.map((cue, i) => (
-                                        <div key={i} className={`rounded-xl border-2 py-1.5 px-2 transition-colors border-border-light ${cue.deleted ? "bg-error-bg" : cue.modified ? "bg-accent-bg/20" : "bg-bg-body"}`}>
+                                        <div key={i} data-cue-index={i} className={`rounded-xl border-2 py-1.5 px-2 transition-colors border-border-light ${cue.deleted ? "bg-error-bg" : cue.modified ? "bg-accent-bg/20" : "bg-bg-body"}`}>
                                             <CueEditor
                                                 cue={cue}
                                                 media={d.videoRef.current}

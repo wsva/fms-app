@@ -44,6 +44,31 @@ function MicButton() {
   );
 }
 
+// ── Tip Toggle Component ─────────────────────────────────────────────────────
+
+type TipToggleProps = {
+  tip: string;
+  content: string;
+  showContent: boolean;
+  onToggle: () => void;
+  size?: "small" | "large";
+  className?: string;
+};
+
+function TipToggle({ tip, content, showContent, onToggle, size = "small", className = "" }: TipToggleProps) {
+  const sizeClasses = size === "large" ? "text-2xl" : "font-normal";
+  
+  return (
+    <div 
+      className={`bg-bg-muted rounded-sm px-1 text-text-tertiary ${sizeClasses} w-full cursor-pointer select-none ${className}`}
+      onDoubleClick={onToggle}
+      title="Double-click to toggle content/tip"
+    >
+      {showContent ? content : tip}
+    </div>
+  );
+}
+
 // ── Dictation ────────────────────────────────────────────────────────────────
 
 type DictationProps = {
@@ -68,9 +93,13 @@ function Dictation({
   adminMode,
 }: DictationProps) {
   const [stateInput, setStateInput] = useState<string>("");
+  const [stateShowContent, setStateShowContent] = useState(false);
+  const [stateShowReference, setStateShowReference] = useState(false);
 
   useEffect(() => {
     setStateInput("");
+    setStateShowContent(false);
+    setStateShowReference(false);
   }, [cue.uuid]);
 
   const isSuccess = (answer: string) => {
@@ -144,13 +173,22 @@ function Dictation({
               }}
             />
           </div>
-          <div className="bg-bg-muted rounded-sm px-1 text-text-tertiary font-normal w-full">
-            {getTip(stateInput, cue.content)}
-          </div>
+          <TipToggle 
+            tip={getTip(stateInput, cue.content)}
+            content={cue.content}
+            showContent={stateShowContent}
+            onToggle={() => setStateShowContent(!stateShowContent)}
+            size="small"
+          />
           {!!cue.reference && cue.reference !== cue.content && (
-            <div className="bg-bg-muted rounded-sm px-1 mt-1 text-text-tertiary font-normal w-full">
-              {getTip(stateInput, cue.reference)}
-            </div>
+            <TipToggle 
+              tip={getTip(stateInput, cue.reference)}
+              content={cue.reference}
+              showContent={stateShowReference}
+              onToggle={() => setStateShowReference(!stateShowReference)}
+              size="small"
+              className="mt-1"
+            />
           )}
         </div>
       ) : (
@@ -194,13 +232,22 @@ function Dictation({
               }}
             />
           </div>
-          <div className="bg-bg-muted rounded-sm px-1 text-text-tertiary text-2xl w-full">
-            {getTip(stateInput, cue.content)}
-          </div>
+          <TipToggle 
+            tip={getTip(stateInput, cue.content)}
+            content={cue.content}
+            showContent={stateShowContent}
+            onToggle={() => setStateShowContent(!stateShowContent)}
+            size="large"
+          />
           {!!cue.reference && cue.reference !== cue.content && (
-            <div className="bg-bg-muted rounded-sm px-1 mt-1 text-text-tertiary text-2xl w-full">
-              {getTip(stateInput, cue.reference)}
-            </div>
+            <TipToggle 
+              tip={getTip(stateInput, cue.reference)}
+              content={cue.reference}
+              showContent={stateShowReference}
+              onToggle={() => setStateShowReference(!stateShowReference)}
+              size="large"
+              className="mt-1"
+            />
           )}
         </div>
       )}
