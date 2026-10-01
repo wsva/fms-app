@@ -83,6 +83,15 @@ export interface WordGenSettings {
 
 /** Load word generation settings from localStorage, falling back to defaults. */
 export function loadWordGenSettings(): WordGenSettings {
+  // Guard against localStorage being undefined (e.g., during SSR or module init)
+  if (typeof localStorage === 'undefined') {
+    return {
+      model: DEFAULT_WORD_GEN_MODEL,
+      prompt: getDefaultPrompt(DEFAULT_WORD_GEN_LANG as WordGenLang),
+      temperature: 0,
+      lang: DEFAULT_WORD_GEN_LANG as WordGenLang,
+    };
+  }
   const lang = (localStorage.getItem(LS_WORD_GEN_LANG) || DEFAULT_WORD_GEN_LANG) as WordGenLang;
   return {
     model: localStorage.getItem(LS_WORD_GEN_MODEL) || DEFAULT_WORD_GEN_MODEL,
@@ -97,6 +106,8 @@ export function saveWordGenSetting<K extends keyof WordGenSettings>(
   key: K,
   value: WordGenSettings[K]
 ): void {
+  // Guard against localStorage being undefined
+  if (typeof localStorage === 'undefined') return;
   const lsKey =
     key === "model"
       ? LS_WORD_GEN_MODEL

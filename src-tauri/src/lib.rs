@@ -3,6 +3,8 @@ mod adjust;
 mod align;
 mod auth;
 mod book;
+mod cards;
+mod cards_sync;
 mod dataset;
 mod db;
 mod dictation;
@@ -265,6 +267,35 @@ pub fn run() {
             workspace::workspace_rename,
             workspace::workspace_claim,
             workspace::workspace_set_auto_login,
+            // Card dataset management
+            cards::card_dataset_list,
+            cards::card_dataset_create,
+            cards::card_dataset_update,
+            cards::card_dataset_add_subscriber,
+            cards::card_dataset_remove_subscriber,
+            cards::card_dataset_delete,
+            cards::card_dataset_move,
+            // Card CRUD
+            cards::card_list,
+            cards::card_get,
+            cards::card_save,
+            cards::card_delete,
+            cards::card_fork,
+            // Card tags
+            cards::card_tag_list,
+            cards::card_tag_save,
+            cards::card_tag_delete,
+            cards::card_set_tags,
+            cards::card_get_tags,
+            // Card review (SM-2)
+            cards::card_test_get,
+            cards::card_test_submit,
+            // Card sync
+            cards::card_sync_status,
+            cards::card_sync_get_changes,
+            // Card dataset sync (bidirectional)
+            cards_sync::card_sync_full,
+            cards_sync::card_sync_all,
         ])
         .manage(workspace::WorkspaceState::new())
         .manage(model::ModelState::new())

@@ -112,6 +112,15 @@ fn delete_tokens(settings: &SettingsState) -> Result<(), String> {
     Ok(())
 }
 
+/// Get the user_id from stored tokens without making a network call.
+/// Returns None if not logged in.
+pub fn get_stored_user_id(settings: &SettingsState) -> Option<String> {
+    read_tokens(settings)
+        .ok()
+        .flatten()
+        .map(|t| t.user_id)
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------

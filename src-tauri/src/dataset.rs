@@ -149,7 +149,7 @@ fn write_dataset_meta(datasets_dir: &str, meta: &DatasetMeta) -> Result<(), Stri
 }
 
 /// Resolve all dataset root directories: default datasets_dir + linked dirs from meta.json
-fn dataset_roots(settings: &SettingsState) -> Vec<PathBuf> {
+pub(crate) fn dataset_roots(settings: &SettingsState) -> Vec<PathBuf> {
     let default_dir = datasets_dir(settings);
     let default_str = default_dir.to_string_lossy().to_string();
     
