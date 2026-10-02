@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { BookOpen, Library, Settings2, Zap } from "lucide-react";
+import { BookOpen, Library, Settings2, Zap, PanelLeftClose } from "lucide-react";
 import type { BookMeta } from "@/lib/read/types";
 import { isTauri } from "@/lib/tauri";
 import ReadingView from "./ReadingView";
@@ -40,6 +40,13 @@ export default function ReadBookPage() {
     <main className="flex-1 flex flex-col h-full min-h-0">
       {/* Header */}
       <div className="p-4 border-b border-border-default flex items-center gap-4 shrink-0">
+        <button
+          className="p-1.5 rounded-md text-text-secondary hover:bg-bg-hover cursor-pointer"
+          title="Toggle sidebar"
+          onClick={() => window.dispatchEvent(new Event("toggle-sidebar"))}
+        >
+          <PanelLeftClose size={18} />
+        </button>
         <h1 className="text-lg font-semibold flex items-center gap-2 text-text-primary">
           <BookOpen size={20} /> Read a Book
         </h1>

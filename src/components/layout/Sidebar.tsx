@@ -212,6 +212,13 @@ export default function Sidebar({
     }
   }, []);
 
+  // Listen for external toggle requests (e.g. from page headers).
+  useEffect(() => {
+    const handler = () => handleToggle();
+    window.addEventListener("toggle-sidebar", handler);
+    return () => window.removeEventListener("toggle-sidebar", handler);
+  }, [collapsed]);
+
   // Notify parent of width changes
   useEffect(() => {
     const currentWidth = collapsed ? COLLAPSED_WIDTH : expandedWidth;
