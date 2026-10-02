@@ -121,16 +121,51 @@ export function saveWordGenSetting<K extends keyof WordGenSettings>(
 
 /**
  * Parse the LLM response and extract the JSON array.
- * Returns null if parsing fails.
+ * Handles markdown code fences and, if the array is truncated mid-way
+ * (e.g. the LLM hit its output token limit), recovers every complete
+ * object that was emitted before the cut-off. Returns null only when no
+ * valid word object can be extracted at all.
  */
 export function parseWordGenResponse(raw: string): WordGenItem[] | null {
+  // 1. Preferred: parse the whole JSON array.
   const jsonMatch = raw.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) return null;
-  try {
-    return JSON.parse(jsonMatch[0]);
-  } catch {
-    return null;
+  if (jsonMatch) {
+    try {
+      const arr = JSON.parse(jsonMatch[0]);
+      if (Array.isArray(arr)) {
+        const items = arr.filter(isWordGenItem);
+        if (items.length > 0) return items;
+      }
+    } catch {
+      /* fall through to tolerant recovery */
+    }
   }
+
+  // 2. Fallback: the array is incomplete/truncated. Extract each fully-formed
+  //    flat object ({...} with no nested braces) and parse it individually.
+  //    A trailing partial object (no closing brace) is naturally skipped.
+  const objMatches = raw.match(/\{[^{}]*\}/g);
+  if (!objMatches) return null;
+  const items: WordGenItem[] = [];
+  for (const obj of objMatches) {
+    try {
+      const parsed = JSON.parse(obj);
+      if (isWordGenItem(parsed)) items.push(parsed);
+    } catch {
+      /* skip malformed object */
+    }
+  }
+  return items.length > 0 ? items : null;
+}
+
+/** Type guard for a single parsed word item. */
+function isWordGenItem(v: unknown): v is WordGenItem {
+  return (
+    !!v &&
+    typeof v === "object" &&
+    typeof (v as WordGenItem).lemma === "string" &&
+    typeof (v as WordGenItem).surface === "string"
+  );
 }
 
 /** Temperature options for the selector. */

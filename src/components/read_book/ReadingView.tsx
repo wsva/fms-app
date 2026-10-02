@@ -490,17 +490,35 @@ export default function ReadingView({ books, sidebarVisible = true }: Props) {
           : data.length;
 
     try {
-      for (const s of toSave) {
-        await invoke("book_save_sentence", {
-          bookUuid: bookUUID,
-          sentence: toDbSentence(s),
-        });
-      }
-      updateData((d) => {
-        d.splice(insertIndex, 0, ...toSave);
-        renumber(d, true);
+      // Assign sequential 1-based order_num at DB-write time (mirrors
+      // handleSaveAdd) so imported rows persist in the correct position even
+      // if the chapter is reloaded before a "Save Order" flush.
+      const ordered: SentenceClient[] = toSave.map((s, i) => ({
+        ...s,
+        order_num: insertIndex + 1 + i,
+      }));
+      await invoke("book_save_sentences", {
+        bookUuid: bookUUID,
+        sentences: ordered.map(toDbSentence),
       });
-      setNeedSave(true);
+
+      // Persist reordering of existing sentences shifted down by the insert.
+      if (insertIndex < data.length) {
+        const shifted = data
+          .slice(insertIndex)
+          .map((s, j) =>
+            toDbSentence({ ...s, order_num: insertIndex + 1 + ordered.length + j }),
+          );
+        await invoke("book_save_sentences", { bookUuid: bookUUID, sentences: shifted });
+      }
+
+      updateData((d) => {
+        d.splice(insertIndex, 0, ...ordered);
+        for (let i = 0; i < d.length; i++) {
+          const s = d[i];
+          d[i] = { ...s, order_num: i + 1, modified: false };
+        }
+      });
     } catch (e) {
       setError(`Import failed: ${e}`);
     }

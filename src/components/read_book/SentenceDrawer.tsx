@@ -18,6 +18,7 @@ import {
 import type { DrawerState, BookSentenceWord } from "@/lib/read/types";
 import type { LlmChatResponse } from "@/lib/llm/types";
 import { isTauri } from "@/lib/tauri";
+import { logInfo } from "@/lib/logger";
 import { BG_COLORS } from "./utils";
 import { getUUID } from "./utils";
 import { highlightDifferences } from "./diff";
@@ -314,21 +315,34 @@ export default function SentenceDrawer({
     setGeneratingWords(true);
     setWordGenError("");
     setWordGenResponse("");
+    const messages = [
+      {
+        role: "system",
+        content: wordGenSettings.prompt,
+      },
+      {
+        role: "user",
+        content: content.trim(),
+      },
+    ];
+    logInfo(
+      `[word_gen] llm_chat request: ${JSON.stringify({
+        model: wordGenSettings.model,
+        temperature: wordGenSettings.temperature,
+        messages,
+      })}`,
+      "word_gen",
+    );
     try {
       const res = await invoke<LlmChatResponse>("llm_chat", {
         model: wordGenSettings.model,
-        messages: [
-          {
-            role: "system",
-            content: wordGenSettings.prompt,
-          },
-          {
-            role: "user",
-            content: content.trim(),
-          },
-        ],
+        messages,
         temperature: wordGenSettings.temperature,
       });
+      logInfo(
+        `[word_gen] llm_chat response: ${JSON.stringify(res)}`,
+        "word_gen",
+      );
 
       // Extract JSON array from the response (LLM may wrap it in markdown code blocks)
       const raw = res.content;

@@ -231,7 +231,7 @@ pub async fn llm_chat(
         stream: false,
         options: ChatOptions {
             temperature: temperature.unwrap_or(0.7),
-            num_predict: 2048,
+            num_predict: 8192,
         },
     };
 

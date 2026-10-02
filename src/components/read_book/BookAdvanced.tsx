@@ -19,6 +19,7 @@ import type {
 } from "@/lib/read/types";
 import type { LlmChatResponse } from "@/lib/llm/types";
 import { isTauri } from "@/lib/tauri";
+import { logInfo } from "@/lib/logger";
 import { getUUID } from "./utils";
 import WordGenSettings from "./WordGenSettings";
 import { parseWordGenResponse, loadWordGenSettings } from "./wordGen";
@@ -138,14 +139,23 @@ export default function BookAdvanced({ books }: Props) {
         addLog("progress", `[${processedCount}/${sentencesWithoutWords.length}] "${sentencePreview}"`);
 
         try {
+          const messages = [
+            { role: "system", content: prompt },
+            { role: "user", content: sentence.content.trim() },
+          ];
+          logInfo(
+            `[word_gen] llm_chat request: ${JSON.stringify({ model, temperature, messages })}`,
+            "word_gen",
+          );
           const res = await invoke<LlmChatResponse>("llm_chat", {
             model,
-            messages: [
-              { role: "system", content: prompt },
-              { role: "user", content: sentence.content.trim() },
-            ],
+            messages,
             temperature,
           });
+          logInfo(
+            `[word_gen] llm_chat response: ${JSON.stringify(res)}`,
+            "word_gen",
+          );
 
           const parsed = parseWordGenResponse(res.content);
           if (!parsed) {
