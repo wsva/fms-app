@@ -8,7 +8,7 @@
 import { useState, useEffect, useMemo, useSyncExternalStore } from "react";
 
 import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui/react";
-import { RefreshCw, Trash2, Database, SquarePen, Target, CheckCircle, FolderPlus, Folder, Link2, X, Pencil, Save, HelpCircle } from "lucide-react";
+import { RefreshCw, Trash2, Database, List, Target, CheckCircle, FolderPlus, Folder, Link2, Pencil, Save, HelpCircle } from "lucide-react";
 import CueEditor from "./components/CueEditor";
 import WaveformCanvas from "./components/WaveformCanvas";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
@@ -218,136 +218,70 @@ export default function DictationPage() {
 
     return (
         <div className="flex flex-col flex-1 min-h-0 p-4 overflow-hidden">
-            {/* Toolbar */}
+            {/* Toolbar — sections are mutually exclusive: Location on the datasets view,
+                Dataset on the media-list view, Dictation on the cue view. */}
             <div className="@container flex flex-row items-center gap-3 w-full px-3 py-2 mb-4 rounded-lg bg-bg-card border border-border-light">
-                {/* ── Location section ── */}
-                <div className="flex items-center gap-1">
-                    <span className="select-none @max-lg:hidden text-xs font-medium text-text-tertiary mr-1">Location</span>
-                    <Tooltip>
-                        <Tooltip.Trigger>
-                            <Button isIconOnly variant="ghost" size="sm" aria-label="Refresh locations" isDisabled={d.stateLoading} onPress={d.loadLocations}>
-                                <RefreshCw size={16} />
-                            </Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>Refresh locations</Tooltip.Content>
-                    </Tooltip>
-                    <Tooltip>
-                        <Tooltip.Trigger>
-                            <Button isIconOnly variant="ghost" size="sm" aria-label="Add location" isDisabled={d.stateLoading} onPress={d.handleAddLocation}>
-                                <FolderPlus size={16} />
-                            </Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>Add dataset location</Tooltip.Content>
-                    </Tooltip>
-                </div>
+                {/* ── Location section (datasets view) ── */}
+                {!d.selectedDatasetUuid && (
+                    <div className="flex items-center gap-1">
+                        <Button variant="ghost" size="sm" aria-label="Refresh locations" isDisabled={d.stateLoading} onPress={d.loadLocations}>
+                            <RefreshCw size={16} /> Refresh
+                        </Button>
+                        <Button variant="ghost" size="sm" aria-label="Add location" isDisabled={d.stateLoading} onPress={d.handleAddLocation}>
+                            <FolderPlus size={16} /> Add Location
+                        </Button>
+                    </div>
+                )}
 
-                {/* split marker */}
-                <div className="h-6 w-px bg-border-light" />
+                {/* ── Dataset section (media list view) ── */}
+                {d.selectedDatasetUuid && !d.stateMediaUUID && (
+                    <div className="flex items-center gap-1">
+                        <Button variant="ghost" size="sm" aria-label="Reload database" isDisabled={!d.selectedDatasetUuid || d.stateLoading} onPress={d.handleReload}>
+                            <Database size={16} /> Reload
+                        </Button>
+                        <Button size="sm" variant={mediaEditMode ? "primary" : "ghost"} aria-label="Toggle edit mode" isDisabled={!d.selectedDatasetUuid} onPress={() => setMediaEditMode((v) => !v)}>
+                            <Pencil size={16} /> {mediaEditMode ? "View" : "Edit"}
+                        </Button>
+                    </div>
+                )}
 
-                {/* ── Dataset section ── */}
-                <div className="flex items-center gap-1">
-                    <span className="select-none @max-lg:hidden text-xs font-medium text-text-tertiary mr-1">Dataset</span>
-                    <Tooltip>
-                        <Tooltip.Trigger>
-                            <Button isIconOnly variant="ghost" size="sm" aria-label="Refresh datasets" isDisabled={d.stateLoading} onPress={d.loadDatasets}>
-                                <RefreshCw size={16} />
-                            </Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>Refresh datasets</Tooltip.Content>
-                    </Tooltip>
-                    <Tooltip>
-                        <Tooltip.Trigger>
-                            <Button isIconOnly variant="ghost" size="sm" aria-label="Reload database" isDisabled={!d.selectedDatasetUuid || d.stateLoading} onPress={d.handleReload}>
-                                <Database size={16} />
-                            </Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>Reload dataset database</Tooltip.Content>
-                    </Tooltip>
-                    <Tooltip>
-                        <Tooltip.Trigger>
-                            <Button isIconOnly size="sm" variant={mediaEditMode ? "primary" : "ghost"} aria-label="Toggle edit mode" isDisabled={!d.selectedDatasetUuid} onPress={() => setMediaEditMode((v) => !v)}>
-                                <Pencil size={16} />
-                            </Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>{mediaEditMode ? "View mode" : "Edit mode"}</Tooltip.Content>
-                    </Tooltip>
-                </div>
-
-                {/* split marker */}
-                <div className="h-6 w-px bg-border-light" />
-
-                {/* ── Media section ── */}
-                <div className="flex items-center gap-1">
-                    <span className="select-none @max-lg:hidden text-xs font-medium text-text-tertiary mr-1">Media</span>
-                    <Tooltip>
-                        <Tooltip.Trigger>
-                            <Button isIconOnly variant="ghost" size="sm" aria-label="Remove media" className="text-error-text" isDisabled={!d.stateMediaUUID || d.stateSaving || d.stateLoading} onPress={() => setConfirmReq({
-                                title: "Remove media",
-                                message: `Remove "${d.stateMedia.source || "this media"}" and all related data and files? This cannot be undone.`,
-                                confirmLabel: "Remove",
-                                onConfirm: d.handleDeleteMedia,
-                            })}>
-                                <Trash2 size={16} />
-                            </Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>Remove media and all related data</Tooltip.Content>
-                    </Tooltip>
-                </div>
-
-                {/* split marker */}
-                <div className="h-6 w-px bg-border-light" />
-
-                {/* ── Dictation section ── */}
-                <div className="flex items-center gap-1">
-                    <span className="select-none @max-lg:hidden text-xs font-medium text-text-tertiary mr-1">Dictation</span>
-                    <Tooltip>
-                        <Tooltip.Trigger>
-                            <Button isIconOnly size="sm" variant={adminMode ? "primary" : "ghost"} aria-label="Toggle admin mode" isDisabled={d.stateCues.length === 0} onPress={() => setAdminMode(!adminMode)}>
-                                <SquarePen size={16} />
-                            </Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>{adminMode ? "Normal mode" : "Admin mode"}</Tooltip.Content>
-                    </Tooltip>
-                    <Tooltip>
-                        <Tooltip.Trigger>
-                            <Button isIconOnly size="sm" variant={d.stateDictMode === "focus" ? "primary" : "ghost"} aria-label="Toggle focus mode" isDisabled={d.stateCues.length === 0} onPress={() => {
-                                if (d.stateDictMode === "focus") { d.setStateDictMode("full"); }
-                                else {
-                                    const cueList = d.stateCues.filter((cue) => !d.stateDictSuccessSet.has(cue.uuid));
-                                    d.setStateDictCue(cueList.length > 0 ? cueList[0] : undefined);
-                                    d.setStateDictMode("focus");
-                                }
-                            }}>
-                                <Target size={16} />
-                            </Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>{d.stateDictMode === "full" ? "Focus mode" : "Full view"}</Tooltip.Content>
-                    </Tooltip>
-                    <Tooltip>
-                        <Tooltip.Trigger>
-                            <Button isIconOnly size="sm" variant={d.stateDictStatus === "complete" ? "primary" : "ghost"} aria-label="Mark complete" isDisabled={d.stateCues.length === 0} onPress={d.handleDictStatusToggle}>
-                                <CheckCircle size={16} />
-                            </Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>{d.stateDictStatus === "complete" ? "Complete" : "Mark complete"}</Tooltip.Content>
-                    </Tooltip>
-                    <Tooltip isOpen={helpOpen} onOpenChange={setHelpOpen}>
-                        <Tooltip.Trigger>
-                            <Button isIconOnly size="sm" variant="ghost" aria-label="Keyboard shortcuts" onPress={() => setHelpOpen(true)}>
-                                <HelpCircle size={16} />
-                            </Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>
-                            <div className="flex flex-col gap-0.5">
-                                <span>Play Audio: Ctrl+s or double space at the end</span>
-                                <span>Clear Input: Ctrl+d</span>
-                                <span>Voice Input: Ctrl+c</span>
-                                <span>Go to Previous/Next: Ctrl+⬆/⬇</span>
-                                <span>Show Content/Reference: Ctrl+⬅/➡</span>
-                            </div>
-                        </Tooltip.Content>
-                    </Tooltip>
-                </div>
+                {/* ── Dictation section (cue view) ── */}
+                {!!d.stateMediaUUID && (
+                    <div className="flex items-center gap-1">
+                        <Button size="sm" variant={adminMode ? "primary" : "ghost"} aria-label="Toggle detailed mode" isDisabled={d.stateCues.length === 0} onPress={() => setAdminMode(!adminMode)}>
+                            <List size={16} /> Detailed
+                        </Button>
+                        <Button size="sm" variant={d.stateDictMode === "focus" ? "primary" : "ghost"} aria-label="Toggle focus mode" isDisabled={d.stateCues.length === 0} onPress={() => {
+                            if (d.stateDictMode === "focus") { d.setStateDictMode("full"); }
+                            else {
+                                const cueList = d.stateCues.filter((cue) => !d.stateDictSuccessSet.has(cue.uuid));
+                                d.setStateDictCue(cueList.length > 0 ? cueList[0] : undefined);
+                                d.setStateDictMode("focus");
+                            }
+                        }}>
+                            <Target size={16} /> Focus
+                        </Button>
+                        <Button size="sm" variant={d.stateDictStatus === "complete" ? "primary" : "ghost"} aria-label="Mark complete" isDisabled={d.stateCues.length === 0} onPress={d.handleDictStatusToggle}>
+                            <CheckCircle size={16} /> Complete
+                        </Button>
+                        <Tooltip isOpen={helpOpen} onOpenChange={setHelpOpen}>
+                            <Tooltip.Trigger>
+                                <Button size="sm" variant="ghost" aria-label="Keyboard shortcuts" onPress={() => setHelpOpen(true)}>
+                                    <HelpCircle size={16} /> Help
+                                </Button>
+                            </Tooltip.Trigger>
+                            <Tooltip.Content>
+                                <div className="flex flex-col gap-0.5">
+                                    <span>Play Audio: Ctrl+s or double space at the end</span>
+                                    <span>Clear Input: Ctrl+d</span>
+                                    <span>Voice Input: Ctrl+c</span>
+                                    <span>Go to Previous/Next: Ctrl+⬆/⬇</span>
+                                    <span>Show Content/Reference: Ctrl+⬅/➡</span>
+                                </div>
+                            </Tooltip.Content>
+                        </Tooltip>
+                    </div>
+                )}
             </div>
 
             {/* Breadcrumb navigation */}
@@ -426,26 +360,20 @@ export default function DictationPage() {
                                             <span className="text-xs text-text-tertiary truncate flex-1" title={loc.path}>{loc.path}</span>
                                             <span className="text-xs text-text-tertiary shrink-0">{items.length}</span>
                                             {loc.is_linked && (
-                                                <Tooltip>
-                                                    <Tooltip.Trigger>
-                                                        <Button
-                                                            isIconOnly
-                                                            variant="ghost"
-                                                            size="sm"
-                                                            aria-label="Remove location"
-                                                            className="text-text-tertiary hover:text-error-text"
-                                                            onPress={() => setConfirmReq({
-                                                                title: "Remove location",
-                                                                message: `Remove "${loc.name}" from dataset locations? Its datasets will no longer be listed here, but files on disk are untouched.`,
-                                                                confirmLabel: "Remove",
-                                                                onConfirm: () => d.handleRemoveLocation(loc.path),
-                                                            })}
-                                                        >
-                                                            <X size={14} />
-                                                        </Button>
-                                                    </Tooltip.Trigger>
-                                                    <Tooltip.Content>Remove this location</Tooltip.Content>
-                                                </Tooltip>
+                                                <Button
+                                                    variant="ghost"
+                                                    size="sm"
+                                                    aria-label="Delete location"
+                                                    className="text-text-tertiary hover:text-error-text"
+                                                    onPress={() => setConfirmReq({
+                                                        title: "Delete location",
+                                                        message: `Delete "${loc.name}" from dataset locations? Its datasets will no longer be listed here, but files on disk are untouched.`,
+                                                        confirmLabel: "Delete",
+                                                        onConfirm: () => d.handleRemoveLocation(loc.path),
+                                                    })}
+                                                >
+                                                    <Trash2 size={14} /> Delete Location
+                                                </Button>
                                             )}
                                         </div>
                                         {/* Datasets under this location */}
@@ -497,28 +425,24 @@ export default function DictationPage() {
                                 key={m.uuid}
                                 className={`p-4 border rounded-lg flex flex-col gap-2 ${dirty ? "border-accent bg-accent-bg/10" : isCompleted ? "bg-success-bg/50 border-accent" : "border-border-default"}`}
                             >
-                                <button
-                                    className="text-left font-medium text-accent hover:underline cursor-pointer"
-                                    onClick={() => d.setStateMediaUUID(m.uuid)}
-                                >
+                                <span className="text-left font-medium text-text-primary">
                                     {m.source}
-                                </button>
+                                </span>
 
                                 {/* Subtitle links — click to jump into that subtitle's dictation */}
                                 {(d.mediaSubtitles[m.uuid]?.length ?? 0) > 0 && (
                                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                                         <span className="text-xs text-text-tertiary">Subtitles:</span>
                                         {d.mediaSubtitles[m.uuid].map((s) => (
-                                            <span key={s.uuid} className="inline-flex items-center gap-1">
-                                                <button
-                                                    className="text-xs text-accent hover:underline cursor-pointer"
-                                                    title={`Open dictation for "${s.name || s.uuid}"`}
-                                                    onClick={() => d.selectMediaSubtitle(m.uuid, s.uuid)}
-                                                >
-                                                    {s.name || s.uuid}
-                                                </button>
-                                                <span className="text-xs text-text-tertiary font-mono">(uuid: {s.uuid})</span>
-                                            </span>
+                                            <button
+                                                key={s.uuid}
+                                                className="inline-flex items-center gap-1 text-xs hover:underline cursor-pointer"
+                                                title={`Open dictation for "${s.name || s.uuid}"`}
+                                                onClick={() => d.selectMediaSubtitle(m.uuid, s.uuid)}
+                                            >
+                                                <span className="text-accent">{s.name || s.uuid}</span>
+                                                <span className="text-text-tertiary font-mono">(uuid: {s.uuid})</span>
+                                            </button>
                                         ))}
                                     </div>
                                 )}

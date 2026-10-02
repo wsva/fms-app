@@ -447,36 +447,25 @@ export default function CueEditor({
       <div className="flex flex-row gap-1">
         {/* Main content area */}
         <div className="flex-1 flex flex-col gap-0.5 min-w-0">
-          {adminMode && <div>{timeEditorEl()}</div>}
-          {(mode === "edit" || mode === "dictation_edit") && allowEdit && (
-            <div className="flex items-center gap-1">
-              <Tooltip>
-                <Tooltip.Trigger>
-                  <Button isIconOnly variant="ghost" size="sm" isDisabled={isDisabled} onPress={() => onInsert(cue.order_num)}>
-                    <div className="text-lg">#1</div>
+          {(adminMode || ((mode === "edit" || mode === "dictation_edit") && allowEdit)) && (
+            <div className="flex items-center gap-1 flex-wrap">
+              {adminMode && timeEditorEl()}
+              {(mode === "edit" || mode === "dictation_edit") && allowEdit && (
+                <>
+                  <Button variant="ghost" size="sm" isDisabled={isDisabled} onPress={() => onInsert(cue.order_num)}>
+                    Insert Before
                   </Button>
-                </Tooltip.Trigger>
-                <Tooltip.Content>insert before</Tooltip.Content>
-              </Tooltip>
-              <Tooltip>
-                <Tooltip.Trigger>
-                  <Button isIconOnly variant="ghost" size="sm" isDisabled={isDisabled} onPress={() => onInsert(cue.order_num + 1)}>
-                    <div className="text-lg">#2</div>
+                  <Button variant="ghost" size="sm" isDisabled={isDisabled} onPress={() => onInsert(cue.order_num + 1)}>
+                    Insert After
                   </Button>
-                </Tooltip.Trigger>
-                <Tooltip.Content>insert after</Tooltip.Content>
-              </Tooltip>
-              <Tooltip>
-                <Tooltip.Trigger>
-                  <Button isIconOnly variant="ghost" size="sm" isDisabled={isDisabled} onPress={onMergeNext}>
-                    <div className="text-lg">#3</div>
+                  <Button variant="ghost" size="sm" isDisabled={isDisabled} onPress={onMergeNext}>
+                    Merge Next
                   </Button>
-                </Tooltip.Trigger>
-                <Tooltip.Content>merge next</Tooltip.Content>
-              </Tooltip>
-              <Button isIconOnly variant="ghost" size="sm" isDisabled={isDisabled} onPress={onDelete}>
-                <Trash2 size={16} color="red" />
-              </Button>
+                  <Button isIconOnly variant="ghost" size="sm" isDisabled={isDisabled} onPress={onDelete}>
+                    <Trash2 size={16} color="red" />
+                  </Button>
+                </>
+              )}
             </div>
           )}
           <div className={isDictationMode ? "" : "hidden"}>
