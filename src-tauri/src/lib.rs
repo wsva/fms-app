@@ -22,6 +22,7 @@ mod web_service;
 mod capture;
 mod ocr;
 mod xp;
+mod simple_words;
 mod wiki;
 mod workspace;
 
@@ -303,6 +304,15 @@ pub fn run() {
             // Card dataset sync (bidirectional)
             cards_sync::card_sync_full,
             cards_sync::card_sync_all,
+            // Simple words
+            simple_words::simple_words_get_config,
+            simple_words::simple_words_save_config,
+            simple_words::simple_words_load_language,
+            simple_words::simple_words_add_word,
+            simple_words::simple_words_list,
+            simple_words::simple_words_contains,
+            simple_words::simple_words_filter,
+            simple_words::simple_words_reload,
         ])
         .manage(workspace::WorkspaceState::new())
         .manage(model::ModelState::new())
@@ -310,6 +320,7 @@ pub fn run() {
         .manage(dataset::DatasetState::new())
         .manage(web_service::WebServiceState::new())
         .manage(ocr::OcrState::new())
+        .manage(simple_words::SimpleWordsState::new())
         .setup(|app| {
             let log_buffer = logger::init_logger(app.handle().clone());
             app.handle().manage(log_buffer);
@@ -354,6 +365,16 @@ pub fn run() {
                 }
             }
             app.handle().manage(index_state);
+
+            // Load simple words into memory (from persisted dataset selection)
+            {
+                let sw_state = app.handle().state::<simple_words::SimpleWordsState>();
+                let settings_state = app.handle().state::<settings::SettingsState>();
+                match simple_words::init_simple_words(&settings_state, &sw_state) {
+                    Ok(count) => log::info!("[Startup] Loaded {} simple words", count),
+                    Err(e) => log::error!("[Startup] Failed to load simple words: {}", e),
+                }
+            }
 
             // Auto-start web service (MCP + HTTP API) on port 8787
             let handle = app.handle().clone();

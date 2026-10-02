@@ -21,6 +21,7 @@ import {
   LogOut,
   Star,
   FolderKanban,
+  Type,
 } from "lucide-react";
 
 function isTauri(): boolean {
@@ -51,6 +52,7 @@ export type TabId =
   | "read-book"
   | "cards"
   | "studio"
+  | "simple-words"
   | "models"
   | "edge-tts"
   | "llm-chat"
@@ -82,6 +84,7 @@ const navGroups: NavGroup[] = [
     tabs: [
       { id: "workspaces", label: "Workspaces", icon: FolderKanban },
       { id: "studio", label: "Dataset Studio", icon: SlidersHorizontal },
+      { id: "simple-words", label: "Simple Words", icon: Type },
       { id: "wiki", label: "Wiki", icon: BookOpenText },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },

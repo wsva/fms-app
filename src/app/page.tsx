@@ -19,6 +19,7 @@ import OcrPage from "@/components/ocr/OcrPage";
 import WikiPage from "@/components/wiki/WikiPage";
 import LogPage from "@/components/tools/LogPage";
 import WorkspacesPage from "@/components/workspace/WorkspacesPage";
+import SimpleWordsPage from "@/components/tools/SimpleWordsPage";
 
 interface Workspace {
   uuid: string;
@@ -108,6 +109,9 @@ export default function Home() {
         </div>
         <div style={{ display: activeTab === "studio" ? "flex" : "none" }} className="flex-1 min-h-0">
           <StudioPage />
+        </div>
+        <div style={{ display: activeTab === "simple-words" ? "flex" : "none" }} className="flex-1 min-h-0">
+          <SimpleWordsPage />
         </div>
         <div style={{ display: activeTab === "read-book" ? "flex" : "none" }} className="flex-1 min-h-0">
           <ReadBookPage />
