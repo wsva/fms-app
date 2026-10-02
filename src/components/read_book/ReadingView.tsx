@@ -420,6 +420,93 @@ export default function ReadingView({ books, sidebarVisible = true }: Props) {
 
   const handleNewParagraph = () => insertParagraph(null);
 
+  // ── Import sentences from text (each line = sentence, empty line = paragraph break) ─
+  const handleImport = async (para: Paragraph, text: string) => {
+    if (!text.trim() || !chapterUUID || !isTauri()) return;
+    setSaving(true);
+    setError("");
+
+    const lines = text.split("\n");
+    const now = nowIso();
+    const toSave: SentenceClient[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (line === "") {
+        // Skip leading empty lines
+        if (toSave.length === 0) continue;
+        // Skip trailing empty lines
+        const remaining = lines.slice(i + 1).some((l) => l.trim() !== "");
+        if (!remaining) break;
+        // Collapse consecutive empty lines into a single paragraph break
+        if (toSave[toSave.length - 1].sentence_type === "paragraph_break") continue;
+        toSave.push({
+          uuid: getUUID(),
+          chapter_uuid: chapterUUID,
+          user_id: "",
+          order_num: 0,
+          content: "",
+          sentence_type: "paragraph_break",
+          audio_path: null,
+          audio_url: null,
+          recognized: null,
+          bg_color: null,
+          created_at: now,
+          updated_at: now,
+          modified: false,
+          hasLocalAudio: false,
+        });
+      } else {
+        toSave.push({
+          uuid: getUUID(),
+          chapter_uuid: chapterUUID,
+          user_id: "",
+          order_num: 0,
+          content: line,
+          sentence_type: "text",
+          audio_path: null,
+          audio_url: null,
+          recognized: null,
+          bg_color: null,
+          created_at: now,
+          updated_at: now,
+          modified: false,
+          hasLocalAudio: false,
+        });
+      }
+    }
+
+    if (toSave.length === 0) {
+      setSaving(false);
+      return;
+    }
+
+    // Find insertion point: after the last sentence of the target paragraph
+    const insertIndex =
+      para.sentences.length > 0
+        ? data.findIndex((s) => s.uuid === para.sentences[para.sentences.length - 1].uuid) + 1
+        : para.breakSentence
+          ? data.findIndex((s) => s.uuid === para.breakSentence!.uuid)
+          : data.length;
+
+    try {
+      for (const s of toSave) {
+        await invoke("book_save_sentence", {
+          bookUuid: bookUUID,
+          sentence: toDbSentence(s),
+        });
+      }
+      updateData((d) => {
+        d.splice(insertIndex, 0, ...toSave);
+        renumber(d, true);
+      });
+      setNeedSave(true);
+    } catch (e) {
+      setError(`Import failed: ${e}`);
+    }
+    setSaving(false);
+  };
+
   // ── Paragraph audio upload ─────────────────────────────────────
   const handleParagraphAudio = async (para: Paragraph) => {
     if (!chapterUUID || !isTauri()) return;
@@ -684,6 +771,7 @@ export default function ReadingView({ books, sidebarVisible = true }: Props) {
           onAddSentence={openAddDrawer}
           onDeleteParagraph={handleDeleteParagraph}
           onParagraphAudio={handleParagraphAudio}
+          onImport={handleImport}
         />
       )}
 

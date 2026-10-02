@@ -1,7 +1,8 @@
 "use client";
 
+import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Play, Copy, Upload, Trash2, Plus } from "lucide-react";
+import { Play, Copy, Upload, Trash2, Plus, FileDown } from "lucide-react";
 import type { Paragraph, SentenceClient } from "@/lib/read/types";
 import { sentenceBgClass } from "./utils";
 
@@ -13,6 +14,7 @@ type Props = {
   onAddSentence: (para: Paragraph) => void;
   onDeleteParagraph: (para: Paragraph) => void;
   onParagraphAudio: (para: Paragraph) => void;
+  onImport: (para: Paragraph, text: string) => void;
 };
 
 function playUrl(url?: string | null) {
@@ -28,7 +30,10 @@ export default function ParagraphList({
   onAddSentence,
   onDeleteParagraph,
   onParagraphAudio,
+  onImport,
 }: Props) {
+  const [importIdx, setImportIdx] = useState<number | null>(null);
+  const [importText, setImportText] = useState("");
   return (
     <div className="flex flex-col gap-4">
       {paragraphs.map((para, pi) => (
@@ -131,8 +136,51 @@ export default function ParagraphList({
             </div>
           )}
 
-          {/* Add Sentence button */}
-          <div className="flex justify-end">
+          {/* Import textarea */}
+          {importIdx === pi && (
+            <div className="flex flex-col gap-2 p-2 rounded-md border border-border-default bg-bg-muted">
+              <textarea
+                autoFocus
+                className="w-full px-3 py-2 rounded-md bg-bg-input border border-border-default text-sm text-text-primary font-mono focus:outline-none focus:border-accent min-h-[120px]"
+                placeholder={"Line 1 → sentence\nLine 2 → sentence\n\nEmpty line → paragraph break"}
+                value={importText}
+                onChange={(e) => setImportText(e.target.value)}
+              />
+              <div className="flex gap-2 justify-end">
+                <button
+                  className="flex items-center gap-1 px-2 py-1 rounded text-sm font-medium bg-accent-bg text-white hover:opacity-90 cursor-pointer disabled:opacity-50"
+                  disabled={saving || !importText.trim()}
+                  onClick={() => {
+                    onImport(para, importText);
+                    setImportIdx(null);
+                    setImportText("");
+                  }}
+                >
+                  <FileDown size={14} />
+                  Import
+                </button>
+                <button
+                  className="px-2 py-1 rounded text-sm text-text-secondary hover:bg-bg-hover cursor-pointer"
+                  onClick={() => { setImportIdx(null); setImportText(""); }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Add Sentence + Import buttons */}
+          <div className="flex justify-end gap-1">
+            <button
+              className="flex items-center gap-1 px-2 py-1 rounded text-sm text-text-secondary hover:bg-bg-hover cursor-pointer"
+              onClick={() => {
+                if (importIdx === pi) { setImportIdx(null); setImportText(""); }
+                else { setImportIdx(pi); setImportText(""); }
+              }}
+            >
+              <FileDown size={14} />
+              {importIdx === pi ? "Cancel" : "Import"}
+            </button>
             <button
               className="flex items-center gap-1 px-2 py-1 rounded text-sm text-text-secondary hover:bg-bg-hover cursor-pointer"
               onClick={() => onAddSentence(para)}
