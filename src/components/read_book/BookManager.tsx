@@ -292,7 +292,7 @@ export default function BookManager({ books, onBooksChanged }: Props) {
       const created: BookChapter[] = [];
 
       for (const rawLine of lines) {
-        const line = rawLine.trimEnd();
+        const line = rawLine.trim();
         if (!line.startsWith("#")) continue;
 
         const isChild = line.startsWith("## ");
