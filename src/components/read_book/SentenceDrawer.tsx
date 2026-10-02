@@ -23,7 +23,6 @@ import { getUUID } from "./utils";
 import { highlightDifferences } from "./diff";
 import WordGenSettings from "./WordGenSettings";
 import {
-  DEFAULT_WORD_GEN_PROMPT,
   parseWordGenResponse,
   loadWordGenSettings,
   saveWordGenSetting,
@@ -142,6 +141,7 @@ export default function SentenceDrawer({
   onParagraphAfter,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [savingWords, setSavingWords] = useState(false);
   const [colorPickerOpen, setColorPickerOpen] = useState(false);
   const [rulesText, setRulesText] = useState(DEFAULT_RULES_TEXT);
   const [showRulesEditor, setShowRulesEditor] = useState(false);
@@ -153,7 +153,13 @@ export default function SentenceDrawer({
   const [wordGenSettings, setWordGenSettings] = useState<WordGenSettingsType>(loadWordGenSettings());
   const [wordGenResponse, setWordGenResponse] = useState("");
   const [drawerFontScale, setDrawerFontScale] = useState(1);
+  const [pendingIds, setPendingIds] = useState<string[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Generated or manually typed words not yet written to the database;
+  // flushed on header Save.
+  const pendingWordsRef = useRef<BookSentenceWord[]>([]);
+
+  const syncPendingIds = () => setPendingIds(pendingWordsRef.current.map((w) => w.uuid));
 
   const editUUID = drawer?.mode === "edit" ? drawer.sentence.uuid : null;
 
@@ -178,6 +184,12 @@ export default function SentenceDrawer({
       .then(setWords)
       .catch(() => setWords([]));
   }, [editUUID, bookUUID]);
+
+  // Reset unsaved words when switching sentences.
+  useEffect(() => {
+    pendingWordsRef.current = [];
+    setPendingIds([]);
+  }, [editUUID]);
 
   if (!drawer) return null;
 
@@ -229,7 +241,41 @@ export default function SentenceDrawer({
     });
   };
 
-  const addWord = async () => {
+  const flushPendingWords = async () => {
+    while (pendingWordsRef.current.length > 0) {
+      const w = pendingWordsRef.current[0];
+      await invoke("book_save_word", { bookUuid: bookUUID, word: w });
+      pendingWordsRef.current = pendingWordsRef.current.slice(1);
+      syncPendingIds();
+    }
+  };
+
+  const handleHeaderSave = async () => {
+    // Write queued words first; keep the drawer open if that fails, so the
+    // unsaved batch is not lost.
+    if (pendingWordsRef.current.length > 0) {
+      setSavingWords(true);
+      try {
+        await flushPendingWords();
+      } catch (e) {
+        setWordGenError(`Failed to save words: ${e instanceof Error ? e.message : String(e)}`);
+        setSavingWords(false);
+        return;
+      }
+      setSavingWords(false);
+    }
+    if (drawer.mode === "add") onSaveAdd();
+    else onSaveEdit();
+  };
+
+  const handleDiscard = () => {
+    // Throw away words that were never written to the database.
+    pendingWordsRef.current = [];
+    setPendingIds([]);
+    onDiscard();
+  };
+
+  const addWord = () => {
     if (!editUUID || !newWord.trim() || !isTauri()) return;
     const w: BookSentenceWord = {
       uuid: getUUID(),
@@ -238,17 +284,22 @@ export default function SentenceDrawer({
       word_type: newWordType.trim(),
       note: "",
     };
-    try {
-      await invoke("book_save_word", { bookUuid: bookUUID, word: w });
-      setWords((prev) => [...prev, w]);
-      setNewWord("");
-      setNewWordType("");
-    } catch {
-      /* ignore */
-    }
+    // Queue it like generated words; written on header Save.
+    setWords((prev) => [...prev, w]);
+    pendingWordsRef.current.push(w);
+    syncPendingIds();
+    setNewWord("");
+    setNewWordType("");
   };
 
   const removeWord = async (uuid: string) => {
+    // Drop from the unsaved queue first; a pending word never reached the DB.
+    if (pendingWordsRef.current.some((w) => w.uuid === uuid)) {
+      pendingWordsRef.current = pendingWordsRef.current.filter((w) => w.uuid !== uuid);
+      syncPendingIds();
+      setWords((prev) => prev.filter((w) => w.uuid !== uuid));
+      return;
+    }
     if (!isTauri()) return;
     try {
       await invoke("book_delete_word", { bookUuid: bookUUID, uuid });
@@ -305,13 +356,17 @@ export default function SentenceDrawer({
           word_type: item.pos || "",
           note: item.surface !== item.lemma ? `from: ${item.surface}` : "",
         };
-        await invoke("book_save_word", { bookUuid: bookUUID, word: w });
+        // Hold the word in local state; it is written to the database when
+        // the header Save button is clicked.
         setWords((prev) => [...prev, w]);
+        pendingWordsRef.current.push(w);
         added++;
       }
 
       if (added === 0) {
         setWordGenError("No new words to add");
+      } else {
+        syncPendingIds();
       }
     } catch (e) {
       setWordGenError(`Failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -352,17 +407,22 @@ export default function SentenceDrawer({
                 <option key={i} value={i}>{s.label}</option>
               ))}
             </select>
+            {pendingIds.length > 0 && (
+              <span className="text-xs text-amber-500">
+                {pendingIds.length} unsaved word{pendingIds.length > 1 ? "s" : ""}
+              </span>
+            )}
             <button
               className="px-4 py-1.5 rounded-md bg-accent-bg text-white text-sm font-medium hover:opacity-90 disabled:opacity-50 cursor-pointer"
-              disabled={saving}
-              onClick={drawer.mode === "add" ? onSaveAdd : onSaveEdit}
+              disabled={saving || savingWords}
+              onClick={handleHeaderSave}
             >
               {drawer.mode === "add" ? "Add" : "Save"}
             </button>
             <button
               className="px-3 py-1.5 rounded-md text-sm text-text-secondary hover:bg-bg-hover cursor-pointer"
-              disabled={saving}
-              onClick={onDiscard}
+              disabled={saving || savingWords}
+              onClick={handleDiscard}
             >
               Discard
             </button>
@@ -652,7 +712,11 @@ export default function SentenceDrawer({
                   <span
                     key={w.uuid}
                     title={w.note || undefined}
-                    className="flex flex-col items-center justify-center gap-1 px-2 py-1 m-2 border border-border-default rounded-md"
+                    className={`flex flex-col items-center justify-center gap-1 px-2 py-1 m-2 border rounded-md ${
+                      pendingIds.includes(w.uuid)
+                        ? "border-amber-500/50 border-dashed"
+                        : "border-border-default"
+                    }`}
                   >
                     <span className="font-semibold text-text-primary">{w.word}</span>
                     <div className="flex flex-row items-center justify-between w-full [&>.word-type]:![font-size:0.5em]">
