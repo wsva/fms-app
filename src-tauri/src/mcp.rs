@@ -3,7 +3,7 @@
 //! Uses the `rmcp` crate (v3.4) for protocol handling with Streamable HTTP transport.
 //! Runs on the same axum HTTP server as the web service, nested at `/mcp`.
 //!
-//! Connect Goose Desktop at: http://localhost:8787/mcp
+//! Connect Goose Desktop at: http://localhost:35711/mcp
 use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::Parameters;
@@ -402,7 +402,7 @@ struct WebServiceStartParam {
     tts: bool,
 }
 
-fn default_port() -> u16 { 8787 }
+fn default_port() -> u16 { 35711 }
 fn default_true() -> bool { true }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -1468,7 +1468,7 @@ impl DatasetMcpServer {
         serde_json::to_string_pretty(&status).unwrap_or_default()
     }
 
-    #[tool(name = "web_service_start", description = "Start the web service (HTTP server) with the given config. Default port is 8787. Enables STT, dataset, and TTS endpoints by default.")]
+    #[tool(name = "web_service_start", description = "Start the web service (HTTP server) with the given config. Default port is 35711. Enables STT, dataset, and TTS endpoints by default.")]
     async fn web_service_start(&self, Parameters(param): Parameters<WebServiceStartParam>) -> Result<String, String> {
         log::info!("[MCP] web_service_start: port={}", param.port);
         let state = self.app.state::<WebServiceState>();

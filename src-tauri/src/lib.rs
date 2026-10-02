@@ -376,7 +376,7 @@ pub fn run() {
                 }
             }
 
-            // Auto-start web service (MCP + HTTP API) on port 8787
+            // Auto-start web service (MCP + HTTP API) on port 35711
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 web_service::auto_start(handle).await;

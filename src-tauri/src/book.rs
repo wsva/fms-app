@@ -215,13 +215,21 @@ fn sanitize_dir_name(title: &str) -> String {
 /// List all books in the reading library across all configured locations.
 #[tauri::command]
 pub async fn book_list(settings: State<'_, SettingsState>) -> Result<Vec<BookMeta>, String> {
-    let roots = book_roots(&settings);
+    Ok(list_books(&settings))
+}
+
+/// Core book listing logic, reusable without Tauri `State` (e.g. web service).
+pub(crate) fn list_books(settings: &SettingsState) -> Vec<BookMeta> {
+    let roots = book_roots(settings);
     let mut books = Vec::new();
     for root in roots {
         if !root.exists() {
             continue;
         }
-        let entries = fs::read_dir(&root).map_err(|e| e.to_string())?;
+        let entries = match fs::read_dir(&root) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() || !path.join("info.json").exists() {
@@ -242,7 +250,7 @@ pub async fn book_list(settings: State<'_, SettingsState>) -> Result<Vec<BookMet
         }
     }
     books.sort_by(|a, b| a.title.cmp(&b.title));
-    Ok(books)
+    books
 }
 
 /// Create a new book directory with an initialized database.
@@ -330,7 +338,15 @@ pub async fn book_list_chapters(
     settings: State<'_, SettingsState>,
     book_uuid: String,
 ) -> Result<Vec<BookChapter>, String> {
-    let dir = find_book_dir(&settings, &book_uuid)?;
+    list_chapters(&settings, &book_uuid)
+}
+
+/// Core chapter listing logic, reusable without Tauri `State` (e.g. web service).
+pub(crate) fn list_chapters(
+    settings: &SettingsState,
+    book_uuid: &str,
+) -> Result<Vec<BookChapter>, String> {
+    let dir = find_book_dir(settings, book_uuid)?;
     let conn = open_book_db(&dir)?;
     let mut stmt = conn
         .prepare(
@@ -422,7 +438,16 @@ pub async fn book_list_sentences(
     book_uuid: String,
     chapter_uuid: String,
 ) -> Result<Vec<BookSentence>, String> {
-    let dir = find_book_dir(&settings, &book_uuid)?;
+    list_sentences(&settings, &book_uuid, &chapter_uuid)
+}
+
+/// Core sentence listing logic, reusable without Tauri `State` (e.g. web service).
+pub(crate) fn list_sentences(
+    settings: &SettingsState,
+    book_uuid: &str,
+    chapter_uuid: &str,
+) -> Result<Vec<BookSentence>, String> {
+    let dir = find_book_dir(settings, book_uuid)?;
     let conn = open_book_db(&dir)?;
     let mut stmt = conn
         .prepare(
@@ -432,7 +457,7 @@ pub async fn book_list_sentences(
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([&chapter_uuid], |row| {
+        .query_map([chapter_uuid], |row| {
             let audio_path: Option<String> = row.get(6)?;
             Ok(BookSentence {
                 uuid: row.get(0)?,

@@ -16,12 +16,13 @@ use tokio::sync::oneshot;
 use tokio_util::io::ReaderStream;
 
 use crate::dataset::{self, DatasetSummary};
+use crate::book::{self, BookChapter};
 use crate::edge_tts;
 use crate::model::{self, ModelState};
 use crate::settings::SettingsState;
 
 /// Default port the web server binds to.
-const DEFAULT_PORT: u16 = 8787;
+const DEFAULT_PORT: u16 = 35711;
 
 // ---------------------------------------------------------------------------
 // Config / status types
@@ -274,12 +275,70 @@ fn build_router(app: AppHandle, config: WebServiceConfig) -> Router {
             .route("/tts/voices", get(tts_voices));
     }
 
+    // Reading library (books) — read-only browsing, always available.
+    r = r
+        .route("/books", get(books_list))
+        .route("/books/{uuid}", get(book_chapters_page))
+        .route("/books/{uuid}/{chapter}", get(book_chapter_content));
+
     r.with_state(state)
 }
 
 // ---------------------------------------------------------------------------
 // Index — rich dashboard
 // ---------------------------------------------------------------------------
+
+/// Shared stylesheet for the embedded HTML pages, reusing the app's Light
+/// theme tokens and the typography patterns of markdown.css.
+const PAGE_STYLE: &str = r#"
+:root{--bg-body:#fbfbfb;--bg-card:#ffffff;--bg-muted:#f0f0f0;--text-primary:#0f0f0f;--text-secondary:#666666;--border-default:#e0e0e0;--border-light:#cccccc;--accent:#0EA89A;--accent-hover:#0c9488;--success-bg:#c6f0d0;--success-text:#1e7e34}
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;padding:0;background:var(--bg-body);color:var(--text-primary);line-height:1.7}
+.container{max-width:960px;margin:0 auto;padding:32px 24px}
+header{margin-bottom:24px}
+h1{font-size:2em;font-weight:800;color:var(--accent);margin:0 0 8px;line-height:1.2;border-bottom:2px solid var(--accent);padding-bottom:.25em;display:flex;align-items:center;gap:10px}
+h1 .badge{font-size:11px;padding:2px 8px;border-radius:10px;background:var(--success-bg);color:var(--success-text);font-weight:600}
+.subtitle{color:var(--text-secondary);font-size:14px;margin:8px 0 0;border:none}
+h3{font-size:1.25em;font-weight:600;color:var(--accent);margin:1.2em 0 .4em 0;line-height:1.3}
+.card{background:var(--bg-card);border:1px solid var(--border-default);border-radius:10px;padding:20px;margin-bottom:20px}
+details{background:var(--bg-card);border:1px solid var(--border-default);border-radius:10px;margin-bottom:16px}
+summary{display:flex;align-items:center;gap:8px;padding:14px 20px;cursor:pointer;font-size:1.5em;font-weight:700;color:var(--accent);line-height:1.3;list-style:none;user-select:none}
+summary::-webkit-details-marker{display:none}
+summary::before{content:"\25B8";font-size:.6em;transition:transform .15s}
+details[open]>summary::before{transform:rotate(90deg)}
+details[open]>summary{border-bottom:1px solid rgba(14,168,154,.35);margin-bottom:12px}
+.sec-body{padding:0 20px 16px}
+table{border-collapse:collapse;width:100%;font-size:.95em;margin:.75em 0}
+th,td{text-align:left;padding:.5em .75em;border:1px solid var(--border-default);word-break:break-word;vertical-align:top}
+th{font-weight:600;color:var(--accent);background:rgba(14,168,154,.1);font-size:12px;text-transform:uppercase;letter-spacing:.5px;text-align:left}
+tbody tr:nth-child(even){background:#f8f8f8}
+tbody tr:hover{background:rgba(14,168,154,.06)}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',ui-monospace,monospace;font-size:.9em;background:var(--bg-muted);padding:.15em .4em;border-radius:4px;border:1px solid var(--border-light)}
+pre{background:var(--bg-muted);border:1px solid var(--border-default);border-radius:6px;padding:.75em 1em;margin:.75em 0;white-space:pre-wrap;overflow-wrap:break-word;font-size:13px;max-height:300px;overflow-y:auto;line-height:1.5}
+a{color:var(--accent);text-decoration:underline;text-decoration-color:rgba(14,168,154,.4);text-underline-offset:2px}
+a:hover{text-decoration-color:var(--accent)}
+.muted{color:var(--text-secondary)}
+.method{display:inline-block;font-family:monospace;font-size:11px;font-weight:600;padding:2px 6px;border-radius:4px;background:var(--bg-muted);border:1px solid var(--border-default);color:var(--text-secondary)}
+.method.get{color:var(--success-text);border-color:rgba(30,126,52,.4)}
+.method.post{color:#b45309;border-color:rgba(180,83,9,.4)}
+.tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--border-default);color:var(--text-secondary);margin-right:4px;background:var(--bg-card)}
+.tag.on{border-color:var(--accent);color:var(--accent)}
+form label{display:block;font-size:13px;color:var(--text-secondary);margin:10px 0 4px}
+form input[type=file],form input[type=text],form textarea,form select{width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border-light);background:var(--bg-card);color:var(--text-primary);font-size:13px}
+form button{margin-top:12px;padding:8px 20px;border-radius:6px;border:0;background:var(--accent);color:#fff;font-size:13px;font-weight:600;cursor:pointer}
+form button:hover{background:var(--accent-hover)}
+.tool-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px;margin-top:8px}
+.tool-item{padding:8px 10px;border-radius:6px;border:1px solid var(--border-default);background:var(--bg-muted);font-size:12px}
+.tool-item .name{font-weight:600;color:var(--accent);margin-bottom:2px}
+.tool-item .desc{color:var(--text-secondary);font-size:11px}
+.status-bar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:20px}
+.footer{text-align:center;color:var(--text-secondary);font-size:12px;margin-top:40px;padding-top:20px;border-top:1px solid var(--border-default)}
+.crumb{margin:0 0 16px;font-size:14px}
+.chap-tree a{display:block;padding:3px 0}
+.chapter-content{font-size:1.05em;max-width:720px}
+.chapter-content .para{margin:0 0 1.8em 0}
+.chapter-content .sent{display:block;line-height:1.9}
+"#;
 
 async fn index_handler(State(s): State<AppState>) -> Response {
     let c = &s.config;
@@ -316,6 +375,22 @@ async fn index_handler(State(s): State<AppState>) -> Response {
         services_html.push_str(&DATASET_SECTION_HTML.replace("{}", &ds_rows));
     }
 
+    // Books section (always shown) — read-only reading library browser.
+    let books = book::list_books(&settings);
+    let mut book_rows = String::new();
+    for b in &books {
+        book_rows.push_str(&format!(
+            "<tr><td><a href=\"/books/{}\">{}</a></td><td>{}</td></tr>",
+            html_escape(&b.uuid),
+            html_escape(&b.title),
+            html_escape(&b.updated_at),
+        ));
+    }
+    if book_rows.is_empty() {
+        book_rows = "<tr><td colspan=\"2\" class=\"muted\">No books found.</td></tr>".to_string();
+    }
+    services_html.push_str(&BOOK_SECTION_HTML.replace("{}", &book_rows));
+
     // MCP section (always shown).
     services_html.push_str(MCP_SECTION_HTML);
 
@@ -336,6 +411,9 @@ async fn index_handler(State(s): State<AppState>) -> Response {
         endpoint_rows.push_str(&ep_row("TTS", "POST", "/tts", "JSON <code>{ text, voice, rate?, volume?, pitch? }</code> &rarr; audio/mpeg"));
         endpoint_rows.push_str(&ep_row("TTS", "GET", "/tts/voices", "JSON list of all Edge TTS voices"));
     }
+    endpoint_rows.push_str(&ep_row("Book", "GET", "/books", "HTML list of all books in the reading library"));
+    endpoint_rows.push_str(&ep_row("Book", "GET", "/books/{uuid}", "HTML chapter list for a book"));
+    endpoint_rows.push_str(&ep_row("Book", "GET", "/books/{uuid}/{chapter}", "HTML chapter content (one sentence per line)"));
     endpoint_rows.push_str(&ep_row("MCP", "POST", "/mcp", "Streamable HTTP MCP endpoint (rmcp v3.4)"));
 
     let html = format!(
@@ -345,42 +423,7 @@ async fn index_handler(State(s): State<AppState>) -> Response {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>fms-app</title>
-<style>
-:root{{--bg:#0f1115;--card:#161920;--border:#23262d;--text:#e6e6e6;--muted:#9aa0a6;--accent:#6cb6ff;--green:#4ade80;--code-bg:#1b1e24}}
-*{{box-sizing:border-box}}
-body{{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;padding:0;background:var(--bg);color:var(--text);line-height:1.6}}
-.container{{max-width:960px;margin:0 auto;padding:32px 24px}}
-header{{margin-bottom:32px}}
-h1{{font-size:24px;margin:0 0 4px;display:flex;align-items:center;gap:10px}}
-h1 .badge{{font-size:11px;padding:2px 8px;border-radius:10px;background:var(--green);color:#000;font-weight:600}}
-.subtitle{{color:var(--muted);font-size:14px;margin:4px 0 0}}
-h2{{font-size:16px;margin:0 0 12px;color:var(--text)}}
-.card{{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:20px}}
-.card h2{{display:flex;align-items:center;gap:8px}}
-table{{border-collapse:collapse;width:100%;font-size:13px}}
-th,td{{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}}
-th{{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px}}
-code{{background:var(--code-bg);padding:2px 5px;border-radius:4px;font-size:12px}}
-a{{color:var(--accent);text-decoration:none}}a:hover{{text-decoration:underline}}
-.muted{{color:var(--muted)}}
-.method{{display:inline-block;font-family:monospace;font-size:11px;font-weight:600;padding:2px 6px;border-radius:4px;background:var(--code-bg);border:1px solid var(--border);color:var(--muted)}}
-.method.get{{color:#4ade80;border-color:#4ade8040}}
-.method.post{{color:#f59e0b;border-color:#f59e0b40}}
-.tag{{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);color:var(--muted);margin-right:4px}}
-.tag.on{{border-color:var(--green);color:var(--green)}}
-form label{{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}}
-form input[type=file],form input[type=text],form textarea,form select{{width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--code-bg);color:var(--text);font-size:13px}}
-form button{{margin-top:12px;padding:8px 20px;border-radius:6px;border:0;background:#2563eb;color:#fff;font-size:13px;font-weight:600;cursor:pointer}}
-form button:hover{{opacity:.9}}
-pre{{background:var(--code-bg);padding:12px;border-radius:6px;white-space:pre-wrap;font-size:13px;max-height:300px;overflow-y:auto;border:1px solid var(--border)}}
-.tool-list{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px;margin-top:8px}}
-.tool-item{{padding:8px 10px;border-radius:6px;border:1px solid var(--border);font-size:12px}}
-.tool-item .name{{font-weight:600;color:var(--accent);margin-bottom:2px}}
-.tool-item .desc{{color:var(--muted);font-size:11px}}
-.status-bar{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:20px}}
-section+section{{margin-top:24px}}
-.footer{{text-align:center;color:var(--muted);font-size:12px;margin-top:40px;padding-top:20px;border-top:1px solid var(--border)}}
-</style>
+<style>{PAGE_STYLE}</style>
 </head>
 <body>
 <div class="container">
@@ -393,18 +436,21 @@ section+section{{margin-top:24px}}
 <span class="tag {stt_tag}">STT</span>
 <span class="tag {dataset_tag}">Datasets</span>
 <span class="tag {tts_tag}">TTS</span>
+<span class="tag on">Books</span>
 <span class="tag on">MCP</span>
 </div>
 
 {services_html}
 
-<div class="card">
-<h2>API Reference</h2>
+<details>
+<summary>API Reference</summary>
+<div class="sec-body">
 <table>
 <thead><tr><th>Service</th><th>Method</th><th>Path</th><th>Description</th></tr></thead>
 <tbody>{endpoint_rows}</tbody>
 </table>
 </div>
+</details>
 
 <div class="footer">
 <p>fms-app &mdash; built with Tauri, axum, and Rust</p>
@@ -437,8 +483,9 @@ fn ep_row(service: &str, method: &str, path: &str, desc: &str) -> String {
 // --- Static HTML fragments for interactive sections ---
 
 const STT_SECTION_HTML: &str = r#"
-<div class="card">
-<h2>&#x1f3a4; Speech-to-Text</h2>
+<details>
+<summary>&#x1f3a4; Speech-to-Text</summary>
+<div class="sec-body">
 <p class="muted" style="margin:0 0 12px;font-size:13px">Upload a 16kHz mono PCM WAV file. The downloaded STT model is loaded automatically.</p>
 <form id="stt-form">
 <label>Audio file (WAV)</label>
@@ -456,11 +503,13 @@ document.getElementById('stt-form').addEventListener('submit',async e=>{
   catch(err){out.textContent='Error: '+err;}
 });
 </script>
-</div>"#;
+</div>
+</details>"#;
 
 const TTS_SECTION_HTML: &str = r#"
-<div class="card">
-<h2>&#x1f50a; Text-to-Speech</h2>
+<details>
+<summary>&#x1f50a; Text-to-Speech</summary>
+<div class="sec-body">
 <p class="muted" style="margin:0 0 12px;font-size:13px">Type text and pick a voice to synthesize speech via Edge TTS.</p>
 <form id="tts-form">
 <label>Text</label>
@@ -496,21 +545,37 @@ document.getElementById('tts-form').addEventListener('submit',async e=>{
   }catch(err){out.textContent='Error: '+err;}
 });
 </script>
-</div>"#;
+</div>
+</details>"#;
 
 const DATASET_SECTION_HTML: &str = r#"
-<div class="card">
-<h2>&#x1f4c2; Datasets</h2>
+<details>
+<summary>&#x1f4c2; Datasets</summary>
+<div class="sec-body">
 <p class="muted" style="margin:0 0 12px;font-size:13px">Browse dataset files. Click a dataset name to see its contents.</p>
 <table>
 <thead><tr><th>Name</th><th>Description</th><th>Status</th><th>Media</th></tr></thead>
 <tbody>{}</tbody>
 </table>
-</div>"#;
+</div>
+</details>"#;
+
+const BOOK_SECTION_HTML: &str = r#"
+<details>
+<summary>&#x1f4d6; Books</summary>
+<div class="sec-body">
+<p class="muted" style="margin:0 0 12px;font-size:13px">Reading library. Click a book title to browse its chapters.</p>
+<table>
+<thead><tr><th>Title</th><th>Last updated</th></tr></thead>
+<tbody>{}</tbody>
+</table>
+</div>
+</details>"#;
 
 const MCP_SECTION_HTML: &str = r#"
-<div class="card">
-<h2>&#x1f916; MCP (Model Context Protocol)</h2>
+<details>
+<summary>&#x1f916; MCP (Model Context Protocol)</summary>
+<div class="sec-body">
 <p class="muted" style="margin:0 0 12px;font-size:13px">
 Connect AI agents via Streamable HTTP at <code>/mcp</code>. Built with <strong>rmcp v3.4</strong>.
 </p>
@@ -539,21 +604,21 @@ Connect AI agents via Streamable HTTP at <code>/mcp</code>. Built with <strong>r
 <div class="tool-item"><div class="name">log_get_history</div><div class="desc">Get recent log entries</div></div>
 <div class="tool-item"><div class="name">log_clear</div><div class="desc">Clear the log buffer</div></div>
 </div>
-</div>"#;
+</div>
+</details>"#;
 
 // ---------------------------------------------------------------------------
 // STT
 // ---------------------------------------------------------------------------
 
 async fn stt_form(State(_s): State<AppState>) -> Response {
-    let html = r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>STT test</title><style>
-body{font-family:system-ui,sans-serif;margin:0;padding:32px;background:#0f1115;color:#e6e6e6}
-h1{font-size:18px} input[type=file]{margin:12px 0} button{background:#2563eb;color:#fff;border:0;padding:8px 16px;border-radius:6px;cursor:pointer}
-pre{background:#1b1e24;padding:12px;border-radius:6px;white-space:pre-wrap;max-width:720px}
-</style></head><body>
+    let html = r##"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>STT test</title><style>"##.to_string()
+        + PAGE_STYLE
+        + r##"</style></head><body>
+<div class="container">
 <h1>Speech-to-Text test</h1>
-<p style="color:#9aa0a6;font-size:13px">Upload a 16kHz mono PCM WAV file. The selected STT model is loaded automatically.</p>
+<p class="muted" style="font-size:13px">Upload a 16kHz mono PCM WAV file. The selected STT model is loaded automatically.</p>
 <form id="f"><input type="file" name="file" accept=".wav,audio/wav" required><br><button type="submit">Transcribe</button></form>
 <pre id="out">Result will appear here.</pre>
 <script>
@@ -568,7 +633,9 @@ document.getElementById('f').addEventListener('submit', async (e) => {
     out.textContent = j.text || j.error || JSON.stringify(j);
   } catch (err) { out.textContent = 'Error: ' + err; }
 });
-</script></body></html>"#;
+</script>
+</div>
+</body></html>"##;
     Html(html).into_response()
 }
 
@@ -674,20 +741,23 @@ async fn dataset_detail(State(s): State<AppState>, AxPath(uuid): AxPath<String>)
         ));
     }
     if rows.is_empty() {
-        rows.push_str("<tr><td colspan=\"2\" style=\"color:#888\">No files.</td></tr>");
+        rows.push_str("<tr><td colspan=\"2\" class=\"muted\">No files.</td></tr>");
     }
 
     let html = format!(
-        r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Dataset {uuid}</title><style>
-body{{font-family:system-ui,sans-serif;margin:0;padding:32px;background:#0f1115;color:#e6e6e6}}
-h1{{font-size:18px}} a{{color:#6cb6ff;text-decoration:none}} a:hover{{text-decoration:underline}}
-table{{border-collapse:collapse;width:100%;max-width:820px}} th,td{{text-align:left;padding:8px 10px;border-bottom:1px solid #23262d;font-size:13px}} th{{color:#9aa0a6}}
-</style></head><body>
+        r##"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dataset {uuid}</title><style>{PAGE_STYLE}</style></head><body>
+<div class="container">
 <p><a href="/datasets">&larr; all datasets</a></p>
 <h1>Dataset <code>{uuid}</code></h1>
+<details>
+<summary>Files</summary>
+<div class="sec-body">
 <table><thead><tr><th>File</th><th>Size</th></tr></thead><tbody>{rows}</tbody></table>
-</body></html>"#
+</div>
+</details>
+</div>
+</body></html>"##
     );
     Html(html).into_response()
 }
@@ -850,6 +920,193 @@ async fn synthesize_response(req: TtsRequest) -> Response {
             .into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Books (reading library)
+// ---------------------------------------------------------------------------
+
+/// Wrap a body fragment in a full HTML document using the shared stylesheet.
+fn render_page(title: &str, body: &str) -> String {
+    format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+         <title>{title}</title><style>{PAGE_STYLE}</style></head><body>{body}</body></html>",
+        title = html_escape(title),
+        body = body,
+    )
+}
+
+/// Flatten a chapter tree into `(depth, chapter)` pairs ordered like the
+/// reading view: each parent followed immediately by its nested children.
+/// Chapters with an unresolvable parent are appended at the top level so no
+/// content is ever hidden.
+fn flatten_chapters(chapters: &[BookChapter]) -> Vec<(usize, &BookChapter)> {
+    fn walk<'a>(
+        chapters: &'a [BookChapter],
+        parent: Option<&str>,
+        depth: usize,
+        out: &mut Vec<(usize, &'a BookChapter)>,
+    ) {
+        let mut children: Vec<&BookChapter> = chapters
+            .iter()
+            .filter(|c| c.parent_uuid.as_deref().filter(|s| !s.is_empty()) == parent)
+            .collect();
+        children.sort_by_key(|c| c.order_num);
+        for c in children {
+            out.push((depth, c));
+            walk(chapters, Some(c.uuid.as_str()), depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(chapters, None, 0, &mut out);
+    let visited: std::collections::HashSet<&str> =
+        out.iter().map(|(_, c)| c.uuid.as_str()).collect();
+    for c in chapters.iter().filter(|c| !visited.contains(c.uuid.as_str())) {
+        out.push((0, c));
+    }
+    out
+}
+
+async fn books_list(State(s): State<AppState>) -> Response {
+    log::debug!("[web_service] GET /books");
+    let settings = s.app.state::<SettingsState>();
+    let books = book::list_books(&settings);
+
+    let mut rows = String::new();
+    for b in &books {
+        rows.push_str(&format!(
+            "<tr><td><a href=\"/books/{}\">{}</a></td><td>{}</td></tr>",
+            url_encode_path(&b.uuid),
+            html_escape(&b.title),
+            html_escape(&b.updated_at),
+        ));
+    }
+    if rows.is_empty() {
+        rows = "<tr><td colspan=\"2\" class=\"muted\">No books found.</td></tr>".to_string();
+    }
+
+    let body = format!(
+        "<div class=\"container\">\
+         <p class=\"crumb\"><a href=\"/\">&larr; Home</a></p>\
+         <h1>Books</h1>\
+         <p class=\"subtitle\">Reading library &mdash; {} book(s). Select a book to view its chapters.</p>\
+         <div class=\"card\">\
+         <table><thead><tr><th>Title</th><th>Last updated</th></tr></thead><tbody>{}</tbody></table>\
+         </div></div>",
+        books.len(),
+        rows,
+    );
+    Html(render_page("Books", &body)).into_response()
+}
+
+async fn book_chapters_page(State(s): State<AppState>, AxPath(uuid): AxPath<String>) -> Response {
+    log::debug!("[web_service] GET /books/{}", uuid);
+    let settings = s.app.state::<SettingsState>();
+    let chapters = match book::list_chapters(&settings, &uuid) {
+        Ok(c) => c,
+        Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
+    };
+    let book_title = book::list_books(&settings)
+        .into_iter()
+        .find(|b| b.uuid == uuid)
+        .map(|b| b.title)
+        .unwrap_or_else(|| uuid.clone());
+
+    let mut links = String::new();
+    for (depth, c) in flatten_chapters(&chapters) {
+        links.push_str(&format!(
+            "<a style=\"padding-left:{}px\" href=\"/books/{}/{}\">{}{}</a>",
+            depth * 20,
+            url_encode_path(&uuid),
+            url_encode_path(&c.uuid),
+            if depth > 0 { "&#9492; " } else { "" },
+            html_escape(&c.title),
+        ));
+    }
+    if links.is_empty() {
+        links = "<p class=\"muted\">No chapters in this book.</p>".to_string();
+    }
+
+    let body = format!(
+        "<div class=\"container\">\
+         <p class=\"crumb\"><a href=\"/books\">&larr; All books</a></p>\
+         <h1>{}</h1>\
+         <p class=\"subtitle\">Select a chapter to read its content.</p>\
+         <div class=\"card chap-tree\">{}</div></div>",
+        html_escape(&book_title),
+        links,
+    );
+    Html(render_page("Chapters", &body)).into_response()
+}
+
+async fn book_chapter_content(
+    State(s): State<AppState>,
+    AxPath((uuid, chapter)): AxPath<(String, String)>,
+) -> Response {
+    log::debug!("[web_service] GET /books/{}/{}", uuid, chapter);
+    let settings = s.app.state::<SettingsState>();
+    let sentences = match book::list_sentences(&settings, &uuid, &chapter) {
+        Ok(x) => x,
+        Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
+    };
+    let chapter_title = book::list_chapters(&settings, &uuid)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|c| c.uuid == chapter)
+        .map(|c| c.title)
+        .unwrap_or_else(|| "Chapter".to_string());
+    let book_title = book::list_books(&settings)
+        .into_iter()
+        .find(|b| b.uuid == uuid)
+        .map(|b| b.title)
+        .unwrap_or_else(|| uuid.clone());
+
+    // Group sentences into paragraphs split on `paragraph_break` rows; each
+    // text sentence renders on its own line, with a larger gap between paragraphs.
+    let mut paragraphs: Vec<String> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    for sent in &sentences {
+        if sent.sentence_type == "paragraph_break" {
+            if !current.is_empty() {
+                paragraphs.push(render_paragraph(&current));
+                current.clear();
+            }
+        } else if !sent.content.trim().is_empty() {
+            current.push(sent.content.clone());
+        }
+    }
+    if !current.is_empty() {
+        paragraphs.push(render_paragraph(&current));
+    }
+
+    let content = if paragraphs.is_empty() {
+        "<p class=\"muted\">This chapter has no content yet.</p>".to_string()
+    } else {
+        format!("<div class=\"chapter-content\">{}</div>", paragraphs.join(""))
+    };
+
+    let body = format!(
+        "<div class=\"container\">\
+         <p class=\"crumb\"><a href=\"/books\">&larr; All books</a> &middot; \
+         <a href=\"/books/{}\">{}</a></p>\
+         <h1>{}</h1>\
+         <div style=\"margin-top:16px\">{}</div></div>",
+        url_encode_path(&uuid),
+        html_escape(&book_title),
+        html_escape(&chapter_title),
+        content,
+    );
+    Html(render_page(&chapter_title, &body)).into_response()
+}
+
+/// Render one paragraph: each sentence becomes a block-level line.
+fn render_paragraph(lines: &[String]) -> String {
+    let inner: String = lines
+        .iter()
+        .map(|l| format!("<span class=\"sent\">{}</span>", html_escape(l)))
+        .collect();
+    format!("<p class=\"para\">{}</p>", inner)
 }
 
 // ---------------------------------------------------------------------------
