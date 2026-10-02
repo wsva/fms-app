@@ -22,9 +22,9 @@ import { useRecorder } from "./useRecorder";
 import { getUUID, nowIso } from "./utils";
 import ConfirmDialog from "./ConfirmDialog";
 
-type Props = { books: BookMeta[] };
+type Props = { books: BookMeta[]; sidebarVisible?: boolean };
 
-export default function ReadingView({ books }: Props) {
+export default function ReadingView({ books, sidebarVisible = true }: Props) {
   // selectors
   const [chaptersFlat, setChaptersFlat] = useState<BookChapter[]>([]);
   const [bookUUID, setBookUUID] = useState("");
@@ -577,6 +577,7 @@ export default function ReadingView({ books }: Props) {
   return (
     <div className="flex flex-row w-full h-full gap-4">
       {/* TOC sidebar */}
+      {sidebarVisible && (
       <div
         className="bg-bg-card border border-border-default rounded-xl flex flex-row shadow-sm flex-shrink-0 h-full"
         style={{ width: `${sidebarWidth}px` }}
@@ -624,6 +625,7 @@ export default function ReadingView({ books }: Props) {
           <div className="w-0.5 h-12 rounded-full bg-border-default group-hover:bg-accent transition-colors" />
         </div>
       </div>
+      )}
   
       {/* Main content */}
       <div className="flex-1 min-w-0 min-h-0 flex flex-col gap-4 overflow-y-auto p-4 pb-[50vh]">
