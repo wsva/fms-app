@@ -121,6 +121,8 @@ export default function BookManager({ books, onBooksChanged }: Props) {
   const [addingUnder, setAddingUnder] = useState<string | null | undefined>(undefined);
   const [addChapterTitle, setAddChapterTitle] = useState("");
   const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
+  const [showMdImport, setShowMdImport] = useState(false);
+  const [mdImportContent, setMdImportContent] = useState("");
 
   const tree = useMemo(() => buildTree(flat), [flat]);
   const selectedBook = books.find((b) => b.uuid === bookUUID);
@@ -271,6 +273,71 @@ export default function BookManager({ books, onBooksChanged }: Props) {
     try {
       await invoke("book_delete_chapter", { bookUuid: bookUUID, uuid: item.uuid });
       setFlat((prev) => prev.filter((c) => c.uuid !== item.uuid));
+    } catch (e) {
+      console.error(e);
+    }
+    setSaving(false);
+  };
+
+  // ── Import chapters from markdown ──────────────────────────────
+  const handleImportMarkdown = async () => {
+    if (!mdImportContent.trim() || !bookUUID || !isTauri()) return;
+    setSaving(true);
+    try {
+      const lines = mdImportContent.split("\n");
+      const now = nowIso();
+      let rootOrder = flat.filter((c) => !c.parent_uuid).length;
+      let childOrder = 0;
+      let lastRootUuid: string | null = null;
+      const created: BookChapter[] = [];
+
+      for (const rawLine of lines) {
+        const line = rawLine.trimEnd();
+        if (!line.startsWith("#")) continue;
+
+        const isChild = line.startsWith("## ");
+        const isRoot = !isChild && line.startsWith("# ");
+        if (!isRoot && !isChild) continue;
+
+        const title = line.replace(/^#+\s*/, "").trim();
+        if (!title) continue;
+
+        if (isRoot) {
+          rootOrder++;
+          const chapter: BookChapter = {
+            uuid: getUUID(),
+            book_uuid: bookUUID,
+            parent_uuid: null,
+            order_num: rootOrder,
+            title,
+            status: null,
+            created_at: now,
+            updated_at: now,
+          };
+          await invoke("book_save_chapter", { bookUuid: bookUUID, chapter });
+          created.push(chapter);
+          lastRootUuid = chapter.uuid;
+          childOrder = 0;
+        } else if (isChild && lastRootUuid) {
+          childOrder++;
+          const chapter: BookChapter = {
+            uuid: getUUID(),
+            book_uuid: bookUUID,
+            parent_uuid: lastRootUuid,
+            order_num: childOrder,
+            title,
+            status: null,
+            created_at: now,
+            updated_at: now,
+          };
+          await invoke("book_save_chapter", { bookUuid: bookUUID, chapter });
+          created.push(chapter);
+        }
+      }
+
+      setFlat((prev) => [...prev, ...created]);
+      setMdImportContent("");
+      setShowMdImport(false);
     } catch (e) {
       console.error(e);
     }
@@ -641,17 +708,60 @@ export default function BookManager({ books, onBooksChanged }: Props) {
             <h3 className="text-base font-semibold text-text-primary">
               Chapters — <span className="font-normal text-text-secondary">{selectedBook.title}</span>
             </h3>
-            <button
-              className={btnPrimary}
-              onClick={() => {
-                setEditChapterUUID(null);
-                setAddingUnder((prev) => (prev === null ? undefined : null));
-                setAddChapterTitle("");
-              }}
-            >
-              {addingUnder === null ? "Cancel" : "+ Root Chapter"}
-            </button>
+            <div className="flex gap-2">
+              <button
+                className={btnGhost}
+                onClick={() => {
+                  setShowMdImport((v) => !v);
+                  setMdImportContent("");
+                }}
+              >
+                {showMdImport ? "Cancel" : "Import Markdown"}
+              </button>
+              <button
+                className={btnPrimary}
+                onClick={() => {
+                  setEditChapterUUID(null);
+                  setAddingUnder((prev) => (prev === null ? undefined : null));
+                  setAddChapterTitle("");
+                }}
+              >
+                {addingUnder === null ? "Cancel" : "+ Root Chapter"}
+              </button>
+            </div>
           </div>
+
+          {showMdImport && (
+            <div className="mb-3 p-3 rounded-lg border border-border-default bg-bg-card space-y-2">
+              <p className="text-xs text-text-secondary">
+                Paste markdown content. <code className="px-1 rounded bg-bg-muted"># Title</code> creates a root chapter, <code className="px-1 rounded bg-bg-muted">## Title</code> creates a sub-chapter under the preceding root chapter.
+              </p>
+              <textarea
+                className="w-full px-3 py-2 rounded-md bg-bg-input border border-border-default text-sm text-text-primary font-mono focus:outline-none focus:border-accent min-h-[200px]"
+                placeholder="# Chapter Title&#10;## Sub-chapter Title&#10;## Another Sub-chapter&#10;&#10;# Next Chapter&#10;## Sub-chapter"
+                value={mdImportContent}
+                onChange={(e) => setMdImportContent(e.target.value)}
+              />
+              <div className="flex gap-2">
+                <button
+                  className={btnPrimary}
+                  disabled={saving || !mdImportContent.trim()}
+                  onClick={handleImportMarkdown}
+                >
+                  Import
+                </button>
+                <button
+                  className={btnGhost}
+                  onClick={() => {
+                    setShowMdImport(false);
+                    setMdImportContent("");
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
 
           {chaptersLoading && (
             <div className="text-center text-text-tertiary py-4">Loading…</div>
