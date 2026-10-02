@@ -134,7 +134,7 @@ impl Default for WorkspaceSettings {
         Self {
             recordings_dir: data_dir.join("recordings").to_string_lossy().into_owned(),
             datasets_dir: data_dir.join("datasets").to_string_lossy().into_owned(),
-            books_dir: data_dir.join("books").to_string_lossy().into_owned(),
+            books_dir: data_dir.join("datasets").join("book").to_string_lossy().into_owned(),
             wiki_dir: data_dir.join("wiki").to_string_lossy().into_owned(),
         }
     }
@@ -168,7 +168,7 @@ impl Default for AppSettings {
             model_dir: data_dir.join("models").to_string_lossy().into_owned(),
             recordings_dir: data_dir.join("recordings").to_string_lossy().into_owned(),
             datasets_dir: data_dir.join("datasets").to_string_lossy().into_owned(),
-            books_dir: data_dir.join("books").to_string_lossy().into_owned(),
+            books_dir: data_dir.join("datasets").join("book").to_string_lossy().into_owned(),
             wiki_dir: data_dir.join("wiki").to_string_lossy().into_owned(),
             selected_model: String::new(),
             model_unload_timeout: ModelUnloadTimeout::default(),

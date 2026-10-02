@@ -248,7 +248,7 @@ export default function SettingsPage() {
 
           <DirField
             label="Books Directory"
-            description="Root directory of the reading library (each book is a sub-directory)."
+            description="Default: <workspace>/datasets/book. Additional locations can be linked from the Read a Book > Manage page."
             value={workspaceSettings?.books_dir ?? ""}
           />
 

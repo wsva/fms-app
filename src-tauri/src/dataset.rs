@@ -153,6 +153,7 @@ fn write_dataset_meta(datasets_dir: &str, meta: &DatasetMeta) -> Result<(), Stri
 pub(crate) enum DatasetType {
     Card,
     Dictation,
+    Book,
 }
 
 impl DatasetType {
@@ -160,6 +161,7 @@ impl DatasetType {
         match self {
             DatasetType::Card => "card",
             DatasetType::Dictation => "dictation",
+            DatasetType::Book => "book",
         }
     }
 }
@@ -197,6 +199,7 @@ pub async fn dataset_list_dirs(
     let ds_type = match dataset_type.as_str() {
         "card" => DatasetType::Card,
         "dictation" => DatasetType::Dictation,
+        "book" => DatasetType::Book,
         _ => return Err(format!("Invalid dataset type: {}", dataset_type)),
     };
     

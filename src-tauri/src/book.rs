@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
 
+use crate::dataset::{dataset_roots, DatasetType};
 use crate::settings::SettingsState;
 
 // ============================================================
@@ -95,38 +96,38 @@ const BOOK_STRUCTURE: &str = "reading-v1";
 // Helpers
 // ============================================================
 
-/// Root directory of the reading library.
-/// Workspace-derived: `<workspace>/books` when a workspace is selected.
-fn books_root(settings: &SettingsState) -> PathBuf {
-    settings.books_dir()
+/// Resolve all book root directories: default `<datasets_dir>/book` + linked dirs from meta.json.
+fn book_roots(settings: &SettingsState) -> Vec<PathBuf> {
+    dataset_roots(settings, DatasetType::Book)
 }
 
-/// Find a book directory by UUID.
+/// Find a book directory by UUID across all configured locations.
 fn find_book_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
-    let root = books_root(settings);
-    if !root.exists() {
-        return Err(format!("Book with UUID {} not found", uuid));
-    }
-    let entries = fs::read_dir(&root).map_err(|e| e.to_string())?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+    for root in book_roots(settings) {
+        if !root.exists() {
             continue;
         }
-        let info_path = path.join("info.json");
-        if !info_path.exists() {
-            continue;
-        }
-        let data = match fs::read_to_string(&info_path) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let info: BookInfoFile = match serde_json::from_str(&data) {
-            Ok(i) => i,
-            Err(_) => continue,
-        };
-        if info.uuid == uuid {
-            return Ok(path);
+        let entries = fs::read_dir(&root).map_err(|e| e.to_string())?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let info_path = path.join("info.json");
+            if !info_path.exists() {
+                continue;
+            }
+            let data = match fs::read_to_string(&info_path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let info: BookInfoFile = match serde_json::from_str(&data) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            if info.uuid == uuid {
+                return Ok(path);
+            }
         }
     }
     Err(format!("Book with UUID {} not found", uuid))
@@ -211,31 +212,33 @@ fn sanitize_dir_name(title: &str) -> String {
 // Book commands
 // ============================================================
 
-/// List all books in the reading library.
+/// List all books in the reading library across all configured locations.
 #[tauri::command]
 pub async fn book_list(settings: State<'_, SettingsState>) -> Result<Vec<BookMeta>, String> {
-    let root = books_root(&settings);
+    let roots = book_roots(&settings);
     let mut books = Vec::new();
-    if !root.exists() {
-        return Ok(books);
-    }
-    let entries = fs::read_dir(&root).map_err(|e| e.to_string())?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() || !path.join("info.json").exists() {
+    for root in roots {
+        if !root.exists() {
             continue;
         }
-        if let Ok(info) = read_book_info(&path) {
-            if info.structure != BOOK_STRUCTURE {
+        let entries = fs::read_dir(&root).map_err(|e| e.to_string())?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() || !path.join("info.json").exists() {
                 continue;
             }
-            books.push(BookMeta {
-                uuid: info.uuid,
-                title: info.title,
-                path: path.to_string_lossy().into_owned(),
-                created_at: info.created_at,
-                updated_at: info.updated_at,
-            });
+            if let Ok(info) = read_book_info(&path) {
+                if info.structure != BOOK_STRUCTURE {
+                    continue;
+                }
+                books.push(BookMeta {
+                    uuid: info.uuid,
+                    title: info.title,
+                    path: path.to_string_lossy().into_owned(),
+                    created_at: info.created_at,
+                    updated_at: info.updated_at,
+                });
+            }
         }
     }
     books.sort_by(|a, b| a.title.cmp(&b.title));
@@ -251,7 +254,10 @@ pub async fn book_create(
     if title.trim().is_empty() {
         return Err("Title is required".into());
     }
-    let root = books_root(&settings);
+    let root = book_roots(&settings)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No book location configured".to_string())?;
     fs::create_dir_all(&root).map_err(|e| format!("Failed to create books dir: {}", e))?;
 
     let uuid = Uuid::new_v4().to_string();
