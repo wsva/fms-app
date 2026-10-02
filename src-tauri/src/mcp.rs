@@ -1067,7 +1067,7 @@ impl DatasetMcpServer {
         serde_json::to_string_pretty(&settings).unwrap_or_default()
     }
 
-    #[tool(name = "settings_set", description = "Update app settings. Pass a JSON object with the settings fields to update. Use settings_get first to see current values. Fields: model_dir, recordings_dir, datasets_dir, books_dir, hf_mirror, selected_model, model_unload_timeout, onboarding_completed.")]
+    #[tool(name = "settings_set", description = "Update app settings. Pass a JSON object with the settings fields to update. Use settings_get first to see current values. Fields: model_dir, recordings_dir, datasets_dir, books_dir, selected_model, model_unload_timeout, onboarding_completed.")]
     async fn settings_set(&self, Parameters(param): Parameters<SettingsSetParam>) -> Result<String, String> {
         log::info!("[MCP] settings_set");
         let state = self.app.state::<SettingsState>();
@@ -1276,10 +1276,11 @@ impl DatasetMcpServer {
     // LLM tools
     // -------------------------------------------------------------------------
 
-    #[tool(name = "llm_check_connection", description = "Check if Ollama is running and reachable on localhost:11434. Returns true/false.")]
+    #[tool(name = "llm_check_connection", description = "Check if Ollama is running and reachable. Returns true/false.")]
     async fn llm_check_connection(&self) -> String {
         log::info!("[MCP] llm_check_connection");
-        match llm::llm_check_connection().await {
+        let settings = self.app.state::<SettingsState>();
+        match llm::llm_check_connection(settings).await {
             Ok(connected) => serde_json::json!({"connected": connected}).to_string(),
             Err(e) => serde_json::json!({"connected": false, "error": e}).to_string(),
         }
@@ -1288,27 +1289,31 @@ impl DatasetMcpServer {
     #[tool(name = "llm_list_models", description = "List LLM models installed in Ollama plus our recommended catalog. Use llm_pull_model to download a recommended model.")]
     async fn llm_list_models(&self) -> Result<String, String> {
         log::info!("[MCP] llm_list_models");
-        let result = llm::llm_list_models().await?;
+        let settings = self.app.state::<SettingsState>();
+        let result = llm::llm_list_models(settings).await?;
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
     #[tool(name = "llm_pull_model", description = "Pull/download a model into Ollama. Use llm_list_models to see recommended model names. May take a while.")]
     async fn llm_pull_model(&self, Parameters(param): Parameters<LlmModelParam>) -> Result<String, String> {
         log::info!("[MCP] llm_pull_model: model={}", param.model);
-        llm::llm_pull_model(self.app.clone(), param.model).await?;
+        let settings = self.app.state::<SettingsState>();
+        llm::llm_pull_model(self.app.clone(), settings, param.model).await?;
         Ok(serde_json::json!({"status": "ok", "message": "Model pulled successfully"}).to_string())
     }
 
     #[tool(name = "llm_delete_model", description = "Delete a model from Ollama to free disk space.")]
     async fn llm_delete_model(&self, Parameters(param): Parameters<LlmModelParam>) -> Result<String, String> {
         log::info!("[MCP] llm_delete_model: model={}", param.model);
-        llm::llm_delete_model(param.model.clone()).await?;
+        let settings = self.app.state::<SettingsState>();
+        llm::llm_delete_model(settings, param.model.clone()).await?;
         Ok(serde_json::json!({"status": "ok", "deleted": param.model}).to_string())
     }
 
     #[tool(name = "llm_chat", description = "Send a chat completion request to Ollama. Pass model name, messages array [{role:'user',content:'...'}], and optional temperature. Returns the assistant response.")]
     async fn llm_chat(&self, Parameters(param): Parameters<LlmChatParam>) -> Result<String, String> {
         log::info!("[MCP] llm_chat: model={}, msgs={}", param.model, param.messages.len());
+        let settings = self.app.state::<SettingsState>();
         let messages: Vec<llm::ChatMessage> = param.messages.into_iter().map(|m| {
             let m: serde_json::Value = m.into();
             llm::ChatMessage {
@@ -1316,7 +1321,7 @@ impl DatasetMcpServer {
                 content: m["content"].as_str().unwrap_or("").to_string(),
             }
         }).collect();
-        let result = llm::llm_chat(param.model, messages, param.temperature).await?;
+        let result = llm::llm_chat(settings, param.model, messages, param.temperature).await?;
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 

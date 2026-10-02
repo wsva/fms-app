@@ -38,10 +38,6 @@ pub struct AppSettings {
     /// Root directory of the wiki (markdown documents).
     #[serde(default)]
     pub wiki_dir: String,
-    /// Use Hugging Face mirror (hf-mirror.com) for faster downloads in China.
-    /// false = use huggingface.co, true = use hf-mirror.com.
-    #[serde(default)]
-    pub hf_mirror: bool,
     /// Currently selected model ID.
     #[serde(default)]
     pub selected_model: String,
@@ -51,6 +47,115 @@ pub struct AppSettings {
     /// Whether the user has completed onboarding.
     #[serde(default)]
     pub onboarding_completed: bool,
+    /// Ollama API base URL (global setting, not workspace-scoped).
+    #[serde(default = "default_ollama_url")]
+    pub ollama_url: String,
+}
+
+fn default_ollama_url() -> String {
+    "http://localhost:11434".to_string()
+}
+
+/// Global-only settings that are NOT workspace-scoped.
+/// These are always stored in the global config path.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct GlobalSettings {
+    /// Ollama API base URL.
+    #[serde(default = "default_ollama_url")]
+    pub ollama_url: String,
+    /// Currently selected STT model ID.
+    #[serde(default)]
+    pub selected_model: String,
+    /// STT model directory (shared across workspaces).
+    #[serde(default)]
+    pub model_dir: String,
+    /// When to unload the model after inactivity.
+    #[serde(default)]
+    pub model_unload_timeout: ModelUnloadTimeout,
+    /// Whether the user has completed onboarding.
+    #[serde(default)]
+    pub onboarding_completed: bool,
+}
+
+impl Default for GlobalSettings {
+    fn default() -> Self {
+        let data_dir = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("fms-app");
+        Self {
+            ollama_url: default_ollama_url(),
+            selected_model: String::new(),
+            model_dir: data_dir.join("models").to_string_lossy().into_owned(),
+            model_unload_timeout: ModelUnloadTimeout::default(),
+            onboarding_completed: false,
+        }
+    }
+}
+
+impl GlobalSettings {
+    fn from_settings(s: &AppSettings) -> Self {
+        Self {
+            ollama_url: s.ollama_url.clone(),
+            selected_model: s.selected_model.clone(),
+            model_dir: s.model_dir.clone(),
+            model_unload_timeout: s.model_unload_timeout,
+            onboarding_completed: s.onboarding_completed,
+        }
+    }
+
+    fn apply_to(&self, s: &mut AppSettings) {
+        s.ollama_url = self.ollama_url.clone();
+        s.selected_model = self.selected_model.clone();
+        s.model_dir = self.model_dir.clone();
+        s.model_unload_timeout = self.model_unload_timeout;
+        s.onboarding_completed = self.onboarding_completed;
+    }
+}
+
+/// Workspace-scoped settings that are specific to each workspace.
+/// These are stored in the workspace's settings.json.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WorkspaceSettings {
+    pub recordings_dir: String,
+    pub datasets_dir: String,
+    /// Root directory of the reading library (each book is a sub-directory).
+    #[serde(default)]
+    pub books_dir: String,
+    /// Root directory of the wiki (markdown documents).
+    #[serde(default)]
+    pub wiki_dir: String,
+}
+
+impl Default for WorkspaceSettings {
+    fn default() -> Self {
+        let data_dir = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("fms-app");
+        Self {
+            recordings_dir: data_dir.join("recordings").to_string_lossy().into_owned(),
+            datasets_dir: data_dir.join("datasets").to_string_lossy().into_owned(),
+            books_dir: data_dir.join("books").to_string_lossy().into_owned(),
+            wiki_dir: data_dir.join("wiki").to_string_lossy().into_owned(),
+        }
+    }
+}
+
+impl WorkspaceSettings {
+    fn from_settings(s: &AppSettings) -> Self {
+        Self {
+            recordings_dir: s.recordings_dir.clone(),
+            datasets_dir: s.datasets_dir.clone(),
+            books_dir: s.books_dir.clone(),
+            wiki_dir: s.wiki_dir.clone(),
+        }
+    }
+
+    fn apply_to(&self, s: &mut AppSettings) {
+        s.recordings_dir = self.recordings_dir.clone();
+        s.datasets_dir = self.datasets_dir.clone();
+        s.books_dir = self.books_dir.clone();
+        s.wiki_dir = self.wiki_dir.clone();
+    }
 }
 
 impl Default for AppSettings {
@@ -65,10 +170,10 @@ impl Default for AppSettings {
             datasets_dir: data_dir.join("datasets").to_string_lossy().into_owned(),
             books_dir: data_dir.join("books").to_string_lossy().into_owned(),
             wiki_dir: data_dir.join("wiki").to_string_lossy().into_owned(),
-            hf_mirror: false,
             selected_model: String::new(),
             model_unload_timeout: ModelUnloadTimeout::default(),
             onboarding_completed: false,
+            ollama_url: default_ollama_url(),
         }
     }
 }
@@ -110,11 +215,17 @@ impl SettingsState {
     fn config_path(workspace_dir: Option<&PathBuf>) -> PathBuf {
         match workspace_dir {
             Some(dir) => dir.join("settings.json"),
-            None => dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("fms-app")
-                .join("settings.json"),
+            None => Self::global_config_path(),
         }
+    }
+
+    /// Always returns the global config path (not workspace-scoped).
+    /// Uses dirs::config_dir() (e.g. %APPDATA% on Windows, ~/.config on Linux).
+    fn global_config_path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("fms-app")
+            .join("settings.json")
     }
 
     /// Resolve a workspace-scoped data sub-directory: `<workspace>/<name>`.
@@ -157,26 +268,148 @@ impl SettingsState {
         self.workspace_subdir("wiki", &configured)
     }
 
+    /// Load settings with global+workspace merge.
+    /// Global settings are always loaded from the global path.
+    /// If a workspace is set, workspace settings are loaded and merged on top.
     fn load(workspace_dir: Option<&PathBuf>) -> Option<AppSettings> {
-        let path = Self::config_path(workspace_dir);
+        // Always load global settings first
+        let global = Self::load_global();
+        
+        // If workspace is set, load workspace settings and merge
+        if let Some(ws_dir) = workspace_dir {
+            if let Some(mut ws_settings) = Self::load_from_path(&ws_dir.join("settings.json")) {
+                // Apply global settings on top (global takes precedence for global fields)
+                global.apply_to(&mut ws_settings);
+                log::debug!("[Settings] Loaded workspace settings with global overlay");
+                return Some(ws_settings);
+            }
+        }
+        
+        // No workspace or no workspace settings — load from global path
+        if let Some(mut global_settings) = Self::load_from_path(&Self::global_config_path()) {
+            global.apply_to(&mut global_settings);
+            log::debug!("[Settings] Loaded global settings");
+            return Some(global_settings);
+        }
+        
+        None
+    }
+    
+    /// Load only global settings from the global path.
+    fn load_global() -> GlobalSettings {
+        let path = Self::global_config_path();
+        log::debug!("[Settings] Loading global settings from: {}", path.display());
+        match fs::read_to_string(&path) {
+            Ok(data) => {
+                let data = data.trim_start_matches('\u{FEFF}');
+                serde_json::from_str(data).unwrap_or_default()
+            }
+            Err(_) => GlobalSettings::default(),
+        }
+    }
+    
+    /// Load settings from a specific path.
+    fn load_from_path(path: &std::path::Path) -> Option<AppSettings> {
         log::debug!("[Settings] Loading settings from: {}", path.display());
         let data = fs::read_to_string(path).ok()?;
-        // Tolerate a UTF-8 BOM (Windows editors/PowerShell often add one).
         let data = data.trim_start_matches('\u{FEFF}');
         serde_json::from_str(data).map_err(|e| {
             log::warn!("[Settings] Failed to parse settings.json: {} - using defaults", e)
         }).ok()
     }
 
+    /// Save settings with global+workspace split.
+    /// Global fields are always saved to the global path.
+    /// Workspace fields are saved to the workspace path (if set) or global path.
     pub fn save(settings: &AppSettings, workspace_dir: Option<&PathBuf>) -> Result<(), String> {
+        // Always save global settings to global path
+        let global = GlobalSettings::from_settings(settings);
+        Self::save_global(&global)?;
+        
+        // Save workspace settings to workspace path (or global if no workspace)
         let path = Self::config_path(workspace_dir);
-        log::debug!("[Settings] Saving settings to: {}", path.display());
+        log::debug!("[Settings] Saving workspace settings to: {}", path.display());
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let data = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
         fs::write(path, data).map_err(|e| e.to_string())?;
         Ok(())
+    }
+    
+    /// Save only global settings to the global path.
+    fn save_global(global: &GlobalSettings) -> Result<(), String> {
+        let path = Self::global_config_path();
+        log::debug!("[Settings] Saving global settings to: {}", path.display());
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        
+        // Load existing settings to merge (preserve workspace fields)
+        let mut existing = Self::load_from_path(&path).unwrap_or_default();
+        global.apply_to(&mut existing);
+        
+        let data = serde_json::to_string_pretty(&existing).map_err(|e| e.to_string())?;
+        fs::write(path, data).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    
+    /// Load only workspace settings from the workspace path.
+    fn load_workspace(workspace_dir: Option<&PathBuf>) -> WorkspaceSettings {
+        match workspace_dir {
+            Some(ws_dir) => {
+                let path = ws_dir.join("settings.json");
+                log::debug!("[Settings] Loading workspace settings from: {}", path.display());
+                match fs::read_to_string(&path) {
+                    Ok(data) => {
+                        let data = data.trim_start_matches('\u{FEFF}');
+                        // Parse as AppSettings then extract workspace fields
+                        match serde_json::from_str::<AppSettings>(data) {
+                            Ok(s) => WorkspaceSettings::from_settings(&s),
+                            Err(_) => WorkspaceSettings::default(),
+                        }
+                    }
+                    Err(_) => WorkspaceSettings::default(),
+                }
+            }
+            None => WorkspaceSettings::default(),
+        }
+    }
+    
+    /// Save only workspace settings to the workspace path.
+    fn save_workspace(workspace: &WorkspaceSettings, workspace_dir: Option<&PathBuf>) -> Result<(), String> {
+        match workspace_dir {
+            Some(ws_dir) => {
+                let path = ws_dir.join("settings.json");
+                log::debug!("[Settings] Saving workspace settings to: {}", path.display());
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                
+                // Load existing settings to merge (preserve global fields)
+                let mut existing = Self::load_from_path(&path).unwrap_or_default();
+                workspace.apply_to(&mut existing);
+                
+                let data = serde_json::to_string_pretty(&existing).map_err(|e| e.to_string())?;
+                fs::write(path, data).map_err(|e| e.to_string())?;
+                Ok(())
+            }
+            None => {
+                // No workspace selected — save to global path
+                let path = Self::global_config_path();
+                log::debug!("[Settings] No workspace, saving workspace settings to global: {}", path.display());
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                
+                let mut existing = Self::load_from_path(&path).unwrap_or_default();
+                workspace.apply_to(&mut existing);
+                
+                let data = serde_json::to_string_pretty(&existing).map_err(|e| e.to_string())?;
+                fs::write(path, data).map_err(|e| e.to_string())?;
+                Ok(())
+            }
+        }
     }
 }
 
@@ -251,4 +484,78 @@ pub async fn settings_pick_folder(
         // Mobile platforms don't support native folder picker
         Err("Folder selection is not supported on mobile platforms. Please configure paths manually.".into())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Separate Global / Workspace commands
+// ---------------------------------------------------------------------------
+
+/// Get global settings (always from global config path).
+#[tauri::command]
+pub async fn settings_get_global(
+    state: State<'_, SettingsState>,
+) -> Result<GlobalSettings, String> {
+    let s = state.settings.lock().unwrap().clone();
+    Ok(GlobalSettings::from_settings(&s))
+}
+
+/// Save global settings (always to global config path).
+#[tauri::command]
+pub async fn settings_set_global(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+    global: GlobalSettings,
+) -> Result<(), String> {
+    let ws_dir = state.workspace_dir.lock().unwrap().clone();
+    SettingsState::save_global(&global)?;
+    log::info!("[Settings] Global settings updated");
+    
+    // Update in-memory state
+    {
+        let mut s = state.settings.lock().unwrap();
+        global.apply_to(&mut *s);
+    }
+    
+    let _ = app.emit("settings-changed", ());
+    Ok(())
+}
+
+/// Get workspace settings (from workspace config path, or global if no workspace).
+#[tauri::command]
+pub async fn settings_get_workspace(
+    state: State<'_, SettingsState>,
+) -> Result<WorkspaceSettings, String> {
+    let ws_dir = state.workspace_dir.lock().unwrap().clone();
+    let ws = SettingsState::load_workspace(ws_dir.as_ref());
+    // Return effective (workspace-derived) paths
+    let mut result = ws;
+    let s = state.settings.lock().unwrap().clone();
+    result.datasets_dir = state.datasets_dir().to_string_lossy().into_owned();
+    result.recordings_dir = state.recordings_dir().to_string_lossy().into_owned();
+    result.books_dir = state.books_dir().to_string_lossy().into_owned();
+    result.wiki_dir = state.wiki_dir().to_string_lossy().into_owned();
+    // Suppress unused variable warning
+    let _ = s;
+    Ok(result)
+}
+
+/// Save workspace settings (to workspace config path, or global if no workspace).
+#[tauri::command]
+pub async fn settings_set_workspace(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+    workspace: WorkspaceSettings,
+) -> Result<(), String> {
+    let ws_dir = state.workspace_dir.lock().unwrap().clone();
+    SettingsState::save_workspace(&workspace, ws_dir.as_ref())?;
+    log::info!("[Settings] Workspace settings updated");
+    
+    // Update in-memory state
+    {
+        let mut s = state.settings.lock().unwrap();
+        workspace.apply_to(&mut *s);
+    }
+    
+    let _ = app.emit("settings-changed", ());
+    Ok(())
 }

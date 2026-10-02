@@ -11,16 +11,24 @@ function isTauri(): boolean {
 // Types
 // ---------------------------------------------------------------------------
 
-interface AppSettings {
+interface GlobalSettings {
+  ollama_url: string;
+  selected_model: string;
   model_dir: string;
+  model_unload_timeout: ModelUnloadTimeout;
+  onboarding_completed: boolean;
+}
+
+type ModelUnloadTimeout =
+  | "immediately"
+  | "never"
+  | { minutes: number };
+
+interface WorkspaceSettings {
   recordings_dir: string;
   datasets_dir: string;
   books_dir: string;
   wiki_dir: string;
-  ocr_engine: string;
-  logics_parsing_repo: string;
-  logics_parsing_model: string;
-  logics_parsing_env: string;
 }
 
 type ThemeId = "light" | "dark" | "solarized" | "gruvbox";
@@ -62,9 +70,10 @@ const btnPrimary = `${btnBase} bg-accent-bg text-white hover:bg-accent-bg-hover`
 // ---------------------------------------------------------------------------
 
 export default function SettingsPage() {
-  const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [globalSettings, setGlobalSettings] = useState<GlobalSettings | null>(null);
+  const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings | null>(null);
+  const [savingGlobal, setSavingGlobal] = useState(false);
+  const [savedGlobal, setSavedGlobal] = useState(false);
   const [currentTheme, setCurrentTheme] = useState<ThemeId>("light");
 
   // ---- Load settings ----
@@ -72,8 +81,12 @@ export default function SettingsPage() {
   const fetchSettings = useCallback(async () => {
     if (!isTauri()) return;
     try {
-      const res = await invoke<AppSettings>("settings_get");
-      setSettings(res);
+      const [g, w] = await Promise.all([
+        invoke<GlobalSettings>("settings_get_global"),
+        invoke<WorkspaceSettings>("settings_get_workspace"),
+      ]);
+      setGlobalSettings(g);
+      setWorkspaceSettings(w);
     } catch (e) {
       console.error("Failed to load settings:", e);
     }
@@ -91,74 +104,50 @@ export default function SettingsPage() {
     applyTheme(theme);
   }
 
-  // ---- Update a field ----
+  // ---- Update helpers ----
 
-  function updateField(field: keyof AppSettings, value: string | boolean) {
-    setSettings((prev) => (prev ? { ...prev, [field]: value } : prev));
-    setSaved(false);
+  function updateGlobalField(field: keyof GlobalSettings, value: string) {
+    setGlobalSettings((prev) => (prev ? { ...prev, [field]: value } : prev));
+    setSavedGlobal(false);
   }
 
-  // ---- Pick folder via native dialog ----
+  // ---- Save handlers ----
 
-  async function pickFolder(field: keyof AppSettings) {
-    if (!isTauri()) return;
+  async function handleSaveGlobal() {
+    if (!isTauri() || !globalSettings) return;
+    setSavingGlobal(true);
     try {
-      const path = await invoke<string>("settings_pick_folder", {
-        field,
-      });
-      updateField(field, path);
+      await invoke("settings_set_global", { global: globalSettings });
+      setSavedGlobal(true);
+      setTimeout(() => setSavedGlobal(false), 2000);
     } catch (e) {
-      console.log("Folder picker:", e);
-    }
-  }
-
-  // ---- Save settings ----
-
-  async function handleSave() {
-    if (!isTauri() || !settings) return;
-    setSaving(true);
-    try {
-      await invoke("settings_set", { settings });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch (e) {
-      console.error("Failed to save settings:", e);
+      console.error("Failed to save global settings:", e);
     } finally {
-      setSaving(false);
+      setSavingGlobal(false);
     }
   }
 
-  // ---- Folder field renderer ----
+  // ---- Read-only directory field ----
 
-  function FolderField({
+  function DirField({
     label,
     description,
-    field,
+    value,
   }: {
     label: string;
     description: string;
-    field: keyof AppSettings;
+    value: string;
   }) {
-    const value = (settings?.[field] ?? "") as string;
     return (
       <div className="mb-4">
         <label className="block font-medium mb-1">{label}</label>
         <p className="text-text-secondary text-sm mb-2">{description}</p>
-        <div className="flex gap-2">
-          <input
-            type="text"
-            className="flex-1 px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
-            value={value}
-            onChange={(e) => updateField(field, e.target.value)}
-            placeholder="Enter path or browse..."
-          />
-          <button
-            className={`${btnPrimary} px-3`}
-            onClick={() => pickFolder(field)}
-          >
-            Browse
-          </button>
-        </div>
+        <input
+          type="text"
+          readOnly
+          className="w-full px-3 py-2 border border-border-light rounded-md bg-bg-card text-text-secondary cursor-default"
+          value={value}
+        />
       </div>
     );
   }
@@ -192,6 +181,82 @@ export default function SettingsPage() {
               </button>
             ))}
           </div>
+        </section>
+
+        {/* ── Global Settings section ────────────────────────────── */}
+        <section className="mb-8">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-[1.3em] font-semibold">Global Settings</h2>
+            <div className="flex items-center gap-2">
+              {savedGlobal && (
+                <span className="text-sm text-green-500">Saved!</span>
+              )}
+              <button
+                className={btnPrimary}
+                onClick={handleSaveGlobal}
+                disabled={savingGlobal}
+              >
+                {savingGlobal ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+          <p className="text-text-secondary text-sm mb-4">
+            These settings apply across all workspaces. Stored in the global config directory.
+          </p>
+
+          {/* Ollama URL */}
+          <div className="mb-4">
+            <label className="block font-medium mb-1">Ollama API URL</label>
+            <p className="text-text-secondary text-sm mb-2">
+              The base URL of your local Ollama instance. Default: http://localhost:11434
+            </p>
+            <input
+              type="text"
+              className="w-full max-w-md px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
+              value={globalSettings?.ollama_url ?? "http://localhost:11434"}
+              onChange={(e) => updateGlobalField("ollama_url", e.target.value)}
+              placeholder="http://localhost:11434"
+            />
+          </div>
+
+          {/* Model Directory (read-only) */}
+          <DirField
+            label="STT Model Directory"
+            description="Where STT models are stored. Shared across all workspaces."
+            value={globalSettings?.model_dir ?? ""}
+          />
+        </section>
+
+        {/* ── Workspace Settings section ─────────────────────────── */}
+        <section className="mb-8">
+          <h2 className="text-[1.3em] font-semibold mb-2">Workspace Settings</h2>
+          <p className="text-text-secondary text-sm mb-4">
+            These directories are set to default values for the current workspace. Stored in the workspace directory.
+          </p>
+
+          <DirField
+            label="Datasets Directory"
+            description="Where language learning datasets are stored."
+            value={workspaceSettings?.datasets_dir ?? ""}
+          />
+
+          <DirField
+            label="Recordings Directory"
+            description="Where audio recordings are stored."
+            value={workspaceSettings?.recordings_dir ?? ""}
+          />
+
+          <DirField
+            label="Books Directory"
+            description="Root directory of the reading library (each book is a sub-directory)."
+            value={workspaceSettings?.books_dir ?? ""}
+          />
+
+          <DirField
+            label="Wiki Directory"
+            description="Root directory for wiki markdown documents."
+            value={workspaceSettings?.wiki_dir ?? ""}
+          />
         </section>
       </main>
     </>

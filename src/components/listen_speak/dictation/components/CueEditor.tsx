@@ -179,8 +179,7 @@ function Dictation({
                   e.preventDefault();
                 }
                 if (e.ctrlKey && "dD".includes(e.key)) {
-                  if (media.paused) playMediaPart(cue, media, false);
-                  else media.pause();
+                  setStateInput("");
                   e.preventDefault();
                 }
               }}
@@ -245,8 +244,7 @@ function Dictation({
                   e.preventDefault();
                 }
                 if (e.ctrlKey && "dD".includes(e.key)) {
-                  if (media.paused) playMediaPart(cue, media, false);
-                  else media.pause();
+                  setStateInput("");
                   e.preventDefault();
                 }
               }}
@@ -568,7 +566,7 @@ export default function CueEditor({
                 <Play size={16} />
               </Button>
             </Tooltip.Trigger>
-            <Tooltip.Content>shortcut: Ctrl+S, Ctrl+D, or type two spaces at the end</Tooltip.Content>
+            <Tooltip.Content>shortcut: Ctrl+S or type two spaces at the end</Tooltip.Content>
           </Tooltip>
           {isDictationMode && <MicButton />}
           {(mode === "edit" || mode === "dictation_edit") && <MicButton />}

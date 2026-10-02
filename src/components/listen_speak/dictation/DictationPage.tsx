@@ -198,14 +198,15 @@ export default function DictationPage() {
     }, [d.stateCues, d.stateDictCue, d.stateFocusedCueUUID, d.stateDictMode, d.stateMediaUUID]);
 
     // ── Media playback shortcut ──
-    // Ctrl/Cmd + S or Ctrl/Cmd + D toggles playback of the current media.
+    // Ctrl/Cmd + S toggles playback of the current media.
+    // Ctrl/Cmd + D clears the dictation input (handled in CueEditor).
     // (Voice input is Ctrl/Cmd + C, handled globally in lib/voice-input; prev/next
     // cue is Ctrl/Cmd + ↑/↓, handled by the navigation effect above.)
     useEffect(() => {
         const handleMediaKeys = (e: KeyboardEvent) => {
             if (!e.ctrlKey && !e.metaKey) return;
             const key = e.key.toLowerCase();
-            if (key !== "s" && key !== "d") return;
+            if (key !== "s") return;
             const media = d.videoRef.current;
             if (!d.hasMedia || !media) return;
             e.preventDefault();
@@ -338,7 +339,8 @@ export default function DictationPage() {
                         </Tooltip.Trigger>
                         <Tooltip.Content>
                             <div className="flex flex-col gap-0.5">
-                                <span>Play Audio: Ctrl+s, Ctrl+d or double space at the end</span>
+                                <span>Play Audio: Ctrl+s or double space at the end</span>
+                                <span>Clear Input: Ctrl+d</span>
                                 <span>Voice Input: Ctrl+c</span>
                                 <span>Go to Previous/Next: Ctrl+⬆/⬇</span>
                                 <span>Show Content/Reference: Ctrl+⬅/➡</span>

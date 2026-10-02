@@ -1,9 +1,9 @@
 /// LLM commands — communicates with a local Ollama instance via its HTTP API.
 /// Ollama handles model management, inference, and GPU acceleration.
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, State};
 
-const OLLAMA_BASE_URL: &str = "http://localhost:11434";
+use crate::settings::SettingsState;
 
 // ---------------------------------------------------------------------------
 // Request / response types for Ollama API
@@ -93,18 +93,24 @@ fn ollama_client() -> reqwest::Client {
         .expect("failed to build HTTP client")
 }
 
+/// Get the Ollama base URL from settings.
+fn get_ollama_url(state: &State<'_, SettingsState>) -> String {
+    state.settings.lock().unwrap().ollama_url.clone()
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
 /// Check if Ollama is running and reachable.
 #[tauri::command]
-pub async fn llm_check_connection() -> Result<bool, String> {
+pub async fn llm_check_connection(state: State<'_, SettingsState>) -> Result<bool, String> {
+    let base_url = get_ollama_url(&state);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
         .map_err(|e| e.to_string())?;
-    match client.get(OLLAMA_BASE_URL).send().await {
+    match client.get(&base_url).send().await {
         Ok(resp) => Ok(resp.status().is_success()),
         Err(_) => Ok(false),
     }
@@ -112,10 +118,11 @@ pub async fn llm_check_connection() -> Result<bool, String> {
 
 /// List models installed in Ollama together with our recommended catalog.
 #[tauri::command]
-pub async fn llm_list_models() -> Result<LlmInstalledModelsResponse, String> {
+pub async fn llm_list_models(state: State<'_, SettingsState>) -> Result<LlmInstalledModelsResponse, String> {
+    let base_url = get_ollama_url(&state);
     let client = ollama_client();
     let resp = client
-        .get(format!("{}/api/tags", OLLAMA_BASE_URL))
+        .get(format!("{}/api/tags", base_url))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -131,8 +138,10 @@ pub async fn llm_list_models() -> Result<LlmInstalledModelsResponse, String> {
 #[tauri::command]
 pub async fn llm_pull_model(
     app: AppHandle,
+    state: State<'_, SettingsState>,
     model: String,
 ) -> Result<(), String> {
+    let base_url = get_ollama_url(&state);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3600)) // pulls can take a while
         .build()
@@ -141,7 +150,7 @@ pub async fn llm_pull_model(
     let body = serde_json::json!({ "name": model, "stream": true });
 
     let resp = client
-        .post(format!("{}/api/pull", OLLAMA_BASE_URL))
+        .post(format!("{}/api/pull", base_url))
         .json(&body)
         .send()
         .await
@@ -187,11 +196,12 @@ pub async fn llm_pull_model(
 
 /// Delete a model from Ollama.
 #[tauri::command]
-pub async fn llm_delete_model(model: String) -> Result<(), String> {
+pub async fn llm_delete_model(state: State<'_, SettingsState>, model: String) -> Result<(), String> {
+    let base_url = get_ollama_url(&state);
     let client = ollama_client();
     let body = serde_json::json!({ "name": model });
     let resp = client
-        .delete(format!("{}/api/delete", OLLAMA_BASE_URL))
+        .delete(format!("{}/api/delete", base_url))
         .json(&body)
         .send()
         .await
@@ -208,10 +218,12 @@ pub async fn llm_delete_model(model: String) -> Result<(), String> {
 /// Send a chat completion request to Ollama (non-streaming).
 #[tauri::command]
 pub async fn llm_chat(
+    state: State<'_, SettingsState>,
     model: String,
     messages: Vec<ChatMessage>,
     temperature: Option<f32>,
 ) -> Result<LlmChatResponse, String> {
+    let base_url = get_ollama_url(&state);
     let client = ollama_client();
     let req = ChatRequest {
         model: &model,
@@ -224,7 +236,7 @@ pub async fn llm_chat(
     };
 
     let resp = client
-        .post(format!("{}/api/chat", OLLAMA_BASE_URL))
+        .post(format!("{}/api/chat", base_url))
         .json(&req)
         .send()
         .await
