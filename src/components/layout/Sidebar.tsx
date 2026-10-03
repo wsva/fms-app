@@ -1,9 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { isMobileApp } from "@/lib/platform";
+import { useAuth } from "@/hooks/useAuth";
 import {
   Box,
   SlidersHorizontal,
@@ -24,29 +23,6 @@ import {
   FolderKanban,
   Type,
 } from "lucide-react";
-
-function isTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
-interface AuthUser {
-  name: string;
-  email: string;
-}
-
-interface XpUser {
-  user_id: string;
-  lifetime_xp: number;
-  level: number;
-  updated_at: string;
-}
-
-interface XpAwardResult {
-  xp_awarded: number;
-  lifetime_xp: number;
-  level: number;
-  is_new: boolean;
-}
 
 export type TabId =
   | "dictation"
@@ -148,82 +124,8 @@ export default function Sidebar({
     tools: true,
   });
 
-  // ---- Auth state ----
-  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
-  const [xpUser, setXpUser] = useState<XpUser | null>(null);
-  const [xpFlash, setXpFlash] = useState<number | null>(null);
-
-  const checkAuth = useCallback(async () => {
-    if (!isTauri()) return;
-    try {
-      const user = await invoke<AuthUser | null>("auth_get_user");
-      setAuthUser(user);
-      if (user) {
-        const xp = await invoke<XpUser | null>("xp_get_user");
-        setXpUser(xp);
-      } else {
-        setXpUser(null);
-      }
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  useEffect(() => {
-    checkAuth();
-    if (!isTauri()) return;
-    const unlistenLogin = listen<AuthUser>("auth-login-success", (event) => {
-      setAuthUser(event.payload);
-      // Fetch XP after login.
-      invoke<XpUser | null>("xp_get_user").then(setXpUser).catch(() => {});
-    });
-    const unlistenLogout = listen("auth-logout", () => {
-      setAuthUser(null);
-      setXpUser(null);
-    });
-    // Auth is per-workspace: on workspace switch, clear the old user and
-    // reload auth/XP from the newly selected workspace's auth.json.
-    const unlistenWorkspace = listen("workspace-selected", () => {
-      setAuthUser(null);
-      setXpUser(null);
-      checkAuth();
-    });
-    const unlistenXp = listen<XpAwardResult>("xp-earned", (event) => {
-      setXpUser((prev) =>
-        prev
-          ? { ...prev, lifetime_xp: event.payload.lifetime_xp, level: event.payload.level }
-          : { user_id: "", lifetime_xp: event.payload.lifetime_xp, level: event.payload.level, updated_at: new Date().toISOString() }
-      );
-      // Flash the XP gain.
-      setXpFlash(event.payload.xp_awarded);
-      setTimeout(() => setXpFlash(null), 2000);
-    });
-    return () => {
-      unlistenLogin.then((fn) => fn());
-      unlistenLogout.then((fn) => fn());
-      unlistenWorkspace.then((fn) => fn());
-      unlistenXp.then((fn) => fn());
-    };
-  }, [checkAuth]);
-
-  async function handleLogin() {
-    if (!isTauri()) return;
-    try {
-      await invoke("auth_open_login");
-    } catch {
-      /* ignore */
-    }
-  }
-
-  async function handleLogout() {
-    if (!isTauri()) return;
-    try {
-      await invoke("auth_logout");
-      setAuthUser(null);
-    } catch {
-      /* ignore */
-    }
-  }
+  // ---- Auth state (shared with the mobile bottom nav via useAuth) ----
+  const { authUser, xpUser, xpFlash, login, logout } = useAuth();
 
   // Load saved width from localStorage
   useEffect(() => {
@@ -395,7 +297,7 @@ export default function Sidebar({
           <div className="flex flex-col w-full items-center gap-0.5">
             {/* Logout button */}
             <button
-              onClick={handleLogout}
+              onClick={logout}
               className={`flex items-center w-full rounded-lg px-2 py-1 hover:bg-mid-gray/20 transition-colors cursor-pointer gap-2 ${
                 collapsed ? "justify-center" : ""
               }`}
@@ -438,7 +340,7 @@ export default function Sidebar({
           </div>
         ) : (
           <button
-            onClick={handleLogin}
+            onClick={login}
             className={`flex items-center w-full rounded-lg px-2 py-1.5 hover:bg-mid-gray/20 transition-colors cursor-pointer ${
               collapsed ? "justify-center" : "gap-2"
             }`}

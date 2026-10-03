@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
+import { isMobileApp } from "@/lib/platform";
 import { type ModelVersionInfo, type DownloadProgress, type ModelStatus } from "@/lib/models/types";
 import ModelCard from "./components/ModelCard";
 import ModelDetailsDialog from "./components/ModelDetailsDialog";
@@ -29,7 +30,10 @@ export default function ModelsPage() {
   // ---- Fetch status ----
 
   const fetchStatus = useCallback(async () => {
-    if (!isTauri()) return;
+    // Model management is desktop-only: the `model_*` commands are gated behind
+    // the `desktop` cargo feature and are not registered on the Android build.
+    // This page stays mounted (display:none) on mobile, so skip the fetch there.
+    if (!isTauri() || isMobileApp()) return;
     try {
       const res = await invoke<{
         models: ModelVersionInfo[];

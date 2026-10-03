@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- FmS thin-client PC sync/discovery. ACCESS_NETWORK_STATE for interface /
+         reachability checks (Tailscale /24 probe); CHANGE_WIFI_MULTICAST_STATE so
+         the WLAN discovery responder's multicast beacons can be received.
+         NOTE: re-apply these after `tauri android init` regenerates this file. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />

@@ -83,7 +83,10 @@ fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
 // Writeback queue (producer side, called from the mobile write commands)
 // ---------------------------------------------------------------------------
 
-/// Append a queued change. No-op on desktop (callers gate on `not(desktop)`).
+/// Append a queued change to the writeback queue. Only fed on mobile: the
+/// `dictation`/`xp` write commands call this under `#[cfg(not(feature = "desktop"))]`
+/// (desktop writes straight to the DB), so it is legitimately unused on desktop.
+#[allow(dead_code)]
 pub fn enqueue_change(
     settings: &SettingsState,
     kind: &str,

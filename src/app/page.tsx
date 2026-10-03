@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { isMobileApp } from "@/lib/platform";
 import Sidebar, { type TabId } from "@/components/layout/Sidebar";
 import StatusBar from "@/components/layout/StatusBar";
+import BottomNav from "@/components/layout/BottomNav";
 import WorkspaceChooser from "@/components/workspace/WorkspaceChooser";
 import ModelsPage from "@/components/listen_speak/models/ModelsPage";
 import DictationPage from "@/components/listen_speak/dictation/DictationPage";
@@ -100,16 +101,18 @@ export default function Home() {
   }
 
   return (
-    <div className="flex h-screen">
-      <Sidebar
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        onWidthChange={setSidebarWidth}
-      />
+    <div className={`flex h-screen ${mobile ? "flex-col" : ""}`}>
+      {!mobile && (
+        <Sidebar
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          onWidthChange={setSidebarWidth}
+        />
+      )}
 
       <div
-        className="flex-1 flex flex-col overflow-hidden transition-[margin] duration-200"
-        style={{ marginLeft: sidebarWidth }}
+        className="flex-1 flex flex-col overflow-hidden transition-[margin] duration-200 min-h-0"
+        style={{ marginLeft: mobile ? 0 : sidebarWidth }}
       >
         <div style={{ display: activeTab === "dictation" ? "flex" : "none" }} className="flex-1 min-h-0">
           <DictationPage />
@@ -151,8 +154,10 @@ export default function Home() {
           <WorkspacesPage />
         </div>
 
-        <StatusBar />
+        {!mobile && <StatusBar />}
       </div>
+
+      {mobile && <BottomNav activeTab={activeTab} onTabChange={setActiveTab} />}
 
       {/* Global text-selection → "Add to Card" menu */}
       <CardContextMenu />

@@ -18,7 +18,13 @@ android {
     compileSdk = 37
     namespace = "com.wsva.fms_app"
     defaultConfig {
-        manifestPlaceholders["usesCleartextTraffic"] = "false"
+        // FmS thin client reaches the paired PC over cleartext HTTP on the
+        // WLAN/Tailscale network (http://<ip>:35711). Keep cleartext enabled for
+        // every build type so the WebView fetch() calls (dataset list, status
+        // recheck) work in release too, not just debug. The Rust reqwest sync
+        // paths use raw sockets and are unaffected by this policy either way.
+        // NOTE: re-apply after `tauri android init` regenerates this file.
+        manifestPlaceholders["usesCleartextTraffic"] = "true"
         applicationId = "com.wsva.fms_app"
         minSdk = 24
         targetSdk = 37
