@@ -1,7 +1,9 @@
 use std::net::SocketAddr;
+use std::io::SeekFrom;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Multipart, Path as AxPath, Query, State};
@@ -11,6 +13,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+use tokio::io::{AsyncSeekExt, AsyncReadExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_util::io::ReaderStream;
@@ -19,10 +22,14 @@ use crate::dataset::{self, DatasetSummary};
 use crate::book::{self, BookChapter};
 use crate::edge_tts;
 use crate::model::{self, ModelState};
+use crate::rest;
 use crate::settings::SettingsState;
 
 /// Default port the web server binds to.
 const DEFAULT_PORT: u16 = 35711;
+
+/// Default UDP port for the LAN/Tailscale discovery beacon + probe.
+const DISCOVERY_PORT: u16 = 35712;
 
 // ---------------------------------------------------------------------------
 // Config / status types
@@ -35,6 +42,11 @@ pub struct WebServiceConfig {
     pub stt: bool,
     pub dataset: bool,
     pub tts: bool,
+    /// Optional shared token guarding the `/api/v1` snapshot + writeback REST
+    /// API (checked via the `x-fms-token` header). Empty = open (the network
+    /// itself, e.g. a Tailscale ACL, is the trust boundary).
+    #[serde(default)]
+    pub api_token: String,
 }
 
 impl Default for WebServiceConfig {
@@ -44,6 +56,7 @@ impl Default for WebServiceConfig {
             stt: true,
             dataset: true,
             tts: true,
+            api_token: String::new(),
         }
     }
 }
@@ -124,11 +137,14 @@ impl WebServiceState {
                 stt: config.stt,
                 dataset: config.dataset,
                 tts: config.tts,
+                api_token: config.api_token.clone(),
             };
         }
         *self.bound_port.lock().unwrap() = Some(bound);
         *self.shutdown.lock().unwrap() = Some(tx);
         self.running.store(true, Ordering::SeqCst);
+
+        spawn_discovery(app.clone(), bound);
 
         log::info!("Web service started on port {}", bound);
         Ok(self.build_status())
@@ -199,11 +215,14 @@ pub async fn auto_start(app: AppHandle) {
             stt: config.stt,
             dataset: config.dataset,
             tts: config.tts,
+            api_token: config.api_token.clone(),
         };
     }
     *state.bound_port.lock().unwrap() = Some(bound);
     *state.shutdown.lock().unwrap() = Some(tx);
     state.running.store(true, Ordering::SeqCst);
+
+    spawn_discovery(app.clone(), bound);
 
     log::info!("Web service auto-started on port {}", bound);
 }
@@ -247,10 +266,16 @@ fn build_router(app: AppHandle, config: WebServiceConfig) -> Router {
     let enable_stt = config.stt;
     let enable_dataset = config.dataset;
     let enable_tts = config.tts;
+    let api_token = config.api_token.clone();
     let state = AppState {
         app: app.clone(),
         config: Arc::new(config),
     };
+
+    // PC-side REST API for the Android thin client (snapshot + writeback).
+    // Carries its own state, so it is nested after the main router's state is
+    // applied below.
+    let rest_router = rest::router(app.clone(), api_token);
 
     // MCP server (always enabled when web service is running)
     let mcp_service = crate::mcp::create_mcp_service(app);
@@ -281,7 +306,8 @@ fn build_router(app: AppHandle, config: WebServiceConfig) -> Router {
         .route("/books/{uuid}", get(book_chapters_page))
         .route("/books/{uuid}/{chapter}", get(book_chapter_content));
 
-    r.with_state(state)
+    // Apply the main router state, then nest the (self-contained) REST router.
+    r.with_state(state).nest("/api/v1", rest_router)
 }
 
 // ---------------------------------------------------------------------------
@@ -775,6 +801,7 @@ async fn dataset_file_list(State(s): State<AppState>, AxPath(uuid): AxPath<Strin
 
 async fn dataset_file(
     State(s): State<AppState>,
+    headers: HeaderMap,
     AxPath((uuid, rel)): AxPath<(String, String)>,
 ) -> Response {
     let settings = s.app.state::<SettingsState>();
@@ -802,21 +829,78 @@ async fn dataset_file(
         return json_error(StatusCode::NOT_FOUND, "Not a file");
     }
 
-    stream_file(&target_c).await
+    stream_file(&target_c, &headers).await
 }
 
-async fn stream_file(path: &Path) -> Response {
+/// Parse a single `Range: bytes=start-end` header against a known length.
+/// Open-ended ranges (`bytes=5-`, `bytes=-100`) and suffix lengths are handled.
+fn parse_range(headers: &HeaderMap, len: u64) -> Option<(u64, u64)> {
+    let raw = headers.get(header::RANGE)?.to_str().ok()?;
+    let spec = raw.trim().strip_prefix("bytes=")?;
+    let part = spec.split(',').next()?.trim();
+    let (start_s, end_s) = part.split_once('-')?;
+    if len == 0 {
+        return None;
+    }
+    let last = len - 1;
+    let (start, end) = if start_s.is_empty() {
+        // suffix: last N bytes
+        let n: u64 = end_s.parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        (last.saturating_sub(n - 1), last)
+    } else {
+        let start: u64 = start_s.parse().ok()?;
+        let end: u64 = if end_s.is_empty() { last } else { end_s.parse().ok()? };
+        (start, end.min(last))
+    };
+    if start > end || start > last {
+        return None;
+    }
+    Some((start, end))
+}
+
+async fn stream_file(path: &Path, req_headers: &HeaderMap) -> Response {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".to_string());
     let ct = mime_for(path);
 
-    let file = match tokio::fs::File::open(path).await {
+    let mut file = match tokio::fs::File::open(path).await {
         Ok(f) => f,
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
-    let len = file.metadata().await.map(|m| m.len()).ok();
+    let len = match file.metadata().await {
+        Ok(m) => m.len(),
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+
+    // Range request -> 206 Partial Content (lets a browser media element seek).
+    if let Some((start, end)) = parse_range(req_headers, len) {
+        if let Err(e) = file.seek(SeekFrom::Start(start)).await {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+        }
+        let take = end - start + 1;
+        let stream = ReaderStream::new(file.take(take));
+        let body = Body::from_stream(stream);
+
+        let mut headers = HeaderMap::new();
+        if let Ok(v) = ct.parse() {
+            headers.insert(header::CONTENT_TYPE, v);
+        }
+        let _ = format!("inline; filename=\"{}\"", name.replace('"', "")).parse::<axum::http::HeaderValue>().map(|v| headers.insert(header::CONTENT_DISPOSITION, v));
+        headers.insert(header::ACCEPT_RANGES, header::HeaderValue::from_static("bytes"));
+        if let Ok(v) = format!("bytes {}-{}/{}", start, end, len).parse() {
+            headers.insert(header::CONTENT_RANGE, v);
+        }
+        if let Ok(v) = take.to_string().parse() {
+            headers.insert(header::CONTENT_LENGTH, v);
+        }
+        return (StatusCode::PARTIAL_CONTENT, headers, body).into_response();
+    }
+
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
 
@@ -827,16 +911,65 @@ async fn stream_file(path: &Path) -> Response {
     if let Ok(v) = format!("inline; filename=\"{}\"", name.replace('"', "")).parse() {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
-    if let Ok(v) = "bytes".parse() {
-        headers.insert(header::ACCEPT_RANGES, v);
-    }
-    if let Some(l) = len {
-        if let Ok(v) = l.to_string().parse() {
-            headers.insert(header::CONTENT_LENGTH, v);
-        }
+    headers.insert(header::ACCEPT_RANGES, header::HeaderValue::from_static("bytes"));
+    if let Ok(v) = len.to_string().parse() {
+        headers.insert(header::CONTENT_LENGTH, v);
     }
 
     (StatusCode::OK, headers, body).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// UDP discovery responder (desktop): beacon + probe reply for the Android client
+// ---------------------------------------------------------------------------
+
+/// Bind UDP `0.0.0.0:35712`, reply to `fms-probe` datagrams, and broadcast a
+/// JSON beacon every 30 s. Degrades to probe-only where broadcast is blocked.
+pub fn spawn_discovery(app: AppHandle, http_port: u16) {
+    tauri::async_runtime::spawn(async move {
+        let socket = match tokio::net::UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).await {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!(
+                    "[discovery] UDP bind on {} failed: {} (Tailscale /24 probe still works)",
+                    DISCOVERY_PORT,
+                    e
+                );
+                return;
+            }
+        };
+        let _ = socket.set_broadcast(true);
+
+        let name = app.package_info().name.clone();
+        let beacon = serde_json::json!({
+            "app": "fms-app",
+            "name": name,
+            "http_port": http_port,
+            "ips": [local_ip().unwrap_or_default()],
+        })
+        .to_string();
+
+        let bcast = format!("255.255.255.255:{}", DISCOVERY_PORT);
+        let mcast = format!("224.0.1.87:{}", DISCOVERY_PORT);
+        let mut buf = [0u8; 2048];
+        let mut ticker = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    let _ = socket.send_to(beacon.as_bytes(), bcast.as_str()).await;
+                    let _ = socket.send_to(beacon.as_bytes(), mcast.as_str()).await;
+                }
+                r = socket.recv_from(&mut buf) => {
+                    if let Ok((n, peer)) = r {
+                        let msg = String::from_utf8_lossy(&buf[..n]);
+                        if msg.trim() == "fms-probe" {
+                            let _ = socket.send_to(beacon.as_bytes(), peer).await;
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn collect_files(base: &Path, dir: &Path, out: &mut Vec<FileEntry>) {

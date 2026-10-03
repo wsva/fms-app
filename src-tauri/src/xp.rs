@@ -176,6 +176,19 @@ pub fn xp_award_internal(
 
     let (lifetime_xp, level) = get_user_xp_from_db(&conn, user_id)?;
 
+    #[cfg(not(feature = "desktop"))]
+    {
+        // Queue the award so it is replayed on the PC during the next flush.
+        // PC-side deduplication is by (user_id, source, reference_id).
+        let payload = serde_json::json!({
+            "user_id": user_id,
+            "amount": amount,
+            "source": source,
+            "reference_id": reference_id,
+        });
+        let _ = crate::sync::enqueue_change(settings, "xp", dataset_uuid.unwrap_or(""), &payload);
+    }
+
     Ok(XpAwardResult {
         xp_awarded: amount,
         lifetime_xp,

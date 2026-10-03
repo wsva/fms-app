@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::settings::SettingsState;
+#[cfg(feature = "desktop")]
 use crate::model::ModelState;
 
 // ---------------------------------------------------------------------------
@@ -877,6 +878,7 @@ fn is_sentence_end(c: char) -> bool {
 /// Splits on sentence-ending punctuation (. ! ? etc.).
 /// Segments are concatenated directly (no extra spaces) because the model's
 /// token output already encodes spacing (e.g. " Bekannt" has a leading space).
+#[cfg(feature = "desktop")]
 fn merge_to_sentences(segments: &[transcribe_rs::TranscriptionSegment]) -> Vec<transcribe_rs::TranscriptionSegment> {
     if segments.is_empty() {
         return Vec::new();
@@ -926,6 +928,7 @@ fn merge_to_sentences(segments: &[transcribe_rs::TranscriptionSegment]) -> Vec<t
 }
 
 /// Generate VTT content from timed segments, merging word-level into sentences.
+#[cfg(feature = "desktop")]
 fn segments_to_vtt(segments: &[transcribe_rs::TranscriptionSegment]) -> String {
     let sentences = merge_to_sentences(segments);
     let mut vtt = String::from("WEBVTT\n\n");
@@ -981,6 +984,7 @@ pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<P
 /// e.g. `media/a/b.mp3` -> `subtitle/a/b.vtt`) are skipped, so re-running only
 /// transcribes newly added media. Use `dataset_delete_subtitles` to force a full
 /// regeneration. Returns a short summary for the UI log.
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn dataset_generate_subtitles(
     app: AppHandle,
@@ -1053,6 +1057,7 @@ pub async fn dataset_generate_subtitles(
 
 /// Generate subtitle for a single media file using the loaded STT model.
 /// Looks up the media source path from the database, transcribes, and writes VTT.
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn dataset_generate_subtitle_single(
     app: AppHandle,
@@ -1222,6 +1227,7 @@ pub(crate) fn write_waveform_to_db(
 ///
 /// If the dataset database exists, waveform data is also written to the
 /// `listen_waveform` table alongside the JSON files.
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn dataset_generate_waveform(
     app: AppHandle,
@@ -1294,6 +1300,7 @@ pub async fn dataset_generate_waveform(
 
 /// Generate waveform for a single media file (by media_uuid).
 /// Returns the source path of the processed media.
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn dataset_generate_waveform_single(
     settings: State<'_, SettingsState>,
@@ -1358,6 +1365,7 @@ pub async fn dataset_generate_waveform_single(
 }
 
 /// Advance a dataset to Stage 2: generate subtitles + waveforms.
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn dataset_advance_to_stage2(
     app: AppHandle,

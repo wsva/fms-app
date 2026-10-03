@@ -17,22 +17,59 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# Feature gating so the mobile (aarch64-linux-android) build never pulls in
+# desktop-only native dependencies (local STT, file dialogs, screen capture,
+# image codec, the axum/rmcp server stack).
+#
+# IMPORTANT: `desktop` is deliberately NOT a default feature. The Tauri CLI
+# re-applies the manifest `default` features to *every* target (including the
+# Android dev/build paths), and it cannot be turned off from the CLI, so
+# anything left in `default` would leak into the Android build. Instead the
+# desktop app build enables it through `build.features = ["desktop"]` in
+# tauri.conf.json, while tauri.android.conf.json overrides it to `[]`.
+# - Run a desktop cargo check with: `cargo check --features desktop`.
+# - Run a mobile (thin-client) cargo check with: `cargo check` (or
+#   `cargo check --no-default-features`).
+# - `desktop` = the full PC build.
+# - `server` = the HTTP/MCP web_service, a PC-only subsystem and a dependency of
+#   `desktop`. Android consumes the PC over the network, so it compiles none.
+[features]
+default = []
+desktop = [
+    "dep:transcribe-rs",
+    "dep:transcribe-cpp",
+    "dep:rfd",
+    "dep:xcap",
+    "dep:arboard",
+    "dep:image",
+    "dep:tauri-plugin-single-instance",
+    "server",
+]
+server = [
+    "dep:axum",
+    "dep:rmcp",
+    "dep:tokio-util",
+    "dep:tokio-stream",
+    "dep:schemars",
+    "dep:anyhow",
+]
+
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-deep-link = "2"
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-transcribe-rs = { version = "0.3.11", features = ["onnx"] }
-transcribe-cpp = { version = "0.2.0", default-features = false }
+transcribe-rs = { version = "0.3.11", features = ["onnx"], optional = true }
+transcribe-cpp = { version = "0.2.0", default-features = false, optional = true }
 tar = "0.4.44"
 flate2 = "1.0"
 sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
-rfd = "0.15"
+rfd = { version = "0.15", optional = true }
 dirs = "6"
 futures-util = "0.3"
 base64 = "0.22"
@@ -41,25 +78,25 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 symphonia = { version = "0.5", features = ["all", "opt-simd"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
-log = "0.4"
+log = { version = "0.4", features = ["std"] }
 lazy_static = "1.4"
 tauri-plugin-fs = "2.5.2"
 edge-tts-rust = "0.1"
-axum = { version = "0.8.9", features = ["multipart"] }
-tokio-util = { version = "0.7", features = ["io"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
-image = "0.25.10"
-schemars = "1.0"
-anyhow = "1"
-rmcp = { version = "3.4.1", features = ["server", "transport-streamable-http-server", "transport-streamable-http-server-session", "macros", "schemars"] }
+axum = { version = "0.8.9", features = ["multipart"], optional = true }
+tokio-util = { version = "0.7", features = ["io", "io-util"], optional = true }
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
+image = { version = "0.25.10", optional = true }
+schemars = { version = "1.0", optional = true }
+anyhow = { version = "1", optional = true }
+rmcp = { version = "3.4.1", optional = true, features = ["server", "transport-streamable-http-server", "transport-streamable-http-server-session", "macros", "schemars"] }
 
 # Windows: native snipping via `ms-screenclip:` + clipboard image read.
 [target.'cfg(windows)'.dependencies]
-arboard = "3"
+arboard = { version = "3", optional = true }
 
 # macOS/Linux: cross-platform full-screen capture (region crop happens in-app).
 [target.'cfg(not(windows))'.dependencies]
-xcap = "0.9"
+xcap = { version = "0.9", optional = true }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

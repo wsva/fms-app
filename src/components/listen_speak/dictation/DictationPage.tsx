@@ -19,6 +19,7 @@ import { datasetStatusLabel, datasetStatusBadgeClasses, type DatasetStatus } fro
 import { subscribe, getVoiceError, clearVoiceError } from "@/lib/voice-input";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
+import { isMobileApp } from "@/lib/platform";
 import { logInfo, logError } from "@/lib/logger";
 
 const getUUID = () => crypto.randomUUID().replaceAll("-", "");
@@ -34,6 +35,27 @@ export default function DictationPage() {
     const voiceError = useSyncExternalStore(subscribe, getVoiceError, getVoiceError);
     // Guards against double-submits while a favorite clip is being cut.
     const [addingFavorite, setAddingFavorite] = useState(false);
+
+    // Mobile thin client: surface how many local edits await upload.
+    const [mobile, setMobile] = useState(false);
+    const [pendingUpload, setPendingUpload] = useState(0);
+    useEffect(() => {
+        setMobile(isMobileApp());
+    }, []);
+    useEffect(() => {
+        if (!isTauri() || !mobile) return;
+        let alive = true;
+        const refresh = () =>
+            invoke<number>("writeback_pending_count")
+                .then((n) => alive && setPendingUpload(n))
+                .catch(() => {});
+        refresh();
+        const timer = setInterval(refresh, 5000);
+        return () => {
+            alive = false;
+            clearInterval(timer);
+        };
+    }, [mobile]);
 
     // Group ready datasets by their root location for the datasets view.
     type DatasetItem = (typeof d.datasets)[number];
@@ -195,6 +217,11 @@ export default function DictationPage() {
 
     return (
         <div className="flex flex-col flex-1 min-h-0 p-4 overflow-hidden">
+            {mobile && pendingUpload > 0 && (
+                <div className="mb-3 px-3 py-1.5 rounded-md text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300 w-fit">
+                    {pendingUpload} change(s) pending upload
+                </div>
+            )}
             {/* Toolbar — sections are mutually exclusive: Location on the datasets view,
                 Dataset on the media-list view, Dictation on the cue view. */}
             <div className="@container flex flex-row items-center gap-3 w-full px-3 py-2 mb-4 rounded-lg bg-bg-card border border-border-light">

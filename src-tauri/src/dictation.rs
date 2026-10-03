@@ -415,6 +415,15 @@ pub async fn listen_save_cue(
         ],
     )
     .map_err(|e| e.to_string())?;
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "cue_save",
+            &dataset_uuid,
+            &serde_json::to_value(&cue).unwrap_or_default(),
+        );
+    }
     Ok(())
 }
 
@@ -429,6 +438,15 @@ pub async fn listen_delete_cue(
     let conn = open_db(&settings, &dataset_uuid)?;
     conn.execute("DELETE FROM listen_subtitle_cue WHERE uuid = ?1", [&cue_uuid])
         .map_err(|e| e.to_string())?;
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "cue_delete",
+            &dataset_uuid,
+            &serde_json::json!({ "cue_uuid": cue_uuid }),
+        );
+    }
     Ok(())
 }
 
@@ -542,6 +560,15 @@ pub async fn listen_save_dictation(
         ],
     )
     .map_err(|e| e.to_string())?;
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &_settings,
+            "dictation",
+            &_dataset_uuid,
+            &serde_json::to_value(&dictation).unwrap_or_default(),
+        );
+    }
     Ok(())
 }
 

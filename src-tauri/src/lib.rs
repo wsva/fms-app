@@ -1,5 +1,7 @@
 mod audio;
+#[cfg(feature = "desktop")]
 mod adjust;
+#[cfg(feature = "desktop")]
 mod align;
 mod auth;
 mod book;
@@ -10,23 +12,37 @@ mod db;
 mod dictation;
 mod llm;
 mod logger;
+#[cfg(feature = "desktop")]
 mod model;
+#[cfg(feature = "desktop")]
 mod model_download;
+#[cfg(feature = "desktop")]
 mod model_list;
+#[cfg(feature = "desktop")]
 mod model_list_stt;
+#[cfg(feature = "desktop")]
 mod mcp;
 mod settings;
+#[cfg(feature = "desktop")]
 mod tools;
 mod edge_tts;
+#[cfg(feature = "desktop")]
 mod web_service;
+#[cfg(feature = "desktop")]
+mod rest;
+#[cfg(feature = "desktop")]
 mod capture;
+#[cfg(feature = "desktop")]
 mod ocr;
 mod xp;
 mod simple_words;
 mod wiki;
 mod workspace;
+mod sync;
+mod discover;
 
 // Unified model index
+#[cfg(feature = "desktop")]
 mod model_index;
 
 use tauri::{Emitter, Manager};
@@ -108,6 +124,7 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+#[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -313,6 +330,12 @@ pub fn run() {
             simple_words::simple_words_contains,
             simple_words::simple_words_filter,
             simple_words::simple_words_reload,
+            // PC sync + discovery (available on desktop too, for testing).
+            sync::dataset_sync_snapshot,
+            sync::writeback_flush,
+            sync::writeback_pending_count,
+            sync::dataset_sync_state,
+            discover::pc_discover,
         ])
         .manage(workspace::WorkspaceState::new())
         .manage(model::ModelState::new())
@@ -439,6 +462,234 @@ pub fn run() {
                     }
                 }
             }
+
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+// ---------------------------------------------------------------------------
+// Mobile (thin-client) entry point.
+//
+// Built with `--no-default-features` (i.e. the `desktop` feature is off). It
+// registers only the command set that compiles and is useful on Android: the
+// local SQLite-backed learning features (dictation, cards, wiki, book, XP,
+// simple words, workspace/settings) plus the PC snapshot-sync + discovery
+// client. The heavy desktop subsystems (local STT, model management, dataset
+// generation pipeline, OCR, capture, tools, and the web_service server) are
+// excluded entirely.
+// ---------------------------------------------------------------------------
+#[cfg(not(feature = "desktop"))]
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_deep_link::init())
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            settings::settings_get,
+            settings::settings_set,
+            settings::settings_get_global,
+            settings::settings_set_global,
+            settings::settings_get_workspace,
+            settings::settings_set_workspace,
+            settings::settings_pick_folder,
+            dataset::dataset_list,
+            dataset::dataset_list_dirs,
+            dataset::dataset_add_dir,
+            dataset::dataset_remove_dir,
+            dataset::dataset_get,
+            dataset::dataset_update,
+            dataset::dataset_delete,
+            dataset::dataset_create,
+            dictation::dictation_list_media,
+            dictation::dictation_get_data,
+            dictation::listen_list_media,
+            dictation::listen_get_media,
+            dictation::listen_get_subtitles,
+            dictation::listen_get_cues,
+            dictation::listen_get_dictation,
+            dictation::listen_get_dataset_dictation_status,
+            dictation::listen_save_media,
+            dictation::listen_rename_media,
+            dictation::listen_save_cue,
+            dictation::listen_delete_cue,
+            dictation::listen_delete_media,
+            dictation::listen_save_dictation,
+            dictation::listen_get_waveform,
+            dictation::dictation_add_cue_to_favorites,
+            dictation::dictation_list_favorite_cues,
+            dictation::subtitle_create_version,
+            dictation::subtitle_finalize_version,
+            dictation::subtitle_get_versions,
+            dictation::subtitle_get_cues_at_version,
+            dictation::subtitle_rollback_to_version,
+            auth::auth_open_login,
+            auth::auth_get_user,
+            auth::auth_logout,
+            llm::llm_check_connection,
+            llm::llm_list_models,
+            llm::llm_pull_model,
+            llm::llm_delete_model,
+            llm::llm_chat,
+            edge_tts::edge_tts_list_voices,
+            edge_tts::edge_tts_synthesize,
+            edge_tts::edge_tts_preview,
+            book::book_list,
+            book::book_create,
+            book::book_rename,
+            book::book_delete,
+            book::book_list_chapters,
+            book::book_save_chapter,
+            book::book_delete_chapter,
+            book::book_list_sentences,
+            book::book_save_sentence,
+            book::book_save_sentences,
+            book::book_delete_sentence,
+            book::book_list_words,
+            book::book_save_word,
+            book::book_delete_word,
+            book::book_write_audio,
+            book::book_import_audio,
+            book::book_delete_audio,
+            xp::xp_get_user,
+            xp::xp_get_history,
+            xp::xp_award_dictation_cue,
+            xp::xp_award_dictation_subtitle,
+            xp::xp_award_dictation_media,
+            xp::xp_award_reading_sentence,
+            xp::xp_award_reading_chapter,
+            logger::log_get_history,
+            logger::log_clear,
+            logger::log_frontend_message,
+            wiki::wiki_list_dirs,
+            wiki::wiki_list_dir,
+            wiki::wiki_read_file,
+            wiki::wiki_write_file,
+            wiki::wiki_delete_file,
+            wiki::wiki_search,
+            wiki::wiki_index,
+            wiki::wiki_add_dir,
+            wiki::wiki_remove_dir,
+            workspace::workspace_list,
+            workspace::workspace_get_current,
+            workspace::workspace_create,
+            workspace::workspace_select,
+            workspace::workspace_delete,
+            workspace::workspace_rename,
+            workspace::workspace_claim,
+            workspace::workspace_set_auto_login,
+            cards::card_dataset_list,
+            cards::card_dataset_create,
+            cards::card_dataset_update,
+            cards::card_dataset_add_subscriber,
+            cards::card_dataset_remove_subscriber,
+            cards::card_dataset_delete,
+            cards::card_dataset_move,
+            cards::card_list,
+            cards::card_get,
+            cards::card_save,
+            cards::card_delete,
+            cards::card_fork,
+            cards::card_tag_list,
+            cards::card_tag_save,
+            cards::card_tag_delete,
+            cards::card_set_tags,
+            cards::card_get_tags,
+            cards::card_test_get,
+            cards::card_test_submit,
+            cards::card_sync_status,
+            cards::card_sync_get_changes,
+            cards::card_search,
+            cards::card_fts_rebuild,
+            cards_sync::card_sync_full,
+            cards_sync::card_sync_all,
+            simple_words::simple_words_get_config,
+            simple_words::simple_words_save_config,
+            simple_words::simple_words_load_language,
+            simple_words::simple_words_add_word,
+            simple_words::simple_words_list,
+            simple_words::simple_words_contains,
+            simple_words::simple_words_filter,
+            simple_words::simple_words_reload,
+            // PC sync + discovery client.
+            sync::dataset_sync_snapshot,
+            sync::writeback_flush,
+            sync::writeback_pending_count,
+            sync::dataset_sync_state,
+            discover::pc_discover,
+        ])
+        .manage(workspace::WorkspaceState::new())
+        .manage(settings::SettingsState::new())
+        .manage(dataset::DatasetState::new())
+        .manage(simple_words::SimpleWordsState::new())
+        .setup(|app| {
+            let log_buffer = logger::init_logger(app.handle().clone());
+            app.handle().manage(log_buffer);
+            log::info!("Application starting up (mobile)");
+
+            // ── Initialize workspaces ──
+            {
+                let ws_state = app.handle().state::<workspace::WorkspaceState>();
+                match workspace::init_workspaces(&*ws_state) {
+                    Ok(count) => {
+                        log::info!("[Startup] {} workspace(s) initialized", count);
+                        if let Some(ws) = workspace::auto_select_workspace(&*ws_state) {
+                            log::info!("[Startup] Auto-selected workspace: '{}' (uuid={})", ws.name, ws.uuid);
+                            let settings_state = app.handle().state::<settings::SettingsState>();
+                            settings_state.set_workspace_dir(Some(workspace::workspace_dir(&ws.uuid)));
+                        } else {
+                            log::info!("[Startup] Showing workspace chooser");
+                            let _ = app.emit("workspace-show-chooser", ());
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("[Startup] Failed to initialize workspaces: {}", e);
+                    }
+                }
+            }
+
+            // Load simple words into memory.
+            {
+                let sw_state = app.handle().state::<simple_words::SimpleWordsState>();
+                let settings_state = app.handle().state::<settings::SettingsState>();
+                match simple_words::init_simple_words(&settings_state, &sw_state) {
+                    Ok(count) => log::info!("[Startup] Loaded {} simple words", count),
+                    Err(e) => log::error!("[Startup] Failed to load simple words: {}", e),
+                }
+            }
+
+            // On Android the fms-app:// scheme is registered by the OS at install
+            // time via the AndroidManifest intent-filter, so there is no runtime
+            // register_all()/register() call here (register_all() is desktop-only and
+            // register() is a no-op on mobile). We only attach the on_open_url handler
+            // below to receive incoming deep links (login callback + wiki nav).
+
+            let dl_handle = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    let url_str = url.to_string();
+                    log::info!("[DeepLink] Received URL: {}", url_str);
+                    if url_str.starts_with("fms-app://login") {
+                        let handle = dl_handle.clone();
+                        let url_str = url_str.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = handle_deep_link_login(handle, &url_str).await {
+                                log::error!("[DeepLink] Login failed: {}", e);
+                            }
+                        });
+                    } else if url_str.starts_with("fms-app://wiki") {
+                        let handle = dl_handle.clone();
+                        let url_str = url_str.clone();
+                        if let Err(e) = handle_deep_link_wiki(handle, &url_str) {
+                            log::error!("[DeepLink] Wiki navigation failed: {}", e);
+                        }
+                    }
+                }
+            });
 
             Ok(())
         })

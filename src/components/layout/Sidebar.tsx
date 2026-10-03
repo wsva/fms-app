@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { isMobileApp } from "@/lib/platform";
 import {
   Box,
   SlidersHorizontal,
@@ -103,6 +104,23 @@ const rootTabs: TabDef[] = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
+// Tabs reachable in the Android thin client. Everything else (Models, OCR,
+// Edge TTS, LLM Chat, Logs, Simple Words, Dataset Studio pipeline) is hidden.
+// "studio" is repurposed on mobile as the dataset *sync* list.
+const MOBILE_VISIBLE_TABS: TabId[] = [
+  "dictation",
+  "read-book",
+  "cards",
+  "wiki",
+  "workspaces",
+  "studio",
+  "settings",
+];
+
+const MOBILE_TAB_LABELS: Partial<Record<TabId, string>> = {
+  studio: "Datasets",
+};
+
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
 const DEFAULT_EXPANDED_WIDTH = 176; // w-44 = 11rem = 176px
 const MIN_WIDTH = 120;
@@ -123,6 +141,7 @@ export default function Sidebar({
   const [collapsed, setCollapsed] = useState(false);
   const [expandedWidth, setExpandedWidth] = useState(DEFAULT_EXPANDED_WIDTH);
   const [isDragging, setIsDragging] = useState(false);
+  const [mobile, setMobile] = useState(false);
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
@@ -265,9 +284,15 @@ export default function Sidebar({
     setExpandedGroups((prev) => ({ ...prev, [groupId]: !prev[groupId] }));
   };
 
+  useEffect(() => {
+    setMobile(isMobileApp());
+  }, []);
+
   const renderTab = (tab: TabDef, isChild: boolean = false) => {
+    if (mobile && !MOBILE_VISIBLE_TABS.includes(tab.id)) return null;
     const Icon = tab.icon;
     const isActive = activeTab === tab.id;
+    const label = (mobile && MOBILE_TAB_LABELS[tab.id]) || tab.label;
     return (
       <div
         key={tab.id}
@@ -279,12 +304,12 @@ export default function Sidebar({
             : "hover:bg-mid-gray/20 hover:opacity-100 opacity-85"
         }`}
         onClick={() => onTabChange(tab.id)}
-        title={collapsed ? tab.label : undefined}
+        title={collapsed ? label : undefined}
       >
         <Icon width={isChild ? 18 : 20} height={isChild ? 18 : 20} className="shrink-0" />
         {!collapsed && (
-          <p className={`${isChild ? "text-xs" : "text-sm"} font-medium truncate`} title={tab.label}>
-            {tab.label}
+          <p className={`${isChild ? "text-xs" : "text-sm"} font-medium truncate`} title={label}>
+            {label}
           </p>
         )}
       </div>
@@ -295,6 +320,18 @@ export default function Sidebar({
     const GroupIcon = group.icon;
     const isExpanded = expandedGroups[group.id] !== false;
     const hasActiveTab = group.tabs.some((t) => t.id === activeTab);
+
+    // Mobile: drop the collapsible group header and surface only the allowed
+    // tabs as flat top-level entries (Workspaces, Wiki, Datasets).
+    if (mobile) {
+      const visible = group.tabs.filter((t) => MOBILE_VISIBLE_TABS.includes(t.id));
+      if (visible.length === 0) return null;
+      return (
+        <div key={group.id} className="flex flex-col w-full gap-1">
+          {visible.map((tab) => renderTab(tab, false))}
+        </div>
+      );
+    }
 
     return (
       <div key={group.id} className="w-full">

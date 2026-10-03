@@ -1477,6 +1477,7 @@ impl DatasetMcpServer {
             stt: param.stt,
             dataset: param.dataset,
             tts: param.tts,
+            api_token: String::new(),
         };
         let status = web_service::web_service_start(self.app.clone(), state, config).await?;
         Ok(serde_json::to_string_pretty(&status).unwrap_or_default())

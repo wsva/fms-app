@@ -3,12 +3,14 @@
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { isMobileApp } from "@/lib/platform";
 import Sidebar, { type TabId } from "@/components/layout/Sidebar";
 import StatusBar from "@/components/layout/StatusBar";
 import WorkspaceChooser from "@/components/workspace/WorkspaceChooser";
 import ModelsPage from "@/components/listen_speak/models/ModelsPage";
 import DictationPage from "@/components/listen_speak/dictation/DictationPage";
 import StudioPage from "@/components/listen_speak/studio/StudioPage";
+import DatasetsSyncPage from "@/components/listen_speak/datasets/DatasetsSyncPage";
 import ReadBookPage from "@/components/read_book/ReadBookPage";
 import CardsPage from "@/components/cards/CardsPage";
 import CardContextMenu from "@/components/cards/CardContextMenu";
@@ -36,6 +38,11 @@ export default function Home() {
   const [sidebarWidth, setSidebarWidth] = useState(176); // default expanded width
   const [showWorkspaceChooser, setShowWorkspaceChooser] = useState(false);
   const [currentWorkspace, setCurrentWorkspace] = useState<Workspace | null>(null);
+  const [mobile, setMobile] = useState(false);
+
+  useEffect(() => {
+    setMobile(isMobileApp());
+  }, []);
 
   // Check workspace state on mount
   useEffect(() => {
@@ -108,7 +115,7 @@ export default function Home() {
           <DictationPage />
         </div>
         <div style={{ display: activeTab === "studio" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <StudioPage />
+          {mobile ? <DatasetsSyncPage /> : <StudioPage />}
         </div>
         <div style={{ display: activeTab === "simple-words" ? "flex" : "none" }} className="flex-1 min-h-0">
           <SimpleWordsPage />

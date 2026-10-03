@@ -50,6 +50,14 @@ pub struct AppSettings {
     /// Ollama API base URL (global setting, not workspace-scoped).
     #[serde(default = "default_ollama_url")]
     pub ollama_url: String,
+    /// PC snapshot server base URL (e.g. `http://192.168.1.20:35711`). Global,
+    /// not workspace-scoped. On Android this is a remembered/manual fallback
+    /// filled by `pc_discover`; left empty until discovery or manual entry.
+    #[serde(default)]
+    pub pc_url: String,
+    /// Optional shared token sent as `x-fms-token` to the PC REST API.
+    #[serde(default)]
+    pub pc_token: String,
 }
 
 fn default_ollama_url() -> String {
@@ -63,6 +71,12 @@ pub struct GlobalSettings {
     /// Ollama API base URL.
     #[serde(default = "default_ollama_url")]
     pub ollama_url: String,
+    /// PC snapshot server base URL (global fallback / remembered value).
+    #[serde(default)]
+    pub pc_url: String,
+    /// Optional shared token for the PC REST API.
+    #[serde(default)]
+    pub pc_token: String,
     /// Currently selected STT model ID.
     #[serde(default)]
     pub selected_model: String,
@@ -84,6 +98,8 @@ impl Default for GlobalSettings {
             .join("fms-app");
         Self {
             ollama_url: default_ollama_url(),
+            pc_url: String::new(),
+            pc_token: String::new(),
             selected_model: String::new(),
             model_dir: data_dir.join("models").to_string_lossy().into_owned(),
             model_unload_timeout: ModelUnloadTimeout::default(),
@@ -96,6 +112,8 @@ impl GlobalSettings {
     fn from_settings(s: &AppSettings) -> Self {
         Self {
             ollama_url: s.ollama_url.clone(),
+            pc_url: s.pc_url.clone(),
+            pc_token: s.pc_token.clone(),
             selected_model: s.selected_model.clone(),
             model_dir: s.model_dir.clone(),
             model_unload_timeout: s.model_unload_timeout,
@@ -105,6 +123,8 @@ impl GlobalSettings {
 
     fn apply_to(&self, s: &mut AppSettings) {
         s.ollama_url = self.ollama_url.clone();
+        s.pc_url = self.pc_url.clone();
+        s.pc_token = self.pc_token.clone();
         s.selected_model = self.selected_model.clone();
         s.model_dir = self.model_dir.clone();
         s.model_unload_timeout = self.model_unload_timeout;
@@ -174,6 +194,8 @@ impl Default for AppSettings {
             model_unload_timeout: ModelUnloadTimeout::default(),
             onboarding_completed: false,
             ollama_url: default_ollama_url(),
+            pc_url: String::new(),
+            pc_token: String::new(),
         }
     }
 }
@@ -466,7 +488,7 @@ pub async fn settings_pick_folder(
     };
 
     // Use rfd for folder picking since tauri-plugin-dialog doesn't support it on mobile
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(feature = "desktop", not(any(target_os = "android", target_os = "ios"))))]
     {
         use rfd::FileDialog;
         let path = FileDialog::new()
@@ -479,9 +501,10 @@ pub async fn settings_pick_folder(
         }
     }
 
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(any(target_os = "android", target_os = "ios", not(feature = "desktop")))]
     {
-        // Mobile platforms don't support native folder picker
+        // Mobile platforms (and the feature-gated mobile build) don't support
+        // the native rfd folder picker.
         Err("Folder selection is not supported on mobile platforms. Please configure paths manually.".into())
     }
 }
