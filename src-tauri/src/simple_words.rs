@@ -58,10 +58,7 @@ pub struct SimpleWordsConfigInfo {
 fn config_path(settings: &SettingsState) -> PathBuf {
     match settings.workspace_dir.lock().unwrap().as_ref() {
         Some(ws_dir) => ws_dir.join("simple_words.json"),
-        None => dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("fms-app")
-            .join("simple_words.json"),
+        None => crate::app_paths::data_root().join("simple_words.json"),
     }
 }
 

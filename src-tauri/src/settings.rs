@@ -93,9 +93,7 @@ pub struct GlobalSettings {
 
 impl Default for GlobalSettings {
     fn default() -> Self {
-        let data_dir = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("fms-app");
+        let data_dir = crate::app_paths::data_root();
         Self {
             ollama_url: default_ollama_url(),
             pc_url: String::new(),
@@ -148,9 +146,7 @@ pub struct WorkspaceSettings {
 
 impl Default for WorkspaceSettings {
     fn default() -> Self {
-        let data_dir = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("fms-app");
+        let data_dir = crate::app_paths::data_root();
         Self {
             recordings_dir: data_dir.join("recordings").to_string_lossy().into_owned(),
             datasets_dir: data_dir.join("datasets").to_string_lossy().into_owned(),
@@ -180,9 +176,7 @@ impl WorkspaceSettings {
 
 impl Default for AppSettings {
     fn default() -> Self {
-        let data_dir = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("fms-app");
+        let data_dir = crate::app_paths::data_root();
 
         Self {
             model_dir: data_dir.join("models").to_string_lossy().into_owned(),
@@ -234,6 +228,17 @@ impl SettingsState {
         }
     }
 
+    /// Re-read settings from disk using the (now-initialized) base directories
+    /// from [`crate::app_paths`]. Called from the Tauri `setup` hook right after
+    /// `app_paths::init`, so that on mobile the in-memory defaults observe the
+    /// app-private paths instead of the pre-`init` fallback.
+    pub fn reload(&self) {
+        let ws_dir = self.workspace_dir.lock().unwrap().clone();
+        let settings = Self::load(ws_dir.as_ref()).unwrap_or_default();
+        *self.settings.lock().unwrap() = settings;
+        log::info!("[Settings] Reloaded settings after app_paths::init");
+    }
+
     fn config_path(workspace_dir: Option<&PathBuf>) -> PathBuf {
         match workspace_dir {
             Some(dir) => dir.join("settings.json"),
@@ -242,12 +247,10 @@ impl SettingsState {
     }
 
     /// Always returns the global config path (not workspace-scoped).
-    /// Uses dirs::config_dir() (e.g. %APPDATA% on Windows, ~/.config on Linux).
+    /// Uses the platform-aware base from [`crate::app_paths`] (desktop:
+    /// `dirs::config_dir()/fms-app`; mobile: app-private data dir).
     fn global_config_path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("fms-app")
-            .join("settings.json")
+        crate::app_paths::config_root().join("settings.json")
     }
 
     /// Resolve a workspace-scoped data sub-directory: `<workspace>/<name>`.
@@ -258,10 +261,7 @@ impl SettingsState {
             return ws_dir.join(name);
         }
         if configured.is_empty() {
-            return dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("fms-app")
-                .join(name);
+            return crate::app_paths::data_subdir(name);
         }
         PathBuf::from(configured)
     }
@@ -505,6 +505,7 @@ pub async fn settings_pick_folder(
     {
         // Mobile platforms (and the feature-gated mobile build) don't support
         // the native rfd folder picker.
+        let _ = title;
         Err("Folder selection is not supported on mobile platforms. Please configure paths manually.".into())
     }
 }
@@ -529,7 +530,6 @@ pub async fn settings_set_global(
     state: State<'_, SettingsState>,
     global: GlobalSettings,
 ) -> Result<(), String> {
-    let ws_dir = state.workspace_dir.lock().unwrap().clone();
     SettingsState::save_global(&global)?;
     log::info!("[Settings] Global settings updated");
     

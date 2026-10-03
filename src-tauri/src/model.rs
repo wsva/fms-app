@@ -167,7 +167,7 @@ impl ModelState {
     }
 
     pub fn model_dir(version: &str) -> Option<std::path::PathBuf> {
-        dirs::data_dir().map(|d| d.join("fms-app").join("models").join(version))
+        Some(crate::app_paths::data_subdir("models").join(version))
     }
 }
 

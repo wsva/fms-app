@@ -36,6 +36,7 @@ pub struct TtsPreviewResult {
 }
 
 /// Synthesize text and return the raw audio bytes (reused by the web service).
+#[allow(dead_code)]
 pub(crate) async fn synthesize_to_bytes(
     text: &str,
     voice: &str,

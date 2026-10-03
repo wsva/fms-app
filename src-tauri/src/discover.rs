@@ -23,6 +23,7 @@ use tauri::{State};
 
 use crate::settings::SettingsState;
 
+#[allow(dead_code)]
 const DISCOVERY_PORT: u16 = 35712;
 const DEFAULT_HTTP_PORT: u16 = 35711;
 

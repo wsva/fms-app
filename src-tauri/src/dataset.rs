@@ -364,6 +364,7 @@ fn media_rel_path(media_dir: &Path, media_path: &Path) -> PathBuf {
 /// Sibling artefact for a media file under `base_dir` with extension `ext`,
 /// mirroring the media sub-directory (see `media_rel_path`). Shared by subtitle,
 /// waveform and transcript resolution so all stages agree on nested media.
+#[allow(dead_code)]
 fn sibling_path(media_dir: &Path, base_dir: &Path, media_path: &Path, ext: &str) -> PathBuf {
     base_dir.join(media_rel_path(media_dir, media_path).with_extension(ext))
 }
@@ -377,6 +378,7 @@ fn rel_source_string(media_dir: &Path, media_path: &Path) -> String {
         .replace('\\', "/")
 }
 
+#[allow(dead_code)]
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| e.to_string())?;
     for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
@@ -487,6 +489,7 @@ pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<DatasetSummary> {
 /// Import a dataset from a source directory. The directory must contain a `media/`
 /// subdirectory with at least one audio file. The entire directory is copied into
 /// the managed datasets directory and an `info.json` is generated.
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn dataset_import(
     settings: State<'_, SettingsState>,
@@ -650,6 +653,7 @@ fn symlink_file(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 fn symlink_file(src: &Path, dst: &Path) -> Result<(), String> {
     std::os::unix::fs::symlink(src, dst).map_err(|e| format!("Failed to symlink: {}", e))
 }
@@ -804,6 +808,7 @@ pub(crate) fn ensure_favorites_dataset(settings: &SettingsState) -> Result<(Path
 
 /// Copy (or symlink) audio/video files from a source directory into a dataset's
 /// media/ folder. Returns the number of files imported.
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn dataset_import_media(
     settings: State<'_, SettingsState>,
@@ -850,6 +855,7 @@ pub async fn dataset_import_media(
 // Stage 2: Subtitle + Waveform generation
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Clone, Serialize)]
 pub struct DatasetProgress {
     pub uuid: String,
@@ -860,6 +866,7 @@ pub struct DatasetProgress {
 }
 
 /// Format seconds as HH:MM:SS.mmm for VTT.
+#[allow(dead_code)]
 fn format_vtt_time(seconds: f32) -> String {
     let total_ms = (seconds * 1000.0).round() as u64;
     let h = total_ms / 3_600_000;
@@ -870,6 +877,7 @@ fn format_vtt_time(seconds: f32) -> String {
 }
 
 /// Check if a character is a sentence-ending punctuation.
+#[allow(dead_code)]
 fn is_sentence_end(c: char) -> bool {
     matches!(c, '.' | '!' | '?' | '\u{3002}' | '\u{ff01}' | '\u{ff1f}' | '\u{2026}') // 。！？！…
 }
@@ -1123,6 +1131,7 @@ pub async fn dataset_generate_subtitle_single(
 
 /// Delete subtitles (VTT files) for a dataset and reset status to only_media.
 /// Also removes subtitle data from the database if it exists.
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn dataset_delete_subtitles(
     _app: AppHandle,
@@ -1160,6 +1169,7 @@ pub async fn dataset_delete_subtitles(
 }
 
 /// Delete waveform JSON files for a dataset.
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn dataset_delete_waveforms(
     _app: AppHandle,
@@ -1180,6 +1190,7 @@ pub async fn dataset_delete_waveforms(
 /// audiowaveform-compatible waveform JSON (v2 layout). Serialised from the
 /// peaks computed in `audio::generate_waveform`; consumed by the frontend
 /// `WaveformCanvas` and by `adjust::load_waveform`.
+#[allow(dead_code)]
 #[derive(Serialize)]
 struct WaveformJson<'a> {
     version: u8,
@@ -1383,6 +1394,7 @@ pub async fn dataset_advance_to_stage2(
 // ---------------------------------------------------------------------------
 
 /// A single cue parsed from a VTT file.
+#[allow(dead_code)]
 pub(crate) struct VttCue {
     pub(crate) start_ms: i64,
     pub(crate) end_ms: i64,
@@ -1390,6 +1402,7 @@ pub(crate) struct VttCue {
 }
 
 /// Parse a VTT file into a list of cues.
+#[allow(dead_code)]
 pub(crate) fn parse_vtt(path: &Path) -> Result<Vec<VttCue>, String> {
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let mut cues = Vec::new();
@@ -1462,6 +1475,7 @@ pub(crate) fn parse_vtt(path: &Path) -> Result<Vec<VttCue>, String> {
 }
 
 /// Parse a VTT timestamp like "00:01:23.456" into milliseconds.
+#[allow(dead_code)]
 fn parse_vtt_timestamp(s: &str) -> Option<i64> {
     let s = s.split_whitespace().next()?; // ignore any trailing position info
     let parts: Vec<&str> = s.split(':').collect();
@@ -1583,6 +1597,7 @@ pub(crate) fn create_db_schema(conn: &rusqlite::Connection) -> Result<(), String
 }
 
 /// Delete the SQLite database for a dataset and reset status to with_subtitle.
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn dataset_delete_database(
     _app: AppHandle,
@@ -1609,6 +1624,7 @@ pub async fn dataset_delete_database(
 }
 
 /// Generate the SQLite database for a dataset (Stage 2 → Stage 3).
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn dataset_generate_database(
     app: AppHandle,
@@ -1725,6 +1741,7 @@ pub async fn dataset_generate_database(
 /// Write VTT subtitles to the existing database (without rebuilding the entire database).
 /// Clears existing subtitle data and re-imports from VTT files by walking the
 /// subtitle/ directory recursively.
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn dataset_write_subtitles_to_db(
     app: AppHandle,
@@ -1873,6 +1890,7 @@ pub async fn dataset_write_subtitles_to_db(
 /// Recursively walk `dir` collecting every `.vtt` file. `root` is the subtitle/
 /// directory used to compute each file's relative stem (e.g. `a/b.vtt` → `a/b`).
 /// Path separators are normalised to `/` to match the `source` field in the database.
+#[allow(dead_code)]
 fn collect_vtt_files(root: &Path, dir: &Path, out: &mut Vec<(String, std::path::PathBuf)>) {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,

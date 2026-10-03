@@ -375,10 +375,7 @@ pub async fn wiki_delete_file(
     }
 
     // Move to trash instead of deleting
-    let data_dir = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("fms-app")
-        .join("trash");
+    let data_dir = crate::app_paths::data_subdir("trash");
     fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create trash directory: {}", e))?;
 
     let file_name = file_path

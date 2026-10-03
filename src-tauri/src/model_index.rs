@@ -120,9 +120,7 @@ pub fn make_key(model_type: &str, id: &str) -> String {
 
 /// Resolve the model root directory.
 pub fn model_root() -> PathBuf {
-    dirs::data_dir()
-        .map(|d| d.join("fms-app").join("models"))
-        .unwrap_or_else(|| PathBuf::from("models"))
+    crate::app_paths::data_subdir("models")
 }
 
 // ---------------------------------------------------------------------------

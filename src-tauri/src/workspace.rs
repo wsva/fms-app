@@ -59,11 +59,10 @@ impl WorkspaceState {
 // Path helpers
 // ---------------------------------------------------------------------------
 
-/// Base data directory: `{data_dir}/fms-app/`
+/// Base data directory: `{data_dir}/fms-app/` (platform-aware, see
+/// [`crate::app_paths`] — app-private on Android/iOS).
 fn app_data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("fms-app")
+    crate::app_paths::data_root()
 }
 
 /// Workspace root: `{data_dir}/fms-app/workspaces/`
@@ -116,6 +115,15 @@ impl WorkspaceState {
             e.to_string()
         })?;
         Ok(())
+    }
+
+    /// Re-read the registry from disk using the (now-initialized) base path.
+    /// Called from the Tauri `setup` hook right after [`crate::app_paths::init`]
+    /// so returning mobile users load their existing workspaces instead of
+    /// getting a duplicate default (the state is built pre-`init`, when the base
+    /// path still points at the desktop fallback).
+    pub fn reload_registry(&self) {
+        *self.registry.lock().unwrap() = Self::load_registry().unwrap_or_default();
     }
 }
 

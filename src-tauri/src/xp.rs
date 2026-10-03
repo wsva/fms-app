@@ -7,7 +7,7 @@
 
 use rusqlite::Connection;
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tauri::{Emitter, State};
 
 use crate::auth::workspace_identity;
@@ -57,9 +57,7 @@ pub struct XpAwardResult {
 fn open_app_db(settings: &SettingsState) -> Result<Connection, String> {
     let db_dir = match settings.workspace_dir.lock().unwrap().as_ref() {
         Some(ws_dir) => ws_dir.clone(),
-        None => dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("fms-app"),
+        None => crate::app_paths::data_root(),
     };
     std::fs::create_dir_all(&db_dir).map_err(|e| e.to_string())?;
     let db_path = db_dir.join("app.sqlite3");

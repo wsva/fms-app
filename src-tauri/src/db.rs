@@ -30,6 +30,7 @@ pub fn is_dataset_being_adjusted(dataset_uuid: &str) -> bool {
 }
 
 /// Mark a dataset as being adjusted. Returns false if already being adjusted.
+#[allow(dead_code)]
 pub fn mark_dataset_adjustment_start(dataset_uuid: &str) -> bool {
     let mut active = ACTIVE_ADJUSTMENTS.lock().unwrap();
     if active.contains(dataset_uuid) {
@@ -41,6 +42,7 @@ pub fn mark_dataset_adjustment_start(dataset_uuid: &str) -> bool {
 }
 
 /// Mark a dataset as no longer being adjusted.
+#[allow(dead_code)]
 pub fn mark_dataset_adjustment_end(dataset_uuid: &str) {
     let mut active = ACTIVE_ADJUSTMENTS.lock().unwrap();
     active.remove(dataset_uuid);
@@ -49,12 +51,14 @@ pub fn mark_dataset_adjustment_end(dataset_uuid: &str) {
 
 /// RAII guard that ensures a dataset's adjustment mark is released when dropped.
 /// This guarantees cleanup even if the operation panics.
+#[allow(dead_code)]
 pub struct AdjustmentGuard {
     dataset_uuid: String,
 }
 
 impl AdjustmentGuard {
     /// Create a new guard. Returns None if the dataset is already being adjusted.
+    #[allow(dead_code)]
     pub fn try_acquire(dataset_uuid: &str) -> Option<Self> {
         if mark_dataset_adjustment_start(dataset_uuid) {
             Some(Self { dataset_uuid: dataset_uuid.to_string() })
@@ -74,6 +78,7 @@ impl Drop for AdjustmentGuard {
 ///
 /// Logs when the connection is opened and sets up a busy handler that logs
 /// when waiting for a lock.
+#[allow(dead_code)]
 pub fn open_db_with_logging(db_path: &Path, context: &str) -> Result<Connection, String> {
     let start = Instant::now();
     log::info!(
@@ -103,6 +108,7 @@ pub fn open_db_with_logging(db_path: &Path, context: &str) -> Result<Connection,
 /// Begin a transaction with logging.
 ///
 /// Logs when the transaction begins and increments the active writer counter.
+#[allow(dead_code)]
 pub fn begin_transaction_with_logging<'a>(
     conn: &'a mut Connection,
     context: &str,
@@ -140,6 +146,7 @@ pub fn begin_transaction_with_logging<'a>(
 /// Commit a transaction with logging.
 ///
 /// Logs when the transaction commits and decrements the active writer counter.
+#[allow(dead_code)]
 pub fn commit_transaction_with_logging(
     tx: rusqlite::Transaction,
     context: &str,

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::{Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::settings::SettingsState;
 use crate::workspace::WorkspaceState;
@@ -42,9 +42,7 @@ fn auth_file_path(settings: &SettingsState) -> Result<PathBuf, String> {
             .map_err(|e| format!("Failed to create workspace dir: {}", e))?;
         return Ok(ws_dir.join("auth.json"));
     }
-    let dir = dirs::data_dir()
-        .ok_or("Could not determine data directory")?
-        .join("fms-app");
+    let dir = crate::app_paths::data_root();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create auth dir: {}", e))?;
     Ok(dir.join("auth.json"))
 }
@@ -129,7 +127,7 @@ pub fn get_stored_user_id(settings: &SettingsState) -> Option<String> {
 /// `fms-app://login?access_token=...&user_id=...&username=...&refresh_token=...`
 /// which is handled by the deep link handler in lib.rs.
 #[tauri::command]
-pub async fn auth_open_login() -> Result<String, String> {
+pub async fn auth_open_login(app: AppHandle) -> Result<String, String> {
     log::info!("auth_open_login: opening browser");
     let callback = format!("{}://login", DEEP_LINK_SCHEME);
     let login_url = format!(
@@ -140,7 +138,7 @@ pub async fn auth_open_login() -> Result<String, String> {
     log::info!("auth_open_login: url={}", login_url);
 
     // Open the URL in the default browser.
-    open_url(&login_url)?;
+    open_url(&app, &login_url)?;
     Ok(login_url)
 }
 
@@ -375,28 +373,12 @@ pub(crate) fn workspace_identity(settings: &SettingsState) -> String {
     }
 }
 
-/// Open a URL in the default browser.
-fn open_url(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
-            .map_err(|e| format!("Failed to open browser: {}", e))?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(url)
-            .spawn()
-            .map_err(|e| format!("Failed to open browser: {}", e))?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(url)
-            .spawn()
-            .map_err(|e| format!("Failed to open browser: {}", e))?;
-    }
-    Ok(())
+/// Open a URL in the default browser via the opener plugin (cross-platform,
+/// works on desktop and Android/iOS).
+fn open_url(app: &AppHandle, url: &str) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app
+        .opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| format!("Failed to open browser: {}", e))
 }

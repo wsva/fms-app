@@ -1,3 +1,4 @@
+mod app_paths;
 mod audio;
 #[cfg(feature = "desktop")]
 mod adjust;
@@ -345,6 +346,13 @@ pub fn run() {
         .manage(ocr::OcrState::new())
         .manage(simple_words::SimpleWordsState::new())
         .setup(|app| {
+            // Anchor all persistent storage on the platform-correct base dir
+            // (app-private on Android/iOS) before anything reads a path or
+            // writes a log. Idempotent and a no-op relocation on desktop.
+            app_paths::init(app.handle());
+            // Re-seed state that was constructed pre-init with placeholder paths.
+            app.state::<workspace::WorkspaceState>().reload_registry();
+            app.state::<settings::SettingsState>().reload();
             let log_buffer = logger::init_logger(app.handle().clone());
             app.handle().manage(log_buffer);
             log::info!("Application starting up");
@@ -627,6 +635,13 @@ pub fn run() {
         .manage(dataset::DatasetState::new())
         .manage(simple_words::SimpleWordsState::new())
         .setup(|app| {
+            // Anchor all persistent storage on the platform-correct base dir
+            // (app-private on Android/iOS) before anything reads a path or
+            // writes a log. Idempotent and a no-op relocation on desktop.
+            app_paths::init(app.handle());
+            // Re-seed state that was constructed pre-init with placeholder paths.
+            app.state::<workspace::WorkspaceState>().reload_registry();
+            app.state::<settings::SettingsState>().reload();
             let log_buffer = logger::init_logger(app.handle().clone());
             app.handle().manage(log_buffer);
             log::info!("Application starting up (mobile)");

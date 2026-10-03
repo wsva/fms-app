@@ -286,10 +286,7 @@ fn get_access_token(settings: &SettingsState) -> Result<String, String> {
     let auth_path = if let Some(ws_dir) = settings.workspace_dir.lock().unwrap().as_ref() {
         ws_dir.join("auth.json")
     } else {
-        let dir = dirs::data_dir()
-            .ok_or("Could not determine data directory")?
-            .join("fms-app");
-        dir.join("auth.json")
+        crate::app_paths::data_root().join("auth.json")
     };
 
     if !auth_path.exists() {
