@@ -70,8 +70,7 @@ export function useDictationData() {
     // Dictation
     const [stateDictSuccessSet, setStateDictSuccessSet] = useState<Set<string>>(new Set());
     const [stateDictStatus, setStateDictStatus] = useState<"in_progress" | "complete">("in_progress");
-    const [stateDictMode, setStateDictMode] = useState<"full" | "focus">("full");
-    const [stateDictCue, setStateDictCue] = useState<Cue | undefined>();
+    const [stateDictMode, setStateDictMode] = useState<"full" | "large">("full");
     const [completedMediaUuids, setCompletedMediaUuids] = useState<Set<string>>(new Set());
     // Cue UUIDs already present in the Favorites dataset (favorite clips reuse the
     // source cue's uuid). Used to mark/disable the "add to favorites" button.
@@ -510,7 +509,7 @@ export function useDictationData() {
         stateEditingCue, setStateEditingCue,
         // Dictation
         stateDictSuccessSet, stateDictStatus, stateDictMode, setStateDictMode,
-        stateDictCue, setStateDictCue, completedMediaUuids,
+        completedMediaUuids,
         handleDictSuccess, handleDictStatusToggle,
         // Favorites
         favoriteCueUuids, reloadFavorites: loadFavoriteCues,

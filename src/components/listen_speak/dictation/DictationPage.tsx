@@ -143,59 +143,36 @@ export default function DictationPage() {
             
             e.preventDefault();
             
-            if (d.stateDictMode === "focus") {
-                // Focus mode: navigate between cues
-                const currentDictCue = d.stateDictCue;
-                const currentIndex = currentDictCue ? d.stateCues.findIndex(c => c.uuid === currentDictCue.uuid) : -1;
-                let newIndex = currentIndex;
-                
-                if (e.key === "ArrowUp") {
-                    newIndex = currentIndex > 0 ? currentIndex - 1 : d.stateCues.length - 1;
-                } else if (e.key === "ArrowDown") {
-                    newIndex = currentIndex < d.stateCues.length - 1 ? currentIndex + 1 : 0;
-                }
-                
-                if (newIndex >= 0 && newIndex < d.stateCues.length) {
-                    const newCue = d.stateCues[newIndex];
-                    d.setStateDictCue(newCue);
-                    // Focus the input field of the new cue
-                    setTimeout(() => {
-                        const inputEl = document.getElementById(`d-s-i-${newCue.uuid}`) as HTMLInputElement | HTMLTextAreaElement;
-                        if (inputEl) inputEl.focus();
-                    }, 0);
-                }
-            } else {
-                // Full mode: navigate and focus on cue
-                const currentIndex = d.stateFocusedCueUUID ? d.stateCues.findIndex(c => c.uuid === d.stateFocusedCueUUID) : -1;
-                let newIndex = currentIndex;
-                
-                if (e.key === "ArrowUp") {
-                    newIndex = currentIndex > 0 ? currentIndex - 1 : d.stateCues.length - 1;
-                } else if (e.key === "ArrowDown") {
-                    newIndex = currentIndex < d.stateCues.length - 1 ? currentIndex + 1 : 0;
-                }
-                
-                if (newIndex >= 0 && newIndex < d.stateCues.length) {
-                    const newCue = d.stateCues[newIndex];
-                    d.setStateFocusedCueUUID(newCue.uuid);
-                    // Focus the input field of the new cue
-                    setTimeout(() => {
-                        const inputEl = document.getElementById(`d-s-i-${newCue.uuid}`) as HTMLInputElement | HTMLTextAreaElement;
-                        if (inputEl) inputEl.focus();
-                    }, 0);
-                    // Scroll the cue into view
-                    const cueElements = document.querySelectorAll('[data-cue-index]');
-                    const targetElement = cueElements[newIndex] as HTMLElement;
-                    if (targetElement) {
-                        targetElement.scrollIntoView({ behavior: "smooth", block: "nearest" });
-                    }
+            // Both modes render all cues; navigate by focused-cue uuid and scroll into view.
+            const currentIndex = d.stateFocusedCueUUID ? d.stateCues.findIndex(c => c.uuid === d.stateFocusedCueUUID) : -1;
+            let newIndex = currentIndex;
+
+            if (e.key === "ArrowUp") {
+                newIndex = currentIndex > 0 ? currentIndex - 1 : d.stateCues.length - 1;
+            } else if (e.key === "ArrowDown") {
+                newIndex = currentIndex < d.stateCues.length - 1 ? currentIndex + 1 : 0;
+            }
+
+            if (newIndex >= 0 && newIndex < d.stateCues.length) {
+                const newCue = d.stateCues[newIndex];
+                d.setStateFocusedCueUUID(newCue.uuid);
+                // Focus the input field of the new cue
+                setTimeout(() => {
+                    const inputEl = document.getElementById(`d-s-i-${newCue.uuid}`) as HTMLInputElement | HTMLTextAreaElement;
+                    if (inputEl) inputEl.focus();
+                }, 0);
+                // Scroll the cue into view
+                const cueElements = document.querySelectorAll('[data-cue-index]');
+                const targetElement = cueElements[newIndex] as HTMLElement;
+                if (targetElement) {
+                    targetElement.scrollIntoView({ behavior: "smooth", block: "nearest" });
                 }
             }
         };
         
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [d.stateCues, d.stateDictCue, d.stateFocusedCueUUID, d.stateDictMode, d.stateMediaUUID]);
+    }, [d.stateCues, d.stateFocusedCueUUID, d.stateMediaUUID]);
 
     // ── Media playback shortcut ──
     // Ctrl/Cmd + S toggles playback of the current media.
@@ -251,15 +228,16 @@ export default function DictationPage() {
                         <Button size="sm" variant={adminMode ? "primary" : "ghost"} aria-label="Toggle detailed mode" isDisabled={d.stateCues.length === 0} onPress={() => setAdminMode(!adminMode)}>
                             <List size={16} /> Detailed
                         </Button>
-                        <Button size="sm" variant={d.stateDictMode === "focus" ? "primary" : "ghost"} aria-label="Toggle focus mode" isDisabled={d.stateCues.length === 0} onPress={() => {
-                            if (d.stateDictMode === "focus") { d.setStateDictMode("full"); }
+                        <Button size="sm" variant={d.stateDictMode === "large" ? "primary" : "ghost"} aria-label="Toggle large mode" isDisabled={d.stateCues.length === 0} onPress={() => {
+                            if (d.stateDictMode === "large") { d.setStateDictMode("full"); }
                             else {
+                                // Jump focus to the first incomplete cue when entering large mode.
                                 const cueList = d.stateCues.filter((cue) => !d.stateDictSuccessSet.has(cue.uuid));
-                                d.setStateDictCue(cueList.length > 0 ? cueList[0] : undefined);
-                                d.setStateDictMode("focus");
+                                if (cueList.length > 0) d.setStateFocusedCueUUID(cueList[0].uuid);
+                                d.setStateDictMode("large");
                             }
                         }}>
-                            <Target size={16} /> Focus
+                            <Target size={16} /> Large
                         </Button>
                         <Button size="sm" variant={d.stateDictStatus === "complete" ? "primary" : "ghost"} aria-label="Mark complete" isDisabled={d.stateCues.length === 0} onPress={d.handleDictStatusToggle}>
                             <CheckCircle size={16} /> Complete
@@ -565,73 +543,36 @@ export default function DictationPage() {
                                     </div>
                                 )}
 
-                                {d.stateDictMode === "full" ? (
-                                    d.stateCues.map((cue, i) => (
-                                        <div key={i} data-cue-index={i} className={`rounded-xl border-2 py-1.5 px-2 transition-colors ${d.stateFocusedCueUUID === cue.uuid ? "border-accent" : "border-border-light"} ${cue.deleted ? "bg-error-bg" : d.stateFocusedCueUUID === cue.uuid ? "bg-accent-bg/40" : cue.modified ? "bg-accent-bg/20" : "bg-bg-body"}`}>
-                                            <CueEditor
-                                                cue={cue}
-                                                media={d.videoRef.current}
-                                                allowEdit={true}
-                                                mode={d.stateEditingCue !== cue.uuid ? "dictation" : "dictation_edit"}
-                                                isDisabled={d.stateSaving}
-                                                adminMode={adminMode}
-                                                onUpdate={(updated) => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === updated.uuid); if (idx !== -1) { draft[idx] = { ...updated, content_original: draft[idx].content_original }; if (updated.modified) d.setStateNeedSave(true); } })}
-                                                onExpandStart={() => d.handleExpandStart(cue)}
-                                                onExpandEnd={() => d.handleExpandEnd(cue)}
-                                                onDelete={() => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === cue.uuid); if (idx !== -1) draft[idx].deleted = true; let n = 1; draft.forEach((item) => { if (!item.deleted) { item.order_num = n++; item.modified = true; } }); d.setStateNeedSave(true); })}
-                                                onMergeNext={() => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === cue.uuid); if (idx >= 0 && idx < draft.length - 1) { draft[idx].content += " " + draft[idx + 1].content; draft[idx].end_ms = draft[idx + 1].end_ms; draft[idx + 1].deleted = true; let n = 1; draft.forEach((item) => { if (!item.deleted) { item.order_num = n++; item.modified = true; } }); } d.setStateNeedSave(true); })}
-                                                onInsert={(pos: number) => d.updateStateCues((draft) => { const newItem: Cue = { uuid: getUUID(), subtitle_uuid: d.stateSubtitle!.uuid, order_num: 0, start_ms: 0, end_ms: 0, content: "", reference: null }; if (pos < 1) draft.unshift(newItem); else if (pos > draft.length) draft.push(newItem); else draft.splice(pos - 1, 0, newItem); let n = 1; draft.forEach((item) => { if (!item.deleted) { item.order_num = n++; item.modified = true; } }); d.setStateNeedSave(true); })}
-                                                onEdit={() => d.setStateEditingCue(cue.uuid)}
-                                                onDone={() => d.setStateEditingCue(null)}
-                                                initialSuccess={d.stateDictSuccessSet.has(cue.uuid)}
-                                                onSuccess={d.handleDictSuccess}
-                                                onFocusInput={() => d.setStateFocusedCueUUID(cue.uuid)}
-                                                onAddToFavorites={() => handleAddToFavorites(cue)}
-                                                favoritesDisabled={inFavoritesDataset}
-                                                isFavorited={d.favoriteCueUuids.has(cue.uuid)}
-                                            />
-                                        </div>
-                                    ))
-                                ) : (
-                                    <div className="flex flex-col items-center justify-center gap-1 w-full">
-                                        {!d.stateDictCue ? (
-                                            <div>cue not found</div>
-                                        ) : (
-                                            <CueEditor
-                                                cue={d.stateDictCue}
-                                                media={d.videoRef.current}
-                                                allowEdit={true}
-                                                mode={d.stateEditingCue === d.stateDictCue.uuid ? "dictation_edit" : "dictation_focus"}
-                                                isDisabled={d.stateSaving}
-                                                adminMode={adminMode}
-                                                onUpdate={(updated) => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === updated.uuid); if (idx !== -1) draft[idx] = updated; })}
-                                                onExpandStart={() => d.handleExpandStart(d.stateDictCue!)}
-                                                onExpandEnd={() => d.handleExpandEnd(d.stateDictCue!)}
-                                                onDelete={() => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === d.stateDictCue!.uuid); if (idx !== -1) draft.splice(idx, 1); draft.forEach((item, i) => (item.order_num = i + 1)); })}
-                                                onMergeNext={() => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === d.stateDictCue!.uuid); if (idx >= 0 && idx < draft.length - 1) { draft[idx].content += " " + draft[idx + 1].content; draft[idx].end_ms = draft[idx + 1].end_ms; draft.splice(idx + 1, 1); draft.forEach((item, i) => (item.order_num = i + 1)); } })}
-                                                onInsert={(pos: number) => d.updateStateCues((draft) => { const newItem: Cue = { uuid: getUUID(), subtitle_uuid: d.stateSubtitle!.uuid, order_num: 0, start_ms: 0, end_ms: 0, content: "", reference: null }; if (pos < 1) draft.unshift(newItem); else if (pos > draft.length) draft.push(newItem); else draft.splice(pos - 1, 0, newItem); draft.forEach((item, i) => (item.order_num = i + 1)); })}
-                                                onEdit={() => d.setStateEditingCue(d.stateDictCue!.uuid)}
-                                                onDone={() => d.setStateEditingCue(null)}
-                                                initialSuccess={d.stateDictSuccessSet.has(d.stateDictCue.uuid)}
-                                                onSuccess={d.handleDictSuccess}
-                                                onFocusInput={() => d.setStateFocusedCueUUID(d.stateDictCue!.uuid)}
-                                                onAddToFavorites={() => handleAddToFavorites(d.stateDictCue!)}
-                                                favoritesDisabled={inFavoritesDataset}
-                                                isFavorited={d.favoriteCueUuids.has(d.stateDictCue!.uuid)}
-                                            />
-                                        )}
-                                        {!!d.stateDictCue && (
-                                            <div className="flex flex-row items-center justify-center gap-1 w-full">
-                                                <Button onPress={() => {
-                                                    for (const cue of d.stateCues) {
-                                                        if (cue.order_num > d.stateDictCue!.order_num && !d.stateDictSuccessSet.has(cue.uuid)) { d.setStateDictCue(cue); return; }
-                                                    }
-                                                    setConfirmReq({ message: "finished!" });
-                                                }}>Next</Button>
-                                            </div>
-                                        )}
+                                {d.stateCues.map((cue, i) => (
+                                    <div key={i} data-cue-index={i} className={`rounded-xl border-2 py-1.5 px-2 transition-colors ${d.stateFocusedCueUUID === cue.uuid ? "border-accent" : "border-border-light"} ${cue.deleted ? "bg-error-bg" : d.stateFocusedCueUUID === cue.uuid ? "bg-accent-bg/40" : cue.modified ? "bg-accent-bg/20" : "bg-bg-body"}`}>
+                                        <CueEditor
+                                            cue={cue}
+                                            media={d.videoRef.current}
+                                            allowEdit={true}
+                                            mode={
+                                                d.stateEditingCue === cue.uuid ? "dictation_edit"
+                                                : d.stateDictMode === "large" && d.stateFocusedCueUUID === cue.uuid ? "dictation_large"
+                                                : "dictation"
+                                            }
+                                            isDisabled={d.stateSaving}
+                                            adminMode={adminMode}
+                                            onUpdate={(updated) => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === updated.uuid); if (idx !== -1) { draft[idx] = { ...updated, content_original: draft[idx].content_original }; if (updated.modified) d.setStateNeedSave(true); } })}
+                                            onExpandStart={() => d.handleExpandStart(cue)}
+                                            onExpandEnd={() => d.handleExpandEnd(cue)}
+                                            onDelete={() => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === cue.uuid); if (idx !== -1) draft[idx].deleted = true; let n = 1; draft.forEach((item) => { if (!item.deleted) { item.order_num = n++; item.modified = true; } }); d.setStateNeedSave(true); })}
+                                            onMergeNext={() => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === cue.uuid); if (idx >= 0 && idx < draft.length - 1) { draft[idx].content += " " + draft[idx + 1].content; draft[idx].end_ms = draft[idx + 1].end_ms; draft[idx + 1].deleted = true; let n = 1; draft.forEach((item) => { if (!item.deleted) { item.order_num = n++; item.modified = true; } }); } d.setStateNeedSave(true); })}
+                                            onInsert={(pos: number) => d.updateStateCues((draft) => { const newItem: Cue = { uuid: getUUID(), subtitle_uuid: d.stateSubtitle!.uuid, order_num: 0, start_ms: 0, end_ms: 0, content: "", reference: null }; if (pos < 1) draft.unshift(newItem); else if (pos > draft.length) draft.push(newItem); else draft.splice(pos - 1, 0, newItem); let n = 1; draft.forEach((item) => { if (!item.deleted) { item.order_num = n++; item.modified = true; } }); d.setStateNeedSave(true); })}
+                                            onEdit={() => d.setStateEditingCue(cue.uuid)}
+                                            onDone={() => d.setStateEditingCue(null)}
+                                            initialSuccess={d.stateDictSuccessSet.has(cue.uuid)}
+                                            onSuccess={d.handleDictSuccess}
+                                            onFocusInput={() => d.setStateFocusedCueUUID(cue.uuid)}
+                                            onAddToFavorites={() => handleAddToFavorites(cue)}
+                                            favoritesDisabled={inFavoritesDataset}
+                                            isFavorited={d.favoriteCueUuids.has(cue.uuid)}
+                                        />
                                     </div>
-                                )}
+                                ))}
                             </div>
                     </div>
                 </div>

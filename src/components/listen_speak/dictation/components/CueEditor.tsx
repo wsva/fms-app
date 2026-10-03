@@ -280,7 +280,7 @@ export type CueEditorProps = {
   media: HTMLMediaElement | null;
 
   allowEdit: boolean;
-  mode: "dictation" | "edit" | "dictation_edit" | "dictation_focus";
+  mode: "dictation" | "edit" | "dictation_edit" | "dictation_large";
   adminMode: boolean;
 
   isDisabled: boolean;
@@ -435,7 +435,7 @@ export default function CueEditor({
     return "flex flex-col gap-0.5 w-full";
   };
 
-  const isDictationMode = mode === "dictation" || mode === "dictation_focus";
+  const isDictationMode = mode === "dictation" || mode === "dictation_large";
   // End (right) column buttons: edit / done / add-favorites.
   const showEditButton = adminMode && isDictationMode && allowEdit;
   const showDoneButton = adminMode && mode === "dictation_edit" && allowEdit;
@@ -476,7 +476,7 @@ export default function CueEditor({
               setStateSuccess={setStateSuccess}
               onSuccess={onSuccess}
               onFocusInput={onFocusInput}
-              mode={mode === "dictation_focus" ? "large" : "compact"}
+              mode={mode === "dictation_large" ? "large" : "compact"}
               adminMode={adminMode}
             />
           </div>
