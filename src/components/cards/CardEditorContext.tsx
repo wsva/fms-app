@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Eye, Pencil, X, Type } from "lucide-react";
+import { Check, Eye, Pencil, Trash2, Type, X } from "lucide-react";
 import type { Card, CardDatasetSummary } from "@/lib/types";
+import { isMobileApp } from "@/lib/platform";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import "./CardEditor.css";
 
@@ -44,7 +45,13 @@ function CardEditModal({
     initialViewMode !== undefined ? initialViewMode : !!card?.uuid
   );
   const [fontScale, setFontScale] = useState<FontScaleKey>("normal");
+  // Deferred platform detection (SSR-safe): isMobileApp() must not run during render.
+  const [mobile, setMobile] = useState(false);
   const answerRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    setMobile(isMobileApp());
+  }, []);
 
   // Callback ref that resizes the textarea when it's mounted
   const setAnswerRef = useCallback((el: HTMLTextAreaElement | null) => {
@@ -74,23 +81,35 @@ function CardEditModal({
   const selectedDatasetName =
     datasets.find((ds) => ds.info.uuid === selectedDataset)?.info.name || "";
 
+  // Compact square icon button used for the header actions on narrow screens.
+  const iconBtn = "p-1.5 rounded-lg border flex items-center justify-center";
+  const iconSize = 16;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="relative bg-bg-card rounded-xl border border-border-default p-8 w-[80vw] h-[80vh] flex flex-col">
-        {/* Close button (top-right corner) */}
-        <button
-          onClick={onClose}
-          className="absolute top-4 right-4 p-1.5 rounded-lg text-text-tertiary hover:text-text-primary hover:bg-mid-gray/20 transition-colors"
-          title="Close"
-        >
-          <X size={20} />
-        </button>
+      <div
+        className={`relative bg-bg-card border border-border-default flex flex-col ${
+          mobile
+            ? "rounded-none w-full h-full px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]"
+            : "rounded-xl p-8 w-[80vw] h-[80vh]"
+        }`}
+      >
+        {/* Close button (top-right corner, desktop only — on mobile it joins the header row) */}
+        {!mobile && (
+          <button
+            onClick={onClose}
+            className="absolute top-4 right-4 p-1.5 rounded-lg text-text-tertiary hover:text-text-primary hover:bg-mid-gray/20 transition-colors"
+            title="Close"
+          >
+            <X size={20} />
+          </button>
+        )}
         {/* Header with title and buttons */}
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-semibold">
+        <div className={`flex items-center justify-between ${mobile ? "flex-wrap gap-y-2" : ""} mb-4`}>
+          <h2 className={`${mobile ? "text-lg" : "text-xl"} font-semibold min-w-0 truncate`}>
             {viewMode ? "View Card" : card ? "Edit Card" : "New Card"}
           </h2>
-          <div className="flex items-center gap-2 pr-10">
+          <div className={`flex items-center gap-2 ${mobile ? "" : "pr-10"}`}>
             <div
               className="flex items-center gap-1.5 px-2 rounded-lg border border-border-default bg-bg-surface"
               title="Font size"
@@ -99,7 +118,7 @@ function CardEditModal({
               <select
                 value={fontScale}
                 onChange={(e) => setFontScale(e.target.value as FontScaleKey)}
-                className="py-2 pr-1 bg-transparent text-sm cursor-pointer outline-none text-text-primary"
+                className={`${mobile ? "py-1" : "py-2"} pr-1 bg-transparent text-sm cursor-pointer outline-none text-text-primary`}
               >
                 <option value="normal">Normal</option>
                 <option value="large">Large</option>
@@ -108,27 +127,29 @@ function CardEditModal({
             </div>
             <button
               onClick={() => setViewMode((v) => !v)}
-              className="px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 flex items-center gap-2"
+              className={mobile ? `${iconBtn} border-border-default hover:bg-mid-gray/20` : "px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 flex items-center gap-2"}
               title={viewMode ? "Switch to edit mode" : "Switch to view mode"}
+              aria-label={viewMode ? "Edit" : "View"}
             >
               {viewMode ? (
-                <>
-                  <Pencil size={14} />
-                  Edit
-                </>
+                <Pencil size={mobile ? iconSize : 14} />
               ) : (
-                <>
-                  <Eye size={14} />
-                  View
-                </>
+                <Eye size={mobile ? iconSize : 14} />
               )}
+              {!mobile && (viewMode ? "Edit" : "View")}
             </button>
             {onDelete && (
               <button
                 onClick={onDelete}
-                className="px-4 py-2 rounded-lg bg-red-500/10 text-red-500 text-sm hover:bg-red-500/20"
+                className={
+                  mobile
+                    ? `${iconBtn} border-red-500/20 bg-red-500/10 text-red-500 hover:bg-red-500/20`
+                    : "px-4 py-2 rounded-lg bg-red-500/10 text-red-500 text-sm hover:bg-red-500/20"
+                }
+                title="Delete"
+                aria-label="Delete"
               >
-                Delete
+                {mobile ? <Trash2 size={iconSize} /> : "Delete"}
               </button>
             )}
             {!viewMode && (
@@ -144,9 +165,25 @@ function CardEditModal({
                   })
                 }
                 disabled={!question.trim()}
-                className="px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 disabled:opacity-50"
+                className={`${
+                  mobile
+                    ? `${iconBtn} border-accent/20 bg-accent-bg/20 text-accent hover:bg-accent-bg/30`
+                    : "px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20"
+                } disabled:opacity-50`}
+                title="Save"
+                aria-label="Save"
               >
-                Save
+                {mobile ? <Check size={iconSize} /> : "Save"}
+              </button>
+            )}
+            {mobile && (
+              <button
+                onClick={onClose}
+                className={`${iconBtn} border-border-default text-text-tertiary hover:text-text-primary hover:bg-mid-gray/20`}
+                title="Close"
+                aria-label="Close"
+              >
+                <X size={iconSize} />
               </button>
             )}
           </div>
@@ -168,7 +205,7 @@ function CardEditModal({
             <div>
               {answer.trim() ? (
                 <div className="card-md relative px-4 py-3 rounded-lg border border-border-default bg-bg-surface">
-                  <MarkdownViewer content={answer} withTOC={true} />
+                  <MarkdownViewer content={answer} withTOC={!mobile} />
                 </div>
               ) : (
                 <div className="text-text-tertiary italic">(no answer)</div>
