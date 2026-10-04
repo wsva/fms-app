@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { RefreshCw, BookOpen, ArrowLeft, ArrowRight } from "lucide-react";
+import { RefreshCw, BookOpen, ArrowLeft, ArrowRight, Menu } from "lucide-react";
 import WikiSidebar from "./WikiSidebar";
 import WikiSearch from "./WikiSearch";
 import MarkdownViewer from "./markdown/markdown";
@@ -41,6 +41,8 @@ export default function WikiPage() {
   const [error, setError] = useState<string | null>(null);
   const [isIndexing, setIsIndexing] = useState(false);
   const [mobile, setMobile] = useState(false);
+  // Mobile only: the file tree lives in a slide-in drawer, closed by default.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const handleSidebarDrag = useCallback(
     (e: React.MouseEvent) => {
@@ -198,6 +200,13 @@ export default function WikiPage() {
     loadFileContent(path);
   };
 
+  // On mobile the tree is a drawer: selecting a file dismisses it so the
+  // content pane gets the full width.
+  const handleMobileFileSelect = (path: string) => {
+    setSidebarOpen(false);
+    handleFileSelect(path);
+  };
+
   // Listen for wiki deep link navigation (fms-app://wiki/path/to/file.md)
   useEffect(() => {
     if (!isTauri()) return;
@@ -250,29 +259,65 @@ export default function WikiPage() {
 
   return (
     <div className="flex h-full w-full bg-bg-body">
-      {/* Sidebar - file tree */}
-      <div
-        className="relative shrink-0 min-h-0"
-        style={{ width: sidebarWidth }}
-      >
-        <WikiSidebar
-          wikiDir={wikiDir}
-          selectedFile={selectedFile}
-          onFileSelect={handleFileSelect}
-        />
-        {/* Resize handle */}
+      {/* Desktop sidebar — persistent, resizable column. */}
+      {!mobile && (
         <div
-          className="absolute top-0 right-0 h-full w-3 cursor-col-resize flex items-center justify-center group z-10"
-          onMouseDown={handleSidebarDrag}
+          className="relative shrink-0 min-h-0"
+          style={{ width: sidebarWidth }}
         >
-          <div className="w-0.5 h-12 rounded-full bg-border-default group-hover:bg-accent transition-colors" />
+          <WikiSidebar
+            wikiDir={wikiDir}
+            selectedFile={selectedFile}
+            onFileSelect={handleFileSelect}
+          />
+          {/* Resize handle (mouse-drag only; not useful on touch) */}
+          <div
+            className="absolute top-0 right-0 h-full w-3 cursor-col-resize flex items-center justify-center group z-10"
+            onMouseDown={handleSidebarDrag}
+          >
+            <div className="w-0.5 h-12 rounded-full bg-border-default group-hover:bg-accent transition-colors" />
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* Mobile sidebar — slide-in drawer with a dimmed backdrop. */}
+      {mobile && (
+        <>
+          <div
+            className={`fixed inset-0 z-30 bg-black/40 transition-opacity duration-200 ${
+              sidebarOpen ? "opacity-100" : "opacity-0 pointer-events-none"
+            }`}
+            onClick={() => setSidebarOpen(false)}
+            aria-hidden="true"
+          />
+          <div
+            className={`fixed top-0 left-0 z-40 h-full w-[80vw] max-w-[300px] shadow-xl transition-transform duration-200 ${
+              sidebarOpen ? "translate-x-0" : "-translate-x-full"
+            }`}
+          >
+            <WikiSidebar
+              wikiDir={wikiDir}
+              selectedFile={selectedFile}
+              onFileSelect={handleMobileFileSelect}
+            />
+          </div>
+        </>
+      )}
 
       {/* Main content area */}
       <div className="flex-1 flex flex-col min-h-0 min-w-0">
         {/* Top bar with navigation, search and controls */}
         <div className="flex items-center gap-3 px-4 py-2 border-b border-border-default bg-bg-card">
+          {/* Mobile: open the wiki file drawer */}
+          {mobile && (
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
+              title="Open wiki files"
+            >
+              <Menu size={18} />
+            </button>
+          )}
           {/* Back/Forward navigation */}
           <div className="flex items-center gap-1">
             <button

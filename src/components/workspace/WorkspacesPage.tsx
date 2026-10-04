@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
+import { isMobileApp } from "@/lib/platform";
 import { Button, Input, TextField, Label } from "@heroui/react";
 import {
   Plus,
@@ -95,6 +96,7 @@ export default function WorkspacesPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mobile, setMobile] = useState(false);
 
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [newName, setNewName] = useState("");
@@ -137,6 +139,11 @@ export default function WorkspacesPage() {
   useEffect(() => {
     fetchAll();
   }, [fetchAll]);
+
+  // Narrow-screen variant: compact icon-only actions live next to the title.
+  useEffect(() => {
+    setMobile(isMobileApp());
+  }, []);
 
   // Refresh when the workspace changes (switch from this page or elsewhere).
   useEffect(() => {
@@ -222,36 +229,74 @@ export default function WorkspacesPage() {
     }
   }
 
+  const description = (
+    <p className="text-sm text-text-secondary mt-1">
+      Each workspace has its own datasets, wiki, books and user account.
+      Colors show how a workspace&apos;s owner relates to the current user
+      {currentUser ? ` (${currentUser})` : ""}.
+    </p>
+  );
+
+  const refreshButton = (
+    <span title="Refresh workspace list">
+      <Button
+        isIconOnly
+        variant="ghost"
+        size="sm"
+        isDisabled={refreshing}
+        onPress={fetchAll}
+      >
+        <RefreshCw size={16} className={refreshing ? "animate-spin" : undefined} />
+      </Button>
+    </span>
+  );
+
+  const createButton = (
+    <Button variant="primary" size="sm" onPress={() => setShowCreateDialog(true)}>
+      <Plus size={16} /> New Workspace
+    </Button>
+  );
+
+  const createIconButton = (
+    <span title="New workspace">
+      <Button
+        isIconOnly
+        variant="ghost"
+        size="sm"
+        onPress={() => setShowCreateDialog(true)}
+      >
+        <Plus size={16} />
+      </Button>
+    </span>
+  );
+
   return (
     <main className="flex-1 p-8 overflow-y-auto">
       <section className="mb-8">
         {/* Header */}
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h1 className="text-2xl font-bold text-text-primary">Workspaces</h1>
-            <p className="text-sm text-text-secondary mt-1">
-              Each workspace has its own datasets, wiki, books and user account.
-              Colors show how a workspace&apos;s owner relates to the current user
-              {currentUser ? ` (${currentUser})` : ""}.
-            </p>
+        {mobile ? (
+          <div className="mb-4">
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl font-bold text-text-primary">Workspaces</h1>
+              <div className="flex items-center gap-1">
+                {refreshButton}
+                {createIconButton}
+              </div>
+            </div>
+            {description}
           </div>
-          <div className="flex items-center gap-2">
-            <span title="Refresh workspace list">
-              <Button
-                isIconOnly
-                variant="ghost"
-                size="sm"
-                isDisabled={refreshing}
-                onPress={fetchAll}
-              >
-                <RefreshCw size={16} className={refreshing ? "animate-spin" : undefined} />
-              </Button>
-            </span>
-            <Button variant="primary" size="sm" onPress={() => setShowCreateDialog(true)}>
-              <Plus size={16} /> New Workspace
-            </Button>
+        ) : (
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h1 className="text-2xl font-bold text-text-primary">Workspaces</h1>
+              {description}
+            </div>
+            <div className="flex items-center gap-2">
+              {refreshButton}
+              {createButton}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Legend */}
         <div className="flex items-center gap-3 mb-4 text-xs text-text-secondary">
