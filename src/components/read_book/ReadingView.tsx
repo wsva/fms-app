@@ -16,19 +16,26 @@ import type {
 } from "@/lib/read/types";
 import { flattenChapters, groupIntoParagraphs, toDbSentence } from "@/lib/read/types";
 import { isTauri } from "@/lib/tauri";
+import { isMobileApp } from "@/lib/platform";
 import ParagraphList from "./ParagraphList";
 import SentenceDrawer from "./SentenceDrawer";
 import { useRecorder } from "./useRecorder";
 import { getUUID, nowIso } from "./utils";
 import ConfirmDialog from "./ConfirmDialog";
 
-type Props = { books: BookMeta[]; sidebarVisible?: boolean };
+type Props = { books: BookMeta[]; sidebarVisible?: boolean; onCloseSidebar?: () => void };
 
-export default function ReadingView({ books, sidebarVisible = true }: Props) {
+export default function ReadingView({ books, sidebarVisible = true, onCloseSidebar }: Props) {
   // selectors
   const [chaptersFlat, setChaptersFlat] = useState<BookChapter[]>([]);
   const [bookUUID, setBookUUID] = useState("");
   const [chapterUUID, setChapterUUID] = useState("");
+
+  // Deferred platform flag (SSR-safe): on mobile the TOC is a slide-in drawer.
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    setMobile(isMobileApp());
+  }, []);
 
   // data
   const [data, updateData] = useImmer<SentenceClient[]>([]);
@@ -679,50 +686,60 @@ export default function ReadingView({ books, sidebarVisible = true }: Props) {
         : "hover:bg-bg-hover text-text-secondary"
     }`;
 
+  // Book / chapter list. Rendered inside the persistent desktop column or the
+  // mobile slide-in drawer. Selecting a chapter dismisses the drawer on mobile
+  // so the reading pane gets the full width.
+  const tocContent = (
+    <div className="flex-1 min-w-0 overflow-y-auto p-3 flex flex-col gap-0.5">
+      <div className="flex flex-row items-center justify-start px-1 mb-2 gap-2">
+        <Library size={16} className="text-text-tertiary" />
+        <span className="text-xs font-semibold text-text-tertiary tracking-wider">Library</span>
+        {loading && <span className="text-xs text-text-tertiary">loading…</span>}
+      </div>
+      {books.map((book) => (
+        <div key={book.uuid}>
+          <button
+            className={bookBtnClass(bookUUID === book.uuid)}
+            onClick={() => setBookUUID(bookUUID === book.uuid ? "" : book.uuid)}
+          >
+            <BookOpen size={16} /> {book.title}
+          </button>
+          {bookUUID === book.uuid && flatChapters.length > 0 && (
+            <div className="ml-2 mt-0.5 mb-1 flex flex-col gap-0.5 border-l-2 border-border-default pl-2">
+              {flatChapters.map((c) => (
+                <button
+                  key={c.uuid}
+                  className={chapterBtnClass(chapterUUID === c.uuid, c.status === "completed")}
+                  onClick={() => {
+                    setChapterUUID(c.uuid);
+                    if (mobile) onCloseSidebar?.();
+                  }}
+                  style={{ paddingLeft: `${c.depth * 16 + 8}px` }}
+                >
+                  <span className="line-clamp-1">{c.depth > 0 ? "└ " : ""}{c.title}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+      {books.length === 0 && (
+        <div className="text-center text-text-tertiary py-4 text-sm">
+          No books yet. Use "Manage" to create one.
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="flex flex-row w-full h-full gap-4">
-      {/* TOC sidebar */}
-      {sidebarVisible && (
+      {/* TOC sidebar — persistent resizable column on desktop, slide-in drawer on mobile */}
+      {!mobile && sidebarVisible && (
       <div
         className="bg-bg-card border border-border-default rounded-xl flex flex-row shadow-sm flex-shrink-0 h-full"
         style={{ width: `${sidebarWidth}px` }}
       >
-        <div className="flex-1 min-w-0 overflow-y-auto p-3 flex flex-col gap-0.5">
-          <div className="flex flex-row items-center justify-start px-1 mb-2 gap-2">
-            <Library size={16} className="text-text-tertiary" />
-            <span className="text-xs font-semibold text-text-tertiary tracking-wider">Library</span>
-            {loading && <span className="text-xs text-text-tertiary">loading…</span>}
-          </div>
-          {books.map((book) => (
-            <div key={book.uuid}>
-              <button
-                className={bookBtnClass(bookUUID === book.uuid)}
-                onClick={() => setBookUUID(bookUUID === book.uuid ? "" : book.uuid)}
-              >
-                <BookOpen size={16} /> {book.title}
-              </button>
-              {bookUUID === book.uuid && flatChapters.length > 0 && (
-                <div className="ml-2 mt-0.5 mb-1 flex flex-col gap-0.5 border-l-2 border-border-default pl-2">
-                  {flatChapters.map((c) => (
-                    <button
-                      key={c.uuid}
-                      className={chapterBtnClass(chapterUUID === c.uuid, c.status === "completed")}
-                      onClick={() => setChapterUUID(c.uuid)}
-                      style={{ paddingLeft: `${c.depth * 16 + 8}px` }}
-                    >
-                      <span className="line-clamp-1">{c.depth > 0 ? "└ " : ""}{c.title}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
-          {books.length === 0 && (
-            <div className="text-center text-text-tertiary py-4 text-sm">
-              No books yet. Use "Manage" to create one.
-            </div>
-          )}
-        </div>
+        {tocContent}
         <div
           className="flex-shrink-0 w-3 cursor-col-resize flex items-center justify-center group self-stretch"
           onMouseDown={handleSidebarDrag}
@@ -730,6 +747,27 @@ export default function ReadingView({ books, sidebarVisible = true }: Props) {
           <div className="w-0.5 h-12 rounded-full bg-border-default group-hover:bg-accent transition-colors" />
         </div>
       </div>
+      )}
+
+      {mobile && (
+        <>
+          <div
+            className={`fixed inset-0 z-30 bg-black/40 transition-opacity duration-200 ${
+              sidebarVisible ? "opacity-100" : "opacity-0 pointer-events-none"
+            }`}
+            onClick={() => onCloseSidebar?.()}
+            aria-hidden="true"
+          />
+          <div
+            className={`fixed top-0 left-0 z-40 h-full w-[80vw] max-w-[300px] shadow-xl transition-transform duration-200 ${
+              sidebarVisible ? "translate-x-0" : "-translate-x-full"
+            }`}
+          >
+            <div className="bg-bg-card border-r border-border-default flex flex-col h-full">
+              {tocContent}
+            </div>
+          </div>
+        </>
       )}
   
       {/* Main content */}
@@ -785,6 +823,7 @@ export default function ReadingView({ books, sidebarVisible = true }: Props) {
           paragraphs={paragraphs}
           viewMode={viewMode}
           saving={saving}
+          mobile={mobile}
           onEditSentence={openEditDrawer}
           onAddSentence={openAddDrawer}
           onDeleteParagraph={handleDeleteParagraph}

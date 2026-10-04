@@ -10,6 +10,7 @@ type Props = {
   paragraphs: Paragraph[];
   viewMode: "line" | "inline";
   saving: boolean;
+  mobile?: boolean;
   onEditSentence: (s: SentenceClient) => void;
   onAddSentence: (para: Paragraph) => void;
   onDeleteParagraph: (para: Paragraph) => void;
@@ -26,6 +27,7 @@ export default function ParagraphList({
   paragraphs,
   viewMode,
   saving,
+  mobile = false,
   onEditSentence,
   onAddSentence,
   onDeleteParagraph,
@@ -34,6 +36,9 @@ export default function ParagraphList({
 }: Props) {
   const [importIdx, setImportIdx] = useState<number | null>(null);
   const [importText, setImportText] = useState("");
+  // Comfortable tap targets on narrow touch screens; compact on desktop.
+  const iconPad = mobile ? "p-2" : "p-1";
+  const textBtnPad = mobile ? "px-2 py-2" : "px-2 py-1";
   return (
     <div className="flex flex-col gap-4">
       {paragraphs.map((para, pi) => (
@@ -52,7 +57,7 @@ export default function ParagraphList({
               {para.sentences.length > 0 && (
                 <button
                   title="Copy paragraph text"
-                  className="p-1 rounded hover:bg-bg-hover text-text-secondary cursor-pointer"
+                  className={`${iconPad} rounded hover:bg-bg-hover text-text-secondary cursor-pointer`}
                   onClick={() =>
                     navigator.clipboard.writeText(
                       para.sentences.map((s) => s.content.trim()).join(" ")
@@ -65,7 +70,7 @@ export default function ParagraphList({
               {para.breakSentence?.audio_path && (
                 <button
                   title="Play paragraph audio"
-                  className="p-1 rounded hover:bg-bg-hover text-text-secondary cursor-pointer"
+                  className={`${iconPad} rounded hover:bg-bg-hover text-text-secondary cursor-pointer`}
                   onClick={() => playUrl(para.breakSentence?.audio_url)}
                 >
                   <Play size={16} />
@@ -74,7 +79,7 @@ export default function ParagraphList({
               <button
                 title={para.breakSentence?.audio_path ? "Replace audio" : "Upload audio"}
                 disabled={saving}
-                className="p-1 rounded hover:bg-bg-hover disabled:opacity-40 cursor-pointer"
+                className={`${iconPad} rounded hover:bg-bg-hover disabled:opacity-40 cursor-pointer`}
                 style={{ color: para.breakSentence?.audio_path ? "#e5484d" : undefined }}
                 onClick={() => onParagraphAudio(para)}
               >
@@ -84,7 +89,7 @@ export default function ParagraphList({
                 <button
                   title="Delete paragraph"
                   disabled={saving}
-                  className="p-1 rounded hover:bg-bg-hover text-red-500 disabled:opacity-40 cursor-pointer"
+                  className={`${iconPad} rounded hover:bg-bg-hover text-red-500 disabled:opacity-40 cursor-pointer`}
                   onClick={() => onDeleteParagraph(para)}
                 >
                   <Trash2 size={16} />
@@ -172,7 +177,7 @@ export default function ParagraphList({
           {/* Add Sentence + Import buttons */}
           <div className="flex justify-end gap-1">
             <button
-              className="flex items-center gap-1 px-2 py-1 rounded text-sm text-text-secondary hover:bg-bg-hover cursor-pointer"
+              className={`flex items-center gap-1 ${textBtnPad} rounded text-sm text-text-secondary hover:bg-bg-hover cursor-pointer`}
               onClick={() => {
                 if (importIdx === pi) { setImportIdx(null); setImportText(""); }
                 else { setImportIdx(pi); setImportText(""); }
@@ -182,7 +187,7 @@ export default function ParagraphList({
               {importIdx === pi ? "Cancel" : "Import"}
             </button>
             <button
-              className="flex items-center gap-1 px-2 py-1 rounded text-sm text-text-secondary hover:bg-bg-hover cursor-pointer"
+              className={`flex items-center gap-1 ${textBtnPad} rounded text-sm text-text-secondary hover:bg-bg-hover cursor-pointer`}
               onClick={() => onAddSentence(para)}
             >
               <Plus size={14} />

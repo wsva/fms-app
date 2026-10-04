@@ -240,7 +240,7 @@ export default function BookAdvanced({ books }: Props) {
           <WordGenSettings disabled={running}>
             {({ settings, showSettings, setShowSettings }) => (
               <>
-                <div className="flex flex-row items-center gap-2">
+                <div className="flex flex-row flex-wrap items-center gap-2">
                   <button
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium bg-accent-bg/15 text-accent hover:bg-accent-bg/25 disabled:opacity-50 cursor-pointer transition-colors"
                     disabled={running || !bookUUID}

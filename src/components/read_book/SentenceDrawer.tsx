@@ -18,6 +18,7 @@ import {
 import type { DrawerState, BookSentenceWord } from "@/lib/read/types";
 import type { LlmChatResponse } from "@/lib/llm/types";
 import { isTauri } from "@/lib/tauri";
+import { isMobileApp } from "@/lib/platform";
 import { logInfo } from "@/lib/logger";
 import { BG_COLORS } from "./utils";
 import { getUUID } from "./utils";
@@ -155,6 +156,9 @@ export default function SentenceDrawer({
   const [wordGenResponse, setWordGenResponse] = useState("");
   const [drawerFontScale, setDrawerFontScale] = useState(1);
   const [pendingIds, setPendingIds] = useState<string[]>([]);
+  // Deferred platform flag (SSR-safe): on mobile the header splits into two
+  // rows so the controls never clip on a narrow screen.
+  const [mobile, setMobile] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Generated or manually typed words not yet written to the database;
   // flushed on header Save.
@@ -167,6 +171,7 @@ export default function SentenceDrawer({
   useEffect(() => {
     setRulesText(loadRulesText());
     setWordGenSettings(loadWordGenSettings());
+    setMobile(isMobileApp());
     const fs = localStorage.getItem(LS_DRAWER_FONT_SCALE);
     if (fs !== null) setDrawerFontScale(parseInt(fs) || 1);
   }, []);
@@ -392,6 +397,17 @@ export default function SentenceDrawer({
   const menuItem =
     "w-full text-left px-3 py-2 text-sm hover:bg-bg-hover cursor-pointer flex items-center gap-2";
 
+  const closeBtn = (
+    <button
+      className="p-1.5 rounded hover:bg-bg-hover text-text-secondary cursor-pointer"
+      onClick={onClose}
+      title="Close"
+      aria-label="Close"
+    >
+      <X size={18} />
+    </button>
+  );
+
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40"
@@ -403,11 +419,14 @@ export default function SentenceDrawer({
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex flex-row items-center justify-between px-4 pt-4 pb-2 border-b border-border-default">
-          <span className="font-semibold text-base text-text-primary">
-            {drawer.mode === "edit" ? "Edit Sentence" : "New Sentence"}
-          </span>
-          <div className="flex flex-row items-center gap-2">
+        <div className={`flex ${mobile ? "flex-col gap-2" : "flex-row items-center justify-between"} px-4 pt-4 pb-2 border-b border-border-default`}>
+          <div className={`flex items-center ${mobile ? "justify-between w-full gap-2" : ""}`}>
+            <span className="font-semibold text-base text-text-primary">
+              {drawer.mode === "edit" ? "Edit Sentence" : "New Sentence"}
+            </span>
+            {mobile && closeBtn}
+          </div>
+          <div className={`flex flex-row items-center gap-2 ${mobile ? "flex-wrap justify-end" : ""}`}>
             <select
               className="px-2 py-1 rounded-md bg-bg-muted border border-border-default text-text-primary cursor-pointer"
               value={drawerFontScale}
@@ -514,13 +533,7 @@ export default function SentenceDrawer({
               </div>
             )}
 
-            <button
-              className="p-1.5 rounded hover:bg-bg-hover text-text-secondary cursor-pointer"
-              onClick={onClose}
-              title="Close"
-            >
-              <X size={18} />
-            </button>
+            {!mobile && closeBtn}
           </div>
         </div>
 

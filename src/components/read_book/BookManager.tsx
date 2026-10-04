@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import type { BookMeta, BookChapter } from "@/lib/read/types";
 import { isTauri } from "@/lib/tauri";
+import { isMobileApp } from "@/lib/platform";
 import { getUUID, nowIso } from "./utils";
 import ConfirmDialog, { type ConfirmRequest } from "./ConfirmDialog";
 
@@ -49,6 +50,12 @@ export default function BookManager({ books, onBooksChanged }: Props) {
   const [addTitle, setAddTitle] = useState("");
   const [editBookUUID, setEditBookUUID] = useState<string | null>(null);
   const [editBookTitle, setEditBookTitle] = useState("");
+  // Deferred platform flag (SSR-safe). On touch there is no hover, so row
+  // actions that reveal on `group-hover` must stay visible on mobile.
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    setMobile(isMobileApp());
+  }, []);
 
   // Locations state
   const [dirs, setDirs] = useState<{ name: string; path: string; is_linked: boolean }[]>([]);
@@ -393,7 +400,7 @@ export default function BookManager({ books, onBooksChanged }: Props) {
               <div className="flex-1 min-w-0 font-medium text-text-primary truncate">
                 {node.title}
               </div>
-              <div className="flex flex-row gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className={`flex flex-row gap-0.5 shrink-0 transition-opacity ${mobile ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
                 <button
                   title={completed ? "Mark incomplete" : "Mark completed"}
                   className={`p-1 rounded cursor-pointer ${
@@ -477,7 +484,7 @@ export default function BookManager({ books, onBooksChanged }: Props) {
   };
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-4 min-w-0 max-w-full overflow-x-hidden">
       {/* Locations */}
       <section>
         <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
@@ -501,8 +508,8 @@ export default function BookManager({ books, onBooksChanged }: Props) {
                 key={dir.path}
                 className="p-3 rounded-lg border border-border-default bg-bg-card"
               >
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between mb-1 gap-2">
+                  <div className="flex items-center gap-2 flex-wrap min-w-0">
                     <MapPin size={14} className="text-text-tertiary" />
                     <span className="text-sm font-medium">{dir.name}</span>
                     {!dir.is_linked && (
@@ -524,7 +531,7 @@ export default function BookManager({ books, onBooksChanged }: Props) {
                     </button>
                   )}
                 </div>
-                <p className="text-xs text-text-tertiary font-mono">{dir.path}</p>
+                <p className="text-xs text-text-tertiary font-mono break-all">{dir.path}</p>
               </div>
             );
           })}
@@ -704,11 +711,11 @@ export default function BookManager({ books, onBooksChanged }: Props) {
       {/* Chapters */}
       {selectedBook && (
         <div className="border-t border-border-default pt-4">
-          <div className="flex flex-row items-center justify-between mb-3">
+          <div className="flex flex-row flex-wrap items-center justify-between gap-2 mb-3">
             <h3 className="text-base font-semibold text-text-primary">
               Chapters — <span className="font-normal text-text-secondary">{selectedBook.title}</span>
             </h3>
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               <button
                 className={btnGhost}
                 onClick={() => {
