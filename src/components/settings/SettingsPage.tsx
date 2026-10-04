@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { QRCodeSVG } from "qrcode.react";
 import { isMobileApp } from "@/lib/platform";
 
 function isTauri(): boolean {
@@ -46,19 +45,6 @@ interface PairedDevice {
   status: string; // "approved" | "denied"
   created_at: string;
   last_seen_at: string | null;
-}
-
-// One-time pairing code issued by `pairing_create_otp` (120 s TTL, single use).
-interface OtpInfo {
-  otp: string;
-  expires_at: number; // unix seconds
-}
-
-interface WebServiceStatus {
-  running: boolean;
-  port: number;
-  local_url: string | null;
-  lan_url: string | null;
 }
 
 type ThemeId = "light" | "dark" | "solarized" | "gruvbox";
@@ -113,10 +99,6 @@ export default function SettingsPage() {
   // Defer it to an effect, like Sidebar / DictationPage do.
   const [mobile, setMobile] = useState(false);
   const [devices, setDevices] = useState<PairedDevice[]>([]);
-  const [otp, setOtp] = useState<OtpInfo | null>(null);
-  const [pairUrl, setPairUrl] = useState("");
-  const [secondsLeft, setSecondsLeft] = useState(0);
-  const [otpBusy, setOtpBusy] = useState(false);
   const [pairError, setPairError] = useState("");
 
   useEffect(() => {
@@ -135,43 +117,6 @@ export default function SettingsPage() {
   useEffect(() => {
     loadDevices();
   }, [loadDevices]);
-
-  // Live countdown of the OTP TTL; the code is dropped when it expires.
-  useEffect(() => {
-    if (!otp) return;
-    const tick = () => {
-      const left = Math.max(0, otp.expires_at - Math.floor(Date.now() / 1000));
-      setSecondsLeft(left);
-      if (left === 0) {
-        setOtp(null);
-        setPairUrl("");
-      }
-    };
-    tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, [otp]);
-
-  async function handleNewOtp() {
-    setOtpBusy(true);
-    setPairError("");
-    try {
-      const info = await invoke<OtpInfo>("pairing_create_otp");
-      setOtp(info);
-      // The QR carries the LAN URL so the phone knows where to connect.
-      const status = await invoke<WebServiceStatus>("web_service_get_status");
-      if (status.lan_url) {
-        setPairUrl(`fms-app://pair?u=${encodeURIComponent(status.lan_url)}&o=${info.otp}`);
-      } else {
-        setPairUrl("");
-        setPairError("Web service is not running — start it to show the QR code (the code below still works).");
-      }
-    } catch (e) {
-      setPairError(`Failed to create pairing code: ${String(e)}`);
-    } finally {
-      setOtpBusy(false);
-    }
-  }
 
   async function handleRevoke(deviceId: string) {
     try {
@@ -379,44 +324,22 @@ export default function SettingsPage() {
           <section className="mb-8">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-[1.3em] font-semibold">Device Pairing</h2>
-              <button className={btnPrimary} onClick={handleNewOtp} disabled={otpBusy}>
-                {otpBusy ? "Preparing…" : otp ? "New Code" : "Pair New Device"}
+              <button
+                className="px-3 py-1 text-xs rounded-md border border-border-light hover:bg-bg-hover cursor-pointer"
+                onClick={loadDevices}
+              >
+                Refresh
               </button>
             </div>
             <p className="text-text-secondary text-sm mb-4">
               Devices on the LAN/WLAN must pair before they can read or write data — like
-              Bluetooth headphones. Requests from this computer (localhost) and from Tailscale
-              are always allowed, so local automations need no pairing.
+              Bluetooth headphones. A phone that asks to connect pops a confirmation dialog here,
+              and it can work once you allow it. Requests from this computer (localhost) and from
+              Tailscale are always allowed, so local automations need no pairing.
             </p>
 
             {pairError && (
               <p className="text-sm text-red-600 mb-3">{pairError}</p>
-            )}
-
-            {otp && (
-              <div className="flex flex-wrap items-start gap-6 p-4 mb-4 rounded-lg border border-border-default bg-bg-card">
-                {pairUrl ? (
-                  <div className="flex flex-col items-center gap-2">
-                    <div className="p-3 bg-white rounded-md">
-                      <QRCodeSVG value={pairUrl} size={180} />
-                    </div>
-                    <span className="text-xs text-text-secondary">
-                      Scan with the phone's camera
-                    </span>
-                  </div>
-                ) : (
-                  <div className="text-sm text-text-secondary">No QR available.</div>
-                )}
-                <div className="flex flex-col gap-1">
-                  <span className="text-sm font-medium">Or enter this code on the phone</span>
-                  <span className="font-mono text-[1.4em] tracking-wider select-all break-all">
-                    {otp.otp}
-                  </span>
-                  <span className="text-sm text-text-secondary">
-                    Expires in {secondsLeft}s · single use
-                  </span>
-                </div>
-              </div>
             )}
 
             <table className="w-full text-sm border-collapse">

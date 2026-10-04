@@ -121,47 +121,6 @@ fn handle_deep_link_wiki(app: tauri::AppHandle, url: &str) -> Result<(), String>
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Deep link handler for device pairing
-// ---------------------------------------------------------------------------
-
-/// Parse `fms-app://pair?u=<pc url>&o=<one-time code>` (the QR payload the PC
-/// displays) and emit `pair-invite` so the sync page can run `pc_pair_start`
-/// with the code. Scanning/opening the link *is* the approval gesture, so no
-/// dialog is involved on this side. Works on desktop and Android.
-fn handle_deep_link_pair(app: tauri::AppHandle, url: &str) -> Result<(), String> {
-    if !url.starts_with("fms-app://pair") {
-        return Err("Invalid pair deep link URL".to_string());
-    }
-    let query = url.split('?').nth(1).unwrap_or("");
-    let params: std::collections::HashMap<String, String> = query
-        .split('&')
-        .filter_map(|pair| {
-            let mut kv = pair.splitn(2, '=');
-            let key = kv.next()?.to_string();
-            let raw = kv.next().unwrap_or("");
-            let val = urlencoding::decode(raw)
-                .map(|cow| cow.into_owned())
-                .unwrap_or_else(|_| raw.to_string());
-            Some((key, val))
-        })
-        .collect();
-
-    let pc_url = params.get("u").cloned().unwrap_or_default();
-    let otp = params.get("o").cloned().unwrap_or_default();
-    if pc_url.is_empty() {
-        return Err("No pc url in pair deep link".to_string());
-    }
-
-    log::info!("[DeepLink] Pairing invite from {} (otp len {})", pc_url, otp.len());
-    app.emit(
-        "pair-invite",
-        serde_json::json!({ "url": pc_url, "otp": otp }),
-    )
-    .map_err(|e| format!("Failed to emit pair-invite event: {}", e))?;
-    Ok(())
-}
-
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -191,12 +150,8 @@ pub fn run() {
                                 log::error!("[SingleInstance] Deep link handling failed: {}", e);
                             }
                         } else if url.starts_with("fms-app://wiki") {
-                            if let Err(e) = handle_deep_link_wiki(app_handle.clone(), &url) {
+                            if let Err(e) = handle_deep_link_wiki(app_handle, &url) {
                                 log::error!("[SingleInstance] Wiki deep link handling failed: {}", e);
-                            }
-                        } else if url.starts_with("fms-app://pair") {
-                            if let Err(e) = handle_deep_link_pair(app_handle, &url) {
-                                log::error!("[SingleInstance] Pair deep link handling failed: {}", e);
                             }
                         }
                     });
@@ -388,8 +343,8 @@ pub fn run() {
             sync::pc_pair_start,
             sync::pc_pair_reset_identity,
             discover::pc_discover,
-            // Device pairing (PC owner side).
-            pairing::pairing_create_otp,
+            // Device pairing (PC owner side). Approval is deliberately only
+            // ever granted by answering the confirm dialog.
             pairing::pairing_list,
             pairing::pairing_respond,
             pairing::pairing_revoke,
@@ -502,11 +457,6 @@ pub fn run() {
                         if let Err(e) = handle_deep_link_wiki(handle, &url_str) {
                             log::error!("[DeepLink] Wiki navigation failed: {}", e);
                         }
-                    } else if url_str.starts_with("fms-app://pair") {
-                        let handle = dl_handle.clone();
-                        if let Err(e) = handle_deep_link_pair(handle, &url_str) {
-                            log::error!("[DeepLink] Pair invite failed: {}", e);
-                        }
                     }
                 }
             });
@@ -528,11 +478,6 @@ pub fn run() {
                         let url_str = url_str.clone();
                         if let Err(e) = handle_deep_link_wiki(handle, &url_str) {
                             log::error!("[DeepLink] Wiki navigation failed: {}", e);
-                        }
-                    } else if url_str.starts_with("fms-app://pair") {
-                        let handle = app.handle().clone();
-                        if let Err(e) = handle_deep_link_pair(handle, &url_str) {
-                            log::error!("[DeepLink] Pair invite failed: {}", e);
                         }
                     }
                 }
@@ -772,11 +717,6 @@ pub fn run() {
                         let url_str = url_str.clone();
                         if let Err(e) = handle_deep_link_wiki(handle, &url_str) {
                             log::error!("[DeepLink] Wiki navigation failed: {}", e);
-                        }
-                    } else if url_str.starts_with("fms-app://pair") {
-                        let handle = dl_handle.clone();
-                        if let Err(e) = handle_deep_link_pair(handle, &url_str) {
-                            log::error!("[DeepLink] Pair invite failed: {}", e);
                         }
                     }
                 }

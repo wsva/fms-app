@@ -60,12 +60,6 @@ interface PairResult {
   fingerprint?: string;
 }
 
-// Payload of the `pair-invite` event (fms-app://pair?u=..&o=.. deep link).
-interface PairInvite {
-  url: string;
-  otp: string;
-}
-
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -84,8 +78,6 @@ export default function DatasetsSyncPage() {
   const [pairing, setPairing] = useState(false);
   const [pairFingerprint, setPairFingerprint] = useState("");
   const [pairMessage, setPairMessage] = useState("");
-  const [manualOtp, setManualOtp] = useState("");
-  const [showPairCode, setShowPairCode] = useState(false);
 
   // Dataset + sync state.
   const [pcDatasets, setPcDatasets] = useState<PcDataset[]>([]);
@@ -160,19 +152,16 @@ export default function DatasetsSyncPage() {
 
   // ---- Pairing ----------------------------------------------------------
 
-  // Run `pc_pair_start`; with an OTP the PC auto-approves, without one the PC
-  // owner gets a confirm dialog and the command polls until it resolves.
+  // Ask the PC to pair this device: the owner gets a confirm dialog and the
+  // command polls until they answer.
   const pair = useCallback(
-    async (url: string, otp?: string) => {
+    async (url: string) => {
       if (!isTauri() || pairing) return;
       setPairing(true);
       setPairMessage("");
       setPairFingerprint("");
       try {
-        const res = await invoke<PairResult>("pc_pair_start", {
-          pcUrl: url,
-          otp: otp && otp.length > 0 ? otp : null,
-        });
+        const res = await invoke<PairResult>("pc_pair_start", { pcUrl: url });
         if (res.fingerprint) setPairFingerprint(res.fingerprint);
         if (res.state === "approved") {
           setPairMessage("Paired with the PC.");
@@ -195,7 +184,7 @@ export default function DatasetsSyncPage() {
   );
 
   // Recovery path after a denial: regenerate the device identity so the next
-  // request pops a fresh dialog / redeems a fresh code.
+  // request pops a fresh dialog.
   const resetIdentity = useCallback(async () => {
     if (!isTauri()) return;
     try {
@@ -283,22 +272,6 @@ export default function DatasetsSyncPage() {
       progressReq.current?.();
     };
   }, []);
-
-  // QR / deep-link intake: scanning the PC's QR (or tapping the link) opens
-  // fms-app://pair?u=..&o=.., which the backend forwards as `pair-invite`.
-  // Remember the PC address, then redeem the code — a valid code is approved
-  // immediately, without the PC owner seeing a dialog.
-  useEffect(() => {
-    if (!isTauri()) return;
-    const un = listen<PairInvite>("pair-invite", (evt) => {
-      const { url, otp } = evt.payload;
-      logInfo(`Pairing invite from ${url}`, "datasets");
-      savePc(url).then(() => pair(url, otp));
-    });
-    return () => {
-      un.then((fn) => fn());
-    };
-  }, [savePc, pair]);
 
   // ---- Actions ----------------------------------------------------------
 
@@ -428,8 +401,8 @@ export default function DatasetsSyncPage() {
           </div>
         )}
 
-        {/* Pairing row: the device identity is automatic; pairing is the only
-            user gesture (QR code, typed code, or the PC owner's dialog). */}
+        {/* Pairing row: the device identity is generated automatically; the
+            only user gesture is asking the PC owner to approve this device. */}
         <div className="flex items-center gap-2 flex-wrap pt-2 border-t border-border-light">
           <span className="text-xs text-text-tertiary flex items-center gap-1 shrink-0">
             <KeyRound size={13} />
@@ -444,15 +417,6 @@ export default function DatasetsSyncPage() {
             <Link2 size={14} className={pairing ? "animate-spin" : undefined} />
             {pairing ? "Pairing…" : "Pair"}
           </button>
-          <button
-            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50 shrink-0"
-            onClick={() => setShowPairCode((s) => !s)}
-            disabled={!pcUrl || pairing}
-            title="Enter the pairing code shown on the PC"
-          >
-            <ChevronDown size={14} className={showPairCode ? "rotate-180 transition-transform" : "transition-transform"} />
-            Code
-          </button>
           {unpaired && (
             <button
               className="ml-auto text-xs text-text-secondary underline disabled:opacity-50"
@@ -464,32 +428,6 @@ export default function DatasetsSyncPage() {
             </button>
           )}
         </div>
-
-        {showPairCode && (
-          <div className="flex items-center gap-2 flex-wrap">
-            <input
-              type="text"
-              autoComplete="off"
-              autoCapitalize="none"
-              className="flex-1 min-w-[10rem] px-3 py-1.5 text-sm font-mono border border-border-light rounded-md bg-bg-input text-text-primary"
-              value={manualOtp}
-              onChange={(e) => setManualOtp(e.target.value)}
-              placeholder="pairing code from the PC"
-            />
-            <button
-              className="inline-flex items-center px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
-              onClick={() => {
-                const code = manualOtp.trim();
-                setManualOtp("");
-                setShowPairCode(false);
-                pair(pcUrl, code);
-              }}
-              disabled={!manualOtp.trim() || pairing}
-            >
-              Use code
-            </button>
-          </div>
-        )}
 
         {pairing && (
           <div className="text-sm text-text-secondary">

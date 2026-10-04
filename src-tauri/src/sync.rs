@@ -13,7 +13,7 @@
 //!   in a `writeback_queue` table and flushed to the PC in batches.
 //! * Auth uses Bluetooth-style device pairing: an Ed25519 identity keypair
 //!   (`device_id` + `device_seed` in global settings) is signed per request
-//!   (`pc_pair_start` bootstraps it via OTP or the PC's confirm dialog).
+//!   (`pc_pair_start` bootstraps it through the PC's confirm dialog).
 //!   The legacy shared `pc_token` is no longer sent.
 
 use std::io::{BufReader, Write as _};
@@ -643,24 +643,18 @@ fn device_name() -> String {
     }).clone()
 }
 
-/// Pair this device with the PC.
-///
-/// * `otp` (from the PC's QR / deep-link / typed code): a valid code is
-///   approved immediately — no dialog, no polling.
-/// * no `otp`: dialog fallback — the PC owner gets a confirm dialog and we
-///   poll `/pair/status` every 2 s (up to 120 s) until it resolves.
+/// Pair this device with the PC. The PC owner gets a confirm dialog; we poll
+/// `/pair/status` every 2 s (up to 120 s) until they answer.
 #[tauri::command]
 pub async fn pc_pair_start(
     settings: State<'_, SettingsState>,
     pc_url: Option<String>,
-    otp: Option<String>,
 ) -> Result<Value, String> {
     let base = resolve_pc_url(&settings, pc_url.as_deref());
     if base.is_empty() {
-        return Err("No PC address — scan the QR code or enter the PC address.".into());
+        return Err("No PC address — enter or discover the PC address first.".into());
     }
     let ident = ensure_device_identity(&settings)?;
-    let otp = otp.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(15))
@@ -671,7 +665,6 @@ pub async fn pc_pair_start(
         "device_id": ident.device_id,
         "name": device_name(),
         "pubkey_hex": ident.pubkey_hex,
-        "otp": otp,
     });
     let resp = client
         .post(format!("{base}/api/v1/pair/request"))
@@ -685,14 +678,14 @@ pub async fn pc_pair_start(
         .await
         .map_err(|e| format!("Unexpected pairing response from PC (HTTP {status}): {e}"))?;
     if !status.is_success() {
-        // e.g. expired / already-used OTP: surface the PC's actionable text.
+        // Surface the PC's actionable text (malformed key, registry error, ...).
         let msg = v["error"].as_str().unwrap_or("pairing request rejected");
         return Err(msg.to_string());
     }
 
     let state = v["state"].as_str().unwrap_or("none").to_string();
     if state != "pending" {
-        // OTP path (immediate approval) and the re-pair / denied short-circuits.
+        // Re-pair (already approved) and denied short-circuit — no dialog.
         return Ok(json!({ "state": state, "fingerprint": v["fingerprint"] }));
     }
 
@@ -724,8 +717,8 @@ pub async fn pc_pair_start(
 }
 
 /// Regenerate this device's identity keypair. Recovery path when the PC owner
-/// denied the pairing: a fresh identity pops a new dialog / redeems a fresh
-/// OTP instead of being silently blocked by the stored denial.
+/// denied the pairing: a fresh identity pops a new dialog instead of being
+/// silently blocked by the stored denial.
 #[tauri::command]
 pub async fn pc_pair_reset_identity(settings: State<'_, SettingsState>) -> Result<String, String> {
     {

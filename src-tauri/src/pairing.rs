@@ -9,14 +9,16 @@
 //!   `/api/v1/pair/*`.
 //!
 //! Pairing bootstraps a device identity (an Ed25519 keypair held by the
-//! phone) into the `paired_devices` registry through one of two paths:
-//! 1. **QR / deep-link (primary, MITM-proof)** — the PC issues a single-use
-//!   one-time secret (`create_otp`, 120 s TTL, in memory only). The phone
-//!   presents it on `POST /pair/request`; a valid OTP *is* the approval —
-//!   no dialog, no polling.
-//! 2. **Confirm dialog (fallback)** — no OTP: a pending request is registered
-//!   and a `pairing-request` event pops a dialog on the PC; the shared
-//!   fingerprint is the manual MITM check. The phone polls `/pair/status`.
+//! phone) into the `paired_devices` registry: the phone posts its pubkey, a
+//! `pairing-request` event pops a confirm dialog on the PC showing the shared
+//! fingerprint, and the phone polls `/pair/status` until the owner answers.
+//!
+//! Approval always costs a human click at the PC. There is deliberately no
+//! out-of-band one-time-secret path: while the transport is cleartext HTTP, a
+//! MITM-proof handshake guards a channel whose payload an on-path attacker can
+//! read anyway, and it trades away the human approval for possession of a
+//! bearer secret. Revisit a QR/one-time-code bootstrap if TLS
+//! (`axum-server` + rustls) is ever added.
 //!
 //! Later connections verify statelessly: signature over
 //! `"{ts}\n{METHOD}\n{path}"` with a ±120 s clock window. The legacy shared
@@ -27,7 +29,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lazy_static::lazy_static;
-use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::UnparsedPublicKey;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
@@ -36,8 +37,7 @@ use uuid::Uuid;
 use crate::dictation;
 use crate::settings::SettingsState;
 
-/// OTP lifetime and pending-dialog lifetime, in seconds.
-const OTP_TTL_SECS: u64 = 120;
+/// Lifetime of a pending confirm dialog, in seconds.
 const PENDING_TTL_SECS: u64 = 180;
 /// Clock skew tolerated on request signatures.
 const SIGN_WINDOW_SECS: i64 = 120;
@@ -83,14 +83,11 @@ pub fn fingerprint_of_pubkey(pubkey_hex: &str) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory state: OTPs, pending requests, registry cache, last-seen throttle
+// In-memory state: pending requests, registry cache, last-seen throttle
 // ---------------------------------------------------------------------------
 
 lazy_static! {
-    /// One-time pairing secrets: hex OTP -> expiry. Lives only in process
-    /// memory; a PC restart invalidates outstanding QRs by design.
-    static ref OTAPS: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
-    /// Dialog-path requests awaiting the PC owner: request_id -> record.
+    /// Dialog requests awaiting the PC owner: request_id -> record.
     static ref PENDING: Mutex<HashMap<String, PendingRequest>> = Mutex::new(HashMap::new());
     /// Cached registry so the auth path never hits SQLite per request.
     /// Invalidated on every mutation (approve / deny / revoke / remove).
@@ -192,24 +189,6 @@ fn upsert_device(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// One-time pairing secrets (QR / deep-link path)
-// ---------------------------------------------------------------------------
-
-/// Generate a 16-byte random hex OTP, valid for `OTP_TTL_SECS`, single-use.
-pub fn create_otp() -> Result<(String, i64), String> {
-    let rng = SystemRandom::new();
-    let mut buf = [0u8; 16];
-    // Never fall back to a predictable (all-zero) secret.
-    rng.fill(&mut buf).map_err(|e| format!("no system entropy for pairing code: {e}"))?;
-    let otp = hex_encode(&buf);
-    let expires_at = unix_now() + OTP_TTL_SECS as i64;
-    let mut map = OTAPS.lock().unwrap();
-    map.retain(|_, exp| *exp > Instant::now());
-    map.insert(otp.clone(), Instant::now() + Duration::from_secs(OTP_TTL_SECS));
-    Ok((otp, expires_at))
-}
-
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -217,43 +196,13 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Constant-time-ish comparison over equal-length hex strings; consumes the
-/// OTP on success (single use, even if it then loses a race — replay-safe).
-pub fn consume_otp(candidate: &str) -> bool {
-    // Codes are generated lowercase; tolerate a hand-typed uppercase variant.
-    let candidate = candidate.to_lowercase();
-    if candidate.is_empty() {
-        return false;
-    }
-    let mut map = OTAPS.lock().unwrap();
-    let now = Instant::now();
-    map.retain(|_, exp| *exp > now);
-    let hit = map
-        .keys()
-        .find(|otp| otp.len() == candidate.len() && constant_time_eq(otp.as_bytes(), candidate.as_bytes()))
-        .cloned();
-    match hit {
-        // Removing on success makes the OTP single-use even under races.
-        Some(otp) => map.remove(&otp).is_some(),
-        None => false,
-    }
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
 // ---------------------------------------------------------------------------
-// Pending requests (dialog fallback path)
+// Pending requests (confirm dialog path)
 // ---------------------------------------------------------------------------
 
-/// Outcome of a pairing request, per the fallback-dialog flow.
+/// Outcome of a pairing request.
 pub enum PairRequestOutcome {
-    /// Already approved in the registry (or fresh key) — no dialog needed.
+    /// Already approved in the registry — re-pairing is frictionless.
     Approved,
     /// Blocked by a prior denial — no dialog.
     Denied,
@@ -311,16 +260,6 @@ pub fn request_pair(
             Ok(PairRequestOutcome::Pending { request_id, fingerprint })
         }
     }
-}
-
-/// Immediate approval path (valid OTP): upsert as approved.
-pub fn approve_device(
-    settings: &SettingsState,
-    device_id: &str,
-    pubkey_hex: &str,
-    name: &str,
-) -> Result<(), String> {
-    upsert_device(settings, device_id, pubkey_hex, name, "approved")
 }
 
 pub fn pending_status(settings: &SettingsState, device_id: &str) -> Result<String, String> {
@@ -501,18 +440,6 @@ pub fn remove_denied(settings: &SettingsState, device_id: &str) -> Result<(), St
 // ---------------------------------------------------------------------------
 // Tauri commands (desktop; registered in lib.rs)
 // ---------------------------------------------------------------------------
-
-#[derive(serde::Serialize)]
-pub struct OtpInfo {
-    pub otp: String,
-    pub expires_at: i64,
-}
-
-#[tauri::command]
-pub fn pairing_create_otp() -> Result<OtpInfo, String> {
-    let (otp, expires_at) = create_otp()?;
-    Ok(OtpInfo { otp, expires_at })
-}
 
 #[tauri::command]
 pub fn pairing_list(settings: State<'_, SettingsState>) -> Result<Vec<PairedDevice>, String> {

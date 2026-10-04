@@ -7,7 +7,7 @@
 //! expects:
 //!
 //! * `GET  /api/v1/status`                     - handshake / TCP-probe target
-//! * `POST /api/v1/pair/request`               - device pairing handshake (OTP or dialog)
+//! * `POST /api/v1/pair/request`               - device pairing handshake (confirm dialog)
 //! * `GET  /api/v1/pair/status`                - poll a pending pairing request
 //! * `GET  /api/v1/datasets/{uuid}/manifest`   - snapshot metadata + overall hash
 //! * `GET  /api/v1/datasets/{uuid}/snapshot`   - the whole dataset dir as tar.gz
@@ -95,14 +95,12 @@ async fn status(State(st): State<RestState>) -> Response {
 struct PairReqBody {
     name: String,
     pubkey_hex: String,
-    #[serde(default)]
-    otp: Option<String>,
 }
 
 /// Pairing handshake. Reached from untrusted networks without a device
-/// signature (the zone guard allow-lists `/api/v1/pair/*`). A valid one-time
-/// secret (QR / typed code) auto-approves — the pairing gesture *is* the
-/// approval. Without an OTP the PC owner's confirm dialog decides.
+/// signature (the zone guard allow-lists `/api/v1/pair/*`). Approval always
+/// requires the PC owner to answer the confirm dialog — by design, so that no
+/// bearer secret can stand in for a human decision.
 async fn pair_request(State(st): State<RestState>, Json(body): Json<PairReqBody>) -> Response {
     let settings = st.app.state::<SettingsState>();
     // The identity is derived from the pubkey server-side; a claimed device_id
@@ -112,31 +110,9 @@ async fn pair_request(State(st): State<RestState>, Json(body): Json<PairReqBody>
         _ => return json_error(StatusCode::BAD_REQUEST, "pubkey_hex must be 32 bytes of hex"),
     };
     let _ = pubkey; // validated only; the hex string is what we store
-    let device_id = match pairing::device_id_of_pubkey(&body.pubkey_hex) {
-        Ok(d) => d,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-    };
     let name = body.name.trim().chars().take(64).collect::<String>();
     let name = if name.is_empty() { "device".to_string() } else { name };
 
-    let otp = body.otp.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    if let Some(otp) = otp {
-        // QR/typed-code path: valid OTP => immediate approval (even over a
-        // prior denial — the owner deliberately generated this code).
-        if !pairing::consume_otp(&otp) {
-            // Do NOT silently downgrade to the dialog path; the user chose QR.
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "pairing code invalid or expired — generate a new one on the PC",
-            );
-        }
-        if let Err(e) = pairing::approve_device(&settings, &device_id, &body.pubkey_hex, &name) {
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
-        }
-        return Json(serde_json::json!({ "state": "approved" })).into_response();
-    }
-
-    // Dialog fallback path.
     let outcome = match pairing::request_pair(&st.app, &settings, &body.pubkey_hex, &name) {
         Ok(o) => o,
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),

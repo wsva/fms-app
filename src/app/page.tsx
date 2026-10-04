@@ -36,7 +36,7 @@ interface Workspace {
 }
 
 // A pairing request emitted by the backend (pairing.rs) when an unknown device
-// on an untrusted network asks to pair without a one-time code.
+// on an untrusted network asks to pair.
 interface PairingRequest {
   request_id: string;
   device_id: string;
@@ -100,9 +100,9 @@ export default function Home() {
     };
   }, []);
 
-  // Pairing fallback (dialog path): ask the PC owner about each request, one
-  // at a time. The QR / one-time-code path never lands here — it is approved
-  // by the scan itself. Only the PC shows dialogs.
+  // Pairing: ask the PC owner about each request, one at a time. This dialog is
+  // the only way a device is ever approved — no bearer secret can replace the
+  // click. Only the PC shows dialogs.
   useEffect(() => {
     if (isMobileApp()) return;
     const queue: PairingRequest[] = [];
