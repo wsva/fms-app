@@ -197,7 +197,9 @@ export default function LoginModal({
           </button>
         </form>
 
-        <div className="flex justify-between items-center mt-5">
+        {/* Stack the links vertically on narrow screens (Android); side by side
+            on wider screens. */}
+        <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-between sm:items-center sm:gap-0 mt-5">
           <button
             type="button"
             onClick={() => openSite("/oauth2/reset-password")}
