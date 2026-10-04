@@ -5,7 +5,7 @@
  * this file only handles rendering.
  */
 
-import { useState, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useState, useEffect, useMemo, useRef, useSyncExternalStore, useLayoutEffect } from "react";
 
 import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui/react";
 import { RefreshCw, Trash2, Database, Target, CheckCircle, FolderPlus, Folder, Link2, Pencil, Save, HelpCircle } from "lucide-react";
@@ -41,6 +41,24 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
     }, [active, loadDatasets, loadLocations]);
 
     const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
+    // ── Deferred cue-input focus ──
+    // Activating a cue swaps its answer field between <Input> and <TextArea>
+    // (compact ⇄ medium ⇄ large), so a synchronous .focus() from a click handler
+    // would target the DOM node about to be unmounted. Bump a nonce and let a
+    // layout effect run focus() after React has committed the new element.
+    const [focusNonce, setFocusNonce] = useState(0);
+    const pendingFocusUuidRef = useRef<string | null>(null);
+    const requestFocusCue = (uuid: string) => {
+        pendingFocusUuidRef.current = uuid;
+        setFocusNonce((n) => n + 1);
+    };
+    useLayoutEffect(() => {
+        const uuid = pendingFocusUuidRef.current;
+        if (!uuid) return;
+        pendingFocusUuidRef.current = null;
+        const el = document.getElementById(`d-s-i-${uuid}`) as HTMLInputElement | HTMLTextAreaElement | null;
+        if (el && document.activeElement !== el) el.focus();
+    }, [focusNonce]);
     // Media-list view/edit mode toggle (view mode hides players, edit mode shows source/note fields).
     const [mediaEditMode, setMediaEditMode] = useState(false);
     // Keyboard-shortcut help tip: shown on hover, and also on click (controlled).
@@ -192,10 +210,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 const newCue = d.stateCues[newIndex];
                 d.setStateFocusedCueUUID(newCue.uuid);
                 // Focus the input field of the new cue
-                setTimeout(() => {
-                    const inputEl = document.getElementById(`d-s-i-${newCue.uuid}`) as HTMLInputElement | HTMLTextAreaElement;
-                    if (inputEl) inputEl.focus();
-                }, 0);
+                requestFocusCue(newCue.uuid);
                 // Scroll the cue into view
                 const cueElements = document.querySelectorAll('[data-cue-index]');
                 const targetElement = cueElements[newIndex] as HTMLElement;
@@ -591,13 +606,37 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                                 )}
 
                                 {d.stateCues.map((cue, i) => (
-                                    <div key={i} data-cue-index={i} onClick={(e) => {
+                                    <div key={i} data-cue-index={i} onMouseDown={(e) => {
+                                        // Suppress browser-native focus on an inactive cue's compact <Input>.
+                                        // Without this, mousedown → focus → our onFocus handler updates
+                                        // stateFocusedCueUUID first, React flushes the discrete event and
+                                        // unmounts the just-focused <input> (Input → TextArea swap), so
+                                        // focus silently drops to <body> before our click handler runs.
+                                        // Only interfere when the field type would actually swap; on the
+                                        // already-active cue, let the browser place the caret naturally.
+                                        if (d.stateFocusedCueUUID === cue.uuid) return;
+                                        const t = e.target as HTMLElement;
+                                        if (t.id?.startsWith("d-s-i-")) e.preventDefault();
+                                    }} onClick={(e) => {
                                         const target = e.target as HTMLElement;
+                                        const wasActive = d.stateFocusedCueUUID === cue.uuid;
                                         d.setStateFocusedCueUUID(cue.uuid);
-                                        // Don't steal focus from buttons or tip-text selection; only drop the caret into the answer input.
-                                        if (target.closest("button, input, textarea, [data-no-focus]")) return;
-                                        const el = document.getElementById(`d-s-i-${cue.uuid}`) as HTMLInputElement | HTMLTextAreaElement | null;
-                                        if (el) el.focus();
+                                        // Any click on an INACTIVE cue activates it and drops the caret into
+                                        // its answer field — input, tip text, padding, or an edge-case action
+                                        // button (e.g. Done on a previously-edited cue). Deferred via a
+                                        // layout effect so the Input → TextArea swap has already committed.
+                                        if (!wasActive) {
+                                            requestFocusCue(cue.uuid);
+                                            return;
+                                        }
+                                        // Already-active cue: buttons own their press behavior; don't steal
+                                        // focus from the time-editor field, the edit-mode content textarea,
+                                        // or the tip-text selection area. Clicks on the cue's own dictation
+                                        // field (id prefixed `d-s-i-`) still funnel through to keep the caret.
+                                        if (target.closest("button")) return;
+                                        const isOwnDictationField = (target as HTMLInputElement).id?.startsWith("d-s-i-");
+                                        if (!isOwnDictationField && target.closest("input, textarea, [data-no-focus]")) return;
+                                        requestFocusCue(cue.uuid);
                                     }} className={`cursor-text rounded-xl border-2 py-1.5 px-2 transition-colors ${d.stateFocusedCueUUID === cue.uuid ? "border-accent" : "border-border-light"} ${cue.deleted ? "bg-error-bg" : d.stateFocusedCueUUID === cue.uuid ? "bg-accent-bg/40" : d.stateDictSuccessSet.has(cue.uuid) ? "bg-success-bg" : cue.modified ? "bg-accent-bg/20" : "bg-bg-body"}`}>
                                         <CueEditor
                                             cue={cue}
