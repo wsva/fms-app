@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import { ChevronRight, ChevronDown, Folder, FileText, RefreshCw, Link, Plus, X } from "lucide-react";
 import { logError } from "@/lib/logger";
+import { isMobileApp } from "@/lib/platform";
 
 interface WikiEntry {
   name: string;
@@ -29,6 +30,7 @@ export default function WikiSidebar({ wikiDir, selectedFile, onFileSelect }: Wik
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [dirContents, setDirContents] = useState<Record<string, WikiEntry[]>>({});
   const [loading, setLoading] = useState(false);
+  const [mobile, setMobile] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [newDirName, setNewDirName] = useState("");
   const [newDirPath, setNewDirPath] = useState("");
@@ -47,6 +49,10 @@ export default function WikiSidebar({ wikiDir, selectedFile, onFileSelect }: Wik
       setLoading(false);
     }
   }, [wikiDir]);
+
+  useEffect(() => {
+    setMobile(isMobileApp());
+  }, []);
 
   useEffect(() => {
     loadRootEntries();
@@ -120,7 +126,7 @@ export default function WikiSidebar({ wikiDir, selectedFile, onFileSelect }: Wik
             </>
           )}
           <span className="truncate flex-1">{entry.name}</span>
-          {entry.is_linked && (
+          {!mobile && entry.is_linked && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -198,13 +204,15 @@ export default function WikiSidebar({ wikiDir, selectedFile, onFileSelect }: Wik
       <div className="flex items-center justify-between px-3 py-2 border-b border-border-default">
         <h3 className="text-sm font-semibold text-text-primary">Wiki</h3>
         <div className="flex items-center gap-1">
-          <button
-            onClick={() => setShowAddDialog(true)}
-            className="p-1 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
-            title="Link external directory"
-          >
-            <Plus size={14} />
-          </button>
+          {!mobile && (
+            <button
+              onClick={() => setShowAddDialog(true)}
+              className="p-1 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
+              title="Link external directory"
+            >
+              <Plus size={14} />
+            </button>
+          )}
           <button
             onClick={handleRefresh}
             disabled={loading}

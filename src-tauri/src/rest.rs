@@ -59,6 +59,10 @@ pub fn router(app: AppHandle) -> Router {
         .route("/datasets/{uuid}/manifest", get(manifest))
         .route("/datasets/{uuid}/snapshot", get(snapshot))
         .route("/sync/changes", post(sync_changes))
+        .route("/wiki/dirs", get(wiki_dirs))
+        .route("/wiki/dir", get(wiki_dir_list))
+        .route("/wiki/file", get(wiki_file))
+        .route("/wiki/search", get(wiki_search))
         .with_state(RestState { app })
 }
 
@@ -679,6 +683,99 @@ fn extract_cue_uuid(payload: &serde_json::Value) -> Result<String, String> {
         .map(|s| s.to_string())
         .or_else(|| payload.get("uuid").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .ok_or_else(|| "cue_delete payload missing cue uuid".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// GET /wiki/*  (read-only wiki browsing for the paired Android client)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct WikiPathQuery {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct WikiSearchQuery {
+    keyword: String,
+}
+
+/// Path-containment guard: a paired device must only reach files/dirs that live
+/// inside one of the allowed wiki roots (the default wiki directory plus every
+/// linked dir recorded in `meta.json`). `require_md` additionally restricts the
+/// target to a markdown file, so the file endpoint can't be turned into an
+/// arbitrary-file reader. Returns `Err(response)` ready to be sent back.
+fn check_wiki_path(settings: &SettingsState, raw: &str, require_md: bool) -> Result<(), Response> {
+    let target = match Path::new(raw).canonicalize() {
+        Ok(t) => t,
+        Err(_) => return Err(json_error(StatusCode::NOT_FOUND, &format!("path not found: {raw}"))),
+    };
+    let roots = crate::wiki::local_impl::wiki_root_paths(settings);
+    if !roots.iter().any(|r| target.starts_with(r)) {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "path is outside the allowed wiki roots",
+        ));
+    }
+    if require_md {
+        let is_md = target
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("md"))
+            .unwrap_or(false);
+        if !is_md {
+            return Err(json_error(
+                StatusCode::BAD_REQUEST,
+                "only markdown (.md) files can be read",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `GET /wiki/dirs` — top-level wiki roots (default dir + linked dirs).
+async fn wiki_dirs(State(st): State<RestState>) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    match crate::wiki::local_impl::wiki_list_dirs_local(&settings) {
+        Ok(entries) => (StatusCode::OK, Json(entries)).into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+/// `GET /wiki/dir?path=` — contents of one wiki directory.
+async fn wiki_dir_list(State(st): State<RestState>, Query(q): Query<WikiPathQuery>) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    if let Err(resp) = check_wiki_path(&settings, &q.path, false) {
+        return resp;
+    }
+    match crate::wiki::local_impl::wiki_list_dir_local(&q.path) {
+        Ok(entries) => (StatusCode::OK, Json(entries)).into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+/// `GET /wiki/file?path=` — markdown content of one file, wrapped as `{ content }`.
+async fn wiki_file(State(st): State<RestState>, Query(q): Query<WikiPathQuery>) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    if let Err(resp) = check_wiki_path(&settings, &q.path, true) {
+        return resp;
+    }
+    match crate::wiki::local_impl::wiki_read_file_local(&q.path) {
+        Ok(content) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "content": content })),
+        )
+            .into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+/// `GET /wiki/search?keyword=` — full-text search across the PC's wiki index.
+async fn wiki_search(State(st): State<RestState>, Query(q): Query<WikiSearchQuery>) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    match crate::wiki::local_impl::wiki_search_local(&settings, &q.keyword) {
+        Ok(results) => (StatusCode::OK, Json(results)).into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
 }
 
 // ---------------------------------------------------------------------------

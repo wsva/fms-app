@@ -1559,14 +1559,16 @@ impl DatasetMcpServer {
     #[tool(name = "wiki_list_dir", description = "List contents of a specific wiki directory. Returns entries with name, path, is_dir, is_linked, and modified timestamp.")]
     async fn wiki_list_dir(&self, Parameters(param): Parameters<WikiPathParam>) -> Result<String, String> {
         log::info!("[MCP] wiki_list_dir: path={}", param.path);
-        let entries = crate::wiki::wiki_list_dir(param.path).await?;
+        let state = self.app.state::<SettingsState>();
+        let entries = crate::wiki::wiki_list_dir(state.into(), param.path).await?;
         Ok(serde_json::to_string_pretty(&entries).unwrap_or_default())
     }
 
     #[tool(name = "wiki_read_file", description = "Read the content of a wiki markdown file. Returns the full file content as a string.")]
     async fn wiki_read_file(&self, Parameters(param): Parameters<WikiPathParam>) -> Result<String, String> {
         log::info!("[MCP] wiki_read_file: path={}", param.path);
-        let content = crate::wiki::wiki_read_file(param.path).await?;
+        let state = self.app.state::<SettingsState>();
+        let content = crate::wiki::wiki_read_file(state.into(), param.path).await?;
         Ok(serde_json::json!({"status": "ok", "content": content}).to_string())
     }
 

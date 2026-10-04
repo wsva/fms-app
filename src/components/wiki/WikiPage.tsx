@@ -7,6 +7,7 @@ import { RefreshCw, BookOpen, ArrowLeft, ArrowRight } from "lucide-react";
 import WikiSidebar from "./WikiSidebar";
 import WikiSearch from "./WikiSearch";
 import MarkdownViewer from "./markdown/markdown";
+import { isMobileApp } from "@/lib/platform";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -15,6 +16,16 @@ function isTauri(): boolean {
 interface AppSettings {
   wiki_dir: string;
   [key: string]: unknown;
+}
+
+// Mirrors the backend `WikiEntry`; used on mobile to resolve the PC wiki root
+// (the non-linked entry) as the base for in-content link / deep-link resolution.
+interface WikiDirEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  is_linked: boolean;
+  modified: string | null;
 }
 
 const WIKI_SIDEBAR_WIDTH_KEY = "wiki-sidebar-width";
@@ -29,6 +40,7 @@ export default function WikiPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isIndexing, setIsIndexing] = useState(false);
+  const [mobile, setMobile] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const handleSidebarDrag = useCallback(
     (e: React.MouseEvent) => {
@@ -63,20 +75,31 @@ export default function WikiPage() {
     historyIndexRef.current = historyIndex;
   }, [historyIndex]);
 
-  // Load settings to get wiki directory
+  // Resolve the wiki directory used as the base for link / deep-link handling.
+  //   * desktop: the local settings `wiki_dir`;
+  //   * mobile: the PC is the source of truth, so ask `wiki_list_dirs` (proxied
+  //     to the PC) and take the default, non-linked root. Nothing is read from
+  //     the phone's own settings here.
   useEffect(() => {
     if (!isTauri()) return;
+    setMobile(isMobileApp());
 
-    const loadSettings = async () => {
+    const loadWikiDir = async () => {
       try {
-        const settings = await invoke<AppSettings>("settings_get");
-        setWikiDir(settings.wiki_dir || "");
+        if (isMobileApp()) {
+          const dirs = await invoke<WikiDirEntry[]>("wiki_list_dirs");
+          const root = dirs.find((d) => !d.is_linked);
+          setWikiDir(root ? root.path : "");
+        } else {
+          const settings = await invoke<AppSettings>("settings_get");
+          setWikiDir(settings.wiki_dir || "");
+        }
       } catch (err) {
-        console.error("Failed to load settings:", err);
+        console.error("Failed to load wiki directory:", err);
       }
     };
 
-    loadSettings();
+    loadWikiDir();
   }, []);
 
   // Load file content - also manages navigation history
@@ -272,17 +295,20 @@ export default function WikiPage() {
           <div className="flex-1 max-w-md">
             <WikiSearch wikiDir={wikiDir} onResultClick={handleFileSelect} />
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleIndexWiki}
-              disabled={isIndexing}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors disabled:opacity-50"
-              title="Re-index wiki files for search"
-            >
-              <RefreshCw size={14} className={isIndexing ? "animate-spin" : ""} />
-              <span>{isIndexing ? "Indexing..." : "Index"}</span>
-            </button>
-          </div>
+          {/* Indexing is a PC-side operation; the phone browses read-only. */}
+          {!mobile && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleIndexWiki}
+                disabled={isIndexing}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors disabled:opacity-50"
+                title="Re-index wiki files for search"
+              >
+                <RefreshCw size={14} className={isIndexing ? "animate-spin" : ""} />
+                <span>{isIndexing ? "Indexing..." : "Index"}</span>
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Content area */}

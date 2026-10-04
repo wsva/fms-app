@@ -736,3 +736,90 @@ pub async fn pc_pair_reset_identity(settings: State<'_, SettingsState>) -> Resul
     log::info!("[sync] device identity reset -> {}", ident.device_id);
     Ok(ident.device_id)
 }
+
+// ---------------------------------------------------------------------------
+// Remote wiki browsing (Android thin client)
+// ---------------------------------------------------------------------------
+// The wiki page on the phone is a pure read-through proxy: listing, reading,
+// and searching all hit the paired PC's `/api/v1/wiki/*` REST endpoints over
+// native reqwest (WebView `fetch()` would be CORS-blocked — see module docs),
+// and nothing is ever stored locally. Compiled only on mobile; the desktop
+// build serves the same data straight from `wiki::local_impl`.
+
+/// Issue a signed GET against a PC `/api/v1/wiki/*` endpoint and return the
+/// raw JSON value. The request path (excluding the query string) is what gets
+/// signed, matching `zone_guard`'s verification on the PC.
+#[cfg(not(feature = "desktop"))]
+async fn wiki_get_json(
+    settings: &SettingsState,
+    api_path: &str,
+    query: &[(&str, String)],
+) -> Result<Value, String> {
+    let base = pc_base(settings);
+    if base.is_empty() {
+        return Err("pc_url is not set — use Settings › Discover PC".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let req = with_device_auth(client.get(format!("{base}{api_path}")), settings, "GET", api_path)?
+        .query(query);
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?;
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        let msg = body["error"].as_str().unwrap_or("device not paired");
+        return Err(format!("{msg} (http://{base})"));
+    }
+    resp.error_for_status()
+        .map_err(|e| format!("Wiki request to PC failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("Unexpected response from PC: {e}"))
+}
+
+/// `GET /api/v1/wiki/dirs` — top-level wiki roots on the PC.
+#[cfg(not(feature = "desktop"))]
+pub(crate) async fn wiki_remote_list_dirs(
+    settings: &SettingsState,
+) -> Result<Vec<crate::wiki::WikiEntry>, String> {
+    let v = wiki_get_json(settings, "/api/v1/wiki/dirs", &[]).await?;
+    serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/dirs response: {e}"))
+}
+
+/// `GET /api/v1/wiki/dir?path=` — contents of one wiki directory on the PC.
+#[cfg(not(feature = "desktop"))]
+pub(crate) async fn wiki_remote_list_dir(
+    settings: &SettingsState,
+    path: &str,
+) -> Result<Vec<crate::wiki::WikiEntry>, String> {
+    let v =
+        wiki_get_json(settings, "/api/v1/wiki/dir", &[("path", path.to_string())]).await?;
+    serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/dir response: {e}"))
+}
+
+/// `GET /api/v1/wiki/file?path=` — markdown content of one file on the PC.
+/// The PC wraps the body as `{ "content": "..." }`.
+#[cfg(not(feature = "desktop"))]
+pub(crate) async fn wiki_remote_read_file(settings: &SettingsState, path: &str) -> Result<String, String> {
+    let v = wiki_get_json(settings, "/api/v1/wiki/file", &[("path", path.to_string())]).await?;
+    v.get("content")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "PC wiki/file response missing 'content'".to_string())
+}
+
+/// `GET /api/v1/wiki/search?keyword=` — full-text results from the PC.
+#[cfg(not(feature = "desktop"))]
+pub(crate) async fn wiki_remote_search(
+    settings: &SettingsState,
+    keyword: &str,
+) -> Result<Vec<crate::wiki::WikiSearchResult>, String> {
+    let v =
+        wiki_get_json(settings, "/api/v1/wiki/search", &[("keyword", keyword.to_string())]).await?;
+    serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/search response: {e}"))
+}
