@@ -35,6 +35,10 @@ export function useAuth() {
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [xpUser, setXpUser] = useState<XpUser | null>(null);
   const [xpFlash, setXpFlash] = useState<number | null>(null);
+  // In-app login modal visibility. Login is verified against the website's
+  // signin API (see LoginModal + auth_login_password), not via a browser
+  // deep-link round trip, so it works reliably on Android.
+  const [loginOpen, setLoginOpen] = useState(false);
 
   const checkAuth = useCallback(async () => {
     if (!isTauri()) return;
@@ -89,13 +93,12 @@ export function useAuth() {
     };
   }, [checkAuth]);
 
-  const login = useCallback(async () => {
-    if (!isTauri()) return;
-    try {
-      await invoke("auth_open_login");
-    } catch {
-      /* ignore */
-    }
+  const login = useCallback(() => {
+    setLoginOpen(true);
+  }, []);
+
+  const closeLogin = useCallback(() => {
+    setLoginOpen(false);
   }, []);
 
   const logout = useCallback(async () => {
@@ -108,5 +111,5 @@ export function useAuth() {
     }
   }, []);
 
-  return { authUser, xpUser, xpFlash, login, logout };
+  return { authUser, xpUser, xpFlash, login, logout, loginOpen, closeLogin };
 }

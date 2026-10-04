@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import type { TabId } from "./Sidebar";
 import { useAuth } from "@/hooks/useAuth";
+import LoginModal from "@/components/auth/LoginModal";
 
 type IconType = React.ComponentType<{ width?: number; height?: number; className?: string }>;
 
@@ -58,7 +59,7 @@ export default function BottomNav({
   onTabChange: (id: TabId) => void;
 }) {
   const [sheetOpen, setSheetOpen] = useState(false);
-  const { authUser, xpUser, xpFlash, login, logout } = useAuth();
+  const { authUser, xpUser, xpFlash, login, logout, loginOpen, closeLogin } = useAuth();
 
   const moreActive = OVERFLOW_IDS.includes(activeTab);
 
@@ -185,6 +186,8 @@ export default function BottomNav({
           </div>
         </div>
       )}
+
+      <LoginModal open={loginOpen} onClose={closeLogin} />
     </>
   );
 }

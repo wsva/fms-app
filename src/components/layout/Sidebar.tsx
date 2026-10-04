@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { isMobileApp } from "@/lib/platform";
 import { useAuth } from "@/hooks/useAuth";
+import LoginModal from "@/components/auth/LoginModal";
 import {
   Box,
   SlidersHorizontal,
@@ -125,7 +126,7 @@ export default function Sidebar({
   });
 
   // ---- Auth state (shared with the mobile bottom nav via useAuth) ----
-  const { authUser, xpUser, xpFlash, login, logout } = useAuth();
+  const { authUser, xpUser, xpFlash, login, logout, loginOpen, closeLogin } = useAuth();
 
   // Load saved width from localStorage
   useEffect(() => {
@@ -344,7 +345,7 @@ export default function Sidebar({
             className={`flex items-center w-full rounded-lg px-2 py-1.5 hover:bg-mid-gray/20 transition-colors cursor-pointer ${
               collapsed ? "justify-center" : "gap-2"
             }`}
-            title={collapsed ? "Login" : "Login in browser"}
+            title="Login"
           >
             <User size={18} className="text-text-tertiary shrink-0" />
             {!collapsed && <span className="text-xs font-medium text-text-secondary">Login</span>}
@@ -374,6 +375,8 @@ export default function Sidebar({
       {isDragging && (
         <div className="fixed inset-0 z-50 cursor-col-resize" />
       )}
+
+      <LoginModal open={loginOpen} onClose={closeLogin} />
     </>
   );
 }

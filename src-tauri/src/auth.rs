@@ -142,6 +142,93 @@ pub async fn auth_open_login(app: AppHandle) -> Result<String, String> {
     Ok(login_url)
 }
 
+/// Format a reqwest/IO error with its full source chain. reqwest's top-level
+/// Display is just "error sending request for url (...)"; the actual cause
+/// (TLS handshake, unknown issuer, DNS, timeout, no crypto provider) lives in
+/// the source chain, which is what we need to diagnose Android network errors.
+fn err_chain<E: std::error::Error>(err: &E) -> String {
+    let mut msg = err.to_string();
+    let mut src: Option<&dyn std::error::Error> = err.source();
+    while let Some(s) = src {
+        msg.push_str(" | caused by: ");
+        msg.push_str(&s.to_string());
+        src = s.source();
+    }
+    msg
+}
+
+/// Verify credentials directly against the website's first-party signin API and
+/// store the returned tokens. This is the in-app login path (primary on
+/// Android): the user never leaves the app for a browser OAuth2 + `fms-app://`
+/// deep-link round trip, which Chrome on Android silently blocks because the
+/// server-issued custom-scheme redirect has no transient user activation.
+///
+/// Response contract of `POST /api/oauth2/signin` (no `desktop_callback`):
+///   success -> { success: true, data: { list: [accessToken, user_id, username, refreshToken] } }
+///   failure -> { success: false, errMsg: "..." }
+#[tauri::command]
+pub async fn auth_login_password(
+    app: AppHandle,
+    email: String,
+    password: String,
+) -> Result<AuthUser, String> {
+    log::info!("[Auth] login: verifying credentials for '{}'", email);
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "data": { "Nickname": email, "Email": email, "Password": password }
+    });
+    let resp = client
+        .post(format!("{}/api/oauth2/signin", BASE_URL))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            // Log the full source chain so the underlying cause (TLS handshake,
+            // unknown issuer, DNS, timeout, no crypto provider) is visible in
+            // the in-app Logs page, not just reqwest's generic top-level text.
+            let detail = err_chain(&e);
+            log::error!("[Auth] login: signin request to {} failed: {}", BASE_URL, detail);
+            format!("Signin request failed: {}", detail)
+        })?;
+
+    let status = resp.status();
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| {
+            log::error!("[Auth] login: failed to parse signin response (status {}): {}", status, e);
+            format!("Failed to parse signin response (status {}): {}", status, e)
+        })?;
+
+    if json["success"].as_bool() != Some(true) {
+        let msg = json["errMsg"].as_str().unwrap_or("Invalid email or password");
+        log::warn!("[Auth] login: signin rejected for '{}': {}", email, msg);
+        return Err(msg.to_string());
+    }
+
+    let list = json["data"]["list"]
+        .as_array()
+        .ok_or_else(|| "Malformed signin response (missing data.list)".to_string())?;
+    let field = |i: usize| list.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let access_token = field(0);
+    let user_id = field(1);
+    let username = field(2);
+    let refresh_token = field(3);
+
+    if access_token.is_empty() {
+        return Err("Signin response contained no access token".to_string());
+    }
+
+    log::info!(
+        "[Auth] login: signin succeeded for user_id='{}', username='{}'",
+        user_id,
+        username
+    );
+    // Reuse the shared post-login pipeline: persist tokens, fetch user info,
+    // claim the current workspace, fold logged-out XP, emit `auth-login-success`.
+    auth_process_token(app, access_token, refresh_token, user_id, username).await
+}
+
 /// Process tokens received from the deep link callback.
 /// Called by the deep link handler when `fms-app://login?access_token=...` is received.
 pub async fn auth_process_token(

@@ -193,16 +193,22 @@ export default function LogPage() {
           filteredLogs.map((entry, i) => (
             <div
               key={`${entry.timestamp}-${i}`}
-              className="flex gap-2 py-0.5 px-1 hover:bg-white/5 rounded"
+              className="flex flex-col sm:flex-row sm:items-baseline gap-y-0.5 sm:gap-x-2 py-0.5 px-1 hover:bg-white/5 rounded"
             >
-              <span className="text-text-tertiary shrink-0 select-none">{entry.timestamp}</span>
-              <span
-                className={`shrink-0 w-12 text-center rounded text-[10px] font-bold ${levelBadgeColor(entry.level)}`}
-              >
-                {entry.level}
-              </span>
+              {/* Line 1 (narrow) / leading group (wide): timestamp + level tag.
+                  The level tag sits right after the time string, and on narrow
+                  screens the message wraps to a second line so the long
+                  timestamp doesn't squeeze it. */}
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-text-tertiary select-none">{entry.timestamp}</span>
+                <span
+                  className={`shrink-0 w-12 text-center rounded text-[10px] font-bold ${levelBadgeColor(entry.level)}`}
+                >
+                  {entry.level}
+                </span>
+              </div>
               <span className={`${levelColor(entry.level)} break-all`}>{entry.message}</span>
-              <span className="text-text-tertiary/50 shrink-0 ml-auto pl-2 hidden xl:inline">
+              <span className="text-text-tertiary/50 shrink-0 sm:ml-auto pl-2 hidden xl:inline">
                 {entry.module}
               </span>
             </div>
