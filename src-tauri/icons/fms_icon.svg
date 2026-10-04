@@ -1,0 +1,95 @@
+<svg width="680" height="680" viewBox="0 0 680 680" role="img" xmlns="http://www.w3.org/2000/svg">
+  <title>Fremdsprachen machen Spaß icon</title>
+  <desc>Language learning icon with copperplate script font</desc>
+  <style>
+    .bg-circle { fill: #0EA89A; }
+    .bubble { fill: #ffffff; }
+    .bubble-sm { fill: #D6F5F2; }
+    .smile-arc { fill: none; stroke: #0EA89A; stroke-width: 7; stroke-linecap: round; }
+    .dot { fill: #0EA89A; }
+    .spark { fill: #F5C842; }
+    .name-main {
+      fill: #0EA89A;
+      font-family: 'Edwardian Script ITC', 'Monotype Corsiva', 'Apple Chancery', 'URW Chancery L', 'Dancing Script', cursive;
+      font-weight: 400;
+      font-style: italic;
+      letter-spacing: 1px;
+    }
+    .name-white {
+      fill: #ffffff;
+      font-family: 'Edwardian Script ITC', 'Monotype Corsiva', 'Apple Chancery', 'URW Chancery L', 'Dancing Script', cursive;
+      font-weight: 400;
+      font-style: italic;
+      letter-spacing: 1px;
+    }
+    .ic { fill: none; stroke: #0EA89A; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+    .icf { fill: #0EA89A; }
+    .icb { fill: #D6F5F2; }
+    .teal-main { fill: #0EA89A; font-family: sans-serif; font-weight: 500; }
+  </style>
+
+  <!-- Background circle — change fill in .bg-circle to recolor -->
+  <circle class="bg-circle" cx="340" cy="340" r="300"/>
+
+  <!-- Main speech bubble -->
+  <rect class="bubble" x="120" y="190" width="400" height="235" rx="36"/>
+  <polygon class="bubble" points="220,423 190,492 310,423"/>
+
+  <!-- Small smiley bubble (top right) -->
+  <rect class="bubble-sm" x="472" y="162" width="115" height="76" rx="20"/>
+  <polygon class="bubble-sm" points="482,236 472,272 524,236"/>
+  <circle class="dot" cx="504" cy="196" r="5.5"/>
+  <circle class="dot" cx="534" cy="196" r="5.5"/>
+  <path class="smile-arc" d="M496 216 Q519 236 542 216"/>
+
+  <!-- "Fremdsprachen" — change font-size to scale text -->
+  <text x="320" y="275" class="name-main" font-size="44" text-anchor="middle">Fremdsprachen</text>
+  <line x1="155" y1="288" x2="485" y2="288" stroke="#A8E8E3" stroke-width="1.2"/>
+
+  <!-- Icon 1: LISTEN (ear) -->
+  <circle class="icb" cx="185" cy="355" r="27"/>
+  <path class="ic" d="M178 348 Q178 338 185 338 Q196 338 196 350 Q196 358 190 360 Q190 364 185 364 Q181 364 181 361"/>
+  <path class="ic" d="M183 352 Q183 345 188 345 Q193 345 193 352 Q193 357 189 358"/>
+
+  <!-- Icon 2: SPEAK (speech bubble + waveform) -->
+  <circle class="icb" cx="268" cy="355" r="27"/>
+  <path class="ic" d="M255 344 Q255 338 268 338 Q281 338 281 344 L281 358 Q281 364 268 364 L261 364 L257 370 L259 364 Q255 364 255 358 Z" fill="#ffffff"/>
+  <line class="ic" x1="262" y1="348" x2="262" y2="358" stroke-width="2"/>
+  <line class="ic" x1="266" y1="345" x2="266" y2="361" stroke-width="2"/>
+  <line class="ic" x1="270" y1="349" x2="270" y2="357" stroke-width="2"/>
+  <line class="ic" x1="274" y1="352" x2="274" y2="354" stroke-width="2"/>
+
+  <!-- Icon 3: DIARY (hardcover with bookmark) -->
+  <circle class="icb" cx="352" cy="355" r="27"/>
+  <rect x="337" y="337" width="26" height="32" rx="3" fill="#ffffff" stroke="#0EA89A" stroke-width="2.2"/>
+  <rect class="icf" x="337" y="337" width="5" height="32" rx="2"/>
+  <line class="ic" x1="346" y1="343" x2="360" y2="343" stroke-width="1.4"/>
+  <line class="ic" x1="346" y1="348" x2="360" y2="348" stroke-width="1.4"/>
+  <line class="ic" x1="346" y1="353" x2="360" y2="353" stroke-width="1.4"/>
+  <line class="ic" x1="346" y1="358" x2="354" y2="358" stroke-width="1.4"/>
+  <polygon class="icf" points="358,337 363,337 363,348 360.5,345 358,348" opacity="0.85"/>
+
+  <!-- Icon 4: FLASHCARD (two overlapping cards) -->
+  <circle class="icb" cx="435" cy="355" r="27"/>
+  <rect class="ic" x="424" y="341" width="22" height="16" rx="3" transform="rotate(-8 435 349)" fill="#A8E8E3"/>
+  <rect x="425" y="348" width="22" height="16" rx="3" fill="#ffffff" stroke="#0EA89A" stroke-width="2.2"/>
+  <text x="436" y="360" class="teal-main" font-size="10" text-anchor="middle">A?</text>
+
+  <!-- Star (left, small) -->
+  <g transform="translate(148, 458)">
+    <polygon class="spark" points="0,-8 2,-2 8,0 2,2 0,8 -2,2 -8,0 -2,-2" opacity="0.7"/>
+  </g>
+
+  <!-- Star (right, medium) -->
+  <g transform="translate(525, 463)">
+    <polygon class="spark" points="0,-10 2.5,-2.5 10,0 2.5,2.5 0,10 -2.5,2.5 -10,0 -2.5,-2.5" opacity="0.9"/>
+  </g>
+
+  <!-- "machen Spaß" — sits between the two stars -->
+  <text x="400" y="470" class="name-white" font-size="28" text-anchor="middle">machen Spaß</text>
+
+  <!-- Top sparkle -->
+  <g transform="translate(130, 198)">
+    <polygon class="spark" points="0,-14 3,-3 14,0 3,3 0,14 -3,3 -14,0 -3,-3"/>
+  </g>
+</svg>
