@@ -349,7 +349,7 @@ fn zone_trusted(ip: std::net::IpAddr) -> bool {
 /// * untrusted peers reach only the handshake paths (`/api/v1/status`,
 ///   `/api/v1/pair/*`); everything else needs valid device-signature headers
 ///   (`x-fms-device` / `x-fms-ts` / `x-fms-sig`, verified in `pairing.rs`).
-async fn zone_guard(State(st): State<AppState>, req: Request, next: Next) -> Response {
+async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
     let peer = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -383,16 +383,21 @@ async fn zone_guard(State(st): State<AppState>, req: Request, next: Next) -> Res
                 "loopback access requires a local Host header (DNS-rebinding guard)",
             );
         }
+        // Trusted zone: no device binding. Handlers fall back to the PC's own
+        // workspace identity for writeback attribution.
+        req.extensions_mut().insert(pairing::AuthContext::trusted());
         return next.run(req).await;
     }
 
     if zone_trusted(peer) {
+        req.extensions_mut().insert(pairing::AuthContext::trusted());
         return next.run(req).await;
     }
 
     // Untrusted zone: pairing handshake routes stay open, everything else
     // requires a valid per-device Ed25519 signature.
     if path == "/api/v1/status" || path.starts_with("/api/v1/pair/") {
+        req.extensions_mut().insert(pairing::AuthContext::trusted());
         return next.run(req).await;
     }
     let get_header = |name: &str| {
@@ -415,6 +420,7 @@ async fn zone_guard(State(st): State<AppState>, req: Request, next: Next) -> Res
     // runtime; settings are reached through the app handle in router state.
     let app = st.app.clone();
     let method = method.to_string();
+    let authed_device_id = device_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let settings = app.state::<SettingsState>();
         pairing::verify_request(
@@ -429,7 +435,15 @@ async fn zone_guard(State(st): State<AppState>, req: Request, next: Next) -> Res
     .await
     .unwrap_or_else(|_| Err(pairing::AuthError::BadSignature));
     match result {
-        Ok(()) => next.run(req).await,
+        Ok(bound_user_id) => {
+            // Paired device: expose its identity binding to the handler so
+            // writeback can enforce that changes land under the bound user.
+            req.extensions_mut().insert(pairing::AuthContext {
+                device_id: Some(authed_device_id),
+                bound_user_id,
+            });
+            next.run(req).await
+        }
         Err(e) => json_error(
             StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::FORBIDDEN),
             e.message(),

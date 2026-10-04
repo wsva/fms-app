@@ -540,12 +540,28 @@ pub async fn listen_save_dictation(
     dictation: ListenDictation,
 ) -> Result<(), String> {
     log::info!("listen_save_dictation: media={}, subtitle={}, status={}", dictation.media_uuid, dictation.subtitle_uuid, dictation.status);
-    let conn = open_app_db(&_settings)?;
     let user_id = workspace_identity(&_settings);
+    listen_save_dictation_as(&_settings, &_dataset_uuid, &dictation, &user_id).await
+}
+
+/// Save dictation progress under an explicit identity.
+///
+/// The Tauri command wrapper passes the local `workspace_identity()`; the PC
+/// writeback replay (`rest.rs`) passes the identity the sending device is bound
+/// to, so a phone's progress is never attributed to whoever happens to be
+/// logged in on the PC. On mobile the change is also queued for writeback.
+#[cfg_attr(feature = "desktop", allow(unused_variables))]
+pub async fn listen_save_dictation_as(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    dictation: &ListenDictation,
+    user_id: &str,
+) -> Result<(), String> {
+    let conn = open_app_db(settings)?;
     // Delete existing row first, then insert fresh
     conn.execute(
         "DELETE FROM listen_dictation WHERE user_id = ?1 AND media_uuid = ?2 AND subtitle_uuid = ?3",
-        rusqlite::params![&user_id, &dictation.media_uuid, &dictation.subtitle_uuid],
+        rusqlite::params![user_id, &dictation.media_uuid, &dictation.subtitle_uuid],
     )
     .map_err(|e| e.to_string())?;
     let new_uuid = Uuid::new_v4().to_string();
@@ -561,10 +577,10 @@ pub async fn listen_save_dictation(
     #[cfg(not(feature = "desktop"))]
     {
         let _ = crate::sync::enqueue_change(
-            &_settings,
+            settings,
             "dictation",
-            &_dataset_uuid,
-            &serde_json::to_value(&dictation).unwrap_or_default(),
+            dataset_uuid,
+            &serde_json::to_value(dictation).unwrap_or_default(),
         );
     }
     Ok(())

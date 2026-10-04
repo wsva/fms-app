@@ -42,6 +42,8 @@ interface PairingRequest {
   device_id: string;
   name: string;
   fingerprint: string;
+  // Identity the device declares; the PC binds writeback to it on approval.
+  user_id?: string;
 }
 
 export default function Home() {
@@ -112,8 +114,11 @@ export default function Home() {
       running = true;
       while (queue.length > 0) {
         const req = queue.shift()!;
+        const asWho = req.user_id && req.user_id !== "local"
+          ? `\n\nIt will sync progress as: ${req.user_id}`
+          : "";
         const approve = await ask(
-          `FmS on ${req.name} wants to pair.\n\nConfirm the code ${req.fingerprint} matches the one shown on the device, then allow or deny.`,
+          `FmS on ${req.name} wants to pair.${asWho}\n\nConfirm the code ${req.fingerprint} matches the one shown on the device, then allow or deny.`,
           { title: "Pairing request", kind: "warning", okLabel: "Allow", cancelLabel: "Deny" },
         );
         try {

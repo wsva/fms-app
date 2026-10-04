@@ -45,6 +45,8 @@ interface PairedDevice {
   status: string; // "approved" | "denied"
   created_at: string;
   last_seen_at: string | null;
+  // Identity this device is bound to for writeback (null for legacy pairings).
+  bound_user_id: string | null;
 }
 
 type ThemeId = "light" | "dark" | "solarized" | "gruvbox";
@@ -348,6 +350,7 @@ export default function SettingsPage() {
                   <th className="py-2 pr-4 font-medium">Device</th>
                   <th className="py-2 pr-4 font-medium">Code</th>
                   <th className="py-2 pr-4 font-medium">Status</th>
+                  <th className="py-2 pr-4 font-medium">Syncs as</th>
                   <th className="py-2 pr-4 font-medium">Last seen</th>
                   <th className="py-2 font-medium"></th>
                 </tr>
@@ -355,7 +358,7 @@ export default function SettingsPage() {
               <tbody>
                 {devices.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="py-3 text-text-tertiary">
+                    <td colSpan={6} className="py-3 text-text-tertiary">
                       No devices paired yet.
                     </td>
                   </tr>
@@ -378,6 +381,11 @@ export default function SettingsPage() {
                       >
                         {d.status}
                       </span>
+                    </td>
+                    <td className="py-2 pr-4 text-text-secondary">
+                      {d.bound_user_id && d.bound_user_id !== "local"
+                        ? d.bound_user_id
+                        : "this PC's user"}
                     </td>
                     <td className="py-2 pr-4 text-text-secondary">
                       {d.last_seen_at ?? "never"}

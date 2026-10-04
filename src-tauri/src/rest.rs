@@ -26,7 +26,7 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
@@ -95,6 +95,10 @@ async fn status(State(st): State<RestState>) -> Response {
 struct PairReqBody {
     name: String,
     pubkey_hex: String,
+    /// Identity the phone declares (`workspace_identity()`); bound to the
+    /// device on approval and enforced on writeback. Empty for legacy phones.
+    #[serde(default)]
+    user_key: String,
 }
 
 /// Pairing handshake. Reached from untrusted networks without a device
@@ -113,7 +117,7 @@ async fn pair_request(State(st): State<RestState>, Json(body): Json<PairReqBody>
     let name = body.name.trim().chars().take(64).collect::<String>();
     let name = if name.is_empty() { "device".to_string() } else { name };
 
-    let outcome = match pairing::request_pair(&st.app, &settings, &body.pubkey_hex, &name) {
+    let outcome = match pairing::request_pair(&st.app, &settings, &body.pubkey_hex, &name, &body.user_key) {
         Ok(o) => o,
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
@@ -343,7 +347,9 @@ async fn snapshot(State(st): State<RestState>, axum::extract::Path(uuid): axum::
 
 #[derive(Deserialize)]
 struct SyncChangesReq {
-    #[allow(dead_code)]
+    /// Identity the phone is writing under (`workspace_identity()`). Checked
+    /// against the device's bound identity before any change is applied.
+    #[serde(default)]
     user_key: String,
     changes: Vec<Change>,
 }
@@ -379,11 +385,60 @@ fn ensure_applied_table(conn: &rusqlite::Connection) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// Resolve the identity that writeback changes must be attributed to, and
+/// reject a device that tries to write as a different user than it was paired
+/// for.
+///
+/// * **Paired device** (`auth.bound_user_id` present): the bound identity is
+///   authoritative. If both the bound identity and the phone's declared
+///   `user_key` are real accounts (non-empty, not the `"local"` sentinel) and
+///   they differ, the batch is rejected — the device was re-provisioned to
+///   another account and must re-pair. A device bound while logged out
+///   (`"local"`) adopts the phone's now-logged-in identity so sync never
+///   dead-ends after a later login.
+/// * **Trusted zone** (loopback / Tailscale agent path, no device binding): the
+///   PC's own current workspace identity is used, preserving legacy behavior.
+fn resolve_write_identity(
+    auth: &pairing::AuthContext,
+    phone_key: &str,
+    settings: &SettingsState,
+) -> Result<String, String> {
+    let Some(bound) = auth.bound_user_id.as_deref() else {
+        // Trusted zone: attribute to the PC's current workspace user.
+        return Ok(crate::auth::workspace_identity(settings));
+    };
+    let bound_real = !bound.is_empty() && bound != "local";
+    let phone_real = !phone_key.is_empty() && phone_key != "local";
+    if bound_real && phone_real && bound != phone_key {
+        return Err(format!(
+            "device is paired as '{}' but sent changes for '{}'; re-pair the device to switch users",
+            bound, phone_key
+        ));
+    }
+    if bound_real {
+        Ok(bound.to_string())
+    } else if phone_real {
+        Ok(phone_key.to_string())
+    } else {
+        Ok(bound.to_string())
+    }
+}
+
 async fn sync_changes(
     State(st): State<RestState>,
+    Extension(auth): Extension<pairing::AuthContext>,
     Json(req): Json<SyncChangesReq>,
 ) -> Response {
     let settings = st.app.state::<SettingsState>();
+
+    // Enforce the device->user binding before touching any data.
+    let write_identity = match resolve_write_identity(&auth, &req.user_key, &settings) {
+        Ok(id) => id,
+        Err(e) => {
+            log::warn!("[rest] writeback rejected (device {:?}): {}", auth.device_id, e);
+            return json_error(StatusCode::FORBIDDEN, &e);
+        }
+    };
 
     // Idempotency ledger lives in the app-level DB (survives dataset swaps).
     let ledger = match dictation::open_app_db(&settings) {
@@ -412,7 +467,7 @@ async fn sync_changes(
             continue;
         }
 
-        match replay(&settings, &req.user_key, &ch).await {
+        match replay(&settings, &write_identity, &ch).await {
             Ok(()) => {
                 let _ = ledger.execute(
                     "INSERT OR IGNORE INTO sync_applied (id, applied_at) VALUES (?1, datetime('now'))",
@@ -436,7 +491,7 @@ async fn sync_changes(
 
 async fn replay(
     settings: &tauri::State<'_, SettingsState>,
-    user_key: &str,
+    write_identity: &str,
     ch: &Change,
 ) -> Result<(), String> {
     let dataset_uuid = ch.dataset_uuid.clone().unwrap_or_default();
@@ -453,7 +508,14 @@ async fn replay(
         "dictation" => {
             let d: ListenDictation =
                 serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
-            dictation::listen_save_dictation(settings.clone(), dataset_uuid, d).await
+            // Attribute to the enforced identity, not the PC's current workspace.
+            dictation::listen_save_dictation_as(
+                settings.inner(),
+                &dataset_uuid,
+                &d,
+                write_identity,
+            )
+            .await
         }
         "xp" => {
             let amount = ch.payload.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -469,20 +531,22 @@ async fn replay(
                 .and_then(|v| v.as_str())
                 .unwrap_or(ch.id.as_str())
                 .to_string();
-            let uid = ch
-                .payload
-                .get("user_id")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or(user_key)
-                .to_string();
+            // The enforced identity is authoritative; a client-supplied
+            // `user_id` in the payload is never trusted.
             let ds = if dataset_uuid.is_empty() {
                 None
             } else {
                 Some(dataset_uuid.as_str())
             };
-            xp::xp_award_internal(settings.inner(), &uid, amount, &source, &reference_id, ds)
-                .map(|_| ())
+            xp::xp_award_internal(
+                settings.inner(),
+                write_identity,
+                amount,
+                &source,
+                &reference_id,
+                ds,
+            )
+            .map(|_| ())
         }
         other => Err(format!("unknown change kind: {}", other)),
     }

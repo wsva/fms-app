@@ -90,8 +90,9 @@ lazy_static! {
     /// Dialog requests awaiting the PC owner: request_id -> record.
     static ref PENDING: Mutex<HashMap<String, PendingRequest>> = Mutex::new(HashMap::new());
     /// Cached registry so the auth path never hits SQLite per request.
+    /// Maps device_id -> (pubkey, status, bound_user_id).
     /// Invalidated on every mutation (approve / deny / revoke / remove).
-    static ref REGISTRY_CACHE: Mutex<Option<HashMap<String, (String, String)>>> =
+    static ref REGISTRY_CACHE: Mutex<Option<HashMap<String, (String, String, Option<String>)>>> =
         Mutex::new(None);
     /// device_id -> last `last_seen_at` DB write, to throttle writes.
     static ref LAST_SEEN: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
@@ -101,6 +102,9 @@ struct PendingRequest {
     device_id: String,
     name: String,
     pubkey_hex: String,
+    /// Identity the phone declared at pairing time (`workspace_identity()`);
+    /// persisted as the device's bound user on approval.
+    user_key: String,
     created: Instant,
 }
 
@@ -111,6 +115,24 @@ pub struct PairedDevice {
     pub status: String,
     pub created_at: String,
     pub last_seen_at: Option<String>,
+    /// The user identity this device was approved to write progress/XP under.
+    pub bound_user_id: Option<String>,
+}
+
+/// Authenticated-request context threaded from the zone guard to handlers via a
+/// request extension. Trusted-zone peers (loopback / Tailscale) carry no device
+/// binding; paired devices carry their `device_id` and bound user identity.
+#[derive(Clone, Debug)]
+pub struct AuthContext {
+    pub device_id: Option<String>,
+    pub bound_user_id: Option<String>,
+}
+
+impl AuthContext {
+    /// Trusted-zone (no device signature): no binding.
+    pub fn trusted() -> Self {
+        Self { device_id: None, bound_user_id: None }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -125,20 +147,26 @@ fn ensure_table(conn: &rusqlite::Connection) -> Result<(), String> {
             name      TEXT NOT NULL,
             status    TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            last_seen_at TEXT
+            last_seen_at TEXT,
+            bound_user_id TEXT
         );",
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    // Idempotent migration for pre-existing registries created before the
+    // device->user binding column existed. Ignore "duplicate column".
+    let _ = conn.execute_batch("ALTER TABLE paired_devices ADD COLUMN bound_user_id TEXT;");
+    Ok(())
 }
 
 fn invalidate_cache() {
     *REGISTRY_CACHE.lock().unwrap() = None;
 }
 
-/// Load the whole registry (pubkey included) into the cache and return a clone.
+/// Load the whole registry (pubkey + bound identity included) into the cache
+/// and return a clone.
 fn cached_registry(
     settings: &SettingsState,
-) -> Result<HashMap<String, (String, String)>, String> {
+) -> Result<HashMap<String, (String, String, Option<String>)>, String> {
     {
         let cache = REGISTRY_CACHE.lock().unwrap();
         if let Some(map) = cache.as_ref() {
@@ -148,7 +176,7 @@ fn cached_registry(
     let conn = dictation::open_app_db(settings)?;
     ensure_table(&conn)?;
     let mut stmt = conn
-        .prepare("SELECT device_id, pubkey, status FROM paired_devices")
+        .prepare("SELECT device_id, pubkey, status, bound_user_id FROM paired_devices")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
@@ -156,13 +184,14 @@ fn cached_registry(
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     let mut map = HashMap::new();
     for row in rows {
-        let (id, pubkey, status) = row.map_err(|e| e.to_string())?;
-        map.insert(id, (pubkey, status));
+        let (id, pubkey, status, bound) = row.map_err(|e| e.to_string())?;
+        map.insert(id, (pubkey, status, bound));
     }
     *REGISTRY_CACHE.lock().unwrap() = Some(map.clone());
     Ok(map)
@@ -174,15 +203,18 @@ fn upsert_device(
     pubkey_hex: &str,
     name: &str,
     status: &str,
+    bound_user_id: &str,
 ) -> Result<(), String> {
     let conn = dictation::open_app_db(settings)?;
     ensure_table(&conn)?;
+    let bound = if bound_user_id.is_empty() { None } else { Some(bound_user_id) };
     conn.execute(
-        "INSERT INTO paired_devices(device_id, pubkey, name, status, created_at)
-         VALUES (?1, ?2, ?3, ?4, datetime('now'))
+        "INSERT INTO paired_devices(device_id, pubkey, name, status, created_at, bound_user_id)
+         VALUES (?1, ?2, ?3, ?4, datetime('now'), ?5)
          ON CONFLICT(device_id) DO UPDATE SET
-            pubkey=excluded.pubkey, name=excluded.name, status=excluded.status",
-        rusqlite::params![device_id, pubkey_hex, name, status],
+            pubkey=excluded.pubkey, name=excluded.name, status=excluded.status,
+            bound_user_id=excluded.bound_user_id",
+        rusqlite::params![device_id, pubkey_hex, name, status, bound],
     )
     .map_err(|e| e.to_string())?;
     invalidate_cache();
@@ -218,11 +250,12 @@ pub fn request_pair(
     settings: &SettingsState,
     pubkey_hex: &str,
     name: &str,
+    user_key: &str,
 ) -> Result<PairRequestOutcome, String> {
     let device_id = device_id_of_pubkey(pubkey_hex)?;
     let status = cached_registry(settings)?
         .get(&device_id)
-        .map(|(_, s)| s.clone())
+        .map(|(_, s, _)| s.clone())
         .unwrap_or_else(|| "none".to_string());
     match status.as_str() {
         "approved" => Ok(PairRequestOutcome::Approved),
@@ -245,6 +278,7 @@ pub fn request_pair(
                             device_id: device_id.clone(),
                             name: name.to_string(),
                             pubkey_hex: pubkey_hex.to_string(),
+                            user_key: user_key.to_string(),
                             created: Instant::now(),
                         },
                     );
@@ -255,6 +289,7 @@ pub fn request_pair(
                 "device_id": device_id,
                 "name": name,
                 "fingerprint": fingerprint,
+                "user_id": user_key,
             });
             let _ = app.emit("pairing-request", &payload);
             Ok(PairRequestOutcome::Pending { request_id, fingerprint })
@@ -264,7 +299,7 @@ pub fn request_pair(
 
 pub fn pending_status(settings: &SettingsState, device_id: &str) -> Result<String, String> {
     // A resolved request is reflected through the registry, which is truth.
-    if let Some((_, status)) = cached_registry(settings)?.get(device_id) {
+    if let Some((_, status, _)) = cached_registry(settings)?.get(device_id) {
         return Ok(status.clone());
     }
     let map = PENDING.lock().unwrap();
@@ -272,7 +307,8 @@ pub fn pending_status(settings: &SettingsState, device_id: &str) -> Result<Strin
     Ok(if hit { "pending" } else { "none" }.to_string())
 }
 
-/// PC owner answered the dialog: write the registry row and drop the request.
+/// PC owner answered the dialog: write the registry row (binding the identity
+/// the phone declared) and drop the request.
 pub fn resolve_pending(
     settings: &SettingsState,
     request_id: &str,
@@ -286,6 +322,7 @@ pub fn resolve_pending(
             &p.pubkey_hex,
             &p.name,
             if approve { "approved" } else { "denied" },
+            &p.user_key,
         ),
         None => Err("pairing request no longer pending (expired?)".to_string()),
     }
@@ -329,7 +366,9 @@ impl AuthError {
 
 /// Verify a signed request: `sig` = hex Ed25519 signature over
 /// `"{ts}\n{METHOD}\n{path}"`. Checks the registry cache, the ±120 s window,
-/// and (on success) throttled `last_seen_at` bookkeeping.
+/// and (on success) throttled `last_seen_at` bookkeeping. On success returns
+/// the identity this device is bound to (may be `None` for legacy rows paired
+/// before binding existed).
 pub fn verify_request(
     settings: &SettingsState,
     device_id: &str,
@@ -337,8 +376,8 @@ pub fn verify_request(
     path: &str,
     ts: &str,
     sig_hex: &str,
-) -> Result<(), AuthError> {
-    let (pubkey_hex, status) = cached_registry(settings)
+) -> Result<Option<String>, AuthError> {
+    let (pubkey_hex, status, bound_user_id) = cached_registry(settings)
         .map_err(|_| AuthError::Registry)?
         .get(device_id)
         .cloned()
@@ -362,7 +401,7 @@ pub fn verify_request(
         .map_err(|_| AuthError::BadSignature)?;
 
     touch_last_seen(settings, device_id);
-    Ok(())
+    Ok(bound_user_id)
 }
 
 fn touch_last_seen(settings: &SettingsState, device_id: &str) {
@@ -398,7 +437,7 @@ pub fn list_devices(settings: &SettingsState) -> Result<Vec<PairedDevice>, Strin
     ensure_table(&conn)?;
     let mut stmt = conn
         .prepare(
-            "SELECT device_id, name, status, created_at, last_seen_at
+            "SELECT device_id, name, status, created_at, last_seen_at, bound_user_id
              FROM paired_devices ORDER BY created_at DESC",
         )
         .map_err(|e| e.to_string())?;
@@ -410,6 +449,7 @@ pub fn list_devices(settings: &SettingsState) -> Result<Vec<PairedDevice>, Strin
                 status: r.get(2)?,
                 created_at: r.get(3)?,
                 last_seen_at: r.get(4)?,
+                bound_user_id: r.get(5)?,
             })
         })
         .map_err(|e| e.to_string())?;

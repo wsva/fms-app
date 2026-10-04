@@ -254,7 +254,7 @@ pub async fn writeback_flush_inner(settings: &SettingsState) -> Result<usize, St
                 })
             })
             .collect();
-        let body = json!({ "user_key": "", "changes": changes });
+        let body = json!({ "user_key": crate::auth::workspace_identity(settings), "changes": changes });
 
         let req = with_device_auth(
             client.post(format!("{base}/api/v1/sync/changes")),
@@ -665,6 +665,7 @@ pub async fn pc_pair_start(
         "device_id": ident.device_id,
         "name": device_name(),
         "pubkey_hex": ident.pubkey_hex,
+        "user_key": crate::auth::workspace_identity(&settings),
     });
     let resp = client
         .post(format!("{base}/api/v1/pair/request"))
