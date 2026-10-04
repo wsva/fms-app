@@ -115,7 +115,7 @@ export default function Home() {
         style={{ marginLeft: mobile ? 0 : sidebarWidth }}
       >
         <div style={{ display: activeTab === "dictation" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <DictationPage />
+          <DictationPage active={activeTab === "dictation"} />
         </div>
         <div style={{ display: activeTab === "studio" ? "flex" : "none" }} className="flex-1 min-h-0">
           {mobile ? <DatasetsSyncPage /> : <StudioPage />}

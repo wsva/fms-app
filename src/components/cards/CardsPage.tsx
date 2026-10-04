@@ -262,10 +262,10 @@ export default function CardsPage() {
   }
 
   return (
-    <main className="flex-1 flex flex-col min-h-0">
+    <main className="flex-1 flex flex-col min-h-0 min-w-0">
       {/* Header */}
-      <div className="px-6 pt-4 pb-2 border-b border-border-default">
-        <div className="flex items-center justify-between gap-4">
+      <div className="px-2 pt-3 pb-2 border-b border-border-default sm:px-6 sm:pt-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-4">
           <h1 className="text-[1.5em] font-bold">Cards</h1>
           <div className="flex items-center gap-2">
             <select
@@ -274,7 +274,7 @@ export default function CardsPage() {
                 setSelectedDatasetUuid(e.target.value);
                 setPage(0);
               }}
-              className="px-3 py-1.5 rounded-lg border border-border-default bg-bg-card text-sm"
+              className="max-w-[50vw] truncate px-3 py-1.5 rounded-lg border border-border-default bg-bg-card text-sm"
             >
               {datasets.map((ds) => (
                 <option key={ds.info.uuid} value={ds.info.uuid}>
@@ -301,7 +301,7 @@ export default function CardsPage() {
 
         {/* Dataset info */}
         {selectedDataset && (
-          <div className="flex items-center gap-4 mt-1 text-xs text-text-secondary">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-xs text-text-secondary">
             <span>{selectedDataset.info.visibility}</span>
             <span>{selectedDataset.card_count} cards</span>
             {selectedDataset.info.sync_url && (
@@ -313,12 +313,12 @@ export default function CardsPage() {
         )}
 
         {/* Tabs */}
-        <div className="flex gap-1 mt-3">
+        <div className="flex gap-0.5 mt-3 overflow-x-auto sm:gap-1">
           {(["cards", "search", "review", "tags", "online", "advanced"] as TabId[]).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-4 py-1.5 rounded-t-lg text-sm transition-colors ${
+              className={`shrink-0 whitespace-nowrap px-2.5 py-1 rounded-t-lg text-xs transition-colors sm:px-4 sm:py-1.5 sm:text-sm ${
                 activeTab === tab
                   ? "bg-bg-card text-text-primary border-b-2 border-accent-blue"
                   : "text-text-secondary hover:text-text-primary"
@@ -336,7 +336,7 @@ export default function CardsPage() {
       </div>
 
       {error && (
-        <div className="mx-6 mt-2 p-2 rounded bg-red-500/10 text-red-500 text-sm">
+        <div className="mx-2 mt-2 p-2 rounded bg-red-500/10 text-red-500 text-sm sm:mx-6">
           {error}
           <button onClick={() => setError(null)} className="ml-2 underline">
             dismiss
@@ -350,7 +350,7 @@ export default function CardsPage() {
         {activeTab === "cards" && (
           <div className="flex flex-col h-full">
             {/* Toolbar */}
-            <div className="px-6 py-2 flex items-center gap-2 border-b border-border-default">
+            <div className="px-2 py-2 flex flex-wrap items-center gap-2 border-b border-border-default sm:px-6">
               <div className="relative flex-1 max-w-xs">
                 <Search
                   size={14}
@@ -392,7 +392,7 @@ export default function CardsPage() {
             </div>
 
             {/* Card list */}
-            <div className="flex-1 overflow-y-auto px-6 py-2">
+            <div className="flex-1 overflow-y-auto px-2 py-2 sm:px-6">
               {cards.length === 0 ? (
                 <p className="text-text-secondary text-center py-8">
                   No cards found. Click "Add Card" to create one.
@@ -402,14 +402,14 @@ export default function CardsPage() {
                   {cards.map((card) => (
                     <div
                       key={card.uuid}
-                      className={`w-full flex items-center gap-3 p-3 rounded-lg hover:bg-mid-gray/10 cursor-pointer ${familiarityColor(card.familiarity)}`}
+                      className={`w-full flex items-center gap-2 p-2 rounded-lg hover:bg-mid-gray/10 cursor-pointer sm:gap-3 sm:p-3 ${familiarityColor(card.familiarity)}`}
                       onClick={() => {
                         const selectedDataset = datasets.find((ds) => ds.info.uuid === selectedDatasetUuid);
                         openCardEditor(selectedDatasetUuid, card, () => loadCards(), undefined, selectedDataset?.info.name);
                       }}
                     >
                       <div className="flex-1 min-w-0">
-                        <p className="text-2xl font-medium truncate">
+                        <p className="text-lg font-medium truncate sm:text-2xl">
                           {card.question || "(empty question)"}
                         </p>
                       </div>
@@ -424,7 +424,7 @@ export default function CardsPage() {
 
             {/* Pagination */}
             {totalPages > 1 && (
-              <div className="px-6 py-2 flex items-center justify-between border-t border-border-default">
+              <div className="px-2 py-2 flex items-center justify-between border-t border-border-default sm:px-6">
                 <span className="text-xs text-text-secondary">
                   {totalCards} cards total
                 </span>
@@ -456,7 +456,7 @@ export default function CardsPage() {
         {activeTab === "search" && (
           <div className="flex flex-col h-full">
             {/* Search bar */}
-            <div className="px-6 py-3 flex items-center gap-2 border-b border-border-default">
+            <div className="px-2 py-3 flex flex-wrap items-center gap-2 border-b border-border-default sm:px-6">
               <div className="relative flex-1 max-w-md">
                 <Search
                   size={16}
@@ -500,7 +500,7 @@ export default function CardsPage() {
             </div>
 
             {/* Search results */}
-            <div className="flex-1 overflow-y-auto px-6 py-3">
+            <div className="flex-1 overflow-y-auto px-2 py-3 sm:px-6">
               {globalSearchResults.length === 0 ? (
                 <div className="text-center py-12">
                   <Search size={32} className="mx-auto text-text-tertiary mb-3" />
@@ -575,7 +575,7 @@ export default function CardsPage() {
 
         {/* Review tab */}
         {activeTab === "review" && (
-          <div className="flex flex-col items-center justify-center h-full p-6">
+          <div className="flex flex-col items-center justify-center h-full p-3 sm:p-6">
             {reviewCard ? (
               <div className="w-full max-w-lg">
                 {/* Card display */}
@@ -682,7 +682,7 @@ export default function CardsPage() {
 
         {/* Tags tab */}
         {activeTab === "tags" && (
-          <div className="p-6 overflow-y-auto h-full">
+          <div className="p-3 overflow-y-auto h-full sm:p-6">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold">Tags</h2>
               <button
@@ -743,7 +743,7 @@ export default function CardsPage() {
 
         {/* Online tab */}
         {activeTab === "online" && (
-          <div className="p-6 overflow-y-auto h-full">
+          <div className="p-3 overflow-y-auto h-full sm:p-6">
             <h2 className="text-lg font-semibold mb-2">Online Card System</h2>
             <p className="text-text-secondary text-sm mb-4">
               Access your cards online at{" "}
@@ -838,7 +838,7 @@ function AdvancedTab({
   }, [loadDirs]);
 
   return (
-    <div className="p-6 overflow-y-auto h-full space-y-6">
+    <div className="p-3 overflow-y-auto h-full space-y-6 sm:p-6">
       {/* Locations - moved to top */}
       <section>
         <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">

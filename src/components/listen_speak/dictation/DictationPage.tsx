@@ -5,7 +5,7 @@
  * this file only handles rendering.
  */
 
-import { useState, useEffect, useMemo, useSyncExternalStore } from "react";
+import { useState, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
 import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui/react";
 import { RefreshCw, Trash2, Database, List, Target, CheckCircle, FolderPlus, Folder, Link2, Pencil, Save, HelpCircle } from "lucide-react";
@@ -24,8 +24,22 @@ import { logInfo, logError } from "@/lib/logger";
 
 const getUUID = () => crypto.randomUUID().replaceAll("-", "");
 
-export default function DictationPage() {
+export default function DictationPage({ active = true }: { active?: boolean }) {
     const d = useDictationData();
+
+    // Pages are kept mounted and toggled via `display`, so the initial dataset
+    // load happens once at app startup. Re-fetch whenever this tab becomes the
+    // active view, otherwise datasets synced/imported elsewhere never show up.
+    const wasActive = useRef(active);
+    const { loadDatasets, loadLocations } = d;
+    useEffect(() => {
+        if (active && !wasActive.current) {
+            loadDatasets();
+            loadLocations();
+        }
+        wasActive.current = active;
+    }, [active, loadDatasets, loadLocations]);
+
     const [adminMode, setAdminMode] = useState(false);
     const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
     // Media-list view/edit mode toggle (view mode hides players, edit mode shows source/note fields).

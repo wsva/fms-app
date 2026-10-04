@@ -4,7 +4,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
-import { Download, RefreshCw, Upload, CloudOff } from "lucide-react";
+import { Download, RefreshCw, Upload, CloudOff, Search, ChevronDown } from "lucide-react";
+import { logInfo, logError } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
 // Types (mirror the PC REST API + sync commands)
@@ -33,9 +34,22 @@ interface SyncProgress {
   phase: "download" | "extract" | "done";
 }
 
-interface PcSettings {
+// A discovered PC returned by the `pc_discover` command.
+interface PcCandidate {
+  url: string;
+  source: string; // "lan" | "tailscale" | "saved"
+  name: string;
+}
+
+// Subset of the global settings this page needs (mirrors settings.rs).
+interface GlobalSettings {
+  ollama_url: string;
   pc_url: string;
   pc_token: string;
+  selected_model: string;
+  model_dir: string;
+  model_unload_timeout: unknown;
+  onboarding_completed: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -44,7 +58,16 @@ interface PcSettings {
 
 export default function DatasetsSyncPage() {
   const [mounted, setMounted] = useState(false);
-  const [pc, setPc] = useState<PcSettings>({ pc_url: "", pc_token: "" });
+  const [global, setGlobal] = useState<GlobalSettings | null>(null);
+
+  // PC connection / discovery state.
+  const [candidates, setCandidates] = useState<PcCandidate[]>([]);
+  const [discovering, setDiscovering] = useState(false);
+  const [showManual, setShowManual] = useState(false);
+  const [manualUrl, setManualUrl] = useState("");
+  const [manualToken, setManualToken] = useState("");
+
+  // Dataset + sync state.
   const [pcDatasets, setPcDatasets] = useState<PcDataset[]>([]);
   const [syncState, setSyncState] = useState<Record<string, SyncStateEntry>>({});
   const [pending, setPending] = useState(0);
@@ -54,6 +77,25 @@ export default function DatasetsSyncPage() {
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState<Record<string, SyncProgress>>({});
   const [message, setMessage] = useState<string>("");
+
+  const pcUrl = (global?.pc_url ?? "").trim();
+  const pcToken = global?.pc_token ?? "";
+
+  // ---- Loaders ----------------------------------------------------------
+
+  const loadSettings = useCallback(async () => {
+    if (!isTauri()) return null;
+    try {
+      const g = await invoke<GlobalSettings>("settings_get_global");
+      setGlobal(g);
+      setManualUrl(g.pc_url ?? "");
+      setManualToken(g.pc_token ?? "");
+      return g;
+    } catch (e) {
+      logError(`Failed to load settings: ${String(e)}`, "datasets");
+      return null;
+    }
+  }, []);
 
   const loadLocalState = useCallback(async () => {
     if (!isTauri()) return;
@@ -67,22 +109,12 @@ export default function DatasetsSyncPage() {
       setSyncState(map);
       setPending(count);
     } catch (e) {
-      console.error("Failed to load sync state:", e);
-    }
-  }, []);
-
-  const loadPcSettings = useCallback(async () => {
-    if (!isTauri()) return;
-    try {
-      const g = await invoke<{ pc_url: string; pc_token: string }>("settings_get_global");
-      setPc({ pc_url: g.pc_url ?? "", pc_token: g.pc_token ?? "" });
-    } catch (e) {
-      console.error("Failed to load PC settings:", e);
+      logError(`Failed to load sync state: ${String(e)}`, "datasets");
     }
   }, []);
 
   const fetchPcDatasets = useCallback(async () => {
-    if (!pc.pc_url.trim()) {
+    if (!pcUrl) {
       setPcDatasets([]);
       setListError("");
       return;
@@ -91,24 +123,65 @@ export default function DatasetsSyncPage() {
     setListError("");
     try {
       // Native command hits the PC with reqwest — no WebView cross-origin fetch.
-      const data = await invoke<PcDataset[]>("pc_list_datasets", {
-        pcUrl: pc.pc_url,
-        pcToken: pc.pc_token,
-      });
+      const data = await invoke<PcDataset[]>("pc_list_datasets", { pcUrl, pcToken });
       setPcDatasets(data);
     } catch (e) {
-      setListError(`Cannot reach PC at ${pc.pc_url}. Check Settings › Discover PC.`);
+      setListError(`Cannot reach PC at ${pcUrl}.`);
       setPcDatasets([]);
     } finally {
       setLoadingList(false);
     }
-  }, [pc]);
+  }, [pcUrl, pcToken]);
+
+  // ---- Discovery + connection ------------------------------------------
+
+  const discover = useCallback(async () => {
+    if (!isTauri()) return;
+    setDiscovering(true);
+    try {
+      const res = await invoke<PcCandidate[]>("pc_discover", { timeoutMs: 2500 });
+      setCandidates(res);
+      if (res.length === 0) logInfo("No FmS PC found on this network.", "datasets");
+    } catch (e) {
+      logError(`Discovery failed: ${String(e)}`, "datasets");
+      setCandidates([]);
+    } finally {
+      setDiscovering(false);
+    }
+  }, []);
+
+  // Persist pc_url (and optionally pc_token) to global settings so the sync
+  // commands (which read settings on the backend) can resolve the target PC.
+  const savePc = useCallback(
+    async (url: string, token?: string) => {
+      if (!global) return;
+      const next: GlobalSettings = { ...global, pc_url: url };
+      if (token !== undefined) next.pc_token = token;
+      setGlobal(next);
+      setManualUrl(url);
+      if (token !== undefined) setManualToken(token);
+      try {
+        await invoke("settings_set_global", { global: next });
+        setMessage(url ? `Connected to ${url}.` : "Disconnected.");
+      } catch (e) {
+        logError(`Failed to save PC url: ${String(e)}`, "datasets");
+        setMessage(`Failed to save PC address: ${String(e)}`);
+      }
+    },
+    [global],
+  );
+
+  // ---- Lifecycle --------------------------------------------------------
 
   useEffect(() => {
     setMounted(true);
-    loadPcSettings();
-    loadLocalState();
-  }, [loadPcSettings, loadLocalState]);
+    (async () => {
+      const g = await loadSettings();
+      loadLocalState();
+      // Auto-discover on open when no PC is connected yet.
+      if (!g || !(g.pc_url ?? "").trim()) discover();
+    })();
+  }, [loadSettings, loadLocalState, discover]);
 
   useEffect(() => {
     fetchPcDatasets();
@@ -138,6 +211,8 @@ export default function DatasetsSyncPage() {
       progressReq.current?.();
     };
   }, []);
+
+  // ---- Actions ----------------------------------------------------------
 
   async function handleSync(uuid: string) {
     if (busyUuid) return;
@@ -188,7 +263,7 @@ export default function DatasetsSyncPage() {
         <button
           className="ml-auto inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50"
           onClick={handleUpload}
-          disabled={uploading || pending === 0 || !pc.pc_url}
+          disabled={uploading || pending === 0 || !pcUrl}
         >
           <Upload size={14} />
           {uploading ? "Uploading…" : `Upload changes${pending > 0 ? ` (${pending})` : ""}`}
@@ -196,9 +271,9 @@ export default function DatasetsSyncPage() {
         <button
           className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50"
           onClick={() => {
-            loadPcSettings();
-            fetchPcDatasets();
+            loadSettings();
             loadLocalState();
+            fetchPcDatasets();
           }}
           disabled={loadingList}
         >
@@ -207,13 +282,79 @@ export default function DatasetsSyncPage() {
         </button>
       </div>
 
+      {/* PC connection selector */}
+      <div className="shrink-0 flex flex-col gap-2 p-3 rounded-lg border border-border-default bg-bg-card">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-medium shrink-0">PC</span>
+          <select
+            className="flex-1 min-w-0 px-2 py-1.5 text-sm rounded-md border border-border-light bg-bg-input text-text-primary"
+            value={pcUrl}
+            onChange={(e) => savePc(e.target.value)}
+            disabled={discovering && !pcUrl}
+          >
+            <option value="">{pcUrl ? "Select a PC…" : "Not connected"}</option>
+            {candidates.map((c) => (
+              <option key={c.url} value={c.url}>
+                {c.name} · {c.source}
+              </option>
+            ))}
+            {pcUrl && !candidates.some((c) => c.url === pcUrl) && (
+              <option value={pcUrl}>{pcUrl} · saved</option>
+            )}
+          </select>
+          <button
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50 shrink-0"
+            onClick={discover}
+            disabled={discovering}
+            title="Scan for nearby PCs"
+          >
+            <Search size={14} className={discovering ? "animate-spin" : undefined} />
+            {discovering ? "Scanning…" : "Scan"}
+          </button>
+          <button
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover shrink-0"
+            onClick={() => setShowManual((s) => !s)}
+            title="Enter PC address manually"
+          >
+            <ChevronDown size={14} className={showManual ? "rotate-180 transition-transform" : "transition-transform"} />
+            Manual
+          </button>
+        </div>
+
+        {showManual && (
+          <div className="flex items-center gap-2 flex-wrap pt-1">
+            <input
+              type="text"
+              className="flex-1 min-w-[12rem] px-3 py-1.5 text-sm border border-border-light rounded-md bg-bg-input text-text-primary"
+              value={manualUrl}
+              onChange={(e) => setManualUrl(e.target.value)}
+              placeholder="http://192.168.1.20:35711"
+            />
+            <input
+              type="text"
+              className="w-32 px-3 py-1.5 text-sm border border-border-light rounded-md bg-bg-input text-text-primary"
+              value={manualToken}
+              onChange={(e) => setManualToken(e.target.value)}
+              placeholder="token (opt.)"
+            />
+            <button
+              className="inline-flex items-center px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
+              onClick={() => savePc(manualUrl.trim(), manualToken)}
+              disabled={!manualUrl.trim()}
+            >
+              Connect
+            </button>
+          </div>
+        )}
+      </div>
+
       {!mounted ? null : !isTauri() ? (
         <p className="text-text-secondary">Datasets are only available in the app.</p>
-      ) : !pc.pc_url ? (
+      ) : !pcUrl ? (
         <div className="flex flex-col items-center gap-2 py-12 text-text-secondary">
           <CloudOff size={32} />
-          <p>No PC connected.</p>
-          <p className="text-sm">Open Settings and tap “Discover PC” to pair with your computer.</p>
+          <p>{discovering ? "Scanning for nearby PCs…" : "Not connected to a PC."}</p>
+          <p className="text-sm">Pick a PC from the selector above, tap Scan, or use Manual address.</p>
         </div>
       ) : (
         <>
