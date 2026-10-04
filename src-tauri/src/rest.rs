@@ -128,6 +128,11 @@ async fn datasets_list(State(st): State<RestState>) -> Response {
     let settings = st.app.state::<SettingsState>();
     let items: Vec<DatasetListItem> = dataset::list_datasets(&settings)
         .into_iter()
+        // Raw-import folders (a directory with media/ but no info.json) carry an
+        // empty uuid and cannot be resolved by the manifest/snapshot endpoints,
+        // so they are not syncable from the phone. Skip them rather than offer
+        // dead entries (which also collapse into duplicate keys in the UI).
+        .filter(|d| !d.info.uuid.is_empty())
         .map(|d| DatasetListItem {
             uuid: d.info.uuid,
             name: d.info.name,

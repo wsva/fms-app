@@ -336,6 +336,8 @@ pub fn run() {
             sync::writeback_flush,
             sync::writeback_pending_count,
             sync::dataset_sync_state,
+            sync::pc_check_status,
+            sync::pc_list_datasets,
             discover::pc_discover,
         ])
         .manage(workspace::WorkspaceState::new())
@@ -628,6 +630,8 @@ pub fn run() {
             sync::writeback_flush,
             sync::writeback_pending_count,
             sync::dataset_sync_state,
+            sync::pc_check_status,
+            sync::pc_list_datasets,
             discover::pc_discover,
         ])
         .manage(workspace::WorkspaceState::new())

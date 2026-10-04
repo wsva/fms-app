@@ -82,8 +82,7 @@ export default function DatasetsSyncPage() {
   }, []);
 
   const fetchPcDatasets = useCallback(async () => {
-    const base = pc.pc_url.trim().replace(/\/+$/, "");
-    if (!base) {
+    if (!pc.pc_url.trim()) {
       setPcDatasets([]);
       setListError("");
       return;
@@ -91,14 +90,14 @@ export default function DatasetsSyncPage() {
     setLoadingList(true);
     setListError("");
     try {
-      const headers: Record<string, string> = {};
-      if (pc.pc_token) headers["x-fms-token"] = pc.pc_token;
-      const res = await fetch(`${base}/api/v1/datasets`, { headers });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as PcDataset[];
+      // Native command hits the PC with reqwest — no WebView cross-origin fetch.
+      const data = await invoke<PcDataset[]>("pc_list_datasets", {
+        pcUrl: pc.pc_url,
+        pcToken: pc.pc_token,
+      });
       setPcDatasets(data);
     } catch (e) {
-      setListError(`Cannot reach PC at ${base}. Check Settings › Discover PC.`);
+      setListError(`Cannot reach PC at ${pc.pc_url}. Check Settings › Discover PC.`);
       setPcDatasets([]);
     } finally {
       setLoadingList(false);
@@ -233,7 +232,7 @@ export default function DatasetsSyncPage() {
             {pcDatasets.length === 0 && !loadingList && (
               <p className="text-sm text-text-tertiary">No datasets available on the PC.</p>
             )}
-            {pcDatasets.map((ds) => {
+            {pcDatasets.map((ds, i) => {
               const st = syncState[ds.uuid];
               const prog = progress[ds.uuid];
               const pct =
@@ -242,7 +241,7 @@ export default function DatasetsSyncPage() {
                   : 0;
               return (
                 <div
-                  key={ds.uuid}
+                  key={ds.uuid || `${ds.name}-${i}`}
                   className="flex flex-col gap-2 p-3 rounded-lg border border-border-default bg-bg-card"
                 >
                   <div className="flex items-center gap-3">

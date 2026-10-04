@@ -13,7 +13,7 @@
 //!   in a `writeback_queue` table and flushed to the PC in batches.
 
 use std::io::{BufReader, Write as _};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
@@ -51,6 +51,23 @@ fn with_token(req: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuil
         req
     } else {
         req.header("x-fms-token", token)
+    }
+}
+
+/// Effective PC base URL: a caller-supplied override (e.g. a typed-but-unsaved
+/// address in Settings) wins if non-empty; otherwise the persisted setting.
+fn resolve_pc_url(settings: &SettingsState, override_url: Option<&str>) -> String {
+    match override_url.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(u) => u.trim_end_matches('/').to_string(),
+        None => pc_base(settings),
+    }
+}
+
+/// Effective PC token: caller override if non-empty, else the persisted setting.
+fn resolve_pc_token(settings: &SettingsState, override_token: Option<&str>) -> String {
+    match override_token.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(t) => t.to_string(),
+        None => pc_token(settings),
     }
 }
 
@@ -412,4 +429,92 @@ pub async fn writeback_pending_count(settings: State<'_, SettingsState>) -> Resu
         .query_row("SELECT COUNT(*) FROM writeback_queue", [], |r| r.get(0))
         .unwrap_or(0);
     Ok(n)
+}
+
+/// Ping the PC's `GET /api/v1/status` endpoint from native Rust.
+///
+/// Used by the frontend instead of a `fetch()` so the WebView never issues a
+/// cross-origin request (which would be blocked by CORS). Reads `pc_url` /
+/// `pc_token` straight from settings and returns the PC's raw status JSON:
+/// `{ ok, app_name, dataset_count, version }`.
+#[tauri::command]
+pub async fn pc_check_status(
+    settings: State<'_, SettingsState>,
+    pc_url: Option<String>,
+    pc_token: Option<String>,
+) -> Result<Value, String> {
+    let base = resolve_pc_url(&settings, pc_url.as_deref());
+    log::info!(
+        "[sync] pc_check_status -> {}/api/v1/status",
+        if base.is_empty() { "<unset>" } else { &base }
+    );
+    if base.is_empty() {
+        return Err("pc_url is not set — use Settings › Discover PC".to_string());
+    }
+    let token = resolve_pc_token(&settings, pc_token.as_deref());
+    let result = async {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| e.to_string())?;
+        with_token(client.get(format!("{base}/api/v1/status")), &token)
+            .send()
+            .await
+            .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?
+            .error_for_status()
+            .map_err(|e| e.to_string())?
+            .json::<Value>()
+            .await
+            .map_err(|e| format!("Unexpected response from PC: {e}"))
+    }
+    .await;
+    match &result {
+        Ok(v) => log::info!("[sync] pc_check_status OK: {v}"),
+        Err(e) => log::error!("[sync] pc_check_status FAILED: {e}"),
+    }
+    result
+}
+
+/// Fetch the PC's dataset list (`GET /api/v1/datasets`) from native Rust.
+///
+/// Same CORS-avoidance rationale as [`pc_check_status`]; returns a JSON array
+/// of `{ uuid, name, updated, media_count, status }`.
+#[tauri::command]
+pub async fn pc_list_datasets(
+    settings: State<'_, SettingsState>,
+    pc_url: Option<String>,
+    pc_token: Option<String>,
+) -> Result<Value, String> {
+    let base = resolve_pc_url(&settings, pc_url.as_deref());
+    log::info!(
+        "[sync] pc_list_datasets -> {}/api/v1/datasets",
+        if base.is_empty() { "<unset>" } else { &base }
+    );
+    if base.is_empty() {
+        return Err("pc_url is not set — use Settings › Discover PC".to_string());
+    }
+    let token = resolve_pc_token(&settings, pc_token.as_deref());
+    let result = async {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(20))
+            .build()
+            .map_err(|e| e.to_string())?;
+        with_token(client.get(format!("{base}/api/v1/datasets")), &token)
+            .send()
+            .await
+            .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?
+            .error_for_status()
+            .map_err(|e| e.to_string())?
+            .json::<Value>()
+            .await
+            .map_err(|e| format!("Unexpected response from PC: {e}"))
+    }
+    .await;
+    match &result {
+        Ok(v) => log::info!("[sync] pc_list_datasets OK ({} bytes of JSON)", v.to_string().len()),
+        Err(e) => log::error!("[sync] pc_list_datasets FAILED: {e}"),
+    }
+    result
 }

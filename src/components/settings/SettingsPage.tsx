@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isMobileApp } from "@/lib/platform";
+import { logInfo, logError } from "@/lib/logger";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -177,21 +178,31 @@ export default function SettingsPage() {
   }
 
   async function handleRecheck() {
-    const url = (globalSettings?.pc_url ?? "").trim().replace(/\/+$/, "");
-    if (!url) return;
+    const url = (globalSettings?.pc_url ?? "").trim();
+    if (!url) {
+      logInfo("Re-check skipped: pc_url is empty (set or discover a PC first).", "settings");
+      setDiscoverMsg("No PC address set. Enter or discover a PC first.");
+      return;
+    }
     setChecking(true);
     setDiscoverMsg("");
+    logInfo(`Re-check: querying ${url} ...`, "settings");
     try {
-      const headers: Record<string, string> = {};
-      if (globalSettings?.pc_token) headers["x-fms-token"] = globalSettings.pc_token;
-      const res = await fetch(`${url}/api/v1/status`, { headers });
-      const v = await res.json().catch(() => null);
-      if (res.ok && v && v.ok) {
+      // Native command hits the PC with reqwest (CORS-free). We pass the current
+      // field values so Re-check tests the typed address even before Save.
+      const v = await invoke<{ ok?: boolean; app_name?: string; dataset_count?: number }>(
+        "pc_check_status",
+        { pcUrl: url, pcToken: globalSettings?.pc_token ?? "" },
+      );
+      if (v?.ok) {
+        logInfo(`Re-check: connected (${v.app_name ?? "fms-app"}, ${v.dataset_count ?? 0} datasets).`, "settings");
         setDiscoverMsg(`Connected · ${v.app_name ?? "fms-app"} · ${v.dataset_count ?? 0} dataset(s).`);
       } else {
-        setDiscoverMsg(`PC not reachable (HTTP ${res.status}).`);
+        logError("Re-check: PC responded but is not ready.", "settings");
+        setDiscoverMsg("PC responded but is not ready.");
       }
     } catch (e) {
+      logError(`Re-check failed: ${String(e)}`, "settings");
       setDiscoverMsg(`PC not reachable: ${String(e)}`);
     } finally {
       setChecking(false);
