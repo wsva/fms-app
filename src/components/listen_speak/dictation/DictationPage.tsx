@@ -8,7 +8,7 @@
 import { useState, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
 import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui/react";
-import { RefreshCw, Trash2, Database, List, Target, CheckCircle, FolderPlus, Folder, Link2, Pencil, Save, HelpCircle } from "lucide-react";
+import { RefreshCw, Trash2, Database, Target, CheckCircle, FolderPlus, Folder, Link2, Pencil, Save, HelpCircle } from "lucide-react";
 import CueEditor from "./components/CueEditor";
 import WaveformCanvas from "./components/WaveformCanvas";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
@@ -40,7 +40,6 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
         wasActive.current = active;
     }, [active, loadDatasets, loadLocations]);
 
-    const [adminMode, setAdminMode] = useState(false);
     const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
     // Media-list view/edit mode toggle (view mode hides players, edit mode shows source/note fields).
     const [mediaEditMode, setMediaEditMode] = useState(false);
@@ -266,39 +265,46 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 {/* ── Dictation section (cue view) ── */}
                 {!!d.stateMediaUUID && (
                     <div className="flex items-center gap-1">
-                        <Button size="sm" variant={adminMode ? "primary" : "ghost"} aria-label="Toggle detailed mode" isDisabled={d.stateCues.length === 0} onPress={() => setAdminMode(!adminMode)}>
-                            <List size={16} /> Detailed
-                        </Button>
-                        <Button size="sm" variant={d.stateDictMode === "large" ? "primary" : "ghost"} aria-label="Toggle large mode" isDisabled={d.stateCues.length === 0} onPress={() => {
-                            if (d.stateDictMode === "large") { d.setStateDictMode("full"); }
-                            else {
-                                // Jump focus to the first incomplete cue when entering large mode.
-                                const cueList = d.stateCues.filter((cue) => !d.stateDictSuccessSet.has(cue.uuid));
-                                if (cueList.length > 0) d.setStateFocusedCueUUID(cueList[0].uuid);
-                                d.setStateDictMode("large");
-                            }
-                        }}>
-                            <Target size={16} /> Large
-                        </Button>
+                        {/* Large mode is desktop-only: on a phone the focused cue already auto-enlarges
+                            to medium, and text-4xl would eat too much vertical space. */}
+                        {!mobile && (
+                            <Button size="sm" variant={d.stateDictMode === "large" ? "primary" : "ghost"} aria-label="Toggle large mode" isDisabled={d.stateCues.length === 0} onPress={() => {
+                                if (d.stateDictMode === "large") { d.setStateDictMode("full"); }
+                                else {
+                                    // Jump focus to the first incomplete cue when entering large mode.
+                                    const cueList = d.stateCues.filter((cue) => !d.stateDictSuccessSet.has(cue.uuid));
+                                    if (cueList.length > 0) d.setStateFocusedCueUUID(cueList[0].uuid);
+                                    d.setStateDictMode("large");
+                                }
+                            }}>
+                                <Target size={16} /> Large
+                            </Button>
+                        )}
                         <Button size="sm" variant={d.stateDictStatus === "complete" ? "primary" : "ghost"} aria-label="Mark complete" isDisabled={d.stateCues.length === 0} onPress={d.handleDictStatusToggle}>
                             <CheckCircle size={16} /> Complete
                         </Button>
-                        <Tooltip isOpen={helpOpen} onOpenChange={setHelpOpen}>
-                            <Tooltip.Trigger>
-                                <Button size="sm" variant="ghost" aria-label="Keyboard shortcuts" onPress={() => setHelpOpen(true)}>
-                                    <HelpCircle size={16} /> Help
-                                </Button>
-                            </Tooltip.Trigger>
-                            <Tooltip.Content>
-                                <div className="flex flex-col gap-0.5">
-                                    <span>Play Audio: Ctrl+s or double space at the end</span>
-                                    <span>Clear Input: Ctrl+d</span>
-                                    <span>Voice Input: Ctrl+c</span>
-                                    <span>Go to Previous/Next: Ctrl+⬆/⬇</span>
-                                    <span>Show Content/Reference: Ctrl+⬅/➡</span>
-                                </div>
-                            </Tooltip.Content>
-                        </Tooltip>
+                        {/* Keyboard-shortcut help is desktop-only: the Ctrl+ combos need a
+                            hardware keyboard, and the touch equivalents (Clear / Show answer
+                            buttons next to the field, Play and Mic in the cue sidebar) are
+                            already visible on the phone. */}
+                        {!mobile && (
+                            <Tooltip isOpen={helpOpen} onOpenChange={setHelpOpen}>
+                                <Tooltip.Trigger>
+                                    <Button size="sm" variant="ghost" aria-label="Keyboard shortcuts" onPress={() => setHelpOpen(true)}>
+                                        <HelpCircle size={16} /> Help
+                                    </Button>
+                                </Tooltip.Trigger>
+                                <Tooltip.Content>
+                                    <div className="flex flex-col gap-0.5">
+                                        <span>Play Audio: Ctrl+s or double space at the end</span>
+                                        <span>Clear Input: Ctrl+d</span>
+                                        <span>Voice Input: Ctrl+c</span>
+                                        <span>Go to Previous/Next: Ctrl+⬆/⬇</span>
+                                        <span>Show Content/Reference: Ctrl+⬅/➡</span>
+                                    </div>
+                                </Tooltip.Content>
+                            </Tooltip>
+                        )}
                     </div>
                 )}
             </div>
@@ -585,7 +591,14 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                                 )}
 
                                 {d.stateCues.map((cue, i) => (
-                                    <div key={i} data-cue-index={i} className={`rounded-xl border-2 py-1.5 px-2 transition-colors ${d.stateFocusedCueUUID === cue.uuid ? "border-accent" : "border-border-light"} ${cue.deleted ? "bg-error-bg" : d.stateFocusedCueUUID === cue.uuid ? "bg-accent-bg/40" : cue.modified ? "bg-accent-bg/20" : "bg-bg-body"}`}>
+                                    <div key={i} data-cue-index={i} onClick={(e) => {
+                                        const target = e.target as HTMLElement;
+                                        d.setStateFocusedCueUUID(cue.uuid);
+                                        // Don't steal focus from buttons or tip-text selection; only drop the caret into the answer input.
+                                        if (target.closest("button, input, textarea, [data-no-focus]")) return;
+                                        const el = document.getElementById(`d-s-i-${cue.uuid}`) as HTMLInputElement | HTMLTextAreaElement | null;
+                                        if (el) el.focus();
+                                    }} className={`cursor-text rounded-xl border-2 py-1.5 px-2 transition-colors ${d.stateFocusedCueUUID === cue.uuid ? "border-accent" : "border-border-light"} ${cue.deleted ? "bg-error-bg" : d.stateFocusedCueUUID === cue.uuid ? "bg-accent-bg/40" : d.stateDictSuccessSet.has(cue.uuid) ? "bg-success-bg" : cue.modified ? "bg-accent-bg/20" : "bg-bg-body"}`}>
                                         <CueEditor
                                             cue={cue}
                                             media={d.videoRef.current}
@@ -596,18 +609,18 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                                                 : "dictation"
                                             }
                                             isDisabled={d.stateSaving}
-                                            adminMode={adminMode}
                                             onUpdate={(updated) => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === updated.uuid); if (idx !== -1) { draft[idx] = { ...updated, content_original: draft[idx].content_original }; if (updated.modified) d.setStateNeedSave(true); } })}
                                             onExpandStart={() => d.handleExpandStart(cue)}
                                             onExpandEnd={() => d.handleExpandEnd(cue)}
                                             onDelete={() => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === cue.uuid); if (idx !== -1) draft[idx].deleted = true; let n = 1; draft.forEach((item) => { if (!item.deleted) { item.order_num = n++; item.modified = true; } }); d.setStateNeedSave(true); })}
                                             onMergeNext={() => d.updateStateCues((draft) => { const idx = draft.findIndex((c) => c.uuid === cue.uuid); if (idx >= 0 && idx < draft.length - 1) { draft[idx].content += " " + draft[idx + 1].content; draft[idx].end_ms = draft[idx + 1].end_ms; draft[idx + 1].deleted = true; let n = 1; draft.forEach((item) => { if (!item.deleted) { item.order_num = n++; item.modified = true; } }); } d.setStateNeedSave(true); })}
                                             onInsert={(pos: number) => d.updateStateCues((draft) => { const newItem: Cue = { uuid: getUUID(), subtitle_uuid: d.stateSubtitle!.uuid, order_num: 0, start_ms: 0, end_ms: 0, content: "", reference: null }; if (pos < 1) draft.unshift(newItem); else if (pos > draft.length) draft.push(newItem); else draft.splice(pos - 1, 0, newItem); let n = 1; draft.forEach((item) => { if (!item.deleted) { item.order_num = n++; item.modified = true; } }); d.setStateNeedSave(true); })}
-                                            onEdit={() => d.setStateEditingCue(cue.uuid)}
+                                            onEdit={() => { d.setStateEditingCue(cue.uuid); d.setStateFocusedCueUUID(cue.uuid); }}
                                             onDone={() => d.setStateEditingCue(null)}
                                             initialSuccess={d.stateDictSuccessSet.has(cue.uuid)}
                                             onSuccess={d.handleDictSuccess}
                                             onFocusInput={() => d.setStateFocusedCueUUID(cue.uuid)}
+                                            isActive={d.stateFocusedCueUUID === cue.uuid}
                                             onAddToFavorites={() => handleAddToFavorites(cue)}
                                             favoritesDisabled={inFavoritesDataset}
                                             isFavorited={d.favoriteCueUuids.has(cue.uuid)}

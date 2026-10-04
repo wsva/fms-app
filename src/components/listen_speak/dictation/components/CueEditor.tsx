@@ -7,6 +7,10 @@ import { hideWord, playMediaPart, pureContent, splitContent } from "@/lib/listen
 import {
   ArrowLeftToLine,
   ArrowRightToLine,
+  Copy,
+  Eraser,
+  Eye,
+  EyeOff,
   MapPin,
   Mic,
   Pencil,
@@ -45,6 +49,37 @@ function MicButton() {
   );
 }
 
+// ── Copy Button ──────────────────────────────────────────────────────────────
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Tooltip>
+      <Tooltip.Trigger>
+        <Button
+          isIconOnly
+          variant="ghost"
+          size="sm"
+          aria-label="copy"
+          className="shrink-0"
+          onPress={async () => {
+            try {
+              await navigator.clipboard.writeText(text);
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1200);
+            } catch {
+              /* clipboard unavailable */
+            }
+          }}
+        >
+          {copied ? <X size={14} /> : <Copy size={14} />}
+        </Button>
+      </Tooltip.Trigger>
+      <Tooltip.Content>{copied ? "copied" : "copy to clipboard"}</Tooltip.Content>
+    </Tooltip>
+  );
+}
+
 // ── Tip Toggle Component ─────────────────────────────────────────────────────
 
 type TipToggleProps = {
@@ -52,15 +87,16 @@ type TipToggleProps = {
   content: string;
   showContent: boolean;
   onToggle: () => void;
-  size?: "small" | "large";
+  size?: "small" | "medium" | "large";
   className?: string;
 };
 
 function TipToggle({ tip, content, showContent, onToggle, size = "small", className = "" }: TipToggleProps) {
-  const sizeClasses = size === "large" ? "text-2xl" : "font-normal";
+  const sizeClasses = size === "large" ? "text-2xl" : size === "medium" ? "text-xl" : "font-normal";
 
   return (
     <div
+      data-no-focus
       className={`bg-bg-muted rounded-sm px-1 text-text-tertiary ${sizeClasses} w-full cursor-pointer select-text ${className}`}
       onDoubleClick={(e) => {
         // Suppress the default double-click word-selection so it doesn't fight
@@ -77,6 +113,18 @@ function TipToggle({ tip, content, showContent, onToggle, size = "small", classN
 
 // ── Dictation ────────────────────────────────────────────────────────────────
 
+// Shared field styling so the dictation answer input and the edit-mode content
+// input look identical; only the type scale differs per render size.
+type FieldSize = "compact" | "medium" | "large";
+
+function fieldClass(size: FieldSize) {
+  return size === "large"
+    ? "text-4xl font-bold border-b-2 border-b-border-light bg-bg-muted rounded-lg p-2 my-1 w-full shadow-none focus:ring-0 focus:border-b-accent"
+    : size === "medium"
+      ? "text-2xl font-bold border-b-2 border-b-border-light bg-bg-muted rounded-lg p-2 my-1 w-full shadow-none focus:ring-0 focus:border-b-accent"
+      : "text-xl font-bold border-b-2 border-b-border-light bg-bg-muted rounded-none p-0 my-1 w-full shadow-none focus:ring-0 focus:border-b-accent";
+}
+
 type DictationProps = {
   cue: Cue;
   media: HTMLMediaElement | null;
@@ -84,8 +132,8 @@ type DictationProps = {
   setStateSuccess: React.Dispatch<React.SetStateAction<boolean>>;
   onSuccess?: (uuid: string, success: boolean) => void;
   onFocusInput?: () => void;
-  mode: "compact" | "large";
-  adminMode: boolean;
+  mode: FieldSize;
+  isActive: boolean;
 };
 
 function Dictation({
@@ -96,7 +144,7 @@ function Dictation({
   onSuccess,
   onFocusInput,
   mode,
-  adminMode,
+  isActive,
 }: DictationProps) {
   const [stateInput, setStateInput] = useState<string>("");
   const [stateShowContent, setStateShowContent] = useState(false);
@@ -137,137 +185,107 @@ function Dictation({
     return tipParts.map((v) => v.content).join("");
   };
 
+  const showTextArea = mode === "large" || mode === "medium";
+  const inputClassName = fieldClass(mode);
+  const tipSize = mode === "large" ? "large" : mode === "medium" ? "medium" : "small";
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const content = e.target.value;
+    if (content.endsWith("  ")) {
+      if (!!media) {
+        if (media.paused) playMediaPart(cue, media, false);
+        else media.pause();
+      }
+    } else {
+      setStateInput(content);
+      if (!stateSuccess && isSuccess(content)) {
+        setStateSuccess(true);
+        onSuccess?.(cue.uuid, true);
+      }
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    // Ctrl+←/→ toggles the content/reference tips of this focused cue.
+    if (e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      setStateShowContent((v) => !v);
+      setStateShowReference((v) => !v);
+      e.preventDefault();
+      return;
+    }
+    if (!media) return;
+    if (e.ctrlKey && "sS".includes(e.key)) {
+      if (media.paused) playMediaPart(cue, media, false);
+      else media.pause();
+      e.preventDefault();
+    }
+    if (e.ctrlKey && "dD".includes(e.key)) {
+      setStateInput("");
+      e.preventDefault();
+    }
+  };
+
+  // Same effect as the Ctrl+←/→ shortcut, exposed as a tap target: on a phone there is
+  // no keyboard and hover-only tooltips ("Double-click to toggle content/tip") are
+  // unreachable, so clearing and revealing the answer need first-class controls.
+  const answerShown = stateShowContent || stateShowReference;
+  const toggleAnswer = () => {
+    setStateShowContent(!stateShowContent);
+    setStateShowReference(!stateShowReference);
+  };
+
   return (
-    <div>
-      {mode === "compact" ? (
-        <div className="flex flex-col items-start justify-center w-full gap-1">
-          <div className="flex flex-row items-center justify-start w-full gap-1">
-            <Input
-              aria-label="input answer"
-              autoComplete="one-time-code"
-              id={`d-s-i-${cue.uuid}`}
-              className="text-xl font-bold border-b-2 border-b-border-light bg-bg-muted rounded-none p-0 my-1 w-full shadow-none focus:ring-0 focus:border-b-accent"
-              value={stateInput}
-              onFocus={onFocusInput}
-              onChange={(e) => {
-                const content = e.target.value;
-                if (content.endsWith("  ")) {
-                  if (!!media) {
-                    if (media.paused) playMediaPart(cue, media, false);
-                    else media.pause();
-                  }
-                } else {
-                  setStateInput(content);
-                  if (!stateSuccess && isSuccess(content)) {
-                    setStateSuccess(true);
-                    onSuccess?.(cue.uuid, true);
-                  }
-                }
-              }}
-              onKeyDown={(e) => {
-                // Ctrl+←/→ toggles the content/reference tips of this focused cue.
-                if (e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
-                  setStateShowContent((v) => !v);
-                  setStateShowReference((v) => !v);
-                  e.preventDefault();
-                  return;
-                }
-                if (!media) return;
-                if (e.ctrlKey && "sS".includes(e.key)) {
-                  if (media.paused) playMediaPart(cue, media, false);
-                  else media.pause();
-                  e.preventDefault();
-                }
-                if (e.ctrlKey && "dD".includes(e.key)) {
-                  setStateInput("");
-                  e.preventDefault();
-                }
-              }}
-            />
-          </div>
-          <TipToggle
-            tip={getTip(stateInput, cue.content)}
-            content={cue.content}
-            showContent={stateShowContent}
-            onToggle={() => setStateShowContent(!stateShowContent)}
-            size="small"
-          />
-          {!!cue.reference && cue.reference !== cue.content && (
-            <TipToggle
-              tip={getTip(stateInput, cue.reference)}
-              content={cue.reference}
-              showContent={stateShowReference}
-              onToggle={() => setStateShowReference(!stateShowReference)}
-              size="small"
-              className="mt-1"
-            />
-          )}
-        </div>
+    <div className="flex flex-col items-start justify-center w-full gap-1">
+      {showTextArea ? (
+        <TextArea
+          aria-label="input answer"
+          autoComplete="one-time-code"
+          id={`d-s-i-${cue.uuid}`}
+          className={inputClassName}
+          value={stateInput}
+          rows={mode === "large" ? 5 : 3}
+          onFocus={onFocusInput}
+          onChange={handleChange}
+          onKeyDown={handleKeyDown}
+        />
       ) : (
-        <div className="flex flex-col items-start justify-center w-full gap-1">
-          <div className="flex flex-row items-center justify-start w-full gap-1">
-            <TextArea
-              aria-label="input answer"
-              autoComplete="one-time-code"
-              id={`d-s-i-${cue.uuid}`}
-              className="text-4xl font-bold border-b-2 border-b-border-light bg-bg-muted rounded-lg p-2 my-1 w-full shadow-none focus:ring-0 focus:border-b-accent"
-              value={stateInput}
-              rows={5}
-              onFocus={onFocusInput}
-              onChange={(e) => {
-                const content = e.target.value;
-                if (content.endsWith("  ")) {
-                  if (!!media) {
-                    if (media.paused) playMediaPart(cue, media, false);
-                    else media.pause();
-                  }
-                } else {
-                  setStateInput(content);
-                  if (!stateSuccess && isSuccess(content)) {
-                    setStateSuccess(true);
-                    onSuccess?.(cue.uuid, true);
-                  }
-                }
-              }}
-              onKeyDown={(e) => {
-                // Ctrl+←/→ toggles the content/reference tips of this focused cue.
-                if (e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
-                  setStateShowContent((v) => !v);
-                  setStateShowReference((v) => !v);
-                  e.preventDefault();
-                  return;
-                }
-                if (!media) return;
-                if (e.ctrlKey && "sS".includes(e.key)) {
-                  if (media.paused) playMediaPart(cue, media, false);
-                  else media.pause();
-                  e.preventDefault();
-                }
-                if (e.ctrlKey && "dD".includes(e.key)) {
-                  setStateInput("");
-                  e.preventDefault();
-                }
-              }}
-            />
-          </div>
-          <TipToggle
-            tip={getTip(stateInput, cue.content)}
-            content={cue.content}
-            showContent={stateShowContent}
-            onToggle={() => setStateShowContent(!stateShowContent)}
-            size="large"
-          />
-          {!!cue.reference && cue.reference !== cue.content && (
-            <TipToggle
-              tip={getTip(stateInput, cue.reference)}
-              content={cue.reference}
-              showContent={stateShowReference}
-              onToggle={() => setStateShowReference(!stateShowReference)}
-              size="large"
-              className="mt-1"
-            />
-          )}
+        <Input
+          aria-label="input answer"
+          autoComplete="one-time-code"
+          id={`d-s-i-${cue.uuid}`}
+          className={inputClassName}
+          value={stateInput}
+          onFocus={onFocusInput}
+          onChange={handleChange}
+          onKeyDown={handleKeyDown}
+        />
+      )}
+      {isActive && (
+        <div className="flex items-center gap-1 flex-wrap">
+          <Button variant="outline" size="sm" isDisabled={!stateInput} className="h-6 px-2 py-0 text-xs" onPress={() => setStateInput("")}>
+            <Eraser size={12} /> Clear
+          </Button>
+          <Button variant={answerShown ? "primary" : "outline"} size="sm" className="h-6 px-2 py-0 text-xs" onPress={toggleAnswer}>
+            {answerShown ? <EyeOff size={12} /> : <Eye size={12} />} {answerShown ? "Hide answer" : "Show answer"}
+          </Button>
         </div>
+      )}
+      <TipToggle
+        tip={getTip(stateInput, cue.content)}
+        content={cue.content}
+        showContent={stateShowContent}
+        onToggle={() => setStateShowContent(!stateShowContent)}
+        size={tipSize}
+      />
+      {!!cue.reference && cue.reference !== cue.content && (
+        <TipToggle
+          tip={getTip(stateInput, cue.reference)}
+          content={cue.reference}
+          showContent={stateShowReference}
+          onToggle={() => setStateShowReference(!stateShowReference)}
+          size={tipSize}
+          className="mt-1"
+        />
       )}
     </div>
   );
@@ -281,7 +299,6 @@ export type CueEditorProps = {
 
   allowEdit: boolean;
   mode: "dictation" | "edit" | "dictation_edit" | "dictation_large";
-  adminMode: boolean;
 
   isDisabled: boolean;
   onUpdate: (updated: Cue) => void;
@@ -296,6 +313,9 @@ export type CueEditorProps = {
   initialSuccess?: boolean;
   onSuccess?: (uuid: string, success: boolean) => void;
   onFocusInput?: () => void;
+  /** When true, this is the active (focused) cue: the end button column is
+   *  shown and the editor renders at a slightly larger size. */
+  isActive?: boolean;
   onAddToFavorites?: () => void;
   /** When true, the "add to favorites" button is shown but disabled (e.g. the
    *  current dataset already IS the Favorites dataset). */
@@ -310,7 +330,6 @@ export default function CueEditor({
   media,
   allowEdit,
   mode,
-  adminMode,
   isDisabled,
   onUpdate,
   onExpandStart,
@@ -323,6 +342,7 @@ export default function CueEditor({
   initialSuccess,
   onSuccess,
   onFocusInput,
+  isActive,
   onAddToFavorites,
   favoritesDisabled,
   isFavorited,
@@ -341,7 +361,7 @@ export default function CueEditor({
 
   const timeEditorEl = () => {
     return (
-      <InputGroup className="w-xs shadow-none rounded-xl bg-bg-muted data-focus-within:border-x-2 data-focus-within:ring-0">
+      <InputGroup fullWidth className="max-w-sm shadow-none rounded-xl bg-bg-muted data-focus-within:border-x-2 data-focus-within:ring-0">
         <InputGroup.Prefix className="p-0 bg-bg-muted">
           <Button
             isIconOnly
@@ -373,7 +393,7 @@ export default function CueEditor({
         <InputGroup.Input
           aria-label="start time"
           autoComplete="one-time-code"
-          className={`text-center font-normal bg-bg-muted w-min ${!(!!(validateVttTime(stateStart) && !!validateVttTime(stateEnd))
+          className={`min-w-0 text-center font-normal bg-bg-muted ${!(!!(validateVttTime(stateStart) && !!validateVttTime(stateEnd))
               ? true
               : false)
               ? "text-error-text"
@@ -436,36 +456,40 @@ export default function CueEditor({
   };
 
   const isDictationMode = mode === "dictation" || mode === "dictation_large";
+  const inEditMode = mode === "edit" || mode === "dictation_edit";
   // End (right) column buttons: edit / done / add-favorites.
-  const showEditButton = adminMode && isDictationMode && allowEdit;
-  const showDoneButton = adminMode && mode === "dictation_edit" && allowEdit;
+  const showEditButton = isDictationMode && allowEdit && isActive;
+  const showDoneButton = mode === "dictation_edit" && allowEdit;
+  const showDeleteButton = (mode === "edit" || mode === "dictation_edit") && allowEdit;
   const showFavoriteButton = isDictationMode && !!onAddToFavorites;
-  const hasEndButtons = showEditButton || showDoneButton || showFavoriteButton;
 
   return (
     <div className={containerClass(cue)}>
-      <div className="flex flex-row gap-1">
-        {/* Main content area */}
+      {/* Narrow viewports (portrait phones) stack the action bar on top of the card via
+          flex-col-reverse; from 640px up (landscape phones, tablets, desktop) the same bar
+          becomes the right-hand rail. Width, not platform, is the real constraint. */}
+      <div className="flex flex-col-reverse gap-1 sm:flex-row-reverse">
+        {/* Left column: time row on top, then the cue content */}
         <div className="flex-1 flex flex-col gap-0.5 min-w-0">
-          {(adminMode || ((mode === "edit" || mode === "dictation_edit") && allowEdit)) && (
+          {/* Time row: editable time editor for the active cue, plain text otherwise */}
+          <div className="w-full">
+            {isActive ? (
+              timeEditorEl()
+            ) : (
+              <div className="px-1 py-1 text-xs text-text-tertiary">{formatVttTime(cue.start_ms)} ➔ {formatVttTime(cue.end_ms)}</div>
+            )}
+          </div>
+          {(mode === "edit" || mode === "dictation_edit") && allowEdit && (
             <div className="flex items-center gap-1 flex-wrap">
-              {adminMode && timeEditorEl()}
-              {(mode === "edit" || mode === "dictation_edit") && allowEdit && (
-                <>
-                  <Button variant="ghost" size="sm" isDisabled={isDisabled} onPress={() => onInsert(cue.order_num)}>
-                    Insert Before
-                  </Button>
-                  <Button variant="ghost" size="sm" isDisabled={isDisabled} onPress={() => onInsert(cue.order_num + 1)}>
-                    Insert After
-                  </Button>
-                  <Button variant="ghost" size="sm" isDisabled={isDisabled} onPress={onMergeNext}>
-                    Merge Next
-                  </Button>
-                  <Button isIconOnly variant="ghost" size="sm" isDisabled={isDisabled} onPress={onDelete}>
-                    <Trash2 size={16} color="red" />
-                  </Button>
-                </>
-              )}
+              <Button variant="outline" size="sm" isDisabled={isDisabled} className="h-6 px-2 py-0 text-xs" onPress={() => onInsert(cue.order_num)}>
+                Insert Before
+              </Button>
+              <Button variant="outline" size="sm" isDisabled={isDisabled} className="h-6 px-2 py-0 text-xs" onPress={() => onInsert(cue.order_num + 1)}>
+                Insert After
+              </Button>
+              <Button variant="outline" size="sm" isDisabled={isDisabled} className="h-6 px-2 py-0 text-xs" onPress={onMergeNext}>
+                Merge Next
+              </Button>
             </div>
           )}
           <div className={isDictationMode ? "" : "hidden"}>
@@ -476,16 +500,17 @@ export default function CueEditor({
               setStateSuccess={setStateSuccess}
               onSuccess={onSuccess}
               onFocusInput={onFocusInput}
-              mode={mode === "dictation_large" ? "large" : "compact"}
-              adminMode={adminMode}
+              mode={mode === "dictation_large" ? "large" : isActive ? "medium" : "compact"}
+              isActive={!!isActive}
             />
           </div>
-          <div className={mode === "edit" || mode === "dictation_edit" ? "w-full" : "hidden"}>
+          <div className={mode === "edit" || mode === "dictation_edit" ? "w-full flex flex-col gap-1" : "hidden"}>
             <TextArea
               aria-label="text"
               autoComplete="one-time-code"
               ref={editAreaRef}
-              className="w-full text-xl font-bold border-2 border-border-light flex-1"
+              rows={3}
+              className={fieldClass(isActive ? "medium" : "compact")}
               disabled={isDisabled || cue.deleted}
               value={cue.content}
               onChange={(e) =>
@@ -496,70 +521,103 @@ export default function CueEditor({
                 })
               }
             />
-            {adminMode && !!cue.reference && <div>{cue.reference}</div>}
+            {/* Plain-text view of content and reference at the bottom */}
+            <div className="flex flex-col gap-0.5">
+              <div className="flex items-center gap-1">
+                <span className="text-xs font-semibold uppercase text-text-tertiary">Content</span>
+                <CopyButton text={cue.content} />
+              </div>
+              <div className="text-sm text-text-tertiary whitespace-pre-wrap break-words">{cue.content}</div>
+            </div>
+            {!!cue.reference && (
+              <div className="flex flex-col gap-0.5">
+                <div className="flex items-center gap-1">
+                  <span className="text-xs font-semibold uppercase text-text-tertiary">Reference</span>
+                  <CopyButton text={cue.reference} />
+                </div>
+                <div className="text-sm text-text-tertiary whitespace-pre-wrap break-words">{cue.reference}</div>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* End sidebar 1 — edit + favorites, one column */}
-        {hasEndButtons && (
+        {/* Action bar — horizontal strip on top (narrow) or 36px vertical rail (≥640px).
+            DOM order is [primary, mode, delete]: `ms-auto` pushes the mode/delete buttons into
+            the top-right corner on a phone, while `sm:order-first` lifts them back to the top
+            of the rail so the desktop column order (edit → star/play/mic → delete) is kept.
+            On short viewports (landscape phones) the rail may outgrow the card's own content,
+            so it wraps into extra columns instead of stretching the card. */}
+        {(isActive || inEditMode) && (
           <div
-            className={`flex flex-col items-center gap-1 py-1 shrink-0 transition-colors rounded-lg ${stateSuccess && isDictationMode ? "bg-success-bg" : "bg-transparent"}`}
-            style={{ width: 36 }}
+            className={`flex flex-row items-center gap-1 w-full pb-1 pt-0 shrink-0 transition-colors rounded-lg sm:w-9 sm:flex-col md:pt-0.5 ${stateSuccess && isDictationMode ? "bg-success-bg" : "bg-transparent"} [@media(min-width:640px)_and_(max-height:500px)]:flex-wrap [@media(min-width:640px)_and_(max-height:500px)]:max-h-32`}
           >
-            {showEditButton && (
+            {isActive && (
+              <div className="flex items-center gap-1 sm:flex-col">
+                {showFavoriteButton && (
+                  <Tooltip>
+                    <Tooltip.Trigger>
+                      <Button isIconOnly variant="ghost" size="sm" aria-label="Add to favorites" isDisabled={favoritesDisabled || isFavorited} onPress={() => onAddToFavorites?.()}>
+                        <Star size={16} fill={isFavorited ? "currentColor" : "none"} />
+                      </Button>
+                    </Tooltip.Trigger>
+                    <Tooltip.Content>{favoritesDisabled ? "already in the Favorites dataset" : isFavorited ? "already in Favorites" : "add to favorites"}</Tooltip.Content>
+                  </Tooltip>
+                )}
+                <Tooltip isDisabled={!isDictationMode}>
+                  <Tooltip.Trigger>
+                    <Button
+                      isIconOnly
+                      variant="ghost"
+                      size="sm"
+                      aria-label="Play"
+                      onPress={() => {
+                        if (!media) return;
+                        if (media.paused) playMediaPart(cue, media, false);
+                        else media.pause();
+                      }}
+                    >
+                      <Play size={16} />
+                    </Button>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content>shortcut: Ctrl+S or type two spaces at the end</Tooltip.Content>
+                </Tooltip>
+                {(isDictationMode || inEditMode) && <MicButton />}
+              </div>
+            )}
+            <div className="flex items-center gap-1 ms-auto sm:ms-0 sm:order-first sm:flex-col">
+              {showEditButton && (
+                <Tooltip>
+                  <Tooltip.Trigger>
+                    <Button isIconOnly variant="ghost" size="sm" onPress={onEdit}>
+                      <Pencil size={16} />
+                    </Button>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content>edit subtitle</Tooltip.Content>
+                </Tooltip>
+              )}
+              {showDoneButton && (
+                <Tooltip>
+                  <Tooltip.Trigger>
+                    <Button isIconOnly variant="ghost" size="sm" aria-label="Done editing" onPress={onDone}>
+                      <X size={16} />
+                    </Button>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content>close editor</Tooltip.Content>
+                </Tooltip>
+              )}
+            </div>
+            {showDeleteButton && (
               <Tooltip>
                 <Tooltip.Trigger>
-                  <Button isIconOnly variant="ghost" size="sm" onPress={onEdit}>
-                    <Pencil size={16} />
+                  <Button isIconOnly variant="ghost" size="sm" isDisabled={isDisabled} aria-label="Delete" onPress={onDelete}>
+                    <Trash2 size={16} color="red" />
                   </Button>
                 </Tooltip.Trigger>
-                <Tooltip.Content>edit subtitle</Tooltip.Content>
-              </Tooltip>
-            )}
-            {showDoneButton && (
-              <Button isIconOnly variant="ghost" size="sm" onPress={onDone}>
-                <X size={16} />
-              </Button>
-            )}
-            {showFavoriteButton && (
-              <Tooltip>
-                <Tooltip.Trigger>
-                  <Button isIconOnly variant="ghost" size="sm" aria-label="Add to favorites" isDisabled={favoritesDisabled || isFavorited} onPress={() => onAddToFavorites?.()}>
-                    <Star size={16} fill={isFavorited ? "currentColor" : "none"} />
-                  </Button>
-                </Tooltip.Trigger>
-                <Tooltip.Content>{favoritesDisabled ? "already in the Favorites dataset" : isFavorited ? "already in Favorites" : "add to favorites"}</Tooltip.Content>
+                <Tooltip.Content>delete cue</Tooltip.Content>
               </Tooltip>
             )}
           </div>
         )}
-
-        {/* End sidebar 2 — playback + voice input, one column */}
-        <div
-          className={`flex flex-col items-center gap-1 py-1 shrink-0 transition-colors rounded-lg ${stateSuccess && isDictationMode ? "bg-success-bg" : "bg-transparent"}`}
-          style={{ width: 36 }}
-        >
-          <Tooltip isDisabled={!isDictationMode}>
-            <Tooltip.Trigger>
-              <Button
-                isIconOnly
-                variant="ghost"
-                size="sm"
-                aria-label="Play"
-                onPress={() => {
-                  if (!media) return;
-                  if (media.paused) playMediaPart(cue, media, false);
-                  else media.pause();
-                }}
-              >
-                <Play size={16} />
-              </Button>
-            </Tooltip.Trigger>
-            <Tooltip.Content>shortcut: Ctrl+S or type two spaces at the end</Tooltip.Content>
-          </Tooltip>
-          {isDictationMode && <MicButton />}
-          {(mode === "edit" || mode === "dictation_edit") && <MicButton />}
-        </div>
       </div>
     </div>
   );
