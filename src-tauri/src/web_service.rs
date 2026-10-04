@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{Multipart, Path as AxPath, Query, State};
+use axum::extract::{ConnectInfo, Multipart, Path as AxPath, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -22,6 +23,7 @@ use crate::dataset::{self, DatasetSummary};
 use crate::book::{self, BookChapter};
 use crate::edge_tts;
 use crate::model::{self, ModelState};
+use crate::pairing;
 use crate::rest;
 use crate::settings::SettingsState;
 
@@ -42,9 +44,9 @@ pub struct WebServiceConfig {
     pub stt: bool,
     pub dataset: bool,
     pub tts: bool,
-    /// Optional shared token guarding the `/api/v1` snapshot + writeback REST
-    /// API (checked via the `x-fms-token` header). Empty = open (the network
-    /// itself, e.g. a Tailscale ACL, is the trust boundary).
+    /// DEPRECATED: the legacy shared token is no longer enforced. Auth is now
+    /// the trust-zone + device-signature model in `zone_guard` / `pairing.rs`.
+    /// The field stays (serde default) so old persisted configs still parse.
     #[serde(default)]
     pub api_token: String,
 }
@@ -123,11 +125,14 @@ impl WebServiceState {
         let (tx, rx) = oneshot::channel::<()>();
 
         tauri::async_runtime::spawn(async move {
-            let _ = axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    let _ = rx.await;
-                })
-                .await;
+            let _ = axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = rx.await;
+            })
+            .await;
         });
 
         {
@@ -199,11 +204,14 @@ pub async fn auto_start(app: AppHandle) {
     let (tx, rx) = oneshot::channel::<()>();
 
     tauri::async_runtime::spawn(async move {
-        let _ = axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = rx.await;
-            })
-            .await;
+        let _ = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = rx.await;
+        })
+        .await;
     });
 
     // Update the managed state
@@ -266,7 +274,6 @@ fn build_router(app: AppHandle, config: WebServiceConfig) -> Router {
     let enable_stt = config.stt;
     let enable_dataset = config.dataset;
     let enable_tts = config.tts;
-    let api_token = config.api_token.clone();
     let state = AppState {
         app: app.clone(),
         config: Arc::new(config),
@@ -275,7 +282,7 @@ fn build_router(app: AppHandle, config: WebServiceConfig) -> Router {
     // PC-side REST API for the Android thin client (snapshot + writeback).
     // Carries its own state, so it is nested after the main router's state is
     // applied below.
-    let rest_router = rest::router(app.clone(), api_token);
+    let rest_router = rest::router(app.clone());
 
     // MCP server (always enabled when web service is running)
     let mcp_service = crate::mcp::create_mcp_service(app);
@@ -306,8 +313,128 @@ fn build_router(app: AppHandle, config: WebServiceConfig) -> Router {
         .route("/books/{uuid}", get(book_chapters_page))
         .route("/books/{uuid}/{chapter}", get(book_chapter_content));
 
-    // Apply the main router state, then nest the (self-contained) REST router.
-    r.with_state(state).nest("/api/v1", rest_router)
+    // Apply the main router state, then nest the (self-contained) REST router,
+    // then wrap *everything* in the trust-zone guard (auth over `/api/v1`,
+    // `/mcp`, `/stt`, `/datasets`, `/tts`, `/books` uniformly).
+    r.with_state(state.clone())
+        .nest("/api/v1", rest_router)
+        // Outermost guard: applied last so it wraps every route, including the
+        // nested REST router. Trust zones are decided from the TCP peer addr.
+        .layer(middleware::from_fn_with_state(state, zone_guard))
+}
+
+// ---------------------------------------------------------------------------
+// Trust-zone auth (Bluetooth-style pairing enforcement)
+// ---------------------------------------------------------------------------
+
+/// Classify the peer: loopback (with DNS-rebinding `Host` guard, checked by
+/// the caller) and the Tailscale CGNAT range `100.64.0.0/10` are Trusted —
+/// local agent calls need no credentials. Everything else is Untrusted.
+fn zone_trusted(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            // 100.64.0.0/10: top two bits of the second octet are `01`.
+            let o = v4.octets();
+            o[0] == 100 && (o[1] & 0xC0) == 0x40
+        }
+        std::net::IpAddr::V6(_) => false, // loopback handled via Host check
+    }
+}
+
+/// Outer guard implementing the three trust zones:
+/// * loopback peers are Trusted only when the `Host` header names the local
+///   machine (DNS-rebinding guard) — a browser tricked into pointing a public
+///   hostname at 127.0.0.1 gets 403;
+/// * trusted-zone peers pass with no credentials;
+/// * untrusted peers reach only the handshake paths (`/api/v1/status`,
+///   `/api/v1/pair/*`); everything else needs valid device-signature headers
+///   (`x-fms-device` / `x-fms-ts` / `x-fms-sig`, verified in `pairing.rs`).
+async fn zone_guard(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip());
+    let headers = req.headers().clone();
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+
+    let Some(peer) = peer else {
+        // No peer info (shouldn't happen over TCP): fail closed.
+        return json_error(StatusCode::FORBIDDEN, "unknown source address");
+    };
+
+    // Loopback: trusted only behind a local-looking Host header.
+    if peer.is_loopback() {
+        let host = headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let host_name = if let Some(rest) = host.strip_prefix('[') {
+            // IPv6 literal: `[::1]` or `[::1]:port`.
+            rest.split_once(']').map(|(h, _)| h).unwrap_or(rest)
+        } else {
+            host.split_once(':').map(|(h, _)| h).unwrap_or(host)
+        };
+        let local_host =
+            matches!(host_name, "localhost" | "127.0.0.1" | "::1") || host_name.starts_with("127.");
+        if !local_host {
+            return json_error(
+                StatusCode::FORBIDDEN,
+                "loopback access requires a local Host header (DNS-rebinding guard)",
+            );
+        }
+        return next.run(req).await;
+    }
+
+    if zone_trusted(peer) {
+        return next.run(req).await;
+    }
+
+    // Untrusted zone: pairing handshake routes stay open, everything else
+    // requires a valid per-device Ed25519 signature.
+    if path == "/api/v1/status" || path.starts_with("/api/v1/pair/") {
+        return next.run(req).await;
+    }
+    let get_header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let device_id = get_header("x-fms-device");
+    let ts = get_header("x-fms-ts");
+    let sig = get_header("x-fms-sig");
+    if device_id.is_empty() || ts.is_empty() || sig.is_empty() {
+        return json_error(
+            StatusCode::UNAUTHORIZED,
+            pairing::AuthError::Unpaired.message(),
+        );
+    }
+    // Verification touches SQLite (cached) + crypto: keep it off the async
+    // runtime; settings are reached through the app handle in router state.
+    let app = st.app.clone();
+    let method = method.to_string();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let settings = app.state::<SettingsState>();
+        pairing::verify_request(
+            &settings,
+            &device_id,
+            &method,
+            &path,
+            &ts,
+            &sig,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| Err(pairing::AuthError::BadSignature));
+    match result {
+        Ok(()) => next.run(req).await,
+        Err(e) => json_error(
+            StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::FORBIDDEN),
+            e.message(),
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------

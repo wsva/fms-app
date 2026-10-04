@@ -11,21 +11,29 @@
 //!   into `<datasets>/dictation/<uuid>` so every existing read path works.
 //! * Local edits (dictation progress, cue save/delete, XP awards) are recorded
 //!   in a `writeback_queue` table and flushed to the PC in batches.
+//! * Auth uses Bluetooth-style device pairing: an Ed25519 identity keypair
+//!   (`device_id` + `device_seed` in global settings) is signed per request
+//!   (`pc_pair_start` bootstraps it via OTP or the PC's confirm dialog).
+//!   The legacy shared `pc_token` is no longer sent.
 
 use std::io::{BufReader, Write as _};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tar::Archive;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
+use ring::signature::{Ed25519KeyPair, KeyPair};
+
 use crate::dictation;
-use crate::settings::SettingsState;
+use crate::settings::{self, SettingsState};
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -42,18 +50,6 @@ fn pc_base(settings: &SettingsState) -> String {
         .to_string()
 }
 
-fn pc_token(settings: &SettingsState) -> String {
-    settings.settings.lock().unwrap().pc_token.clone()
-}
-
-fn with_token(req: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
-    if token.is_empty() {
-        req
-    } else {
-        req.header("x-fms-token", token)
-    }
-}
-
 /// Effective PC base URL: a caller-supplied override (e.g. a typed-but-unsaved
 /// address in Settings) wins if non-empty; otherwise the persisted setting.
 fn resolve_pc_url(settings: &SettingsState, override_url: Option<&str>) -> String {
@@ -63,12 +59,93 @@ fn resolve_pc_url(settings: &SettingsState, override_url: Option<&str>) -> Strin
     }
 }
 
-/// Effective PC token: caller override if non-empty, else the persisted setting.
-fn resolve_pc_token(settings: &SettingsState, override_token: Option<&str>) -> String {
-    match override_token.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(t) => t.to_string(),
-        None => pc_token(settings),
+// ---------------------------------------------------------------------------
+// Device identity + request signing (pairing v1, mirrors `pairing.rs` server-side)
+// ---------------------------------------------------------------------------
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+    if s.len() % 2 != 0 {
+        return Err("hex string has odd length".into());
     }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| "invalid hex".to_string()))
+        .collect()
+}
+
+/// Loaded device identity: keypair + derived `device_id` / public key hex.
+struct DeviceIdentity {
+    key_pair: Ed25519KeyPair,
+    device_id: String,
+    pubkey_hex: String,
+}
+
+fn identity_from_seed(seed_hex: &str) -> Result<DeviceIdentity, String> {
+    let doc = hex_decode(seed_hex)?;
+    let key_pair = Ed25519KeyPair::from_pkcs8_maybe_unchecked(&doc)
+        .map_err(|_| "device_seed is not a valid Ed25519 keypair".to_string())?;
+    let pubkey_hex = hex_encode(key_pair.public_key().as_ref());
+    let mut hasher = Sha256::new();
+    hasher.update(key_pair.public_key().as_ref());
+    let device_id = hex_encode(&hasher.finalize())[..16].to_string();
+    Ok(DeviceIdentity {
+        key_pair,
+        device_id,
+        pubkey_hex,
+    })
+}
+
+/// Lazily generate + persist the device keypair on first use. The identity is
+/// the credential; pairing merely registers its public key on the PC.
+fn ensure_device_identity(settings: &SettingsState) -> Result<DeviceIdentity, String> {
+    let existing = {
+        let s = settings.settings.lock().unwrap();
+        (s.device_seed.clone(), s.device_id.clone())
+    };
+    if !existing.0.is_empty() {
+        return identity_from_seed(&existing.0);
+    }
+    let der = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .to_vec();
+    let seed_hex = hex_encode(&der);
+    let ident = identity_from_seed(&seed_hex)?;
+    {
+        let mut s = settings.settings.lock().unwrap();
+        s.device_seed = seed_hex;
+        s.device_id = ident.device_id.clone();
+    }
+    let ws_dir = settings.workspace_dir.lock().unwrap().clone();
+    let snapshot = settings.settings.lock().unwrap().clone();
+    settings::SettingsState::save(&snapshot, ws_dir.as_ref())?;
+    Ok(ident)
+}
+
+/// Add `x-fms-device` / `x-fms-ts` / `x-fms-sig` headers to an outbound PC
+/// request. `path` must be the URL path *as the PC sees it* (including the
+/// `/api/v1` prefix) — it is part of the signed message.
+fn with_device_auth(
+    req: reqwest::RequestBuilder,
+    settings: &SettingsState,
+    method: &str,
+    path: &str,
+) -> Result<reqwest::RequestBuilder, String> {
+    let ident = ensure_device_identity(settings)?;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let msg = format!("{}\n{}\n{}", ts, method.to_uppercase(), path);
+    let sig = ident.key_pair.sign(msg.as_bytes());
+    Ok(req
+        .header("x-fms-device", ident.device_id.clone())
+        .header("x-fms-ts", ts.to_string())
+        .header("x-fms-sig", hex_encode(sig.as_ref())))
 }
 
 /// Directory that dictation datasets live in: `<datasets>/dictation`.
@@ -133,7 +210,6 @@ pub async fn writeback_flush_inner(settings: &SettingsState) -> Result<usize, St
     if base.is_empty() {
         return Ok(0);
     }
-    let token = pc_token(settings);
     let client = reqwest::Client::new();
     let mut flushed = 0usize;
 
@@ -180,7 +256,13 @@ pub async fn writeback_flush_inner(settings: &SettingsState) -> Result<usize, St
             .collect();
         let body = json!({ "user_key": "", "changes": changes });
 
-        let req = with_token(client.post(format!("{base}/api/v1/sync/changes")), &token).json(&body);
+        let req = with_device_auth(
+            client.post(format!("{base}/api/v1/sync/changes")),
+            settings,
+            "POST",
+            "/api/v1/sync/changes",
+        )?
+        .json(&body);
         let resp = req.send().await.map_err(|e| e.to_string())?;
         let status = resp.status();
         let results: Value = resp.json().await.unwrap_or(Value::Null);
@@ -240,14 +322,15 @@ pub async fn dataset_sync_snapshot(
     if base.is_empty() {
         return Err("No PC configured. Use Discover PC or set the PC address.".into());
     }
-    let token = pc_token(&settings);
     let client = reqwest::Client::new();
-
+    
     // 1. Manifest -> compare hash.
-    let mreq = with_token(
+    let mreq = with_device_auth(
         client.get(format!("{base}/api/v1/datasets/{uuid}/manifest")),
-        &token,
-    );
+        &settings,
+        "GET",
+        &format!("/api/v1/datasets/{uuid}/manifest"),
+    )?;
     let m: Value = mreq
         .send()
         .await
@@ -295,10 +378,12 @@ pub async fn dataset_sync_snapshot(
     std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
 
     // 4. Stream the tar.gz to disk, emitting progress.
-    let sreq = with_token(
+    let sreq = with_device_auth(
         client.get(format!("{base}/api/v1/datasets/{uuid}/snapshot")),
-        &token,
-    );
+        &settings,
+        "GET",
+        &format!("/api/v1/datasets/{uuid}/snapshot"),
+    )?;
     let resp = sreq
         .send()
         .await
@@ -434,14 +519,14 @@ pub async fn writeback_pending_count(settings: State<'_, SettingsState>) -> Resu
 /// Ping the PC's `GET /api/v1/status` endpoint from native Rust.
 ///
 /// Used by the frontend instead of a `fetch()` so the WebView never issues a
-/// cross-origin request (which would be blocked by CORS). Reads `pc_url` /
-/// `pc_token` straight from settings and returns the PC's raw status JSON:
-/// `{ ok, app_name, dataset_count, version }`.
+/// cross-origin request (which would be blocked by CORS). Reads `pc_url`
+/// straight from settings and returns the PC's raw status JSON:
+/// `{ ok, app_name, dataset_count, version }`. `/status` is one of the two
+/// routes the zone guard leaves open, so this works before pairing too.
 #[tauri::command]
 pub async fn pc_check_status(
     settings: State<'_, SettingsState>,
     pc_url: Option<String>,
-    pc_token: Option<String>,
 ) -> Result<Value, String> {
     let base = resolve_pc_url(&settings, pc_url.as_deref());
     log::info!(
@@ -451,22 +536,24 @@ pub async fn pc_check_status(
     if base.is_empty() {
         return Err("pc_url is not set — use Settings › Discover PC".to_string());
     }
-    let token = resolve_pc_token(&settings, pc_token.as_deref());
     let result = async {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(8))
             .timeout(Duration::from_secs(15))
             .build()
             .map_err(|e| e.to_string())?;
-        with_token(client.get(format!("{base}/api/v1/status")), &token)
+        let resp = client
+            .get(format!("{base}/api/v1/status"))
             .send()
             .await
-            .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?
+            .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?;
+        let v: Value = resp
             .error_for_status()
-            .map_err(|e| e.to_string())?
-            .json::<Value>()
+            .map_err(|e| format!("{e} — is the PC's web service running?"))?
+            .json()
             .await
-            .map_err(|e| format!("Unexpected response from PC: {e}"))
+            .map_err(|e| format!("Unexpected response from PC: {e}"))?;
+        Ok(v)
     }
     .await;
     match &result {
@@ -479,12 +566,12 @@ pub async fn pc_check_status(
 /// Fetch the PC's dataset list (`GET /api/v1/datasets`) from native Rust.
 ///
 /// Same CORS-avoidance rationale as [`pc_check_status`]; returns a JSON array
-/// of `{ uuid, name, updated, media_count, status }`.
+/// of `{ uuid, name, updated, media_count, status }`. Signed with the device
+/// identity — a 401 here means "pair first" and the message is passed through.
 #[tauri::command]
 pub async fn pc_list_datasets(
     settings: State<'_, SettingsState>,
     pc_url: Option<String>,
-    pc_token: Option<String>,
 ) -> Result<Value, String> {
     let base = resolve_pc_url(&settings, pc_url.as_deref());
     log::info!(
@@ -494,18 +581,28 @@ pub async fn pc_list_datasets(
     if base.is_empty() {
         return Err("pc_url is not set — use Settings › Discover PC".to_string());
     }
-    let token = resolve_pc_token(&settings, pc_token.as_deref());
     let result = async {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(8))
             .timeout(Duration::from_secs(20))
             .build()
             .map_err(|e| e.to_string())?;
-        with_token(client.get(format!("{base}/api/v1/datasets")), &token)
+        let req = with_device_auth(
+            client.get(format!("{base}/api/v1/datasets")),
+            &settings,
+            "GET",
+            "/api/v1/datasets",
+        )?;
+        let resp = req
             .send()
             .await
-            .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?
-            .error_for_status()
+            .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            let msg = body["error"].as_str().unwrap_or("device not paired");
+            return Err(format!("{msg} (http://{base})"));
+        }
+        resp.error_for_status()
             .map_err(|e| e.to_string())?
             .json::<Value>()
             .await
@@ -517,4 +614,126 @@ pub async fn pc_list_datasets(
         Err(e) => log::error!("[sync] pc_list_datasets FAILED: {e}"),
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// Pairing (phone side)
+// ---------------------------------------------------------------------------
+
+/// Best-effort human-readable device name for the PC's confirm dialog.
+fn device_name() -> String {
+    // Android: the product model, e.g. "Pixel 8". Static after first call.
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let probe = |key: &str| {
+            Command::new("getprop")
+                .arg(key)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        match (|| Some(format!("{} ({})", probe("ro.product.model")?, probe("ro.product.brand")?)))()
+            .or_else(|| probe("ro.product.model"))
+        {
+            Some(m) => m,
+            None => format!("{} device", std::env::consts::OS),
+        }
+    }).clone()
+}
+
+/// Pair this device with the PC.
+///
+/// * `otp` (from the PC's QR / deep-link / typed code): a valid code is
+///   approved immediately — no dialog, no polling.
+/// * no `otp`: dialog fallback — the PC owner gets a confirm dialog and we
+///   poll `/pair/status` every 2 s (up to 120 s) until it resolves.
+#[tauri::command]
+pub async fn pc_pair_start(
+    settings: State<'_, SettingsState>,
+    pc_url: Option<String>,
+    otp: Option<String>,
+) -> Result<Value, String> {
+    let base = resolve_pc_url(&settings, pc_url.as_deref());
+    if base.is_empty() {
+        return Err("No PC address — scan the QR code or enter the PC address.".into());
+    }
+    let ident = ensure_device_identity(&settings)?;
+    let otp = otp.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = json!({
+        "device_id": ident.device_id,
+        "name": device_name(),
+        "pubkey_hex": ident.pubkey_hex,
+        "otp": otp,
+    });
+    let resp = client
+        .post(format!("{base}/api/v1/pair/request"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?;
+    let status = resp.status();
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Unexpected pairing response from PC (HTTP {status}): {e}"))?;
+    if !status.is_success() {
+        // e.g. expired / already-used OTP: surface the PC's actionable text.
+        let msg = v["error"].as_str().unwrap_or("pairing request rejected");
+        return Err(msg.to_string());
+    }
+
+    let state = v["state"].as_str().unwrap_or("none").to_string();
+    if state != "pending" {
+        // OTP path (immediate approval) and the re-pair / denied short-circuits.
+        return Ok(json!({ "state": state, "fingerprint": v["fingerprint"] }));
+    }
+
+    // Dialog path: poll until the PC owner answers (or we give up).
+    let fingerprint = v["fingerprint"].as_str().unwrap_or("").to_string();
+    let request_id = v["request_id"].as_str().unwrap_or("").to_string();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let s: Value = client
+            .get(format!(
+                "{base}/api/v1/pair/status?device_id={}",
+                ident.device_id
+            ))
+            .send()
+            .await
+            .map_err(|e| format!("Lost contact with the PC while pairing: {e}"))?
+            .error_for_status()
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        let state = s["state"].as_str().unwrap_or("pending").to_string();
+        if state != "pending" {
+            return Ok(json!({ "state": state, "fingerprint": fingerprint, "request_id": request_id }));
+        }
+    }
+    Err("Timed out waiting for the PC owner to confirm pairing.".into())
+}
+
+/// Regenerate this device's identity keypair. Recovery path when the PC owner
+/// denied the pairing: a fresh identity pops a new dialog / redeems a fresh
+/// OTP instead of being silently blocked by the stored denial.
+#[tauri::command]
+pub async fn pc_pair_reset_identity(settings: State<'_, SettingsState>) -> Result<String, String> {
+    {
+        let mut s = settings.settings.lock().unwrap();
+        s.device_seed.clear();
+        s.device_id.clear();
+    }
+    let ident = ensure_device_identity(&settings)?;
+    log::info!("[sync] device identity reset -> {}", ident.device_id);
+    Ok(ident.device_id)
 }

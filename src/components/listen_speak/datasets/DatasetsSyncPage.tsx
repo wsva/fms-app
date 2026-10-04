@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
-import { Download, RefreshCw, Upload, CloudOff, Search, ChevronDown } from "lucide-react";
+import { Download, RefreshCw, Upload, CloudOff, Search, ChevronDown, Link2, KeyRound } from "lucide-react";
 import { logInfo, logError } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
@@ -46,10 +46,24 @@ interface GlobalSettings {
   ollama_url: string;
   pc_url: string;
   pc_token: string;
+  device_id: string;
+  device_seed: string;
   selected_model: string;
   model_dir: string;
   model_unload_timeout: unknown;
   onboarding_completed: boolean;
+}
+
+// Result of the `pc_pair_start` command.
+interface PairResult {
+  state: "approved" | "pending" | "denied" | "none";
+  fingerprint?: string;
+}
+
+// Payload of the `pair-invite` event (fms-app://pair?u=..&o=.. deep link).
+interface PairInvite {
+  url: string;
+  otp: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +79,13 @@ export default function DatasetsSyncPage() {
   const [discovering, setDiscovering] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [manualUrl, setManualUrl] = useState("");
-  const [manualToken, setManualToken] = useState("");
+
+  // Pairing state (Bluetooth-style device identity, see sync.rs / pairing.rs).
+  const [pairing, setPairing] = useState(false);
+  const [pairFingerprint, setPairFingerprint] = useState("");
+  const [pairMessage, setPairMessage] = useState("");
+  const [manualOtp, setManualOtp] = useState("");
+  const [showPairCode, setShowPairCode] = useState(false);
 
   // Dataset + sync state.
   const [pcDatasets, setPcDatasets] = useState<PcDataset[]>([]);
@@ -73,13 +93,14 @@ export default function DatasetsSyncPage() {
   const [pending, setPending] = useState(0);
   const [loadingList, setLoadingList] = useState(false);
   const [listError, setListError] = useState<string>("");
+  const [unpaired, setUnpaired] = useState(false);
   const [busyUuid, setBusyUuid] = useState<string>("");
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState<Record<string, SyncProgress>>({});
   const [message, setMessage] = useState<string>("");
 
   const pcUrl = (global?.pc_url ?? "").trim();
-  const pcToken = global?.pc_token ?? "";
+  const deviceId = global?.device_id ?? "";
 
   // ---- Loaders ----------------------------------------------------------
 
@@ -89,7 +110,6 @@ export default function DatasetsSyncPage() {
       const g = await invoke<GlobalSettings>("settings_get_global");
       setGlobal(g);
       setManualUrl(g.pc_url ?? "");
-      setManualToken(g.pc_token ?? "");
       return g;
     } catch (e) {
       logError(`Failed to load settings: ${String(e)}`, "datasets");
@@ -123,15 +143,69 @@ export default function DatasetsSyncPage() {
     setListError("");
     try {
       // Native command hits the PC with reqwest — no WebView cross-origin fetch.
-      const data = await invoke<PcDataset[]>("pc_list_datasets", { pcUrl, pcToken });
+      const data = await invoke<PcDataset[]>("pc_list_datasets", { pcUrl });
       setPcDatasets(data);
+      setUnpaired(false);
     } catch (e) {
-      setListError(`Cannot reach PC at ${pcUrl}.`);
+      // A 401 from the PC means "not paired yet" — surface the Pair button.
+      const text = String(e);
+      const notPaired = text.includes("not paired") || text.includes("pairing denied");
+      setUnpaired(notPaired);
+      setListError(notPaired ? "This device is not paired with the PC yet." : `Cannot reach PC at ${pcUrl}.`);
       setPcDatasets([]);
     } finally {
       setLoadingList(false);
     }
-  }, [pcUrl, pcToken]);
+  }, [pcUrl]);
+
+  // ---- Pairing ----------------------------------------------------------
+
+  // Run `pc_pair_start`; with an OTP the PC auto-approves, without one the PC
+  // owner gets a confirm dialog and the command polls until it resolves.
+  const pair = useCallback(
+    async (url: string, otp?: string) => {
+      if (!isTauri() || pairing) return;
+      setPairing(true);
+      setPairMessage("");
+      setPairFingerprint("");
+      try {
+        const res = await invoke<PairResult>("pc_pair_start", {
+          pcUrl: url,
+          otp: otp && otp.length > 0 ? otp : null,
+        });
+        if (res.fingerprint) setPairFingerprint(res.fingerprint);
+        if (res.state === "approved") {
+          setPairMessage("Paired with the PC.");
+          setUnpaired(false);
+          setListError("");
+          loadSettings();
+          fetchPcDatasets();
+        } else if (res.state === "denied") {
+          setPairMessage("The PC owner denied this pairing. Ask them to remove the block, or start a new pairing request.");
+        } else {
+          setPairMessage("Pairing did not complete.");
+        }
+      } catch (e) {
+        setPairMessage(`Pairing failed: ${String(e)}`);
+      } finally {
+        setPairing(false);
+      }
+    },
+    [pairing, loadSettings, fetchPcDatasets],
+  );
+
+  // Recovery path after a denial: regenerate the device identity so the next
+  // request pops a fresh dialog / redeems a fresh code.
+  const resetIdentity = useCallback(async () => {
+    if (!isTauri()) return;
+    try {
+      await invoke<string>("pc_pair_reset_identity");
+      setPairMessage("Generated a new device identity. Pair again.");
+      loadSettings();
+    } catch (e) {
+      setPairMessage(`Failed to reset device identity: ${String(e)}`);
+    }
+  }, [loadSettings]);
 
   // ---- Discovery + connection ------------------------------------------
 
@@ -150,16 +224,14 @@ export default function DatasetsSyncPage() {
     }
   }, []);
 
-  // Persist pc_url (and optionally pc_token) to global settings so the sync
-  // commands (which read settings on the backend) can resolve the target PC.
+  // Persist pc_url to global settings so the sync commands (which read
+  // settings on the backend) can resolve the target PC.
   const savePc = useCallback(
-    async (url: string, token?: string) => {
+    async (url: string) => {
       if (!global) return;
       const next: GlobalSettings = { ...global, pc_url: url };
-      if (token !== undefined) next.pc_token = token;
       setGlobal(next);
       setManualUrl(url);
-      if (token !== undefined) setManualToken(token);
       try {
         await invoke("settings_set_global", { global: next });
         setMessage(url ? `Connected to ${url}.` : "Disconnected.");
@@ -211,6 +283,22 @@ export default function DatasetsSyncPage() {
       progressReq.current?.();
     };
   }, []);
+
+  // QR / deep-link intake: scanning the PC's QR (or tapping the link) opens
+  // fms-app://pair?u=..&o=.., which the backend forwards as `pair-invite`.
+  // Remember the PC address, then redeem the code — a valid code is approved
+  // immediately, without the PC owner seeing a dialog.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const un = listen<PairInvite>("pair-invite", (evt) => {
+      const { url, otp } = evt.payload;
+      logInfo(`Pairing invite from ${url}`, "datasets");
+      savePc(url).then(() => pair(url, otp));
+    });
+    return () => {
+      un.then((fn) => fn());
+    };
+  }, [savePc, pair]);
 
   // ---- Actions ----------------------------------------------------------
 
@@ -330,20 +418,86 @@ export default function DatasetsSyncPage() {
               onChange={(e) => setManualUrl(e.target.value)}
               placeholder="http://192.168.1.20:35711"
             />
-            <input
-              type="text"
-              className="w-32 px-3 py-1.5 text-sm border border-border-light rounded-md bg-bg-input text-text-primary"
-              value={manualToken}
-              onChange={(e) => setManualToken(e.target.value)}
-              placeholder="token (opt.)"
-            />
             <button
               className="inline-flex items-center px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
-              onClick={() => savePc(manualUrl.trim(), manualToken)}
+              onClick={() => savePc(manualUrl.trim())}
               disabled={!manualUrl.trim()}
             >
               Connect
             </button>
+          </div>
+        )}
+
+        {/* Pairing row: the device identity is automatic; pairing is the only
+            user gesture (QR code, typed code, or the PC owner's dialog). */}
+        <div className="flex items-center gap-2 flex-wrap pt-2 border-t border-border-light">
+          <span className="text-xs text-text-tertiary flex items-center gap-1 shrink-0">
+            <KeyRound size={13} />
+            {deviceId ? `code ${deviceId.slice(0, 6)}` : "new device"}
+          </span>
+          <button
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
+            onClick={() => pair(pcUrl)}
+            disabled={pairing || !pcUrl}
+            title="Ask the PC to pair this device"
+          >
+            <Link2 size={14} className={pairing ? "animate-spin" : undefined} />
+            {pairing ? "Pairing…" : "Pair"}
+          </button>
+          <button
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50 shrink-0"
+            onClick={() => setShowPairCode((s) => !s)}
+            disabled={!pcUrl || pairing}
+            title="Enter the pairing code shown on the PC"
+          >
+            <ChevronDown size={14} className={showPairCode ? "rotate-180 transition-transform" : "transition-transform"} />
+            Code
+          </button>
+          {unpaired && (
+            <button
+              className="ml-auto text-xs text-text-secondary underline disabled:opacity-50"
+              onClick={resetIdentity}
+              disabled={pairing}
+              title="Regenerate this device's identity (use after the PC denied the pairing)"
+            >
+              New identity
+            </button>
+          )}
+        </div>
+
+        {showPairCode && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <input
+              type="text"
+              autoComplete="off"
+              autoCapitalize="none"
+              className="flex-1 min-w-[10rem] px-3 py-1.5 text-sm font-mono border border-border-light rounded-md bg-bg-input text-text-primary"
+              value={manualOtp}
+              onChange={(e) => setManualOtp(e.target.value)}
+              placeholder="pairing code from the PC"
+            />
+            <button
+              className="inline-flex items-center px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
+              onClick={() => {
+                const code = manualOtp.trim();
+                setManualOtp("");
+                setShowPairCode(false);
+                pair(pcUrl, code);
+              }}
+              disabled={!manualOtp.trim() || pairing}
+            >
+              Use code
+            </button>
+          </div>
+        )}
+
+        {pairing && (
+          <div className="text-sm text-text-secondary">
+            Waiting for the PC owner to confirm. Compare the code{" "}
+            <span className="font-mono font-semibold">
+              {pairFingerprint || deviceId.slice(0, 6) || "------"}
+            </span>{" "}
+            with the one on the PC.
           </div>
         )}
       </div>
@@ -361,6 +515,20 @@ export default function DatasetsSyncPage() {
           {listError && (
             <div className="px-3 py-2 text-sm rounded-md bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300">
               {listError}
+              {unpaired && (
+                <button
+                  className="ml-2 underline font-medium"
+                  onClick={() => pair(pcUrl)}
+                  disabled={pairing}
+                >
+                  {pairing ? "Pairing…" : "Pair now"}
+                </button>
+              )}
+            </div>
+          )}
+          {pairMessage && (
+            <div className="px-3 py-2 text-sm rounded-md bg-bg-hover text-text-primary">
+              {pairMessage}
             </div>
           )}
           {message && (

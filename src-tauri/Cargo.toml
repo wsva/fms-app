@@ -67,6 +67,9 @@ transcribe-cpp = { version = "0.2.0", default-features = false, optional = true 
 tar = "0.4.44"
 flate2 = "1.0"
 sha2 = "0.10"
+# Ed25519 device-identity keypairs for PC<->Android pairing (ring is already
+# in the tree via rustls; Android-portable, so it is a plain dependency).
+ring = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 rfd = { version = "0.15", optional = true }

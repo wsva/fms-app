@@ -406,6 +406,11 @@ fn default_port() -> u16 { 35711 }
 fn default_true() -> bool { true }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct PairingDeviceParam {
+    device_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct OcrRecognizeParam {
     image_base64: String,
     #[serde(default)]
@@ -1489,6 +1494,26 @@ impl DatasetMcpServer {
         let state = self.app.state::<WebServiceState>();
         let status = web_service::web_service_stop(state).await?;
         Ok(serde_json::to_string_pretty(&status).unwrap_or_default())
+    }
+
+    // -------------------------------------------------------------------------
+    // Device pairing tools (read + revoke only; approval stays a human gesture)
+    // -------------------------------------------------------------------------
+
+    #[tool(name = "pairing_list_devices", description = "List devices paired with this PC's web service (device_id, name, approved/denied status, created/last-seen times). Requests from localhost and Tailscale always bypass pairing.")]
+    async fn pairing_list_devices(&self) -> Result<String, String> {
+        log::info!("[MCP] pairing_list_devices");
+        let settings = self.app.state::<SettingsState>();
+        let devices = crate::pairing::list_devices(&settings)?;
+        Ok(serde_json::to_string_pretty(&devices).unwrap_or_default())
+    }
+
+    #[tool(name = "pairing_revoke_device", description = "Revoke a paired device so its future requests are rejected until it pairs again. Pass the device_id from pairing_list_devices.")]
+    async fn pairing_revoke_device(&self, Parameters(param): Parameters<PairingDeviceParam>) -> Result<String, String> {
+        log::info!("[MCP] pairing_revoke_device: {}", param.device_id);
+        let settings = self.app.state::<SettingsState>();
+        crate::pairing::revoke(&settings, &param.device_id)?;
+        Ok(serde_json::json!({ "status": "ok", "revoked": param.device_id }).to_string())
     }
 
     // -------------------------------------------------------------------------

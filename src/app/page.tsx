@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { isMobileApp } from "@/lib/platform";
 import Sidebar, { type TabId } from "@/components/layout/Sidebar";
 import StatusBar from "@/components/layout/StatusBar";
@@ -32,6 +33,15 @@ interface Workspace {
   created_at: string;
   last_accessed: string;
   auto_login: boolean;
+}
+
+// A pairing request emitted by the backend (pairing.rs) when an unknown device
+// on an untrusted network asks to pair without a one-time code.
+interface PairingRequest {
+  request_id: string;
+  device_id: string;
+  name: string;
+  fingerprint: string;
 }
 
 export default function Home() {
@@ -84,6 +94,39 @@ export default function Home() {
   useEffect(() => {
     const unlisten = listen<string>("wiki-navigate", () => {
       setActiveTab("wiki");
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // Pairing fallback (dialog path): ask the PC owner about each request, one
+  // at a time. The QR / one-time-code path never lands here — it is approved
+  // by the scan itself. Only the PC shows dialogs.
+  useEffect(() => {
+    if (isMobileApp()) return;
+    const queue: PairingRequest[] = [];
+    let running = false;
+    const drain = async () => {
+      if (running) return;
+      running = true;
+      while (queue.length > 0) {
+        const req = queue.shift()!;
+        const approve = await ask(
+          `FmS on ${req.name} wants to pair.\n\nConfirm the code ${req.fingerprint} matches the one shown on the device, then allow or deny.`,
+          { title: "Pairing request", kind: "warning", okLabel: "Allow", cancelLabel: "Deny" },
+        );
+        try {
+          await invoke("pairing_respond", { requestId: req.request_id, approve });
+        } catch (e) {
+          console.error("pairing_respond failed:", e);
+        }
+      }
+      running = false;
+    };
+    const unlisten = listen<PairingRequest>("pairing-request", (event) => {
+      queue.push(event.payload);
+      void drain();
     });
     return () => {
       unlisten.then((fn) => fn());

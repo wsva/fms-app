@@ -7,21 +7,23 @@
 //! expects:
 //!
 //! * `GET  /api/v1/status`                     - handshake / TCP-probe target
+//! * `POST /api/v1/pair/request`               - device pairing handshake (OTP or dialog)
+//! * `GET  /api/v1/pair/status`                - poll a pending pairing request
 //! * `GET  /api/v1/datasets/{uuid}/manifest`   - snapshot metadata + overall hash
 //! * `GET  /api/v1/datasets/{uuid}/snapshot`   - the whole dataset dir as tar.gz
 //! * `POST /api/v1/sync/changes`               - replay queued writeback changes
 //!
-//! An optional shared token (`WebServiceConfig::api_token`) guards everything
-//! except `/status` via the `x-fms-token` header. By default the token is empty
-//! and the trust boundary is the network itself (WLAN / Tailscale ACL).
+//! Auth is owned by the outer trust-zone layer in `web_service.rs`: loopback +
+//! Tailscale pass unauthenticated; other networks need a valid per-device
+//! Ed25519 signature (see `pairing.rs`) except `/status` and `/pair/*` here.
+//! The legacy shared `api_token` is no longer enforced.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use axum::extract::{Request, State};
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -34,54 +36,28 @@ use tokio_util::io::{ReaderStream, SyncIoBridge};
 
 use crate::dataset;
 use crate::dictation::{self, ListenCue, ListenDictation};
+use crate::pairing;
 use crate::settings::SettingsState;
 use crate::xp;
 
 /// Shared state for the REST router: the Tauri app handle (to reach managed
-/// state) plus the optional access token.
+/// state). Authentication lives in the outer zone layer of `web_service.rs`.
 #[derive(Clone)]
 pub struct RestState {
     pub app: AppHandle,
-    pub token: String,
 }
 
 /// Build the `/api/v1` router. Mounted by `web_service::build_router`.
-pub fn router(app: AppHandle, token: String) -> Router {
-    let state = RestState { app, token };
+pub fn router(app: AppHandle) -> Router {
     Router::new()
         .route("/status", get(status))
+        .route("/pair/request", post(pair_request))
+        .route("/pair/status", get(pair_status))
         .route("/datasets", get(datasets_list))
         .route("/datasets/{uuid}/manifest", get(manifest))
         .route("/datasets/{uuid}/snapshot", get(snapshot))
         .route("/sync/changes", post(sync_changes))
-        // Token guard wraps every route (the handler itself decides whether
-        // `/status` may pass without a token).
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_token,
-        ))
-        .with_state(state)
-}
-
-async fn require_token(
-    State(st): State<RestState>,
-    headers: HeaderMap,
-    req: Request,
-    next: Next,
-) -> Response {
-    // `/status` doubles as the LAN/Tailscale probe handshake: always allowed so
-    // discovery works without pairing a token first.
-    let is_status = req.uri().path().ends_with("/status");
-    if !st.token.is_empty() && !is_status {
-        let got = headers
-            .get("x-fms-token")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if got != st.token.as_str() {
-            return json_error(StatusCode::UNAUTHORIZED, "invalid or missing x-fms-token");
-        }
-    }
-    next.run(req).await
+        .with_state(RestState { app })
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +85,95 @@ async fn status(State(st): State<RestState>) -> Response {
         }),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// POST /pair/request + GET /pair/status  (pairing handshake, `pairing.rs`)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct PairReqBody {
+    name: String,
+    pubkey_hex: String,
+    #[serde(default)]
+    otp: Option<String>,
+}
+
+/// Pairing handshake. Reached from untrusted networks without a device
+/// signature (the zone guard allow-lists `/api/v1/pair/*`). A valid one-time
+/// secret (QR / typed code) auto-approves — the pairing gesture *is* the
+/// approval. Without an OTP the PC owner's confirm dialog decides.
+async fn pair_request(State(st): State<RestState>, Json(body): Json<PairReqBody>) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    // The identity is derived from the pubkey server-side; a claimed device_id
+    // is never trusted. Reject structurally invalid keys.
+    let pubkey = match pairing::hex_decode(&body.pubkey_hex) {
+        Ok(b) if b.len() == 32 => b,
+        _ => return json_error(StatusCode::BAD_REQUEST, "pubkey_hex must be 32 bytes of hex"),
+    };
+    let _ = pubkey; // validated only; the hex string is what we store
+    let device_id = match pairing::device_id_of_pubkey(&body.pubkey_hex) {
+        Ok(d) => d,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+    };
+    let name = body.name.trim().chars().take(64).collect::<String>();
+    let name = if name.is_empty() { "device".to_string() } else { name };
+
+    let otp = body.otp.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Some(otp) = otp {
+        // QR/typed-code path: valid OTP => immediate approval (even over a
+        // prior denial — the owner deliberately generated this code).
+        if !pairing::consume_otp(&otp) {
+            // Do NOT silently downgrade to the dialog path; the user chose QR.
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "pairing code invalid or expired — generate a new one on the PC",
+            );
+        }
+        if let Err(e) = pairing::approve_device(&settings, &device_id, &body.pubkey_hex, &name) {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
+        }
+        return Json(serde_json::json!({ "state": "approved" })).into_response();
+    }
+
+    // Dialog fallback path.
+    let outcome = match pairing::request_pair(&st.app, &settings, &body.pubkey_hex, &name) {
+        Ok(o) => o,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    match outcome {
+        pairing::PairRequestOutcome::Approved => {
+            Json(serde_json::json!({ "state": "approved" })).into_response()
+        }
+        pairing::PairRequestOutcome::Denied => {
+            Json(serde_json::json!({ "state": "denied" })).into_response()
+        }
+        pairing::PairRequestOutcome::Pending { request_id, fingerprint } => {
+            Json(serde_json::json!({
+                "state": "pending",
+                "request_id": request_id,
+                "fingerprint": fingerprint,
+            }))
+            .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct PairStatusQuery {
+    device_id: String,
+}
+
+/// Poll a pairing request (dialog path only): pending -> approved/denied.
+async fn pair_status(
+    State(st): State<RestState>,
+    Query(q): Query<PairStatusQuery>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    match pairing::pending_status(&settings, &q.device_id) {
+        Ok(state) => Json(serde_json::json!({ "state": state })).into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
 }
 
 // ---------------------------------------------------------------------------

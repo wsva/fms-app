@@ -56,8 +56,19 @@ pub struct AppSettings {
     #[serde(default)]
     pub pc_url: String,
     /// Optional shared token sent as `x-fms-token` to the PC REST API.
+    /// DEPRECATED: replaced by device-signature pairing (see `pairing.rs` /
+    /// `sync.rs`). Kept only so old settings JSON keeps parsing.
     #[serde(default)]
     pub pc_token: String,
+    /// This device's pairing identity: first 16 hex chars of SHA-256(pubkey).
+    /// Generated lazily on the phone (never entered by the user).
+    #[serde(default)]
+    pub device_id: String,
+    /// Hex-encoded PKCS#8 v1 Ed25519 keypair (private + public) backing
+    /// `device_id`. The pubkey is derived from it at load — the PC trusts only
+    /// the key, never a claimed identity.
+    #[serde(default)]
+    pub device_seed: String,
 }
 
 fn default_ollama_url() -> String {
@@ -74,9 +85,15 @@ pub struct GlobalSettings {
     /// PC snapshot server base URL (global fallback / remembered value).
     #[serde(default)]
     pub pc_url: String,
-    /// Optional shared token for the PC REST API.
+    /// Optional shared token for the PC REST API. DEPRECATED (pairing now).
     #[serde(default)]
     pub pc_token: String,
+    /// Device pairing identity (see `AppSettings::device_id`).
+    #[serde(default)]
+    pub device_id: String,
+    /// Hex PKCS#8 Ed25519 keypair (see `AppSettings::device_seed`).
+    #[serde(default)]
+    pub device_seed: String,
     /// Currently selected STT model ID.
     #[serde(default)]
     pub selected_model: String,
@@ -98,6 +115,8 @@ impl Default for GlobalSettings {
             ollama_url: default_ollama_url(),
             pc_url: String::new(),
             pc_token: String::new(),
+            device_id: String::new(),
+            device_seed: String::new(),
             selected_model: String::new(),
             model_dir: data_dir.join("models").to_string_lossy().into_owned(),
             model_unload_timeout: ModelUnloadTimeout::default(),
@@ -112,6 +131,8 @@ impl GlobalSettings {
             ollama_url: s.ollama_url.clone(),
             pc_url: s.pc_url.clone(),
             pc_token: s.pc_token.clone(),
+            device_id: s.device_id.clone(),
+            device_seed: s.device_seed.clone(),
             selected_model: s.selected_model.clone(),
             model_dir: s.model_dir.clone(),
             model_unload_timeout: s.model_unload_timeout,
@@ -123,6 +144,8 @@ impl GlobalSettings {
         s.ollama_url = self.ollama_url.clone();
         s.pc_url = self.pc_url.clone();
         s.pc_token = self.pc_token.clone();
+        s.device_id = self.device_id.clone();
+        s.device_seed = self.device_seed.clone();
         s.selected_model = self.selected_model.clone();
         s.model_dir = self.model_dir.clone();
         s.model_unload_timeout = self.model_unload_timeout;
@@ -190,6 +213,8 @@ impl Default for AppSettings {
             ollama_url: default_ollama_url(),
             pc_url: String::new(),
             pc_token: String::new(),
+            device_id: String::new(),
+            device_seed: String::new(),
         }
     }
 }
