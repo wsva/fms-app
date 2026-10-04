@@ -93,6 +93,10 @@ export default function DatasetsSyncPage() {
   const [progress, setProgress] = useState<Record<string, SyncProgress>>({});
   const [message, setMessage] = useState<string>("");
 
+  // Which dataset section is shown (Dictation / Cards / Books). On the narrow
+  // Android screen these are exposed as tabs instead of stacked vertically.
+  const [activeSection, setActiveSection] = useState<string>("dictation");
+
   const pcUrl = (global?.pc_url ?? "").trim();
   const deviceId = global?.device_id ?? "";
 
@@ -547,19 +551,43 @@ export default function DatasetsSyncPage() {
             {pcDatasets.length === 0 && !loadingList && (
               <p className="text-sm text-text-tertiary">No datasets available on the PC.</p>
             )}
-            {sections.map((section) => (
-              <div key={section.key} className="flex flex-col gap-2">
-                <h2 className="text-xs font-semibold uppercase tracking-wide text-text-tertiary px-1">
-                  {section.label}
-                  {section.items.length > 0 && ` · ${section.items.length}`}
-                </h2>
-                {section.items.length === 0 ? (
-                  <p className="text-sm text-text-tertiary px-1">None on PC.</p>
-                ) : (
-                  section.items.map((ds, i) => renderDatasetCard(ds, i))
-                )}
-              </div>
-            ))}
+            {pcDatasets.length > 0 && (
+              <>
+                {/* Section tabs: Dictation / Cards / Books. Only the active
+                    section's datasets are listed, keeping the narrow Android
+                    screen uncluttered. */}
+                <div className="shrink-0 flex gap-1 border-b border-border-default">
+                  {sections.map((section) => (
+                    <button
+                      key={section.key}
+                      onClick={() => setActiveSection(section.key)}
+                      className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                        activeSection === section.key
+                          ? "border-accent-bg text-text-primary"
+                          : "border-transparent text-text-tertiary hover:text-text-secondary"
+                      }`}
+                    >
+                      {section.label}
+                      {section.items.length > 0 && (
+                        <span className="ml-1 text-xs opacity-70">{section.items.length}</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+
+                {(() => {
+                  const section =
+                    sections.find((s) => s.key === activeSection) ?? sections[0];
+                  return section.items.length === 0 ? (
+                    <p className="text-sm text-text-tertiary px-1">None on PC.</p>
+                  ) : (
+                    <div className="flex flex-col gap-2">
+                      {section.items.map((ds, i) => renderDatasetCard(ds, i))}
+                    </div>
+                  );
+                })()}
+              </>
+            )}
           </div>
         </>
       )}
