@@ -158,7 +158,7 @@ pub(crate) enum DatasetType {
 }
 
 impl DatasetType {
-    fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             DatasetType::Card => "card",
             DatasetType::Dictation => "dictation",
@@ -980,6 +980,53 @@ pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<P
             };
             if info.uuid == uuid {
                 return Ok(path);
+            }
+        }
+    }
+    Err(format!("Dataset with UUID {} not found", uuid))
+}
+
+/// Find a dataset directory by UUID across every dataset type (dictation, card,
+/// book). Returns the resolved path together with its type so callers — the REST
+/// manifest/snapshot endpoints and the phone sync client — know both where the
+/// dataset lives and which local root it belongs to.
+///
+/// `info.json` shapes differ per type (books have no `name`/`description`), so
+/// only the `uuid` field is read via a lenient JSON parse.
+#[allow(dead_code)] // only the desktop REST endpoints call this
+pub(crate) fn find_dataset_dir_typed(
+    settings: &SettingsState,
+    uuid: &str,
+) -> Result<(PathBuf, DatasetType), String> {
+    for ty in [DatasetType::Dictation, DatasetType::Card, DatasetType::Book] {
+        for root in dataset_roots(settings, ty) {
+            if !root.exists() {
+                continue;
+            }
+            let entries = match fs::read_dir(&root) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let info_path = path.join("info.json");
+                if !info_path.exists() {
+                    continue;
+                }
+                let data = match fs::read_to_string(&info_path) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let value: serde_json::Value = match serde_json::from_str(&data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if value.get("uuid").and_then(|u| u.as_str()) == Some(uuid) {
+                    return Ok((path, ty));
+                }
             }
         }
     }

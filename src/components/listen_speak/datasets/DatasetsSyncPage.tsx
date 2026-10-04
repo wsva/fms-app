@@ -15,6 +15,8 @@ interface PcDataset {
   uuid: string;
   name: string;
   updated: string;
+  /** One of "dictation" | "card" | "book" — drives section grouping. */
+  dataset_type: string;
   media_count: number;
   status: string;
 }
@@ -316,6 +318,72 @@ export default function DatasetsSyncPage() {
     }
   }
 
+  // ---- Rendering helpers ------------------------------------------------
+
+  // Human-readable count label per dataset type.
+  function countLabel(ds: PcDataset): string {
+    if (ds.dataset_type === "card") return `${ds.media_count} cards`;
+    if (ds.dataset_type === "book") return "book";
+    return `${ds.media_count} media`;
+  }
+
+  function renderDatasetCard(ds: PcDataset, i: number) {
+    const st = syncState[ds.uuid];
+    const prog = progress[ds.uuid];
+    const pct =
+      prog && prog.total > 0
+        ? Math.min(100, Math.round((prog.received / prog.total) * 100))
+        : 0;
+    return (
+      <div
+        key={ds.uuid || `${ds.name}-${i}`}
+        className="flex flex-col gap-2 p-3 rounded-lg border border-border-default bg-bg-card"
+      >
+        <div className="flex items-center gap-3">
+          <div className="flex flex-col min-w-0 flex-1">
+            <span className="font-medium truncate">{ds.name}</span>
+            <span className="text-xs text-text-tertiary">
+              {countLabel(ds)} · {st ? `synced ${st.synced_at}` : "not synced"}
+            </span>
+          </div>
+          <button
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
+            onClick={() => handleSync(ds.uuid)}
+            disabled={!!busyUuid}
+          >
+            <Download size={14} />
+            {busyUuid === ds.uuid ? "Syncing…" : st ? "Re-sync" : "Sync"}
+          </button>
+        </div>
+
+        {prog && prog.phase !== "done" && (
+          <div className="flex flex-col gap-1">
+            <div className="h-1.5 w-full rounded bg-bg-hover overflow-hidden">
+              <div
+                className="h-full bg-accent-bg transition-[width]"
+                style={{
+                  width: prog.phase === "extract" ? "100%" : `${pct}%`,
+                }}
+              />
+            </div>
+            <span className="text-xs text-text-tertiary">
+              {prog.phase === "extract"
+                ? "Extracting…"
+                : `Downloading… ${pct}% (${prog.received} / ${prog.total} bytes)`}
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Datasets grouped into the three sync sections, in display order.
+  const sections: { key: string; label: string; items: PcDataset[] }[] = [
+    { key: "dictation", label: "Dictation", items: pcDatasets.filter((d) => d.dataset_type === "dictation") },
+    { key: "card", label: "Cards", items: pcDatasets.filter((d) => d.dataset_type === "card") },
+    { key: "book", label: "Books", items: pcDatasets.filter((d) => d.dataset_type === "book") },
+  ];
+
   return (
     <div className="flex flex-col w-full h-full min-h-0 p-4 gap-3">
       {/* Header */}
@@ -475,60 +543,23 @@ export default function DatasetsSyncPage() {
             </div>
           )}
 
-          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
+          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4">
             {pcDatasets.length === 0 && !loadingList && (
               <p className="text-sm text-text-tertiary">No datasets available on the PC.</p>
             )}
-            {pcDatasets.map((ds, i) => {
-              const st = syncState[ds.uuid];
-              const prog = progress[ds.uuid];
-              const pct =
-                prog && prog.total > 0
-                  ? Math.min(100, Math.round((prog.received / prog.total) * 100))
-                  : 0;
-              return (
-                <div
-                  key={ds.uuid || `${ds.name}-${i}`}
-                  className="flex flex-col gap-2 p-3 rounded-lg border border-border-default bg-bg-card"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="flex flex-col min-w-0 flex-1">
-                      <span className="font-medium truncate">{ds.name}</span>
-                      <span className="text-xs text-text-tertiary">
-                        {ds.media_count} media ·{" "}
-                        {st ? `synced ${st.synced_at}` : "not synced"}
-                      </span>
-                    </div>
-                    <button
-                      className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
-                      onClick={() => handleSync(ds.uuid)}
-                      disabled={!!busyUuid}
-                    >
-                      <Download size={14} />
-                      {busyUuid === ds.uuid ? "Syncing…" : st ? "Re-sync" : "Sync"}
-                    </button>
-                  </div>
-
-                  {prog && prog.phase !== "done" && (
-                    <div className="flex flex-col gap-1">
-                      <div className="h-1.5 w-full rounded bg-bg-hover overflow-hidden">
-                        <div
-                          className="h-full bg-accent-bg transition-[width]"
-                          style={{
-                            width: prog.phase === "extract" ? "100%" : `${pct}%`,
-                          }}
-                        />
-                      </div>
-                      <span className="text-xs text-text-tertiary">
-                        {prog.phase === "extract"
-                          ? "Extracting…"
-                          : `Downloading… ${pct}% (${prog.received} / ${prog.total} bytes)`}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {sections.map((section) => (
+              <div key={section.key} className="flex flex-col gap-2">
+                <h2 className="text-xs font-semibold uppercase tracking-wide text-text-tertiary px-1">
+                  {section.label}
+                  {section.items.length > 0 && ` · ${section.items.length}`}
+                </h2>
+                {section.items.length === 0 ? (
+                  <p className="text-sm text-text-tertiary px-1">None on PC.</p>
+                ) : (
+                  section.items.map((ds, i) => renderDatasetCard(ds, i))
+                )}
+              </div>
+            ))}
           </div>
         </>
       )}

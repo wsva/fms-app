@@ -34,6 +34,8 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 use tokio_util::io::{ReaderStream, SyncIoBridge};
 
+use crate::book::{self, BookChapter, BookSentence, BookSentenceWord};
+use crate::cards::{self, Card, Tag};
 use crate::dataset;
 use crate::dictation::{self, ListenCue, ListenDictation};
 use crate::pairing;
@@ -165,27 +167,65 @@ struct DatasetListItem {
     uuid: String,
     name: String,
     updated: String,
+    /// One of `dictation` | `card` | `book` — lets the phone group the list and
+    /// know which local root to unpack a snapshot into.
+    dataset_type: String,
+    /// Dictation: media file count. Card: card count. Book: 0 (not tracked).
     media_count: usize,
     status: String,
 }
 
 async fn datasets_list(State(st): State<RestState>) -> Response {
     let settings = st.app.state::<SettingsState>();
-    let items: Vec<DatasetListItem> = dataset::list_datasets(&settings)
-        .into_iter()
-        // Raw-import folders (a directory with media/ but no info.json) carry an
-        // empty uuid and cannot be resolved by the manifest/snapshot endpoints,
-        // so they are not syncable from the phone. Skip them rather than offer
-        // dead entries (which also collapse into duplicate keys in the UI).
-        .filter(|d| !d.info.uuid.is_empty())
-        .map(|d| DatasetListItem {
+    let mut items: Vec<DatasetListItem> = Vec::new();
+
+    // Dictation datasets. Raw-import folders (a directory with media/ but no
+    // info.json) carry an empty uuid and cannot be resolved by the
+    // manifest/snapshot endpoints, so skip them rather than offer dead entries.
+    for d in dataset::list_datasets(&settings) {
+        if d.info.uuid.is_empty() {
+            continue;
+        }
+        items.push(DatasetListItem {
             uuid: d.info.uuid,
             name: d.info.name,
             updated: d.info.updated,
+            dataset_type: "dictation".into(),
             media_count: d.media_count,
             status: d.status,
-        })
-        .collect();
+        });
+    }
+
+    // Card datasets.
+    for d in crate::cards::list_card_datasets(&settings) {
+        if d.info.uuid.is_empty() {
+            continue;
+        }
+        items.push(DatasetListItem {
+            uuid: d.info.uuid,
+            name: d.info.name,
+            updated: d.info.updated,
+            dataset_type: "card".into(),
+            media_count: d.card_count,
+            status: "ready".into(),
+        });
+    }
+
+    // Books (reading library).
+    for b in crate::book::list_books(&settings) {
+        if b.uuid.is_empty() {
+            continue;
+        }
+        items.push(DatasetListItem {
+            uuid: b.uuid,
+            name: b.title,
+            updated: b.updated_at,
+            dataset_type: "book".into(),
+            media_count: 0,
+            status: "ready".into(),
+        });
+    }
+
     (StatusCode::OK, Json(items)).into_response()
 }
 
@@ -199,6 +239,10 @@ struct Manifest {
     total_bytes: u64,
     overall_hash: String,
     updated_at: String,
+    /// Dataset type (`dictation` | `card` | `book`) so the phone unpacks the
+    /// snapshot into the matching local root.
+    #[serde(default)]
+    dataset_type: String,
 }
 
 /// Recursively collect `(rel_path_forward_slash, absolute_path)` pairs, sorted
@@ -265,6 +309,7 @@ fn compute_manifest(dir: &Path) -> Manifest {
         total_bytes,
         overall_hash,
         updated_at,
+        dataset_type: String::new(),
     }
 }
 
@@ -279,12 +324,13 @@ fn checkpoint_db(dir: &Path) {
 
 async fn manifest(State(st): State<RestState>, axum::extract::Path(uuid): axum::extract::Path<String>) -> Response {
     let settings = st.app.state::<SettingsState>();
-    let dir = match dataset::find_dataset_dir(&settings, &uuid) {
+    let (dir, ty) = match dataset::find_dataset_dir_typed(&settings, &uuid) {
         Ok(d) => d,
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
     checkpoint_db(&dir);
-    let m = compute_manifest(&dir);
+    let mut m = compute_manifest(&dir);
+    m.dataset_type = ty.as_str().to_string();
     (StatusCode::OK, Json(m)).into_response()
 }
 
@@ -294,7 +340,7 @@ async fn manifest(State(st): State<RestState>, axum::extract::Path(uuid): axum::
 
 async fn snapshot(State(st): State<RestState>, axum::extract::Path(uuid): axum::extract::Path<String>) -> Response {
     let settings = st.app.state::<SettingsState>();
-    let dir = match dataset::find_dataset_dir(&settings, &uuid) {
+    let (dir, _ty) = match dataset::find_dataset_dir_typed(&settings, &uuid) {
         Ok(d) => d,
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
@@ -548,8 +594,79 @@ async fn replay(
             )
             .map(|_| ())
         }
+        "card_save" => {
+            let card: Card =
+                serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
+            cards::card_save(settings.clone(), dataset_uuid, card).await.map(|_| ())
+        }
+        "card_delete" => {
+            let card_uuid = extract_str(&ch.payload, "card_uuid")?;
+            cards::card_delete(settings.clone(), dataset_uuid, card_uuid).await
+        }
+        "card_review" => {
+            let card_uuid = extract_str(&ch.payload, "card_uuid")?;
+            let quality = ch.payload.get("quality").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            cards::card_test_submit(settings.clone(), dataset_uuid, card_uuid, quality).await.map(|_| ())
+        }
+        "card_tag_save" => {
+            let tag: Tag =
+                serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
+            cards::card_tag_save(settings.clone(), dataset_uuid, tag).await.map(|_| ())
+        }
+        "card_tag_delete" => {
+            let tag_uuid = extract_str(&ch.payload, "tag_uuid")?;
+            cards::card_tag_delete(settings.clone(), dataset_uuid, tag_uuid).await
+        }
+        "card_set_tags" => {
+            let card_uuid = extract_str(&ch.payload, "card_uuid")?;
+            let tag_uuids: Vec<String> = ch.payload.get("tag_uuids").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+            }).unwrap_or_default();
+            cards::card_set_tags(settings.clone(), dataset_uuid, card_uuid, tag_uuids).await
+        }
+        "book_chapter_save" => {
+            let chapter: BookChapter =
+                serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
+            book::book_save_chapter(settings.clone(), dataset_uuid, chapter).await
+        }
+        "book_chapter_delete" => {
+            let uuid = extract_str(&ch.payload, "uuid")?;
+            book::book_delete_chapter(settings.clone(), dataset_uuid, uuid).await
+        }
+        "book_sentence_save" => {
+            let sentence: BookSentence =
+                serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
+            book::book_save_sentence(settings.clone(), dataset_uuid, sentence).await
+        }
+        "book_sentences_save" => {
+            let sentences: Vec<BookSentence> =
+                serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
+            book::book_save_sentences(settings.clone(), dataset_uuid, sentences).await
+        }
+        "book_sentence_delete" => {
+            let uuid = extract_str(&ch.payload, "uuid")?;
+            book::book_delete_sentence(settings.clone(), dataset_uuid, uuid).await
+        }
+        "book_word_save" => {
+            let word: BookSentenceWord =
+                serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
+            book::book_save_word(settings.clone(), dataset_uuid, word).await
+        }
+        "book_word_delete" => {
+            let uuid = extract_str(&ch.payload, "uuid")?;
+            book::book_delete_word(settings.clone(), dataset_uuid, uuid).await
+        }
         other => Err(format!("unknown change kind: {}", other)),
     }
+}
+
+/// Read a required string field out of a change payload.
+fn extract_str(payload: &serde_json::Value, key: &str) -> Result<String, String> {
+    payload
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("payload missing '{key}'"))
 }
 
 fn extract_cue_uuid(payload: &serde_json::Value) -> Result<String, String> {

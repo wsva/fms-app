@@ -148,9 +148,11 @@ fn with_device_auth(
         .header("x-fms-sig", hex_encode(sig.as_ref())))
 }
 
-/// Directory that dictation datasets live in: `<datasets>/dictation`.
-fn dictation_root(settings: &SettingsState) -> std::path::PathBuf {
-    settings.datasets_dir().join("dictation")
+/// Local root a dataset type syncs into: `<datasets>/<type>` (e.g.
+/// `<datasets>/dictation`, `<datasets>/card`, `<datasets>/book`). Mirrors the
+/// PC-side layout so every existing read path discovers the unpacked dataset.
+fn type_root(settings: &SettingsState, dataset_type: &str) -> std::path::PathBuf {
+    settings.datasets_dir().join(dataset_type)
 }
 
 fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
@@ -344,6 +346,9 @@ pub async fn dataset_sync_snapshot(
     let hash = m["overall_hash"].as_str().unwrap_or("").to_string();
     let total_bytes = m["total_bytes"].as_u64().unwrap_or(0);
     let file_count = m["file_count"].as_u64().unwrap_or(0) as usize;
+    // Which local root to unpack into; the PC reports it in the manifest.
+    // Fall back to "dictation" for older PCs that predate the field.
+    let dataset_type = m["dataset_type"].as_str().unwrap_or("dictation").to_string();
 
     let stored: Option<String> = {
         let conn = dictation::open_app_db(&settings)?;
@@ -367,8 +372,8 @@ pub async fn dataset_sync_snapshot(
     // 2. Always flush local changes before replacing the dataset dir.
     let _ = writeback_flush_inner(&settings).await;
 
-    // 3. Prepare temp paths under <datasets>/dictation.
-    let root = dictation_root(&settings);
+    // 3. Prepare temp paths under <datasets>/<type>.
+    let root = type_root(&settings, &dataset_type);
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     let tmp_dir = root.join(format!("{uuid}.tmp"));
     let final_dir = root.join(&uuid);

@@ -1169,7 +1169,7 @@ pub async fn card_save(
     }
 
     log::info!("[Cards] Saved card '{}' in dataset '{}'", uuid, dataset_uuid);
-    Ok(Card {
+    let saved = Card {
         uuid,
         question: card.question,
         suggestion: card.suggestion,
@@ -1182,7 +1182,21 @@ pub async fn card_save(
         deleted_at: None,
         created_at: now.clone(),
         updated_at: now,
-    })
+    };
+
+    // Thin-client writeback: queue the change for the PC. Mobile only — desktop
+    // is the source of truth and already wrote straight to its DB.
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "card_save",
+            &dataset_uuid,
+            &serde_json::to_value(&saved).unwrap_or_default(),
+        );
+    }
+
+    Ok(saved)
 }
 
 /// Soft-delete a card.
@@ -1215,6 +1229,15 @@ pub async fn card_delete(
     }
 
     log::info!("[Cards] Deleted card '{}' in dataset '{}'", card_uuid, dataset_uuid);
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "card_delete",
+            &dataset_uuid,
+            &serde_json::json!({ "card_uuid": card_uuid }),
+        );
+    }
     Ok(())
 }
 
@@ -1340,14 +1363,24 @@ pub async fn card_tag_save(
     )
     .map_err(|e| e.to_string())?;
 
-    Ok(Tag {
+    let saved = Tag {
         uuid,
         name: tag.name,
         color: tag.color,
         deleted_at: None,
         created_at: now.clone(),
         updated_at: now,
-    })
+    };
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "card_tag_save",
+            &dataset_uuid,
+            &serde_json::to_value(&saved).unwrap_or_default(),
+        );
+    }
+    Ok(saved)
 }
 
 /// Delete a tag (soft delete).
@@ -1366,6 +1399,16 @@ pub async fn card_tag_delete(
         rusqlite::params![now, tag_uuid],
     )
     .map_err(|e| e.to_string())?;
+
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "card_tag_delete",
+            &dataset_uuid,
+            &serde_json::json!({ "tag_uuid": tag_uuid }),
+        );
+    }
 
     Ok(())
 }
@@ -1398,6 +1441,16 @@ pub async fn card_set_tags(
             rusqlite::params![ct_uuid, card_uuid, tag_uuid, now, now],
         )
         .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "card_set_tags",
+            &dataset_uuid,
+            &serde_json::json!({ "card_uuid": card_uuid, "tag_uuids": tag_uuids }),
+        );
     }
 
     Ok(())
@@ -1618,6 +1671,16 @@ pub async fn card_test_submit(
         quality,
         interval_days
     );
+
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "card_review",
+            &dataset_uuid,
+            &serde_json::json!({ "card_uuid": card_uuid, "quality": quality }),
+        );
+    }
 
     Ok(CardReview {
         uuid: review_uuid,

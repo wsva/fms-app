@@ -398,6 +398,15 @@ pub async fn book_save_chapter(
         ],
     )
     .map_err(|e| e.to_string())?;
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "book_chapter_save",
+            &book_uuid,
+            &serde_json::to_value(&chapter).unwrap_or_default(),
+        );
+    }
     Ok(())
 }
 
@@ -424,6 +433,15 @@ pub async fn book_delete_chapter(
     .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM book_chapter WHERE uuid = ?1", [&uuid])
         .map_err(|e| e.to_string())?;
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "book_chapter_delete",
+            &book_uuid,
+            &serde_json::json!({ "uuid": uuid }),
+        );
+    }
     Ok(())
 }
 
@@ -518,7 +536,17 @@ pub async fn book_save_sentence(
 ) -> Result<(), String> {
     let dir = find_book_dir(&settings, &book_uuid)?;
     let conn = open_book_db(&dir)?;
-    save_sentence_row(&conn, &sentence)
+    save_sentence_row(&conn, &sentence)?;
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "book_sentence_save",
+            &book_uuid,
+            &serde_json::to_value(&sentence).unwrap_or_default(),
+        );
+    }
+    Ok(())
 }
 
 /// Insert or update many sentences in a transaction (used for reordering).
@@ -535,6 +563,15 @@ pub async fn book_save_sentences(
         save_sentence_row(&tx, s)?;
     }
     tx.commit().map_err(|e| e.to_string())?;
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "book_sentences_save",
+            &book_uuid,
+            &serde_json::to_value(&sentences).unwrap_or_default(),
+        );
+    }
     Ok(())
 }
 
@@ -564,6 +601,15 @@ pub async fn book_delete_sentence(
     .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM book_sentence WHERE uuid = ?1", [&uuid])
         .map_err(|e| e.to_string())?;
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "book_sentence_delete",
+            &book_uuid,
+            &serde_json::json!({ "uuid": uuid }),
+        );
+    }
     Ok(())
 }
 
@@ -623,6 +669,15 @@ pub async fn book_save_word(
         ],
     )
     .map_err(|e| e.to_string())?;
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "book_word_save",
+            &book_uuid,
+            &serde_json::to_value(&word).unwrap_or_default(),
+        );
+    }
     Ok(())
 }
 
@@ -637,6 +692,15 @@ pub async fn book_delete_word(
     let conn = open_book_db(&dir)?;
     conn.execute("DELETE FROM book_sentence_word WHERE uuid = ?1", [&uuid])
         .map_err(|e| e.to_string())?;
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = crate::sync::enqueue_change(
+            &settings,
+            "book_word_delete",
+            &book_uuid,
+            &serde_json::json!({ "uuid": uuid }),
+        );
+    }
     Ok(())
 }
 
