@@ -8,7 +8,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore, useLayoutEffect } from "react";
 
 import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui/react";
-import { RefreshCw, Trash2, Database, Target, CheckCircle, FolderPlus, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown } from "lucide-react";
+import { RefreshCw, Trash2, Database, Target, CheckCircle, FolderPlus, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown, Captions } from "lucide-react";
 import CueEditor from "./components/CueEditor";
 import WaveformCanvas from "./components/WaveformCanvas";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
@@ -540,11 +540,12 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                                         {d.mediaSubtitles[m.uuid].map((s) => (
                                             <button
                                                 key={s.uuid}
-                                                className="inline-flex items-center gap-1 text-xs hover:underline cursor-pointer"
+                                                className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-md bg-accent-bg/30 border border-border-light cursor-pointer transition-colors hover:bg-accent-bg/60 hover:border-accent"
                                                 title={`Open dictation for "${s.name || s.uuid}"`}
                                                 onClick={() => d.selectMediaSubtitle(m.uuid, s.uuid)}
                                             >
-                                                <span className="text-accent">{s.name || s.uuid}</span>
+                                                <Captions size={12} className="text-accent shrink-0" />
+                                                <span className="text-accent font-medium">{s.name || s.uuid}</span>
                                                 <span className="text-text-tertiary font-mono">(uuid: {s.uuid})</span>
                                             </button>
                                         ))}
