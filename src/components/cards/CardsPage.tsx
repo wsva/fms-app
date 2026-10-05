@@ -29,6 +29,7 @@ import type {
 } from "@/lib/types";
 import { CARD_BASE_URL, CARD_LINKS, openCardUrl } from "@/lib/cards";
 import { isMobileApp } from "@/lib/platform";
+import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import { useCardEditor } from "./CardEditorContext";
 
 type TabId = "cards" | "search" | "review" | "tags" | "online" | "advanced";
@@ -574,42 +575,56 @@ export default function CardsPage() {
           </div>
         )}
 
-        {/* Review tab */}
+        {/* Review tab. The panel scrolls so a long answer stays reachable instead of
+            being clipped by the tab content's overflow-hidden; `m-auto` on the child
+            keeps the card centered while there is spare space and collapses to 0 once
+            the content is taller than the viewport. */}
         {activeTab === "review" && (
-          <div className="flex flex-col items-center justify-center h-full p-3 sm:p-6">
+          <div className="flex h-full overflow-y-auto p-3 sm:p-6">
             {reviewCard ? (
-              <div className="w-full max-w-lg">
+              <div className="m-auto w-full max-w-lg">
                 {/* Card display */}
-                <div
-                  className="relative bg-bg-card rounded-xl border border-border-default p-8 min-h-[300px] flex items-center justify-center cursor-pointer"
-                  onClick={() => setReviewFlipped(!reviewFlipped)}
-                >
-                  <div className="text-center">
-                    {!reviewFlipped ? (
-                      <>
-                        <p className="text-2xl font-medium mb-4">
-                          {reviewCard.question}
-                        </p>
-                        <p className="text-sm text-text-tertiary">
-                          Click to reveal answer
-                        </p>
-                      </>
-                    ) : (
-                      <>
-                        <p className="text-lg text-text-secondary mb-2">
-                          {reviewCard.question}
-                        </p>
-                        <div className="border-t border-border-default my-4" />
-                        <p className="text-xl">{reviewCard.answer}</p>
-                        {reviewCard.note && (
-                          <p className="text-sm text-text-tertiary mt-4">
-                            {reviewCard.note}
+                <div className="relative" onClick={() => setReviewFlipped(!reviewFlipped)}>
+                  <div className="bg-bg-card rounded-xl border border-border-default p-4 min-h-[220px] max-h-[55vh] flex flex-col overflow-y-auto cursor-pointer sm:p-8 sm:min-h-[300px]">
+                    {/* Long answers read as a block of prose, so the revealed side is
+                        left-aligned; the prompt-only side stays centered. */}
+                    <div className={`break-words my-auto w-full ${reviewFlipped ? "text-left" : "text-center"}`}>
+                      {!reviewFlipped ? (
+                        <>
+                          <p className="text-2xl font-medium mb-4">
+                            {reviewCard.question}
                           </p>
-                        )}
-                      </>
-                    )}
+                          <p className="text-sm text-text-tertiary">
+                            Click to reveal answer
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-lg text-text-secondary mb-2">
+                            {reviewCard.question}
+                          </p>
+                          <div className="border-t border-border-default my-4" />
+                          {/* Answers are written in markdown (the card editor says so), so
+                              render them through the same viewer the wiki uses. Links must
+                              not flip the card back, hence the conditional stopPropagation. */}
+                          <div
+                            className="text-xl"
+                            onClick={(e) => {
+                              if ((e.target as HTMLElement).closest("a")) e.stopPropagation();
+                            }}
+                          >
+                            <MarkdownViewer content={reviewCard.answer} />
+                          </div>
+                          {reviewCard.note && (
+                            <div className="text-sm mt-4">
+                              <MarkdownViewer content={reviewCard.note} />
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
                   </div>
-                  <div className="absolute top-2 right-2">
+                  <div className="absolute top-2 right-2 bg-bg-card rounded px-1">
                     <FlipHorizontal size={16} className="text-text-tertiary" />
                   </div>
                 </div>
