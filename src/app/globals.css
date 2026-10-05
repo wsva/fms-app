@@ -184,3 +184,16 @@
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
+/* Android boot splash. The static export is prerendered as the wide desktop
+   shell, so a phone would paint that for as long as it takes to download and
+   hydrate the JS bundle. The markup ships in the prerendered HTML and stays
+   mounted until React signals it is live (`booted` in page.tsx); display is
+   decided here rather than in a class so it can key off the pre-paint
+   `data-mobile` tag from layout.tsx — desktop never shows it at all. */
+.app-boot-splash {
+  display: none;
+}
+html[data-mobile="1"] .app-boot-splash {
+  display: flex;
+}

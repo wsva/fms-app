@@ -52,9 +52,16 @@ export default function Home() {
   const [showWorkspaceChooser, setShowWorkspaceChooser] = useState(false);
   const [currentWorkspace, setCurrentWorkspace] = useState<Workspace | null>(null);
   const [mobile, setMobile] = useState(false);
+  // Android paints the prerendered desktop shell while the JS bundle is still
+  // loading, which reads as "wrong app" for a second or more on a phone. The
+  // splash is therefore rendered from the very first (prerendered) paint and
+  // only dropped once the client has committed the platform-correct layout.
+  // `booted` starts false on server and client alike, so hydration matches.
+  const [booted, setBooted] = useState(false);
 
   useEffect(() => {
     setMobile(isMobileApp());
+    setBooted(true);
   }, []);
 
   // Check workspace state on mount
@@ -213,6 +220,17 @@ export default function Home() {
 
       {/* Global text-selection → "Add to Card" menu */}
       <CardContextMenu />
+
+      {/* Boot splash — visible on Android only, see .app-boot-splash in globals.css.
+          No `flex` class: display is owned by that rule so the pre-paint
+          data-mobile tag can decide it. /logo.png is a copy of
+          src-tauri/icons/icon.png (the launcher artwork); it lives in public/ so
+          the WebView can reach it, and is rounded to echo the adaptive icon. */}
+      {!booted && (
+        <div className="app-boot-splash fixed inset-0 z-[9999] flex-col items-center justify-center bg-bg-body">
+          <img src="/logo.png" alt="" className="h-36 w-36 select-none rounded-2xl" draggable={false} />
+        </div>
+      )}
     </div>
   );
 }

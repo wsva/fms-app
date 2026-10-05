@@ -15,6 +15,13 @@ export const viewport: Viewport = {
   viewportFit: "cover",
 };
 
+// The `data-mobile` tag in the head script below must keep the same test as
+// isMobileApp() in src/lib/platform.ts. It exists because the static export is
+// prerendered once (as the desktop shell), so only a script that runs before
+// first paint can tell the Android boot splash apart from a desktop session —
+// React's own deferred platform flag arrives too late. See .app-boot-splash in
+// globals.css and the `booted` state in page.tsx.
+
 export default function RootLayout({
   children,
 }: {
@@ -24,7 +31,7 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: `
-          (function(){var t=localStorage.getItem('theme');if(t&&t!=='light')document.documentElement.setAttribute('data-theme',t);})()
+          (function(){var t=localStorage.getItem('theme');if(t&&t!=='light')document.documentElement.setAttribute('data-theme',t);if(/android/i.test(navigator.userAgent))document.documentElement.setAttribute('data-mobile','1');})()
         `}} />
       </head>
       <body>
