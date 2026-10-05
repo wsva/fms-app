@@ -149,7 +149,11 @@ export default function Home() {
   }
 
   return (
-    <div className={`flex h-screen ${mobile ? "flex-col" : ""}`}>
+    <div
+      className={`flex h-screen ${mobile ? "flex-col" : ""}`}
+      // Edge-to-edge WebView draws under the status bar; push the shell below it.
+      style={mobile ? { paddingTop: "env(safe-area-inset-top)" } : undefined}
+    >
       {!mobile && (
         <Sidebar
           activeTab={activeTab}
