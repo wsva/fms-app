@@ -770,6 +770,8 @@ Connect AI agents via Streamable HTTP at <code>/mcp</code>. Built with <strong>r
 <div class="tool-item"><div class="name">web_service_stop</div><div class="desc">Stop the web service</div></div>
 <div class="tool-item"><div class="name">log_get_history</div><div class="desc">Get recent log entries</div></div>
 <div class="tool-item"><div class="name">log_clear</div><div class="desc">Clear the log buffer</div></div>
+<div class="tool-item"><div class="name">log_get_file_path</div><div class="desc">Path of the persisted log file</div></div>
+<div class="tool-item"><div class="name">log_read_file_history</div><div class="desc">Read archived logs from file</div></div>
 </div>
 </div>
 </details>"#;

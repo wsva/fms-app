@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
-import { Trash2, ArrowDown, Pause, Play } from "lucide-react";
+import { Trash2, ArrowDown, Pause, Play, FileText, Radio } from "lucide-react";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -55,17 +55,23 @@ function levelBadgeColor(level: string): string {
 
 export default function LogPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [source, setSource] = useState<"memory" | "file">("memory");
+  const [logFilePath, setLogFilePath] = useState("");
   const [activeFilters, setActiveFilters] = useState<Set<LevelFilter>>(
     new Set(["INFO", "WARN", "ERROR"])
   );
   const [autoScroll, setAutoScroll] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // The live listener must not mix streamed entries into a static file snapshot.
+  const sourceRef = useRef<"memory" | "file">("memory");
+  sourceRef.current = source;
 
   // Listen for real-time log events
   useEffect(() => {
     if (!isTauri()) return;
     let unlisten: (() => void) | undefined;
     listen<LogEntry>("app-log", (evt) => {
+      if (sourceRef.current !== "memory") return;
       setLogs((prev) => {
         const next = [...prev, evt.payload];
         // Keep at most 1000 entries in frontend buffer
@@ -121,6 +127,31 @@ export default function LogPage() {
     }
   }, []);
 
+  // Swap between the in-memory ring buffer (last 1000 entries, live) and the
+  // persisted log file (full history, survives restarts and clears).
+  const handleToggleSource = useCallback(() => {
+    if (!isTauri()) return;
+    if (source === "memory") {
+      Promise.all([
+        invoke<string>("log_get_file_path"),
+        invoke<LogEntry[]>("log_read_file_history", { limit: 5000 }),
+      ])
+        .then(([path, entries]) => {
+          setLogFilePath(path);
+          setLogs(entries);
+          setSource("file");
+        })
+        .catch(() => {});
+    } else {
+      invoke<LogEntry[]>("log_get_history")
+        .then((entries) => {
+          setLogs(entries);
+          setSource("memory");
+        })
+        .catch(() => {});
+    }
+  }, [source]);
+
   // Filtered logs
   const filteredLogs = logs.filter((entry) => activeFilters.has(entry.level as LevelFilter));
 
@@ -160,6 +191,23 @@ export default function LogPage() {
             {autoScroll ? <ArrowDown width={16} height={16} /> : <Pause width={16} height={16} />}
           </button>
 
+          {/* Memory / file source toggle */}
+          <button
+            onClick={handleToggleSource}
+            className={`p-1.5 rounded transition-colors ${
+              source === "file"
+                ? "text-accent hover:bg-accent/10"
+                : "text-text-tertiary hover:bg-mid-gray/20"
+            }`}
+            title={
+              source === "memory"
+                ? "Read the persisted log file (full history, survives restarts)"
+                : "Back to the live in-memory buffer (last 1000 entries)"
+            }
+          >
+            {source === "memory" ? <FileText width={16} height={16} /> : <Radio width={16} height={16} />}
+          </button>
+
           {/* Clear button */}
           <button
             onClick={handleClear}
@@ -176,18 +224,22 @@ export default function LogPage() {
         <span>
           {filteredLogs.length} entries{filteredLogs.length !== logs.length && ` (${logs.length} total)`}
         </span>
-        {autoScroll && (
+        {source === "file" ? (
+          <span className="truncate max-w-[50%] font-mono" title={logFilePath}>
+            file: {logFilePath}
+          </span>
+        ) : autoScroll ? (
           <span className="flex items-center gap-1">
             <Play width={10} height={10} className="fill-current" /> Live
           </span>
-        )}
+        ) : null}
       </div>
 
       {/* Log output */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-2 font-mono text-xs min-h-0">
         {filteredLogs.length === 0 ? (
           <div className="flex items-center justify-center h-full text-text-tertiary">
-            {logs.length === 0 ? "No logs yet" : "No entries match the current filters"}
+            {logs.length === 0 ? (source === "file" ? "Log file is empty" : "No logs yet") : "No entries match the current filters"}
           </div>
         ) : (
           filteredLogs.map((entry, i) => (

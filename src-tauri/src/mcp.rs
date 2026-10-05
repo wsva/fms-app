@@ -2003,11 +2003,27 @@ impl DatasetMcpServer {
         serde_json::to_string_pretty(&entries).unwrap_or_default()
     }
 
-    #[tool(name = "log_clear", description = "Clear the application log buffer.")]
+    #[tool(name = "log_clear", description = "Clear the application log buffer. The on-disk log file keeps the history and stays readable via log_read_file_history.")]
     async fn log_clear(&self) -> String {
         let buffer = self.app.state::<LogBuffer>();
         buffer.clear();
         serde_json::json!({"status": "ok", "message": "Logs cleared"}).to_string()
+    }
+
+    #[tool(name = "log_get_file_path", description = "Get the path of the persistent on-disk log file (with size-based rotation). The in-memory buffer behind log_get_history only keeps the latest 1000 entries and is lost on restart; this file survives both.")]
+    async fn log_get_file_path(&self) -> String {
+        log::info!("[MCP] log_get_file_path");
+        let path = crate::logger::LogBuffer::file_path();
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        serde_json::json!({"status": "ok", "path": path.to_string_lossy(), "size_bytes": size}).to_string()
+    }
+
+    #[tool(name = "log_read_file_history", description = "Read archived log entries from the persistent log file (oldest first, includes the rotated backup). Survives app restarts and log_clear, unlike log_get_history. Optional 'limit' returns only the newest N entries.")]
+    async fn log_read_file_history(&self, Parameters(param): Parameters<LogHistoryParam>) -> String {
+        log::info!("[MCP] log_read_file_history: limit={:?}", param.limit);
+        let buffer = self.app.state::<LogBuffer>();
+        let entries = buffer.read_file_history(param.limit);
+        serde_json::to_string_pretty(&entries).unwrap_or_default()
     }
 }
 
