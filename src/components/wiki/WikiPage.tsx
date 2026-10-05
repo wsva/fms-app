@@ -280,40 +280,19 @@ export default function WikiPage() {
         </div>
       )}
 
-      {/* Mobile sidebar — slide-in drawer with a dimmed backdrop. */}
-      {mobile && (
-        <>
-          <div
-            className={`fixed inset-0 z-30 bg-black/40 transition-opacity duration-200 ${
-              sidebarOpen ? "opacity-100" : "opacity-0 pointer-events-none"
-            }`}
-            onClick={() => setSidebarOpen(false)}
-            aria-hidden="true"
-          />
-          <div
-            className={`fixed top-0 left-0 z-40 h-full w-[80vw] max-w-[300px] shadow-xl transition-transform duration-200 ${
-              sidebarOpen ? "translate-x-0" : "-translate-x-full"
-            }`}
-          >
-            <WikiSidebar
-              wikiDir={wikiDir}
-              selectedFile={selectedFile}
-              onFileSelect={handleMobileFileSelect}
-            />
-          </div>
-        </>
-      )}
-
       {/* Main content area */}
       <div className="flex-1 flex flex-col min-h-0 min-w-0">
         {/* Top bar with navigation, search and controls */}
         <div className="flex items-center gap-3 px-4 py-2 border-b border-border-default bg-bg-card">
-          {/* Mobile: open the wiki file drawer */}
+          {/* Mobile: toggle the wiki file drawer. It stays visible while the
+              drawer is open now that the panel sits below the bar, so the button
+              has to close the drawer as well as open it. */}
           {mobile && (
             <button
-              onClick={() => setSidebarOpen(true)}
+              onClick={() => setSidebarOpen((v) => !v)}
+              aria-expanded={sidebarOpen}
               className="p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
-              title="Open wiki files"
+              title="Show/hide wiki files"
             >
               <Menu size={18} />
             </button>
@@ -356,34 +335,65 @@ export default function WikiPage() {
           )}
         </div>
 
-        {/* Content area */}
-        <div className="flex-1 overflow-y-auto min-h-0">
-          {isLoading ? (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-text-tertiary">Loading...</div>
-            </div>
-          ) : error ? (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-error-text bg-error-bg px-4 py-2 rounded-lg">
-                Error: {error}
+        {/* Everything under the top bar. This is the file drawer's containing
+            block: the drawer used to be `fixed top-0 h-full`, i.e. anchored to the
+            viewport, which put it under the Android status bar and let it cover the
+            bar that opens it. Absolute positioning inside this wrapper bounds its
+            height to the space between the top bar and the bottom navigation. */}
+        <div className="relative flex flex-col flex-1 min-h-0 overflow-hidden">
+          {/* Content area */}
+          <div className="flex-1 overflow-y-auto min-h-0">
+            {isLoading ? (
+              <div className="flex items-center justify-center h-full">
+                <div className="text-text-tertiary">Loading...</div>
               </div>
-            </div>
-          ) : selectedFile ? (
-            <div className="px-6 pt-6 pb-[50vh]">
-              {/* File path breadcrumb */}
-              <div className="text-xs text-text-tertiary mb-4 truncate">
-                {getFileName(selectedFile)}
+            ) : error ? (
+              <div className="flex items-center justify-center h-full">
+                <div className="text-error-text bg-error-bg px-4 py-2 rounded-lg">
+                  Error: {error}
+                </div>
               </div>
-              <MarkdownViewer content={fileContent} withTOC={true} onWikiLink={handleWikiLink} />
-            </div>
-          ) : (
-            <div className="flex flex-col items-center justify-center h-full text-text-tertiary">
-              <BookOpen size={48} className="mb-4 opacity-30" />
-              <p className="text-lg">Select a file to view</p>
-              <p className="text-sm mt-2">
-                Choose a markdown file from the sidebar or search for content
-              </p>
-            </div>
+            ) : selectedFile ? (
+              <div className="px-6 pt-6 pb-[50vh]">
+                {/* File path breadcrumb */}
+                <div className="text-xs text-text-tertiary mb-4 truncate">
+                  {getFileName(selectedFile)}
+                </div>
+                <MarkdownViewer content={fileContent} withTOC={true} onWikiLink={handleWikiLink} />
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full text-text-tertiary">
+                <BookOpen size={48} className="mb-4 opacity-30" />
+                <p className="text-lg">Select a file to view</p>
+                <p className="text-sm mt-2">
+                  Choose a markdown file from the sidebar or search for content
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Mobile sidebar — slide-in drawer with a dimmed backdrop. */}
+          {mobile && (
+            <>
+              <div
+                className={`absolute inset-0 z-30 bg-black/40 transition-opacity duration-200 ${
+                  sidebarOpen ? "opacity-100" : "opacity-0 pointer-events-none"
+                }`}
+                onClick={() => setSidebarOpen(false)}
+                aria-hidden="true"
+              />
+              <div
+                className={`absolute inset-y-0 left-0 z-40 w-[80vw] max-w-[300px] shadow-xl transition-transform duration-200 ${
+                  sidebarOpen ? "translate-x-0" : "-translate-x-full"
+                }`}
+              >
+                <WikiSidebar
+                  wikiDir={wikiDir}
+                  selectedFile={selectedFile}
+                  onFileSelect={handleMobileFileSelect}
+                />
+              </div>
+            </>
           )}
         </div>
       </div>
