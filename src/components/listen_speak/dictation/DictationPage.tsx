@@ -5,10 +5,10 @@
  * this file only handles rendering.
  */
 
-import { useState, useEffect, useMemo, useRef, useSyncExternalStore, useLayoutEffect } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore, useLayoutEffect } from "react";
 
 import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui/react";
-import { RefreshCw, Trash2, Database, Target, CheckCircle, FolderPlus, Folder, Link2, Pencil, Save, HelpCircle } from "lucide-react";
+import { RefreshCw, Trash2, Database, Target, CheckCircle, FolderPlus, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown } from "lucide-react";
 import CueEditor from "./components/CueEditor";
 import WaveformCanvas from "./components/WaveformCanvas";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
@@ -23,6 +23,9 @@ import { isMobileApp } from "@/lib/platform";
 import { logInfo, logError } from "@/lib/logger";
 
 const getUUID = () => crypto.randomUUID().replaceAll("-", "");
+
+// Persistent preference for the mobile "cues only" collapse toggle.
+const COLLAPSED_KEY = "dictation.collapsed";
 
 export default function DictationPage({ active = true }: { active?: boolean }) {
     const d = useDictationData();
@@ -48,10 +51,10 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
     // layout effect run focus() after React has committed the new element.
     const [focusNonce, setFocusNonce] = useState(0);
     const pendingFocusUuidRef = useRef<string | null>(null);
-    const requestFocusCue = (uuid: string) => {
+    const requestFocusCue = useCallback((uuid: string) => {
         pendingFocusUuidRef.current = uuid;
         setFocusNonce((n) => n + 1);
-    };
+    }, []);
     useLayoutEffect(() => {
         const uuid = pendingFocusUuidRef.current;
         if (!uuid) return;
@@ -70,9 +73,32 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
     // Mobile thin client: surface how many local edits await upload.
     const [mobile, setMobile] = useState(false);
     const [pendingUpload, setPendingUpload] = useState(0);
+    // "Cues only" mode: a phone screen barely fits one cue, so hide the
+    // breadcrumb, player, waveform and progress line behind a toolbar toggle.
+    // Default collapsed on mobile (vertical space is the scarce resource),
+    // expanded on desktop — where the toggle itself is not rendered.
+    // Always expanded on the first render (SSR-safe), then restored from storage.
+    const [collapsed, setCollapsed] = useState(false);
     useEffect(() => {
-        setMobile(isMobileApp());
+        const m = isMobileApp();
+        setMobile(m);
+        // Absent entry means the user never chose: fall back to the per-platform
+        // default instead of persisting it, so the default can still evolve.
+        let stored: string | null = null;
+        try {
+            stored = localStorage.getItem(COLLAPSED_KEY);
+        } catch { /* private mode / unsupported */ }
+        if (stored !== null) setCollapsed(stored === "1");
+        else setCollapsed(m);
     }, []);
+    // Record an explicit choice only — see the note above about the default.
+    const handleToggleCollapsed = () => {
+        const next = !collapsed;
+        setCollapsed(next);
+        try {
+            localStorage.setItem(COLLAPSED_KEY, next ? "1" : "0");
+        } catch { /* ignore */ }
+    };
     useEffect(() => {
         if (!isTauri() || !mobile) return;
         let alive = true;
@@ -177,7 +203,32 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
         }
     };
 
-    // ── Arrow key navigation for cues ──
+    // ── Cue navigation ──
+    // Shared by the Ctrl/Cmd+↑/↓ shortcut and the mobile toolbar arrows: move the
+    // active cue one step (wrapping at both ends), focus its answer field and
+    // scroll it into view. Stabilised so the keydown listener below re-registers
+    // only when the cue list or the focused cue actually changes.
+    const navigateCue = useCallback((dir: -1 | 1) => {
+        // Must have cues with media selected
+        if (d.stateCues.length === 0 || !d.stateMediaUUID) return;
+
+        // Both modes render all cues; navigate by focused-cue uuid and scroll into view.
+        const currentIndex = d.stateFocusedCueUUID ? d.stateCues.findIndex((c) => c.uuid === d.stateFocusedCueUUID) : -1;
+        const newIndex = dir < 0
+            ? (currentIndex > 0 ? currentIndex - 1 : d.stateCues.length - 1)
+            : (currentIndex < d.stateCues.length - 1 ? currentIndex + 1 : 0);
+        if (newIndex < 0 || newIndex >= d.stateCues.length) return;
+
+        const newCue = d.stateCues[newIndex];
+        d.setStateFocusedCueUUID(newCue.uuid);
+        // Focus the input field of the new cue
+        requestFocusCue(newCue.uuid);
+        // Scroll the cue into view
+        const targetElement = document.querySelectorAll("[data-cue-index]")[newIndex] as HTMLElement | undefined;
+        if (targetElement) targetElement.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }, [d.stateCues, d.stateFocusedCueUUID, d.stateMediaUUID, requestFocusCue]);
+
+    // ── Arrow key navigation for cues (desktop equivalent of the toolbar arrows) ──
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             // Only handle Ctrl/Cmd + arrow keys
@@ -192,37 +243,15 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
             }
             
             // Must have cues with media selected
-            if (d.stateCues.length === 0 || !d.stateMediaUUID) return;
-            
+            if (!d.stateMediaUUID || d.stateCues.length === 0) return;
+
             e.preventDefault();
-            
-            // Both modes render all cues; navigate by focused-cue uuid and scroll into view.
-            const currentIndex = d.stateFocusedCueUUID ? d.stateCues.findIndex(c => c.uuid === d.stateFocusedCueUUID) : -1;
-            let newIndex = currentIndex;
-
-            if (e.key === "ArrowUp") {
-                newIndex = currentIndex > 0 ? currentIndex - 1 : d.stateCues.length - 1;
-            } else if (e.key === "ArrowDown") {
-                newIndex = currentIndex < d.stateCues.length - 1 ? currentIndex + 1 : 0;
-            }
-
-            if (newIndex >= 0 && newIndex < d.stateCues.length) {
-                const newCue = d.stateCues[newIndex];
-                d.setStateFocusedCueUUID(newCue.uuid);
-                // Focus the input field of the new cue
-                requestFocusCue(newCue.uuid);
-                // Scroll the cue into view
-                const cueElements = document.querySelectorAll('[data-cue-index]');
-                const targetElement = cueElements[newIndex] as HTMLElement;
-                if (targetElement) {
-                    targetElement.scrollIntoView({ behavior: "smooth", block: "nearest" });
-                }
-            }
+            navigateCue(e.key === "ArrowUp" ? -1 : 1);
         };
-        
+
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [d.stateCues, d.stateFocusedCueUUID, d.stateMediaUUID]);
+    }, [navigateCue, d.stateCues, d.stateMediaUUID]);
 
     // ── Media playback shortcut ──
     // Ctrl/Cmd + S toggles playback of the current media.
@@ -259,9 +288,14 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                         <Button variant="ghost" size="sm" aria-label="Refresh locations" isDisabled={d.stateLoading} onPress={d.loadLocations}>
                             <RefreshCw size={16} /> Refresh
                         </Button>
-                        <Button variant="ghost" size="sm" aria-label="Add location" isDisabled={d.stateLoading} onPress={d.handleAddLocation}>
-                            <FolderPlus size={16} /> Add Location
-                        </Button>
+                        {/* Adding a location needs a native folder picker (rfd), which
+                            does not exist on mobile — there the dataset roots live in
+                            app-private storage and are filled by the PC sync flow. */}
+                        {!mobile && (
+                            <Button variant="ghost" size="sm" aria-label="Add location" isDisabled={d.stateLoading} onPress={d.handleAddLocation}>
+                                <FolderPlus size={16} /> Add Location
+                            </Button>
+                        )}
                     </div>
                 )}
 
@@ -322,9 +356,36 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                         )}
                     </div>
                 )}
+
+                {/* ── Cue stepping + collapse toggle (cue view, mobile only) ── */}
+                {/* Right-aligned group. Desktop keeps room for the player, steps
+                    through cues with Ctrl+↑/↓ and uses Large mode instead of
+                    collapsing, so neither button is offered there. */}
+                {mobile && !!d.stateMediaUUID && (
+                    <div className="ml-auto flex shrink-0 items-center gap-1">
+                        {/* Thick stroke: at 20px a default-weight arrow reads as a
+                            hairline on a phone and is easy to miss as a touch target. */}
+                        <Button isIconOnly size="sm" variant="ghost" aria-label="Previous cue" isDisabled={d.stateCues.length === 0} onPress={() => navigateCue(-1)}>
+                            <ArrowUp size={20} strokeWidth={3} />
+                        </Button>
+                        <Button isIconOnly size="sm" variant="ghost" aria-label="Next cue" isDisabled={d.stateCues.length === 0} onPress={() => navigateCue(1)}>
+                            <ArrowDown size={20} strokeWidth={3} />
+                        </Button>
+                        <Button
+                            size="sm"
+                            variant={collapsed ? "primary" : "ghost"}
+                            aria-label={collapsed ? "Show player, waveform and breadcrumb" : "Hide everything except the cues"}
+                            aria-pressed={collapsed}
+                            onPress={handleToggleCollapsed}
+                        >
+                            {collapsed ? <ChevronsUpDown size={16} /> : <ChevronsDownUp size={16} />}
+                        </Button>
+                    </div>
+                )}
             </div>
 
             {/* Breadcrumb navigation */}
+            {!collapsed && (
             <nav className="flex flex-row items-center gap-2 mb-4 text-sm select-none min-w-0">
                 <button
                     className={`shrink-0 cursor-pointer hover:underline ${d.selectedDatasetUuid ? "text-accent" : "text-text-primary font-medium"}`}
@@ -366,6 +427,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 )}
                 {d.stateLoading && <ProgressCircle size="sm" aria-label="Loading" />}
             </nav>
+            )}
 
             {/* Datasets view (initial) — grouped by location */}
             {!d.selectedDatasetUuid && (
@@ -382,7 +444,9 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                     )}
 
                     {d.locations.length === 0 && d.datasets.length === 0 ? (
-                        <p className="text-text-secondary">No datasets available. Use the &quot;Add dataset location&quot; button in the toolbar to link a directory containing datasets, or generate a database in Datasets &gt; Studio first.</p>
+                        <p className="text-text-secondary">{mobile
+                            ? "No datasets available. Open More \u203A Datasets and tap Sync to pull one from your PC."
+                            : "No datasets available. Use the \"Add dataset location\" button in the toolbar to link a directory containing datasets, or generate a database in Datasets > Studio first."}</p>
                     ) : (
                         <>
                             {d.locations.map((loc) => {
@@ -541,8 +605,10 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
             {/* Main content area */}
             {d.stateMediaUUID && (
                 <div className="flex flex-col gap-3 flex-1 min-h-0 overflow-hidden">
-                    {/* Player */}
-                    <div className="flex flex-col gap-1 shrink-0 w-full sticky top-0 z-10 bg-bg-body">
+                    {/* Player — hidden, never unmounted, while collapsed: the media
+                        element owns playback for the cue Play buttons (via videoRef),
+                        and the canvas keeps its ResizeObserver/media listeners. */}
+                    <div className={`${collapsed ? "hidden" : "flex"} flex-col gap-1 shrink-0 w-full sticky top-0 z-10 bg-bg-body`}>
                         {d.hasMedia && (
                             d.audioMode ? (
                                 <audio ref={d.videoRef as React.RefObject<HTMLAudioElement>} className="w-full" controls src={d.audioSrc} />
@@ -571,6 +637,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                     {/* Dictation */}
                     <div className="flex flex-col w-full gap-3 flex-1 min-h-0 overflow-hidden">
                             {/* ── Fixed header ── */}
+                            {!collapsed && (
                             <div className="shrink-0 flex flex-col gap-3">
                                 {d.stateSubtitleList.length > 1 && (
                                     <Select value={d.stateSubtitle?.uuid ?? null} onChange={(v) => d.setStateSubtitle(d.stateSubtitleList.find((s) => s.uuid === String(v ?? "")))}>
@@ -592,6 +659,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                                     </div>
                                 )}
                             </div>
+                            )}
 
                             {/* ── Scrollable cue cards ── */}
                             <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 pb-48">

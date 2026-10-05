@@ -471,12 +471,15 @@ export default function CueEditor({
       <div className="flex flex-col-reverse gap-1 sm:flex-row-reverse">
         {/* Left column: time row on top, then the cue content */}
         <div className="flex-1 flex flex-col gap-0.5 min-w-0">
-          {/* Time row: editable time editor for the active cue, plain text otherwise */}
+          {/* Time row: the editable editor (with the capture / expand buttons) is a
+              editing affordance, so it appears only in edit mode. An active cue in
+              dictation mode shows the same compact time string as an inactive one —
+              on a phone the editor ate a full row plus its button column. */}
           <div className="w-full">
-            {isActive ? (
+            {inEditMode ? (
               timeEditorEl()
             ) : (
-              <div className="px-1 py-1 text-xs text-text-tertiary">{formatVttTime(cue.start_ms)} ➔ {formatVttTime(cue.end_ms)}</div>
+              <div className={`px-1 py-1 text-xs ${isActive ? "text-text-secondary" : "text-text-tertiary"}`}>{formatVttTime(cue.start_ms)} ➔ {formatVttTime(cue.end_ms)}</div>
             )}
           </div>
           {(mode === "edit" || mode === "dictation_edit") && allowEdit && (
