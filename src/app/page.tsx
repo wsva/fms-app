@@ -25,7 +25,7 @@ import WikiPage from "@/components/wiki/WikiPage";
 import LogPage from "@/components/tools/LogPage";
 import WorkspacesPage from "@/components/workspace/WorkspacesPage";
 import SimpleWordsPage from "@/components/tools/SimpleWordsPage";
-import AgentPage from "@/components/agent/AgentPage";
+import AgentDock from "@/components/agent/AgentDock";
 import type { AgentAction } from "@/lib/agent/types";
 
 interface Workspace {
@@ -123,6 +123,10 @@ export default function Home() {
       const action = event.payload;
       switch (action.type) {
         case "navigate":
+          // The agent no longer has a dedicated tab (it lives in an always-on
+          // dock). Ignore a legacy `navigate to agent` so in-flight sessions
+          // don't blank the content area.
+          if ((action.tab as string) === "agent") break;
           setActiveTab(action.tab);
           break;
         case "open-review":
@@ -253,9 +257,6 @@ export default function Home() {
         <div style={{ display: activeTab === "workspaces" ? "flex" : "none" }} className="flex-1 min-h-0">
           <WorkspacesPage />
         </div>
-        <div style={{ display: activeTab === "agent" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <AgentPage active={activeTab === "agent"} activeTab={activeTab} />
-        </div>
 
         {!mobile && <StatusBar />}
       </div>
@@ -264,6 +265,10 @@ export default function Home() {
 
       {/* Global text-selection → "Add to Card" menu */}
       <CardContextMenu />
+
+      {/* Always-accessible agent dock (desktop only) — overlays the content
+          area on the right, toggled by the floating Bot button or Ctrl+Space. */}
+      {!mobile && <AgentDock activeTab={activeTab} />}
 
       {/* Agent `app_notify` toast */}
       {toast && (

@@ -617,7 +617,7 @@ struct CardFtsRebuildParam {
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct AppNavigateParam {
-    /// Target tab id, e.g. "cards", "dictation", "wiki", "llm-chat", "agent".
+    /// Target tab id, e.g. "cards", "dictation", "wiki", "llm-chat".
     tab: String,
 }
 
@@ -2223,13 +2223,18 @@ impl DatasetMcpServer {
     // structured JSON so the agent gets immediate, actionable feedback.
     // -------------------------------------------------------------------------
 
-    #[tool(name = "app_navigate", description = "Switch the app to another page/tab. Valid tabs: dictation, read-book, read-aloud, cards, studio, simple-words, models, edge-tts, llm-chat, ocr, wiki, workspaces, logs, settings, agent. Use this to bring the user to the right screen before/while acting.")]
+    #[tool(name = "app_navigate", description = "Switch the app to another page/tab. Valid tabs: dictation, read-book, read-aloud, cards, studio, simple-words, models, edge-tts, llm-chat, ocr, wiki, workspaces, logs, settings. Use this to bring the user to the right screen before/while acting. The agent itself has no tab — it lives in a dock always available on every screen.")]
     async fn app_navigate(&self, Parameters(param): Parameters<AppNavigateParam>) -> Result<String, String> {
-        const VALID: [&str; 15] = [
+        const VALID: [&str; 14] = [
             "dictation", "read-book", "read-aloud", "cards", "studio", "simple-words", "models",
-            "edge-tts", "llm-chat", "ocr", "wiki", "workspaces", "logs", "settings", "agent",
+            "edge-tts", "llm-chat", "ocr", "wiki", "workspaces", "logs", "settings",
         ];
         let tab = param.tab.trim();
+        if tab == "agent" {
+            return Err(
+                "the agent has no page — it lives in a dock available on every screen; navigate to the page you want the user to see instead.".to_string(),
+            );
+        }
         if !VALID.contains(&tab) {
             return Err(format!(
                 "unknown tab '{}'. Valid tabs: {}",
