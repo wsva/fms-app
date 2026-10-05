@@ -1,8 +1,10 @@
 import { useCallback, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  analyzeLevel,
   arrayBufferToBase64,
   checkMicSupport,
+  describeLevel,
   describeMicError,
   encodeWav,
   openMicCapture,
@@ -78,6 +80,13 @@ export function useRecorder(
           if (samples.length === 0) {
             throw new Error("The microphone produced no audio at all — nothing to transcribe.");
           }
+          const level = analyzeLevel(samples);
+          logInfo(
+            `recording: signal level ${describeLevel(level)} from "${capture.device}" — ${
+              level.silent ? "no signal: this microphone delivered silence" : "signal present"
+            }`,
+            LOG_MODULE
+          );
           const wav = encodeWav(samples, 16000);
           const wavBase64 = arrayBufferToBase64(wav);
           logInfo(
@@ -92,6 +101,16 @@ export function useRecorder(
             `recording: model_transcribe answered after ${Date.now() - transcribedAt} ms: "${text}"`,
             LOG_MODULE
           );
+          // A silent take is worthless as a recording, so report it. A take with
+          // signal is kept even when the model found no words in it — the audio
+          // is the point here, the transcript is only a diff helper.
+          if (!text.trim() && level.silent) {
+            throw new Error(
+              `The microphone "${capture.device}" captured only silence (${describeLevel(level)}), ` +
+                "so there is nothing to save. Pick your real microphone under Settings \u2192 Microphone \u2014 " +
+                "virtual microphones from Steam, OBS or Voicemeeter often hold the system default slot."
+            );
+          }
           cbRef.current.onResult({ wavBase64, text: (text || "").trim() });
         } catch (err) {
           const msg = describeMicError(err);

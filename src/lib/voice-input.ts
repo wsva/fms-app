@@ -8,7 +8,8 @@
  * Capture runs on one of two backends (see `openMicCapture`): the MediaRecorder
  * pipeline the desktop app has always used, and a raw Web Audio PCM path for
  * webviews — i.e. the Android one — that cannot record or decode a compressed
- * container.
+ * container. Which microphone is opened follows Settings → Microphone; empty
+ * means the system default.
  */
 
 import { isMobileApp } from "@/lib/platform";
@@ -128,6 +129,8 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
 export type MicCapture = {
   stop: () => Promise<Float32Array>;
   backend: "mediarecorder" | "pcm";
+  /** Human-readable name of the device actually capturing, for error messages. */
+  device: string;
 };
 
 const MIC_CONSTRAINTS: MediaTrackConstraints = {
@@ -136,6 +139,165 @@ const MIC_CONSTRAINTS: MediaTrackConstraints = {
   echoCancellation: true,
   noiseSuppression: true,
 };
+
+// ---------------------------------------------------------------------------
+// Input device selection
+// ---------------------------------------------------------------------------
+
+/**
+ * Which microphone to open. Persisted in `localStorage` rather than in the
+ * backend's settings file on purpose: the input device belongs to the machine
+ * the microphone is plugged into, so a paired phone must not inherit the PC's
+ * pick (and vice versa).
+ */
+const MIC_DEVICE_STORAGE_KEY = "micDeviceId";
+
+export function getPreferredMicDeviceId(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return localStorage.getItem(MIC_DEVICE_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** Empty string means "follow the system default". */
+export function setPreferredMicDeviceId(deviceId: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (deviceId) localStorage.setItem(MIC_DEVICE_STORAGE_KEY, deviceId);
+    else localStorage.removeItem(MIC_DEVICE_STORAGE_KEY);
+  } catch {
+    /* A webview with storage disabled keeps using the system default. */
+  }
+}
+
+export type MicDevice = { deviceId: string; label: string };
+
+/**
+ * Audio input devices, in the order the browser reports them.
+ *
+ * `label` is empty until the page holds microphone permission (Chromium gates
+ * device names behind it), which is what `requestAccess` unlocks by opening the
+ * mic once and closing it again — a picker of anonymous ids would not help
+ * telling a real microphone from a virtual one. Duplicate labels get their id
+ * appended, because Chrome lists the same hardware again as the "Default" and
+ * "Communications" endpoints.
+ */
+export async function listInputDevices(requestAccess = false): Promise<MicDevice[]> {
+  const md = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
+  if (!md?.enumerateDevices) return [];
+  const read = async (): Promise<MicDevice[]> =>
+    (await md.enumerateDevices())
+      .filter((d) => d.kind === "audioinput")
+      .map((d) => ({ deviceId: d.deviceId, label: d.label }));
+
+  let devices = await read();
+  if (requestAccess && devices.some((d) => !d.label)) {
+    try {
+      const stream = await md.getUserMedia({ audio: true });
+      stream.getTracks().forEach((t) => t.stop());
+      devices = await read();
+    } catch (err) {
+      logError(
+        `voice input: microphone access refused, device names stay hidden — ${describeMicError(err)}`,
+        LOG_MODULE
+      );
+    }
+  }
+
+  const counts = new Map<string, number>();
+  for (const d of devices) counts.set(d.label, (counts.get(d.label) ?? 0) + 1);
+  return devices.map((d) =>
+    d.label && (counts.get(d.label) ?? 0) > 1
+      ? { ...d, label: `${d.label} (${d.deviceId.slice(0, 4)})` }
+      : d
+  );
+}
+
+/** Constraints for the configured device, or the bare defaults for "system default". */
+function micConstraints(): MediaTrackConstraints {
+  const preferred = getPreferredMicDeviceId();
+  return preferred ? { ...MIC_CONSTRAINTS, deviceId: { exact: preferred } } : MIC_CONSTRAINTS;
+}
+
+// ---------------------------------------------------------------------------
+// Signal level
+// ---------------------------------------------------------------------------
+
+export type LevelInfo = { peak: number; rms: number; dbfs: number; silent: boolean };
+
+/**
+ * Peak / RMS of a finished recording.
+ *
+ * A container that decodes to the right duration but carries no signal is the
+ * signature of a virtual microphone (Steam, OBS, Voicemeeter) holding the
+ * system default slot: Opus with DTX squeezes three seconds of silence into a
+ * kilobyte, the WAV still measures the full length, and the model correctly
+ * answers "" — which from the outside looks exactly like a broken STT
+ * pipeline. Measuring the signal is what separates "nothing was captured"
+ * from "nothing was recognized".
+ */
+export function analyzeLevel(samples: Float32Array): LevelInfo {
+  let peak = 0;
+  let sumSq = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const v = samples[i];
+    const abs = v < 0 ? -v : v;
+    if (abs > peak) peak = abs;
+    sumSq += v * v;
+  }
+  const rms = samples.length > 0 ? Math.sqrt(sumSq / samples.length) : 0;
+  const dbfs = peak > 0 ? Math.round(20 * Math.log10(peak)) : -120;
+  // ≈ -50 dBFS peak: quieter than any microphone that is actually reproducing
+  // speech, yet well above the all-zero floor of a device that is fully dead.
+  return { peak, rms, dbfs, silent: peak < 0.0032 && rms < 0.001 };
+}
+
+/** One-line rendering for the Log page. */
+export function describeLevel(level: LevelInfo): string {
+  const dbfs = level.dbfs <= -120 ? "-inf" : String(level.dbfs);
+  return `peak ${level.peak.toFixed(4)} / RMS ${level.rms.toFixed(4)} (${dbfs} dBFS)`;
+}
+
+/**
+ * What to tell the user when a recording produced no text.
+ *
+ * Returns the diagnosis for the capture itself — a silent mic is not the
+ * model's fault, and the actionable step is to change input device, not to
+ * reload the model.
+ */
+export function diagnoseEmptyTranscript(device: string, level: LevelInfo): string {
+  return level.silent
+    ? `The microphone "${device}" captured only silence (${describeLevel(level)}), so there was nothing to recognize. ` +
+      "Pick your real microphone under Settings → Microphone, or set it as the system input device — " +
+      "virtual microphones from Steam, OBS or Voicemeeter often take that slot."
+    : `The model returned no text for a recording that does carry signal (${describeLevel(level)}). ` +
+      "Check that the loaded STT model matches the language you spoke.";
+}
+
+/**
+ * Open the configured device, falling back to the system default.
+ *
+ * A pinned device that has been unplugged since it was chosen would otherwise
+ * fail every dictation with an `OverconstrainedError` until the user found the
+ * Settings row and cleared it — so a vanished device degrades to the default
+ * (loudly, in the log) instead of wedging voice input.
+ */
+async function openMicStream(preferred: string): Promise<MediaStream> {
+  const md = navigator.mediaDevices;
+  try {
+    return await md.getUserMedia({ audio: micConstraints() });
+  } catch (err) {
+    const name = err instanceof DOMException ? err.name : (err as { name?: string })?.name ?? "";
+    if (!preferred || (name !== "OverconstrainedError" && name !== "NotFoundError")) throw err;
+    logError(
+      `voice input: the microphone pinned in Settings is gone (${name}) — falling back to the system default device`,
+      LOG_MODULE
+    );
+    return await md.getUserMedia({ audio: MIC_CONSTRAINTS });
+  }
+}
 
 /**
  * Why voice input cannot run here, phrased so the user can act on it. Checked
@@ -221,7 +383,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
  */
 export async function openMicCapture(): Promise<MicCapture> {
   const openedAt = Date.now();
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: MIC_CONSTRAINTS });
+  const preferred = getPreferredMicDeviceId();
+  const stream = await openMicStream(preferred);
   const release = () => stream.getTracks().forEach((t) => t.stop());
 
   const track = stream.getAudioTracks()[0];
@@ -234,6 +397,7 @@ export async function openMicCapture(): Promise<MicCapture> {
     } ms (${settings.sampleRate ?? "?"} Hz, ${settings.channelCount ?? "?"} ch, ${
       track?.readyState ?? "no track"
     }), capture backend = ${useRecorder ? "MediaRecorder" : "raw PCM"}` +
+      (preferred ? " [pinned in Settings → Microphone]" : " [system default device]") +
       (preferPcm
         ? " — MediaRecorder output could not be decoded earlier"
         : recorderAvailable
@@ -241,6 +405,7 @@ export async function openMicCapture(): Promise<MicCapture> {
           : " — MediaRecorder is unavailable here"),
     LOG_MODULE
   );
+  const device = track?.label || (preferred ? "selected microphone" : "system default microphone");
 
   if (useRecorder) {
     const recorder = new MediaRecorder(stream);
@@ -254,6 +419,7 @@ export async function openMicCapture(): Promise<MicCapture> {
     recorder.start();
     return {
       backend: "mediarecorder",
+      device,
       async stop() {
         logInfo("voice input: stopping MediaRecorder", LOG_MODULE);
         recorder.stop();
@@ -327,6 +493,7 @@ export async function openMicCapture(): Promise<MicCapture> {
 
   return {
     backend: "pcm",
+    device,
     async stop() {
       processor.onaudioprocess = null;
       processor.disconnect();
@@ -611,6 +778,13 @@ export async function startRecording(callbacks: VoiceCallbacks): Promise<void> {
       if (samples.length === 0) {
         throw new Error("The microphone produced no audio at all — nothing to transcribe.");
       }
+      const level = analyzeLevel(samples);
+      logInfo(
+        `voice input: signal level ${describeLevel(level)} — ${
+          level.silent ? "no signal: this microphone delivered silence" : "signal present"
+        }`,
+        LOG_MODULE
+      );
       callbacks.onStateChange("processing");
 
       const wav = encodeWav(samples, 16000);
@@ -618,7 +792,7 @@ export async function startRecording(callbacks: VoiceCallbacks): Promise<void> {
       logInfo(
         `voice input: ${(samples.length / 16000).toFixed(2)} s of audio captured in ${
           Date.now() - capturedAt
-        } ms, sending ${(wav.byteLength / 1024).toFixed(0)} KB WAV to model_transcribe`,
+        } ms, sending ${(wav.byteLength / 1024).toFixed(0)} KB WAV to model_transcribe via "${capture.device}"`,
         LOG_MODULE
       );
 
@@ -629,6 +803,12 @@ export async function startRecording(callbacks: VoiceCallbacks): Promise<void> {
         `voice input: model_transcribe answered after ${Date.now() - transcribedAt} ms: "${text}"`,
         LOG_MODULE
       );
+
+      // An empty transcript used to be indistinguishable from a broken model.
+      // The level decides who to blame, and either way the user gets a step to act on.
+      if (!text.trim()) {
+        throw new Error(diagnoseEmptyTranscript(capture.device, level));
+      }
 
       callbacks.onResult(text.trim());
     } catch (err) {

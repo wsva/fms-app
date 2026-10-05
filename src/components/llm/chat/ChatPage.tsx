@@ -2,9 +2,10 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Send, Bot, User, Loader2, Mic, Square, ChevronDown, ChevronUp, Wand2, ZoomIn, ZoomOut } from "lucide-react";
+import { Send, Bot, User, Loader2, ChevronDown, ChevronUp, Wand2, ZoomIn, ZoomOut } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import { startRecording, stopRecording, type VoiceState } from "@/lib/voice-input";
+import { VoiceMicButton } from "@/components/voice/VoiceMicButton";
 import {
   type ChatMessage,
   type OllamaModelInfo,
@@ -387,30 +388,12 @@ export default function LLMChatPage() {
             rows={1}
             disabled={!selectedModel || loading}
           />
-          <button
-            className={`p-2.5 rounded-lg cursor-pointer transition-all ${
-              voiceState === "recording"
-                ? "bg-error-text text-white animate-pulse"
-                : voiceState === "processing"
-                  ? "bg-bg-muted text-text-tertiary cursor-wait"
-                  : "bg-bg-muted text-text-secondary hover:bg-bg-hover"
-            }`}
-            onClick={handleVoiceToggle}
-            disabled={voiceState === "processing" || !selectedModel}
-            title={
-              voiceState === "recording"
-                ? "Stop recording"
-                : voiceState === "processing"
-                  ? "Transcribing..."
-                  : "Voice input"
-            }
-          >
-            {voiceState === "recording" ? (
-              <Square size={18} />
-            ) : (
-              <Mic size={18} />
-            )}
-          </button>
+          <VoiceMicButton
+            state={voiceState}
+            surface="composer"
+            onPress={handleVoiceToggle}
+            disabled={!selectedModel}
+          />
           <button
             className="p-2.5 rounded-lg bg-accent-bg text-white hover:opacity-90 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
             onClick={handleSend}

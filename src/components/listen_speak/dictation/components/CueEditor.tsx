@@ -12,7 +12,6 @@ import {
   Eye,
   EyeOff,
   MapPin,
-  Mic,
   Pencil,
   Play,
   Star,
@@ -21,35 +20,18 @@ import {
 } from "lucide-react";
 import { lcs } from "@/lib/listen/lcs";
 import type { Cue } from "@/lib/types";
-import { handleToggle, subscribe, getVoiceState, type VoiceState } from "@/lib/voice-input";
+import { handleToggle, subscribe, getVoiceState } from "@/lib/voice-input";
+import { VoiceMicButton } from "@/components/voice/VoiceMicButton";
 
 // ── Mic Button ────────────────────────────────────────────────────────────────
 
 function MicButton() {
   const voiceState = useSyncExternalStore(subscribe, getVoiceState, getVoiceState);
 
-  return (
-    <>
-      <Tooltip>
-        <Tooltip.Trigger>
-          <Button
-            isIconOnly
-            variant={voiceState === "recording" ? "danger" : "ghost"}
-            size="sm"
-            aria-label={voiceState === "recording" ? "Stop dictating" : "Voice input"}
-            isDisabled={voiceState === "processing"}
-            onPress={handleToggle}
-            className={voiceState === "recording" ? "animate-pulse" : ""}
-          >
-            {voiceState === "recording" ? <X size={14} /> : <Mic size={14} />}
-          </Button>
-        </Tooltip.Trigger>
-        {/* On desktop this is the mouse entry point for the Ctrl+C shortcut; on a
-            touch screen it is the only entry point, so the label must stand alone. */}
-        <Tooltip.Content>Dictate with the microphone — shortcut: Ctrl+C (no selection)</Tooltip.Content>
-      </Tooltip>
-    </>
-  );
+  // The three states (idle / recording / recognising) are defined in
+  // VoiceMicButton so the chat composer cannot grow a second idea of what
+  // "stop" looks like.
+  return <VoiceMicButton state={voiceState} onPress={handleToggle} />;
 }
 
 // ── Copy Button ──────────────────────────────────────────────────────────────

@@ -3,6 +3,13 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isMobileApp } from "@/lib/platform";
+import { logError, logInfo } from "@/lib/logger";
+import {
+  getPreferredMicDeviceId,
+  listInputDevices,
+  setPreferredMicDeviceId,
+  type MicDevice,
+} from "@/lib/voice-input";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -82,6 +89,7 @@ function applyTheme(theme: ThemeId) {
 
 const btnBase = "px-4 py-2 rounded-md font-medium cursor-pointer transition-colors disabled:opacity-50 disabled:cursor-not-allowed";
 const btnPrimary = `${btnBase} bg-accent-bg text-white hover:bg-accent-bg-hover`;
+const btnGhost = "px-3 py-1 text-xs rounded-md border border-border-light hover:bg-bg-hover cursor-pointer disabled:cursor-not-allowed disabled:opacity-50";
 
 // ---------------------------------------------------------------------------
 // Component
@@ -119,6 +127,63 @@ export default function SettingsPage() {
   useEffect(() => {
     loadDevices();
   }, [loadDevices]);
+
+  // ---- Microphone (voice input) ----
+  // Stored in localStorage, not in the backend settings file: the input device
+  // belongs to the machine the microphone is plugged into, so a paired phone
+  // must not inherit this PC's pick. Chrome also hides device *names* until the
+  // page has been granted the microphone, hence the explicit Detect button.
+  const [micDevices, setMicDevices] = useState<MicDevice[]>([]);
+  const [micDeviceId, setMicDeviceId] = useState("");
+  const [micNamed, setMicNamed] = useState(false);
+  const [micLoading, setMicLoading] = useState(false);
+  const [micError, setMicError] = useState("");
+  const [micSaved, setMicSaved] = useState(false);
+
+  const loadMics = useCallback(async (requestAccess: boolean) => {
+    setMicLoading(true);
+    setMicError("");
+    try {
+      const list = await listInputDevices(requestAccess);
+      setMicDevices(list);
+      setMicNamed(list.length > 0 && list.every((d) => d.label !== ""));
+      const stored = getPreferredMicDeviceId();
+      // Keep showing an id whose device was unplugged (the capture path falls
+      // back to the default for it), but mark it so the user can re-pick.
+      setMicDeviceId(stored);
+      if (stored && list.length > 0 && !list.some((d) => d.deviceId === stored)) {
+        setMicError("The pinned microphone is not connected right now — voice input is using the system default until you pick another one.");
+      }
+      logInfo(
+        `settings: listed ${list.length} audio input device(s), names ${
+          list.length > 0 && list.every((d) => d.label !== "") ? "available" : "hidden"
+        }`,
+        "settings"
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setMicError(`Could not list microphones: ${msg}`);
+      logError(`settings: enumerating microphones failed — ${msg}`, "settings");
+    } finally {
+      setMicLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    setMicDeviceId(getPreferredMicDeviceId());
+    // Read-only pass on mount: enumerateDevices() without a getUserMedia probe
+    // never triggers a permission prompt.
+    void loadMics(false);
+  }, [loadMics]);
+
+  function handleMicChange(deviceId: string) {
+    setMicDeviceId(deviceId);
+    setPreferredMicDeviceId(deviceId);
+    setMicSaved(true);
+    setTimeout(() => setMicSaved(false), 2000);
+  }
+
+  const selectedMicMissing = micDeviceId !== "" && !micDevices.some((d) => d.deviceId === micDeviceId);
 
   async function handleRevoke(deviceId: string) {
     try {
@@ -319,6 +384,61 @@ export default function SettingsPage() {
             description="Root directory for wiki markdown documents."
             value={workspaceSettings?.wiki_dir ?? ""}
           />
+        </section>
+
+        {/* ── Microphone section ─────────────────────────────── */}
+        <section className="mb-8">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-[1.3em] font-semibold">Microphone</h2>
+            <div className="flex items-center gap-2">
+              {micSaved && <span className="text-sm text-green-500">Saved!</span>}
+              <button
+                className={btnGhost}
+                onClick={() => loadMics(true)}
+                disabled={micLoading}
+                title="Reads the device names, which the webview only reveals once microphone access has been granted"
+              >
+                {micLoading ? "Detecting..." : "Detect microphones"}
+              </button>
+            </div>
+          </div>
+          <p className="text-text-secondary text-sm mb-4">
+            Input device used by voice input and by Read a Book recordings. Leave it on
+            System default to follow the operating system, or pin your real microphone so a
+            virtual device (Steam, OBS, Voicemeeter) cannot quietly take over dictation. Stored
+            on this device only.
+          </p>
+
+          {micError && <p className="text-sm text-red-600 mb-2">{micError}</p>}
+
+          <div className="flex items-center gap-3 flex-wrap">
+            <select
+              className="px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary max-w-md w-full"
+              value={micDeviceId}
+              onChange={(e) => handleMicChange(e.target.value)}
+            >
+              <option value="">System default</option>
+              {micDevices.map((d, i) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.label || `Microphone ${i + 1} (name hidden)`}
+                </option>
+              ))}
+              {selectedMicMissing && <option value={micDeviceId}>Pinned device (not connected)</option>}
+            </select>
+          </div>
+
+          {!micNamed && !micLoading && (
+            <p className="text-xs text-text-tertiary mt-2">
+              Device names are hidden until this app has microphone access — press Detect
+              microphones (or dictate once) to see which entry is which.
+            </p>
+          )}
+          {micDevices.length === 0 && !micLoading && (
+            <p className="text-xs text-text-tertiary mt-2">
+              No audio input devices reported. If you expected one, check that it is connected
+              and not disabled in the system sound settings.
+            </p>
+          )}
         </section>
 
         {/* ── Device pairing section (PC only) ──────────────────── */}
