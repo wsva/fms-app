@@ -14,6 +14,7 @@ import DictationPage from "@/components/listen_speak/dictation/DictationPage";
 import StudioPage from "@/components/listen_speak/studio/StudioPage";
 import DatasetsSyncPage from "@/components/listen_speak/datasets/DatasetsSyncPage";
 import ReadBookPage from "@/components/read_book/ReadBookPage";
+import ReadAloudPage from "@/components/read_aloud/ReadAloudPage";
 import CardsPage from "@/components/cards/CardsPage";
 import CardContextMenu from "@/components/cards/CardContextMenu";
 import TtsPage from "@/components/listen_speak/edge_tts/TtsPage";
@@ -184,6 +185,9 @@ export default function Home() {
         </div>
         <div style={{ display: activeTab === "read-book" ? "flex" : "none" }} className="flex-1 min-h-0">
           <ReadBookPage />
+        </div>
+        <div style={{ display: activeTab === "read-aloud" ? "flex" : "none" }} className="flex-1 min-h-0">
+          <ReadAloudPage />
         </div>
         <div style={{ display: activeTab === "cards" ? "flex" : "none" }} className="flex-1 min-h-0">
           <CardsPage />

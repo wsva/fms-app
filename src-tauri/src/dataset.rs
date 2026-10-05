@@ -155,6 +155,7 @@ pub(crate) enum DatasetType {
     Card,
     Dictation,
     Book,
+    Read,
 }
 
 impl DatasetType {
@@ -163,6 +164,7 @@ impl DatasetType {
             DatasetType::Card => "card",
             DatasetType::Dictation => "dictation",
             DatasetType::Book => "book",
+            DatasetType::Read => "read_aloud",
         }
     }
 }
@@ -201,6 +203,7 @@ pub async fn dataset_list_dirs(
         "card" => DatasetType::Card,
         "dictation" => DatasetType::Dictation,
         "book" => DatasetType::Book,
+        "read_aloud" => DatasetType::Read,
         _ => return Err(format!("Invalid dataset type: {}", dataset_type)),
     };
     

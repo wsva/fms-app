@@ -14,6 +14,7 @@ import {
   Wrench,
   BookOpen,
   BookOpenText,
+  Mic,
   Layers,
   ScanText,
   FileText,
@@ -28,6 +29,7 @@ import {
 export type TabId =
   | "dictation"
   | "read-book"
+  | "read-aloud"
   | "cards"
   | "studio"
   | "simple-words"
@@ -77,6 +79,7 @@ const navGroups: NavGroup[] = [
 const rootTabs: TabDef[] = [
   { id: "dictation", label: "Dictation", icon: Headphones },
   { id: "read-book", label: "Read a Book", icon: BookOpen },
+  { id: "read-aloud", label: "Read Aloud", icon: Mic },
   { id: "cards", label: "Cards", icon: Layers },
   { id: "settings", label: "Settings", icon: Settings },
 ];
@@ -88,6 +91,7 @@ const rootTabs: TabDef[] = [
 const MOBILE_VISIBLE_TABS: TabId[] = [
   "dictation",
   "read-book",
+  "read-aloud",
   "cards",
   "wiki",
   "workspaces",
@@ -356,14 +360,14 @@ export default function Sidebar({
 
         <div className="w-full border-b border-border-default my-1" />
 
-        {/* Root tabs above groups: Dictation, Read a Book, Cards */}
-        {rootTabs.slice(0, 3).map((tab) => renderTab(tab, false))}
+        {/* Root tabs above groups: Dictation, Read a Book, Read Aloud, Cards */}
+        {rootTabs.slice(0, 4).map((tab) => renderTab(tab, false))}
 
         {/* Navigation groups */}
         {navGroups.map(renderGroup)}
 
         {/* Settings at bottom of nav */}
-        {rootTabs.slice(3).map((tab) => renderTab(tab, false))}
+        {rootTabs.slice(4).map((tab) => renderTab(tab, false))}
       </nav>
 
       {/* Resize handle */}

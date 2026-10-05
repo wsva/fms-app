@@ -43,6 +43,8 @@ mod wiki;
 mod workspace;
 mod sync;
 mod discover;
+mod read_aloud;
+mod textsim;
 
 // Unified model index
 #[cfg(feature = "stt")]
@@ -258,6 +260,17 @@ pub fn run() {
             book::book_write_audio,
             book::book_import_audio,
             book::book_delete_audio,
+            read_aloud::read_aloud_list,
+            read_aloud::read_aloud_create,
+            read_aloud::read_aloud_update,
+            read_aloud::read_aloud_delete,
+            read_aloud::read_aloud_list_texts,
+            read_aloud::read_aloud_save_text,
+            read_aloud::read_aloud_delete_text,
+            read_aloud::read_aloud_list_attempts,
+            read_aloud::read_aloud_delete_attempt,
+            read_aloud::read_aloud_score,
+            read_aloud::read_aloud_submit,
             web_service::web_service_get_status,
             web_service::web_service_start,
             web_service::web_service_stop,
@@ -589,6 +602,17 @@ macro_rules! mobile_invoke_handler {
             book::book_write_audio,
             book::book_import_audio,
             book::book_delete_audio,
+            read_aloud::read_aloud_list,
+            read_aloud::read_aloud_create,
+            read_aloud::read_aloud_update,
+            read_aloud::read_aloud_delete,
+            read_aloud::read_aloud_list_texts,
+            read_aloud::read_aloud_save_text,
+            read_aloud::read_aloud_delete_text,
+            read_aloud::read_aloud_list_attempts,
+            read_aloud::read_aloud_delete_attempt,
+            read_aloud::read_aloud_score,
+            read_aloud::read_aloud_submit,
             xp::xp_get_user,
             xp::xp_get_history,
             xp::xp_award_dictation_cue,

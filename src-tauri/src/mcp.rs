@@ -30,6 +30,7 @@ use crate::llm;
 use crate::logger::LogBuffer;
 use crate::model::ModelState;
 use crate::ocr::{self, OcrState};
+use crate::read_aloud;
 use crate::settings::SettingsState;
 use crate::web_service::{self, WebServiceState, WebServiceConfig};
 
@@ -386,6 +387,74 @@ struct BookListSentencesParam {
 struct BookListWordsParam {
     book_uuid: String,
     sentence_uuid: String,
+}
+
+// -- Read aloud --
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudCreateParam {
+    name: String,
+    #[serde(default)]
+    description: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudUuidParam {
+    uuid: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudUpdateParam {
+    uuid: String,
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudDatasetParam {
+    dataset_uuid: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudTextParam {
+    dataset_uuid: String,
+    text: JsonValue,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudDeleteTextParam {
+    dataset_uuid: String,
+    uuid: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudListAttemptsParam {
+    dataset_uuid: String,
+    text_uuid: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudDeleteAttemptParam {
+    dataset_uuid: String,
+    uuid: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudScoreParam {
+    content: String,
+    recognized: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudSubmitParam {
+    dataset_uuid: String,
+    text_uuid: String,
+    #[serde(default)]
+    recognized: String,
+    /// Optional base64-encoded 16kHz mono WAV of the reading.
+    #[serde(default)]
+    wav_base64: String,
 }
 
 // -- System --
@@ -1475,6 +1544,100 @@ impl DatasetMcpServer {
         let settings = self.app.state::<SettingsState>();
         book::book_delete_word(settings, param.book_uuid, param.uuid).await?;
         Ok(serde_json::json!({"status": "ok", "message": "Word deleted"}).to_string())
+    }
+
+    // -------------------------------------------------------------------------
+    // Read-aloud tools
+    // -------------------------------------------------------------------------
+
+    #[tool(name = "read_aloud_list", description = "List all read-aloud datasets. Returns UUID, name, description, path, and timestamps.")]
+    async fn read_aloud_list(&self) -> Result<String, String> {
+        log::info!("[MCP] read_aloud_list");
+        let settings = self.app.state::<SettingsState>();
+        let items = read_aloud::read_aloud_list(settings).await?;
+        Ok(serde_json::to_string_pretty(&items).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_create", description = "Create a new read-aloud dataset (a collection of texts to practise reading aloud). Returns the dataset metadata with UUID.")]
+    async fn read_aloud_create(&self, Parameters(param): Parameters<ReadAloudCreateParam>) -> Result<String, String> {
+        log::info!("[MCP] read_aloud_create: name={}", param.name);
+        let settings = self.app.state::<SettingsState>();
+        let result = read_aloud::read_aloud_create(settings, param.name, Some(param.description)).await?;
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_update", description = "Update a read-aloud dataset's name and/or description by UUID.")]
+    async fn read_aloud_update(&self, Parameters(param): Parameters<ReadAloudUpdateParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        read_aloud::read_aloud_update(settings, param.uuid, param.name, param.description).await?;
+        Ok(serde_json::json!({"status": "ok", "message": "Dataset updated"}).to_string())
+    }
+
+    #[tool(name = "read_aloud_delete", description = "Delete a read-aloud dataset and all its texts, attempts, and recordings.")]
+    async fn read_aloud_delete(&self, Parameters(param): Parameters<ReadAloudUuidParam>) -> Result<String, String> {
+        log::warn!("[MCP] read_aloud_delete: uuid={}", param.uuid);
+        let settings = self.app.state::<SettingsState>();
+        read_aloud::read_aloud_delete(settings, param.uuid).await?;
+        Ok(serde_json::json!({"status": "ok", "message": "Dataset deleted"}).to_string())
+    }
+
+    #[tool(name = "read_aloud_list_texts", description = "List all texts in a read-aloud dataset, ordered, with best score and attempt count.")]
+    async fn read_aloud_list_texts(&self, Parameters(param): Parameters<ReadAloudDatasetParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let items = read_aloud::read_aloud_list_texts(settings, param.dataset_uuid).await?;
+        Ok(serde_json::to_string_pretty(&items).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_save_text", description = "Create or update a text. Pass text as JSON with fields: uuid, dataset_uuid, order_num, title, note, content. The note holds source/location info.")]
+    async fn read_aloud_save_text(&self, Parameters(param): Parameters<ReadAloudTextParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let text: read_aloud::ReadText = serde_json::from_value(param.text.into())
+            .map_err(|e| format!("Invalid text JSON: {}", e))?;
+        read_aloud::read_aloud_save_text(settings, param.dataset_uuid, text).await?;
+        Ok(serde_json::json!({"status": "ok", "message": "Text saved"}).to_string())
+    }
+
+    #[tool(name = "read_aloud_delete_text", description = "Delete a text and all its recorded attempts and audio.")]
+    async fn read_aloud_delete_text(&self, Parameters(param): Parameters<ReadAloudDeleteTextParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        read_aloud::read_aloud_delete_text(settings, param.dataset_uuid, param.uuid).await?;
+        Ok(serde_json::json!({"status": "ok", "message": "Text deleted"}).to_string())
+    }
+
+    #[tool(name = "read_aloud_list_attempts", description = "List all recorded attempts for a text (newest first) with score, transcript, and resolved audio URL.")]
+    async fn read_aloud_list_attempts(&self, Parameters(param): Parameters<ReadAloudListAttemptsParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let items = read_aloud::read_aloud_list_attempts(settings, param.dataset_uuid, param.text_uuid).await?;
+        Ok(serde_json::to_string_pretty(&items).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_delete_attempt", description = "Delete a single recorded attempt and its audio file.")]
+    async fn read_aloud_delete_attempt(&self, Parameters(param): Parameters<ReadAloudDeleteAttemptParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        read_aloud::read_aloud_delete_attempt(settings, param.dataset_uuid, param.uuid).await?;
+        Ok(serde_json::json!({"status": "ok", "message": "Attempt deleted"}).to_string())
+    }
+
+    #[tool(name = "read_aloud_score", description = "Compute the similarity score (0-100) between a reference text and a recognized transcript, without persisting anything. Score >= 60 passes.")]
+    async fn read_aloud_score(&self, Parameters(param): Parameters<ReadAloudScoreParam>) -> Result<String, String> {
+        let score = read_aloud::read_aloud_score(param.content, param.recognized).await?;
+        Ok(serde_json::json!({"score": score, "passed": score >= 60.0}).to_string())
+    }
+
+    #[tool(name = "read_aloud_submit", description = "Submit a reading attempt: stores the (optional) recording, scores the recognized transcript against the reference text, saves the attempt, and awards scaled XP (1 XP at score >= 60, +1 more at >= 80). Returns the score, saved attempt, and XP awarded.")]
+    async fn read_aloud_submit(&self, Parameters(param): Parameters<ReadAloudSubmitParam>) -> Result<String, String> {
+        log::info!("[MCP] read_aloud_submit: dataset={}, text={}", param.dataset_uuid, param.text_uuid);
+        let settings = self.app.state::<SettingsState>();
+        let result = read_aloud::read_aloud_submit(
+            self.app.clone(),
+            settings,
+            param.dataset_uuid,
+            param.text_uuid,
+            param.wav_base64,
+            param.recognized,
+        )
+        .await?;
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
     // -------------------------------------------------------------------------

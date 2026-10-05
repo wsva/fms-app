@@ -6,6 +6,7 @@ import {
   Layers,
   Menu,
   BookOpen,
+  Mic,
   SlidersHorizontal,
   BookOpenText,
   FolderKanban,
@@ -37,6 +38,7 @@ const PRIMARY_TABS: NavItem[] = [
 // Overflow tabs surfaced inside the "More" bottom sheet.
 const OVERFLOW_TABS: NavItem[] = [
   { id: "read-book", label: "Read a Book", icon: BookOpen },
+  { id: "read-aloud", label: "Read Aloud", icon: Mic },
   { id: "studio", label: "Datasets", icon: SlidersHorizontal },
   { id: "wiki", label: "Wiki", icon: BookOpenText },
   { id: "workspaces", label: "Workspaces", icon: FolderKanban },
