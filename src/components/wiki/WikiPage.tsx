@@ -8,6 +8,7 @@ import WikiSidebar from "./WikiSidebar";
 import WikiSearch from "./WikiSearch";
 import MarkdownViewer from "./markdown/markdown";
 import { isMobileApp } from "@/lib/platform";
+import { logError } from "@/lib/logger";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -97,7 +98,10 @@ export default function WikiPage() {
           setWikiDir(settings.wiki_dir || "");
         }
       } catch (err) {
-        console.error("Failed to load wiki directory:", err);
+        // On the thin client the wiki commands are proxied to the PC; an
+        // unreachable PC is the normal offline state, so just record it in the
+        // app log (console.error would trigger the Next.js dev error overlay).
+        logError(`Failed to load wiki directory: ${err instanceof Error ? err.message : String(err)}`, "wiki");
       }
     };
 

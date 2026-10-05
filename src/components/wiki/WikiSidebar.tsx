@@ -25,6 +25,12 @@ function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+// On the thin client, wiki commands are proxied to the PC; an unreachable PC is
+// the normal offline state, so don't pop a dialog — the error is already logged.
+function isPcUnreachable(err: unknown): boolean {
+  return isMobileApp() && String(err).includes("Cannot reach PC");
+}
+
 export default function WikiSidebar({ wikiDir, selectedFile, onFileSelect }: WikiSidebarProps) {
   const [entries, setEntries] = useState<WikiEntry[]>([]);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
@@ -44,7 +50,7 @@ export default function WikiSidebar({ wikiDir, selectedFile, onFileSelect }: Wik
     } catch (err) {
       const errorMsg = `Failed to load wiki entries: ${err instanceof Error ? err.message : String(err)}`;
       logError(errorMsg, "wiki");
-      await message(errorMsg, { title: "Error", kind: "error" });
+      if (!isPcUnreachable(err)) await message(errorMsg, { title: "Error", kind: "error" });
     } finally {
       setLoading(false);
     }
@@ -66,7 +72,7 @@ export default function WikiSidebar({ wikiDir, selectedFile, onFileSelect }: Wik
     } catch (err) {
       const errorMsg = `Failed to load directory contents: ${err instanceof Error ? err.message : String(err)}`;
       logError(errorMsg, "wiki");
-      await message(errorMsg, { title: "Error", kind: "error" });
+      if (!isPcUnreachable(err)) await message(errorMsg, { title: "Error", kind: "error" });
     }
   };
 
