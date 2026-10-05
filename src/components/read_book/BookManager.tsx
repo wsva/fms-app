@@ -51,7 +51,10 @@ export default function BookManager({ books, onBooksChanged }: Props) {
   const [editBookUUID, setEditBookUUID] = useState<string | null>(null);
   const [editBookTitle, setEditBookTitle] = useState("");
   // Deferred platform flag (SSR-safe). On touch there is no hover, so row
-  // actions that reveal on `group-hover` must stay visible on mobile.
+  // actions that reveal on `group-hover` must stay visible on mobile. It also
+  // hides the folder Browse... button: `open({ directory: true })` is desktop-only
+  // (the dialog plugin returns FolderPickerNotImplemented), while the path field
+  // below can still be filled by hand.
   const [mobile, setMobile] = useState(false);
   useEffect(() => {
     setMobile(isMobileApp());
@@ -560,13 +563,15 @@ export default function BookManager({ books, onBooksChanged }: Props) {
                   placeholder="e.g. /mnt/external/books"
                   className="flex-1 px-2 py-1 rounded border border-border-default bg-bg-surface text-sm"
                 />
-                <button
-                  onClick={handlePickLocation}
-                  className="px-2 py-1 rounded border border-border-default hover:bg-bg-hover text-sm"
-                  title="Browse..."
-                >
-                  <FolderOpen size={14} />
-                </button>
+                {!mobile && (
+                  <button
+                    onClick={handlePickLocation}
+                    className="px-2 py-1 rounded border border-border-default hover:bg-bg-hover text-sm"
+                    title="Browse..."
+                  >
+                    <FolderOpen size={14} />
+                  </button>
+                )}
               </div>
             </div>
             <div className="flex gap-2">

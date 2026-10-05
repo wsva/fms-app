@@ -28,6 +28,7 @@ import type {
   CardTag,
 } from "@/lib/types";
 import { CARD_BASE_URL, CARD_LINKS, openCardUrl } from "@/lib/cards";
+import { isMobileApp } from "@/lib/platform";
 import { useCardEditor } from "./CardEditorContext";
 
 type TabId = "cards" | "search" | "review" | "tags" | "online" | "advanced";
@@ -822,6 +823,14 @@ function AdvancedTab({
   const [showAddDir, setShowAddDir] = useState(false);
   const [newDirName, setNewDirName] = useState("");
   const [newDirPath, setNewDirPath] = useState("");
+  // Deferred platform flag (SSR-safe). Folder picking is desktop-only — the dialog
+  // plugin answers `open({ directory: true })` with FolderPickerNotImplemented on
+  // Android/iOS — so the Browse affordance is hidden there and the path stays typed
+  // by hand (e.g. a directory filled by the PC sync flow).
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    setMobile(isMobileApp());
+  }, []);
 
   // Load dataset directories (locations)
   const loadDirs = useCallback(async () => {
@@ -920,18 +929,20 @@ function AdvancedTab({
                   placeholder="e.g. /mnt/external/fms-datasets"
                   className="flex-1 px-2 py-1 rounded border border-border-default bg-bg-surface text-sm"
                 />
-                <button
-                  onClick={async () => {
-                    const picked = await open({ directory: true, multiple: false, title: "Select Directory" });
-                    if (typeof picked === "string") {
-                      setNewDirPath(picked);
-                    }
-                  }}
-                  className="px-2 py-1 rounded border border-border-default hover:bg-mid-gray/20 text-sm"
-                  title="Browse..."
-                >
-                  <FolderOpen size={14} />
-                </button>
+                {!mobile && (
+                  <button
+                    onClick={async () => {
+                      const picked = await open({ directory: true, multiple: false, title: "Select Directory" });
+                      if (typeof picked === "string") {
+                        setNewDirPath(picked);
+                      }
+                    }}
+                    className="px-2 py-1 rounded border border-border-default hover:bg-mid-gray/20 text-sm"
+                    title="Browse..."
+                  >
+                    <FolderOpen size={14} />
+                  </button>
+                )}
               </div>
             </div>
             <div className="flex gap-2">
