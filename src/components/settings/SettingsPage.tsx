@@ -24,6 +24,9 @@ interface GlobalSettings {
   llm_provider: string;
   llm_api_key: string;
   llm_model: string;
+  goose_acp_url: string;
+  goose_acp_secret: string;
+  goose_acp_enabled: boolean;
   pc_url: string;
   pc_token: string;
   // Carried through unchanged on save: the device pairing identity (unused on
@@ -103,6 +106,7 @@ export default function SettingsPage() {
   const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings | null>(null);
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [savedGlobal, setSavedGlobal] = useState(false);
+  const [agentTest, setAgentTest] = useState<{ kind: "ok" | "err" | "busy"; text: string } | null>(null);
   const [currentTheme, setCurrentTheme] = useState<ThemeId>("light");
 
   // ---- Pairing (desktop only) ----
@@ -254,6 +258,34 @@ export default function SettingsPage() {
       console.error("Failed to save global settings:", e);
     } finally {
       setSavingGlobal(false);
+    }
+  }
+
+  // Persist the current URL/secret, then attempt an ACP connect and report the
+  // outcome inline. `agent_connect` is idempotent, so this doubles as a status
+  // probe when already connected.
+  async function handleTestAgent() {
+    if (!isTauri() || !globalSettings) return;
+    setAgentTest({ kind: "busy", text: "Connecting…" });
+    try {
+      await invoke("settings_set_global", { global: globalSettings });
+      const status = await invoke<{
+        connected: boolean;
+        session_id?: string | null;
+        mcp_registered?: boolean;
+      }>("agent_connect");
+      if (status.connected) {
+        setAgentTest({
+          kind: "ok",
+          text: `Connected (session ${status.session_id ?? "?"})${
+            status.mcp_registered ? " · fms-app tools registered" : ""
+          }.`,
+        });
+      } else {
+        setAgentTest({ kind: "err", text: "Not connected." });
+      }
+    } catch (e) {
+      setAgentTest({ kind: "err", text: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -417,6 +449,84 @@ export default function SettingsPage() {
             description="Where STT models are stored. Shared across all workspaces."
             value={globalSettings?.model_dir ?? ""}
           />
+
+          {/* ── Agent (Goose ACP) — desktop only ─────────────────── */}
+          {!mobile && (
+            <div className="mt-6 pt-6 border-t border-border-light">
+              <h3 className="text-lg font-semibold mb-1">Agent (Goose ACP)</h3>
+              <p className="text-text-secondary text-sm mb-4">
+                Connect to a running <code>goose serve</code> over the Agent Client Protocol so the
+                agent can drive fms-app with natural messages. Desktop only. The app offers its
+                built-in MCP tools to goose automatically on connect when goose supports HTTP MCP;
+                otherwise register the fms-app extension in goose pointing at the loopback server.
+              </p>
+
+              <label className="flex items-center gap-2 mb-4 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="w-4 h-4"
+                  checked={globalSettings?.goose_acp_enabled ?? false}
+                  onChange={(e) => {
+                    setGlobalSettings((prev) =>
+                      prev ? { ...prev, goose_acp_enabled: e.target.checked } : prev
+                    );
+                    setSavedGlobal(false);
+                  }}
+                />
+                <span className="font-medium">Enable Agent integration</span>
+              </label>
+
+              <div className="mb-4">
+                <label className="block font-medium mb-1">ACP WebSocket URL</label>
+                <p className="text-text-secondary text-sm mb-2">
+                  The <code>goose serve</code> ACP endpoint. Default: ws://127.0.0.1:3284/acp
+                </p>
+                <input
+                  type="text"
+                  className="w-full max-w-md px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
+                  value={globalSettings?.goose_acp_url ?? "ws://127.0.0.1:3284/acp"}
+                  onChange={(e) => updateGlobalField("goose_acp_url", e.target.value)}
+                  placeholder="ws://127.0.0.1:3284/acp"
+                />
+              </div>
+
+              <div className="mb-4">
+                <label className="block font-medium mb-1">Secret Key</label>
+                <p className="text-text-secondary text-sm mb-2">
+                  Sent as the <code>X-Secret-Key</code> header; must match goose&apos;s
+                  <code> GOOSE_SERVER__SECRET_KEY</code>. Leave empty if unauthenticated.
+                </p>
+                <input
+                  type="password"
+                  className="w-full max-w-md px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
+                  value={globalSettings?.goose_acp_secret ?? ""}
+                  onChange={(e) => updateGlobalField("goose_acp_secret", e.target.value)}
+                  placeholder="goose server secret key"
+                  autoComplete="off"
+                />
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  className={btnGhost}
+                  onClick={handleTestAgent}
+                  disabled={agentTest?.kind === "busy"}
+                >
+                  {agentTest?.kind === "busy" ? "Connecting…" : "Test connection"}
+                </button>
+                {agentTest && agentTest.kind !== "busy" && (
+                  <span
+                    className={`text-sm ${
+                      agentTest.kind === "ok" ? "text-green-500" : "text-error-text"
+                    }`}
+                  >
+                    {agentTest.text}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
         </section>
 
         {/* ── Workspace Settings section ─────────────────────────── */}

@@ -52,6 +52,7 @@ desktop = [
     "dep:image",
     "dep:tauri-plugin-single-instance",
     "dep:goose-sdk",
+    "dep:tokio-tungstenite",
     "server",
 ]
 server = [
@@ -103,6 +104,10 @@ schemars = { version = "1.0", optional = true }
 anyhow = { version = "1", optional = true }
 rmcp = { version = "3.4.1", optional = true, features = ["server", "transport-streamable-http-server", "transport-streamable-http-server-session", "macros", "schemars"] }
 goose-sdk = { version = "0.1.0-alpha.11", features = ["uniffi"], optional = true }
+# WebSocket client for the goose ACP agent (desktop only; connects to a local
+# `goose serve` over ws://). Already in the tree transitively, so the pinned
+# 0.28 resolves from the offline registry cache.
+tokio-tungstenite = { version = "0.28", optional = true }
 
 # Windows: native snipping via `ms-screenclip:` + clipboard image read.
 [target.'cfg(windows)'.dependencies]

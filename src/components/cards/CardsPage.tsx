@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   Plus,
@@ -186,6 +187,20 @@ export default function CardsPage() {
       loadNextReview();
     }
   }, [selectedDatasetUuid, activeTab, loadNextReview]);
+
+  // Agent control: `app_open_review` puts this page into review/quiz mode,
+  // optionally preselecting a card dataset. The review-load effect above picks
+  // up the tab/dataset change and draws the first due card.
+  useEffect(() => {
+    const unlisten = listen<{ dataset_uuid: string | null }>("agent-open-review", (event) => {
+      const uuid = event.payload?.dataset_uuid;
+      if (uuid) setSelectedDatasetUuid(uuid);
+      setActiveTab("review");
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   // Submit review
   async function submitReview(quality: number) {

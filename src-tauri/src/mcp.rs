@@ -613,6 +613,34 @@ struct CardFtsRebuildParam {
     location: String,
 }
 
+// -- App control (agent drives the UI) --
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct AppNavigateParam {
+    /// Target tab id, e.g. "cards", "dictation", "wiki", "llm-chat", "agent".
+    tab: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct AppOpenReviewParam {
+    /// Optional card dataset to preselect in the review/quiz panel.
+    #[serde(default)]
+    dataset_uuid: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct AppStartDictationParam {
+    #[serde(default)]
+    dataset_uuid: Option<String>,
+    #[serde(default)]
+    media_uuid: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct AppNotifyParam {
+    message: String,
+}
+
 // ---------------------------------------------------------------------------
 // Tool definitions — #[tool_router(server_handler)] generates ServerHandler impl
 // ---------------------------------------------------------------------------
@@ -2187,6 +2215,88 @@ impl DatasetMcpServer {
         let buffer = self.app.state::<LogBuffer>();
         let entries = buffer.read_file_history(param.limit);
         serde_json::to_string_pretty(&entries).unwrap_or_default()
+    }
+
+    // -------------------------------------------------------------------------
+    // App control — let the agent drive the UI. Each handler emits an
+    // `agent-action` Tauri event that `page.tsx` performs, then returns
+    // structured JSON so the agent gets immediate, actionable feedback.
+    // -------------------------------------------------------------------------
+
+    #[tool(name = "app_navigate", description = "Switch the app to another page/tab. Valid tabs: dictation, read-book, read-aloud, cards, studio, simple-words, models, edge-tts, llm-chat, ocr, wiki, workspaces, logs, settings, agent. Use this to bring the user to the right screen before/while acting.")]
+    async fn app_navigate(&self, Parameters(param): Parameters<AppNavigateParam>) -> Result<String, String> {
+        const VALID: [&str; 15] = [
+            "dictation", "read-book", "read-aloud", "cards", "studio", "simple-words", "models",
+            "edge-tts", "llm-chat", "ocr", "wiki", "workspaces", "logs", "settings", "agent",
+        ];
+        let tab = param.tab.trim();
+        if !VALID.contains(&tab) {
+            return Err(format!(
+                "unknown tab '{}'. Valid tabs: {}",
+                tab,
+                VALID.join(", ")
+            ));
+        }
+        log::info!("[MCP] app_navigate: tab={}", tab);
+        self.app
+            .emit("agent-action", serde_json::json!({ "type": "navigate", "tab": tab }))
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "ok": true, "action": "navigate", "tab": tab }).to_string())
+    }
+
+    #[tool(name = "app_open_review", description = "Open the interactive Cards review/quiz panel. Optionally preselect a card dataset by uuid. Use this when the user wants the visual quiz UI (as opposed to answering inline in the chat).")]
+    async fn app_open_review(&self, Parameters(param): Parameters<AppOpenReviewParam>) -> Result<String, String> {
+        log::info!("[MCP] app_open_review: dataset={:?}", param.dataset_uuid);
+        let payload = serde_json::json!({
+            "type": "open-review",
+            "dataset_uuid": param.dataset_uuid,
+        });
+        self.app.emit("agent-action", payload).map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "action": "open-review",
+            "dataset_uuid": param.dataset_uuid,
+        }).to_string())
+    }
+
+    #[tool(name = "app_start_dictation", description = "Open the Dictation page and optionally select a dataset/media item to start practicing.")]
+    async fn app_start_dictation(&self, Parameters(param): Parameters<AppStartDictationParam>) -> Result<String, String> {
+        log::info!("[MCP] app_start_dictation: dataset={:?} media={:?}", param.dataset_uuid, param.media_uuid);
+        let payload = serde_json::json!({
+            "type": "start-dictation",
+            "dataset_uuid": param.dataset_uuid,
+            "media_uuid": param.media_uuid,
+        });
+        self.app.emit("agent-action", payload).map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "action": "start-dictation",
+            "dataset_uuid": param.dataset_uuid,
+            "media_uuid": param.media_uuid,
+        }).to_string())
+    }
+
+    #[tool(name = "app_notify", description = "Show a toast notification to the user in the app UI.")]
+    async fn app_notify(&self, Parameters(param): Parameters<AppNotifyParam>) -> Result<String, String> {
+        log::info!("[MCP] app_notify: {}", param.message);
+        self.app
+            .emit("agent-action", serde_json::json!({ "type": "notify", "message": param.message }))
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "ok": true, "action": "notify", "message": param.message }).to_string())
+    }
+
+    #[tool(name = "app_get_ui_state", description = "Read the app's current UI state (active tab, selected dataset). Call this before navigating or acting so you know where the user currently is.")]
+    async fn app_get_ui_state(&self) -> String {
+        let state = self.app.state::<crate::agent_acp::AcpClientState>();
+        let ui = state.ui_state();
+        serde_json::json!({
+            "ok": true,
+            "connected": state.is_connected(),
+            "active_tab": ui.get("active_tab").cloned().unwrap_or(serde_json::Value::Null),
+            "active_dataset_uuid": ui.get("active_dataset_uuid").cloned().unwrap_or(serde_json::Value::Null),
+            "updated_at": ui.get("updated_at").cloned().unwrap_or(serde_json::Value::Null),
+        })
+        .to_string()
     }
 }
 

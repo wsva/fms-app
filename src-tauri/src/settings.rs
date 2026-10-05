@@ -60,6 +60,16 @@ pub struct AppSettings {
     /// Default model name for cloud providers / free-text model entry.
     #[serde(default)]
     pub llm_model: String,
+    /// goose ACP server WebSocket URL (`goose serve`). Global, desktop-only.
+    #[serde(default = "default_goose_acp_url")]
+    pub goose_acp_url: String,
+    /// Secret key sent as `X-Secret-Key` when connecting to `goose serve`.
+    /// Empty means the server runs unauthenticated.
+    #[serde(default)]
+    pub goose_acp_secret: String,
+    /// Whether the Agent (goose ACP) integration is enabled.
+    #[serde(default)]
+    pub goose_acp_enabled: bool,
     /// PC snapshot server base URL (e.g. `http://192.168.1.20:35711`). Global,
     /// not workspace-scoped. On Android this is a remembered/manual fallback
     /// filled by `pc_discover`; left empty until discovery or manual entry.
@@ -89,6 +99,10 @@ fn default_llm_provider() -> String {
     "ollama".to_string()
 }
 
+fn default_goose_acp_url() -> String {
+    "ws://127.0.0.1:3284/acp".to_string()
+}
+
 /// Global-only settings that are NOT workspace-scoped.
 /// These are always stored in the global config path.
 #[derive(Clone, Serialize, Deserialize)]
@@ -105,6 +119,15 @@ pub struct GlobalSettings {
     /// Default model name for cloud providers / free-text entry.
     #[serde(default)]
     pub llm_model: String,
+    /// goose ACP server WebSocket URL (`goose serve`).
+    #[serde(default = "default_goose_acp_url")]
+    pub goose_acp_url: String,
+    /// Secret key sent as `X-Secret-Key` when connecting to `goose serve`.
+    #[serde(default)]
+    pub goose_acp_secret: String,
+    /// Whether the Agent (goose ACP) integration is enabled.
+    #[serde(default)]
+    pub goose_acp_enabled: bool,
     /// PC snapshot server base URL (global fallback / remembered value).
     #[serde(default)]
     pub pc_url: String,
@@ -139,6 +162,9 @@ impl Default for GlobalSettings {
             llm_provider: default_llm_provider(),
             llm_api_key: String::new(),
             llm_model: String::new(),
+            goose_acp_url: default_goose_acp_url(),
+            goose_acp_secret: String::new(),
+            goose_acp_enabled: false,
             pc_url: String::new(),
             pc_token: String::new(),
             device_id: String::new(),
@@ -158,6 +184,9 @@ impl GlobalSettings {
             llm_provider: s.llm_provider.clone(),
             llm_api_key: s.llm_api_key.clone(),
             llm_model: s.llm_model.clone(),
+            goose_acp_url: s.goose_acp_url.clone(),
+            goose_acp_secret: s.goose_acp_secret.clone(),
+            goose_acp_enabled: s.goose_acp_enabled,
             pc_url: s.pc_url.clone(),
             pc_token: s.pc_token.clone(),
             device_id: s.device_id.clone(),
@@ -174,6 +203,9 @@ impl GlobalSettings {
         s.llm_provider = self.llm_provider.clone();
         s.llm_api_key = self.llm_api_key.clone();
         s.llm_model = self.llm_model.clone();
+        s.goose_acp_url = self.goose_acp_url.clone();
+        s.goose_acp_secret = self.goose_acp_secret.clone();
+        s.goose_acp_enabled = self.goose_acp_enabled;
         s.pc_url = self.pc_url.clone();
         s.pc_token = self.pc_token.clone();
         s.device_id = self.device_id.clone();
@@ -246,6 +278,9 @@ impl Default for AppSettings {
             llm_provider: default_llm_provider(),
             llm_api_key: String::new(),
             llm_model: String::new(),
+            goose_acp_url: default_goose_acp_url(),
+            goose_acp_secret: String::new(),
+            goose_acp_enabled: false,
             pc_url: String::new(),
             pc_token: String::new(),
             device_id: String::new(),

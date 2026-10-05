@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { isMobileApp } from "@/lib/platform";
@@ -25,6 +25,8 @@ import WikiPage from "@/components/wiki/WikiPage";
 import LogPage from "@/components/tools/LogPage";
 import WorkspacesPage from "@/components/workspace/WorkspacesPage";
 import SimpleWordsPage from "@/components/tools/SimpleWordsPage";
+import AgentPage from "@/components/agent/AgentPage";
+import type { AgentAction } from "@/lib/agent/types";
 
 interface Workspace {
   uuid: string;
@@ -59,6 +61,9 @@ export default function Home() {
   // only dropped once the client has committed the platform-correct layout.
   // `booted` starts false on server and client alike, so hydration matches.
   const [booted, setBooted] = useState(false);
+  // Ephemeral notification banner for the agent's `app_notify` action (the app
+  // has no toast system, so the shell renders a self-dismissing one).
+  const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
     setMobile(isMobileApp());
@@ -104,6 +109,38 @@ export default function Home() {
   useEffect(() => {
     const unlisten = listen<string>("wiki-navigate", () => {
       setActiveTab("wiki");
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // Agent app-control bridge: the goose agent drives the UI through the `app_*`
+  // MCP tools, which emit `agent-action`. Perform the shell-level action here
+  // (navigation + toast) and re-emit page-specific intents for the target page.
+  useEffect(() => {
+    const unlisten = listen<AgentAction>("agent-action", (event) => {
+      const action = event.payload;
+      switch (action.type) {
+        case "navigate":
+          setActiveTab(action.tab);
+          break;
+        case "open-review":
+          setActiveTab("cards");
+          void emit("agent-open-review", { dataset_uuid: action.dataset_uuid ?? null });
+          break;
+        case "start-dictation":
+          setActiveTab("dictation");
+          void emit("agent-start-dictation", {
+            dataset_uuid: action.dataset_uuid ?? null,
+            media_uuid: action.media_uuid ?? null,
+          });
+          break;
+        case "notify":
+          setToast(action.message);
+          window.setTimeout(() => setToast(null), 4000);
+          break;
+      }
     });
     return () => {
       unlisten.then((fn) => fn());
@@ -216,6 +253,9 @@ export default function Home() {
         <div style={{ display: activeTab === "workspaces" ? "flex" : "none" }} className="flex-1 min-h-0">
           <WorkspacesPage />
         </div>
+        <div style={{ display: activeTab === "agent" ? "flex" : "none" }} className="flex-1 min-h-0">
+          <AgentPage active={activeTab === "agent"} activeTab={activeTab} />
+        </div>
 
         {!mobile && <StatusBar />}
       </div>
@@ -224,6 +264,13 @@ export default function Home() {
 
       {/* Global text-selection → "Add to Card" menu */}
       <CardContextMenu />
+
+      {/* Agent `app_notify` toast */}
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[9998] px-4 py-2.5 rounded-lg bg-bg-card border border-border-default text-sm text-text-primary shadow-lg max-w-[80%] break-words">
+          {toast}
+        </div>
+      )}
 
       {/* Boot splash — visible on Android only, see .app-boot-splash in globals.css.
           No `flex` class: display is owned by that rule so the pre-paint

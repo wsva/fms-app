@@ -24,6 +24,7 @@ import {
   Star,
   FolderKanban,
   Type,
+  Bot,
 } from "lucide-react";
 
 export type TabId =
@@ -40,7 +41,8 @@ export type TabId =
   | "wiki"
   | "workspaces"
   | "logs"
-  | "settings";
+  | "settings"
+  | "agent";
 
 type TabDef = {
   id: TabId;
@@ -62,6 +64,7 @@ const navGroups: NavGroup[] = [
     label: "Tools",
     icon: Wrench,
     tabs: [
+      { id: "agent", label: "Agent", icon: Bot },
       { id: "workspaces", label: "Workspaces", icon: FolderKanban },
       { id: "studio", label: "Dataset Studio", icon: SlidersHorizontal },
       { id: "simple-words", label: "Simple Words", icon: Type },

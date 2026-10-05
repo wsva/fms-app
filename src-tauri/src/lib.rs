@@ -14,6 +14,8 @@ mod dictation;
 mod llm;
 #[cfg(feature = "desktop")]
 mod goose_llm;
+#[cfg(feature = "desktop")]
+mod agent_acp;
 mod logger;
 #[cfg(feature = "stt")]
 mod model;
@@ -370,6 +372,14 @@ pub fn run() {
             pairing::pairing_respond,
             pairing::pairing_revoke,
             pairing::pairing_remove_denied,
+            // Goose ACP agent client (desktop only)
+            agent_acp::agent_connect,
+            agent_acp::agent_send_prompt,
+            agent_acp::agent_cancel,
+            agent_acp::agent_respond_permission,
+            agent_acp::agent_disconnect,
+            agent_acp::agent_status,
+            agent_acp::agent_report_ui_state,
         ])
         .manage(workspace::WorkspaceState::new())
         .manage(model::ModelState::new())
@@ -378,6 +388,7 @@ pub fn run() {
         .manage(web_service::WebServiceState::new())
         .manage(ocr::OcrState::new())
         .manage(simple_words::SimpleWordsState::new())
+        .manage(agent_acp::AcpClientState::new())
         .setup(|app| {
             // Anchor all persistent storage on the platform-correct base dir
             // (app-private on Android/iOS) before anything reads a path or
