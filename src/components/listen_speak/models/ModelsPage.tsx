@@ -3,9 +3,11 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { message } from "@tauri-apps/plugin-dialog";
 import { ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
+import { logError } from "@/lib/logger";
 import { type ModelVersionInfo, type DownloadProgress, type ModelStatus } from "@/lib/models/types";
 import ModelCard from "./components/ModelCard";
 import ModelDetailsDialog from "./components/ModelDetailsDialog";
@@ -17,6 +19,8 @@ import ModelDetailsDialog from "./components/ModelDetailsDialog";
 export default function ModelsPage() {
   const [models, setModels] = useState<ModelVersionInfo[]>([]);
   const [selectedVersion, setSelectedVersion] = useState<string>("");
+  const [defaultVersion, setDefaultVersion] = useState<string>("");
+  const [settingDefaultId, setSettingDefaultId] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [downloadingVersion, setDownloadingVersion] = useState<string | null>(null);
@@ -44,12 +48,14 @@ export default function ModelsPage() {
       const res = await invoke<{
         models: ModelVersionInfo[];
         selected_version: string;
+        default_version: string;
         active_version: string | null;
         active_status: ModelStatus;
         download_progress: DownloadProgress | null;
       }>("model_get_status");
       setModels(res.models);
       setSelectedVersion(res.selected_version);
+      setDefaultVersion(res.default_version ?? "");
       setActiveVersion(res.active_version);
       setActiveStatus(res.active_status);
       setDownloadProgress(res.download_progress ?? null);
@@ -126,6 +132,26 @@ export default function ModelsPage() {
     finally { setModelLoading(false); }
   }
 
+  // Mark a downloaded model as the user's preference — the one the app loads
+  // automatically whenever it needs transcription and nothing is loaded yet.
+  async function handleSetDefault(modelId: string) {
+    if (!isTauri()) return;
+    setSettingDefaultId(modelId);
+    try {
+      await invoke("model_set_default", { version: modelId });
+      setDefaultVersion(modelId);
+    } catch (e) {
+      const detail = String(e);
+      logError(`Failed to set default model '${modelId}': ${detail}`, "models");
+      await message(`Could not set this model as default:\n${detail}`, {
+        title: "Set as default",
+        kind: "error",
+      });
+    } finally {
+      setSettingDefaultId(null);
+    }
+  }
+
   // ---- Derived state ----
 
   const isModelRunning = activeStatus === "Running";
@@ -157,6 +183,7 @@ export default function ModelsPage() {
           <p className="text-xs text-text-tertiary mb-3">
             Powered by models from <a href="https://github.com/cjpais/Handy" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline inline-flex items-center gap-0.5">Handy <ExternalLink size={10} /></a>.
             Supports Parakeet, Whisper, Moonshine, and more via transcribe-rs and transcribe-cpp.
+            Use <span className="font-medium">Set as default</span> to pick the model loaded automatically when none is running.
           </p>
 
           {/* Downloaded STT models - compact list */}
@@ -178,6 +205,9 @@ export default function ModelsPage() {
                 onDelete={() => handleDelete(model.id)}
                 onCancelDelete={() => setConfirmDeleteId(null)}
                 onShowDetails={() => setDetailsModel(model)}
+                isDefault={defaultVersion === model.id}
+                onSetDefault={() => handleSetDefault(model.id)}
+                defaultSaving={settingDefaultId === model.id}
               />
             ))}
             {downloadedModels.length === 0 && !isDownloadingAny && (

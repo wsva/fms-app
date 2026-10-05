@@ -163,6 +163,7 @@ pub fn run() {
             greet,
             model::model_get_status,
             model::model_select_version,
+            model::model_set_default,
             model::model_download,
             model::model_start,
             model::model_stop,
@@ -368,6 +369,10 @@ pub fn run() {
             app.state::<workspace::WorkspaceState>().reload_registry();
             app.state::<settings::SettingsState>().reload();
             app.state::<model::ModelState>().reload();
+            // Restore the user's preferred default STT model (settings is global,
+            // so it survives workspace switching).
+            let persisted_model = app.state::<settings::SettingsState>().selected_model();
+            app.state::<model::ModelState>().apply_persisted_default(&persisted_model);
             let log_buffer = logger::init_logger(app.handle().clone());
             app.handle().manage(log_buffer);
             log::info!("Application starting up");
@@ -678,6 +683,7 @@ pub fn run() {
         .invoke_handler(mobile_invoke_handler!(
             model::model_get_status,
             model::model_select_version,
+            model::model_set_default,
             model::model_download,
             model::model_start,
             model::model_stop,
@@ -702,6 +708,11 @@ pub fn run() {
             // ModelState is only managed on STT builds (see builder above).
             #[cfg(feature = "stt")]
             app.state::<model::ModelState>().reload();
+            #[cfg(feature = "stt")]
+            {
+                let persisted_model = app.state::<settings::SettingsState>().selected_model();
+                app.state::<model::ModelState>().apply_persisted_default(&persisted_model);
+            }
             let log_buffer = logger::init_logger(app.handle().clone());
             app.handle().manage(log_buffer);
             log::info!("Application starting up (mobile)");

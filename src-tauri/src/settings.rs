@@ -38,7 +38,7 @@ pub struct AppSettings {
     /// Root directory of the wiki (markdown documents).
     #[serde(default)]
     pub wiki_dir: String,
-    /// Currently selected model ID.
+    /// Preferred default STT model ID (auto-loaded when nothing is loaded).
     #[serde(default)]
     pub selected_model: String,
     /// When to unload the model after inactivity.
@@ -94,7 +94,7 @@ pub struct GlobalSettings {
     /// Hex PKCS#8 Ed25519 keypair (see `AppSettings::device_seed`).
     #[serde(default)]
     pub device_seed: String,
-    /// Currently selected STT model ID.
+    /// Preferred default STT model ID (set from the Models page).
     #[serde(default)]
     pub selected_model: String,
     /// STT model directory (shared across workspaces).
@@ -313,6 +313,22 @@ impl SettingsState {
     pub fn wiki_dir(&self) -> PathBuf {
         let configured = self.settings.lock().unwrap().wiki_dir.clone();
         self.workspace_subdir("wiki", &configured)
+    }
+
+    /// Currently preferred default STT model ID (global setting; empty = unset).
+    pub fn selected_model(&self) -> String {
+        self.settings.lock().unwrap().selected_model.clone()
+    }
+
+    /// Persist the preferred default STT model ID. Empty clears the preference,
+    /// falling back to the app's automatic choice.
+    pub fn set_selected_model(&self, version: &str) -> Result<(), String> {
+        let ws_dir = self.workspace_dir.lock().unwrap().clone();
+        let mut s = self.settings.lock().unwrap().clone();
+        s.selected_model = version.to_string();
+        SettingsState::save(&s, ws_dir.as_ref())?;
+        *self.settings.lock().unwrap() = s;
+        Ok(())
     }
 
     /// Load settings with global+workspace merge.

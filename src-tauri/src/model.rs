@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 // Whisper GGUF (transcribe-cpp) is desktop-only; ONNX builds (e.g. the Android
 // `stt` experiment) compile the engine out and reject its models at load time.
 #[cfg(feature = "desktop")]
@@ -72,6 +72,10 @@ pub struct ModelState {
     pub download_status: Mutex<HashMap<String, ModelStatus>>,
     pub download_progress: Arc<Mutex<DownloadProgress>>,
     pub selected_version: Mutex<String>,
+    /// User's preferred default model, persisted in settings (`selected_model`).
+    /// This is what the app loads when it needs a model and none is loaded yet.
+    /// Empty until the user picks one via "Set as default".
+    pub default_version: Mutex<String>,
     model: Mutex<Option<ActiveModel>>,
     pub active_version: Mutex<Option<String>>,
     pub cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
@@ -118,6 +122,7 @@ pub struct ModelVersionInfo {
 pub struct ModelStatusResponse {
     pub models: Vec<ModelVersionInfo>,
     pub selected_version: String,
+    pub default_version: String,
     pub active_version: Option<String>,
     pub active_status: ModelStatus,
     pub download_progress: Option<DownloadProgress>,
@@ -153,6 +158,7 @@ impl ModelState {
                 eta_seconds: None,
             })),
             selected_version: Mutex::new(selected),
+            default_version: Mutex::new(String::new()),
             model: Mutex::new(None),
             active_version: Mutex::new(None),
             cancel_flags: Mutex::new(HashMap::new()),
@@ -204,6 +210,33 @@ impl ModelState {
             .iter()
             .filter(|def| cfg!(feature = "desktop") || def.engine != EngineType::TranscribeCpp)
     }
+
+    /// Whether a model is present in the model directory (per our cached status).
+    fn is_downloaded(&self, version: &str) -> bool {
+        self.download_status
+            .lock()
+            .unwrap()
+            .get(version)
+            .map(|s| *s == ModelStatus::Downloaded)
+            .unwrap_or(false)
+    }
+
+    /// Seed the persisted default model preference at startup. Values that no
+    /// longer exist in this build's catalog (e.g. a desktop-only model id saved
+    /// before switching to an ONNX-only build) are ignored, keeping the
+    /// built-in fallback selection.
+    pub fn apply_persisted_default(&self, version: &str) {
+        if version.is_empty() {
+            return;
+        }
+        if !Self::available_models().any(|def| def.id == version) {
+            log::warn!("Ignoring unknown default model '{}' from settings", version);
+            return;
+        }
+        log::info!("Restoring default model '{}' from settings", version);
+        *self.default_version.lock().unwrap() = version.to_string();
+        *self.selected_version.lock().unwrap() = version.to_string();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +272,7 @@ pub async fn model_get_status(state: State<'_, ModelState>) -> Result<ModelStatu
         .collect();
 
     let selected = state.selected_version.lock().unwrap().clone();
+    let default_version = state.default_version.lock().unwrap().clone();
     let active = state.active_version.lock().unwrap().clone();
 
     let progress = state.download_progress.lock().unwrap().clone();
@@ -265,11 +299,7 @@ pub async fn model_get_status(state: State<'_, ModelState>) -> Result<ModelStatu
     let hint = if active.is_some() {
         format!("Model '{}' is loaded and ready for transcription.", active.as_ref().unwrap())
     } else if !downloaded_versions.is_empty() {
-        let preferred = if downloaded_versions.contains(&"parakeet-v3".to_string()) {
-            "parakeet-v3"
-        } else {
-            &downloaded_versions[0]
-        };
+        let preferred = auto_load_version(&state);
         format!(
             "No model loaded. {} model(s) downloaded: {}. Call model_load with version='{}' (or empty for auto-select) to load one.",
             downloaded_versions.len(),
@@ -283,6 +313,7 @@ pub async fn model_get_status(state: State<'_, ModelState>) -> Result<ModelStatu
     Ok(ModelStatusResponse {
         models,
         selected_version: selected,
+        default_version,
         active_version: active,
         active_status,
         download_progress: if is_downloading {
@@ -305,6 +336,78 @@ pub async fn model_select_version(
     }
     let mut sel = state.selected_version.lock().unwrap();
     *sel = version;
+    Ok(())
+}
+
+/// Version to load when the app needs a model but none is loaded: the user's
+/// default (if still downloaded), otherwise the session selection.
+pub(crate) fn auto_load_version(state: &ModelState) -> String {
+    let default = state.default_version.lock().unwrap().clone();
+    if !default.is_empty() && state.is_downloaded(&default) {
+        return default;
+    }
+    state.selected_version.lock().unwrap().clone()
+}
+
+/// Mark `version` as the user's preferred default model — in memory and in the
+/// persisted settings, so it survives restarts and drives every auto-load path
+/// (voice input, subtitle generation, MCP transcription).
+///
+/// Passing an empty string clears the preference and restores the built-in
+/// fallback (first model loadable in this build).
+pub(crate) fn set_default_version_core(
+    state: &ModelState,
+    settings: &SettingsState,
+    version: &str,
+) -> Result<(), String> {
+    if version.is_empty() {
+        let fallback = ModelState::available_models()
+            .next()
+            .map(|def| def.id.to_string())
+            .unwrap_or_default();
+        log::info!("Clearing default model, falling back to '{}'", fallback);
+        *state.default_version.lock().unwrap() = String::new();
+        *state.selected_version.lock().unwrap() = fallback;
+        return settings.set_selected_model("");
+    }
+
+    let def = model_list_stt::find_model(version)
+        .ok_or_else(|| format!("Unknown model version: {}", version))?;
+    if !(cfg!(feature = "desktop") || def.engine != EngineType::TranscribeCpp) {
+        return Err(format!("Model '{}' cannot be loaded in this build", version));
+    }
+    if !state.is_downloaded(version) {
+        return Err(format!(
+            "Model '{}' is not downloaded. Download it before setting it as the default.",
+            version
+        ));
+    }
+
+    log::info!("Default model set to '{}'", version);
+    *state.default_version.lock().unwrap() = version.to_string();
+    *state.selected_version.lock().unwrap() = version.to_string();
+    settings.set_selected_model(version)
+}
+
+/// Forget the default preference when the model it pointed at was deleted.
+pub(crate) fn clear_default_if_matches(state: &ModelState, settings: &SettingsState, version: &str) {
+    let matches = state.default_version.lock().unwrap().as_str() == version;
+    if matches {
+        log::info!("Default model '{}' deleted, clearing the preference", version);
+        *state.default_version.lock().unwrap() = String::new();
+        let _ = settings.set_selected_model("");
+    }
+}
+
+#[tauri::command]
+pub async fn model_set_default(
+    app: AppHandle,
+    state: State<'_, ModelState>,
+    settings: State<'_, SettingsState>,
+    version: String,
+) -> Result<(), String> {
+    set_default_version_core(&state, &settings, &version)?;
+    let _ = app.emit("model-status-changed", ());
     Ok(())
 }
 
@@ -603,9 +706,12 @@ pub async fn model_stop(state: State<'_, ModelState>) -> Result<(), String> {
 pub async fn model_delete(
     state: State<'_, ModelState>,
     index: State<'_, ModelIndexState>,
+    settings: State<'_, SettingsState>,
     version: String,
 ) -> Result<(), String> {
-    delete_model_core(&state, &index, &version)
+    delete_model_core(&state, &index, &version)?;
+    clear_default_if_matches(&state, &settings, &version);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1197,7 +1303,8 @@ fn run_transcribe_text(model: &mut ActiveModel, samples: &[f32]) -> Result<Strin
     }
 }
 
-/// Ensure a model is loaded, loading the currently selected version if needed.
+/// Ensure a model is loaded, loading the user's default (or the currently
+/// selected version when no default is set) if needed.
 pub(crate) fn ensure_model_loaded(state: &ModelState) -> Result<(), String> {
     {
         let active = state.active_version.lock().unwrap();
@@ -1205,8 +1312,8 @@ pub(crate) fn ensure_model_loaded(state: &ModelState) -> Result<(), String> {
             return Ok(());
         }
     }
-    let version = state.selected_version.lock().unwrap().clone();
-    log::info!("ensure_model_loaded: auto-loading selected model '{}'", version);
+    let version = auto_load_version(state);
+    log::info!("ensure_model_loaded: auto-loading model '{}'", version);
     load_model_core(state, &version)?;
     Ok(())
 }

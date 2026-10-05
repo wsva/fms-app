@@ -1,7 +1,7 @@
 "use client";
 
 import { type ReactNode } from "react";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Star } from "lucide-react";
 import { type ModelVersionInfo, type DownloadProgress, type ModelStatus, formatBytes, formatSpeed, formatEta, statusLabel, statusBadgeClass, btnSmall } from "@/lib/models/types";
 
 // ---------------------------------------------------------------------------
@@ -72,6 +72,12 @@ interface ModelCardProps {
   onDelete: () => void;
   onCancelDelete: () => void;
   onShowDetails: () => void;
+  /** Whether this model is the user's preferred default (auto-loaded when nothing is loaded). */
+  isDefault?: boolean;
+  /** Provided on downloaded models only: mark this model as the default. */
+  onSetDefault?: () => void;
+  /** True while a default change for this model is in flight. */
+  defaultSaving?: boolean;
   /** Optional: provider selector node. */
   providerSelector?: ReactNode;
   /** Optional: external URL for the model (shown as link icon). */
@@ -93,6 +99,9 @@ export default function ModelCard({
   onDelete,
   onCancelDelete,
   onShowDetails,
+  isDefault,
+  onSetDefault,
+  defaultSaving,
   providerSelector,
   externalUrl,
 }: ModelCardProps) {
@@ -178,7 +187,7 @@ export default function ModelCard({
       )}
 
       {/* Action buttons */}
-      <div className="flex items-center gap-1.5 mt-2">
+      <div className="flex flex-wrap items-center gap-1.5 mt-2">
         {isDownloading && (
           <button className={`${btnSmall} bg-error-text text-white hover:bg-error-hover`} onClick={onCancel}>
             Cancel
@@ -200,6 +209,27 @@ export default function ModelCard({
         )}
         {isActive && (
           <span className="text-xs text-text-secondary italic">Ready</span>
+        )}
+        {onSetDefault && (
+          isDefault ? (
+            <span
+              className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-accent"
+              title="Loaded automatically when no model is running"
+            >
+              <Star size={12} fill="currentColor" />
+              Default
+            </span>
+          ) : (
+            <button
+              className="ml-auto flex items-center gap-1 px-2.5 py-1 text-xs rounded font-medium cursor-pointer transition-colors bg-bg-muted text-text-secondary hover:bg-accent-bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={onSetDefault}
+              disabled={modelLoading || defaultSaving || isDownloadInProgress}
+              title="Load this model automatically when none is running"
+            >
+              <Star size={12} />
+              {defaultSaving ? "Saving..." : "Set as default"}
+            </button>
+          )
         )}
         {confirmDelete && (
           <button className={`${btnSmall} bg-transparent text-text-secondary hover:bg-bg-hover`} onClick={onCancelDelete}>
