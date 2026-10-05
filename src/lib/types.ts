@@ -87,6 +87,21 @@ export type CardReview = {
   next_review_at: string | null;
 };
 
+/** Review queue counts for one dataset, mirroring how `card_test_get` picks cards. */
+export type CardTestStats = {
+  /** Overdue cards — served before anything else. */
+  due: number;
+  /** Never-reviewed cards, waiting behind `due`. */
+  fresh: number;
+  /** Familiarity 6: out of the review rotation. */
+  mature: number;
+  /** Missing question or answer, so review skips them. */
+  incomplete: number;
+  total: number;
+  /** Which pool the next card comes from. */
+  serving: "due" | "fresh" | "none";
+};
+
 export type CardTag = {
   uuid: string;
   name: string;

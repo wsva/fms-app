@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
@@ -10,6 +11,12 @@ import {
   ChevronLeft,
   ChevronRight,
   FlipHorizontal,
+  CircleHelp,
+  Frown,
+  Meh,
+  Smile,
+  Laugh,
+  SkipForward,
   Check,
   X,
   Tag,
@@ -26,6 +33,7 @@ import type {
   Card,
   CardReview,
   CardTag,
+  CardTestStats,
 } from "@/lib/types";
 import { CARD_BASE_URL, CARD_LINKS, openCardUrl } from "@/lib/cards";
 import { isMobileApp } from "@/lib/platform";
@@ -58,6 +66,7 @@ export default function CardsPage() {
   const [reviewCard, setReviewCard] = useState<Card | null>(null);
   const [reviewFlipped, setReviewFlipped] = useState(false);
   const [reviewResult, setReviewResult] = useState<CardReview | null>(null);
+  const [reviewStats, setReviewStats] = useState<CardTestStats | null>(null);
 
   // Tags
   const [tags, setTags] = useState<CardTag[]>([]);
@@ -137,6 +146,20 @@ export default function CardsPage() {
     }
   }, [selectedDatasetUuid, activeTab, loadTags]);
 
+  // Queue counts for the Review tab. Refreshed with every draw so the numbers
+  // describe the same pool card_test_get just picked from.
+  const loadReviewStats = useCallback(async () => {
+    if (!selectedDatasetUuid) return;
+    try {
+      setReviewStats(await invoke<CardTestStats>("card_test_stats", {
+        datasetUuid: selectedDatasetUuid,
+      }));
+    } catch {
+      // Informational only, so a failure just hides the bar.
+      setReviewStats(null);
+    }
+  }, [selectedDatasetUuid]);
+
   // Get next review card
   const loadNextReview = useCallback(async () => {
     if (!selectedDatasetUuid) return;
@@ -153,8 +176,10 @@ export default function CardsPage() {
       setReviewResult(null);
     } catch (e) {
       setError(`Failed to load review card: ${e}`);
+    } finally {
+      void loadReviewStats();
     }
-  }, [selectedDatasetUuid]);
+  }, [selectedDatasetUuid, loadReviewStats]);
 
   useEffect(() => {
     if (selectedDatasetUuid && activeTab === "review") {
@@ -575,57 +600,115 @@ export default function CardsPage() {
           </div>
         )}
 
-        {/* Review tab. The panel scrolls so a long answer stays reachable instead of
-            being clipped by the tab content's overflow-hidden; `m-auto` on the child
-            keeps the card centered while there is spare space and collapses to 0 once
-            the content is taller than the viewport. */}
+        {/* Review tab. This panel is the only scroller: the card grows with its content
+            instead of scrolling internally, so a long answer uses the full tab height.
+            Content is top-aligned on purpose: centring it would move the toolbar up and
+            down every time the answer is revealed or a longer card is drawn. */}
         {activeTab === "review" && (
           <div className="flex h-full overflow-y-auto p-3 sm:p-6">
             {reviewCard ? (
-              <div className="m-auto w-full max-w-lg">
-                {/* Card display */}
-                <div className="relative" onClick={() => setReviewFlipped(!reviewFlipped)}>
-                  <div className="bg-bg-card rounded-xl border border-border-default p-4 min-h-[220px] max-h-[55vh] flex flex-col overflow-y-auto cursor-pointer sm:p-8 sm:min-h-[300px]">
-                    {/* Long answers read as a block of prose, so the revealed side is
-                        left-aligned; the prompt-only side stays centered. */}
-                    <div className={`break-words my-auto w-full ${reviewFlipped ? "text-left" : "text-center"}`}>
-                      {!reviewFlipped ? (
-                        <>
-                          <p className="text-2xl font-medium mb-4">
-                            {reviewCard.question}
-                          </p>
-                          <p className="text-sm text-text-tertiary">
-                            Click to reveal answer
-                          </p>
-                        </>
-                      ) : (
-                        <>
-                          <p className="text-lg text-text-secondary mb-2">
-                            {reviewCard.question}
-                          </p>
-                          <div className="border-t border-border-default my-4" />
-                          {/* Answers are written in markdown (the card editor says so), so
-                              render them through the same viewer the wiki uses. Links must
-                              not flip the card back, hence the conditional stopPropagation. */}
-                          <div
-                            className="text-xl"
-                            onClick={(e) => {
-                              if ((e.target as HTMLElement).closest("a")) e.stopPropagation();
-                            }}
-                          >
-                            <MarkdownViewer content={reviewCard.answer} />
-                          </div>
-                          {reviewCard.note && (
-                            <div className="text-sm mt-4">
-                              <MarkdownViewer content={reviewCard.note} />
-                            </div>
-                          )}
-                        </>
-                      )}
-                    </div>
+              <div className="w-full">
+                {/* Desktop: one toolbar row, the grade scale dead-centre, the card-level
+                    actions pinned to the far end. The empty flank keeps the scale centred on the
+                    row rather than centred in whatever the actions leave over. Ratings are
+                    always on screen, so a card can be graded from its question and nothing
+                    shifts when the answer appears.
+                    Below `sm` the cells stack full width and `order` puts the actions on the
+                    first line, flush right, with the grade scale centred under them — card
+                    level controls above the grading decision, which is the order a thumb
+                    reaches for them on a phone. `items-start` keeps both groups on their top
+                    edge, so a wrapped scale cannot push the actions up and down.
+                    Sticky, so the grade buttons stay reachable while a long answer scrolls
+                    (the same `sticky top-0 z-10 bg-bg-body` idiom the dictation toolbar
+                    uses). The negative margins pull the bar up over the panel's own padding
+                    and its padding puts that space back, so the opaque background covers the
+                    gutters too and no text peeks around the edges. */}
+                <div className="sticky top-0 z-10 -mx-3 -mt-3 grid grid-cols-1 items-start gap-2 bg-bg-body px-3 pb-4 pt-3 sm:-mx-6 sm:-mt-6 sm:grid-cols-[1fr_auto_1fr] sm:gap-4 sm:px-6 sm:pt-6">
+                  {/* Left flank exists only to balance the 3-column grid on desktop. Hidden
+                      below `sm`, where it would take up a stacked line. */}
+                  <div className="hidden sm:order-1 sm:block" />
+
+                  <div className="order-2 flex flex-wrap justify-center gap-2">
+                    {/* Icon + label on desktop, icon only below `sm` (see `IconLabel`),
+                        so the scale still fits a phone. The tint and left-to-right order
+                        carry the progression; the face on top names it. */}
+                    {[
+                      { q: 1, label: "Forgot", color: "bg-red-500", Icon: CircleHelp },
+                      { q: 2, label: "Hard", color: "bg-orange-500", Icon: Frown },
+                      { q: 3, label: "Okay", color: "bg-amber-500", Icon: Meh },
+                      { q: 4, label: "Good", color: "bg-cyan-500", Icon: Smile },
+                      { q: 5, label: "Easy", color: "bg-green-500", Icon: Laugh },
+                    ].map((btn) => (
+                      <button
+                        key={btn.q}
+                        onClick={() => submitReview(btn.q)}
+                        title={btn.label}
+                        aria-label={btn.label}
+                        className={`flex items-center gap-1.5 px-4 py-2 min-h-11 sm:min-h-0 rounded-lg border border-border-default ${btn.color} text-sm hover:opacity-90`}
+                      >
+                        <btn.Icon size={14} />
+                        <IconLabel>{btn.label}</IconLabel>
+                      </button>
+                    ))}
                   </div>
-                  <div className="absolute top-2 right-2 bg-bg-card rounded px-1">
-                    <FlipHorizontal size={16} className="text-text-tertiary" />
+
+                  <div className="order-1 flex items-center justify-end gap-2 sm:order-3">
+                    <button
+                      onClick={() => setReviewFlipped(!reviewFlipped)}
+                      title={reviewFlipped ? "Show question" : "Show answer"}
+                      aria-label={reviewFlipped ? "Show question" : "Show answer"}
+                      className="flex items-center gap-1.5 px-4 py-2 min-h-11 sm:min-h-0 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20"
+                    >
+                      <FlipHorizontal size={14} />
+                      <IconLabel>{reviewFlipped ? "Question" : "Answer"}</IconLabel>
+                    </button>
+                    <button
+                      onClick={loadNextReview}
+                      title="Skip this card"
+                      aria-label="Skip this card"
+                      className="flex items-center gap-1.5 px-4 py-2 min-h-11 sm:min-h-0 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20"
+                    >
+                      <SkipForward size={14} />
+                      <IconLabel>Skip</IconLabel>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Card display. Deliberately not clickable: dragging to select part of
+                    a question or answer must not flip the card over, so the side switch
+                    lives on the buttons above. No `max-h`/`overflow-y-auto` here — the
+                    box grows and the panel above scrolls. */}
+                <div className="bg-bg-card rounded-xl border border-border-default p-4 min-h-[220px] flex flex-col sm:p-8 sm:min-h-[300px]">
+                  {/* Long answers read as a block of prose, so the revealed side is
+                      left-aligned; the prompt-only side stays centered. */}
+                  <div className={`break-words my-auto w-full ${reviewFlipped ? "text-left" : "text-center"}`}>
+                    {!reviewFlipped ? (
+                      /* The prompt is the whole point of this side, so it is sized as a
+                          display heading. Parent `break-words` keeps a long German compound
+                          wrapping instead of overflowing the card. */
+                      <p className="text-4xl font-bold sm:text-5xl">
+                        {reviewCard.question}
+                      </p>
+                    ) : (
+                      <>
+                        {/* Repeated above the answer for context only, so it stays small —
+                            at display size it would compete with what you are reading. */}
+                        <p className="text-lg text-text-secondary mb-2">
+                          {reviewCard.question}
+                        </p>
+                        <div className="border-t border-border-default my-4" />
+                        {/* Answers are written in markdown (the card editor says so), so
+                            render them through the same viewer the wiki uses. */}
+                        <div className="text-xl">
+                          <MarkdownViewer content={reviewCard.answer} />
+                        </div>
+                        {reviewCard.note && (
+                          <div className="text-sm mt-4">
+                            <MarkdownViewer content={reviewCard.note} />
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -638,57 +721,24 @@ export default function CardsPage() {
                   </div>
                 )}
 
-                {/* Rating buttons (only when flipped) */}
-                {reviewFlipped && (
-                  <div className="mt-6">
-                    <p className="text-center text-sm text-text-secondary mb-3">
-                      How well did you recall this?
-                    </p>
-                    <div className="flex justify-center gap-2">
-                      {[
-                        { q: 1, label: "Forgot", color: "bg-red-500" },
-                        { q: 2, label: "Hard", color: "bg-orange-500" },
-                        { q: 3, label: "Okay", color: "bg-amber-500" },
-                        { q: 4, label: "Good", color: "bg-cyan-500" },
-                        { q: 5, label: "Easy", color: "bg-green-500" },
-                      ].map((btn) => (
-                        <button
-                          key={btn.q}
-                          onClick={() => submitReview(btn.q)}
-                          className={`px-4 py-2 rounded-lg border border-border-default ${btn.color} text-sm hover:opacity-90`}
-                        >
-                          {btn.label}
-                        </button>
-                      ))}
-                    </div>
-                    <p className="text-center text-xs text-text-tertiary mt-2">
-                      1 = complete failure, 5 = perfect recall
-                    </p>
-                  </div>
-                )}
-
-                {/* Skip button */}
-                <div className="mt-4 text-center">
-                  <button
-                    onClick={loadNextReview}
-                    className="text-sm text-text-secondary hover:text-text-primary"
-                  >
-                    Skip →
-                  </button>
-                </div>
+                <ReviewQueueBar stats={reviewStats} />
               </div>
             ) : (
               <div className="text-center">
+                <ReviewQueueBar stats={reviewStats} />
                 <p className="text-text-secondary text-lg mb-4">
                   No cards to review!
                 </p>
                 <p className="text-text-tertiary text-sm">
-                  All cards have been reviewed or no cards match the criteria.
+                  {reviewStats && reviewStats.incomplete > 0
+                    ? `${reviewStats.incomplete} ${reviewStats.incomplete === 1 ? "card has" : "cards have"} no question or answer yet — fill them in on the Cards tab.`
+                    : "Nothing is due, and no new cards are waiting."}
                 </p>
                 <button
                   onClick={loadNextReview}
-                  className="mt-4 px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20"
+                  className="mt-4 flex items-center gap-1.5 mx-auto px-4 py-2 min-h-11 sm:min-h-0 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20"
                 >
+                  <RefreshCw size={14} />
                   Check again
                 </button>
               </div>
@@ -1190,6 +1240,53 @@ function DatasetCard({
           {deleting ? "Deleting..." : "Remove"}
         </button>
       </div>
+    </div>
+  );
+}
+
+function plural(n: number, singular: string, count: string) {
+  return n === 1 ? singular : count;
+}
+
+/**
+ * Button caption that disappears below `sm`, so a phone sees the icon alone while the
+ * wide layout keeps icon + text. The owning button carries `title`/`aria-label`, so the
+ * accessible name and a hover hint do not depend on this span being visible.
+ */
+function IconLabel({ children }: { children: ReactNode }) {
+  return <span className="hidden sm:inline">{children}</span>;
+}
+
+/**
+ * Review queue summary: how many cards are in front of you, how many are waiting,
+ * and why the waiting ones are not showing up yet.
+ *
+ * `card_test_get` serves overdue cards before never-reviewed ones, so a big "to learn"
+ * count beside a small "due" count is not missing data — it is a queue that needs the
+ * overdue cards answered first. Saying so here keeps that from looking like a bug.
+ */
+function ReviewQueueBar({ stats }: { stats: CardTestStats | null }) {
+  if (!stats) return null;
+
+  let hint: string | null = null;
+  if (stats.due > 0 && stats.fresh > 0) {
+    hint = `${stats.fresh} ${plural(stats.fresh, "card is", "cards are")} waiting to learn in this dataset, but the ${stats.due} overdue ${plural(stats.due, "card goes", "cards go")} first — rate this one to bring the next forward.`;
+  } else if (stats.fresh > 0) {
+    hint = `${stats.fresh} ${plural(stats.fresh, "card is", "cards are")} waiting to learn in this dataset — answer this one to get the next.`;
+  } else if (stats.due > 0) {
+    hint = `No new cards left here — only the ${stats.due} overdue ${plural(stats.due, "one remains", "ones remain")}.`;
+  }
+
+  return (
+    <div className="my-3 text-center">
+      <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs text-text-tertiary">
+        <span>{stats.due} due</span>
+        <span>{stats.fresh} to learn</span>
+        <span>{stats.total} cards</span>
+        {stats.mature > 0 && <span>{stats.mature} mastered</span>}
+        {stats.incomplete > 0 && <span>{stats.incomplete} incomplete</span>}
+      </div>
+      {hint && <p className="mt-1 text-xs text-accent-blue">{hint}</p>}
     </div>
   );
 }

@@ -87,6 +87,23 @@ fn default_ease_factor() -> i32 {
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct CardTestStats {
+    /// Reviewed cards whose `next_review_at` has passed. `card_test_get` serves these
+    /// first, so a non-zero count means `fresh` cards are queued behind them.
+    pub due: i64,
+    /// Cards that have never been reviewed. Only served once `due` reaches 0.
+    pub fresh: i64,
+    /// Cards at familiarity 6 — graduated out of the review pool.
+    pub mature: i64,
+    /// Cards with no question or no answer, which review skips.
+    pub incomplete: i64,
+    /// Live (non-deleted) cards in the dataset.
+    pub total: i64,
+    /// Which pool the next draw comes from: `"due"`, `"fresh"` or `"none"`.
+    pub serving: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Tag {
     pub uuid: String,
     pub name: String,
@@ -1497,6 +1514,18 @@ pub async fn card_get_tags(
 // Commands: SM-2 Review
 // ---------------------------------------------------------------------------
 
+/// Eligibility for the review pool. Requires the card row to be aliased `c`, and is
+/// shared by `card_test_get` and `card_test_stats` so the numbers shown in the UI
+/// always describe the queue that actually serves cards.
+const REVIEW_ELIGIBLE: &str = "c.deleted_at IS NULL AND c.familiarity < 6 \
+    AND length(c.question) > 0 AND length(c.answer) > 0";
+
+/// A reviewed card that has come back due. Requires the review row aliased `cr`.
+const REVIEW_DUE: &str = "cr.next_review_at <= datetime('now')";
+
+/// A card no review has ever been recorded for. Requires the card row aliased `c`.
+const REVIEW_FRESH: &str = "NOT EXISTS (SELECT 1 FROM card_review cr WHERE cr.card_uuid = c.uuid)";
+
 /// Get the next card for review (SM-2 spaced repetition).
 #[tauri::command]
 pub async fn card_test_get(
@@ -1507,18 +1536,18 @@ pub async fn card_test_get(
     let conn = open_card_db(&path)?;
 
     // First try to find a card that is due for review
-    let due_result = conn.query_row(
+    let due_sql = format!(
         "SELECT c.*, cr.uuid, cr.card_uuid, cr.familiarity, cr.interval_days, \
          cr.ease_factor, cr.repetitions, cr.last_review_at, cr.next_review_at \
          FROM card c \
          JOIN card_review cr ON cr.card_uuid = c.uuid \
-         WHERE c.deleted_at IS NULL \
-           AND c.familiarity < 6 \
-           AND length(c.question) > 0 \
-           AND length(c.answer) > 0 \
-           AND cr.next_review_at <= datetime('now') \
+         WHERE {} AND {} \
          ORDER BY RANDOM() * (6 - c.familiarity) DESC \
          LIMIT 1",
+        REVIEW_ELIGIBLE, REVIEW_DUE
+    );
+    let due_result = conn.query_row(
+        &due_sql,
         [],
         |row| {
             let card = Card {
@@ -1554,15 +1583,15 @@ pub async fn card_test_get(
     }
 
     // No due reviews — pick from cards that have never been reviewed
-    let new_result = conn.query_row(
+    let new_sql = format!(
         "SELECT c.* FROM card c \
-         WHERE c.deleted_at IS NULL \
-           AND c.familiarity < 6 \
-           AND length(c.question) > 0 \
-           AND length(c.answer) > 0 \
-           AND NOT EXISTS (SELECT 1 FROM card_review cr WHERE cr.card_uuid = c.uuid) \
+         WHERE {} AND {} \
          ORDER BY RANDOM() * (6 - c.familiarity) DESC \
          LIMIT 1",
+        REVIEW_ELIGIBLE, REVIEW_FRESH
+    );
+    let new_result = conn.query_row(
+        &new_sql,
         [],
         |row| {
             let card = Card {
@@ -1587,6 +1616,63 @@ pub async fn card_test_get(
         Ok(result) => Ok(Some(result)),
         Err(_) => Ok(None),
     }
+}
+
+/// Count what the review queue holds for this dataset.
+///
+/// The pool is split the way `card_test_get` splits it: overdue cards are served
+/// before never-reviewed ones, so `fresh` is not lost, it is waiting. `serving` says
+/// which pool the next draw resolves to.
+#[tauri::command]
+pub async fn card_test_stats(
+    settings: State<'_, SettingsState>,
+    dataset_uuid: String,
+) -> Result<CardTestStats, String> {
+    let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
+    let conn = open_card_db(&path)?;
+
+    let sql = format!(
+        "SELECT \
+           (SELECT COUNT(*) FROM card c JOIN card_review cr ON cr.card_uuid = c.uuid WHERE {} AND {}), \
+           (SELECT COUNT(*) FROM card c WHERE {} AND {}), \
+           (SELECT COUNT(*) FROM card c WHERE c.deleted_at IS NULL AND c.familiarity >= 6), \
+           (SELECT COUNT(*) FROM card c WHERE c.deleted_at IS NULL AND c.familiarity < 6 \
+              AND (length(c.question) = 0 OR length(c.answer) = 0)), \
+           (SELECT COUNT(*) FROM card c WHERE c.deleted_at IS NULL)",
+        REVIEW_ELIGIBLE,
+        REVIEW_DUE,
+        REVIEW_ELIGIBLE,
+        REVIEW_FRESH,
+    );
+
+    let (due, fresh, mature, incomplete, total) = conn
+        .query_row(&sql, [], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let serving = if due > 0 {
+        "due"
+    } else if fresh > 0 {
+        "fresh"
+    } else {
+        "none"
+    };
+
+    Ok(CardTestStats {
+        due,
+        fresh,
+        mature,
+        incomplete,
+        total,
+        serving: serving.to_string(),
+    })
 }
 
 /// Submit a review result and update SM-2 state.

@@ -315,6 +315,7 @@ pub fn run() {
             cards::card_get_tags,
             // Card review (SM-2)
             cards::card_test_get,
+            cards::card_test_stats,
             cards::card_test_submit,
             // Card sync
             cards::card_sync_status,
@@ -626,6 +627,7 @@ macro_rules! mobile_invoke_handler {
             cards::card_set_tags,
             cards::card_get_tags,
             cards::card_test_get,
+            cards::card_test_stats,
             cards::card_test_submit,
             cards::card_sync_status,
             cards::card_sync_get_changes,

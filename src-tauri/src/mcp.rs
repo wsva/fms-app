@@ -1842,6 +1842,14 @@ impl DatasetMcpServer {
         }}).to_string())
     }
 
+    #[tool(name = "card_test_stats", description = "Count what the review queue holds for a dataset: due (overdue, served first), fresh (never reviewed, served only once due is empty), mature (familiarity 6, out of rotation), incomplete (missing question or answer, skipped), total, and serving = which pool the next draw comes from.")]
+    async fn card_test_stats(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
+        log::info!("[MCP] card_test_stats: dataset={}", param.uuid);
+        let settings = self.app.state::<SettingsState>();
+        let stats = cards::card_test_stats(settings, param.uuid).await?;
+        Ok(serde_json::to_string_pretty(&stats).unwrap_or_default())
+    }
+
     // -------------------------------------------------------------------------
     // Card tag tools
     // -------------------------------------------------------------------------
