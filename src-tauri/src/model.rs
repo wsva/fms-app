@@ -129,18 +129,7 @@ impl ModelState {
     pub fn new() -> Self {
         let mut download_status = HashMap::new();
         for model_def in Self::available_models() {
-            let dir = Self::model_dir(model_def.id);
-            let downloaded = if model_def.is_directory {
-                dir.as_ref().map(|d| d.exists()).unwrap_or(false)
-            } else {
-                dir.as_ref()
-                    .map(|d| {
-                        let file_path = d.join(model_def.id);
-                        file_path.exists()
-                    })
-                    .unwrap_or(false)
-            };
-            let status = if downloaded {
+            let status = if Self::downloaded_on_disk(model_def) {
                 ModelStatus::Downloaded
             } else {
                 ModelStatus::NotDownloaded
@@ -173,6 +162,39 @@ impl ModelState {
 
     pub fn model_dir(version: &str) -> Option<std::path::PathBuf> {
         Some(crate::app_paths::data_subdir("models").join(version))
+    }
+
+    /// Whether this model's files are present in the (current) model directory.
+    fn downloaded_on_disk(model_def: &model_list_stt::ModelDef) -> bool {
+        let Some(dir) = Self::model_dir(model_def.id) else {
+            return false;
+        };
+        if model_def.is_directory {
+            dir.exists()
+        } else {
+            dir.join(model_def.id).exists()
+        }
+    }
+
+    /// Re-check the model directory against the storage base established by
+    /// [`crate::app_paths::init`]. [`Self::new`] runs at builder time, before that
+    /// base is known, so its pre-init fallback path sees nothing — on Android/iOS
+    /// every model would stay reported `NotDownloaded` (and `load_model_core`
+    /// would refuse to load it) even though the files are on disk. Models with a
+    /// download in flight are left untouched.
+    pub fn reload(&self) {
+        let mut statuses = self.download_status.lock().unwrap();
+        for model_def in Self::available_models() {
+            if statuses.get(model_def.id) == Some(&ModelStatus::Downloading) {
+                continue;
+            }
+            let status = if Self::downloaded_on_disk(model_def) {
+                ModelStatus::Downloaded
+            } else {
+                ModelStatus::NotDownloaded
+            };
+            statuses.insert(model_def.id.to_string(), status);
+        }
     }
 
     /// Models loadable in this build. ONNX-only builds (e.g. the Android `stt`

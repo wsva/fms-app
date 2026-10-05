@@ -366,6 +366,7 @@ pub fn run() {
             // Re-seed state that was constructed pre-init with placeholder paths.
             app.state::<workspace::WorkspaceState>().reload_registry();
             app.state::<settings::SettingsState>().reload();
+            app.state::<model::ModelState>().reload();
             let log_buffer = logger::init_logger(app.handle().clone());
             app.handle().manage(log_buffer);
             log::info!("Application starting up");
@@ -696,6 +697,9 @@ pub fn run() {
             // Re-seed state that was constructed pre-init with placeholder paths.
             app.state::<workspace::WorkspaceState>().reload_registry();
             app.state::<settings::SettingsState>().reload();
+            // ModelState is only managed on STT builds (see builder above).
+            #[cfg(feature = "stt")]
+            app.state::<model::ModelState>().reload();
             let log_buffer = logger::init_logger(app.handle().clone());
             app.handle().manage(log_buffer);
             log::info!("Application starting up (mobile)");
