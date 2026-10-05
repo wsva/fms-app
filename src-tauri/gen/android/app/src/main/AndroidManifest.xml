@@ -8,6 +8,19 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
+    <!-- Voice input (local STT) on the dictation and read-a-book pages. The
+         WebView asks for these two as soon as JS calls getUserMedia(): wry's
+         RustWebChromeClient grants AUDIO_CAPTURE by default and then requests
+         the matching Android runtime permissions. requestPermissions() is
+         auto-denied for anything the manifest does not declare, so BOTH entries
+         are required — MODIFY_AUDIO_SETTINGS is a normal (install-time)
+         permission but it is part of the requested set, and a single undeclared
+         entry makes the whole request fail. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- No phone lacks a mic today, but do not let that become an install filter. -->
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 

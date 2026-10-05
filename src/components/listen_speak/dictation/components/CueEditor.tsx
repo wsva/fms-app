@@ -36,6 +36,7 @@ function MicButton() {
             isIconOnly
             variant={voiceState === "recording" ? "danger" : "ghost"}
             size="sm"
+            aria-label={voiceState === "recording" ? "Stop dictating" : "Voice input"}
             isDisabled={voiceState === "processing"}
             onPress={handleToggle}
             className={voiceState === "recording" ? "animate-pulse" : ""}
@@ -43,7 +44,9 @@ function MicButton() {
             {voiceState === "recording" ? <X size={14} /> : <Mic size={14} />}
           </Button>
         </Tooltip.Trigger>
-        <Tooltip.Content>Ctrl+C (no selection)</Tooltip.Content>
+        {/* On desktop this is the mouse entry point for the Ctrl+C shortcut; on a
+            touch screen it is the only entry point, so the label must stand alone. */}
+        <Tooltip.Content>Dictate with the microphone — shortcut: Ctrl+C (no selection)</Tooltip.Content>
       </Tooltip>
     </>
   );

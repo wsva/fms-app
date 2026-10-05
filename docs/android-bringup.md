@@ -18,6 +18,12 @@ In `src-tauri/gen/android/app/src/main/AndroidManifest.xml`, inside `<manifest>`
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 <!-- PC discovery: UDP broadcast probe on WLAN -->
 <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+<!-- Voice input / local STT: the WebView requests both as soon as JS calls
+     getUserMedia(), and Android auto-denies any runtime permission that the
+     manifest does not declare — so both entries are mandatory. -->
+<uses-permission android:name="android.permission.RECORD_AUDIO" />
+<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+<uses-feature android:name="android.hardware.microphone" android:required="false" />
 ```
 
 And on `<application>`:
