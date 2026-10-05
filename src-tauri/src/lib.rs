@@ -13,13 +13,13 @@ mod db;
 mod dictation;
 mod llm;
 mod logger;
-#[cfg(feature = "desktop")]
+#[cfg(feature = "stt")]
 mod model;
-#[cfg(feature = "desktop")]
+#[cfg(feature = "stt")]
 mod model_download;
-#[cfg(feature = "desktop")]
+#[cfg(feature = "stt")]
 mod model_list;
-#[cfg(feature = "desktop")]
+#[cfg(feature = "stt")]
 mod model_list_stt;
 #[cfg(feature = "desktop")]
 mod mcp;
@@ -45,7 +45,7 @@ mod sync;
 mod discover;
 
 // Unified model index
-#[cfg(feature = "desktop")]
+#[cfg(feature = "stt")]
 mod model_index;
 
 use tauri::{Emitter, Manager};
@@ -497,19 +497,22 @@ pub fn run() {
 // registers only the command set that compiles and is useful on Android: the
 // local SQLite-backed learning features (dictation, cards, wiki, book, XP,
 // simple words, workspace/settings) plus the PC snapshot-sync + discovery
-// client. The heavy desktop subsystems (local STT, model management, dataset
-// generation pipeline, OCR, capture, tools, and the web_service server) are
-// excluded entirely.
+// client. The heavy desktop subsystems (dataset generation pipeline, OCR,
+// capture, tools, and the web_service server) are excluded entirely.
+//
+// Local STT (the `model_*` commands, ONNX-only via the `stt` feature) is
+// opt-in on mobile through `build.features` in tauri.android.conf.json — it is
+// currently there to verify the ONNX Runtime stack cross-compiles and runs on
+// Android. transcribe-cpp (Whisper GGUF) stays desktop-only.
 // ---------------------------------------------------------------------------
+
+// Shared mobile command list. `generate_handler!` cannot contain cfg'd
+// entries, so the STT commands are appended via `$($extra)` only in the
+// `stt`-enabled build.
 #[cfg(not(feature = "desktop"))]
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_deep_link::init())
-        .invoke_handler(tauri::generate_handler![
+macro_rules! mobile_invoke_handler {
+    ($($extra:path),* $(,)?) => {
+        tauri::generate_handler![
             greet,
             settings::settings_get,
             settings::settings_set,
@@ -647,11 +650,44 @@ pub fn run() {
             sync::pc_pair_start,
             sync::pc_pair_reset_identity,
             discover::pc_discover,
-        ])
+            $($extra),*
+        ]
+    };
+}
+#[cfg(not(feature = "desktop"))]
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_deep_link::init())
         .manage(workspace::WorkspaceState::new())
         .manage(settings::SettingsState::new())
         .manage(dataset::DatasetState::new())
-        .manage(simple_words::SimpleWordsState::new())
+        .manage(simple_words::SimpleWordsState::new());
+
+    // STT builds additionally manage ModelState and register the `model_*`
+    // commands (see the mobile section header comment above).
+    #[cfg(feature = "stt")]
+    let builder = builder
+        .manage(model::ModelState::new())
+        .invoke_handler(mobile_invoke_handler!(
+            model::model_get_status,
+            model::model_select_version,
+            model::model_download,
+            model::model_start,
+            model::model_stop,
+            model::model_delete,
+            model::model_cancel_download,
+            model::model_transcribe,
+            model_index::model_index_get,
+            model_index::model_index_refresh
+        ));
+    #[cfg(not(feature = "stt"))]
+    let builder = builder.invoke_handler(mobile_invoke_handler!());
+
+    builder
         .setup(|app| {
             // Anchor all persistent storage on the platform-correct base dir
             // (app-private on Android/iOS) before anything reads a path or
@@ -683,6 +719,26 @@ pub fn run() {
                         log::error!("[Startup] Failed to initialize workspaces: {}", e);
                     }
                 }
+            }
+
+            // ── Initialize unified model index (STT builds only; scan filesystem
+            // on first run) ──
+            #[cfg(feature = "stt")]
+            {
+                let model_root = model_index::model_root();
+                let index_state = model_index::ModelIndexState::new(&model_root);
+                {
+                    let idx = index_state.index.lock().unwrap();
+                    if idx.models.is_empty() {
+                        drop(idx);
+                        log::info!("[ModelIndex] Empty index, running initial scan...");
+                        let scanned = model_index::scan_models(&model_root);
+                        let mut idx = index_state.index.lock().unwrap();
+                        *idx = scanned;
+                        let _ = model_index::ModelIndexState::save(&*idx, &index_state.index_path);
+                    }
+                }
+                app.handle().manage(index_state);
             }
 
             // Load simple words into memory.

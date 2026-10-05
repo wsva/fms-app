@@ -27,13 +27,19 @@ export default function ModelsPage() {
   const [detailsModel, setDetailsModel] = useState<ModelVersionInfo | null>(null);
   const [showAvailable, setShowAvailable] = useState(false);
 
+  // On Android nothing is downloaded yet, so the collapsed "Available Models"
+  // toggle would hide the whole list. Expand it by default there.
+  // isMobileApp() must run in an effect (not render) to avoid SSR hydration mismatch.
+  useEffect(() => {
+    if (isMobileApp()) setShowAvailable(true);
+  }, []);
+
   // ---- Fetch status ----
 
   const fetchStatus = useCallback(async () => {
-    // Model management is desktop-only: the `model_*` commands are gated behind
-    // the `desktop` cargo feature and are not registered on the Android build.
-    // This page stays mounted (display:none) on mobile, so skip the fetch there.
-    if (!isTauri() || isMobileApp()) return;
+    // The `model_*` commands are available on desktop and (via the `stt`
+    // cargo feature) on the Android build, where we verify ONNX Runtime support.
+    if (!isTauri()) return;
     try {
       const res = await invoke<{
         models: ModelVersionInfo[];

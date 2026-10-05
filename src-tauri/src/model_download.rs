@@ -816,16 +816,27 @@ pub async fn download_blob_model(
 
     let partial_path = model_dir.join(format!("{}.partial", model_id));
 
-    // Initialize progress
+    // Initialize progress. The file name must match the destination's trailing
+    // path components (`download_single_file_with_progress` locates the entry
+    // via `dest.ends_with(&f.file)`), hence the `.partial` suffix here.
+    // Reuse any total already known (set by model_download_inner from the
+    // catalog size); a single-file blob download starts at 0 bytes.
     {
         let mut p = download_progress.lock().unwrap();
+        let known_total = p
+            .files
+            .first()
+            .and_then(|f| f.total_bytes)
+            .filter(|t| *t > 0);
         p.files = vec![FileDownloadInfo {
-            file: model_id.to_string(),
+            file: format!("{}.partial", model_id),
             bytes_downloaded: 0,
-            total_bytes: None,
+            total_bytes: known_total,
             speed: 0,
             eta_seconds: None,
         }];
+        p.overall_bytes_downloaded = 0;
+        p.overall_total_bytes = known_total.unwrap_or(0);
     }
 
     // Download using the unified single-file function

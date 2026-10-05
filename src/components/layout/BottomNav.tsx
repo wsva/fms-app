@@ -11,6 +11,7 @@ import {
   FolderKanban,
   Settings,
   FileText,
+  Box,
   User,
   LogOut,
   Star,
@@ -40,6 +41,7 @@ const OVERFLOW_TABS: NavItem[] = [
   { id: "wiki", label: "Wiki", icon: BookOpenText },
   { id: "workspaces", label: "Workspaces", icon: FolderKanban },
   { id: "logs", label: "Logs", icon: FileText },
+  { id: "models", label: "Models", icon: Box },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 

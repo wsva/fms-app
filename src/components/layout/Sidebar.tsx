@@ -81,9 +81,10 @@ const rootTabs: TabDef[] = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
-// Tabs reachable in the Android thin client. Everything else (Models, OCR,
+// Tabs reachable in the Android thin client. Everything else (OCR,
 // Edge TTS, LLM Chat, Logs, Simple Words, Dataset Studio pipeline) is hidden.
 // "studio" is repurposed on mobile as the dataset *sync* list.
+// "models" is enabled to verify local STT (transcribe-rs/ONNX) on Android.
 const MOBILE_VISIBLE_TABS: TabId[] = [
   "dictation",
   "read-book",
@@ -91,6 +92,7 @@ const MOBILE_VISIBLE_TABS: TabId[] = [
   "wiki",
   "workspaces",
   "studio",
+  "models",
   "settings",
 ];
 

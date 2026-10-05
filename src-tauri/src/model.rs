@@ -7,6 +7,9 @@ use std::sync::Arc;
 use base64::Engine;
 use serde::Serialize;
 use tauri::{AppHandle, State};
+// Whisper GGUF (transcribe-cpp) is desktop-only; ONNX builds (e.g. the Android
+// `stt` experiment) compile the engine out and reject its models at load time.
+#[cfg(feature = "desktop")]
 use transcribe_cpp::{Model as CppModel, RunOptions as CppRunOptions, Session as CppSession};
 use transcribe_rs::onnx::{
     canary::CanaryModel,
@@ -54,6 +57,7 @@ pub enum ModelStatus {
 
 /// Active model wrapper for all supported engine types
 enum ActiveModel {
+    #[cfg(feature = "desktop")]
     TranscribeCpp(CppSession),
     Parakeet(ParakeetModel),
     Moonshine(MoonshineModel),
@@ -124,7 +128,7 @@ pub struct ModelStatusResponse {
 impl ModelState {
     pub fn new() -> Self {
         let mut download_status = HashMap::new();
-        for model_def in model_list_stt::MODELS {
+        for model_def in Self::available_models() {
             let dir = Self::model_dir(model_def.id);
             let downloaded = if model_def.is_directory {
                 dir.as_ref().map(|d| d.exists()).unwrap_or(false)
@@ -145,9 +149,10 @@ impl ModelState {
         }
 
         let selected = model_list_stt::MODELS
-            .first()
+            .iter()
+            .find(|m| cfg!(feature = "desktop") || m.engine != EngineType::TranscribeCpp)
             .map(|m| m.id.to_string())
-            .unwrap();
+            .unwrap_or_else(|| model_list_stt::MODELS[0].id.to_string());
 
         Self {
             download_status: Mutex::new(download_status),
@@ -169,6 +174,14 @@ impl ModelState {
     pub fn model_dir(version: &str) -> Option<std::path::PathBuf> {
         Some(crate::app_paths::data_subdir("models").join(version))
     }
+
+    /// Models loadable in this build. ONNX-only builds (e.g. the Android `stt`
+    /// experiment) hide Whisper GGUF entries since transcribe-cpp is desktop-only.
+    pub fn available_models() -> impl Iterator<Item = &'static model_list_stt::ModelDef> {
+        model_list_stt::MODELS
+            .iter()
+            .filter(|def| cfg!(feature = "desktop") || def.engine != EngineType::TranscribeCpp)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -177,8 +190,7 @@ impl ModelState {
 
 #[tauri::command]
 pub async fn model_get_status(state: State<'_, ModelState>) -> Result<ModelStatusResponse, String> {
-    let models: Vec<ModelVersionInfo> = model_list_stt::MODELS
-        .iter()
+    let models: Vec<ModelVersionInfo> = ModelState::available_models()
         .map(|def| {
             let downloaded = state
                 .download_status
@@ -414,6 +426,7 @@ pub fn load_model_core(state: &ModelState, version: &str) -> Result<String, Stri
         .ok_or_else(|| "Could not determine model directory".to_string())?;
 
     let active_model = match def.engine {
+        #[cfg(feature = "desktop")]
         EngineType::TranscribeCpp => {
             let model_path = model_dir.join(def.id);
             let model = CppModel::load(&model_path)
@@ -422,6 +435,10 @@ pub fn load_model_core(state: &ModelState, version: &str) -> Result<String, Stri
                 .session()
                 .map_err(|e| format!("Failed to create session: {}", e))?;
             ActiveModel::TranscribeCpp(session)
+        }
+        #[cfg(not(feature = "desktop"))]
+        EngineType::TranscribeCpp => {
+            return Err("Whisper GGUF models are not available in this build (desktop-only). Use an ONNX model such as Parakeet or Moonshine.".to_string());
         }
         EngineType::Parakeet => {
             let m = ParakeetModel::load(&model_dir, &Quantization::Int8)
@@ -617,6 +634,7 @@ pub async fn model_transcribe(
     };
 
     let result = match &mut model {
+        #[cfg(feature = "desktop")]
         ActiveModel::TranscribeCpp(session) => {
             let transcript = session
                 .run(&samples, &CppRunOptions::default())
@@ -793,6 +811,7 @@ fn transcribe_file_pass(
     };
 
     let result = match &mut model {
+        #[cfg(feature = "desktop")]
         ActiveModel::TranscribeCpp(session) => {
             let transcript = session
                 .run(samples, &CppRunOptions::default())
@@ -1118,6 +1137,7 @@ fn transcribe_word_level_pass(
 /// Run text transcription against an already-loaded active model.
 fn run_transcribe_text(model: &mut ActiveModel, samples: &[f32]) -> Result<String, String> {
     match model {
+        #[cfg(feature = "desktop")]
         ActiveModel::TranscribeCpp(session) => {
             let transcript = session
                 .run(samples, &CppRunOptions::default())
