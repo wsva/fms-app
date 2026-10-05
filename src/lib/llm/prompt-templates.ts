@@ -10,6 +10,12 @@ export interface PromptTemplate {
   id: string;
   name: Record<PromptLanguage, string>;
   prompt: Record<PromptLanguage, string>;
+  /**
+   * Optional explicit system-prompt instruction. When omitted, the system
+   * prompt is derived from `prompt` by removing the `{content}` slot (see
+   * {@link buildSystemPrompt}).
+   */
+  system?: Partial<Record<PromptLanguage, string>>;
 }
 
 export const PROMPT_LANGUAGES: { value: PromptLanguage; label: string }[] = [
@@ -108,4 +114,27 @@ export function buildPrompt(
   const template = PROMPT_TEMPLATES.find((t) => t.id === templateId);
   if (!template) return null;
   return template.prompt[language].replace("{content}", content);
+}
+
+/**
+ * Build the system-prompt instruction for a template.
+ *
+ * The chat page maps a selected template onto the model's *system prompt*
+ * (goose-sdk takes the system prompt separately from the conversation), so the
+ * user's own text stays the user message. Uses the template's explicit `system`
+ * override when present; otherwise derives it from `prompt` by dropping the
+ * `{content}` slot and any trailing separator/whitespace.
+ */
+export function buildSystemPrompt(
+  templateId: string,
+  language: PromptLanguage
+): string | null {
+  const template = PROMPT_TEMPLATES.find((t) => t.id === templateId);
+  if (!template) return null;
+  const explicit = template.system?.[language];
+  if (explicit && explicit.trim()) return explicit.trim();
+  return template.prompt[language]
+    .replace("{content}", "")
+    .replace(/[\s:]+$/, "")
+    .trim();
 }

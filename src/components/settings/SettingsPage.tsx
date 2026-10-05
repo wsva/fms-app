@@ -21,6 +21,9 @@ function isTauri(): boolean {
 
 interface GlobalSettings {
   ollama_url: string;
+  llm_provider: string;
+  llm_api_key: string;
+  llm_model: string;
   pc_url: string;
   pc_token: string;
   // Carried through unchanged on save: the device pairing identity (unused on
@@ -331,11 +334,72 @@ export default function SettingsPage() {
             These settings apply across all workspaces. Stored in the global config directory.
           </p>
 
-          {/* Ollama URL */}
+          {/* LLM provider */}
           <div className="mb-4">
-            <label className="block font-medium mb-1">Ollama API URL</label>
+            <label className="block font-medium mb-1">LLM Provider</label>
             <p className="text-text-secondary text-sm mb-2">
-              The base URL of your local Ollama instance. Default: http://localhost:11434
+              Backend used for the chat page and other LLM features (via the goose
+              SDK provider layer). Local Ollama needs no API key.
+            </p>
+            <select
+              className="w-full max-w-md px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
+              value={globalSettings?.llm_provider ?? "ollama"}
+              onChange={(e) => updateGlobalField("llm_provider", e.target.value)}
+            >
+              <option value="ollama">Ollama (local)</option>
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="groq">Groq</option>
+              <option value="databricks">Databricks</option>
+            </select>
+          </div>
+
+          {/* API key (cloud providers only) */}
+          {(globalSettings?.llm_provider ?? "ollama") !== "ollama" && (
+            <div className="mb-4">
+              <label className="block font-medium mb-1">
+                {(globalSettings?.llm_provider ?? "") === "databricks" ? "Token" : "API Key"}
+              </label>
+              <input
+                type="password"
+                className="w-full max-w-md px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
+                value={globalSettings?.llm_api_key ?? ""}
+                onChange={(e) => updateGlobalField("llm_api_key", e.target.value)}
+                placeholder="Paste your API key"
+                autoComplete="off"
+              />
+            </div>
+          )}
+
+          {/* Default model (cloud providers only) */}
+          {(globalSettings?.llm_provider ?? "ollama") !== "ollama" && (
+            <div className="mb-4">
+              <label className="block font-medium mb-1">Default Model</label>
+              <p className="text-text-secondary text-sm mb-2">
+                Model name used on the chat page. You can still change it per conversation.
+              </p>
+              <input
+                type="text"
+                className="w-full max-w-md px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
+                value={globalSettings?.llm_model ?? ""}
+                onChange={(e) => updateGlobalField("llm_model", e.target.value)}
+                placeholder="e.g. gpt-4o, claude-sonnet-4-5, llama-3.3-70b-versatile"
+              />
+            </div>
+          )}
+
+          {/* Ollama URL / Databricks host */}
+          {["ollama", "databricks"].includes(globalSettings?.llm_provider ?? "ollama") && (
+          <div className="mb-4">
+            <label className="block font-medium mb-1">
+              {(globalSettings?.llm_provider ?? "ollama") === "databricks"
+                ? "Databricks Host"
+                : "Ollama API URL"}
+            </label>
+            <p className="text-text-secondary text-sm mb-2">
+              {(globalSettings?.llm_provider ?? "ollama") === "databricks"
+                ? "The Databricks workspace host used as the provider base URL."
+                : "The base URL of your local Ollama instance. Default: http://localhost:11434"}
             </p>
             <input
               type="text"
@@ -345,6 +409,7 @@ export default function SettingsPage() {
               placeholder="http://localhost:11434"
             />
           </div>
+          )}
 
           {/* Model Directory (read-only) */}
           <DirField

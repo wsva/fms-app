@@ -50,6 +50,16 @@ pub struct AppSettings {
     /// Ollama API base URL (global setting, not workspace-scoped).
     #[serde(default = "default_ollama_url")]
     pub ollama_url: String,
+    /// LLM inference provider for the chat page and other LLM features.
+    /// One of: `ollama` (default), `openai`, `anthropic`, `groq`, `databricks`.
+    #[serde(default = "default_llm_provider")]
+    pub llm_provider: String,
+    /// API key for cloud LLM providers (empty for local Ollama).
+    #[serde(default)]
+    pub llm_api_key: String,
+    /// Default model name for cloud providers / free-text model entry.
+    #[serde(default)]
+    pub llm_model: String,
     /// PC snapshot server base URL (e.g. `http://192.168.1.20:35711`). Global,
     /// not workspace-scoped. On Android this is a remembered/manual fallback
     /// filled by `pc_discover`; left empty until discovery or manual entry.
@@ -75,6 +85,10 @@ fn default_ollama_url() -> String {
     "http://localhost:11434".to_string()
 }
 
+fn default_llm_provider() -> String {
+    "ollama".to_string()
+}
+
 /// Global-only settings that are NOT workspace-scoped.
 /// These are always stored in the global config path.
 #[derive(Clone, Serialize, Deserialize)]
@@ -82,6 +96,15 @@ pub struct GlobalSettings {
     /// Ollama API base URL.
     #[serde(default = "default_ollama_url")]
     pub ollama_url: String,
+    /// LLM inference provider (`ollama`/`openai`/`anthropic`/`groq`/`databricks`).
+    #[serde(default = "default_llm_provider")]
+    pub llm_provider: String,
+    /// API key for cloud LLM providers.
+    #[serde(default)]
+    pub llm_api_key: String,
+    /// Default model name for cloud providers / free-text entry.
+    #[serde(default)]
+    pub llm_model: String,
     /// PC snapshot server base URL (global fallback / remembered value).
     #[serde(default)]
     pub pc_url: String,
@@ -113,6 +136,9 @@ impl Default for GlobalSettings {
         let data_dir = crate::app_paths::data_root();
         Self {
             ollama_url: default_ollama_url(),
+            llm_provider: default_llm_provider(),
+            llm_api_key: String::new(),
+            llm_model: String::new(),
             pc_url: String::new(),
             pc_token: String::new(),
             device_id: String::new(),
@@ -129,6 +155,9 @@ impl GlobalSettings {
     fn from_settings(s: &AppSettings) -> Self {
         Self {
             ollama_url: s.ollama_url.clone(),
+            llm_provider: s.llm_provider.clone(),
+            llm_api_key: s.llm_api_key.clone(),
+            llm_model: s.llm_model.clone(),
             pc_url: s.pc_url.clone(),
             pc_token: s.pc_token.clone(),
             device_id: s.device_id.clone(),
@@ -142,6 +171,9 @@ impl GlobalSettings {
 
     fn apply_to(&self, s: &mut AppSettings) {
         s.ollama_url = self.ollama_url.clone();
+        s.llm_provider = self.llm_provider.clone();
+        s.llm_api_key = self.llm_api_key.clone();
+        s.llm_model = self.llm_model.clone();
         s.pc_url = self.pc_url.clone();
         s.pc_token = self.pc_token.clone();
         s.device_id = self.device_id.clone();
@@ -211,6 +243,9 @@ impl Default for AppSettings {
             model_unload_timeout: ModelUnloadTimeout::default(),
             onboarding_completed: false,
             ollama_url: default_ollama_url(),
+            llm_provider: default_llm_provider(),
+            llm_api_key: String::new(),
+            llm_model: String::new(),
             pc_url: String::new(),
             pc_token: String::new(),
             device_id: String::new(),

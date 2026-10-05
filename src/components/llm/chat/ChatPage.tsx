@@ -2,21 +2,37 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Send, Bot, User, Loader2, ChevronDown, ChevronUp, Wand2, ZoomIn, ZoomOut } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
+import { Send, Bot, User, Loader2, ChevronDown, ChevronUp, Wand2, ZoomIn, ZoomOut, X } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import { startRecording, stopRecording, type VoiceState } from "@/lib/voice-input";
 import { VoiceMicButton } from "@/components/voice/VoiceMicButton";
 import {
   type ChatMessage,
   type OllamaModelInfo,
-  type LlmChatResponse,
+  type LlmProvider,
+  type LlmChatChunk,
+  type LlmChatDone,
+  type LlmChatError,
 } from "@/lib/llm/types";
 import {
   PROMPT_TEMPLATES,
   PROMPT_LANGUAGES,
   type PromptLanguage,
-  buildPrompt,
+  buildSystemPrompt,
 } from "@/lib/llm/prompt-templates";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Correlation id for a single streaming request. */
+function newRequestId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `req-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -53,16 +69,53 @@ export default function LLMChatPage() {
   // ---- Temperature ----
   const [temperature, setTemperature] = useState(0.7);
 
-  // ---- Prompt builder state ----
+  // ---- Provider config (from global settings) ----
+  const [provider, setProvider] = useState<LlmProvider>("ollama");
+  const [configuredModel, setConfiguredModel] = useState("");
+
+  // ---- Prompt builder state (maps a template onto the system prompt) ----
   const [showPromptBuilder, setShowPromptBuilder] = useState(false);
   const [promptLanguage, setPromptLanguage] = useState<PromptLanguage>("en");
   const [selectedTemplate, setSelectedTemplate] = useState("");
-  const [promptContent, setPromptContent] = useState("");
 
-  // ---- Fetch installed models ----
+  // The system prompt derived from the selected template (null = none).
+  const activeSystem = selectedTemplate
+    ? buildSystemPrompt(selectedTemplate, promptLanguage)
+    : null;
+  const activeTemplateName =
+    PROMPT_TEMPLATES.find((t) => t.id === selectedTemplate)?.name[promptLanguage] ?? "";
+
+  // ---- Load provider config from global settings ----
+
+  const loadProviderConfig = useCallback(async () => {
+    if (!isTauri()) return;
+    try {
+      const g = await invoke<{
+        llm_provider?: string;
+        llm_model?: string;
+      }>("settings_get_global");
+      const p = ((g.llm_provider || "ollama") as LlmProvider);
+      setProvider(p);
+      setConfiguredModel(g.llm_model || "");
+    } catch (e) {
+      console.error("Failed to load provider config:", e);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadProviderConfig();
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    listen("settings-changed", () => loadProviderConfig()).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, [loadProviderConfig]);
+
+  // ---- Fetch installed models (Ollama only) ----
 
   const fetchModels = useCallback(async () => {
-    if (!isTauri()) return;
+    if (!isTauri() || provider !== "ollama") return;
     try {
       const running = await invoke<boolean>("llm_check_connection");
       if (!running) return;
@@ -81,11 +134,18 @@ export default function LLMChatPage() {
     } catch (e) {
       console.error("Failed to list models:", e);
     }
-  }, [selectedModel]);
+  }, [provider, selectedModel, setSelectedModel]);
 
   useEffect(() => {
     fetchModels();
   }, [fetchModels]);
+
+  // For cloud providers, default the model to the configured value.
+  useEffect(() => {
+    if (provider !== "ollama" && !selectedModel && configuredModel) {
+      setSelectedModel(configuredModel);
+    }
+  }, [provider, configuredModel, selectedModel, setSelectedModel]);
 
   // ---- Auto-scroll ----
 
@@ -93,37 +153,77 @@ export default function LLMChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // ---- Send message ----
+  // ---- Send message (streaming) ----
 
   async function handleSend() {
     if (!input.trim() || !selectedModel || loading) return;
 
     const userMessage: ChatMessage = { role: "user", content: input.trim() };
-    const newMessages = [...messages, userMessage];
-    setMessages(newMessages);
+    const history = [...messages, userMessage];
+    const requestId = newRequestId();
+
+    // Show the user message plus an empty assistant placeholder that fills as
+    // tokens stream in.
+    setMessages([...history, { role: "assistant", content: "" }]);
     setInput("");
     setLoading(true);
 
+    // Append text to the trailing assistant placeholder.
+    const appendChunk = (text: string) => {
+      setMessages((prev) => {
+        const copy = [...prev];
+        const last = copy[copy.length - 1];
+        if (last && last.role === "assistant") {
+          copy[copy.length - 1] = { ...last, content: last.content + text };
+        }
+        return copy;
+      });
+    };
+    const setAssistantError = (msg: string) => {
+      setMessages((prev) => {
+        const copy = [...prev];
+        const last = copy[copy.length - 1];
+        if (last && last.role === "assistant") {
+          copy[copy.length - 1] = { ...last, content: `Error: ${msg}` };
+        }
+        return copy;
+      });
+    };
+
+    const unlisteners: (() => void)[] = [];
     try {
-      const response = await invoke<LlmChatResponse>("llm_chat", {
+      unlisteners.push(
+        await listen<LlmChatChunk>("llm-chat-chunk", (e) => {
+          if (e.payload.id !== requestId) return;
+          appendChunk(e.payload.text);
+        })
+      );
+      unlisteners.push(
+        await listen<LlmChatDone>("llm-chat-done", (e) => {
+          if (e.payload.id !== requestId) return;
+          setLoading(false);
+        })
+      );
+      unlisteners.push(
+        await listen<LlmChatError>("llm-chat-error", (e) => {
+          if (e.payload.id !== requestId) return;
+          setAssistantError(e.payload.message);
+          setLoading(false);
+        })
+      );
+
+      await invoke("llm_chat_stream", {
+        id: requestId,
         model: selectedModel,
-        messages: newMessages,
+        messages: history,
+        system: activeSystem,
         temperature,
       });
-      setMessages([
-        ...newMessages,
-        { role: "assistant", content: response.content },
-      ]);
     } catch (e) {
       console.error("Chat error:", e);
-      setMessages([
-        ...newMessages,
-        {
-          role: "assistant",
-          content: `Error: ${e instanceof Error ? e.message : String(e)}`,
-        },
-      ]);
+      setAssistantError(e instanceof Error ? e.message : String(e));
     } finally {
+      unlisteners.forEach((fn) => fn());
       setLoading(false);
     }
   }
@@ -173,11 +273,18 @@ export default function LLMChatPage() {
 
   // ---- Render ----
 
+  const modelReady = provider === "ollama" ? availableModels.length > 0 : !!selectedModel;
+
   return (
     <main className="flex-1 flex flex-col h-full">
       {/* Header */}
       <div className="p-4 border-b border-border-default flex items-center gap-4">
-        <h1 className="text-lg font-semibold flex-1">LLM Chat (Ollama)</h1>
+        <h1 className="text-lg font-semibold flex-1 flex items-center gap-2">
+          LLM Chat
+          <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-bg-muted border border-border-default text-text-tertiary">
+            {provider}
+          </span>
+        </h1>
         <div className="flex items-center gap-3">
           {/* Temperature control */}
           <div className="flex items-center gap-2" title="Temperature: controls response randomness">
@@ -221,20 +328,29 @@ export default function LLMChatPage() {
               <ZoomIn size={14} />
             </button>
           </div>
-          <select
-            className="px-3 py-1.5 text-sm rounded-lg bg-bg-muted border border-border-default text-text-primary cursor-pointer"
-            value={selectedModel}
-            onChange={(e) => setSelectedModel(e.target.value)}
-          >
-            {availableModels.length === 0 && (
-              <option value="">No models installed</option>
-            )}
-            {availableModels.map((m) => (
-              <option key={m.name} value={m.name}>
-                {m.name}
-              </option>
-            ))}
-          </select>
+          {provider === "ollama" ? (
+            <select
+              className="px-3 py-1.5 text-sm rounded-lg bg-bg-muted border border-border-default text-text-primary cursor-pointer"
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+            >
+              {availableModels.length === 0 && (
+                <option value="">No models installed</option>
+              )}
+              {availableModels.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              className="px-3 py-1.5 text-sm rounded-lg bg-bg-muted border border-border-default text-text-primary w-48"
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              placeholder="Model name"
+            />
+          )}
         </div>
       </div>
 
@@ -244,51 +360,50 @@ export default function LLMChatPage() {
           <div className="flex flex-col items-center justify-center h-full text-center text-text-tertiary">
             <Bot size={48} className="mb-4 opacity-50" />
             <p className="text-sm">
-              {availableModels.length > 0
-                ? "Start a conversation with your local AI model."
-                : "Need to install and start Ollama first."}
+              {modelReady
+                ? "Start a conversation with your AI model."
+                : provider === "ollama"
+                ? "Need to install and start Ollama first."
+                : "Set a model name (and API key in Settings) to start chatting."}
             </p>
           </div>
         )}
 
-        {messages.map((msg, i) => (
-          <div
-            key={i}
-            className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-          >
-            {msg.role === "assistant" && (
-              <div className="w-8 h-8 rounded-full bg-accent-bg/20 flex items-center justify-center shrink-0">
-                <Bot size={16} className="text-accent-bg" />
-              </div>
-            )}
+        {messages.map((msg, i) => {
+          const isLast = i === messages.length - 1;
+          const streamingEmpty = msg.role === "assistant" && msg.content === "" && loading && isLast;
+          return (
             <div
-              className={`max-w-[70%] px-4 py-2.5 rounded-2xl whitespace-pre-wrap ${
-                msg.role === "user"
-                  ? "bg-accent-bg text-white"
-                  : "bg-bg-muted text-text-primary"
-              }`}
-              style={{ fontSize: `${fontSize}px` }}
+              key={i}
+              className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"}`}
             >
-              {msg.content}
-            </div>
-            {msg.role === "user" && (
-              <div className="w-8 h-8 rounded-full bg-bg-muted flex items-center justify-center shrink-0">
-                <User size={16} className="text-text-secondary" />
+              {msg.role === "assistant" && (
+                <div className="w-8 h-8 rounded-full bg-accent-bg/20 flex items-center justify-center shrink-0">
+                  <Bot size={16} className="text-accent-bg" />
+                </div>
+              )}
+              <div
+                className={`max-w-[70%] px-4 py-2.5 rounded-2xl whitespace-pre-wrap ${
+                  msg.role === "user"
+                    ? "bg-accent-bg text-white"
+                    : "bg-bg-muted text-text-primary"
+                }`}
+                style={{ fontSize: `${fontSize}px` }}
+              >
+                {streamingEmpty ? (
+                  <Loader2 size={16} className="animate-spin text-text-tertiary" />
+                ) : (
+                  msg.content
+                )}
               </div>
-            )}
-          </div>
-        ))}
-
-        {loading && (
-          <div className="flex gap-3 justify-start">
-            <div className="w-8 h-8 rounded-full bg-accent-bg/20 flex items-center justify-center shrink-0">
-              <Bot size={16} className="text-accent-bg" />
+              {msg.role === "user" && (
+                <div className="w-8 h-8 rounded-full bg-bg-muted flex items-center justify-center shrink-0">
+                  <User size={16} className="text-text-secondary" />
+                </div>
+              )}
             </div>
-            <div className="px-4 py-2.5 rounded-2xl bg-bg-muted">
-              <Loader2 size={16} className="animate-spin text-text-tertiary" />
-            </div>
-          </div>
-        )}
+          );
+        })}
 
         <div ref={messagesEndRef} />
       </div>
@@ -306,7 +421,7 @@ export default function LLMChatPage() {
           {showPromptBuilder ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
         </button>
 
-        {/* Prompt builder panel */}
+        {/* Prompt builder panel — maps a template onto the system prompt */}
         {showPromptBuilder && (
           <div className="mb-3 p-3 rounded-lg bg-bg-muted border border-border-default space-y-3">
             {/* Language + Template row */}
@@ -327,7 +442,7 @@ export default function LLMChatPage() {
                 onChange={(e) => setSelectedTemplate(e.target.value)}
                 className="flex-1 px-2 py-1.5 rounded-md bg-bg-input border border-border-default text-xs text-text-primary"
               >
-                <option value="">Select a template...</option>
+                <option value="">No template (plain chat)</option>
                 {PROMPT_TEMPLATES.map((t) => (
                   <option key={t.id} value={t.id}>
                     {t.name[promptLanguage]}
@@ -336,37 +451,36 @@ export default function LLMChatPage() {
               </select>
             </div>
 
-            {/* Content input */}
-            <textarea
-              value={promptContent}
-              onChange={(e) => setPromptContent(e.target.value)}
-              placeholder="Paste or type your content here..."
-              className="w-full px-3 py-2 rounded-md bg-bg-input border border-border-default text-sm text-text-primary resize-none focus:outline-none focus:border-accent"
-              rows={3}
-            />
+            <p className="text-xs text-text-tertiary">
+              The template becomes the model&apos;s system prompt. Type the text you want
+              worked on in the chat box below — it is sent as your message.
+            </p>
 
-            {/* Preview + Insert button */}
-            {selectedTemplate && promptContent && (
-              <div className="space-y-2">
-                <p className="text-xs text-text-tertiary">Preview:</p>
+            {/* System prompt preview */}
+            {activeSystem && (
+              <div className="space-y-1">
+                <p className="text-xs text-text-tertiary">System prompt:</p>
                 <div className="p-2 rounded-md bg-bg-card border border-border-default text-xs text-text-secondary max-h-24 overflow-y-auto whitespace-pre-wrap">
-                  {buildPrompt(selectedTemplate, promptLanguage, promptContent)}
+                  {activeSystem}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const prompt = buildPrompt(selectedTemplate, promptLanguage, promptContent);
-                    if (prompt) {
-                      setInput(prompt);
-                      inputRef.current?.focus();
-                    }
-                  }}
-                  className="w-full px-3 py-1.5 rounded-md bg-accent text-white text-xs font-medium hover:opacity-90 transition-opacity"
-                >
-                  Insert into chat
-                </button>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Active system prompt chip */}
+        {activeSystem && !showPromptBuilder && (
+          <div className="mb-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-accent-bg/15 border border-accent-bg/30 text-xs text-text-secondary max-w-full">
+            <Wand2 size={12} className="shrink-0 text-accent-bg" />
+            <span className="truncate">{activeTemplateName}</span>
+            <button
+              type="button"
+              onClick={() => setSelectedTemplate("")}
+              className="shrink-0 hover:text-text-primary"
+              title="Clear system prompt"
+            >
+              <X size={12} />
+            </button>
           </div>
         )}
 
@@ -380,7 +494,9 @@ export default function LLMChatPage() {
             placeholder={
               selectedModel
                 ? "Type a message... (Enter to send, Shift+Enter for newline)"
-                : "Install a model first to start chatting"
+                : provider === "ollama"
+                ? "Install a model first to start chatting"
+                : "Set a model name to start chatting"
             }
             value={input}
             onChange={(e) => setInput(e.target.value)}

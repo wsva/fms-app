@@ -12,6 +12,8 @@ mod dataset;
 mod db;
 mod dictation;
 mod llm;
+#[cfg(feature = "desktop")]
+mod goose_llm;
 mod logger;
 #[cfg(feature = "stt")]
 mod model;
@@ -240,6 +242,7 @@ pub fn run() {
             llm::llm_pull_model,
             llm::llm_delete_model,
             llm::llm_chat,
+            llm::llm_chat_stream,
             edge_tts::edge_tts_list_voices,
             edge_tts::edge_tts_synthesize,
             edge_tts::edge_tts_preview,
@@ -582,6 +585,7 @@ macro_rules! mobile_invoke_handler {
             llm::llm_pull_model,
             llm::llm_delete_model,
             llm::llm_chat,
+            llm::llm_chat_stream,
             edge_tts::edge_tts_list_voices,
             edge_tts::edge_tts_synthesize,
             edge_tts::edge_tts_preview,

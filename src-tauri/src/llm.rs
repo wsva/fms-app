@@ -10,6 +10,7 @@ use crate::settings::SettingsState;
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
+#[cfg(not(feature = "desktop"))]
 struct ChatRequest<'a> {
     model: &'a str,
     messages: Vec<ChatMessage>,
@@ -24,12 +25,14 @@ pub struct ChatMessage {
 }
 
 #[derive(Serialize)]
+#[cfg(not(feature = "desktop"))]
 struct ChatOptions {
     temperature: f32,
     num_predict: u32,
 }
 
 #[derive(Deserialize)]
+#[cfg(not(feature = "desktop"))]
 struct ChatResponse {
     message: Option<ChatMessage>,
     prompt_eval_count: Option<u32>,
@@ -98,14 +101,37 @@ fn get_ollama_url(state: &State<'_, SettingsState>) -> String {
     state.settings.lock().unwrap().ollama_url.clone()
 }
 
+/// Read the LLM inference configuration: (provider, api_key, base_url).
+/// `base_url` is the Ollama URL for the `ollama` provider, and the Databricks
+/// host for `databricks`; unused by the other cloud providers.
+fn get_llm_config(state: &State<'_, SettingsState>) -> (String, String, String) {
+    let s = state.settings.lock().unwrap();
+    (
+        s.llm_provider.clone(),
+        s.llm_api_key.clone(),
+        s.ollama_url.clone(),
+    )
+}
+
+/// True when the configured provider is a cloud provider (not local Ollama).
+fn is_cloud_provider(provider: &str) -> bool {
+    !provider.is_empty() && provider != "ollama"
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
-/// Check if Ollama is running and reachable.
+/// Check if the configured LLM provider is reachable.
+///
+/// For cloud providers this reports whether an API key is configured. For local
+/// Ollama it pings the HTTP endpoint.
 #[tauri::command]
 pub async fn llm_check_connection(state: State<'_, SettingsState>) -> Result<bool, String> {
-    let base_url = get_ollama_url(&state);
+    let (provider, api_key, base_url) = get_llm_config(&state);
+    if is_cloud_provider(&provider) {
+        return Ok(!api_key.trim().is_empty());
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
@@ -215,7 +241,12 @@ pub async fn llm_delete_model(state: State<'_, SettingsState>, model: String) ->
     Ok(())
 }
 
-/// Send a chat completion request to Ollama (non-streaming).
+/// Send a chat completion request (non-streaming).
+///
+/// On desktop this is backed by the goose-sdk provider layer (multi-provider +
+/// local Ollama via a declarative provider). On other platforms it falls back to
+/// the Ollama HTTP API. The signature and response shape are unchanged, so all
+/// callers (chat page, OCR fix, word generation) keep working.
 #[tauri::command]
 pub async fn llm_chat(
     state: State<'_, SettingsState>,
@@ -223,14 +254,97 @@ pub async fn llm_chat(
     messages: Vec<ChatMessage>,
     temperature: Option<f32>,
 ) -> Result<LlmChatResponse, String> {
-    let base_url = get_ollama_url(&state);
+    let temperature = temperature.unwrap_or(0.7);
+    #[cfg(feature = "desktop")]
+    {
+        let (provider, api_key, base_url) = get_llm_config(&state);
+        crate::goose_llm::chat_once(
+            &provider,
+            &api_key,
+            &base_url,
+            &model,
+            messages,
+            None,
+            temperature,
+        )
+        .await
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        let base_url = get_ollama_url(&state);
+        ollama_chat(&base_url, &model, messages, temperature).await
+    }
+}
+
+/// Streaming chat completion. Emits `llm-chat-chunk` events (text deltas) as the
+/// model responds, then a single `llm-chat-done` event with token usage. Errors
+/// mid-stream are emitted as `llm-chat-error`. Every event carries `id` so the
+/// frontend can correlate chunks with the request that produced them.
+#[tauri::command]
+pub async fn llm_chat_stream(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+    id: String,
+    model: String,
+    messages: Vec<ChatMessage>,
+    system: Option<String>,
+    temperature: Option<f32>,
+) -> Result<(), String> {
+    let temperature = temperature.unwrap_or(0.7);
+    #[cfg(feature = "desktop")]
+    {
+        let (provider, api_key, base_url) = get_llm_config(&state);
+        crate::goose_llm::chat_stream(
+            &app,
+            &id,
+            &provider,
+            &api_key,
+            &base_url,
+            &model,
+            messages,
+            system,
+            temperature,
+        )
+        .await
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        use tauri::Emitter;
+        // Fallback: no goose-sdk on this platform. Run the Ollama HTTP path once
+        // and replay it as a single chunk + done event so the frontend streaming
+        // contract still holds.
+        let mut msgs = messages;
+        if let Some(sys) = system {
+            if !sys.trim().is_empty() {
+                msgs.insert(0, ChatMessage { role: "system".to_string(), content: sys });
+            }
+        }
+        let base_url = get_ollama_url(&state);
+        let resp = ollama_chat(&base_url, &model, msgs, temperature).await?;
+        let _ = app.emit("llm-chat-chunk", serde_json::json!({ "id": id, "text": resp.content }));
+        let _ = app.emit(
+            "llm-chat-done",
+            serde_json::json!({ "id": id, "prompt_tokens": resp.prompt_tokens, "completion_tokens": resp.completion_tokens }),
+        );
+        Ok(())
+    }
+}
+
+/// Non-streaming Ollama HTTP chat completion (non-desktop fallback path).
+#[cfg(not(feature = "desktop"))]
+async fn ollama_chat(
+    base_url: &str,
+    model: &str,
+    messages: Vec<ChatMessage>,
+    temperature: f32,
+) -> Result<LlmChatResponse, String> {
     let client = ollama_client();
     let req = ChatRequest {
-        model: &model,
+        model,
         messages,
         stream: false,
         options: ChatOptions {
-            temperature: temperature.unwrap_or(0.7),
+            temperature,
             num_predict: 8192,
         },
     };
