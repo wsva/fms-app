@@ -1,62 +1,60 @@
-# Tauri + React + Typescript
+<div align="center">
+  <img src="public/logo.png" alt="FmS logo" width="96" />
+  <h1>FmS — fms-app</h1>
+  <p><strong>Fremdsprachen machen Spaß!</strong> — Foreign languages are fun.</p>
+  <p>
+    A local-first language learning desktop app built around <em>listening, speaking, reading and vocabulary</em>,
+    powered by on-device AI.
+  </p>
+  <p>
+    <a href="https://github.com/wsva/fms-app/releases/latest"><img src="https://img.shields.io/github/v/release/wsva/fms-app?label=release" alt="Latest release" /></a>
+    <a href="https://github.com/wsva/fms-app/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/wsva/fms-app/build.yml?label=build" alt="Build status" /></a>
+    <img src="https://img.shields.io/badge/Tauri-2.x-orange" alt="Tauri 2" />
+    <img src="https://img.shields.io/badge/React-19-blue" alt="React 19" />
+    <img src="https://img.shields.io/badge/license-TBD-lightgrey" alt="License TBD" />
+  </p>
+</div>
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+---
 
-## Recommended IDE Setup
+## What is this?
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+FmS turns authentic audio — textbook recordings, audiobooks, podcasts — into structured
+**dictation and speaking practice**. You import a dataset, the app transcribes it with a local
+speech-to-text model, generates waveforms and cue-level subtitles, and then you practice by
+typing (or speaking) what you hear. Everything runs on your machine: your material, your
+progress, and your models never leave the device.
 
-# Init
-## install
-`````
-PS C:\Users\yanan\code> mkdir fms-app
-PS C:\Users\yanan\code> cd .\fms-app\
-PS C:\Users\yanan\code\fms-app> cargo install create-tauri-app --locked
+The app is a **Tauri v2** port of the web version at [wsva/fms](https://github.com/wsva/fms),
+and ships for **Windows and Linux** (plus an experimental **Android** client that syncs with a PC).
 
-PS C:\Users\yanan\code> cargo create-tauri-app
-✔ Project name · fms-app
-✔ Identifier · com.wsva.fms-app
-✔ Choose which language to use for your frontend · TypeScript / JavaScript - (pnpm, yarn, npm, deno, bun)
-✔ Choose your package manager · pnpm
-✔ Choose your UI template · React - (https://react.dev/)
-✔ Choose your UI flavor · TypeScript
+## Features
 
-Template created! To get started run:
-  cd fms-app
-  pnpm install
-  pnpm tauri android init
+**Learning**
+- **Dictation** — media player with canvas waveform, cue cards, and per-cue progress; compare your
+  transcription against reference subtitles, in large/focus modes.
+- **Speaking practice** — system-wide voice input: tap the mic (or `Ctrl+C` in any text field) and
+  your speech is transcribed locally and inserted at the cursor.
+- **Read a Book** — split books into chapters/sentences, read with per-sentence TTS audio (Edge TTS),
+  and save words/sentences in context.
+- **Read Aloud** — recite sentences aloud and get them checked against the target text.
+- **Cards** — flashcard datasets with review queues, question generation, and FTS5 search.
 
-For Desktop development, run:
-  pnpm tauri dev
+**Tooling**
+- **Dataset Studio** — staged pipeline: import → generate subtitles (STT) → waveforms → database,
+  plus transcript alignment and book splitting.
+- **STT Models** — download, load, and manage local ONNX models (Parakeet family via `transcribe-rs`).
+- **LLM Chat** — Ollama (local) or cloud providers through the goose SDK provider layer.
+- **OCR, Edge TTS, Wiki** — capture text from images, synthesize speech, keep notes.
+- **Workspaces** — multi-user data isolation with per-workspace directories and XP.
 
-For Android development, run:
-  pnpm tauri android dev
+## Download
 
-PS C:\Users\yanan\code> cd .\fms-app\
-PS C:\Users\yanan\code\fms-app> npx get-pnpm latest-12
-`````
+Grab a prebuilt installer from the [latest release](https://github.com/wsva/fms-app/releases/latest):
 
-## pnpm install
-need to open a new terminal to use the new PATH config.
-`````
-PS C:\Users\yanan\code\fms-app> pnpm install
-`````
+| Platform | Artifacts |
+|----------|-----------|
+| Windows  | `.exe` (NSIS), `.msi` |
+| Linux    | `.AppImage`, `.deb`, `.rpm` |
 
-## start dev
-`````
-Start the development server:
-pnpm tauri dev
-`````
-
-## change cargo source
-there is not this file by default, so create it.
-
-C:\Users\yanan\.cargo\config.toml
-`````
-[source.crates-io]
-replace-with = 'rsproxy-sparse'
-
-[source.rsproxy-sparse]
-registry = "sparse+https://rsproxy.cn/index/"
-`````
-
+Releases are built automatically by [GitHub Actions](.github/workflows/build.yml) on every `v*` tag.
