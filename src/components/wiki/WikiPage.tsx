@@ -3,12 +3,17 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { RefreshCw, BookOpen, ArrowLeft, ArrowRight, Menu } from "lucide-react";
+import { RefreshCw, BookOpen, ArrowLeft, ArrowRight } from "lucide-react";
 import WikiSidebar from "./WikiSidebar";
 import WikiSearch from "./WikiSearch";
 import MarkdownViewer from "./markdown/markdown";
 import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
+import {
+  useCollapsibleSidebar,
+  CollapsibleSidebar,
+  SidebarToggleButton,
+} from "@/components/layout/CollapsibleSidebar";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -29,11 +34,6 @@ interface WikiDirEntry {
   modified: string | null;
 }
 
-const WIKI_SIDEBAR_WIDTH_KEY = "wiki-sidebar-width";
-const DEFAULT_SIDEBAR_WIDTH = 224; // w-56 = 14rem = 224px
-const MIN_SIDEBAR_WIDTH = 150;
-const MAX_SIDEBAR_WIDTH = 400;
-
 export default function WikiPage() {
   const [wikiDir, setWikiDir] = useState<string>("");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -41,31 +41,14 @@ export default function WikiPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isIndexing, setIsIndexing] = useState(false);
-  const [mobile, setMobile] = useState(false);
-  // Mobile only: the file tree lives in a slide-in drawer, closed by default.
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
-  const handleSidebarDrag = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      const startX = e.clientX;
-      const startWidth = sidebarWidth;
-      const onMove = (ev: MouseEvent) =>
-        setSidebarWidth(Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, startWidth + ev.clientX - startX)));
-      const onUp = () => {
-        document.removeEventListener("mousemove", onMove);
-        document.removeEventListener("mouseup", onUp);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-        localStorage.setItem(WIKI_SIDEBAR_WIDTH_KEY, String(sidebarWidth));
-      };
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
-    },
-    [sidebarWidth]
-  );
+  // Shared slide-in file-tree sidebar (overlay on desktop, drawer on mobile).
+  const sidebar = useCollapsibleSidebar({
+    storageKey: "wiki-sidebar-width",
+    defaultWidth: 224,
+    minWidth: 150,
+    maxWidth: 400,
+  });
+  const mobile = sidebar.mobile;
 
   // Navigation history
   const [history, setHistory] = useState<string[]>([]);
@@ -85,7 +68,6 @@ export default function WikiPage() {
   //     the phone's own settings here.
   useEffect(() => {
     if (!isTauri()) return;
-    setMobile(isMobileApp());
 
     const loadWikiDir = async () => {
       try {
@@ -201,14 +183,10 @@ export default function WikiPage() {
   }, [goBack, goForward]);
 
   const handleFileSelect = (path: string) => {
+    // Closes the drawer on mobile; the desktop overlay stays open for
+    // repeated picks.
+    sidebar.closeOnSelect();
     loadFileContent(path);
-  };
-
-  // On mobile the tree is a drawer: selecting a file dismisses it so the
-  // content pane gets the full width.
-  const handleMobileFileSelect = (path: string) => {
-    setSidebarOpen(false);
-    handleFileSelect(path);
   };
 
   // Listen for wiki deep link navigation (fms-app://wiki/path/to/file.md)
@@ -252,55 +230,15 @@ export default function WikiPage() {
     return path.split(/[\\/]/).pop() || path;
   };
 
-  // Load saved sidebar width from localStorage
-  useEffect(() => {
-    const saved = localStorage.getItem(WIKI_SIDEBAR_WIDTH_KEY);
-    if (saved) {
-      const w = parseInt(saved, 10);
-      if (w >= MIN_SIDEBAR_WIDTH && w <= MAX_SIDEBAR_WIDTH) setSidebarWidth(w);
-    }
-  }, []);
-
   return (
-    <div className="flex h-full w-full bg-bg-body">
-      {/* Desktop sidebar — persistent, resizable column. */}
-      {!mobile && (
-        <div
-          className="relative shrink-0 min-h-0"
-          style={{ width: sidebarWidth }}
-        >
-          <WikiSidebar
-            wikiDir={wikiDir}
-            selectedFile={selectedFile}
-            onFileSelect={handleFileSelect}
-          />
-          {/* Resize handle (mouse-drag only; not useful on touch) */}
-          <div
-            className="absolute top-0 right-0 h-full w-3 cursor-col-resize flex items-center justify-center group z-10"
-            onMouseDown={handleSidebarDrag}
-          >
-            <div className="w-0.5 h-12 rounded-full bg-border-default group-hover:bg-accent transition-colors" />
-          </div>
-        </div>
-      )}
-
+    <div className="flex h-full w-full bg-bg-body min-w-0">
       {/* Main content area */}
       <div className="flex-1 flex flex-col min-h-0 min-w-0">
-        {/* Top bar with navigation, search and controls */}
+        {/* Top bar with sidebar toggle, navigation, search and controls */}
         <div className="flex items-center gap-3 px-4 py-2 border-b border-border-default bg-bg-card">
-          {/* Mobile: toggle the wiki file drawer. It stays visible while the
-              drawer is open now that the panel sits below the bar, so the button
-              has to close the drawer as well as open it. */}
-          {mobile && (
-            <button
-              onClick={() => setSidebarOpen((v) => !v)}
-              aria-expanded={sidebarOpen}
-              className="p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
-              title="Show/hide wiki files"
-            >
-              <Menu size={18} />
-            </button>
-          )}
+          {/* Toggle the file-tree sidebar. It stays visible while the drawer is
+              open, so the button has to close it as well as open it. */}
+          <SidebarToggleButton sidebar={sidebar} title="Show/hide wiki files" />
           {/* Back/Forward navigation */}
           <div className="flex items-center gap-1">
             <button
@@ -339,12 +277,21 @@ export default function WikiPage() {
           )}
         </div>
 
-        {/* Everything under the top bar. This is the file drawer's containing
-            block: the drawer used to be `fixed top-0 h-full`, i.e. anchored to the
-            viewport, which put it under the Android status bar and let it cover the
-            bar that opens it. Absolute positioning inside this wrapper bounds its
-            height to the space between the top bar and the bottom navigation. */}
-        <div className="relative flex flex-col flex-1 min-h-0 overflow-hidden">
+        {/* Everything under the top bar — flex row so the desktop file-tree
+            column splits the page with the content. On mobile the drawer is
+            anchored here (absolute, not fixed to the viewport): its height is
+            bounded between the top bar and the bottom navigation and it never
+            runs under the Android status bar. */}
+        <div className="relative flex flex-1 min-h-0 overflow-hidden">
+          {/* File-tree sidebar — shared slide-in (desktop overlay / mobile drawer) */}
+          <CollapsibleSidebar sidebar={sidebar}>
+            <WikiSidebar
+              wikiDir={wikiDir}
+              selectedFile={selectedFile}
+              onFileSelect={handleFileSelect}
+            />
+          </CollapsibleSidebar>
+
           {/* Content area */}
           <div className="flex-1 overflow-y-auto min-h-0">
             {isLoading ? (
@@ -375,30 +322,6 @@ export default function WikiPage() {
               </div>
             )}
           </div>
-
-          {/* Mobile sidebar — slide-in drawer with a dimmed backdrop. */}
-          {mobile && (
-            <>
-              <div
-                className={`absolute inset-0 z-30 bg-black/40 transition-opacity duration-200 ${
-                  sidebarOpen ? "opacity-100" : "opacity-0 pointer-events-none"
-                }`}
-                onClick={() => setSidebarOpen(false)}
-                aria-hidden="true"
-              />
-              <div
-                className={`absolute inset-y-0 left-0 z-40 w-[80vw] max-w-[300px] shadow-xl transition-transform duration-200 ${
-                  sidebarOpen ? "translate-x-0" : "-translate-x-full"
-                }`}
-              >
-                <WikiSidebar
-                  wikiDir={wikiDir}
-                  selectedFile={selectedFile}
-                  onFileSelect={handleMobileFileSelect}
-                />
-              </div>
-            </>
-          )}
         </div>
       </div>
     </div>

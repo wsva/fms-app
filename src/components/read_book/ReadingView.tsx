@@ -16,26 +16,21 @@ import type {
 } from "@/lib/read/types";
 import { flattenChapters, groupIntoParagraphs, toDbSentence } from "@/lib/read/types";
 import { isTauri } from "@/lib/tauri";
-import { isMobileApp } from "@/lib/platform";
+import { CollapsibleSidebar, type SidebarController } from "@/components/layout/CollapsibleSidebar";
 import ParagraphList from "./ParagraphList";
 import SentenceDrawer from "./SentenceDrawer";
 import { useRecorder } from "./useRecorder";
 import { getUUID, nowIso } from "./utils";
 import ConfirmDialog from "./ConfirmDialog";
 
-type Props = { books: BookMeta[]; sidebarVisible?: boolean; onCloseSidebar?: () => void };
+type Props = { books: BookMeta[]; sidebar: SidebarController };
 
-export default function ReadingView({ books, sidebarVisible = true, onCloseSidebar }: Props) {
+export default function ReadingView({ books, sidebar }: Props) {
   // selectors
   const [chaptersFlat, setChaptersFlat] = useState<BookChapter[]>([]);
   const [bookUUID, setBookUUID] = useState("");
   const [chapterUUID, setChapterUUID] = useState("");
-
-  // Deferred platform flag (SSR-safe): on mobile the TOC is a slide-in drawer.
-  const [mobile, setMobile] = useState(false);
-  useEffect(() => {
-    setMobile(isMobileApp());
-  }, []);
+  const mobile = sidebar.mobile;
 
   // data
   const [data, updateData] = useImmer<SentenceClient[]>([]);
@@ -54,29 +49,6 @@ export default function ReadingView({ books, sidebarVisible = true, onCloseSideb
   const [drawerRecognized, setDrawerRecognized] = useState("");
   const [drawerBgColor, setDrawerBgColor] = useState<string | null>(null);
   const [drawerAudio, setDrawerAudio] = useState<{ rel: string; url: string } | null>(null);
-
-  // resizable sidebar (TOC)
-  const [sidebarWidth, setSidebarWidth] = useState(260);
-  const handleSidebarDrag = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      const startX = e.clientX;
-      const startWidth = sidebarWidth;
-      const onMove = (ev: MouseEvent) =>
-        setSidebarWidth(Math.min(window.innerWidth * 0.8, Math.max(160, startWidth + ev.clientX - startX)));
-      const onUp = () => {
-        document.removeEventListener("mousemove", onMove);
-        document.removeEventListener("mouseup", onUp);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-      };
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
-    },
-    [sidebarWidth]
-  );
 
   const flatChapters = useMemo(() => flattenChapters(chaptersFlat), [chaptersFlat]);
   const paragraphs = useMemo(() => groupIntoParagraphs(data), [data]);
@@ -712,7 +684,7 @@ export default function ReadingView({ books, sidebarVisible = true, onCloseSideb
                   className={chapterBtnClass(chapterUUID === c.uuid, c.status === "completed")}
                   onClick={() => {
                     setChapterUUID(c.uuid);
-                    if (mobile) onCloseSidebar?.();
+                    sidebar.closeOnSelect();
                   }}
                   style={{ paddingLeft: `${c.depth * 16 + 8}px` }}
                 >
@@ -732,44 +704,10 @@ export default function ReadingView({ books, sidebarVisible = true, onCloseSideb
   );
 
   return (
-    <div className="flex flex-row w-full h-full gap-4">
-      {/* TOC sidebar — persistent resizable column on desktop, slide-in drawer on mobile */}
-      {!mobile && sidebarVisible && (
-      <div
-        className="bg-bg-card border border-border-default rounded-xl flex flex-row shadow-sm flex-shrink-0 h-full"
-        style={{ width: `${sidebarWidth}px` }}
-      >
-        {tocContent}
-        <div
-          className="flex-shrink-0 w-3 cursor-col-resize flex items-center justify-center group self-stretch"
-          onMouseDown={handleSidebarDrag}
-        >
-          <div className="w-0.5 h-12 rounded-full bg-border-default group-hover:bg-accent transition-colors" />
-        </div>
-      </div>
-      )}
+    <div className="relative w-full h-full min-h-0 flex overflow-hidden min-w-0">
+      {/* TOC — shared sidebar (split column on desktop, slide-in drawer on mobile) */}
+      <CollapsibleSidebar sidebar={sidebar}>{tocContent}</CollapsibleSidebar>
 
-      {mobile && (
-        <>
-          <div
-            className={`fixed inset-0 z-30 bg-black/40 transition-opacity duration-200 ${
-              sidebarVisible ? "opacity-100" : "opacity-0 pointer-events-none"
-            }`}
-            onClick={() => onCloseSidebar?.()}
-            aria-hidden="true"
-          />
-          <div
-            className={`fixed top-0 left-0 z-40 h-full w-[80vw] max-w-[300px] shadow-xl transition-transform duration-200 ${
-              sidebarVisible ? "translate-x-0" : "-translate-x-full"
-            }`}
-          >
-            <div className="bg-bg-card border-r border-border-default flex flex-col h-full">
-              {tocContent}
-            </div>
-          </div>
-        </>
-      )}
-  
       {/* Main content */}
       <div className="flex-1 min-w-0 min-h-0 flex flex-col gap-4 overflow-y-auto p-4 pb-[50vh]">
       {/* Error banner */}

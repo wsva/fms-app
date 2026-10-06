@@ -206,7 +206,7 @@ export default function WikiSidebar({ wikiDir, selectedFile, onFileSelect }: Wik
   };
 
   return (
-    <div className="flex flex-col h-full min-h-0 bg-bg-card border-r border-border-default">
+    <div className="flex flex-col h-full min-h-0">
       <div className="flex items-center justify-between px-3 py-2 border-b border-border-default">
         <h3 className="text-sm font-semibold text-text-primary">Wiki</h3>
         <div className="flex items-center gap-1">

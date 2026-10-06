@@ -7,15 +7,18 @@ import {
   Plus,
   Pencil,
   Trash2,
-  ArrowLeft,
   FolderPlus,
   BookText,
 } from "lucide-react";
 import type { ReadAloudMeta, ReadText } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { isTauri } from "@/lib/tauri";
-import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
+import {
+  useCollapsibleSidebar,
+  CollapsibleSidebar,
+  SidebarToggleButton,
+} from "@/components/layout/CollapsibleSidebar";
 import PracticePanel from "./PracticePanel";
 import TextEditor from "./TextEditor";
 import DatasetDialog from "./DatasetDialog";
@@ -30,7 +33,10 @@ export default function ReadAloudPage() {
   const [selectedDataset, setSelectedDataset] = useState<string>("");
   const [texts, setTexts] = useState<ReadText[]>([]);
   const [selectedText, setSelectedText] = useState<string | null>(null);
-  const [mobile, setMobile] = useState(false);
+  // Shared slide-in sidebar: text list overlays the practice pane on desktop,
+  // slides in as a drawer on mobile.
+  const sidebar = useCollapsibleSidebar({ storageKey: "read-aloud-sidebar-width", defaultWidth: 288 });
+  const mobile = sidebar.mobile;
 
   const [textEditor, setTextEditor] = useState<{ open: boolean; text: ReadText | null }>({
     open: false,
@@ -38,10 +44,6 @@ export default function ReadAloudPage() {
   });
   const [datasetDialog, setDatasetDialog] = useState<DatasetDialogState>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
-
-  useEffect(() => {
-    setMobile(isMobileApp());
-  }, []);
 
   const loadDatasets = useCallback(async (preferUuid?: string) => {
     if (!isTauri()) return;
@@ -151,7 +153,10 @@ export default function ReadAloudPage() {
               className={`group flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-colors ${
                 selectedText === t.uuid ? "bg-accent-bg/15" : "hover:bg-bg-hover"
               }`}
-              onClick={() => setSelectedText(t.uuid)}
+              onClick={() => {
+                setSelectedText(t.uuid);
+                sidebar.closeOnSelect();
+              }}
             >
               <div className="flex flex-col min-w-0 flex-1">
                 <span className="text-sm text-text-primary truncate">
@@ -213,20 +218,14 @@ export default function ReadAloudPage() {
     </div>
   );
 
-  const showPracticeOnly = mobile && selectedText !== null;
-
   return (
     <main className="flex-1 flex flex-col h-full min-h-0 min-w-0">
       {/* Header */}
       <div className="p-3 border-b border-border-default flex items-center gap-2 shrink-0 min-w-0">
-        {mobile && showPracticeOnly && (
-          <button className={btnIcon} title="Back to list" aria-label="Back" onClick={() => setSelectedText(null)}>
-            <ArrowLeft size={18} />
-          </button>
-        )}
         <h1 className="text-lg font-semibold flex items-center gap-2 text-text-primary shrink-0">
           <Mic size={20} />{!mobile && " Read Aloud"}
         </h1>
+        <SidebarToggleButton sidebar={sidebar} title="Show/hide text list" />
 
         <select
           className="ml-2 min-w-0 flex-1 max-w-xs p-1.5 rounded-md bg-bg-muted border border-border-default text-text-primary text-sm cursor-pointer"
@@ -269,20 +268,11 @@ export default function ReadAloudPage() {
         </div>
       </div>
 
-      {/* Body */}
-      <div className="flex-1 min-h-0 flex min-w-0">
-        {mobile ? (
-          showPracticeOnly ? (
-            practice
-          ) : (
-            <div className="flex-1 min-h-0 min-w-0">{textList}</div>
-          )
-        ) : (
-          <>
-            <div className="w-72 shrink-0 border-r border-border-default min-h-0">{textList}</div>
-            {practice}
-          </>
-        )}
+      {/* Body — text list is a split column on desktop / slide-in drawer on
+          mobile; the practice pane takes the remaining width */}
+      <div className="relative flex-1 min-h-0 flex overflow-hidden min-w-0">
+        <CollapsibleSidebar sidebar={sidebar}>{textList}</CollapsibleSidebar>
+        {practice}
       </div>
 
       {textEditor.open && selectedDataset && (
