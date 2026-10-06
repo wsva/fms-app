@@ -81,6 +81,12 @@ sha2 = "0.10"
 # Ed25519 device-identity keypairs for PC<->Android pairing (ring is already
 # in the tree via rustls; Android-portable, so it is a plain dependency).
 ring = "0.17"
+# Direct dependency so we can pin the process-level CryptoProvider at startup.
+# Several crates (reqwest, rmcp, goose-sdk, tokio-tungstenite) enable both the
+# `ring` and `aws-lc-rs` rustls features through feature unification, which
+# makes rustls panic when it cannot auto-select a provider. We install `ring`
+# explicitly in lib.rs::install_crypto_provider().
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 rfd = { version = "0.15", optional = true }

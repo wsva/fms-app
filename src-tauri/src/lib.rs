@@ -57,6 +57,22 @@ mod model_index;
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
+/// Install the process-level rustls `CryptoProvider`.
+///
+/// Several crates in the tree (reqwest, rmcp, goose-sdk, tokio-tungstenite)
+/// enable *both* the `ring` and `aws-lc-rs` features of rustls through cargo
+/// feature unification. When that happens rustls cannot auto-select a provider
+/// and panics on the first TLS handshake with "Could not automatically
+/// determine the process-level CryptoProvider". We pin `ring` (already a direct
+/// dependency and Android-portable) explicitly at startup, before any TLS use.
+fn install_crypto_provider() {
+    use rustls::crypto::CryptoProvider;
+    if CryptoProvider::get_default().is_none() {
+        // Ignore the error: a concurrent thread may have installed it first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Deep link handler for OAuth login callback
 // ---------------------------------------------------------------------------
@@ -136,6 +152,7 @@ fn greet(name: &str) -> String {
 #[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_crypto_provider();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -708,6 +725,7 @@ macro_rules! mobile_invoke_handler {
 #[cfg(not(feature = "desktop"))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_crypto_provider();
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
