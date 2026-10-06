@@ -284,7 +284,7 @@ export function diagnoseEmptyTranscript(device: string, level: LevelInfo): strin
  * Settings row and cleared it — so a vanished device degrades to the default
  * (loudly, in the log) instead of wedging voice input.
  */
-async function openMicStream(preferred: string): Promise<MediaStream> {
+export async function openMicStream(preferred: string): Promise<MediaStream> {
   const md = navigator.mediaDevices;
   try {
     return await md.getUserMedia({ audio: micConstraints() });

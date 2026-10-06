@@ -16,6 +16,7 @@ import {
   SidebarToggleButton,
   useCollapsibleSidebar,
 } from "@/components/layout/CollapsibleSidebar";
+import MicTestPanel from "@/components/voice/MicTestPanel";
 import { isMobileApp } from "@/lib/platform";
 import { logError, logInfo } from "@/lib/logger";
 import {
@@ -699,6 +700,9 @@ export default function SettingsPage() {
               and not disabled in the system sound settings.
             </p>
           )}
+
+          {/* Zoom-style audio check on the currently selected device. */}
+          <MicTestPanel />
         </section>
 
         {/* ── Device pairing section (PC only) ──────────────────── */}
