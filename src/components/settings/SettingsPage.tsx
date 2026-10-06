@@ -2,6 +2,20 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  Globe,
+  LayoutGrid,
+  Mic,
+  Palette,
+  Server,
+  Settings as SettingsIcon,
+  Users,
+} from "lucide-react";
+import {
+  CollapsibleSidebar,
+  SidebarToggleButton,
+  useCollapsibleSidebar,
+} from "@/components/layout/CollapsibleSidebar";
 import { isMobileApp } from "@/lib/platform";
 import { logError, logInfo } from "@/lib/logger";
 import {
@@ -121,6 +135,39 @@ export default function SettingsPage() {
   useEffect(() => {
     setMobile(isMobileApp());
   }, []);
+
+  // ---- Section navigation sidebar ----
+  // Shared slide-in sidebar (desktop split column / mobile drawer). Its
+  // entries are the page's sections: picking one shows only that section,
+  // "All" restores the stacked view.
+  const sidebar = useCollapsibleSidebar({
+    storageKey: "settings-sidebar-width",
+    defaultWidth: 220,
+    minWidth: 160,
+  });
+  const [activeSection, setActiveSection] = useState("all");
+
+  function selectSection(id: string) {
+    setActiveSection(id);
+    // Closes the mobile drawer only — the desktop column stays open so the
+    // user can keep switching sections.
+    sidebar.closeOnSelect();
+  }
+
+  const sections = [
+    { id: "all", label: "All", icon: LayoutGrid },
+    { id: "theme", label: "Theme", icon: Palette },
+    { id: "global", label: "Global Settings", icon: Globe },
+    { id: "workspace", label: "Workspace Settings", icon: Server },
+    { id: "microphone", label: "Microphone", icon: Mic },
+    // Pairing is a PC-side feature, so the phone has no such section.
+    ...(sidebar.mobile ? [] : [{ id: "pairing", label: "Device Pairing", icon: Users }]),
+  ];
+
+  // Section hidden while another one is selected? Visibility is toggled with
+  // a class instead of unmounting, so form state and "Saved!" toasts survive
+  // switching between sections.
+  const showSection = (id: string) => activeSection === "all" || activeSection === id;
 
   const loadDevices = useCallback(async () => {
     if (!isTauri() || isMobileApp()) return;
@@ -315,12 +362,50 @@ export default function SettingsPage() {
   }
 
   return (
-    <>
-      <main className="flex-1 p-8 overflow-y-auto">
-        <h1 className="text-[1.8em] font-bold mb-6">Settings</h1>
+    <main className="flex-1 flex flex-col h-full min-h-0 min-w-0">
+      {/* Header — same bar style as Read a Book: icon + title on a bordered
+          strip pinned above the scrolling content. */}
+      <div className="p-4 border-b border-border-default flex items-center gap-4 shrink-0 min-w-0">
+        <h1 className="text-lg font-semibold flex items-center gap-2 text-text-primary">
+          <SettingsIcon size={20} /> Settings
+        </h1>
+        <SidebarToggleButton sidebar={sidebar} title="Show/hide sections" />
+      </div>
+
+      {/* Body — flex row so the desktop section list splits the page with the
+          content; on mobile the drawer is anchored here (absolute, not fixed
+          to the viewport), so it stays below the header and bottom nav. */}
+      <div className="relative flex flex-1 min-h-0 overflow-hidden">
+        <CollapsibleSidebar sidebar={sidebar}>
+          <nav className="flex flex-col gap-1 p-3 overflow-y-auto min-h-0">
+            <div className="text-xs font-semibold text-text-tertiary uppercase tracking-wide px-2 pt-1 pb-2 mb-1 border-b border-border-light">
+              Sections
+            </div>
+            {sections.map((s) => {
+              const Icon = s.icon;
+              return (
+                <button
+                  key={s.id}
+                  className={`flex items-center gap-2 px-2 py-1.5 rounded-md text-sm text-left cursor-pointer transition-colors ${
+                    activeSection === s.id
+                      ? "bg-bg-hover text-text-primary font-medium"
+                      : "text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+                  }`}
+                  onClick={() => selectSection(s.id)}
+                >
+                  <Icon size={15} className="shrink-0" />
+                  <span className="truncate">{s.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </CollapsibleSidebar>
+
+        {/* Content */}
+        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 min-w-0">
 
         {/* ── Theme section ──────────────────────────────────────── */}
-        <section className="mb-8">
+        <section className={`mb-8${showSection("theme") ? "" : " hidden"}`}>
           <h2 className="text-[1.3em] font-semibold mb-2">Theme</h2>
           <p className="text-text-secondary text-sm mb-4">
             Choose a color theme for the application.
@@ -346,7 +431,7 @@ export default function SettingsPage() {
         </section>
 
         {/* ── Global Settings section ────────────────────────────── */}
-        <section className="mb-8">
+        <section className={`mb-8${showSection("global") ? "" : " hidden"}`}>
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-[1.3em] font-semibold">Global Settings</h2>
             <div className="flex items-center gap-2">
@@ -530,7 +615,7 @@ export default function SettingsPage() {
         </section>
 
         {/* ── Workspace Settings section ─────────────────────────── */}
-        <section className="mb-8">
+        <section className={`mb-8${showSection("workspace") ? "" : " hidden"}`}>
           <h2 className="text-[1.3em] font-semibold mb-2">Workspace Settings</h2>
           <p className="text-text-secondary text-sm mb-4">
             These directories are set to default values for the current workspace. Stored in the workspace directory.
@@ -562,7 +647,7 @@ export default function SettingsPage() {
         </section>
 
         {/* ── Microphone section ─────────────────────────────── */}
-        <section className="mb-8">
+        <section className={`mb-8${showSection("microphone") ? "" : " hidden"}`}>
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-[1.3em] font-semibold">Microphone</h2>
             <div className="flex items-center gap-2">
@@ -618,7 +703,7 @@ export default function SettingsPage() {
 
         {/* ── Device pairing section (PC only) ──────────────────── */}
         {!mobile && (
-          <section className="mb-8">
+          <section className={`mb-8${showSection("pairing") ? "" : " hidden"}`}>
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-[1.3em] font-semibold">Device Pairing</h2>
               <button
@@ -708,7 +793,8 @@ export default function SettingsPage() {
             </table>
           </section>
         )}
-      </main>
-    </>
+        </div>
+      </div>
+    </main>
   );
 }
