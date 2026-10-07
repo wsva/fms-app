@@ -10,6 +10,7 @@ import {
   Settings,
   Headphones,
   MessageSquare,
+  MessagesSquare,
   Volume2,
   Wrench,
   BookOpen,
@@ -36,6 +37,7 @@ export type TabId =
   | "models"
   | "edge-tts"
   | "llm-chat"
+  | "chat"
   | "ocr"
   | "wiki"
   | "workspaces"
@@ -68,6 +70,7 @@ const navGroups: NavGroup[] = [
       { id: "wiki", label: "Wiki", icon: BookOpenText },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
+      { id: "chat", label: "Device Chat", icon: MessagesSquare },
       { id: "ocr", label: "OCR", icon: ScanText },
       { id: "models", label: "Models", icon: Box },
       { id: "logs", label: "Logs", icon: FileText },
@@ -94,6 +97,7 @@ const MOBILE_VISIBLE_TABS: TabId[] = [
   "read-aloud",
   "cards",
   "wiki",
+  "chat",
   "workspaces",
   "studio",
   "models",

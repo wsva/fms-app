@@ -87,7 +87,7 @@ ring = "0.17"
 # makes rustls panic when it cannot auto-select a provider. We install `ring`
 # explicitly in lib.rs::install_crypto_provider().
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 rfd = { version = "0.15", optional = true }
 dirs = "6"

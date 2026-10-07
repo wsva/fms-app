@@ -8,6 +8,7 @@ mod auth;
 mod book;
 mod cards;
 mod cards_sync;
+mod chat;
 mod dataset;
 mod db;
 mod dictation;
@@ -389,6 +390,11 @@ pub fn run() {
             pairing::pairing_respond,
             pairing::pairing_revoke,
             pairing::pairing_remove_denied,
+            // Cross-device chat (desktop serves the store directly).
+            chat::chat_list_messages,
+            chat::chat_send_message,
+            chat::chat_resolve_attachment,
+            chat::chat_save_attachment,
             // Goose ACP agent client (desktop only)
             agent_acp::agent_connect,
             agent_acp::agent_send_prompt,
@@ -718,6 +724,11 @@ macro_rules! mobile_invoke_handler {
             sync::pc_pair_start,
             sync::pc_pair_reset_identity,
             discover::pc_discover,
+            // Cross-device chat: same command names as desktop, relayed to the PC.
+            chat::chat_list_messages,
+            chat::chat_send_message,
+            chat::chat_resolve_attachment,
+            chat::chat_save_attachment,
             $($extra),*
         ]
     };

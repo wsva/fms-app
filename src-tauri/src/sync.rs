@@ -40,7 +40,7 @@ use crate::settings::{self, SettingsState};
 // ---------------------------------------------------------------------------
 
 /// Effective PC base URL (trimmed of trailing slashes). Empty when unset.
-fn pc_base(settings: &SettingsState) -> String {
+pub(crate) fn pc_base(settings: &SettingsState) -> String {
     settings
         .settings
         .lock()
@@ -129,7 +129,7 @@ fn ensure_device_identity(settings: &SettingsState) -> Result<DeviceIdentity, St
 /// Add `x-fms-device` / `x-fms-ts` / `x-fms-sig` headers to an outbound PC
 /// request. `path` must be the URL path *as the PC sees it* (including the
 /// `/api/v1` prefix) — it is part of the signed message.
-fn with_device_auth(
+pub(crate) fn with_device_auth(
     req: reqwest::RequestBuilder,
     settings: &SettingsState,
     method: &str,
@@ -626,7 +626,7 @@ pub async fn pc_list_datasets(
 // ---------------------------------------------------------------------------
 
 /// Best-effort human-readable device name for the PC's confirm dialog.
-fn device_name() -> String {
+pub(crate) fn device_name() -> String {
     // Android: the product model, e.g. "Pixel 8". Static after first call.
     static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     NAME.get_or_init(|| {
@@ -746,11 +746,12 @@ pub async fn pc_pair_reset_identity(settings: State<'_, SettingsState>) -> Resul
 // and nothing is ever stored locally. Compiled only on mobile; the desktop
 // build serves the same data straight from `wiki::local_impl`.
 
-/// Issue a signed GET against a PC `/api/v1/wiki/*` endpoint and return the
-/// raw JSON value. The request path (excluding the query string) is what gets
-/// signed, matching `zone_guard`'s verification on the PC.
+/// Issue a signed GET against a PC `/api/v1/*` endpoint and return the raw
+/// JSON value. The request path (excluding the query string) is what gets
+/// signed, matching `zone_guard`'s verification on the PC. Shared by the wiki
+/// and chat remote clients.
 #[cfg(not(feature = "desktop"))]
-async fn wiki_get_json(
+pub(crate) async fn pc_get_json(
     settings: &SettingsState,
     api_path: &str,
     query: &[(&str, String)],
@@ -776,7 +777,7 @@ async fn wiki_get_json(
         return Err(format!("{msg} (http://{base})"));
     }
     resp.error_for_status()
-        .map_err(|e| format!("Wiki request to PC failed: {e}"))?
+        .map_err(|e| format!("Request to PC failed: {e}"))?
         .json::<Value>()
         .await
         .map_err(|e| format!("Unexpected response from PC: {e}"))
@@ -787,7 +788,7 @@ async fn wiki_get_json(
 pub(crate) async fn wiki_remote_list_dirs(
     settings: &SettingsState,
 ) -> Result<Vec<crate::wiki::WikiEntry>, String> {
-    let v = wiki_get_json(settings, "/api/v1/wiki/dirs", &[]).await?;
+    let v = pc_get_json(settings, "/api/v1/wiki/dirs", &[]).await?;
     serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/dirs response: {e}"))
 }
 
@@ -798,7 +799,7 @@ pub(crate) async fn wiki_remote_list_dir(
     path: &str,
 ) -> Result<Vec<crate::wiki::WikiEntry>, String> {
     let v =
-        wiki_get_json(settings, "/api/v1/wiki/dir", &[("path", path.to_string())]).await?;
+        pc_get_json(settings, "/api/v1/wiki/dir", &[("path", path.to_string())]).await?;
     serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/dir response: {e}"))
 }
 
@@ -806,7 +807,7 @@ pub(crate) async fn wiki_remote_list_dir(
 /// The PC wraps the body as `{ "content": "..." }`.
 #[cfg(not(feature = "desktop"))]
 pub(crate) async fn wiki_remote_read_file(settings: &SettingsState, path: &str) -> Result<String, String> {
-    let v = wiki_get_json(settings, "/api/v1/wiki/file", &[("path", path.to_string())]).await?;
+    let v = pc_get_json(settings, "/api/v1/wiki/file", &[("path", path.to_string())]).await?;
     v.get("content")
         .and_then(|c| c.as_str())
         .map(|s| s.to_string())
@@ -820,6 +821,6 @@ pub(crate) async fn wiki_remote_search(
     keyword: &str,
 ) -> Result<Vec<crate::wiki::WikiSearchResult>, String> {
     let v =
-        wiki_get_json(settings, "/api/v1/wiki/search", &[("keyword", keyword.to_string())]).await?;
+        pc_get_json(settings, "/api/v1/wiki/search", &[("keyword", keyword.to_string())]).await?;
     serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/search response: {e}"))
 }

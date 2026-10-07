@@ -12,6 +12,9 @@
 //! * `GET  /api/v1/datasets/{uuid}/manifest`   - snapshot metadata + overall hash
 //! * `GET  /api/v1/datasets/{uuid}/snapshot`   - the whole dataset dir as tar.gz
 //! * `POST /api/v1/sync/changes`               - replay queued writeback changes
+//! * `GET  /api/v1/chat/messages`              - cross-device chat thread page
+//! * `POST /api/v1/chat/message`               - post a chat message (multipart: uuid/text/device_name/file parts)
+//! * `GET  /api/v1/chat/attachment/{uuid}`     - stream one stored attachment
 //!
 //! Auth is owned by the outer trust-zone layer in `web_service.rs`: loopback +
 //! Tailscale pass unauthenticated; other networks need a valid per-device
@@ -22,8 +25,8 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{DefaultBodyLimit, Multipart, Query, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -31,11 +34,13 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::io::{ReaderStream, SyncIoBridge};
+use uuid::Uuid;
 
 use crate::book::{self, BookChapter, BookSentence, BookSentenceWord};
 use crate::cards::{self, Card, Tag};
+use crate::chat;
 use crate::dataset;
 use crate::dictation::{self, ListenCue, ListenDictation};
 use crate::pairing;
@@ -59,6 +64,14 @@ pub fn router(app: AppHandle) -> Router {
         .route("/datasets/{uuid}/manifest", get(manifest))
         .route("/datasets/{uuid}/snapshot", get(snapshot))
         .route("/sync/changes", post(sync_changes))
+        .route("/chat/messages", get(chat_messages))
+        // File uploads go through this route only; axum's default 2 MB body
+        // limit would silently reject larger attachments.
+        .route(
+            "/chat/message",
+            post(chat_message).layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
+        )
+        .route("/chat/attachment/{uuid}", get(chat_attachment))
         .route("/wiki/dirs", get(wiki_dirs))
         .route("/wiki/dir", get(wiki_dir_list))
         .route("/wiki/file", get(wiki_file))
@@ -776,6 +789,177 @@ async fn wiki_search(State(st): State<RestState>, Query(q): Query<WikiSearchQuer
         Ok(results) => (StatusCode::OK, Json(results)).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
+}
+
+// ---------------------------------------------------------------------------
+// /chat/*  (cross-device chat thread, served from the PC-side store)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ChatListQuery {
+    /// `created_at` cursor; empty returns the newest page.
+    #[serde(default)]
+    after: String,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// `GET /chat/messages?after=&limit=` — one page of the shared thread plus the
+/// caller's own device id, so a phone knows which bubbles are "mine".
+async fn chat_messages(
+    State(st): State<RestState>,
+    Extension(auth): Extension<pairing::AuthContext>,
+    Query(q): Query<ChatListQuery>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    match chat::list_messages(&settings, &q.after, q.limit.unwrap_or(200)) {
+        Ok(messages) => {
+            let self_device = auth.device_id.unwrap_or_else(|| "pc".to_string());
+            (
+                StatusCode::OK,
+                Json(chat::ChatListResponse { messages, self_device }),
+            )
+                .into_response()
+        }
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+/// `POST /chat/message` — multipart: `uuid` / `text` / `device_name` fields
+/// plus any number of `file` parts. Idempotent on `uuid`, so a phone retrying
+/// a send whose response was lost cannot duplicate the message.
+async fn chat_message(
+    State(st): State<RestState>,
+    Extension(auth): Extension<pairing::AuthContext>,
+    mut multipart: Multipart,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    let mut uuid = String::new();
+    let mut text = String::new();
+    let mut claimed_name = String::new();
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
+    // Uploads are spooled to a temp dir, then copied into the chat store; the
+    // temp dir is removed whichever way the request ends.
+    let tmp_dir = std::env::temp_dir().join(format!("fms-chat-upload-{}", Uuid::new_v4()));
+
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                return json_error(StatusCode::BAD_REQUEST, &format!("malformed multipart body: {e}"));
+            }
+        };
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" {
+            let orig = field.file_name().unwrap_or("file").to_string();
+            let bytes = match field.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    return json_error(StatusCode::BAD_REQUEST, &format!("cannot read upload: {e}"));
+                }
+            };
+            if std::fs::create_dir_all(&tmp_dir).is_err() {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "cannot prepare upload dir");
+            }
+            let path = tmp_dir.join(format!("{}.bin", files.len()));
+            if let Err(e) = std::fs::write(&path, &bytes) {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+            }
+            files.push((path, orig));
+        } else {
+            let value = match field.text().await {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    return json_error(StatusCode::BAD_REQUEST, &format!("cannot read field: {e}"));
+                }
+            };
+            match name.as_str() {
+                "uuid" => uuid = value,
+                "text" => text = value,
+                "device_name" => claimed_name = value,
+                _ => {}
+            }
+        }
+    }
+
+    let response = chat_message_inner(&settings, &auth, uuid, text, claimed_name, &files)
+        .map(|msg| {
+            let _ = st.app.emit("chat-message", &msg);
+            (StatusCode::OK, Json(msg)).into_response()
+        })
+        .unwrap_or_else(|e| json_error(StatusCode::BAD_REQUEST, &e));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    response
+}
+
+fn chat_message_inner(
+    settings: &SettingsState,
+    auth: &pairing::AuthContext,
+    uuid: String,
+    text: String,
+    claimed_name: String,
+    files: &[(PathBuf, String)],
+) -> Result<chat::ChatMessage, String> {
+    // Stored verbatim as the primary key and echoed back, so shape-check it.
+    if !chat::valid_message_uuid(&uuid) {
+        return Err("missing or invalid 'uuid' field".to_string());
+    }
+    if text.trim().is_empty() && files.is_empty() {
+        return Err("message is empty — send text or at least one file".to_string());
+    }
+    // A paired device is attributed by its registry entry; the name it claims
+    // is only a fallback (legacy clients / trusted-zone callers).
+    let sender_device = auth.device_id.clone().unwrap_or_else(|| "pc".to_string());
+    let sender_name = match auth.device_id.as_deref() {
+        Some(id) => pairing::list_devices(settings)
+            .ok()
+            .and_then(|ds| ds.into_iter().find(|d| d.device_id == id).map(|d| d.name))
+            .or_else(|| {
+                if claimed_name.is_empty() { None } else { Some(claimed_name.clone()) }
+            })
+            .unwrap_or_else(|| "Device".to_string()),
+        None => chat::pc_sender_name(),
+    };
+    chat::insert_message(settings, &uuid, &sender_device, &sender_name, &text, files)
+}
+
+/// `GET /chat/attachment/{uuid}` — stream one stored attachment back to the
+/// caller. Resolved through the DB row only, so the path can't be steered at
+/// arbitrary files on the PC.
+async fn chat_attachment(
+    State(st): State<RestState>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    if !chat::valid_message_uuid(&uuid) {
+        return json_error(StatusCode::BAD_REQUEST, "invalid attachment id");
+    }
+    let (path, att) = match chat::attachment_file(&settings, &uuid) {
+        Ok(v) => v,
+        Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
+    };
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let body = axum::body::Body::from_stream(ReaderStream::new(file));
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&att.mime).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    let disposition = format!("inline; filename=\"{}\"", chat::sanitize_filename(&att.filename));
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&disposition).unwrap_or_else(|_| HeaderValue::from_static("inline")),
+    );
+    (StatusCode::OK, headers, body).into_response()
 }
 
 // ---------------------------------------------------------------------------

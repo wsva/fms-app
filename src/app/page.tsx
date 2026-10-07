@@ -20,6 +20,7 @@ import CardContextMenu from "@/components/cards/CardContextMenu";
 import TtsPage from "@/components/listen_speak/edge_tts/TtsPage";
 import SettingsPage from "@/components/settings/SettingsPage";
 import LLMChatPage from "@/components/llm/chat/ChatPage";
+import DeviceChatPage from "@/components/chat/ChatPage";
 import OcrPage from "@/components/ocr/OcrPage";
 import WikiPage from "@/components/wiki/WikiPage";
 import LogPage from "@/components/tools/LogPage";
@@ -244,6 +245,9 @@ export default function Home() {
         </div>
         <div style={{ display: activeTab === "llm-chat" ? "flex" : "none" }} className="flex-1 min-h-0">
           <LLMChatPage />
+        </div>
+        <div style={{ display: activeTab === "chat" ? "flex" : "none" }} className="flex-1 min-h-0">
+          <DeviceChatPage active={activeTab === "chat"} />
         </div>
         <div style={{ display: activeTab === "ocr" ? "flex" : "none" }} className="flex-1 min-h-0">
           <OcrPage />
