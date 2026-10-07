@@ -1643,6 +1643,10 @@ pub(crate) fn create_db_schema(conn: &rusqlite::Connection) -> Result<(), String
     )
     .map_err(|e| e.to_string())?;
 
+    // §3.4: a per-dataset tombstone table (travels with snapshots) so a delete
+    // is durable and can collide with a resurrected offline edit.
+    crate::sync_log::ensure_tombstones(conn)?;
+
     Ok(())
 }
 

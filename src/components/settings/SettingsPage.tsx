@@ -64,6 +64,11 @@ interface WorkspaceSettings {
   datasets_dir: string;
   books_dir: string;
   wiki_dir: string;
+  // Sync role + cluster identity (docs/my_sync_design.md §3.1). Workspace-
+  // scoped: `role` is "hub"|"follower" (empty ⇒ follower); `cluster_id` is a
+  // UUID issued once when a workspace is first designated hub.
+  role: string;
+  cluster_id: string;
 }
 
 // A row of the PC's paired-device registry (pairing.rs `PairedDevice`).
@@ -121,6 +126,10 @@ export default function SettingsPage() {
   const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings | null>(null);
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [savedGlobal, setSavedGlobal] = useState(false);
+  // Sync role designation (desktop only): pending role while the invoke runs,
+  // plus a short-lived confirmation string.
+  const [savingRole, setSavingRole] = useState<"" | "hub" | "follower">("");
+  const [roleMsg, setRoleMsg] = useState("");
   const [agentTest, setAgentTest] = useState<{ kind: "ok" | "err" | "busy"; text: string } | null>(null);
   const [currentTheme, setCurrentTheme] = useState<ThemeId>("light");
 
@@ -306,6 +315,26 @@ export default function SettingsPage() {
       console.error("Failed to save global settings:", e);
     } finally {
       setSavingGlobal(false);
+    }
+  }
+
+  // Designate this workspace as hub or follower. The backend generates the
+  // `cluster_id` once on the first promotion to hub, then persists the role.
+  // Re-fetch the workspace so the freshly-issued cluster id shows up.
+  async function handleSetRole(role: "hub" | "follower") {
+    if (!isTauri() || savingRole) return;
+    setSavingRole(role);
+    setRoleMsg("");
+    try {
+      await invoke("settings_set_role", { role });
+      const w = await invoke<WorkspaceSettings>("settings_get_workspace");
+      setWorkspaceSettings(w);
+      setRoleMsg(role === "hub" ? "This workspace is now the sync hub." : "This workspace is now a follower.");
+      setTimeout(() => setRoleMsg(""), 4000);
+    } catch (e) {
+      setRoleMsg(`Failed to set role: ${String(e)}`);
+    } finally {
+      setSavingRole("");
     }
   }
 
@@ -645,6 +674,39 @@ export default function SettingsPage() {
             description="Root directory for wiki markdown documents."
             value={workspaceSettings?.wiki_dir ?? ""}
           />
+
+          {/* Sync role (desktop only) — designate this workspace as the hub or a
+              follower. A phone is always a follower, so the control is hidden on
+              mobile (docs/my_sync_design.md §3.1). */}
+          {!mobile && (
+            <div className="mb-4 mt-6 pt-4 border-t border-border-light">
+              <label className="block font-medium mb-1">Sync Role</label>
+              <p className="text-text-secondary text-sm mb-3">
+                Choose which machine holds the authoritative copy. The <strong>hub</strong> is the
+                source of truth that followers sync against; a <strong>follower</strong> pulls from
+                the hub and pushes edits back. Promoting to hub issues a cluster id once.
+              </p>
+              <div className="flex items-center gap-3 flex-wrap">
+                <select
+                  className="px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary max-w-xs w-full"
+                  value={workspaceSettings?.role && workspaceSettings.role !== "" ? workspaceSettings.role : "follower"}
+                  disabled={!!savingRole || !workspaceSettings}
+                  onChange={(e) => handleSetRole(e.target.value === "hub" ? "hub" : "follower")}
+                >
+                  <option value="follower">Follower (syncs from the hub)</option>
+                  <option value="hub">Hub (authoritative copy)</option>
+                </select>
+                {savingRole && <span className="text-sm text-text-secondary">Applying…</span>}
+              </div>
+              <div className="mt-3 text-sm">
+                <span className="text-text-secondary">Cluster ID: </span>
+                <code className="px-1.5 py-0.5 rounded bg-bg-muted border border-border-light select-all">
+                  {workspaceSettings?.cluster_id || "— (not yet a hub)"}
+                </code>
+              </div>
+              {roleMsg && <p className="mt-2 text-sm text-green-500">{roleMsg}</p>}
+            </div>
+          )}
         </section>
 
         {/* ── Microphone section ─────────────────────────────── */}

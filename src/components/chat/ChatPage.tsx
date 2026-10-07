@@ -37,6 +37,10 @@ interface ChatMessage {
   text: string;
   created_at: string;
   attachments: ChatAttachment[];
+  /** Hub-side rowid cursor; 0 while the message is still only in the outbox. */
+  id?: number;
+  /** Phone mirror: queued offline, not yet acknowledged by the hub (§4). */
+  pending?: boolean;
 }
 
 interface ChatListResponse {
@@ -525,15 +529,20 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
   }, []);
 
   const grouped = useMemo(() => {
+    // A send in flight renders once as an ephemeral "sending…" outbox row; the
+    // durable mirror echoes the same uuid back as `pending`, so drop it here to
+    // avoid a double bubble until the hub confirms and it becomes a normal row.
+    const inflight = new Set(outbox.map((o) => o.uuid));
     const out: { day: string; items: ChatMessage[] }[] = [];
     for (const m of messages) {
+      if (inflight.has(m.uuid)) continue;
       const day = dayKey(m.created_at);
       const last = out[out.length - 1];
       if (last && last.day === day) last.items.push(m);
       else out.push({ day, items: [m] });
     }
     return out;
-  }, [messages]);
+  }, [messages, outbox]);
 
   // Platform facts (`isTauri()`, `mobile`) only exist inside the WebView, so
   // nothing platform-dependent may be rendered before mount — otherwise the
@@ -613,11 +622,20 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
                 >
                   <span className="text-[11px] text-text-tertiary px-1 select-none">
                     {m.sender_name} · {formatTime(m.created_at)}
+                    {m.pending && (
+                      <span className="ml-1 inline-flex items-center gap-0.5">
+                        <Loader2 size={10} className="animate-spin inline" />pending
+                      </span>
+                    )}
                   </span>
                   {m.text && (
                     <div
                       className={`px-3 py-2 rounded-xl text-sm whitespace-pre-wrap break-words ${
-                        mine ? "bg-accent-bg text-white" : "bg-bg-card border border-border-light text-text-primary"
+                        mine
+                          ? m.pending
+                            ? "bg-accent-bg/40 text-text-primary"
+                            : "bg-accent-bg text-white"
+                          : "bg-bg-card border border-border-light text-text-primary"
                       }`}
                     >
                       {m.text}

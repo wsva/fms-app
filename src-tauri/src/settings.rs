@@ -91,6 +91,22 @@ pub struct AppSettings {
     /// the key, never a claimed identity.
     #[serde(default)]
     pub device_seed: String,
+    /// This workspace's sync role (§3.1): `"hub"` (authority copy, runs the
+    /// web service, appends to `sync_log`, never enqueues) or `"follower"`
+    /// (pulls + enqueues edits). A **runtime property, not a compile flag** —
+    /// the same desktop binary can play either role. Workspace-scoped (lives
+    /// alongside the chat store under `<workspace>/`), not global. Empty is
+    /// treated as `"follower"` for safety; mobile is always a follower.
+    #[serde(default)]
+    pub role: String,
+    /// Identifier of the cluster (hub identity group) this workspace belongs
+    /// to. Generated once when a workspace is designated the hub and adopted
+    /// by followers on first successful signed contact (§7 trust-on-first-use).
+    /// Every request, `/status`, and the discovery beacon carry it; a follower
+    /// refuses a differing `cluster_id` — kills the "whoever's URL you typed is
+    /// the hub" ambiguity. Workspace-scoped, not global.
+    #[serde(default)]
+    pub cluster_id: String,
 }
 
 fn default_ollama_url() -> String {
@@ -231,6 +247,13 @@ pub struct WorkspaceSettings {
     /// Root directory of the wiki (markdown documents).
     #[serde(default)]
     pub wiki_dir: String,
+    /// Sync role for this workspace (`"hub"` | `"follower"`; see
+    /// `AppSettings::role`). Workspace-scoped.
+    #[serde(default)]
+    pub role: String,
+    /// Cluster id this workspace belongs to (see `AppSettings::cluster_id`).
+    #[serde(default)]
+    pub cluster_id: String,
 }
 
 impl Default for WorkspaceSettings {
@@ -241,6 +264,8 @@ impl Default for WorkspaceSettings {
             datasets_dir: data_dir.join("datasets").to_string_lossy().into_owned(),
             books_dir: data_dir.join("datasets").join("book").to_string_lossy().into_owned(),
             wiki_dir: data_dir.join("wiki").to_string_lossy().into_owned(),
+            role: String::new(),
+            cluster_id: String::new(),
         }
     }
 }
@@ -252,6 +277,8 @@ impl WorkspaceSettings {
             datasets_dir: s.datasets_dir.clone(),
             books_dir: s.books_dir.clone(),
             wiki_dir: s.wiki_dir.clone(),
+            role: s.role.clone(),
+            cluster_id: s.cluster_id.clone(),
         }
     }
 
@@ -260,6 +287,8 @@ impl WorkspaceSettings {
         s.datasets_dir = self.datasets_dir.clone();
         s.books_dir = self.books_dir.clone();
         s.wiki_dir = self.wiki_dir.clone();
+        s.role = self.role.clone();
+        s.cluster_id = self.cluster_id.clone();
     }
 }
 
@@ -287,6 +316,8 @@ impl Default for AppSettings {
             pc_token: String::new(),
             device_id: String::new(),
             device_seed: String::new(),
+            role: String::new(),
+            cluster_id: String::new(),
         }
     }
 }
@@ -385,6 +416,25 @@ impl SettingsState {
     pub fn wiki_dir(&self) -> PathBuf {
         let configured = self.settings.lock().unwrap().wiki_dir.clone();
         self.workspace_subdir("wiki", &configured)
+    }
+
+    /// This workspace's sync role (§3.1). Empty means "not yet designated" and
+    /// is treated as `"follower"` for safety (a stray desktop must not silently
+    /// act as the authority hub). Mobile builds never set `hub`.
+    pub fn role(&self) -> String {
+        let r = self.settings.lock().unwrap().role.clone();
+        if r.is_empty() { "follower".to_string() } else { r }
+    }
+
+    /// Whether this workspace is the designated hub (authority copy).
+    pub fn is_hub(&self) -> bool {
+        self.role() == "hub"
+    }
+
+    /// This workspace's cluster id (empty until designated hub or adopted from
+    /// a hub on first successful signed contact — see docs/my_sync_design.md §7).
+    pub fn cluster_id(&self) -> String {
+        self.settings.lock().unwrap().cluster_id.clone()
     }
 
     /// Currently preferred default STT model ID (global setting; empty = unset).
@@ -694,4 +744,94 @@ pub async fn settings_set_workspace(
     
     let _ = app.emit("settings-changed", ());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Sync role + cluster designation (docs/my_sync_design.md §3.1)
+// ---------------------------------------------------------------------------
+
+/// Designate this workspace's sync role. `"hub"` makes it the authority copy:
+/// the first time a workspace becomes a hub it is issued a fresh `cluster_id`
+/// (kept thereafter so followers can bind to it). `"follower"` demotes it.
+/// Mobile builds are always followers and reject a `"hub"` request.
+#[tauri::command]
+pub async fn settings_set_role(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+    role: String,
+) -> Result<AppSettings, String> {
+    let role = role.trim().to_lowercase();
+    if role != "hub" && role != "follower" {
+        return Err(format!("invalid role '{role}' (expected 'hub' or 'follower')"));
+    }
+    #[cfg(not(feature = "desktop"))]
+    if role == "hub" {
+        return Err("this device is a follower and cannot act as the hub".to_string());
+    }
+    let ws_dir = state.workspace_dir.lock().unwrap().clone();
+    let mut s = state.settings.lock().unwrap().clone();
+    s.role = role.clone();
+    if role == "hub" && s.cluster_id.is_empty() {
+        s.cluster_id = uuid::Uuid::new_v4().to_string();
+    }
+    SettingsState::save(&s, ws_dir.as_ref())?;
+    *state.settings.lock().unwrap() = s.clone();
+    log::info!("[Settings] role set to '{role}' (cluster_id='{}')", s.cluster_id);
+    let _ = app.emit("settings-changed", ());
+    Ok(s)
+}
+
+/// Trust-on-first-use cluster adoption (§7): a follower stores the `cluster_id`
+/// reported by the hub it has just successfully paired with, so subsequent
+/// contact refuses any other hub. Only widens an empty local id; a follower
+/// already bound to a cluster never silently switches (the user must re-pair).
+#[tauri::command]
+pub async fn settings_adopt_cluster(
+    state: State<'_, SettingsState>,
+    cluster_id: String,
+) -> Result<(), String> {
+    let cluster_id = cluster_id.trim().to_string();
+    if cluster_id.is_empty() {
+        return Err("empty cluster_id".to_string());
+    }
+    let ws_dir = state.workspace_dir.lock().unwrap().clone();
+    let mut s = state.settings.lock().unwrap().clone();
+    if s.cluster_id.is_empty() {
+        s.cluster_id = cluster_id.clone();
+        SettingsState::save(&s, ws_dir.as_ref())?;
+        *state.settings.lock().unwrap() = s;
+        log::info!("[Settings] adopted cluster_id='{cluster_id}'");
+    } else if s.cluster_id != cluster_id {
+        return Err(format!(
+            "this device belongs to cluster '{}' but the hub reports '{cluster_id}'; use 'forget hub / re-pair' to switch",
+            s.cluster_id
+        ));
+    }
+    Ok(())
+}
+
+/// "Forget hub / re-pair" (§7): drop the trust-on-first-use cluster binding and
+/// the saved hub address so this device can attach to a different hub. A
+/// follower that adopted the wrong cluster (or whose hub was replaced) is otherwise
+/// locked out — [`settings_adopt_cluster`] refuses a differing id by design, so
+/// this is the only sanctioned reset. Leaves the role untouched (a device stays
+/// whatever it was designated); does not delete any local dataset data.
+#[tauri::command]
+pub async fn settings_forget_hub(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+) -> Result<AppSettings, String> {
+    let ws_dir = state.workspace_dir.lock().unwrap().clone();
+    let mut s = state.settings.lock().unwrap().clone();
+    log::info!(
+        "[Settings] forget hub (was cluster_id='{}', pc_url='{}')",
+        s.cluster_id,
+        s.pc_url
+    );
+    s.cluster_id = String::new();
+    s.pc_url = String::new();
+    SettingsState::save(&s, ws_dir.as_ref())?;
+    *state.settings.lock().unwrap() = s.clone();
+    let _ = app.emit("settings-changed", ());
+    Ok(s)
 }

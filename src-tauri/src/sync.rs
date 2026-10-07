@@ -53,6 +53,36 @@ pub(crate) fn pc_base(settings: &SettingsState) -> String {
         .to_string()
 }
 
+/// Trust-on-first-use cluster adoption + guard (§3.1, §7), applied from a hub
+/// `/status` payload:
+/// * if this device has no `cluster_id` yet, adopt the hub's (TOFU);
+/// * if it already belongs to one and the hub reports a different id, refuse
+///   rather than silently switch (the user must "forget hub / re-pair").
+/// An empty hub id (not-yet-upgraded) is ignored — adoption happens later.
+fn adopt_or_verify_cluster(settings: &SettingsState, hub_cluster: &str) -> Result<(), String> {
+    if hub_cluster.is_empty() {
+        return Ok(());
+    }
+    let ws_dir = settings.workspace_dir.lock().unwrap().clone();
+    let mut s = settings.settings.lock().unwrap().clone();
+    if s.cluster_id.is_empty() {
+        s.cluster_id = hub_cluster.to_string();
+        settings::SettingsState::save(&s, ws_dir.as_ref())?;
+        *settings.settings.lock().unwrap() = s;
+        log::info!("[sync] adopted hub cluster_id='{hub_cluster}' (trust-on-first-use)");
+        Ok(())
+    } else if s.cluster_id != hub_cluster {
+        Err(format!(
+            "this device belongs to cluster '{}' but the hub at {} is '{}'; use 'forget hub / re-pair' to switch",
+            s.cluster_id,
+            pc_base(settings),
+            hub_cluster
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Effective PC base URL: a caller-supplied override (e.g. a typed-but-unsaved
 /// address in Settings) wins if non-empty; otherwise the persisted setting.
 fn resolve_pc_url(settings: &SettingsState, override_url: Option<&str>) -> String {
@@ -129,26 +159,92 @@ fn ensure_device_identity(settings: &SettingsState) -> Result<DeviceIdentity, St
     Ok(ident)
 }
 
+/// The device id this machine signs with — the id the hub records as a message's
+/// `sender_device`, so the phone's chat mirror can decide which bubbles are its
+/// own without a round-trip. Ensures the identity exists (persisting it) on call.
+pub(crate) fn local_device_id(settings: &SettingsState) -> Result<String, String> {
+    Ok(ensure_device_identity(settings)?.device_id)
+}
+
+/// Percent-encode one query component per RFC 3986 (only unreserved bytes pass
+/// through). Kept hand-rolled so the string we sign and the string we splice
+/// into the URL are byte-for-byte identical — `reqwest`'s own `.query()` encoder
+/// would reorder/re-encode and break the v2 signature.
+pub(crate) fn qenc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Build a deterministic `k1=v1&k2=v2` query string (each component RFC 3986
+/// encoded) from ordered pairs. Empty when there are no pairs — callers append
+/// it to the URL verbatim and sign the exact same string.
+pub(crate) fn build_query(pairs: &[(&str, String)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", qenc(k), qenc(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// sha256 hex of `query ++ b"\n" ++ body`, the payload component of the v2
+/// signed message (§3.3 signature hardening). `body` is the exact bytes that
+/// will be sent; for streaming multipart uploads (`/chat/message`) both ends
+/// pass an empty slice and rely on the message uuid for replay-safety.
+pub(crate) fn payload_hash(query: &str, body: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(query.as_bytes());
+    h.update([b'\n']);
+    h.update(body);
+    format!("{:x}", h.finalize())
+}
+
+/// The canonical signed preimage. v2 (this build) folds in the payload hash so a
+/// captured request cannot be replayed with a mutated body or query.
+pub(crate) fn signed_message(ts: u64, method: &str, path: &str, query: &str, body: &[u8]) -> String {
+    format!("{}\n{}\n{}\n{}", ts, method.to_uppercase(), path, payload_hash(query, body))
+}
+
 /// Add `x-fms-device` / `x-fms-ts` / `x-fms-sig` headers to an outbound PC
 /// request. `path` must be the URL path *as the PC sees it* (including the
-/// `/api/v1` prefix) — it is part of the signed message.
+/// `/api/v1` prefix) and `query` the exact (pre-encoded) query string appended
+/// to the URL — both are part of the signed message. `body` must be the exact
+/// bytes sent; callers embed it with `.body(body.to_vec())` so the signature
+/// and the wire bytes never diverge.
 pub(crate) fn with_device_auth(
     req: reqwest::RequestBuilder,
     settings: &SettingsState,
     method: &str,
     path: &str,
+    query: &str,
+    body: &[u8],
 ) -> Result<reqwest::RequestBuilder, String> {
     let ident = ensure_device_identity(settings)?;
+    let (role, cluster_id) = {
+        let s = settings.settings.lock().unwrap();
+        (s.role.clone(), s.cluster_id.clone())
+    };
+    let role = if role.is_empty() { "follower".to_string() } else { role };
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let msg = format!("{}\n{}\n{}", ts, method.to_uppercase(), path);
+    let msg = signed_message(ts, method, path, query, body);
     let sig = ident.key_pair.sign(msg.as_bytes());
     Ok(req
         .header("x-fms-device", ident.device_id.clone())
         .header("x-fms-ts", ts.to_string())
-        .header("x-fms-sig", hex_encode(sig.as_ref())))
+        .header("x-fms-sig", hex_encode(sig.as_ref()))
+        .header("x-fms-role", role)
+        .header("x-fms-cluster", cluster_id)
+        .header("x-fms-protocol", crate::PROTOCOL_VERSION.to_string()))
 }
 
 /// Local root a dataset type syncs into: `<datasets>/<type>` (e.g.
@@ -175,17 +271,54 @@ fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
             file_count   INTEGER NOT NULL DEFAULT 0
         );",
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    // Migration (§3.2): promote `dataset_sync_state` with a nullable incremental
+    // row-log cursor. Added with **no DEFAULT** so every pre-existing row stays
+    // NULL — a NULL cursor means "this copy predates incremental sync", so the
+    // first `/changes` pull is told `resync_required` and the follower takes one
+    // fresh snapshot, after which the cursor is a real hub seq.
+    let has_cursor: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('dataset_sync_state') WHERE name = 'cursor'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if !has_cursor {
+        conn.execute("ALTER TABLE dataset_sync_state ADD COLUMN \"cursor\" INTEGER", [])
+            .map_err(|e| e.to_string())?;
+    }
+    // Migration (Phase 5, §3.4): promote `writeback_queue` with `edit_time` (the
+    // device-local action stamp that drives later-wins conflicts on the hub) and
+    // `object_id` (the row a *state* change mutates, so coalescing can fold
+    // repeat edits to one row). Added nullable so pre-existing rows keep
+    // working; `enqueue_change` backfills both on every new insert.
+    let has_edit_time: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('writeback_queue') WHERE name = 'edit_time'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if !has_edit_time {
+        conn.execute("ALTER TABLE writeback_queue ADD COLUMN \"edit_time\" TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
+    let has_object_id: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('writeback_queue') WHERE name = 'object_id'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if !has_object_id {
+        conn.execute("ALTER TABLE writeback_queue ADD COLUMN object_id TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Writeback queue (producer side, called from the mobile write commands)
 // ---------------------------------------------------------------------------
 
-/// Append a queued change to the writeback queue. Only fed on mobile: the
-/// `dictation`/`xp` write commands call this under `#[cfg(not(feature = "desktop"))]`
-/// (desktop writes straight to the DB), so it is legitimately unused on desktop.
-#[allow(dead_code)]
+/// Append a queued change to the writeback queue. Both mobile clients and a
+/// desktop running `role = "follower"` funnel here via
+/// [`crate::sync_log::commit_change`]; the hub role never enqueues. State kinds
+/// coalesce (§3.4): a newer edit to the same `(kind, dataset, object_id)`
+/// replaces the still-pending older one instead of stacking, while append-only
+/// and counter kinds keep every distinct row.
 pub fn enqueue_change(
     settings: &SettingsState,
     kind: &str,
@@ -194,14 +327,57 @@ pub fn enqueue_change(
 ) -> Result<(), String> {
     let conn = dictation::open_app_db(settings)?;
     ensure_sync_tables(&conn)?;
+    let edit_time = chrono::Utc::now().to_rfc3339();
+    let object_id = crate::sync_log::object_id_for(kind, payload);
+    // Fold repeat edits to one mutable row so we neither ship stale intermediate
+    // payloads nor grow the queue without bound between flushes. An empty
+    // `object_id` (bulk inserts) is left uncoalesced by the guard.
+    if crate::sync_log::ChangeClass::of(kind).coalescible() && !object_id.is_empty() {
+        conn.execute(
+            "DELETE FROM writeback_queue \
+             WHERE kind = ?1 AND dataset_uuid = ?2 AND object_id = ?3",
+            params![kind, dataset_uuid, &object_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     let id = Uuid::new_v4().to_string();
     conn.execute(
-        "INSERT OR REPLACE INTO writeback_queue (id, kind, dataset_uuid, payload, queued_at) \
-         VALUES (?1, ?2, ?3, ?4, datetime('now'))",
-        params![id, kind, dataset_uuid, payload.to_string()],
+        "INSERT INTO writeback_queue \
+         (id, kind, dataset_uuid, payload, queued_at, edit_time, object_id) \
+         VALUES (?1, ?2, ?3, ?4, datetime('now'), ?5, ?6)",
+        params![id, kind, dataset_uuid, payload.to_string(), &edit_time, &object_id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Sum the `amount` of XP deltas still sitting un-acknowledged in the writeback
+/// queue for `user_id` (§3.6 counter display). A follower *bakes* the delta into
+/// its local `xp_user` at award time **and** enqueues it, so the local total is
+/// already `hub_total + sum(pending)`; this count is therefore the informational
+/// "not yet confirmed by the hub" overlay the UI/status surface shows, and it
+/// drains on the flush ack (the queue entry is dropped once acknowledged).
+/// Reading the queue directly keeps the source of truth single — no separate
+/// pending ledger to drift.
+pub fn pending_xp_delta(settings: &SettingsState, user_id: &str) -> Result<i64, String> {
+    let conn = dictation::open_app_db(settings)?;
+    ensure_sync_tables(&conn)?;
+    let mut stmt = conn
+        .prepare("SELECT payload FROM writeback_queue WHERE kind = 'xp'")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut total = 0i64;
+    for row in rows {
+        let raw = row.map_err(|e| e.to_string())?;
+        if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+            if v.get("user_id").and_then(|x| x.as_str()) == Some(user_id) {
+                total += v.get("amount").and_then(|x| x.as_i64()).unwrap_or(0);
+            }
+        }
+    }
+    Ok(total)
 }
 
 // ---------------------------------------------------------------------------
@@ -220,12 +396,13 @@ pub async fn writeback_flush_inner(settings: &SettingsState) -> Result<usize, St
 
     loop {
         // 1. Read a batch (Connection not held across await).
-        let batch: Vec<(String, String, String, String, String)> = {
+        let batch: Vec<(String, String, String, String, String, String)> = {
             let conn = dictation::open_app_db(settings)?;
             ensure_sync_tables(&conn)?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, kind, dataset_uuid, payload, queued_at \
+                    "SELECT id, kind, dataset_uuid, payload, queued_at, \
+                        COALESCE(edit_time, '') \
                      FROM writeback_queue ORDER BY queued_at LIMIT 50",
                 )
                 .map_err(|e| e.to_string())?;
@@ -237,6 +414,7 @@ pub async fn writeback_flush_inner(settings: &SettingsState) -> Result<usize, St
                         r.get::<_, String>(2)?,
                         r.get::<_, String>(3)?,
                         r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
                     ))
                 })
                 .map_err(|e| e.to_string())?;
@@ -249,25 +427,34 @@ pub async fn writeback_flush_inner(settings: &SettingsState) -> Result<usize, St
         // 2. POST the batch.
         let changes: Vec<Value> = batch
             .iter()
-            .map(|(id, kind, ds, payload, queued_at)| {
+            .map(|(id, kind, ds, payload, queued_at, edit_time)| {
                 json!({
                     "id": id,
                     "kind": kind,
                     "dataset_uuid": if ds.is_empty() { Value::Null } else { json!(ds) },
                     "payload": serde_json::from_str::<Value>(payload).unwrap_or(Value::Null),
+                    // Empty for a pre-Phase-5 queue row; the hub then treats it
+                    // as "arrived now" (§3.4 clamp). Otherwise the device stamp.
+                    "edit_time": edit_time,
                     "queued_at": queued_at,
                 })
             })
             .collect();
         let body = json!({ "user_key": crate::auth::workspace_identity(settings), "changes": changes });
 
+        // Serialize once and sign the exact bytes we put on the wire, so the
+        // v2 signature (which covers the body, §3.3) and the request agree.
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
         let req = with_device_auth(
             client.post(format!("{base}/api/v1/sync/changes")),
             settings,
             "POST",
             "/api/v1/sync/changes",
+            "",
+            &body_bytes,
         )?
-        .json(&body);
+        .header("content-type", "application/json")
+        .body(body_bytes);
         let resp = req.send().await.map_err(|e| e.to_string())?;
         let status = resp.status();
         let results: Value = resp.json().await.unwrap_or(Value::Null);
@@ -335,6 +522,8 @@ pub async fn dataset_sync_snapshot(
         &settings,
         "GET",
         &format!("/api/v1/datasets/{uuid}/manifest"),
+        "",
+        b"",
     )?;
     let m: Value = mreq
         .send()
@@ -391,6 +580,8 @@ pub async fn dataset_sync_snapshot(
         &settings,
         "GET",
         &format!("/api/v1/datasets/{uuid}/snapshot"),
+        "",
+        b"",
     )?;
     let resp = sreq
         .send()
@@ -398,6 +589,16 @@ pub async fn dataset_sync_snapshot(
         .map_err(|e| e.to_string())?
         .error_for_status()
         .map_err(|e| e.to_string())?;
+
+    // The hub's change-log seq this snapshot already reflects. Recorded as the
+    // follower's cursor so the next `/changes` pull continues from here (§3.3).
+    // Absent from a pre-v2 hub → NULL, which keeps the copy marked "needs resync"
+    // (harmless, since a v1 hub is never polled incrementally).
+    let snapshot_seq: Option<i64> = resp
+        .headers()
+        .get("x-snapshot-seq")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok());
 
     let mut file = std::fs::File::create(&part).map_err(|e| e.to_string())?;
     let mut stream = resp.bytes_stream();
@@ -444,15 +645,15 @@ pub async fn dataset_sync_snapshot(
     let _ = std::fs::remove_dir_all(&old_dir);
     let _ = std::fs::remove_file(&part);
 
-    // 7. Record sync state.
+    // 7. Record sync state (with the incremental cursor this snapshot carries).
     {
         let conn = dictation::open_app_db(&settings)?;
         ensure_sync_tables(&conn)?;
         conn.execute(
             "INSERT OR REPLACE INTO dataset_sync_state \
-             (dataset_uuid, overall_hash, synced_at, bytes, file_count) \
-             VALUES (?1, ?2, datetime('now'), ?3, ?4)",
-            params![&uuid, &hash, received as i64, file_count as i64],
+             (dataset_uuid, overall_hash, synced_at, bytes, file_count, \"cursor\") \
+             VALUES (?1, ?2, datetime('now'), ?3, ?4, ?5)",
+            params![&uuid, &hash, received as i64, file_count as i64, snapshot_seq],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -484,6 +685,9 @@ pub struct SyncStateEntry {
     pub synced_at: String,
     pub bytes: i64,
     pub file_count: i64,
+    /// Incremental row-log cursor (§3.2). `None` = a NULL cursor, i.e. this copy
+    /// predates incremental sync and is due one resync before deltas apply.
+    pub cursor: Option<i64>,
 }
 
 /// Read the local `dataset_sync_state` table (what has been pulled and when).
@@ -495,7 +699,7 @@ pub async fn dataset_sync_state(
     ensure_sync_tables(&conn)?;
     let mut stmt = conn
         .prepare(
-            "SELECT dataset_uuid, overall_hash, synced_at, bytes, file_count \
+            "SELECT dataset_uuid, overall_hash, synced_at, bytes, file_count, \"cursor\" \
              FROM dataset_sync_state",
         )
         .map_err(|e| e.to_string())?;
@@ -507,6 +711,7 @@ pub async fn dataset_sync_state(
                 synced_at: r.get(2)?,
                 bytes: r.get(3)?,
                 file_count: r.get(4)?,
+                cursor: r.get(5)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -522,6 +727,274 @@ pub async fn writeback_pending_count(settings: State<'_, SettingsState>) -> Resu
         .query_row("SELECT COUNT(*) FROM writeback_queue", [], |r| r.get(0))
         .unwrap_or(0);
     Ok(n)
+}
+
+// ---------------------------------------------------------------------------
+// Sync status detail (§3.5) — one object backing the desktop + mobile Status
+// surface and its MCP twin. Reads only; never triggers a round.
+// ---------------------------------------------------------------------------
+
+/// Where one dataset stands relative to the hub. `state` is a coarse bucket the
+/// UI can render directly:
+/// * `downloaded`   — present locally with a live row-log cursor;
+/// * `needs_resync` — present but the cursor is NULL (predates incremental sync)
+///   or sits below the hub's prune watermark, so one snapshot is due;
+/// * `not_downloaded` — advertised by the hub, absent locally;
+/// * `removed_on_hub` — a local copy the hub no longer lists (deleted upstream).
+#[derive(Serialize)]
+pub struct DatasetStatus {
+    pub dataset_uuid: String,
+    pub dataset_type: String,
+    pub name: String,
+    /// `downloaded` | `needs_resync` | `not_downloaded` | `removed_on_hub`.
+    pub state: String,
+    /// Incremental cursor; `None` when never pulled or awaiting a resync.
+    pub cursor: Option<i64>,
+    pub synced_at: String,
+    pub bytes: i64,
+    pub file_count: i64,
+    /// Whether the hub's current `seq` is ahead of our `cursor` (rows to pull).
+    pub hub_ahead: bool,
+}
+
+/// Live view of the connected hub from its unauthenticated `/status`.
+#[derive(Serialize)]
+pub struct HubStatus {
+    pub address: String,
+    pub reachable: bool,
+    /// Present only when reachable.
+    pub role: Option<String>,
+    pub cluster_id: Option<String>,
+    pub protocol_version: Option<u32>,
+    pub dataset_count: Option<i64>,
+    /// Set when the probe failed — the reason surfaced on the Status page.
+    pub error: Option<String>,
+}
+
+/// Aggregated local + hub sync state for the Status surface (§3.5).
+#[derive(Serialize)]
+pub struct SyncStatusDetail {
+    pub role: String,
+    pub cluster_id: String,
+    pub protocol_version: u32,
+    pub device_id: String,
+    pub hub: HubStatus,
+    pub datasets: Vec<DatasetStatus>,
+    /// Rows queued for writeback upload (this device is a follower).
+    pub queued_count: i64,
+    /// Offline chat messages awaiting flush (follower only; `0` on a hub).
+    pub chat_pending: i64,
+    /// Paired-device registry entries — populated only when `role == "hub"`.
+    /// `Value` (not `pairing::PairedDevice`) because `pairing` is desktop-only;
+    /// the hub serializes its `Vec<PairedDevice>` into this JSON array.
+    pub devices: Value,
+}
+
+/// Assemble the full [`SyncStatusDetail`]. Awaits (hub `/status` + catalog) run
+/// to completion *before* any `Connection` is opened, so no rusqlite handle
+/// (which is `!Send`) is ever held across an `.await`.
+pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncStatusDetail, String> {
+    let base = pc_base(settings);
+
+    // 1. Probe the hub's `/status` (left open by the zone guard, so it works
+    //    before pairing). A failure is recorded, not propagated — a partially
+    //    unreachable hub should still show local state.
+    let mut hub = HubStatus {
+        address: base.clone(),
+        reachable: false,
+        role: None,
+        cluster_id: None,
+        protocol_version: None,
+        dataset_count: None,
+        error: None,
+    };
+    if base.is_empty() {
+        hub.error = Some("no hub configured — use Settings › Discover PC".to_string());
+    } else {
+        let probe = async {
+            let client = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(6))
+                .timeout(Duration::from_secs(12))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let resp = client
+                .get(format!("{base}/api/v1/status"))
+                .send()
+                .await
+                .map_err(|e| format!("cannot reach hub at {base}: {e}"))?;
+            resp.error_for_status()
+                .map_err(|e| format!("{e}"))?
+                .json::<Value>()
+                .await
+                .map_err(|e| format!("unexpected /status response: {e}"))
+        }
+        .await;
+        match probe {
+            Ok(v) => {
+                hub.reachable = true;
+                hub.role = v.get("role").and_then(|r| r.as_str()).map(|s| s.to_string());
+                hub.cluster_id =
+                    v.get("cluster_id").and_then(|c| c.as_str()).map(|s| s.to_string());
+                hub.protocol_version =
+                    v.get("protocol_version").and_then(|p| p.as_u64()).map(|p| p as u32);
+                hub.dataset_count = v.get("dataset_count").and_then(|d| d.as_i64());
+            }
+            Err(e) => hub.error = Some(e),
+        }
+    }
+
+    // 2. Pull the hub catalog (cheap `lite` list). Empty when unreachable/unpaired
+    //    — the merge below still reports local-only datasets.
+    let mut catalog: Vec<Value> = Vec::new();
+    if hub.reachable {
+        catalog = pc_get_json(settings, "/api/v1/datasets", &[("lite", "1".to_string())])
+            .await
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+    }
+
+    // 3. Everything below is synchronous SQLite / in-process reads.
+    let role = settings.role();
+    let cluster_id = settings.cluster_id();
+    let device_id = local_device_id(settings).unwrap_or_default();
+
+    let conn = dictation::open_app_db(settings)?;
+    ensure_sync_tables(&conn)?;
+
+    let mut local: Vec<SyncStateEntry> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT dataset_uuid, overall_hash, synced_at, bytes, file_count, \"cursor\" \
+                 FROM dataset_sync_state",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(SyncStateEntry {
+                    dataset_uuid: r.get(0)?,
+                    overall_hash: r.get(1)?,
+                    synced_at: r.get(2)?,
+                    bytes: r.get(3)?,
+                    file_count: r.get(4)?,
+                    cursor: r.get(5)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    // Mark datasets the hub pruned past our cursor (a resync is forced on the
+    // next round — surface it here so the Status page can warn before one runs).
+    for e in &mut local {
+        if let Some(c) = e.cursor {
+            let pruned: Option<i64> = conn
+                .query_row(
+                    "SELECT pruned_up_to FROM sync_prune_marks WHERE dataset_uuid = ?1",
+                    params![e.dataset_uuid],
+                    |r| r.get(0),
+                )
+                .ok();
+            if pruned.map(|p| p > c).unwrap_or(false) {
+                e.cursor = None;
+            }
+        }
+    }
+
+    let queued_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM writeback_queue", [], |r| r.get(0))
+        .unwrap_or(0);
+    drop(conn);
+
+    let chat_pending = if role == "hub" {
+        0
+    } else {
+        crate::chat::pending_outbox_count(settings)
+    };
+
+    let devices: Value = if role == "hub" {
+        #[cfg(feature = "desktop")]
+        {
+            serde_json::to_value(crate::pairing::list_devices(settings).unwrap_or_default())
+                .unwrap_or_else(|_| Value::Array(Vec::new()))
+        }
+        #[cfg(not(feature = "desktop"))]
+        {
+            Value::Array(Vec::new())
+        }
+    } else {
+        Value::Array(Vec::new())
+    };
+
+    // 4. Merge local rows + hub catalog into a per-dataset classification. The
+    //    hub owns no `deleted` flag, so absence from the catalog means the
+    //    dataset was removed upstream (`removed_on_hub`).
+    let mut datasets: Vec<DatasetStatus> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for c in &catalog {
+        let uuid = c["uuid"].as_str().unwrap_or("").to_string();
+        if uuid.is_empty() {
+            continue;
+        }
+        seen.insert(uuid.clone());
+        let entry = local.iter().find(|e| e.dataset_uuid == uuid);
+        let cursor = entry.and_then(|e| e.cursor);
+        let state = match entry {
+            None => "not_downloaded",
+            Some(_) if cursor.is_none() => "needs_resync",
+            Some(_) => "downloaded",
+        };
+        let hub_seq = c["hub_seq"].as_i64();
+        let hub_ahead = match (hub_seq, cursor) {
+            (Some(seq), Some(c)) => seq > c,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        datasets.push(DatasetStatus {
+            dataset_uuid: uuid,
+            dataset_type: c["dataset_type"].as_str().unwrap_or("").to_string(),
+            name: c["name"].as_str().unwrap_or("").to_string(),
+            state: state.to_string(),
+            cursor,
+            synced_at: entry.map(|e| e.synced_at.clone()).unwrap_or_default(),
+            bytes: entry.map(|e| e.bytes).unwrap_or(0),
+            file_count: entry.map(|e| e.file_count).unwrap_or(0),
+            hub_ahead,
+        });
+    }
+    for e in &local {
+        if seen.contains(&e.dataset_uuid) {
+            continue;
+        }
+        datasets.push(DatasetStatus {
+            dataset_uuid: e.dataset_uuid.clone(),
+            dataset_type: String::new(),
+            name: String::new(),
+            state: if hub.reachable { "removed_on_hub" } else { "needs_resync" }.to_string(),
+            cursor: e.cursor,
+            synced_at: e.synced_at.clone(),
+            bytes: e.bytes,
+            file_count: e.file_count,
+            hub_ahead: false,
+        });
+    }
+
+    Ok(SyncStatusDetail {
+        role,
+        cluster_id,
+        protocol_version: crate::PROTOCOL_VERSION,
+        device_id,
+        hub,
+        datasets,
+        queued_count,
+        chat_pending,
+        devices,
+    })
+}
+
+/// `#[tauri::command]` wrapper for the Status page on both desktop + mobile.
+#[tauri::command]
+pub async fn sync_status(settings: State<'_, SettingsState>) -> Result<SyncStatusDetail, String> {
+    sync_status_detail(&settings).await
 }
 
 /// Ping the PC's `GET /api/v1/status` endpoint from native Rust.
@@ -568,6 +1041,13 @@ pub async fn pc_check_status(
         Ok(v) => log::info!("[sync] pc_check_status OK: {v}"),
         Err(e) => log::error!("[sync] pc_check_status FAILED: {e}"),
     }
+    // Trust-on-first-use cluster adoption + mis-pairing guard from the hub's
+    // advertised cluster (§3.1, §7). Runs on the connect path so a follower
+    // binds to its hub and refuses a different cluster thereafter.
+    if let Ok(v) = &result {
+        let hub_cluster = v.get("cluster_id").and_then(|c| c.as_str()).unwrap_or("");
+        adopt_or_verify_cluster(&settings, hub_cluster)?;
+    }
     result
 }
 
@@ -600,6 +1080,8 @@ pub async fn pc_list_datasets(
             &settings,
             "GET",
             "/api/v1/datasets",
+            "",
+            b"",
         )?;
         let resp = req
             .send()
@@ -622,6 +1104,520 @@ pub async fn pc_list_datasets(
         Err(e) => log::error!("[sync] pc_list_datasets FAILED: {e}"),
     }
     result
+}
+
+/// `GET /api/v1/datasets/{uuid}/changes?after=S` — one incremental change-log
+/// page from the hub (§3.2/§3.3). The query string is signed verbatim (v2
+/// hardening). Returns the hub's `{ entries, pruned_up_to, hub_seq,
+/// resync_required }` JSON. A follower refuses this against a hub reporting an
+/// older `protocol_version` — enforced by the caller (Phase 4 round).
+pub async fn pc_changes_since(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+    after: i64,
+) -> Result<Value, String> {
+    let base = pc_base(&settings);
+    if base.is_empty() {
+        return Err("pc_url is not set — use Settings › Discover PC".to_string());
+    }
+    let api_path = format!("/api/v1/datasets/{uuid}/changes");
+    let qs = build_query(&[("after", after.to_string())]);
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let req = with_device_auth(
+        client.get(format!("{base}{api_path}?{qs}")),
+        &settings,
+        "GET",
+        &api_path,
+        &qs,
+        b"",
+    )?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?;
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        let msg = body["error"].as_str().unwrap_or("device not paired");
+        return Err(format!("{msg} (http://{base})"));
+    }
+    resp.error_for_status()
+        .map_err(|e| format!("/changes request failed: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("Unexpected /changes response from PC: {e}"))
+}
+
+/// `GET /api/v1/file?dataset=D&path=P` — fetch one non-DB file from the hub
+/// (§3.2). Streams the raw bytes back; callers splice them into the dataset
+/// directory. The signed query matches the URL verbatim so a captured request
+/// cannot be re-pointed at another path.
+pub async fn pc_fetch_file(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+    path: String,
+) -> Result<Vec<u8>, String> {
+    let base = pc_base(&settings);
+    if base.is_empty() {
+        return Err("pc_url is not set — use Settings › Discover PC".to_string());
+    }
+    let api_path = "/api/v1/file";
+    let qs = build_query(&[("dataset", uuid), ("path", path)]);
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let req = with_device_auth(
+        client.get(format!("{base}{api_path}?{qs}")),
+        &settings,
+        "GET",
+        api_path,
+        &qs,
+        b"",
+    )?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?;
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        let msg = body["error"].as_str().unwrap_or("device not paired");
+        return Err(format!("{msg} (http://{base})"));
+    }
+    let bytes = resp
+        .error_for_status()
+        .map_err(|e| format!("/file request failed: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read /file body: {e}"))?;
+    Ok(bytes.to_vec())
+}
+
+// ---------------------------------------------------------------------------
+// Incremental sync round (§3.3): push → per-dataset /changes apply → file-drift
+// snapshot → catalog prune. Reuses the snapshot path for any non-DB file change
+// (media/vtt), and folds the DB-only row deltas in place with the row log.
+// ---------------------------------------------------------------------------
+
+/// Signed GET returning parsed JSON. `path` is the URL path (no query), `qs`
+/// the exact pre-encoded query string appended to the URL and folded into the
+/// v2 signature. Shared by the round's catalog + manifest reads.
+async fn signed_get_json(settings: &SettingsState, path: &str, qs: &str) -> Result<Value, String> {
+    let base = pc_base(settings);
+    if base.is_empty() {
+        return Err("pc_url is not set — use Settings › Discover PC".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = if qs.is_empty() {
+        format!("{base}{path}")
+    } else {
+        format!("{base}{path}?{qs}")
+    };
+    let req = with_device_auth(client.get(&url), settings, "GET", path, qs, b"")?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?;
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let b: Value = resp.json().await.unwrap_or(Value::Null);
+        return Err(format!("{} (http://{base})", b["error"].as_str().unwrap_or("device not paired")));
+    }
+    resp.error_for_status()
+        .map_err(|e| e.to_string())?
+        .json::<Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /datasets?lite=1` — the hub's current dataset catalog (uuid → type).
+async fn fetch_catalog(settings: &SettingsState) -> Result<Vec<Value>, String> {
+    let v = signed_get_json(settings, "/api/v1/datasets", "lite=1").await?;
+    Ok(v.as_array().cloned().unwrap_or_default())
+}
+
+/// `GET /datasets/{uuid}/manifest` — the hub's current non-DB `overall_hash`.
+async fn fetch_manifest_hash(settings: &SettingsState, uuid: &str) -> Result<String, String> {
+    let v = signed_get_json(
+        settings,
+        &format!("/api/v1/datasets/{uuid}/manifest"),
+        "",
+    )
+    .await?;
+    Ok(v["overall_hash"].as_str().unwrap_or("").to_string())
+}
+
+/// Apply one pulled `sync_log` entry to the local dataset DB by dispatching to
+/// the same write commands the UI uses. MUST be wrapped in a
+/// [`crate::sync_log::ApplyGuard`] by the caller so the write does not
+/// re-enqueue/re-log (the change is arriving *from* the hub). Mirrors the hub's
+/// `rest.rs::replay` dispatch, but cross-platform (this module compiles on
+/// mobile too). Returns `Ok(false)` for an unknown kind (skipped, not fatal).
+async fn apply_change(
+    settings: &State<'_, SettingsState>,
+    dataset_uuid: &str,
+    kind: &str,
+    payload: &Value,
+    write_identity: &str,
+) -> Result<bool, String> {
+    use crate::book::{BookChapter, BookSentence, BookSentenceWord};
+    use crate::cards::{Card, Tag};
+    use crate::dictation::{ListenCue, ListenDictation};
+    let ds = dataset_uuid.to_string();
+    let str_field = |k: &str| -> Result<String, String> {
+        payload
+            .get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("payload missing '{k}'"))
+    };
+    match kind {
+        "cue_save" => {
+            let cue: ListenCue = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+            crate::dictation::listen_save_cue(settings.clone(), ds, cue).await.map(|_| true)
+        }
+        "cue_delete" => {
+            let cue_uuid = payload
+                .get("cue_uuid")
+                .and_then(|v| v.as_str())
+                .or_else(|| payload.as_str())
+                .or_else(|| payload.get("uuid").and_then(|v| v.as_str()))
+                .map(|s| s.to_string())
+                .ok_or_else(|| "cue_delete missing uuid".to_string())?;
+            crate::dictation::listen_delete_cue(settings.clone(), ds, cue_uuid).await.map(|_| true)
+        }
+        "dictation" => {
+            let d: ListenDictation = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+            crate::dictation::listen_save_dictation_as(settings.inner(), &ds, &d, write_identity)
+                .await
+                .map(|_| true)
+        }
+        "xp" => {
+            let amount = payload.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
+            let source = payload.get("source").and_then(|v| v.as_str()).unwrap_or("sync").to_string();
+            let reference_id = payload
+                .get("reference_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sync")
+                .to_string();
+            let dsref = if ds.is_empty() { None } else { Some(ds.as_str()) };
+            crate::xp::xp_award_internal(settings.inner(), write_identity, amount, &source, &reference_id, dsref)
+                .map(|_| true)
+                .map_err(|e| e.to_string())
+        }
+        "card_save" => {
+            let card: Card = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+            crate::cards::card_save(settings.clone(), ds, card).await.map(|_| true)
+        }
+        "card_delete" => {
+            let card_uuid = str_field("card_uuid")?;
+            crate::cards::card_delete(settings.clone(), ds, card_uuid).await.map(|_| true)
+        }
+        "card_review" => {
+            let card_uuid = str_field("card_uuid")?;
+            let quality = payload.get("quality").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            crate::cards::card_test_submit(settings.clone(), ds, card_uuid, quality).await.map(|_| true)
+        }
+        "card_tag_save" => {
+            let tag: Tag = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+            crate::cards::card_tag_save(settings.clone(), ds, tag).await.map(|_| true)
+        }
+        "card_tag_delete" => {
+            let tag_uuid = str_field("tag_uuid")?;
+            crate::cards::card_tag_delete(settings.clone(), ds, tag_uuid).await.map(|_| true)
+        }
+        "card_set_tags" => {
+            let card_uuid = str_field("card_uuid")?;
+            let tag_uuids: Vec<String> = payload
+                .get("tag_uuids")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            crate::cards::card_set_tags(settings.clone(), ds, card_uuid, tag_uuids).await.map(|_| true)
+        }
+        "book_chapter_save" => {
+            let chapter: BookChapter = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+            crate::book::book_save_chapter(settings.clone(), ds, chapter).await.map(|_| true)
+        }
+        "book_chapter_delete" => {
+            let uuid = str_field("uuid")?;
+            crate::book::book_delete_chapter(settings.clone(), ds, uuid).await.map(|_| true)
+        }
+        "book_sentence_save" => {
+            let sentence: BookSentence = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+            crate::book::book_save_sentence(settings.clone(), ds, sentence).await.map(|_| true)
+        }
+        "book_sentences_save" => {
+            let sentences: Vec<BookSentence> = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+            crate::book::book_save_sentences(settings.clone(), ds, sentences).await.map(|_| true)
+        }
+        "book_sentence_delete" => {
+            let uuid = str_field("uuid")?;
+            crate::book::book_delete_sentence(settings.clone(), ds, uuid).await.map(|_| true)
+        }
+        "book_word_save" => {
+            let word: BookSentenceWord = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+            crate::book::book_save_word(settings.clone(), ds, word).await.map(|_| true)
+        }
+        "book_word_delete" => {
+            let uuid = str_field("uuid")?;
+            crate::book::book_delete_word(settings.clone(), ds, uuid).await.map(|_| true)
+        }
+        other => {
+            log::warn!("[sync_round] skipping unknown change kind '{other}'");
+            Ok(false)
+        }
+    }
+}
+
+/// Conservative later-wins guard for Phase 4: when a local writeback entry for
+/// the same (kind, dataset, object) is still un-pushed, the local edit wins and
+/// the pulled row is skipped (it will be reconciled once our push lands and
+/// echoes back). Phase 5 sharpens this with a real `edit_time` column.
+fn has_pending_local_edit(conn: &Connection, dataset_uuid: &str, kind: &str, object_id: &str) -> bool {
+    let mut stmt = match conn.prepare(
+        "SELECT payload FROM writeback_queue WHERE kind = ?1 AND dataset_uuid = ?2",
+    ) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let rows = match stmt.query_map(params![kind, dataset_uuid], |r| r.get::<_, String>(0)) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    for payload_str in rows.flatten() {
+        let payload: Value = serde_json::from_str(&payload_str).unwrap_or(Value::Null);
+        let local_obj = crate::sync_log::object_id_for(kind, &payload);
+        if local_obj == object_id {
+            return true;
+        }
+    }
+    false
+}
+
+/// Remove a local dataset the hub no longer offers: delete its directory under
+/// every type root and drop its `dataset_sync_state` row (prune-by-absence).
+fn prune_local_dataset(settings: &SettingsState, conn: &Connection, uuid: &str) {
+    for ty in ["dictation", "card", "book"] {
+        let dir = type_root(settings, ty).join(uuid);
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+    let _ = conn.execute("DELETE FROM dataset_sync_state WHERE dataset_uuid = ?1", params![uuid]);
+}
+
+/// Explicit "unsubscribe" for a dataset the hub no longer offers (or a copy the
+/// user wants dropped): remove the local directory + `dataset_sync_state` row.
+/// The round's prune-by-absence only cleans up datasets it can confirm are gone
+/// from a reachable hub, so this is the manual path for the `removed_on_hub`
+/// Status row. Refuses to act while a hub is reachable and still lists the
+/// dataset, so it can never delete something that is still being synced.
+#[tauri::command]
+pub async fn sync_forget_dataset(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+) -> Result<(), String> {
+    if hub_lists_dataset(&settings, &uuid).await {
+        return Err("the hub still offers this dataset — it stays in sync".to_string());
+    }
+    let conn = dictation::open_app_db(&settings)?;
+    ensure_sync_tables(&conn)?;
+    prune_local_dataset(&settings, &conn, &uuid);
+    log::info!("[sync] forgot local dataset {uuid}");
+    Ok(())
+}
+
+/// `true` when the reachable hub's catalog still contains `uuid`. Any error
+/// (offline, unpaired) is treated as "not listed" so the forget action stays
+/// usable when the hub is gone.
+async fn hub_lists_dataset(settings: &SettingsState, uuid: &str) -> bool {
+    match pc_get_json(settings, "/api/v1/datasets", &[("lite", "1".to_string())]).await {
+        Ok(v) => v
+            .as_array()
+            .map(|arr| arr.iter().any(|d| d["uuid"].as_str() == Some(uuid)))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// Run one full incremental sync round against the connected hub. Triggers:
+/// app start, after a local write, a timer, or a network change (§3.3).
+pub async fn sync_round_inner(
+    app: AppHandle,
+    settings: State<'_, SettingsState>,
+) -> Result<Value, String> {
+    if pc_base(&settings).is_empty() {
+        return Err("No PC configured. Use Discover PC or set the PC address.".into());
+    }
+    let mut errors: Vec<Value> = Vec::new();
+    let mut resynced: Vec<String> = Vec::new();
+    let mut pruned: Vec<String> = Vec::new();
+    let mut applied = 0i64;
+
+    // 1. Push local edits first so the hub holds our changes before we pull.
+    let pushed = writeback_flush_inner(&settings).await.unwrap_or_else(|e| {
+        errors.push(json!({ "stage": "push", "error": e }));
+        0
+    });
+
+    // 2. Refresh the hub catalog (uuid -> type) with the cheap `lite` list.
+    let mut catalog_ok = true;
+    let catalog = fetch_catalog(&settings).await.unwrap_or_else(|e| {
+        catalog_ok = false;
+        errors.push(json!({ "stage": "catalog", "error": e }));
+        Vec::new()
+    });
+    let mut catalog_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for d in &catalog {
+        let u = d["uuid"].as_str().unwrap_or("").to_string();
+        let t = d["dataset_type"].as_str().unwrap_or("").to_string();
+        if !u.is_empty() {
+            catalog_map.insert(u, t);
+        }
+    }
+
+    // 3. Per already-synced dataset: incremental apply, or a full resync when
+    //    the cursor is unknown / a prune gap is reported / files drifted.
+    let local: Vec<(String, Option<i64>, String)> = {
+        let conn = dictation::open_app_db(&settings)?;
+        ensure_sync_tables(&conn)?;
+        let mut stmt = conn
+            .prepare("SELECT dataset_uuid, \"cursor\", overall_hash FROM dataset_sync_state")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(|x| x.ok()).collect()
+    };
+
+    for (uuid, cursor_opt, stored_hash) in local {
+        if !catalog_map.contains_key(&uuid) {
+            if catalog_ok {
+                let conn = dictation::open_app_db(&settings)?;
+                prune_local_dataset(&settings, &conn, &uuid);
+                pruned.push(uuid);
+            }
+            continue;
+        }
+
+        let after = cursor_opt.unwrap_or(-1);
+        let page = match pc_changes_since(settings.clone(), uuid.clone(), after).await {
+            Ok(p) => p,
+            Err(e) => {
+                errors.push(json!({ "uuid": uuid, "stage": "changes", "error": e }));
+                continue;
+            }
+        };
+        let resync_required = page["resync_required"].as_bool().unwrap_or(true);
+        let hub_seq = page["hub_seq"].as_i64().unwrap_or(after);
+        // Safety alarm (§3.5): a hub seq *below* our cursor means its journal
+        // regressed (a reset / re-install / different cluster answering the same
+        // address). Its deltas can no longer be trusted to be the continuation
+        // of what we already applied, so resync rather than advance backwards.
+        if let Some(c) = cursor_opt {
+            if hub_seq < c {
+                log::error!(
+                    "[sync] {uuid}: hub_seq {hub_seq} < local cursor {c} — journal regressed, forcing resync"
+                );
+                errors.push(json!({ "uuid": &uuid, "stage": "alarm", "error": format!("hub seq {hub_seq} regressed below cursor {c}") }));
+                match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
+                    Ok(r) => {
+                        if r.updated {
+                            resynced.push(uuid);
+                        }
+                    }
+                    Err(e) => errors.push(json!({ "uuid": uuid, "stage": "resync", "error": e })),
+                }
+                continue;
+            }
+        }
+        if resync_required {
+            // NULL/gap cursor: take one fresh snapshot (sets cursor + hash).
+            match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
+                Ok(r) => {
+                    if r.updated {
+                        resynced.push(uuid);
+                    }
+                }
+                Err(e) => errors.push(json!({ "uuid": uuid, "stage": "resync", "error": e })),
+            }
+            continue;
+        }
+
+        let entries = page["entries"].as_array().cloned().unwrap_or_default();
+        if !entries.is_empty() {
+            let _guard = crate::sync_log::ApplyGuard::new();
+            let conn = dictation::open_app_db(&settings)?;
+            ensure_sync_tables(&conn)?;
+            for ent in &entries {
+                let kind = ent["kind"].as_str().unwrap_or("");
+                let object_id = ent["object_id"].as_str().unwrap_or("");
+                let user_key = ent["user_key"].as_str().unwrap_or("");
+                let payload = ent["payload"].clone();
+                if has_pending_local_edit(&conn, &uuid, kind, object_id) {
+                    continue; // local un-pushed edit wins; reconciled on next echo
+                }
+                match apply_change(&settings, &uuid, kind, &payload, user_key).await {
+                    Ok(true) => applied += 1,
+                    Ok(false) => {}
+                    Err(e) => errors.push(json!({ "uuid": uuid, "kind": kind, "error": e })),
+                }
+            }
+            drop(_guard);
+            // Advance the row cursor to the hub's high-water mark.
+            let conn = dictation::open_app_db(&settings)?;
+            ensure_sync_tables(&conn)?;
+            let _ = conn.execute(
+                "UPDATE dataset_sync_state SET \"cursor\" = ?2 WHERE dataset_uuid = ?1",
+                params![uuid, hub_seq],
+            );
+        }
+
+        // 4. Non-DB file drift (media/vtt/etc. change the manifest hash, which
+        //    the row log does not cover): fall back to one snapshot re-pull.
+        match fetch_manifest_hash(&settings, &uuid).await {
+            Ok(h) if !h.is_empty() && h != stored_hash => {
+                match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
+                    Ok(_) => resynced.push(uuid),
+                    Err(e) => errors.push(json!({ "uuid": uuid, "stage": "files", "error": e })),
+                }
+            }
+            Err(e) => errors.push(json!({ "uuid": uuid, "stage": "manifest", "error": e })),
+            _ => {}
+        }
+    }
+
+    Ok(json!({
+        "status": if errors.is_empty() { "ok" } else { "partial" },
+        "pushed": pushed,
+        "applied": applied,
+        "resynced": resynced,
+        "pruned": pruned,
+        "errors": errors,
+    }))
+}
+
+/// Tauri entry point for the round (Datasets Sync page + MCP).
+#[tauri::command]
+pub async fn sync_run_round(
+    app: AppHandle,
+    settings: State<'_, SettingsState>,
+) -> Result<Value, String> {
+    sync_round_inner(app, settings).await
 }
 
 // ---------------------------------------------------------------------------
@@ -760,8 +1756,9 @@ pub async fn pc_pair_reset_identity(settings: State<'_, SettingsState>) -> Resul
 /// Issue a signed GET against a PC `/api/v1/*` endpoint and return the raw
 /// JSON value. The request path (excluding the query string) is what gets
 /// signed, matching `zone_guard`'s verification on the PC. Shared by the wiki
-/// and chat remote clients.
-#[cfg(not(feature = "desktop"))]
+/// and chat remote clients — on mobile always, and on the desktop when this
+/// workspace runs `role = "follower"` (a demoted PC relays chat over REST).
+#[cfg_attr(feature = "desktop", allow(dead_code))]
 pub(crate) async fn pc_get_json(
     settings: &SettingsState,
     api_path: &str,
@@ -776,8 +1773,13 @@ pub(crate) async fn pc_get_json(
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?;
-    let req = with_device_auth(client.get(format!("{base}{api_path}")), settings, "GET", api_path)?
-        .query(query);
+    let qs = build_query(query);
+    let url = if qs.is_empty() {
+        format!("{base}{api_path}")
+    } else {
+        format!("{base}{api_path}?{qs}")
+    };
+    let req = with_device_auth(client.get(&url), settings, "GET", api_path, &qs, b"")?;
     let resp = req
         .send()
         .await

@@ -657,6 +657,23 @@ struct PcUrlParam {
     pc_url: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct SyncChangesParam {
+    /// Dataset uuid whose hub change log to read.
+    uuid: String,
+    /// Return entries with seq > this value (-1 = from the beginning).
+    #[serde(default)]
+    after: i64,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct SyncFileParam {
+    /// Dataset uuid on the hub.
+    uuid: String,
+    /// Path of one non-DB file, relative to the dataset dir (e.g. "subtitle/a.vtt").
+    path: String,
+}
+
 // -- App control (agent drives the UI) --
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -2350,11 +2367,20 @@ impl DatasetMcpServer {
     #[tool(name = "pc_sync_status", description = "Summarise the cross-machine sync setup: the connected source, the datasets it offers, what this machine has already pulled, and queued writeback changes. Read this before pulling anything.")]
     async fn pc_sync_status(&self) -> Result<String, String> {
         log::info!("[MCP] pc_sync_status");
-        let pc_url = self.app.state::<SettingsState>().settings.lock().unwrap().pc_url.clone();
+        let settings = self.app.state::<SettingsState>();
+        let pc_url = settings.settings.lock().unwrap().pc_url.clone();
+        // This machine's sync role/cluster + wire protocol (§3.1) so an agent
+        // can tell hub from follower and diagnose mis-pairing before acting.
+        let local = serde_json::json!({
+            "role": settings.role(),
+            "cluster_id": settings.cluster_id(),
+            "protocol_version": crate::PROTOCOL_VERSION,
+        });
         if pc_url.trim().is_empty() {
             return Ok(serde_json::json!({
                 "status": "not_connected",
                 "pc_url": "",
+                "local": local,
                 "next": "Run pc_sync_scan, then pc_sync_connect with one of the candidate urls."
             })
             .to_string());
@@ -2370,6 +2396,7 @@ impl DatasetMcpServer {
             Ok(list) => Ok(serde_json::json!({
                 "status": "ok",
                 "pc_url": pc_url,
+                "local": local,
                 "remote_datasets": list,
                 "pulled": pulled,
                 "pending_writeback": pending,
@@ -2386,7 +2413,7 @@ impl DatasetMcpServer {
         }
     }
 
-    #[tool(name = "pc_sync_pull", description = "Pull one full dataset (media, subtitles, waveforms, database) from the connected source machine into local storage. Non-destructive: local changes are flushed first and the directory is swapped atomically with rollback. Returns updated=false when the dataset is already in sync.")]
+    #[tool(name = "pc_sync_pull", description = "Pull one full dataset (media, subtitles, waveforms, database) from the connected source machine into local storage. Non-destructive: local changes are flushed first and the directory is swapped atomically with rollback. Returns updated=false when the dataset is already in sync. For a whole-repo incremental update in one pass prefer sync_run_round.")]
     async fn pc_sync_pull(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::info!("[MCP] pc_sync_pull: uuid={}", param.uuid);
         let app = self.app.clone();
@@ -2443,6 +2470,45 @@ impl DatasetMcpServer {
             }
         })
         .to_string())
+    }
+
+    #[tool(name = "sync_changes_since", description = "Read one incremental page of a hub dataset's change log (GET /datasets/{uuid}/changes?after=SEQ). Returns { entries, pruned_up_to, hub_seq, resync_required }. Protocol diagnostics for the v2 incremental path — use pc_sync_pull for a real sync.")]
+    async fn sync_changes_since(&self, Parameters(param): Parameters<SyncChangesParam>) -> Result<String, String> {
+        log::info!("[MCP] sync_changes_since: uuid={} after={}", param.uuid, param.after);
+        let v = sync::pc_changes_since(self.app.state::<SettingsState>(), param.uuid.clone(), param.after).await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "sync_fetch_file", description = "Fetch one non-DB file from the connected hub (GET /file?dataset=&path=) and report its size + sha256 (bytes are not echoed). Verifies the incremental file-transfer path without pulling a whole snapshot.")]
+    async fn sync_fetch_file(&self, Parameters(param): Parameters<SyncFileParam>) -> Result<String, String> {
+        log::info!("[MCP] sync_fetch_file: uuid={} path={}", param.uuid, param.path);
+        let bytes = sync::pc_fetch_file(self.app.state::<SettingsState>(), param.uuid.clone(), param.path.clone()).await?;
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(&bytes);
+        Ok(serde_json::json!({
+            "status": "ok",
+            "uuid": param.uuid,
+            "path": param.path,
+            "bytes": bytes.len(),
+            "sha256": format!("{:x}", h.finalize()),
+        })
+        .to_string())
+    }
+
+    #[tool(name = "sync_run_round", description = "Run one full incremental sync round against the connected hub: flush local edits, pull each subscribed dataset's row-log delta (advancing the cursor), re-snapshot only datasets whose files actually changed, and prune datasets the hub removed. This is the normal 'sync now' action; use pc_sync_pull to force one whole dataset and pc_sync_pull_all for a bulk first-time import.")]
+    async fn sync_run_round(&self) -> Result<String, String> {
+        log::info!("[MCP] sync_run_round");
+        let v = sync::sync_round_inner(self.app.clone(), self.app.state::<SettingsState>()).await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "sync_status_detail", description = "JSON twin of the Datasets Sync status screen (§3.5): this device's role/cluster/protocol, hub address + reachability, per-dataset sync state (downloaded / needs_resync / not_downloaded / removed_on_hub) with row-log cursors, queued writeback + pending chat counts, and (on a hub) the paired-device registry. Read-only and richer than pc_sync_status; use it to diagnose sync without driving the UI.")]
+    async fn sync_status_detail(&self) -> Result<String, String> {
+        log::info!("[MCP] sync_status_detail");
+        let settings = self.app.state::<SettingsState>();
+        let detail = sync::sync_status_detail(&settings).await?;
+        serde_json::to_string(&detail).map_err(|e| e.to_string())
     }
 
     // -------------------------------------------------------------------------

@@ -568,6 +568,9 @@ fn create_card_schema(conn: &Connection) -> Result<(), String> {
         "
     )
     .map_err(|e| e.to_string())?;
+    // §3.4: a per-dataset tombstone table (travels with snapshots) so a delete
+    // is durable and can collide with a resurrected offline edit.
+    crate::sync_log::ensure_tombstones(conn)?;
     Ok(())
 }
 
@@ -1203,9 +1206,8 @@ pub async fn card_save(
 
     // Thin-client writeback: queue the change for the PC. Mobile only — desktop
     // is the source of truth and already wrote straight to its DB.
-    #[cfg(not(feature = "desktop"))]
     {
-        let _ = crate::sync::enqueue_change(
+        let _ = crate::sync_log::commit_change(
             &settings,
             "card_save",
             &dataset_uuid,
@@ -1246,9 +1248,8 @@ pub async fn card_delete(
     }
 
     log::info!("[Cards] Deleted card '{}' in dataset '{}'", card_uuid, dataset_uuid);
-    #[cfg(not(feature = "desktop"))]
     {
-        let _ = crate::sync::enqueue_change(
+        let _ = crate::sync_log::commit_change(
             &settings,
             "card_delete",
             &dataset_uuid,
@@ -1388,9 +1389,8 @@ pub async fn card_tag_save(
         created_at: now.clone(),
         updated_at: now,
     };
-    #[cfg(not(feature = "desktop"))]
     {
-        let _ = crate::sync::enqueue_change(
+        let _ = crate::sync_log::commit_change(
             &settings,
             "card_tag_save",
             &dataset_uuid,
@@ -1417,9 +1417,8 @@ pub async fn card_tag_delete(
     )
     .map_err(|e| e.to_string())?;
 
-    #[cfg(not(feature = "desktop"))]
     {
-        let _ = crate::sync::enqueue_change(
+        let _ = crate::sync_log::commit_change(
             &settings,
             "card_tag_delete",
             &dataset_uuid,
@@ -1460,9 +1459,8 @@ pub async fn card_set_tags(
         .map_err(|e| e.to_string())?;
     }
 
-    #[cfg(not(feature = "desktop"))]
     {
-        let _ = crate::sync::enqueue_change(
+        let _ = crate::sync_log::commit_change(
             &settings,
             "card_set_tags",
             &dataset_uuid,
@@ -1758,9 +1756,8 @@ pub async fn card_test_submit(
         interval_days
     );
 
-    #[cfg(not(feature = "desktop"))]
     {
-        let _ = crate::sync::enqueue_change(
+        let _ = crate::sync_log::commit_change(
             &settings,
             "card_review",
             &dataset_uuid,

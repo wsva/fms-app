@@ -22,6 +22,9 @@ export interface XpUser {
   lifetime_xp: number;
   level: number;
   updated_at: string;
+  // §3.6: XP earned on this follower but not yet confirmed by the hub (still
+  // queued). Already folded into `lifetime_xp`; shown only as a syncing hint.
+  pending_xp?: number;
 }
 
 export interface XpAwardResult {

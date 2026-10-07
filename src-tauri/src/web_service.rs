@@ -33,6 +33,11 @@ const DEFAULT_PORT: u16 = 35711;
 /// Default UDP port for the LAN/Tailscale discovery beacon + probe.
 const DISCOVERY_PORT: u16 = 35712;
 
+/// Cap on a signed (non-multipart) request body we buffer to hash for v2
+/// signature verification. Sync change-batches and pair requests are small
+/// JSON payloads; large binary uploads go through multipart (empty body hash).
+const MAX_SIGNED_BODY_BYTES: usize = 32 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Config / status types
 // ---------------------------------------------------------------------------
@@ -416,11 +421,44 @@ async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) ->
             pairing::AuthError::Unpaired.message(),
         );
     }
+    // v2 signatures cover `sha256(query\nbody)`, so read the declared protocol
+    // and the exact query string before verification. Peer protocol gates the
+    // preimage format (§3.3 hardening); a not-yet-upgraded device (missing /
+    // zero header) keeps the legacy path.
+    let peer_protocol = get_header("x-fms-protocol")
+        .parse::<u32>()
+        .unwrap_or(0);
+    let query = req.uri().query().unwrap_or("").to_string();
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // Buffer the body only when we must hash it. Streaming multipart uploads
+    // (`/chat/message`) can carry large media and sign an *empty* body
+    // component on both ends, so leave those untouched for the handler.
+    let body_bytes: Vec<u8> = if peer_protocol >= 2 && content_type.starts_with("multipart/") {
+        Vec::new()
+    } else if peer_protocol >= 2 {
+        let (parts, body) = req.into_parts();
+        match axum::body::to_bytes(body, MAX_SIGNED_BODY_BYTES).await {
+            Ok(bytes) => {
+                let v = bytes.to_vec();
+                req = Request::from_parts(parts, Body::from(v.clone()));
+                v
+            }
+            Err(_) => return json_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"),
+        }
+    } else {
+        Vec::new()
+    };
     // Verification touches SQLite (cached) + crypto: keep it off the async
     // runtime; settings are reached through the app handle in router state.
     let app = st.app.clone();
     let method = method.to_string();
     let authed_device_id = device_id.clone();
+    let verify_query = query.clone();
+    let verify_body = body_bytes.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let settings = app.state::<SettingsState>();
         pairing::verify_request(
@@ -428,6 +466,9 @@ async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) ->
             &device_id,
             &method,
             &path,
+            &verify_query,
+            &verify_body,
+            peer_protocol,
             &ts,
             &sig,
         )
@@ -438,9 +479,26 @@ async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) ->
         Ok(bound_user_id) => {
             // Paired device: expose its identity binding to the handler so
             // writeback can enforce that changes land under the bound user.
+            // Also capture the declared role/cluster/protocol headers for the
+            // status surface (§3.1). A cluster mismatch is logged, not yet
+            // hard-rejected — the client enforces its own refusal + TOFU
+            // adoption (docs/my_sync_design.md §7).
+            let peer_role = get_header("x-fms-role");
+            let peer_cluster = get_header("x-fms-cluster");
+            let settings = st.app.state::<SettingsState>();
+            let our_cluster = settings.cluster_id();
+            if !peer_cluster.is_empty() && !our_cluster.is_empty() && peer_cluster != our_cluster {
+                log::warn!(
+                    "[zone_guard] device {} declared cluster '{}' but this hub is '{}' (mis-pairing?)",
+                    authed_device_id, peer_cluster, our_cluster
+                );
+            }
             req.extensions_mut().insert(pairing::AuthContext {
                 device_id: Some(authed_device_id),
                 bound_user_id,
+                role: if peer_role.is_empty() { None } else { Some(peer_role) },
+                cluster_id: if peer_cluster.is_empty() { None } else { Some(peer_cluster) },
+                protocol_version: peer_protocol,
             });
             next.run(req).await
         }
@@ -1004,7 +1062,7 @@ fn parse_range(headers: &HeaderMap, len: u64) -> Option<(u64, u64)> {
     Some((start, end))
 }
 
-async fn stream_file(path: &Path, req_headers: &HeaderMap) -> Response {
+pub(crate) async fn stream_file(path: &Path, req_headers: &HeaderMap) -> Response {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -1084,14 +1142,25 @@ pub fn spawn_discovery(app: AppHandle, http_port: u16) {
         let _ = socket.set_broadcast(true);
 
         let name = app.package_info().name.clone();
-        let beacon = serde_json::json!({
-            "app": "fms-app",
-            "name": name,
-            "http_port": http_port,
-            "ips": [local_ip().unwrap_or_default()],
-        })
-        .to_string();
-
+        // Beacon is rebuilt each tick from live settings so a role/cluster
+        // change (designating this workspace a hub) is reflected without a
+        // restart. Every desktop runs the web service, so the beacon must say
+        // whether *this* one is a hub or a follower (§3.1) — the phone lists
+        // only hubs as connect targets.
+        let make_beacon = |app: &AppHandle| -> String {
+            let settings = app.state::<SettingsState>();
+            serde_json::json!({
+                "app": "fms-app",
+                "name": name,
+                "http_port": http_port,
+                "ips": [local_ip().unwrap_or_default()],
+                "role": settings.role(),
+                "cluster_id": settings.cluster_id(),
+                "protocol_version": crate::PROTOCOL_VERSION,
+            })
+            .to_string()
+        };
+        let mut beacon = make_beacon(&app);
         let bcast = format!("255.255.255.255:{}", DISCOVERY_PORT);
         let mcast = format!("224.0.1.87:{}", DISCOVERY_PORT);
         let mut buf = [0u8; 2048];
@@ -1099,6 +1168,7 @@ pub fn spawn_discovery(app: AppHandle, http_port: u16) {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
+                    beacon = make_beacon(&app);
                     let _ = socket.send_to(beacon.as_bytes(), bcast.as_str()).await;
                     let _ = socket.send_to(beacon.as_bytes(), mcast.as_str()).await;
                 }

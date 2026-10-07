@@ -62,7 +62,9 @@ pub fn router(app: AppHandle) -> Router {
         .route("/pair/status", get(pair_status))
         .route("/datasets", get(datasets_list))
         .route("/datasets/{uuid}/manifest", get(manifest))
+        .route("/datasets/{uuid}/changes", get(changes))
         .route("/datasets/{uuid}/snapshot", get(snapshot))
+        .route("/file", get(file_endpoint))
         .route("/sync/changes", post(sync_changes))
         .route("/chat/messages", get(chat_messages))
         // File uploads go through this route only; axum's default 2 MB body
@@ -89,6 +91,14 @@ struct StatusResp {
     app_name: &'static str,
     dataset_count: usize,
     ok: bool,
+    /// Wire protocol version so a follower can refuse `/changes`/`/file`/chat
+    /// `after_id` against an older hub (§3.1, §7).
+    protocol_version: u32,
+    /// This machine's sync role (`"hub"` | `"follower"`) — both desktops run the
+    /// web service, so the beacon/status must say which role *this* one plays.
+    role: String,
+    /// Cluster (hub identity group) this workspace belongs to (§3.1).
+    cluster_id: String,
 }
 
 async fn status(State(st): State<RestState>) -> Response {
@@ -101,6 +111,9 @@ async fn status(State(st): State<RestState>) -> Response {
             app_name: "fms-app",
             dataset_count: count,
             ok: true,
+            protocol_version: crate::PROTOCOL_VERSION,
+            role: settings.role(),
+            cluster_id: settings.cluster_id(),
         }),
     )
         .into_response()
@@ -188,12 +201,25 @@ struct DatasetListItem {
     /// know which local root to unpack a snapshot into.
     dataset_type: String,
     /// Dictation: media file count. Card: card count. Book: 0 (not tracked).
+    /// Zeroed under `?lite=1` (the incremental sync round only needs uuid +
+    /// type + updated, so counting rows per dataset is wasted work).
     media_count: usize,
     status: String,
 }
 
-async fn datasets_list(State(st): State<RestState>) -> Response {
+#[derive(Deserialize)]
+struct DatasetsListQuery {
+    /// `1` (or `true`) skips the per-dataset row/media counts in the response.
+    #[serde(default)]
+    lite: Option<String>,
+}
+
+async fn datasets_list(
+    State(st): State<RestState>,
+    Query(q): Query<DatasetsListQuery>,
+) -> Response {
     let settings = st.app.state::<SettingsState>();
+    let lite = matches!(q.lite.as_deref(), Some("1") | Some("true"));
     let mut items: Vec<DatasetListItem> = Vec::new();
 
     // Dictation datasets. Raw-import folders (a directory with media/ but no
@@ -208,7 +234,7 @@ async fn datasets_list(State(st): State<RestState>) -> Response {
             name: d.info.name,
             updated: d.info.updated,
             dataset_type: "dictation".into(),
-            media_count: d.media_count,
+            media_count: if lite { 0 } else { d.media_count },
             status: d.status,
         });
     }
@@ -223,7 +249,7 @@ async fn datasets_list(State(st): State<RestState>) -> Response {
             name: d.info.name,
             updated: d.info.updated,
             dataset_type: "card".into(),
-            media_count: d.card_count,
+            media_count: if lite { 0 } else { d.card_count },
             status: "ready".into(),
         });
     }
@@ -260,6 +286,119 @@ struct Manifest {
     /// snapshot into the matching local root.
     #[serde(default)]
     dataset_type: String,
+    /// Per non-DB file content hash (`{ rel_path: sha256 }`), for incremental
+    /// `/file` fetches. Excludes the dataset DB, which the row log owns (§3.2),
+    /// so a single row edit does not force a whole-DB file re-download.
+    #[serde(default)]
+    files: std::collections::BTreeMap<String, String>,
+}
+
+/// The dataset SQLite file + its WAL/SHM sidecars are excluded from the hashed
+/// file set (§3.2): they are content the row log and snapshot own, not media.
+fn is_db_file(rel: &str) -> bool {
+    rel == "data.sqlite3" || rel == "data.sqlite3-wal" || rel == "data.sqlite3-shm"
+}
+
+/// SHA-256 (hex) of a file's contents, streamed in chunks.
+fn hash_file_contents(path: &Path) -> Result<String, String> {
+    use std::io::Read as _;
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut h = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", h.finalize()))
+}
+
+/// Cached per-file hash (§3.2): reuse the recorded sha256 while the file's
+/// `(size, mtime)` tuple is unchanged; recompute and upsert otherwise. Skipping
+/// this cache would mean re-hashing multi-GB media on every manifest call.
+fn cached_file_hash(
+    cache: Option<&rusqlite::Connection>,
+    dataset_uuid: &str,
+    rel: &str,
+    path: &Path,
+    size: u64,
+    mtime: u64,
+) -> String {
+    if let Some(conn) = cache {
+        let cached: Option<String> = conn
+            .query_row(
+                "SELECT sha256 FROM file_hash_cache \
+                 WHERE dataset_uuid = ?1 AND path = ?2 AND size = ?3 AND mtime = ?4",
+                rusqlite::params![dataset_uuid, rel, size as i64, mtime as i64],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(h) = cached {
+            return h;
+        }
+    }
+    let h = hash_file_contents(path).unwrap_or_default();
+    if let Some(conn) = cache {
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO file_hash_cache (dataset_uuid, path, size, mtime, sha256) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![dataset_uuid, rel, size as i64, mtime as i64, &h],
+        );
+    }
+    h
+}
+
+/// Compute the manifest over the **non-DB** file set: file count, total bytes,
+/// a per-file `sha256` map, and an `overall_hash` folded from those hashes so
+/// it is a fast "nothing changed" short-circuit. `updated_at` comes from
+/// info.json when present.
+fn compute_manifest(
+    dir: &Path,
+    dataset_uuid: &str,
+    cache: Option<&rusqlite::Connection>,
+) -> Manifest {
+    let files: Vec<(String, PathBuf)> = collect_rel_files(dir)
+        .into_iter()
+        .filter(|(rel, _)| !is_db_file(rel))
+        .collect();
+    let mut overall = Sha256::new();
+    let mut total_bytes = 0u64;
+    let mut map = std::collections::BTreeMap::new();
+    for (rel, path) in &files {
+        let meta = std::fs::metadata(path).ok();
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        total_bytes += size;
+        let h = cached_file_hash(cache, dataset_uuid, rel, path, size, mtime);
+        overall.update(rel.as_bytes());
+        overall.update([0u8]);
+        overall.update(h.as_bytes());
+        map.insert(rel.clone(), h);
+    }
+    let overall_hash = format!("{:x}", overall.finalize());
+
+    let info_path = dir.join("info.json");
+    let updated_at = std::fs::read_to_string(&info_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("updated").and_then(|u| u.as_str()).map(String::from))
+        .unwrap_or_default();
+
+    Manifest {
+        file_count: files.len(),
+        total_bytes,
+        overall_hash,
+        updated_at,
+        dataset_type: String::new(),
+        files: map,
+    }
 }
 
 /// Recursively collect `(rel_path_forward_slash, absolute_path)` pairs, sorted
@@ -290,46 +429,6 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
     }
 }
 
-/// Compute the manifest: file count, total bytes, and a SHA-256 over the
-/// sorted `(rel_path, size, mtime_ms)` tuples. `updated_at` comes from info.json
-/// when present.
-fn compute_manifest(dir: &Path) -> Manifest {
-    let files = collect_rel_files(dir);
-    let mut hasher = Sha256::new();
-    let mut total_bytes = 0u64;
-    for (rel, path) in &files {
-        let meta = std::fs::metadata(path).ok();
-        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-        let mtime_ms = meta
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        total_bytes += size;
-        hasher.update(rel.as_bytes());
-        hasher.update([0u8]);
-        hasher.update(size.to_le_bytes());
-        hasher.update(mtime_ms.to_le_bytes());
-    }
-    let overall_hash = format!("{:x}", hasher.finalize());
-
-    let info_path = dir.join("info.json");
-    let updated_at = std::fs::read_to_string(&info_path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("updated").and_then(|u| u.as_str()).map(String::from))
-        .unwrap_or_default();
-
-    Manifest {
-        file_count: files.len(),
-        total_bytes,
-        overall_hash,
-        updated_at,
-        dataset_type: String::new(),
-    }
-}
-
 /// `PRAGMA wal_checkpoint(TRUNCATE)` so the archived `data.sqlite3` is
 /// self-contained (no sidecar `-wal`/`-shm` needed on the receiving end).
 fn checkpoint_db(dir: &Path) {
@@ -339,6 +438,29 @@ fn checkpoint_db(dir: &Path) {
     }
 }
 
+/// Produce a point-in-time copy of a dataset's `data.sqlite3` via `VACUUM INTO`.
+/// Unlike `wal_checkpoint(TRUNCATE)` — which does **not** block concurrent
+/// writers and so could archive a torn image — `VACUUM INTO` reads a consistent
+/// snapshot transaction, safe under live edits (§3.2 snapshot correctness).
+/// Returns the temp file path (caller deletes it) or `None` when there is no DB
+/// to copy (raw-import folders carry none).
+fn snapshot_db_copy(dir: &Path) -> Option<PathBuf> {
+    let db = dir.join("data.sqlite3");
+    if !db.exists() {
+        return None;
+    }
+    let dest = std::env::temp_dir().join(format!("fms-snap-{}-{}.sqlite3", Uuid::new_v4().simple(), std::process::id()));
+    let _ = std::fs::remove_file(&dest);
+    let conn = rusqlite::Connection::open(&db).ok()?;
+    // `VACUUM INTO` takes a text expression; a bound parameter is allowed in a
+    // prepared statement and avoids quoting/escaping the temp path.
+    conn.prepare_cached("VACUUM INTO ?1")
+        .ok()?
+        .execute(rusqlite::params![dest.to_string_lossy().as_ref()])
+        .ok()?;
+    Some(dest)
+}
+
 async fn manifest(State(st): State<RestState>, axum::extract::Path(uuid): axum::extract::Path<String>) -> Response {
     let settings = st.app.state::<SettingsState>();
     let (dir, ty) = match dataset::find_dataset_dir_typed(&settings, &uuid) {
@@ -346,7 +468,8 @@ async fn manifest(State(st): State<RestState>, axum::extract::Path(uuid): axum::
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
     checkpoint_db(&dir);
-    let mut m = compute_manifest(&dir);
+    let cache = crate::dictation::open_app_db(&settings).ok();
+    let mut m = compute_manifest(&dir, &uuid, cache.as_ref());
     m.dataset_type = ty.as_str().to_string();
     (StatusCode::OK, Json(m)).into_response()
 }
@@ -362,13 +485,36 @@ async fn snapshot(State(st): State<RestState>, axum::extract::Path(uuid): axum::
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
 
-    // Checkpoint + hash the files before archiving so the header carries the
-    // same value the manifest endpoint would report.
-    checkpoint_db(&dir);
-    let m = compute_manifest(&dir);
+    // Read the hub cursor *before* freezing the DB image: a follower records this
+    // seq as its cursor, so any change that races in afterwards (seq > this) is
+    // re-delivered by the next `/changes` pull rather than silently lost. The
+    // snapshot already containing a slightly newer row is then a harmless,
+    // idempotent re-apply.
+    let hub_seq: i64 = crate::dictation::open_app_db(&settings)
+        .ok()
+        .and_then(|conn| crate::sync_log::hub_seq_for(&conn, &uuid).ok())
+        .unwrap_or(0);
 
-    // Enumerate files now (sync) so the archive contents match the hashed set.
-    let files = collect_rel_files(&dir);
+    // Freeze a consistent DB image, then hash + archive the non-DB set exactly
+    // as the manifest endpoint would (the manifest excludes the DB itself).
+    let snap_db = snapshot_db_copy(&dir);
+    let cache = crate::dictation::open_app_db(&settings).ok();
+    let m = compute_manifest(&dir, &uuid, cache.as_ref());
+
+    // Archive the frozen copy under the name `data.sqlite3` and never the live
+    // sidecars (the vacuum image is self-contained, WAL off on the receiver).
+    let files: Vec<(String, PathBuf)> = collect_rel_files(&dir)
+        .into_iter()
+        .filter(|(rel, _)| rel != "data.sqlite3-wal" && rel != "data.sqlite3-shm")
+        .map(|(rel, p)| {
+            if rel == "data.sqlite3" {
+                if let Some(sp) = &snap_db {
+                    return (rel, sp.clone());
+                }
+            }
+            (rel, p)
+        })
+        .collect();
 
     // Bridge a blocking tar.gz writer into an async body via an in-memory duplex.
     let (client_half, server_half) = tokio::io::duplex(64 * 1024);
@@ -388,6 +534,9 @@ async fn snapshot(State(st): State<RestState>, axum::extract::Path(uuid): axum::
         }
         let _ = writer.flush();
         // writer dropped here -> closes the duplex -> EOF for the reader.
+        if let Some(sp) = &snap_db {
+            let _ = std::fs::remove_file(sp);
+        }
     });
 
     let stream = ReaderStream::new(client_half);
@@ -398,10 +547,107 @@ async fn snapshot(State(st): State<RestState>, axum::extract::Path(uuid): axum::
         m.overall_hash.parse().unwrap(),
     );
     headers.insert(
+        "x-snapshot-seq",
+        hub_seq.to_string().parse().unwrap(),
+    );
+    headers.insert(
         axum::http::header::CONTENT_TYPE,
         "application/gzip".parse().unwrap(),
     );
     (StatusCode::OK, headers, body).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /datasets/{uuid}/changes  (incremental row-log pull, §3.2 / §3.3)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ChangesQuery {
+    /// Follower's per-dataset `sync_log` cursor. Absent ⇒ treated as -1
+    /// (unknown) so a not-yet-migrated copy is told to resync (§3.2).
+    #[serde(default)]
+    after: Option<i64>,
+}
+
+/// Stream `sync_log` rows for one dataset after a seq cursor. The response
+/// carries `pruned_up_to` (gap detection → `resync_required`) and the hub's
+/// current `seq` (drift check, §3.2).
+async fn changes(
+    State(st): State<RestState>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+    Query(q): Query<ChangesQuery>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    // Reject unknown datasets with 404 before touching the log.
+    if let Err(e) = dataset::find_dataset_dir_typed(&settings, &uuid) {
+        return json_error(StatusCode::NOT_FOUND, &e);
+    }
+    let conn = match crate::dictation::open_app_db(&settings) {
+        Ok(c) => c,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let after = q.after.unwrap_or(-1);
+    // Opportunistic hub-side retention (§3.5): at most once a day this compacts
+    // the journal and raises `pruned_up_to`, which is what makes a follower with
+    // a stale cursor below the new mark get `resync_required` from `read_changes`
+    // below. Only the hub owns a journal worth pruning.
+    if settings.role() == "hub" {
+        crate::sync_log::maybe_prune(&conn);
+    }
+    match crate::sync_log::read_changes(&conn, &uuid, after) {
+        Ok(page) => (StatusCode::OK, Json(page)).into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /file  (one non-DB file's bytes, resumable, §3.3)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct FileQuery {
+    dataset: String,
+    path: String,
+}
+
+/// Serve a single non-DB file out of a dataset directory. Canonicalizes the
+/// path and refuses anything resolving outside the dataset dir (traversal),
+/// refuses the dataset DB sidecars, and honours `Range` so a multi-GB media
+/// fetch can resume on flaky Wi-Fi (§3.3).
+async fn file_endpoint(
+    State(st): State<RestState>,
+    headers: HeaderMap,
+    Query(q): Query<FileQuery>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    let (dir, _ty) = match dataset::find_dataset_dir_typed(&settings, &q.dataset) {
+        Ok(d) => d,
+        Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
+    };
+    let rel = q.path.trim_start_matches('/');
+    if rel.is_empty() || is_db_file(rel) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "only non-database files are served via /file",
+        );
+    }
+    let target = dir.join(rel);
+    // Path-containment guard (mirrors `dataset_file` in web_service.rs).
+    let base_c = match dir.canonicalize() {
+        Ok(p) => p,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let target_c = match target.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return json_error(StatusCode::NOT_FOUND, "file not found"),
+    };
+    if !target_c.starts_with(&base_c) {
+        return json_error(StatusCode::FORBIDDEN, "access denied");
+    }
+    if !target_c.is_file() {
+        return json_error(StatusCode::NOT_FOUND, "not a file");
+    }
+    crate::web_service::stream_file(&target_c, &headers).await
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +670,12 @@ struct Change {
     #[serde(default)]
     dataset_uuid: Option<String>,
     payload: serde_json::Value,
+    /// Device-local ISO timestamp of the user action (§3.3 / §3.6). Drives
+    /// later-`edit_time`-wins conflicts and, once the apply path is built
+    /// (Phase 4), the applied row's `updated_at`. Carried here so the hub has
+    /// it available for the log entry and comparison.
+    #[serde(default)]
+    edit_time: String,
     #[serde(default)]
     #[allow(dead_code)]
     queued_at: String,
@@ -435,17 +687,69 @@ struct ChangeResult {
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// §3.4 conflict: a losing push is still acknowledged (`ok = true`, so the
+    /// follower stops resending it) but flagged `rejected`, carrying the hub's
+    /// winning entry. The follower drops its stale queued change; the winner
+    /// re-converges it on the next `/changes` pull (no seq is rewritten here).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rejected: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    winner_seq: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    winner_payload: Option<serde_json::Value>,
 }
 
-/// Ensure the idempotency ledger exists in the app DB.
-fn ensure_applied_table(conn: &rusqlite::Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS sync_applied (
-            id         TEXT PRIMARY KEY,
-            applied_at TEXT NOT NULL
-        );",
-    )
-    .map_err(|e| e.to_string())
+impl ChangeResult {
+    fn applied(id: String) -> Self {
+        ChangeResult { id, ok: true, error: None, rejected: None, winner_seq: None, winner_payload: None }
+    }
+    fn failed(id: String, error: String) -> Self {
+        ChangeResult { id, ok: false, error: Some(error), rejected: None, winner_seq: None, winner_payload: None }
+    }
+    fn losing(id: String, winner_seq: i64, winner_payload: serde_json::Value) -> Self {
+        ChangeResult {
+            id,
+            ok: true,
+            error: None,
+            rejected: Some(true),
+            winner_seq: Some(winner_seq),
+            winner_payload: Some(winner_payload),
+        }
+    }
+}
+
+/// Parse a client `edit_time` into a comparable UTC instant, tolerating both
+/// RFC3339 and SQLite `datetime('now')` (`YYYY-MM-DD HH:MM:SS`, assumed UTC)
+/// formats, and clamping anything dated in the future to the hub's now (§3.4: a
+/// follower with a fast clock must not win every later conflict forever). An
+/// empty or unparseable stamp is treated as "arrived now".
+fn normalize_edit_time(raw: &str, hub_now: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return hub_now;
+    }
+    let parsed = chrono::DateTime::parse_from_rfc3339(trimmed)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S").map(|n| n.and_utc())
+        })
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S").map(|n| n.and_utc())
+        });
+    match parsed {
+        Ok(dt) if dt > hub_now => hub_now,
+        Ok(dt) => dt,
+        Err(_) => hub_now,
+    }
+}
+
+/// Parse a `sync_log` `edit_time` (always written as RFC3339 UTC by the hub) for
+/// comparison. Returns `None` on a malformed/legacy value so the caller can fall
+/// back to treating the existing entry as the oldest possible (incoming wins).
+fn parse_log_time(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .ok()
 }
 
 /// Resolve the identity that writeback changes must be attributed to, and
@@ -503,10 +807,12 @@ async fn sync_changes(
         }
     };
 
-    // Idempotency ledger lives in the app-level DB (survives dataset swaps).
+    // Idempotency ledger + hub sync tables live in the app-level DB (survive
+    // dataset swaps). `ensure_hub_tables` creates `applied_changes` alongside
+    // `sync_log`, so the hub's own writes and follower replays share one journal.
     let ledger = match dictation::open_app_db(&settings) {
         Ok(conn) => {
-            if let Err(e) = ensure_applied_table(&conn) {
+            if let Err(e) = crate::sync_log::ensure_hub_tables(&conn) {
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
             }
             conn
@@ -515,36 +821,69 @@ async fn sync_changes(
     };
 
     let mut results = Vec::with_capacity(req.changes.len());
+    let hub_now = chrono::Utc::now();
     for ch in req.changes {
         // Skip anything already applied (idempotent by change id).
-        let already: bool = ledger
-            .query_row(
-                "SELECT COUNT(*) FROM sync_applied WHERE id = ?1",
-                rusqlite::params![&ch.id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|n| n > 0)
-            .unwrap_or(false);
-        if already {
-            results.push(ChangeResult { id: ch.id, ok: true, error: None });
+        if crate::sync_log::already_applied(&ledger, &ch.id) {
+            results.push(ChangeResult::applied(ch.id));
             continue;
+        }
+
+        // Later-`edit_time`-wins conflict resolution (§3.4) for mutable *state*
+        // rows. The hub's newest `sync_log` entry for the same object mirrors the
+        // live row (`updated_at`) and any tombstone (its `op`), so a push that
+        // loses on time is rejected without a new seq being written — the follower
+        // drops it and re-converges from the winner on its next `/changes` pull.
+        if crate::sync_log::ChangeClass::of(&ch.kind).coalescible() {
+            let dataset_uuid = ch.dataset_uuid.clone().unwrap_or_default();
+            let object_id = crate::sync_log::object_id_for(&ch.kind, &ch.payload);
+            if !object_id.is_empty() {
+                let incoming = normalize_edit_time(&ch.edit_time, hub_now);
+                let latest = crate::sync_log::latest_for_object(&ledger, &dataset_uuid, &object_id)
+                    .ok()
+                    .flatten();
+                if let Some((winner_seq, winner_edit, _op, winner_payload)) = latest {
+                    // A missing/unparseable stored time is treated as oldest so
+                    // the fresh push wins rather than being wrongly rejected.
+                    let existing = parse_log_time(&winner_edit).unwrap_or(hub_now);
+                    if existing >= incoming {
+                        log::info!(
+                            "[rest] writeback {} ({}) lost to hub seq {} (edit_time {} >= incoming {})",
+                            ch.id, ch.kind, winner_seq, winner_edit, incoming.to_rfc3339()
+                        );
+                        results.push(ChangeResult::losing(ch.id, winner_seq, winner_payload));
+                        continue;
+                    }
+                } else if crate::sync_log::op_for(&ch.kind) == "upsert"
+                    && crate::sync_log::is_tombstoned_at_least(
+                        settings.inner(),
+                        &dataset_uuid,
+                        &object_id,
+                        &incoming.to_rfc3339(),
+                    )
+                {
+                    // No log entry, but a recorded tombstone at/after this edit:
+                    // the row was deleted before incremental sync existed, so an
+                    // offline edit resurrecting it is dropped against the delete
+                    // (§3.4) rather than re-creating a dead row.
+                    log::info!(
+                        "[rest] writeback {} ({}) dropped: tombstone >= incoming edit_time",
+                        ch.id, ch.kind
+                    );
+                    results.push(ChangeResult::losing(ch.id, 0, serde_json::Value::Null));
+                    continue;
+                }
+            }
         }
 
         match replay(&settings, &write_identity, &ch).await {
             Ok(()) => {
-                let _ = ledger.execute(
-                    "INSERT OR IGNORE INTO sync_applied (id, applied_at) VALUES (?1, datetime('now'))",
-                    rusqlite::params![&ch.id],
-                );
-                results.push(ChangeResult { id: ch.id, ok: true, error: None });
+                crate::sync_log::mark_applied(&ledger, &ch.id);
+                results.push(ChangeResult::applied(ch.id));
             }
             Err(e) => {
                 log::warn!("[rest] writeback {} ({}) failed: {}", ch.id, ch.kind, e);
-                results.push(ChangeResult {
-                    id: ch.id,
-                    ok: false,
-                    error: Some(e),
-                });
+                results.push(ChangeResult::failed(ch.id, e));
             }
         }
     }
@@ -800,19 +1139,29 @@ struct ChatListQuery {
     /// `created_at` cursor; empty returns the newest page.
     #[serde(default)]
     after: String,
+    /// Monotonic rowid cursor (§4.3). When present it wins over `after`: the
+    /// integer id never ties, so incremental polls cannot drop same-millisecond
+    /// sends. A hub older than protocol v2 simply never sets it.
+    #[serde(default)]
+    after_id: Option<i64>,
     #[serde(default)]
     limit: Option<i64>,
 }
 
-/// `GET /chat/messages?after=&limit=` — one page of the shared thread plus the
-/// caller's own device id, so a phone knows which bubbles are "mine".
+/// `GET /chat/messages?after=&after_id=&limit=` — one page of the shared thread
+/// plus the caller's own device id, so a phone knows which bubbles are "mine".
 async fn chat_messages(
     State(st): State<RestState>,
     Extension(auth): Extension<pairing::AuthContext>,
     Query(q): Query<ChatListQuery>,
 ) -> Response {
     let settings = st.app.state::<SettingsState>();
-    match chat::list_messages(&settings, &q.after, q.limit.unwrap_or(200)) {
+    let limit = q.limit.unwrap_or(200);
+    let listed = match q.after_id {
+        Some(id) => chat::list_messages_after_id(&settings, id, limit),
+        None => chat::list_messages(&settings, &q.after, limit),
+    };
+    match listed {
         Ok(messages) => {
             let self_device = auth.device_id.unwrap_or_else(|| "pc".to_string());
             (

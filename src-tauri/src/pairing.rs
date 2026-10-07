@@ -126,12 +126,25 @@ pub struct PairedDevice {
 pub struct AuthContext {
     pub device_id: Option<String>,
     pub bound_user_id: Option<String>,
+    /// Declared sync role from `x-fms-role` (`"hub"`/`"follower"`), for status.
+    pub role: Option<String>,
+    /// Declared cluster id from `x-fms-cluster`; the hub compares it against its
+    /// own to detect a mis-paired follower (§3.1). None for legacy clients.
+    pub cluster_id: Option<String>,
+    /// Peer `x-fms-protocol` version (0 when the header is absent/old client).
+    pub protocol_version: u32,
 }
 
 impl AuthContext {
     /// Trusted-zone (no device signature): no binding.
     pub fn trusted() -> Self {
-        Self { device_id: None, bound_user_id: None }
+        Self {
+            device_id: None,
+            bound_user_id: None,
+            role: None,
+            cluster_id: None,
+            protocol_version: crate::PROTOCOL_VERSION,
+        }
     }
 }
 
@@ -364,16 +377,23 @@ impl AuthError {
     }
 }
 
-/// Verify a signed request: `sig` = hex Ed25519 signature over
-/// `"{ts}\n{METHOD}\n{path}"`. Checks the registry cache, the ±120 s window,
-/// and (on success) throttled `last_seen_at` bookkeeping. On success returns
-/// the identity this device is bound to (may be `None` for legacy rows paired
-/// before binding existed).
+/// Verify a signed request. Legacy (`peer_protocol < 2`) signs
+/// `"{ts}\n{METHOD}\n{path}"`; v2 folds in the request payload,
+/// `"{ts}\n{METHOD}\n{path}\nsha256(query\nbody)"` (see `sync::signed_message`).
+/// `query` is the raw URL query string and `body` the exact received bytes; for
+/// streaming multipart uploads the caller passes an empty slice to match the
+/// client, which cannot pre-hash a body it is still streaming. Checks the
+/// registry cache, the ±120 s window, and (on success) throttled `last_seen_at`
+/// bookkeeping. On success returns the identity this device is bound to (may be
+/// `None` for legacy rows paired before binding existed).
 pub fn verify_request(
     settings: &SettingsState,
     device_id: &str,
     method: &str,
     path: &str,
+    query: &str,
+    body: &[u8],
+    peer_protocol: u32,
     ts: &str,
     sig_hex: &str,
 ) -> Result<Option<String>, AuthError> {
@@ -395,7 +415,11 @@ pub fn verify_request(
 
     let pubkey = hex_decode(&pubkey_hex).map_err(|_| AuthError::BadSignature)?;
     let sig = hex_decode(sig_hex).map_err(|_| AuthError::BadSignature)?;
-    let msg = format!("{}\n{}\n{}", ts, method.to_uppercase(), path);
+    let msg = if peer_protocol >= 2 {
+        crate::sync::signed_message(ts_num.max(0) as u64, method, path, query, body)
+    } else {
+        format!("{}\n{}\n{}", ts, method.to_uppercase(), path)
+    };
     UnparsedPublicKey::new(&ring::signature::ED25519, &pubkey)
         .verify(msg.as_bytes(), &sig)
         .map_err(|_| AuthError::BadSignature)?;

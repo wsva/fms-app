@@ -47,6 +47,7 @@ mod simple_words;
 mod wiki;
 mod workspace;
 mod sync;
+mod sync_log;
 mod discover;
 mod read_aloud;
 mod textsim;
@@ -57,6 +58,18 @@ mod model_index;
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
+
+/// Wire protocol version for the hub<->follower sync REST API and the request
+/// signature format. Carried by `/status`, the discovery beacon, and every
+/// signed request header, so a follower can refuse `/changes`, `/file`, and the
+/// chat `after_id` path against a hub that predates them (see docs/my_sync_design.md
+/// §3.1, §7). Bump only on backwards-incompatible protocol changes.
+///
+/// * `1` (Phase 1): role/cluster/protocol headers + `/status` fields; request
+///   signature still covers only `ts\nMETHOD\npath`.
+/// * `2` (Phase 2): adds `/datasets/{uuid}/changes`, `/file`, per-file manifest
+///   hashes, and the **hardened signature** covering `sha256(query\nbody)`.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Install the process-level rustls `CryptoProvider`.
 ///
@@ -200,6 +213,9 @@ pub fn run() {
             settings::settings_set_global,
             settings::settings_get_workspace,
             settings::settings_set_workspace,
+            settings::settings_set_role,
+            settings::settings_adopt_cluster,
+            settings::settings_forget_hub,
             settings::settings_pick_folder,
             dataset::dataset_list,
             dataset::dataset_list_dirs,
@@ -376,11 +392,14 @@ pub fn run() {
             simple_words::simple_words_reload,
             // PC sync + discovery (available on desktop too, for testing).
             sync::dataset_sync_snapshot,
+            sync::sync_run_round,
             sync::writeback_flush,
             sync::writeback_pending_count,
             sync::dataset_sync_state,
             sync::pc_check_status,
             sync::pc_list_datasets,
+            sync::sync_status,
+            sync::sync_forget_dataset,
             sync::pc_pair_start,
             sync::pc_pair_reset_identity,
             discover::pc_discover,
@@ -579,6 +598,9 @@ macro_rules! mobile_invoke_handler {
             settings::settings_set_global,
             settings::settings_get_workspace,
             settings::settings_set_workspace,
+            settings::settings_set_role,
+            settings::settings_adopt_cluster,
+            settings::settings_forget_hub,
             settings::settings_pick_folder,
             dataset::dataset_list,
             dataset::dataset_list_dirs,
@@ -716,11 +738,14 @@ macro_rules! mobile_invoke_handler {
             simple_words::simple_words_reload,
             // PC sync + discovery client.
             sync::dataset_sync_snapshot,
+            sync::sync_run_round,
             sync::writeback_flush,
             sync::writeback_pending_count,
             sync::dataset_sync_state,
             sync::pc_check_status,
             sync::pc_list_datasets,
+            sync::sync_status,
+            sync::sync_forget_dataset,
             sync::pc_pair_start,
             sync::pc_pair_reset_identity,
             discover::pc_discover,

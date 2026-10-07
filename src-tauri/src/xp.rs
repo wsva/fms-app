@@ -23,6 +23,12 @@ pub struct XpUser {
     pub lifetime_xp: i64,
     pub level: i64,
     pub updated_at: String,
+    /// §3.6 counter display: the XP earned on this device but not yet confirmed
+    /// by the hub (still in the writeback queue). Always 0 on the hub. The local
+    /// `lifetime_xp` already includes it (a follower bakes the delta at award
+    /// time); this is only the "syncing" overlay the UI/status surface reads.
+    #[serde(default)]
+    pub pending_xp: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,17 +180,17 @@ pub fn xp_award_internal(
 
     let (lifetime_xp, level) = get_user_xp_from_db(&conn, user_id)?;
 
-    #[cfg(not(feature = "desktop"))]
     {
-        // Queue the award so it is replayed on the PC during the next flush.
-        // PC-side deduplication is by (user_id, source, reference_id).
+        // Queue/record the award: a follower enqueues it for the next push;
+        // the hub appends it to `sync_log` as a counter delta (§3.6). PC-side
+        // deduplication is by (user_id, source, reference_id).
         let payload = serde_json::json!({
             "user_id": user_id,
             "amount": amount,
             "source": source,
             "reference_id": reference_id,
         });
-        let _ = crate::sync::enqueue_change(settings, "xp", dataset_uuid.unwrap_or(""), &payload);
+        let _ = crate::sync_log::commit_change(settings, "xp", dataset_uuid.unwrap_or(""), &payload);
     }
 
     Ok(XpAwardResult {
@@ -319,10 +325,20 @@ pub async fn xp_get_user(
                     lifetime_xp: row.get(1)?,
                     level: row.get(2)?,
                     updated_at: row.get(3)?,
+                    pending_xp: 0,
                 })
             },
         )
         .map_err(|e| e.to_string())?;
+
+    // On a follower, overlay how much of the displayed total the hub has not
+    // confirmed yet (§3.6 reconcile-on-ack). The hub role has no queue.
+    let pending_xp = if _settings.role() != "hub" {
+        crate::sync::pending_xp_delta(&_settings, &user_id).unwrap_or(0)
+    } else {
+        0
+    };
+    let result = XpUser { pending_xp, ..result };
 
     Ok(Some(result))
 }

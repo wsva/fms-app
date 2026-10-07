@@ -334,6 +334,14 @@ export default function Sidebar({
                   <Star size={10} className="text-yellow-500" />
                   {xpUser?.lifetime_xp ?? 0} XP
                 </span>
+                {(xpUser?.pending_xp ?? 0) > 0 && (
+                  <span
+                    className="text-text-tertiary/70 leading-none"
+                    title={`${xpUser?.pending_xp} XP awaiting hub sync`}
+                  >
+                    (+{xpUser?.pending_xp}⋯)
+                  </span>
+                )}
                 {xpFlash !== null && (
                   <span className="text-yellow-500 font-bold animate-bounce">
                     +{xpFlash}
