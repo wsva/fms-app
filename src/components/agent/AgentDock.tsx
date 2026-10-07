@@ -171,22 +171,26 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  // Effective FAB coordinates: fall back to bottom-right when nothing stored.
-  // Reads viewport size only on the client; the button is hidden during SSR
-  // anyway (`mobile` starts false but the whole AgentDock is desktop-gated
-  // further down), so a hard-coded 1280x800 default is fine for the first
-  // paint before hydration sets real values.
-  const vw = typeof window !== "undefined" ? window.innerWidth : 1280;
-  const vh = typeof window !== "undefined" ? window.innerHeight : 800;
-  const effectiveFabPos = fabPos ?? {
-    x: vw - FAB_MARGIN - FAB_SIZE,
-    y: vh - FAB_MARGIN - FAB_SIZE,
-  };
+  // Effective FAB styling: until a position is stored or dragged, the button
+  // keeps its default bottom-right corner expressed as `right`/`bottom` insets.
+  // Those are viewport-independent, which matters: deriving the corner from
+  // `window.innerWidth/innerHeight` makes the prerendered HTML (no window, so a
+  // placeholder size) disagree with the client's real viewport on the style
+  // attribute — a hydration mismatch React warns about and deliberately does not
+  // patch up, leaving the FAB in the wrong corner.
+  const fabStyle: React.CSSProperties = fabPos
+    ? { left: fabPos.x, top: fabPos.y, width: FAB_SIZE, height: FAB_SIZE }
+    : { right: FAB_MARGIN, bottom: FAB_MARGIN, width: FAB_SIZE, height: FAB_SIZE };
 
   const handleFabPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
     // Ignore right/middle mouse; let text-selection / context menu still work.
     if (e.pointerType === "mouse" && e.button !== 0) return;
-    const cur = fabPosRef.current ?? effectiveFabPos;
+    // Handlers run on the client only, so reading the viewport here is safe; it
+    // mirrors the `right`/`bottom` default into `left`/`top` for the drag.
+    const cur = fabPosRef.current ?? {
+      x: window.innerWidth - FAB_MARGIN - FAB_SIZE,
+      y: window.innerHeight - FAB_MARGIN - FAB_SIZE,
+    };
     fabDrag.current = {
       active: true,
       startX: e.clientX,
@@ -580,12 +584,7 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
         title="Agent — drag to move, click to open/close (Ctrl+Space)"
         aria-label="Toggle agent panel"
         className="fixed z-[101] rounded-full bg-accent-bg text-white shadow-lg flex items-center justify-center hover:opacity-90 cursor-grab active:cursor-grabbing select-none touch-none"
-        style={{
-          left: effectiveFabPos.x,
-          top: effectiveFabPos.y,
-          width: FAB_SIZE,
-          height: FAB_SIZE,
-        }}
+        style={fabStyle}
       >
         <Bot size={22} />
         {(unread || busy || permission) && (
