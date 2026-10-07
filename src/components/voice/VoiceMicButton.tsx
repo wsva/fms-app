@@ -29,8 +29,9 @@
  * field. Both pass `state` in, so the meaning of a state cannot drift.
  */
 
-import { Loader2, Mic } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { Button, Tooltip } from "@heroui/react";
+import { MicGlyph } from "@/components/voice/MicGlyph";
 import type { VoiceState } from "@/lib/voice-input";
 
 /** Where the button lives: the compact cue rail, or the chat input row. */
@@ -69,7 +70,8 @@ function Glyph({ state, size }: { state: VoiceState; size: number }) {
   if (state === "processing") return <Loader2 size={size} className="animate-spin" />;
   return (
     <span className="relative inline-flex items-center justify-center">
-      <Mic size={size} />
+      {/* MicGlyph is the app-wide microphone glyph (Rss rotated 45deg CW). */}
+      <MicGlyph size={size} />
       {state === "recording" && (
         <span
           aria-hidden
@@ -99,7 +101,7 @@ export function VoiceMicButton({
         title={view.hint}
         disabled={busy}
         onClick={onPress}
-        className={`p-2.5 rounded-lg cursor-pointer transition-colors disabled:cursor-wait disabled:opacity-60 ${
+        className={`inline-flex items-center justify-center p-2.5 rounded-lg border border-transparent cursor-pointer transition-colors disabled:cursor-wait disabled:opacity-60 ${
           recording ? RECORDING_CLASSES : "bg-bg-muted text-text-secondary enabled:hover:bg-bg-hover"
         }`}
       >

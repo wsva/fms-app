@@ -4,8 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Play,
-  Mic,
-  MicOff,
   X,
   MoreVertical,
   Trash2,
@@ -15,6 +13,7 @@ import {
   Loader2,
   Settings2,
 } from "lucide-react";
+import { MicGlyph } from "@/components/voice/MicGlyph";
 import type { DrawerState, BookSentenceWord } from "@/lib/read/types";
 import type { LlmChatResponse } from "@/lib/llm/types";
 import { isTauri } from "@/lib/tauri";
@@ -554,7 +553,7 @@ export default function SentenceDrawer({
               disabled={!recording && processing}
               onClick={onToggleRecording}
             >
-              {recording ? <MicOff size={16} /> : <Mic size={16} />}
+              <MicGlyph size={16} />
               {recording ? "Stop" : processing ? "Processing\u2026" : "Record"}
             </button>
             {drawer.mode === "add" && (

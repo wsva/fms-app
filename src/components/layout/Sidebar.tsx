@@ -14,7 +14,6 @@ import {
   Wrench,
   BookOpen,
   BookOpenText,
-  Mic,
   Layers,
   ScanText,
   FileText,
@@ -25,6 +24,7 @@ import {
   FolderKanban,
   Type,
 } from "lucide-react";
+import { MicGlyph } from "@/components/voice/MicGlyph";
 
 export type TabId =
   | "dictation"
@@ -79,7 +79,7 @@ const navGroups: NavGroup[] = [
 const rootTabs: TabDef[] = [
   { id: "dictation", label: "Dictation", icon: Headphones },
   { id: "read-book", label: "Read a Book", icon: BookOpen },
-  { id: "read-aloud", label: "Read Aloud", icon: Mic },
+  { id: "read-aloud", label: "Read Aloud", icon: MicGlyph },
   { id: "cards", label: "Cards", icon: Layers },
   { id: "settings", label: "Settings", icon: Settings },
 ];

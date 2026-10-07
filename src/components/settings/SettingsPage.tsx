@@ -5,12 +5,12 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Globe,
   LayoutGrid,
-  Mic,
   Palette,
   Server,
   Settings as SettingsIcon,
   Users,
 } from "lucide-react";
+import { MicGlyph } from "@/components/voice/MicGlyph";
 import {
   CollapsibleSidebar,
   SidebarToggleButton,
@@ -160,7 +160,7 @@ export default function SettingsPage() {
     { id: "theme", label: "Theme", icon: Palette },
     { id: "global", label: "Global Settings", icon: Globe },
     { id: "workspace", label: "Workspace Settings", icon: Server },
-    { id: "microphone", label: "Microphone", icon: Mic },
+    { id: "microphone", label: "Microphone", icon: MicGlyph },
     // Pairing is a PC-side feature, so the phone has no such section.
     ...(sidebar.mobile ? [] : [{ id: "pairing", label: "Device Pairing", icon: Users }]),
   ];

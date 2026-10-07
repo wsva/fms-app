@@ -16,7 +16,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Mic, Square, RotateCcw } from "lucide-react";
+import { Square, RotateCcw } from "lucide-react";
+import { MicGlyph } from "@/components/voice/MicGlyph";
 import { logError, logInfo } from "@/lib/logger";
 import {
   analyzeLevel,
@@ -377,7 +378,7 @@ export default function MicTestPanel() {
   return (
     <div className="mt-6 pt-6 border-t border-border-light">
       <h3 className="text-base font-semibold mb-1 flex items-center gap-2">
-        <Mic size={16} /> Test microphone
+        <MicGlyph size={16} /> Test microphone
       </h3>
       <p className="text-text-secondary text-sm mb-3">
         Like the audio test in a meeting app: press start, speak normally for a few seconds, and
@@ -419,7 +420,7 @@ export default function MicTestPanel() {
             className="px-4 py-2 rounded-md font-medium cursor-pointer transition-colors bg-accent-bg text-white hover:bg-accent-bg-hover flex items-center gap-2"
             onClick={handleStart}
           >
-            <Mic size={15} /> {phase === "finished" ? "Test again" : "Start test"}
+            <MicGlyph size={15} /> {phase === "finished" ? "Test again" : "Start test"}
           </button>
         )}
         {phase === "testing" && (

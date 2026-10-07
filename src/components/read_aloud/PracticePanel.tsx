@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { Mic, Square, Play, Trash2, Loader2, RotateCcw } from "lucide-react";
+import { Square, Play, Trash2, Loader2, RotateCcw } from "lucide-react";
+import { MicGlyph } from "@/components/voice/MicGlyph";
 import type { ReadAttempt, ReadAloudSubmitResult, ReadText } from "@/lib/read_aloud/types";
 import { GOOD_SCORE, PASS_SCORE, scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { useRecorder } from "@/components/read_book/useRecorder";
@@ -139,7 +140,7 @@ export default function PracticePanel({ datasetUuid, text, onScored }: Props) {
           ) : recorder.recording ? (
             <Square size={26} />
           ) : (
-            <Mic size={30} />
+            <MicGlyph size={30} />
           )}
         </button>
         <p className="text-xs text-text-tertiary text-center">

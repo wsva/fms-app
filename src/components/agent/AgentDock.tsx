@@ -75,6 +75,18 @@ const DEFAULT_DOCK_WIDTH = 380;
 const MIN_DOCK_WIDTH = 300;
 const MAX_DOCK_WIDTH = 640;
 
+// Floating toggle button geometry. Persisted so users can park it out of the
+// way when it covers page content (waveform, video, cue list) and the choice
+// survives reloads. Null = default bottom-right corner (matches the pre-drag
+// `bottom-4 right-4` styling), so a fresh install looks unchanged.
+const FAB_SIZE = 48;
+const FAB_MARGIN = 16;
+const FAB_EDGE_PAD = 4;
+const FAB_POS_KEY = "agent.fabPos";
+// Movement past this threshold (in CSS px, summed |dx|+|dy|) is treated as a
+// drag and suppresses the click-to-open handler on pointerup.
+const FAB_DRAG_THRESHOLD = 4;
+
 export default function AgentDock({ activeTab }: { activeTab: TabId }) {
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [input, setInput] = useState("");
@@ -94,6 +106,19 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
   // One auto-reopen per turn: if the user closes the dock mid-stream we stop
   // fighting them until the next turn starts. Reset on send and on done/error.
   const reopenedThisTurn = useRef(false);
+
+  // ---- Floating toggle button: position + drag state ----
+  const [fabPos, setFabPosState] = useState<{ x: number; y: number } | null>(null);
+  // Mirror the latest pos so pointerup can persist without re-reading state.
+  const fabPosRef = useRef<{ x: number; y: number } | null>(null);
+  const setFabPos = (p: { x: number; y: number } | null) => {
+    fabPosRef.current = p;
+    setFabPosState(p);
+  };
+  // Live drag session; kept in a ref so pointermove doesn't force a rerender
+  // of the whole dock (which would still be mounted while closed, running the
+  // ACP listeners and effects). `moved` gates the click handler.
+  const fabDrag = useRef({ active: false, startX: 0, startY: 0, startLeft: 0, startTop: 0, moved: 0 });
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -115,7 +140,101 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
     if (Number.isFinite(w)) {
       setDockWidth(Math.min(MAX_DOCK_WIDTH, Math.max(MIN_DOCK_WIDTH, w)));
     }
+    // Restore FAB position if we have a stored one; anything else falls back
+    // to the default bottom-right corner at render time (see `effectivePos`).
+    try {
+      const raw = localStorage.getItem(FAB_POS_KEY);
+      if (raw) {
+        const p = JSON.parse(raw);
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+          setFabPos(clampFabPos(p.x, p.y));
+        }
+      }
+    } catch {
+      /* ignore malformed storage, fall back to default corner */
+    }
   }, []);
+
+  // Re-clamp when the viewport shrinks (window resize, dev tools dock, etc.)
+  // so the button never drifts off-screen and becomes unreachable.
+  useEffect(() => {
+    const onResize = () => {
+      setFabPosState((prev) => {
+        if (!prev) return prev;
+        const next = clampFabPos(prev.x, prev.y);
+        if (next.x === prev.x && next.y === prev.y) return prev;
+        fabPosRef.current = next;
+        return next;
+      });
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // Effective FAB coordinates: fall back to bottom-right when nothing stored.
+  // Reads viewport size only on the client; the button is hidden during SSR
+  // anyway (`mobile` starts false but the whole AgentDock is desktop-gated
+  // further down), so a hard-coded 1280x800 default is fine for the first
+  // paint before hydration sets real values.
+  const vw = typeof window !== "undefined" ? window.innerWidth : 1280;
+  const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+  const effectiveFabPos = fabPos ?? {
+    x: vw - FAB_MARGIN - FAB_SIZE,
+    y: vh - FAB_MARGIN - FAB_SIZE,
+  };
+
+  const handleFabPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    // Ignore right/middle mouse; let text-selection / context menu still work.
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    const cur = fabPosRef.current ?? effectiveFabPos;
+    fabDrag.current = {
+      active: true,
+      startX: e.clientX,
+      startY: e.clientY,
+      startLeft: cur.x,
+      startTop: cur.y,
+      moved: 0,
+    };
+    // Capture so we keep getting moves even if the pointer leaves the button.
+    e.currentTarget.setPointerCapture(e.pointerId);
+    // Snap the FAB from the default corner to real coords immediately on the
+    // first drag frame so subsequent moves track the pointer one-to-one.
+    if (!fabPosRef.current) setFabPos(cur);
+  };
+
+  const handleFabPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const d = fabDrag.current;
+    if (!d.active) return;
+    const dx = e.clientX - d.startX;
+    const dy = e.clientY - d.startY;
+    d.moved = Math.max(d.moved, Math.abs(dx) + Math.abs(dy));
+    setFabPos(clampFabPos(d.startLeft + dx, d.startTop + dy));
+  };
+
+  const handleFabPointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const d = fabDrag.current;
+    if (!d.active) return;
+    d.active = false;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* capture may already be released */
+    }
+    if (d.moved > FAB_DRAG_THRESHOLD && fabPosRef.current) {
+      localStorage.setItem(FAB_POS_KEY, JSON.stringify(fabPosRef.current));
+    }
+  };
+
+  const handleFabClick = () => {
+    // Suppress the click that fires right after a drag; only a *tap* (small
+    // movement) toggles the dock. Stays visible while open, so it doubles as
+    // a close control.
+    if (fabDrag.current.moved > FAB_DRAG_THRESHOLD) {
+      fabDrag.current.moved = 0;
+      return;
+    }
+    setOpen(!isDockOpenRef.current);
+  };
 
   // Ref mirror of `open` for callbacks registered once (auto-open rules +
   // keyboard toggle below), so they read the current value without re-binding.
@@ -445,23 +564,34 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
 
   return (
     <>
-      {/* Floating toggle button — the always-reachable entry point while the
-          dock is closed. Dots when the agent is waiting, working, or produced
-          output the user hasn't seen. */}
-      {!open && (
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          title="Agent (Ctrl+Space)"
-          aria-label="Toggle agent panel"
-          className="fixed bottom-4 right-4 z-[100] w-12 h-12 rounded-full bg-accent-bg text-white shadow-lg flex items-center justify-center hover:opacity-90 transition-opacity"
-        >
-          <Bot size={22} />
-          {(unread || busy || permission) && (
-            <span className="absolute top-0.5 right-0.5 w-3 h-3 rounded-full bg-yellow-500 border-2 border-bg-card" />
-          )}
-        </button>
-      )}
+      {/* Floating toggle button — always present, whether the dock is open or
+          closed, so it doubles as a close control and stays draggable. Dots
+          when the agent is waiting, working, or produced output the user
+          hasn't seen. Drag it anywhere on-screen to move it out of the way
+          when it would cover content; position persists. z above the dock so
+          it never gets buried when parked over the panel. */}
+      <button
+        type="button"
+        onClick={handleFabClick}
+        onPointerDown={handleFabPointerDown}
+        onPointerMove={handleFabPointerMove}
+        onPointerUp={handleFabPointerUp}
+        onPointerCancel={handleFabPointerUp}
+        title="Agent — drag to move, click to open/close (Ctrl+Space)"
+        aria-label="Toggle agent panel"
+        className="fixed z-[101] rounded-full bg-accent-bg text-white shadow-lg flex items-center justify-center hover:opacity-90 cursor-grab active:cursor-grabbing select-none touch-none"
+        style={{
+          left: effectiveFabPos.x,
+          top: effectiveFabPos.y,
+          width: FAB_SIZE,
+          height: FAB_SIZE,
+        }}
+      >
+        <Bot size={22} />
+        {(unread || busy || permission) && (
+          <span className="absolute top-0.5 right-0.5 w-3 h-3 rounded-full bg-yellow-500 border-2 border-bg-card" />
+        )}
+      </button>
 
       {/* Dock panel — overlays the content area on the right. */}
       {open && (
@@ -615,7 +745,7 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
               {busy ? (
                 <button
                   type="button"
-                  className="p-2.5 rounded-lg bg-bg-muted border border-border-default text-text-secondary hover:bg-bg-hover transition-colors"
+                  className="inline-flex items-center justify-center p-2.5 rounded-lg border border-border-default bg-bg-muted text-text-secondary hover:bg-bg-hover transition-colors"
                   onClick={handleCancel}
                   title="Cancel the current turn"
                 >
@@ -624,7 +754,7 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
               ) : (
                 <button
                   type="button"
-                  className="p-2.5 rounded-lg bg-accent-bg text-white hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="inline-flex items-center justify-center p-2.5 rounded-lg border border-transparent bg-accent-bg text-white hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
                   onClick={handleSend}
                   disabled={!input.trim() || !status.connected || busy}
                 >
@@ -637,6 +767,16 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
       )}
     </>
   );
+}
+
+// Small helpers so the drag handler stays readable.
+function clampFabPos(x: number, y: number) {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  return {
+    x: Math.max(FAB_EDGE_PAD, Math.min(vw - FAB_SIZE - FAB_EDGE_PAD, x)),
+    y: Math.max(FAB_EDGE_PAD, Math.min(vh - FAB_SIZE - FAB_EDGE_PAD, y)),
+  };
 }
 
 // ---------------------------------------------------------------------------

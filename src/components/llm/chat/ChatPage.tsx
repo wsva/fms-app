@@ -511,7 +511,7 @@ export default function LLMChatPage() {
             disabled={!selectedModel}
           />
           <button
-            className="p-2.5 rounded-lg bg-accent-bg text-white hover:opacity-90 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
+            className="inline-flex items-center justify-center p-2.5 rounded-lg border border-transparent bg-accent-bg text-white hover:opacity-90 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
             onClick={handleSend}
             disabled={!input.trim() || !selectedModel || loading}
           >

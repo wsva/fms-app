@@ -3,13 +3,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  Mic,
   Plus,
   Pencil,
   Trash2,
   FolderPlus,
   BookText,
 } from "lucide-react";
+import { MicGlyph } from "@/components/voice/MicGlyph";
 import type { ReadAloudMeta, ReadText } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { isTauri } from "@/lib/tauri";
@@ -223,7 +223,7 @@ export default function ReadAloudPage() {
       {/* Header */}
       <div className="p-3 border-b border-border-default flex items-center gap-2 shrink-0 min-w-0">
         <h1 className="text-lg font-semibold flex items-center gap-2 text-text-primary shrink-0">
-          <Mic size={20} />{!mobile && " Read Aloud"}
+          <MicGlyph size={20} />{!mobile && " Read Aloud"}
         </h1>
         <SidebarToggleButton sidebar={sidebar} title="Show/hide text list" />
 
