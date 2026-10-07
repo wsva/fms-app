@@ -274,8 +274,12 @@ export default function Home() {
       <CardContextMenu />
 
       {/* Always-accessible agent dock (desktop only) — overlays the content
-          area on the right, toggled by the floating Bot button or Ctrl+Space. */}
-      {!mobile && <AgentDock activeTab={activeTab} />}
+          area on the right, toggled by the floating Bot button or Ctrl+Space.
+          `booted` is required as well as `!mobile`: the platform is unknown on
+          the prerendered first paint, so without it Android would mount the
+          dock for one commit and its effects would call the `agent_*` commands
+          that only exist in the desktop binary. */}
+      {booted && !mobile && <AgentDock activeTab={activeTab} />}
 
       {/* Agent `app_notify` toast */}
       {toast && (

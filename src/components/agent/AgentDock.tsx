@@ -87,6 +87,23 @@ const FAB_POS_KEY = "agent.fabPos";
 // drag and suppresses the click-to-open handler on pointerup.
 const FAB_DRAG_THRESHOLD = 4;
 
+/**
+ * True when this build actually hosts the agent backend.
+ *
+ * `ai/agent_acp.rs` is gated behind the Rust `desktop` feature and is absent
+ * from the Android binary, so invoking any `agent_*` command on the phone fails
+ * with "Command agent_status not found". The shell does not mount this dock on
+ * mobile, but it renders the desktop layout for the first commit (the platform
+ * is only knowable after mount, see the `mobile` state below), so effects can
+ * still fire once on Android — hence every agent IPC call is gated here too.
+ *
+ * Safe to call from effects and handlers only: `isMobileApp()` falls back to
+ * `false` during prerendering, so using it while rendering would break hydration.
+ */
+function isAgentHost(): boolean {
+  return isTauri() && !isMobileApp();
+}
+
 export default function AgentDock({ activeTab }: { activeTab: TabId }) {
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [input, setInput] = useState("");
@@ -321,7 +338,7 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
 
   // ---- Load settings + connection status ----
   const refreshStatus = useCallback(async () => {
-    if (!isTauri()) return;
+    if (!isAgentHost()) return;
     try {
       const g = await invoke<{ goose_acp_enabled?: boolean }>("settings_get_global");
       setEnabled(!!g.goose_acp_enabled);
@@ -333,7 +350,7 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
   }, []);
 
   const doConnect = useCallback(async () => {
-    if (!isTauri() || connecting) return;
+    if (!isAgentHost() || connecting) return;
     setConnecting(true);
     try {
       const s = await invoke<AgentStatus>("agent_connect");
@@ -351,7 +368,7 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
   }, [connecting]);
 
   const doDisconnect = useCallback(async () => {
-    if (!isTauri()) return;
+    if (!isAgentHost()) return;
     try {
       await invoke("agent_disconnect");
       setStatus({ connected: false });
@@ -381,13 +398,13 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
   // Ungated by dock visibility: the shell's real active tab is what the agent
   // needs to know, wherever the user currently is.
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isAgentHost()) return;
     invoke("agent_report_ui_state", { activeTab, activeDatasetUuid: null }).catch(() => {});
   }, [activeTab]);
 
   // ---- Event listeners (registered once) ----
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isAgentHost()) return;
     const unlisteners: (() => void)[] = [];
     let cancelled = false;
     const reg = <T,>(event: string, handler: (payload: T) => void) => {
@@ -482,7 +499,7 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
   // ---- Send prompt ----
   const handleSend = useCallback(async () => {
     const text = input.trim();
-    if (!text || busy || !status.connected) return;
+    if (!text || busy || !isAgentHost() || !status.connected) return;
     reopenedThisTurn.current = false;
     setBlocks((prev) => [...prev, { kind: "user", text }]);
     setInput("");
@@ -497,7 +514,7 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
   }, [input, busy, status.connected]);
 
   const handleCancel = useCallback(async () => {
-    if (!isTauri()) return;
+    if (!isAgentHost()) return;
     try {
       await invoke("agent_cancel");
     } catch (e) {
@@ -507,7 +524,7 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
 
   const respondPermission = useCallback(
     async (optionId: string | null) => {
-      if (!permission) return;
+      if (!permission || !isAgentHost()) return;
       try {
         await invoke("agent_respond_permission", {
           requestId: permission.request_id,
