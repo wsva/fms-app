@@ -38,13 +38,13 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::io::{ReaderStream, SyncIoBridge};
 use uuid::Uuid;
 
-use crate::book::{self, BookChapter, BookSentence, BookSentenceWord};
-use crate::cards::{self, Card, Tag};
-use crate::chat;
-use crate::dataset;
-use crate::dictation::{self, ListenCue, ListenDictation};
-use crate::pairing;
+use crate::ai;
+use crate::datasets;
+use crate::datasets::book::{BookChapter, BookSentence, BookSentenceWord};
+use crate::datasets::cards::{Card, Tag};
+use crate::datasets::dictation::{ListenCue, ListenDictation};
 use crate::settings::SettingsState;
+use crate::sync;
 use crate::xp;
 
 /// Shared state for the REST router: the Tauri app handle (to reach managed
@@ -54,7 +54,7 @@ pub struct RestState {
     pub app: AppHandle,
 }
 
-/// Build the `/api/v1` router. Mounted by `web_service::build_router`.
+/// Build the `/api/v1` router. Mounted by `sync::server::build_router`.
 pub fn router(app: AppHandle) -> Router {
     Router::new()
         .route("/status", get(status))
@@ -103,7 +103,7 @@ struct StatusResp {
 
 async fn status(State(st): State<RestState>) -> Response {
     let settings = st.app.state::<SettingsState>();
-    let count = dataset::list_datasets(&settings).len();
+    let count = datasets::list_datasets(&settings).len();
     (
         StatusCode::OK,
         Json(StatusResp {
@@ -111,7 +111,7 @@ async fn status(State(st): State<RestState>) -> Response {
             app_name: "fms-app",
             dataset_count: count,
             ok: true,
-            protocol_version: crate::PROTOCOL_VERSION,
+            protocol_version: crate::sync::PROTOCOL_VERSION,
             role: settings.role(),
             cluster_id: settings.cluster_id(),
         }),
@@ -141,7 +141,7 @@ async fn pair_request(State(st): State<RestState>, Json(body): Json<PairReqBody>
     let settings = st.app.state::<SettingsState>();
     // The identity is derived from the pubkey server-side; a claimed device_id
     // is never trusted. Reject structurally invalid keys.
-    let pubkey = match pairing::hex_decode(&body.pubkey_hex) {
+    let pubkey = match sync::pairing::hex_decode(&body.pubkey_hex) {
         Ok(b) if b.len() == 32 => b,
         _ => return json_error(StatusCode::BAD_REQUEST, "pubkey_hex must be 32 bytes of hex"),
     };
@@ -149,18 +149,18 @@ async fn pair_request(State(st): State<RestState>, Json(body): Json<PairReqBody>
     let name = body.name.trim().chars().take(64).collect::<String>();
     let name = if name.is_empty() { "device".to_string() } else { name };
 
-    let outcome = match pairing::request_pair(&st.app, &settings, &body.pubkey_hex, &name, &body.user_key) {
+    let outcome = match sync::pairing::request_pair(&st.app, &settings, &body.pubkey_hex, &name, &body.user_key) {
         Ok(o) => o,
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
     match outcome {
-        pairing::PairRequestOutcome::Approved => {
+        sync::pairing::PairRequestOutcome::Approved => {
             Json(serde_json::json!({ "state": "approved" })).into_response()
         }
-        pairing::PairRequestOutcome::Denied => {
+        sync::pairing::PairRequestOutcome::Denied => {
             Json(serde_json::json!({ "state": "denied" })).into_response()
         }
-        pairing::PairRequestOutcome::Pending { request_id, fingerprint } => {
+        sync::pairing::PairRequestOutcome::Pending { request_id, fingerprint } => {
             Json(serde_json::json!({
                 "state": "pending",
                 "request_id": request_id,
@@ -182,7 +182,7 @@ async fn pair_status(
     Query(q): Query<PairStatusQuery>,
 ) -> Response {
     let settings = st.app.state::<SettingsState>();
-    match pairing::pending_status(&settings, &q.device_id) {
+    match sync::pairing::pending_status(&settings, &q.device_id) {
         Ok(state) => Json(serde_json::json!({ "state": state })).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
@@ -225,7 +225,7 @@ async fn datasets_list(
     // Dictation datasets. Raw-import folders (a directory with media/ but no
     // info.json) carry an empty uuid and cannot be resolved by the
     // manifest/snapshot endpoints, so skip them rather than offer dead entries.
-    for d in dataset::list_datasets(&settings) {
+    for d in datasets::list_datasets(&settings) {
         if d.info.uuid.is_empty() {
             continue;
         }
@@ -240,7 +240,7 @@ async fn datasets_list(
     }
 
     // Card datasets.
-    for d in crate::cards::list_card_datasets(&settings) {
+    for d in crate::datasets::cards::list_card_datasets(&settings) {
         if d.info.uuid.is_empty() {
             continue;
         }
@@ -255,7 +255,7 @@ async fn datasets_list(
     }
 
     // Books (reading library).
-    for b in crate::book::list_books(&settings) {
+    for b in crate::datasets::book::list_books(&settings) {
         if b.uuid.is_empty() {
             continue;
         }
@@ -463,12 +463,12 @@ fn snapshot_db_copy(dir: &Path) -> Option<PathBuf> {
 
 async fn manifest(State(st): State<RestState>, axum::extract::Path(uuid): axum::extract::Path<String>) -> Response {
     let settings = st.app.state::<SettingsState>();
-    let (dir, ty) = match dataset::find_dataset_dir_typed(&settings, &uuid) {
+    let (dir, ty) = match datasets::find_dataset_dir_typed(&settings, &uuid) {
         Ok(d) => d,
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
     checkpoint_db(&dir);
-    let cache = crate::dictation::open_app_db(&settings).ok();
+    let cache = crate::datasets::dictation::open_app_db(&settings).ok();
     let mut m = compute_manifest(&dir, &uuid, cache.as_ref());
     m.dataset_type = ty.as_str().to_string();
     (StatusCode::OK, Json(m)).into_response()
@@ -480,7 +480,7 @@ async fn manifest(State(st): State<RestState>, axum::extract::Path(uuid): axum::
 
 async fn snapshot(State(st): State<RestState>, axum::extract::Path(uuid): axum::extract::Path<String>) -> Response {
     let settings = st.app.state::<SettingsState>();
-    let (dir, _ty) = match dataset::find_dataset_dir_typed(&settings, &uuid) {
+    let (dir, _ty) = match datasets::find_dataset_dir_typed(&settings, &uuid) {
         Ok(d) => d,
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
@@ -490,15 +490,15 @@ async fn snapshot(State(st): State<RestState>, axum::extract::Path(uuid): axum::
     // re-delivered by the next `/changes` pull rather than silently lost. The
     // snapshot already containing a slightly newer row is then a harmless,
     // idempotent re-apply.
-    let hub_seq: i64 = crate::dictation::open_app_db(&settings)
+    let hub_seq: i64 = crate::datasets::dictation::open_app_db(&settings)
         .ok()
-        .and_then(|conn| crate::sync_log::hub_seq_for(&conn, &uuid).ok())
+        .and_then(|conn| crate::sync::change_log::hub_seq_for(&conn, &uuid).ok())
         .unwrap_or(0);
 
     // Freeze a consistent DB image, then hash + archive the non-DB set exactly
     // as the manifest endpoint would (the manifest excludes the DB itself).
     let snap_db = snapshot_db_copy(&dir);
-    let cache = crate::dictation::open_app_db(&settings).ok();
+    let cache = crate::datasets::dictation::open_app_db(&settings).ok();
     let m = compute_manifest(&dir, &uuid, cache.as_ref());
 
     // Archive the frozen copy under the name `data.sqlite3` and never the live
@@ -579,10 +579,10 @@ async fn changes(
 ) -> Response {
     let settings = st.app.state::<SettingsState>();
     // Reject unknown datasets with 404 before touching the log.
-    if let Err(e) = dataset::find_dataset_dir_typed(&settings, &uuid) {
+    if let Err(e) = datasets::find_dataset_dir_typed(&settings, &uuid) {
         return json_error(StatusCode::NOT_FOUND, &e);
     }
-    let conn = match crate::dictation::open_app_db(&settings) {
+    let conn = match crate::datasets::dictation::open_app_db(&settings) {
         Ok(c) => c,
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
@@ -592,9 +592,9 @@ async fn changes(
     // a stale cursor below the new mark get `resync_required` from `read_changes`
     // below. Only the hub owns a journal worth pruning.
     if settings.role() == "hub" {
-        crate::sync_log::maybe_prune(&conn);
+        crate::sync::change_log::maybe_prune(&conn);
     }
-    match crate::sync_log::read_changes(&conn, &uuid, after) {
+    match crate::sync::change_log::read_changes(&conn, &uuid, after) {
         Ok(page) => (StatusCode::OK, Json(page)).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
@@ -620,7 +620,7 @@ async fn file_endpoint(
     Query(q): Query<FileQuery>,
 ) -> Response {
     let settings = st.app.state::<SettingsState>();
-    let (dir, _ty) = match dataset::find_dataset_dir_typed(&settings, &q.dataset) {
+    let (dir, _ty) = match datasets::find_dataset_dir_typed(&settings, &q.dataset) {
         Ok(d) => d,
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
@@ -647,7 +647,7 @@ async fn file_endpoint(
     if !target_c.is_file() {
         return json_error(StatusCode::NOT_FOUND, "not a file");
     }
-    crate::web_service::stream_file(&target_c, &headers).await
+    crate::sync::server::stream_file(&target_c, &headers).await
 }
 
 // ---------------------------------------------------------------------------
@@ -766,7 +766,7 @@ fn parse_log_time(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 /// * **Trusted zone** (loopback / Tailscale agent path, no device binding): the
 ///   PC's own current workspace identity is used, preserving legacy behavior.
 fn resolve_write_identity(
-    auth: &pairing::AuthContext,
+    auth: &sync::pairing::AuthContext,
     phone_key: &str,
     settings: &SettingsState,
 ) -> Result<String, String> {
@@ -793,7 +793,7 @@ fn resolve_write_identity(
 
 async fn sync_changes(
     State(st): State<RestState>,
-    Extension(auth): Extension<pairing::AuthContext>,
+    Extension(auth): Extension<sync::pairing::AuthContext>,
     Json(req): Json<SyncChangesReq>,
 ) -> Response {
     let settings = st.app.state::<SettingsState>();
@@ -810,9 +810,9 @@ async fn sync_changes(
     // Idempotency ledger + hub sync tables live in the app-level DB (survive
     // dataset swaps). `ensure_hub_tables` creates `applied_changes` alongside
     // `sync_log`, so the hub's own writes and follower replays share one journal.
-    let ledger = match dictation::open_app_db(&settings) {
+    let ledger = match datasets::dictation::open_app_db(&settings) {
         Ok(conn) => {
-            if let Err(e) = crate::sync_log::ensure_hub_tables(&conn) {
+            if let Err(e) = crate::sync::change_log::ensure_hub_tables(&conn) {
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
             }
             conn
@@ -824,7 +824,7 @@ async fn sync_changes(
     let hub_now = chrono::Utc::now();
     for ch in req.changes {
         // Skip anything already applied (idempotent by change id).
-        if crate::sync_log::already_applied(&ledger, &ch.id) {
+        if crate::sync::change_log::already_applied(&ledger, &ch.id) {
             results.push(ChangeResult::applied(ch.id));
             continue;
         }
@@ -834,12 +834,12 @@ async fn sync_changes(
         // live row (`updated_at`) and any tombstone (its `op`), so a push that
         // loses on time is rejected without a new seq being written — the follower
         // drops it and re-converges from the winner on its next `/changes` pull.
-        if crate::sync_log::ChangeClass::of(&ch.kind).coalescible() {
+        if crate::sync::change_log::ChangeClass::of(&ch.kind).coalescible() {
             let dataset_uuid = ch.dataset_uuid.clone().unwrap_or_default();
-            let object_id = crate::sync_log::object_id_for(&ch.kind, &ch.payload);
+            let object_id = crate::sync::change_log::object_id_for(&ch.kind, &ch.payload);
             if !object_id.is_empty() {
                 let incoming = normalize_edit_time(&ch.edit_time, hub_now);
-                let latest = crate::sync_log::latest_for_object(&ledger, &dataset_uuid, &object_id)
+                let latest = crate::sync::change_log::latest_for_object(&ledger, &dataset_uuid, &object_id)
                     .ok()
                     .flatten();
                 if let Some((winner_seq, winner_edit, _op, winner_payload)) = latest {
@@ -854,8 +854,8 @@ async fn sync_changes(
                         results.push(ChangeResult::losing(ch.id, winner_seq, winner_payload));
                         continue;
                     }
-                } else if crate::sync_log::op_for(&ch.kind) == "upsert"
-                    && crate::sync_log::is_tombstoned_at_least(
+                } else if crate::sync::change_log::op_for(&ch.kind) == "upsert"
+                    && crate::sync::change_log::is_tombstoned_at_least(
                         settings.inner(),
                         &dataset_uuid,
                         &object_id,
@@ -878,7 +878,7 @@ async fn sync_changes(
 
         match replay(&settings, &write_identity, &ch).await {
             Ok(()) => {
-                crate::sync_log::mark_applied(&ledger, &ch.id);
+                crate::sync::change_log::mark_applied(&ledger, &ch.id);
                 results.push(ChangeResult::applied(ch.id));
             }
             Err(e) => {
@@ -901,17 +901,17 @@ async fn replay(
         "cue_save" => {
             let cue: ListenCue =
                 serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
-            dictation::listen_save_cue(settings.clone(), dataset_uuid, cue).await
+            datasets::dictation::listen_save_cue(settings.clone(), dataset_uuid, cue).await
         }
         "cue_delete" => {
             let cue_uuid: String = extract_cue_uuid(&ch.payload)?;
-            dictation::listen_delete_cue(settings.clone(), dataset_uuid, cue_uuid).await
+            datasets::dictation::listen_delete_cue(settings.clone(), dataset_uuid, cue_uuid).await
         }
         "dictation" => {
             let d: ListenDictation =
                 serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
             // Attribute to the enforced identity, not the PC's current workspace.
-            dictation::listen_save_dictation_as(
+            datasets::dictation::listen_save_dictation_as(
                 settings.inner(),
                 &dataset_uuid,
                 &d,
@@ -953,64 +953,64 @@ async fn replay(
         "card_save" => {
             let card: Card =
                 serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
-            cards::card_save(settings.clone(), dataset_uuid, card).await.map(|_| ())
+            datasets::cards::card_save(settings.clone(), dataset_uuid, card).await.map(|_| ())
         }
         "card_delete" => {
             let card_uuid = extract_str(&ch.payload, "card_uuid")?;
-            cards::card_delete(settings.clone(), dataset_uuid, card_uuid).await
+            datasets::cards::card_delete(settings.clone(), dataset_uuid, card_uuid).await
         }
         "card_review" => {
             let card_uuid = extract_str(&ch.payload, "card_uuid")?;
             let quality = ch.payload.get("quality").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            cards::card_test_submit(settings.clone(), dataset_uuid, card_uuid, quality).await.map(|_| ())
+            datasets::cards::card_test_submit(settings.clone(), dataset_uuid, card_uuid, quality).await.map(|_| ())
         }
         "card_tag_save" => {
             let tag: Tag =
                 serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
-            cards::card_tag_save(settings.clone(), dataset_uuid, tag).await.map(|_| ())
+            datasets::cards::card_tag_save(settings.clone(), dataset_uuid, tag).await.map(|_| ())
         }
         "card_tag_delete" => {
             let tag_uuid = extract_str(&ch.payload, "tag_uuid")?;
-            cards::card_tag_delete(settings.clone(), dataset_uuid, tag_uuid).await
+            datasets::cards::card_tag_delete(settings.clone(), dataset_uuid, tag_uuid).await
         }
         "card_set_tags" => {
             let card_uuid = extract_str(&ch.payload, "card_uuid")?;
             let tag_uuids: Vec<String> = ch.payload.get("tag_uuids").and_then(|v| v.as_array()).map(|arr| {
                 arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
             }).unwrap_or_default();
-            cards::card_set_tags(settings.clone(), dataset_uuid, card_uuid, tag_uuids).await
+            datasets::cards::card_set_tags(settings.clone(), dataset_uuid, card_uuid, tag_uuids).await
         }
         "book_chapter_save" => {
             let chapter: BookChapter =
                 serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
-            book::book_save_chapter(settings.clone(), dataset_uuid, chapter).await
+            datasets::book::book_save_chapter(settings.clone(), dataset_uuid, chapter).await
         }
         "book_chapter_delete" => {
             let uuid = extract_str(&ch.payload, "uuid")?;
-            book::book_delete_chapter(settings.clone(), dataset_uuid, uuid).await
+            datasets::book::book_delete_chapter(settings.clone(), dataset_uuid, uuid).await
         }
         "book_sentence_save" => {
             let sentence: BookSentence =
                 serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
-            book::book_save_sentence(settings.clone(), dataset_uuid, sentence).await
+            datasets::book::book_save_sentence(settings.clone(), dataset_uuid, sentence).await
         }
         "book_sentences_save" => {
             let sentences: Vec<BookSentence> =
                 serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
-            book::book_save_sentences(settings.clone(), dataset_uuid, sentences).await
+            datasets::book::book_save_sentences(settings.clone(), dataset_uuid, sentences).await
         }
         "book_sentence_delete" => {
             let uuid = extract_str(&ch.payload, "uuid")?;
-            book::book_delete_sentence(settings.clone(), dataset_uuid, uuid).await
+            datasets::book::book_delete_sentence(settings.clone(), dataset_uuid, uuid).await
         }
         "book_word_save" => {
             let word: BookSentenceWord =
                 serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
-            book::book_save_word(settings.clone(), dataset_uuid, word).await
+            datasets::book::book_save_word(settings.clone(), dataset_uuid, word).await
         }
         "book_word_delete" => {
             let uuid = extract_str(&ch.payload, "uuid")?;
-            book::book_delete_word(settings.clone(), dataset_uuid, uuid).await
+            datasets::book::book_delete_word(settings.clone(), dataset_uuid, uuid).await
         }
         other => Err(format!("unknown change kind: {}", other)),
     }
@@ -1152,21 +1152,21 @@ struct ChatListQuery {
 /// plus the caller's own device id, so a phone knows which bubbles are "mine".
 async fn chat_messages(
     State(st): State<RestState>,
-    Extension(auth): Extension<pairing::AuthContext>,
+    Extension(auth): Extension<sync::pairing::AuthContext>,
     Query(q): Query<ChatListQuery>,
 ) -> Response {
     let settings = st.app.state::<SettingsState>();
     let limit = q.limit.unwrap_or(200);
     let listed = match q.after_id {
-        Some(id) => chat::list_messages_after_id(&settings, id, limit),
-        None => chat::list_messages(&settings, &q.after, limit),
+        Some(id) => ai::chat::list_messages_after_id(&settings, id, limit),
+        None => ai::chat::list_messages(&settings, &q.after, limit),
     };
     match listed {
         Ok(messages) => {
             let self_device = auth.device_id.unwrap_or_else(|| "pc".to_string());
             (
                 StatusCode::OK,
-                Json(chat::ChatListResponse { messages, self_device }),
+                Json(ai::chat::ChatListResponse { messages, self_device }),
             )
                 .into_response()
         }
@@ -1179,7 +1179,7 @@ async fn chat_messages(
 /// a send whose response was lost cannot duplicate the message.
 async fn chat_message(
     State(st): State<RestState>,
-    Extension(auth): Extension<pairing::AuthContext>,
+    Extension(auth): Extension<sync::pairing::AuthContext>,
     mut multipart: Multipart,
 ) -> Response {
     let settings = st.app.state::<SettingsState>();
@@ -1249,14 +1249,14 @@ async fn chat_message(
 
 fn chat_message_inner(
     settings: &SettingsState,
-    auth: &pairing::AuthContext,
+    auth: &sync::pairing::AuthContext,
     uuid: String,
     text: String,
     claimed_name: String,
     files: &[(PathBuf, String)],
-) -> Result<chat::ChatMessage, String> {
+) -> Result<ai::chat::ChatMessage, String> {
     // Stored verbatim as the primary key and echoed back, so shape-check it.
-    if !chat::valid_message_uuid(&uuid) {
+    if !ai::chat::valid_message_uuid(&uuid) {
         return Err("missing or invalid 'uuid' field".to_string());
     }
     if text.trim().is_empty() && files.is_empty() {
@@ -1266,16 +1266,16 @@ fn chat_message_inner(
     // is only a fallback (legacy clients / trusted-zone callers).
     let sender_device = auth.device_id.clone().unwrap_or_else(|| "pc".to_string());
     let sender_name = match auth.device_id.as_deref() {
-        Some(id) => pairing::list_devices(settings)
+        Some(id) => sync::pairing::list_devices(settings)
             .ok()
             .and_then(|ds| ds.into_iter().find(|d| d.device_id == id).map(|d| d.name))
             .or_else(|| {
                 if claimed_name.is_empty() { None } else { Some(claimed_name.clone()) }
             })
             .unwrap_or_else(|| "Device".to_string()),
-        None => chat::pc_sender_name(),
+        None => ai::chat::pc_sender_name(),
     };
-    chat::insert_message(settings, &uuid, &sender_device, &sender_name, &text, files)
+    ai::chat::insert_message(settings, &uuid, &sender_device, &sender_name, &text, files)
 }
 
 /// `GET /chat/attachment/{uuid}` — stream one stored attachment back to the
@@ -1286,10 +1286,10 @@ async fn chat_attachment(
     axum::extract::Path(uuid): axum::extract::Path<String>,
 ) -> Response {
     let settings = st.app.state::<SettingsState>();
-    if !chat::valid_message_uuid(&uuid) {
+    if !ai::chat::valid_message_uuid(&uuid) {
         return json_error(StatusCode::BAD_REQUEST, "invalid attachment id");
     }
-    let (path, att) = match chat::attachment_file(&settings, &uuid) {
+    let (path, att) = match ai::chat::attachment_file(&settings, &uuid) {
         Ok(v) => v,
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
@@ -1303,7 +1303,7 @@ async fn chat_attachment(
         header::CONTENT_TYPE,
         HeaderValue::from_str(&att.mime).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
     );
-    let disposition = format!("inline; filename=\"{}\"", chat::sanitize_filename(&att.filename));
+    let disposition = format!("inline; filename=\"{}\"", ai::chat::sanitize_filename(&att.filename));
     headers.insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&disposition).unwrap_or_else(|_| HeaderValue::from_static("inline")),

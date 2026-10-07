@@ -19,16 +19,16 @@ workspace/
 
 ## Backend Changes
 
-### 1. DatasetType Enum (`src-tauri/src/dataset.rs`)
+### 1. DatasetType Enum (`src-tauri/src/datasets/mod.rs`)
 - Added `DatasetType` enum with `Card` and `Dictation` variants
 - Updated `dataset_roots()` to accept `DatasetType` parameter
 - Function now looks in `datasets/{type}/` subdirectory based on type
 - Each type has its own `meta.json` for linked directories
 
 ### 2. Updated Callers
-- **dataset.rs**: All dictation dataset functions now use `DatasetType::Dictation`
-- **cards.rs**: All card dataset functions now use `DatasetType::Card`
-- **mcp.rs**: Updated `dataset_list_dirs` MCP tool to accept `dataset_type` parameter
+- **datasets/mod.rs**: All dictation dataset functions now use `DatasetType::Dictation`
+- **datasets/cards/mod.rs**: All card dataset functions now use `DatasetType::Card`
+- **mcp/datasets.rs**: Updated `dataset_list_dirs` MCP tool to accept `dataset_type` parameter
 
 ### 3. dataset_list_dirs Command
 - Now requires `dataset_type` parameter ("card" or "dictation")

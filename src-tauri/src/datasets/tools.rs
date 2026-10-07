@@ -4,8 +4,8 @@ use std::process::Command;
 
 use tauri::{AppHandle, Manager, State};
 
-use crate::align::split_book_sentences;
-use crate::dataset::find_dataset_dir;
+use crate::datasets::dictation::align::split_book_sentences;
+use crate::datasets::find_dataset_dir;
 use crate::settings::SettingsState;
 
 // ============================================================
@@ -296,7 +296,7 @@ pub async fn dataset_write_transcripts(
 /// Stage 4a: split `book.txt` into sentences and cache them (one per line) in
 /// `book_sentences.txt`. Two engines are offered via `mode`:
 ///
-/// - `"rust"` (default): built-in splitter (`align::split_book_sentences`).
+/// - `"rust"` (default): built-in splitter (`datasets::dictation::align::split_book_sentences`).
 ///   Self-contained and fast, but a simple heuristic — lower quality on
 ///   abbreviations / edge cases. Boundaries match the transcript-align stage.
 /// - `"python"`: runs the bundled `split_book.py` (NLTK `sent_tokenize`, with the

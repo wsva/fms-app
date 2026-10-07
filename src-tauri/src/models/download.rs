@@ -22,7 +22,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::model::{DownloadProgress, FileDownloadInfo};
+use crate::models::{DownloadProgress, FileDownloadInfo};
 
 // ---------------------------------------------------------------------------
 // Constants

@@ -35,7 +35,7 @@ use uuid::Uuid;
 
 use ring::signature::{Ed25519KeyPair, KeyPair};
 
-use crate::dictation;
+use crate::datasets;
 use crate::settings::{self, SettingsState};
 
 // ---------------------------------------------------------------------------
@@ -244,7 +244,7 @@ pub(crate) fn with_device_auth(
         .header("x-fms-sig", hex_encode(sig.as_ref()))
         .header("x-fms-role", role)
         .header("x-fms-cluster", cluster_id)
-        .header("x-fms-protocol", crate::PROTOCOL_VERSION.to_string()))
+        .header("x-fms-protocol", crate::sync::PROTOCOL_VERSION.to_string()))
 }
 
 /// Local root a dataset type syncs into: `<datasets>/<type>` (e.g.
@@ -315,7 +315,7 @@ fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
 
 /// Append a queued change to the writeback queue. Both mobile clients and a
 /// desktop running `role = "follower"` funnel here via
-/// [`crate::sync_log::commit_change`]; the hub role never enqueues. State kinds
+/// [`crate::sync::change_log::commit_change`]; the hub role never enqueues. State kinds
 /// coalesce (§3.4): a newer edit to the same `(kind, dataset, object_id)`
 /// replaces the still-pending older one instead of stacking, while append-only
 /// and counter kinds keep every distinct row.
@@ -325,14 +325,14 @@ pub fn enqueue_change(
     dataset_uuid: &str,
     payload: &Value,
 ) -> Result<(), String> {
-    let conn = dictation::open_app_db(settings)?;
+    let conn = datasets::dictation::open_app_db(settings)?;
     ensure_sync_tables(&conn)?;
     let edit_time = chrono::Utc::now().to_rfc3339();
-    let object_id = crate::sync_log::object_id_for(kind, payload);
+    let object_id = crate::sync::change_log::object_id_for(kind, payload);
     // Fold repeat edits to one mutable row so we neither ship stale intermediate
     // payloads nor grow the queue without bound between flushes. An empty
     // `object_id` (bulk inserts) is left uncoalesced by the guard.
-    if crate::sync_log::ChangeClass::of(kind).coalescible() && !object_id.is_empty() {
+    if crate::sync::change_log::ChangeClass::of(kind).coalescible() && !object_id.is_empty() {
         conn.execute(
             "DELETE FROM writeback_queue \
              WHERE kind = ?1 AND dataset_uuid = ?2 AND object_id = ?3",
@@ -360,7 +360,7 @@ pub fn enqueue_change(
 /// Reading the queue directly keeps the source of truth single — no separate
 /// pending ledger to drift.
 pub fn pending_xp_delta(settings: &SettingsState, user_id: &str) -> Result<i64, String> {
-    let conn = dictation::open_app_db(settings)?;
+    let conn = datasets::dictation::open_app_db(settings)?;
     ensure_sync_tables(&conn)?;
     let mut stmt = conn
         .prepare("SELECT payload FROM writeback_queue WHERE kind = 'xp'")
@@ -397,7 +397,7 @@ pub async fn writeback_flush_inner(settings: &SettingsState) -> Result<usize, St
     loop {
         // 1. Read a batch (Connection not held across await).
         let batch: Vec<(String, String, String, String, String, String)> = {
-            let conn = dictation::open_app_db(settings)?;
+            let conn = datasets::dictation::open_app_db(settings)?;
             ensure_sync_tables(&conn)?;
             let mut stmt = conn
                 .prepare(
@@ -474,7 +474,7 @@ pub async fn writeback_flush_inner(settings: &SettingsState) -> Result<usize, St
             .collect();
 
         if !acked.is_empty() {
-            let conn = dictation::open_app_db(settings)?;
+            let conn = datasets::dictation::open_app_db(settings)?;
             ensure_sync_tables(&conn)?;
             for id in &acked {
                 let _ = conn.execute("DELETE FROM writeback_queue WHERE id = ?1", [id]);
@@ -543,7 +543,7 @@ pub async fn dataset_sync_snapshot(
     let dataset_type = m["dataset_type"].as_str().unwrap_or("dictation").to_string();
 
     let stored: Option<String> = {
-        let conn = dictation::open_app_db(&settings)?;
+        let conn = datasets::dictation::open_app_db(&settings)?;
         ensure_sync_tables(&conn)?;
         conn.query_row(
             "SELECT overall_hash FROM dataset_sync_state WHERE dataset_uuid = ?1",
@@ -647,7 +647,7 @@ pub async fn dataset_sync_snapshot(
 
     // 7. Record sync state (with the incremental cursor this snapshot carries).
     {
-        let conn = dictation::open_app_db(&settings)?;
+        let conn = datasets::dictation::open_app_db(&settings)?;
         ensure_sync_tables(&conn)?;
         conn.execute(
             "INSERT OR REPLACE INTO dataset_sync_state \
@@ -695,7 +695,7 @@ pub struct SyncStateEntry {
 pub async fn dataset_sync_state(
     settings: State<'_, SettingsState>,
 ) -> Result<Vec<SyncStateEntry>, String> {
-    let conn = dictation::open_app_db(&settings)?;
+    let conn = datasets::dictation::open_app_db(&settings)?;
     ensure_sync_tables(&conn)?;
     let mut stmt = conn
         .prepare(
@@ -721,7 +721,7 @@ pub async fn dataset_sync_state(
 /// Number of changes waiting to be uploaded (for the UI badge).
 #[tauri::command]
 pub async fn writeback_pending_count(settings: State<'_, SettingsState>) -> Result<i64, String> {
-    let conn = dictation::open_app_db(&settings)?;
+    let conn = datasets::dictation::open_app_db(&settings)?;
     ensure_sync_tables(&conn)?;
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM writeback_queue", [], |r| r.get(0))
@@ -785,7 +785,7 @@ pub struct SyncStatusDetail {
     /// Offline chat messages awaiting flush (follower only; `0` on a hub).
     pub chat_pending: i64,
     /// Paired-device registry entries — populated only when `role == "hub"`.
-    /// `Value` (not `pairing::PairedDevice`) because `pairing` is desktop-only;
+    /// `Value` (not `sync::pairing::PairedDevice`) because `pairing` is desktop-only;
     /// the hub serializes its `Vec<PairedDevice>` into this JSON array.
     pub devices: Value,
 }
@@ -859,7 +859,7 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
     let cluster_id = settings.cluster_id();
     let device_id = local_device_id(settings).unwrap_or_default();
 
-    let conn = dictation::open_app_db(settings)?;
+    let conn = datasets::dictation::open_app_db(settings)?;
     ensure_sync_tables(&conn)?;
 
     let mut local: Vec<SyncStateEntry> = {
@@ -908,13 +908,13 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
     let chat_pending = if role == "hub" {
         0
     } else {
-        crate::chat::pending_outbox_count(settings)
+        crate::ai::chat::pending_outbox_count(settings)
     };
 
     let devices: Value = if role == "hub" {
         #[cfg(feature = "desktop")]
         {
-            serde_json::to_value(crate::pairing::list_devices(settings).unwrap_or_default())
+            serde_json::to_value(crate::sync::pairing::list_devices(settings).unwrap_or_default())
                 .unwrap_or_else(|_| Value::Array(Vec::new()))
         }
         #[cfg(not(feature = "desktop"))]
@@ -981,7 +981,7 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
     Ok(SyncStatusDetail {
         role,
         cluster_id,
-        protocol_version: crate::PROTOCOL_VERSION,
+        protocol_version: crate::sync::PROTOCOL_VERSION,
         device_id,
         hub,
         datasets,
@@ -1256,7 +1256,7 @@ async fn fetch_manifest_hash(settings: &SettingsState, uuid: &str) -> Result<Str
 
 /// Apply one pulled `sync_log` entry to the local dataset DB by dispatching to
 /// the same write commands the UI uses. MUST be wrapped in a
-/// [`crate::sync_log::ApplyGuard`] by the caller so the write does not
+/// [`crate::sync::change_log::ApplyGuard`] by the caller so the write does not
 /// re-enqueue/re-log (the change is arriving *from* the hub). Mirrors the hub's
 /// `rest.rs::replay` dispatch, but cross-platform (this module compiles on
 /// mobile too). Returns `Ok(false)` for an unknown kind (skipped, not fatal).
@@ -1267,9 +1267,9 @@ async fn apply_change(
     payload: &Value,
     write_identity: &str,
 ) -> Result<bool, String> {
-    use crate::book::{BookChapter, BookSentence, BookSentenceWord};
-    use crate::cards::{Card, Tag};
-    use crate::dictation::{ListenCue, ListenDictation};
+    use crate::datasets::book::{BookChapter, BookSentence, BookSentenceWord};
+    use crate::datasets::cards::{Card, Tag};
+    use crate::datasets::dictation::{ListenCue, ListenDictation};
     let ds = dataset_uuid.to_string();
     let str_field = |k: &str| -> Result<String, String> {
         payload
@@ -1281,7 +1281,7 @@ async fn apply_change(
     match kind {
         "cue_save" => {
             let cue: ListenCue = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
-            crate::dictation::listen_save_cue(settings.clone(), ds, cue).await.map(|_| true)
+            crate::datasets::dictation::listen_save_cue(settings.clone(), ds, cue).await.map(|_| true)
         }
         "cue_delete" => {
             let cue_uuid = payload
@@ -1291,11 +1291,11 @@ async fn apply_change(
                 .or_else(|| payload.get("uuid").and_then(|v| v.as_str()))
                 .map(|s| s.to_string())
                 .ok_or_else(|| "cue_delete missing uuid".to_string())?;
-            crate::dictation::listen_delete_cue(settings.clone(), ds, cue_uuid).await.map(|_| true)
+            crate::datasets::dictation::listen_delete_cue(settings.clone(), ds, cue_uuid).await.map(|_| true)
         }
         "dictation" => {
             let d: ListenDictation = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
-            crate::dictation::listen_save_dictation_as(settings.inner(), &ds, &d, write_identity)
+            crate::datasets::dictation::listen_save_dictation_as(settings.inner(), &ds, &d, write_identity)
                 .await
                 .map(|_| true)
         }
@@ -1314,24 +1314,24 @@ async fn apply_change(
         }
         "card_save" => {
             let card: Card = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
-            crate::cards::card_save(settings.clone(), ds, card).await.map(|_| true)
+            crate::datasets::cards::card_save(settings.clone(), ds, card).await.map(|_| true)
         }
         "card_delete" => {
             let card_uuid = str_field("card_uuid")?;
-            crate::cards::card_delete(settings.clone(), ds, card_uuid).await.map(|_| true)
+            crate::datasets::cards::card_delete(settings.clone(), ds, card_uuid).await.map(|_| true)
         }
         "card_review" => {
             let card_uuid = str_field("card_uuid")?;
             let quality = payload.get("quality").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            crate::cards::card_test_submit(settings.clone(), ds, card_uuid, quality).await.map(|_| true)
+            crate::datasets::cards::card_test_submit(settings.clone(), ds, card_uuid, quality).await.map(|_| true)
         }
         "card_tag_save" => {
             let tag: Tag = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
-            crate::cards::card_tag_save(settings.clone(), ds, tag).await.map(|_| true)
+            crate::datasets::cards::card_tag_save(settings.clone(), ds, tag).await.map(|_| true)
         }
         "card_tag_delete" => {
             let tag_uuid = str_field("tag_uuid")?;
-            crate::cards::card_tag_delete(settings.clone(), ds, tag_uuid).await.map(|_| true)
+            crate::datasets::cards::card_tag_delete(settings.clone(), ds, tag_uuid).await.map(|_| true)
         }
         "card_set_tags" => {
             let card_uuid = str_field("card_uuid")?;
@@ -1340,35 +1340,35 @@ async fn apply_change(
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            crate::cards::card_set_tags(settings.clone(), ds, card_uuid, tag_uuids).await.map(|_| true)
+            crate::datasets::cards::card_set_tags(settings.clone(), ds, card_uuid, tag_uuids).await.map(|_| true)
         }
         "book_chapter_save" => {
             let chapter: BookChapter = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
-            crate::book::book_save_chapter(settings.clone(), ds, chapter).await.map(|_| true)
+            crate::datasets::book::book_save_chapter(settings.clone(), ds, chapter).await.map(|_| true)
         }
         "book_chapter_delete" => {
             let uuid = str_field("uuid")?;
-            crate::book::book_delete_chapter(settings.clone(), ds, uuid).await.map(|_| true)
+            crate::datasets::book::book_delete_chapter(settings.clone(), ds, uuid).await.map(|_| true)
         }
         "book_sentence_save" => {
             let sentence: BookSentence = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
-            crate::book::book_save_sentence(settings.clone(), ds, sentence).await.map(|_| true)
+            crate::datasets::book::book_save_sentence(settings.clone(), ds, sentence).await.map(|_| true)
         }
         "book_sentences_save" => {
             let sentences: Vec<BookSentence> = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
-            crate::book::book_save_sentences(settings.clone(), ds, sentences).await.map(|_| true)
+            crate::datasets::book::book_save_sentences(settings.clone(), ds, sentences).await.map(|_| true)
         }
         "book_sentence_delete" => {
             let uuid = str_field("uuid")?;
-            crate::book::book_delete_sentence(settings.clone(), ds, uuid).await.map(|_| true)
+            crate::datasets::book::book_delete_sentence(settings.clone(), ds, uuid).await.map(|_| true)
         }
         "book_word_save" => {
             let word: BookSentenceWord = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
-            crate::book::book_save_word(settings.clone(), ds, word).await.map(|_| true)
+            crate::datasets::book::book_save_word(settings.clone(), ds, word).await.map(|_| true)
         }
         "book_word_delete" => {
             let uuid = str_field("uuid")?;
-            crate::book::book_delete_word(settings.clone(), ds, uuid).await.map(|_| true)
+            crate::datasets::book::book_delete_word(settings.clone(), ds, uuid).await.map(|_| true)
         }
         other => {
             log::warn!("[sync_round] skipping unknown change kind '{other}'");
@@ -1394,7 +1394,7 @@ fn has_pending_local_edit(conn: &Connection, dataset_uuid: &str, kind: &str, obj
     };
     for payload_str in rows.flatten() {
         let payload: Value = serde_json::from_str(&payload_str).unwrap_or(Value::Null);
-        let local_obj = crate::sync_log::object_id_for(kind, &payload);
+        let local_obj = crate::sync::change_log::object_id_for(kind, &payload);
         if local_obj == object_id {
             return true;
         }
@@ -1428,7 +1428,7 @@ pub async fn sync_forget_dataset(
     if hub_lists_dataset(&settings, &uuid).await {
         return Err("the hub still offers this dataset — it stays in sync".to_string());
     }
-    let conn = dictation::open_app_db(&settings)?;
+    let conn = datasets::dictation::open_app_db(&settings)?;
     ensure_sync_tables(&conn)?;
     prune_local_dataset(&settings, &conn, &uuid);
     log::info!("[sync] forgot local dataset {uuid}");
@@ -1487,7 +1487,7 @@ pub async fn sync_round_inner(
     // 3. Per already-synced dataset: incremental apply, or a full resync when
     //    the cursor is unknown / a prune gap is reported / files drifted.
     let local: Vec<(String, Option<i64>, String)> = {
-        let conn = dictation::open_app_db(&settings)?;
+        let conn = datasets::dictation::open_app_db(&settings)?;
         ensure_sync_tables(&conn)?;
         let mut stmt = conn
             .prepare("SELECT dataset_uuid, \"cursor\", overall_hash FROM dataset_sync_state")
@@ -1507,7 +1507,7 @@ pub async fn sync_round_inner(
     for (uuid, cursor_opt, stored_hash) in local {
         if !catalog_map.contains_key(&uuid) {
             if catalog_ok {
-                let conn = dictation::open_app_db(&settings)?;
+                let conn = datasets::dictation::open_app_db(&settings)?;
                 prune_local_dataset(&settings, &conn, &uuid);
                 pruned.push(uuid);
             }
@@ -1560,8 +1560,8 @@ pub async fn sync_round_inner(
 
         let entries = page["entries"].as_array().cloned().unwrap_or_default();
         if !entries.is_empty() {
-            let _guard = crate::sync_log::ApplyGuard::new();
-            let conn = dictation::open_app_db(&settings)?;
+            let _guard = crate::sync::change_log::ApplyGuard::new();
+            let conn = datasets::dictation::open_app_db(&settings)?;
             ensure_sync_tables(&conn)?;
             for ent in &entries {
                 let kind = ent["kind"].as_str().unwrap_or("");
@@ -1579,7 +1579,7 @@ pub async fn sync_round_inner(
             }
             drop(_guard);
             // Advance the row cursor to the hub's high-water mark.
-            let conn = dictation::open_app_db(&settings)?;
+            let conn = datasets::dictation::open_app_db(&settings)?;
             ensure_sync_tables(&conn)?;
             let _ = conn.execute(
                 "UPDATE dataset_sync_state SET \"cursor\" = ?2 WHERE dataset_uuid = ?1",

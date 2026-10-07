@@ -23,14 +23,14 @@ use chrono::Utc;
 use rusqlite::Connection;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::dataset::{find_dataset_dir, DatasetInfo, DatasetProgress};
+use crate::datasets::{find_dataset_dir, DatasetInfo, DatasetProgress};
 use crate::settings::SettingsState;
-use crate::textsim::normalize;
+use crate::datasets::textsim::normalize;
 
 // The scoring helpers live in the always-compiled `textsim` module so they are
-// available on mobile too. Re-exported here so existing `crate::align::
+// available on mobile too. Re-exported here so existing `crate::datasets::dictation::align::
 // similarity_score` callers (e.g. adjust.rs) keep working unchanged.
-pub(crate) use crate::textsim::similarity_score;
+pub(crate) use crate::datasets::textsim::similarity_score;
 
 // ---------------------------------------------------------------------------
 // Configuration (mirrors lib/alignment.py)

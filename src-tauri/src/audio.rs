@@ -352,7 +352,7 @@ pub struct WaveformPeaks {
 /// The audio is decoded to 16 kHz mono f32 (see [`decode_to_pcm`]); every bucket
 /// of `sample_rate / pixels_per_second` consecutive samples collapses to its
 /// min/max, scaled into the signed 8-bit range used by audiowaveform. Consumers
-/// (`WaveformCanvas`, `adjust::load_waveform`) divide by 128 and derive
+/// (`WaveformCanvas`, `datasets::dictation::adjust::load_waveform`) divide by 128 and derive
 /// `ms_per_pixel = samples_per_pixel / sample_rate * 1000`.
 pub fn generate_waveform(path: &Path, pixels_per_second: u32) -> Result<WaveformPeaks, String> {
     log::debug!("Generating waveform for: {} ({} pps)", path.display(), pixels_per_second);

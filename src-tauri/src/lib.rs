@@ -1,75 +1,57 @@
-mod app_paths;
-mod audio;
-#[cfg(feature = "desktop")]
-mod adjust;
-#[cfg(feature = "desktop")]
-mod align;
-mod auth;
-mod book;
-mod cards;
-mod cards_sync;
-mod chat;
-mod dataset;
-mod db;
-mod dictation;
-mod llm;
-#[cfg(feature = "desktop")]
-mod goose_llm;
-#[cfg(feature = "desktop")]
-mod agent_acp;
-mod logger;
+// ---------------------------------------------------------------------------
+// Grouped subsystems
+//
+// Each group's `mod.rs` declares its own children and carries the per-child
+// feature gates; only a wholly-gated group is gated here.
+// ---------------------------------------------------------------------------
+
+/// Datasets: shared root/`meta.json` discovery plus one submodule per dataset
+/// type (`dictation`, `cards`, `book`, `read_aloud`), mirroring the on-disk
+/// `<datasets_dir>/{dictation,card,book,read_aloud}/` layout.
+mod datasets;
+/// Cross-device sync: the PC server stack (`server`/`rest`/`pairing`, desktop
+/// only) and the client half (`client`/`discover`/`change_log`) that the Android
+/// thin client runs. Owns `PROTOCOL_VERSION`.
+mod sync;
+/// Ollama LLM client, cross-device chat, and the Goose agent integrations.
+mod ai;
+/// STT model download/lifecycle/transcription, download catalogs, and the
+/// unified model index.
 #[cfg(feature = "stt")]
-mod model;
-#[cfg(feature = "stt")]
-mod model_download;
-#[cfg(feature = "stt")]
-mod model_list;
-#[cfg(feature = "stt")]
-mod model_list_stt;
+mod models;
+/// Built-in MCP server: one submodule per tool domain, merged into a single
+/// `ServerHandler` by `mcp::tool_router()`. Mounted at `/mcp` on the sync web
+/// service, so it is desktop-only exactly like `sync::server`.
 #[cfg(feature = "desktop")]
 mod mcp;
+
+// App infrastructure (cross-cutting: paths, DB helpers, settings, logging,
+// workspaces, auth, audio decoding).
+mod app_paths;
+mod audio;
+mod auth;
+mod db;
+mod logger;
 mod settings;
-#[cfg(feature = "desktop")]
-mod tools;
+mod workspace;
+
+// Content and learning state that is *not* stored as a dataset: the wiki has its
+// own root + `meta.json` linkage, XP lives in the app-level SQLite.
+mod simple_words;
+mod wiki;
+mod xp;
+
+// Voice synthesis (all platforms).
 mod edge_tts;
-#[cfg(feature = "desktop")]
-mod web_service;
-#[cfg(feature = "desktop")]
-mod rest;
-#[cfg(feature = "desktop")]
-mod pairing;
+
+// Desktop-only utilities.
 #[cfg(feature = "desktop")]
 mod capture;
 #[cfg(feature = "desktop")]
 mod ocr;
-mod xp;
-mod simple_words;
-mod wiki;
-mod workspace;
-mod sync;
-mod sync_log;
-mod discover;
-mod read_aloud;
-mod textsim;
-
-// Unified model index
-#[cfg(feature = "stt")]
-mod model_index;
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
-
-/// Wire protocol version for the hub<->follower sync REST API and the request
-/// signature format. Carried by `/status`, the discovery beacon, and every
-/// signed request header, so a follower can refuse `/changes`, `/file`, and the
-/// chat `after_id` path against a hub that predates them (see docs/my_sync_design.md
-/// §3.1, §7). Bump only on backwards-incompatible protocol changes.
-///
-/// * `1` (Phase 1): role/cluster/protocol headers + `/status` fields; request
-///   signature still covers only `ts\nMETHOD\npath`.
-/// * `2` (Phase 2): adds `/datasets/{uuid}/changes`, `/file`, per-file manifest
-///   hashes, and the **hardened signature** covering `sha256(query\nbody)`.
-pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Install the process-level rustls `CryptoProvider`.
 ///
@@ -198,15 +180,15 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             greet,
-            model::model_get_status,
-            model::model_select_version,
-            model::model_set_default,
-            model::model_download,
-            model::model_start,
-            model::model_stop,
-            model::model_delete,
-            model::model_cancel_download,
-            model::model_transcribe,
+            models::model_get_status,
+            models::model_select_version,
+            models::model_set_default,
+            models::model_download,
+            models::model_start,
+            models::model_stop,
+            models::model_delete,
+            models::model_cancel_download,
+            models::model_transcribe,
             settings::settings_get,
             settings::settings_set,
             settings::settings_get_global,
@@ -217,102 +199,102 @@ pub fn run() {
             settings::settings_adopt_cluster,
             settings::settings_forget_hub,
             settings::settings_pick_folder,
-            dataset::dataset_list,
-            dataset::dataset_list_dirs,
-            dataset::dataset_add_dir,
-            dataset::dataset_remove_dir,
-            dataset::dataset_import,
-            dataset::dataset_get,
-            dataset::dataset_update,
-            dataset::dataset_delete,
-            dataset::dataset_create,
-            dataset::dataset_import_media,
-            dataset::dataset_generate_subtitles,
-            dataset::dataset_generate_subtitle_single,
-            dataset::dataset_delete_subtitles,
-            dataset::dataset_generate_waveform,
-            dataset::dataset_generate_waveform_single,
-            dataset::dataset_delete_waveforms,
-            dataset::dataset_advance_to_stage2,
-            dataset::dataset_generate_database,
-            dataset::dataset_delete_database,
-            dataset::dataset_write_subtitles_to_db,
-            tools::dataset_write_transcripts,
-            tools::dataset_parse_book,
-            align::dataset_align_cues,
-            align::dataset_align_cues_transcript,
-            adjust::dataset_adjust_cue_time,
-            adjust::dataset_adjust_cue_time_single,
-            adjust::dataset_check_subtitle_adjusted,
-            adjust::dataset_sync_cue_times,
-            adjust::dataset_sync_cue_times_word_level,
-            dictation::dictation_list_media,
-            dictation::dictation_get_data,
-            dictation::listen_list_media,
-            dictation::listen_get_media,
-            dictation::listen_get_subtitles,
-            dictation::listen_get_cues,
-            dictation::listen_get_dictation,
-            dictation::listen_get_dataset_dictation_status,
-            dictation::listen_save_media,
-            dictation::listen_rename_media,
-            dictation::listen_save_cue,
-            dictation::listen_delete_cue,
-            dictation::listen_delete_media,
-            dictation::listen_save_dictation,
-            dictation::listen_get_waveform,
-            dictation::dictation_add_cue_to_favorites,
-            dictation::dictation_list_favorite_cues,
+            datasets::dataset_list,
+            datasets::dataset_list_dirs,
+            datasets::dataset_add_dir,
+            datasets::dataset_remove_dir,
+            datasets::dataset_import,
+            datasets::dataset_get,
+            datasets::dataset_update,
+            datasets::dataset_delete,
+            datasets::dataset_create,
+            datasets::dataset_import_media,
+            datasets::dataset_generate_subtitles,
+            datasets::dataset_generate_subtitle_single,
+            datasets::dataset_delete_subtitles,
+            datasets::dataset_generate_waveform,
+            datasets::dataset_generate_waveform_single,
+            datasets::dataset_delete_waveforms,
+            datasets::dataset_advance_to_stage2,
+            datasets::dataset_generate_database,
+            datasets::dataset_delete_database,
+            datasets::dataset_write_subtitles_to_db,
+            datasets::tools::dataset_write_transcripts,
+            datasets::tools::dataset_parse_book,
+            datasets::dictation::align::dataset_align_cues,
+            datasets::dictation::align::dataset_align_cues_transcript,
+            datasets::dictation::adjust::dataset_adjust_cue_time,
+            datasets::dictation::adjust::dataset_adjust_cue_time_single,
+            datasets::dictation::adjust::dataset_check_subtitle_adjusted,
+            datasets::dictation::adjust::dataset_sync_cue_times,
+            datasets::dictation::adjust::dataset_sync_cue_times_word_level,
+            datasets::dictation::dictation_list_media,
+            datasets::dictation::dictation_get_data,
+            datasets::dictation::listen_list_media,
+            datasets::dictation::listen_get_media,
+            datasets::dictation::listen_get_subtitles,
+            datasets::dictation::listen_get_cues,
+            datasets::dictation::listen_get_dictation,
+            datasets::dictation::listen_get_dataset_dictation_status,
+            datasets::dictation::listen_save_media,
+            datasets::dictation::listen_rename_media,
+            datasets::dictation::listen_save_cue,
+            datasets::dictation::listen_delete_cue,
+            datasets::dictation::listen_delete_media,
+            datasets::dictation::listen_save_dictation,
+            datasets::dictation::listen_get_waveform,
+            datasets::dictation::dictation_add_cue_to_favorites,
+            datasets::dictation::dictation_list_favorite_cues,
             // Version management
-            dictation::subtitle_create_version,
-            dictation::subtitle_finalize_version,
-            dictation::subtitle_get_versions,
-            dictation::subtitle_get_cues_at_version,
-            dictation::subtitle_rollback_to_version,
+            datasets::dictation::subtitle_create_version,
+            datasets::dictation::subtitle_finalize_version,
+            datasets::dictation::subtitle_get_versions,
+            datasets::dictation::subtitle_get_cues_at_version,
+            datasets::dictation::subtitle_rollback_to_version,
             auth::auth_open_login,
             auth::auth_login_password,
             auth::auth_get_user,
             auth::auth_logout,
-            llm::llm_check_connection,
-            llm::llm_list_models,
-            llm::llm_pull_model,
-            llm::llm_delete_model,
-            llm::llm_chat,
-            llm::llm_chat_stream,
+            ai::llm::llm_check_connection,
+            ai::llm::llm_list_models,
+            ai::llm::llm_pull_model,
+            ai::llm::llm_delete_model,
+            ai::llm::llm_chat,
+            ai::llm::llm_chat_stream,
             edge_tts::edge_tts_list_voices,
             edge_tts::edge_tts_synthesize,
             edge_tts::edge_tts_preview,
-            book::book_list,
-            book::book_create,
-            book::book_rename,
-            book::book_delete,
-            book::book_list_chapters,
-            book::book_save_chapter,
-            book::book_delete_chapter,
-            book::book_list_sentences,
-            book::book_save_sentence,
-            book::book_save_sentences,
-            book::book_delete_sentence,
-            book::book_list_words,
-            book::book_save_word,
-            book::book_delete_word,
-            book::book_write_audio,
-            book::book_import_audio,
-            book::book_delete_audio,
-            read_aloud::read_aloud_list,
-            read_aloud::read_aloud_create,
-            read_aloud::read_aloud_update,
-            read_aloud::read_aloud_delete,
-            read_aloud::read_aloud_list_texts,
-            read_aloud::read_aloud_save_text,
-            read_aloud::read_aloud_delete_text,
-            read_aloud::read_aloud_list_attempts,
-            read_aloud::read_aloud_delete_attempt,
-            read_aloud::read_aloud_score,
-            read_aloud::read_aloud_submit,
-            web_service::web_service_get_status,
-            web_service::web_service_start,
-            web_service::web_service_stop,
+            datasets::book::book_list,
+            datasets::book::book_create,
+            datasets::book::book_rename,
+            datasets::book::book_delete,
+            datasets::book::book_list_chapters,
+            datasets::book::book_save_chapter,
+            datasets::book::book_delete_chapter,
+            datasets::book::book_list_sentences,
+            datasets::book::book_save_sentence,
+            datasets::book::book_save_sentences,
+            datasets::book::book_delete_sentence,
+            datasets::book::book_list_words,
+            datasets::book::book_save_word,
+            datasets::book::book_delete_word,
+            datasets::book::book_write_audio,
+            datasets::book::book_import_audio,
+            datasets::book::book_delete_audio,
+            datasets::read_aloud::read_aloud_list,
+            datasets::read_aloud::read_aloud_create,
+            datasets::read_aloud::read_aloud_update,
+            datasets::read_aloud::read_aloud_delete,
+            datasets::read_aloud::read_aloud_list_texts,
+            datasets::read_aloud::read_aloud_save_text,
+            datasets::read_aloud::read_aloud_delete_text,
+            datasets::read_aloud::read_aloud_list_attempts,
+            datasets::read_aloud::read_aloud_delete_attempt,
+            datasets::read_aloud::read_aloud_score,
+            datasets::read_aloud::read_aloud_submit,
+            sync::server::web_service_get_status,
+            sync::server::web_service_start,
+            sync::server::web_service_stop,
             ocr::ocr_recognize,
             ocr::ocr_list_languages,
             xp::xp_get_user,
@@ -322,8 +304,8 @@ pub fn run() {
             xp::xp_award_dictation_media,
             xp::xp_award_reading_sentence,
             xp::xp_award_reading_chapter,
-            model_index::model_index_get,
-            model_index::model_index_refresh,
+            models::index::model_index_get,
+            models::index::model_index_refresh,
             capture::capture_screenshot,
             logger::log_get_history,
             logger::log_clear,
@@ -349,38 +331,38 @@ pub fn run() {
             workspace::workspace_claim,
             workspace::workspace_set_auto_login,
             // Card dataset management
-            cards::card_dataset_list,
-            cards::card_dataset_create,
-            cards::card_dataset_update,
-            cards::card_dataset_add_subscriber,
-            cards::card_dataset_remove_subscriber,
-            cards::card_dataset_delete,
-            cards::card_dataset_move,
+            datasets::cards::card_dataset_list,
+            datasets::cards::card_dataset_create,
+            datasets::cards::card_dataset_update,
+            datasets::cards::card_dataset_add_subscriber,
+            datasets::cards::card_dataset_remove_subscriber,
+            datasets::cards::card_dataset_delete,
+            datasets::cards::card_dataset_move,
             // Card CRUD
-            cards::card_list,
-            cards::card_get,
-            cards::card_save,
-            cards::card_delete,
-            cards::card_fork,
+            datasets::cards::card_list,
+            datasets::cards::card_get,
+            datasets::cards::card_save,
+            datasets::cards::card_delete,
+            datasets::cards::card_fork,
             // Card tags
-            cards::card_tag_list,
-            cards::card_tag_save,
-            cards::card_tag_delete,
-            cards::card_set_tags,
-            cards::card_get_tags,
+            datasets::cards::card_tag_list,
+            datasets::cards::card_tag_save,
+            datasets::cards::card_tag_delete,
+            datasets::cards::card_set_tags,
+            datasets::cards::card_get_tags,
             // Card review (SM-2)
-            cards::card_test_get,
-            cards::card_test_stats,
-            cards::card_test_submit,
+            datasets::cards::card_test_get,
+            datasets::cards::card_test_stats,
+            datasets::cards::card_test_submit,
             // Card sync
-            cards::card_sync_status,
-            cards::card_sync_get_changes,
+            datasets::cards::card_sync_status,
+            datasets::cards::card_sync_get_changes,
             // Card FTS search
-            cards::card_search,
-            cards::card_fts_rebuild,
+            datasets::cards::card_search,
+            datasets::cards::card_fts_rebuild,
             // Card dataset sync (bidirectional)
-            cards_sync::card_sync_full,
-            cards_sync::card_sync_all,
+            datasets::cards::sync::card_sync_full,
+            datasets::cards::sync::card_sync_all,
             // Simple words
             simple_words::simple_words_get_config,
             simple_words::simple_words_save_config,
@@ -391,46 +373,46 @@ pub fn run() {
             simple_words::simple_words_filter,
             simple_words::simple_words_reload,
             // PC sync + discovery (available on desktop too, for testing).
-            sync::dataset_sync_snapshot,
-            sync::sync_run_round,
-            sync::writeback_flush,
-            sync::writeback_pending_count,
-            sync::dataset_sync_state,
-            sync::pc_check_status,
-            sync::pc_list_datasets,
-            sync::sync_status,
-            sync::sync_forget_dataset,
-            sync::pc_pair_start,
-            sync::pc_pair_reset_identity,
-            discover::pc_discover,
+            sync::client::dataset_sync_snapshot,
+            sync::client::sync_run_round,
+            sync::client::writeback_flush,
+            sync::client::writeback_pending_count,
+            sync::client::dataset_sync_state,
+            sync::client::pc_check_status,
+            sync::client::pc_list_datasets,
+            sync::client::sync_status,
+            sync::client::sync_forget_dataset,
+            sync::client::pc_pair_start,
+            sync::client::pc_pair_reset_identity,
+            sync::discover::pc_discover,
             // Device pairing (PC owner side). Approval is deliberately only
             // ever granted by answering the confirm dialog.
-            pairing::pairing_list,
-            pairing::pairing_respond,
-            pairing::pairing_revoke,
-            pairing::pairing_remove_denied,
+            sync::pairing::pairing_list,
+            sync::pairing::pairing_respond,
+            sync::pairing::pairing_revoke,
+            sync::pairing::pairing_remove_denied,
             // Cross-device chat (desktop serves the store directly).
-            chat::chat_list_messages,
-            chat::chat_send_message,
-            chat::chat_resolve_attachment,
-            chat::chat_save_attachment,
+            ai::chat::chat_list_messages,
+            ai::chat::chat_send_message,
+            ai::chat::chat_resolve_attachment,
+            ai::chat::chat_save_attachment,
             // Goose ACP agent client (desktop only)
-            agent_acp::agent_connect,
-            agent_acp::agent_send_prompt,
-            agent_acp::agent_cancel,
-            agent_acp::agent_respond_permission,
-            agent_acp::agent_disconnect,
-            agent_acp::agent_status,
-            agent_acp::agent_report_ui_state,
+            ai::agent_acp::agent_connect,
+            ai::agent_acp::agent_send_prompt,
+            ai::agent_acp::agent_cancel,
+            ai::agent_acp::agent_respond_permission,
+            ai::agent_acp::agent_disconnect,
+            ai::agent_acp::agent_status,
+            ai::agent_acp::agent_report_ui_state,
         ])
         .manage(workspace::WorkspaceState::new())
-        .manage(model::ModelState::new())
+        .manage(models::ModelState::new())
         .manage(settings::SettingsState::new())
-        .manage(dataset::DatasetState::new())
-        .manage(web_service::WebServiceState::new())
+        .manage(datasets::DatasetState::new())
+        .manage(sync::server::WebServiceState::new())
         .manage(ocr::OcrState::new())
         .manage(simple_words::SimpleWordsState::new())
-        .manage(agent_acp::AcpClientState::new())
+        .manage(ai::agent_acp::AcpClientState::new())
         .setup(|app| {
             // Anchor all persistent storage on the platform-correct base dir
             // (app-private on Android/iOS) before anything reads a path or
@@ -439,11 +421,11 @@ pub fn run() {
             // Re-seed state that was constructed pre-init with placeholder paths.
             app.state::<workspace::WorkspaceState>().reload_registry();
             app.state::<settings::SettingsState>().reload();
-            app.state::<model::ModelState>().reload();
+            app.state::<models::ModelState>().reload();
             // Restore the user's preferred default STT model (settings is global,
             // so it survives workspace switching).
             let persisted_model = app.state::<settings::SettingsState>().selected_model();
-            app.state::<model::ModelState>().apply_persisted_default(&persisted_model);
+            app.state::<models::ModelState>().apply_persisted_default(&persisted_model);
             let log_buffer = logger::init_logger(app.handle().clone());
             app.handle().manage(log_buffer);
             log::info!("Application starting up");
@@ -473,17 +455,17 @@ pub fn run() {
             }
 
             // Initialize unified model index (scan filesystem on first run)
-            let model_root = model_index::model_root();
-            let index_state = model_index::ModelIndexState::new(&model_root);
+            let model_root = models::index::model_root();
+            let index_state = models::index::ModelIndexState::new(&model_root);
             {
                 let idx = index_state.index.lock().unwrap();
                 if idx.models.is_empty() {
                     drop(idx);
                     log::info!("[ModelIndex] Empty index, running initial scan...");
-                    let scanned = model_index::scan_models(&model_root);
+                    let scanned = models::index::scan_models(&model_root);
                     let mut idx = index_state.index.lock().unwrap();
                     *idx = scanned;
-                    let _ = model_index::ModelIndexState::save(&*idx, &index_state.index_path);
+                    let _ = models::index::ModelIndexState::save(&*idx, &index_state.index_path);
                 }
             }
             app.handle().manage(index_state);
@@ -501,7 +483,7 @@ pub fn run() {
             // Auto-start web service (MCP + HTTP API) on port 35711
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                web_service::auto_start(handle).await;
+                sync::server::auto_start(handle).await;
             });
 
             // Register deep link handler for OAuth login callback.
@@ -602,77 +584,77 @@ macro_rules! mobile_invoke_handler {
             settings::settings_adopt_cluster,
             settings::settings_forget_hub,
             settings::settings_pick_folder,
-            dataset::dataset_list,
-            dataset::dataset_list_dirs,
-            dataset::dataset_add_dir,
-            dataset::dataset_remove_dir,
-            dataset::dataset_get,
-            dataset::dataset_update,
-            dataset::dataset_delete,
-            dataset::dataset_create,
-            dictation::dictation_list_media,
-            dictation::dictation_get_data,
-            dictation::listen_list_media,
-            dictation::listen_get_media,
-            dictation::listen_get_subtitles,
-            dictation::listen_get_cues,
-            dictation::listen_get_dictation,
-            dictation::listen_get_dataset_dictation_status,
-            dictation::listen_save_media,
-            dictation::listen_rename_media,
-            dictation::listen_save_cue,
-            dictation::listen_delete_cue,
-            dictation::listen_delete_media,
-            dictation::listen_save_dictation,
-            dictation::listen_get_waveform,
-            dictation::dictation_add_cue_to_favorites,
-            dictation::dictation_list_favorite_cues,
-            dictation::subtitle_create_version,
-            dictation::subtitle_finalize_version,
-            dictation::subtitle_get_versions,
-            dictation::subtitle_get_cues_at_version,
-            dictation::subtitle_rollback_to_version,
+            datasets::dataset_list,
+            datasets::dataset_list_dirs,
+            datasets::dataset_add_dir,
+            datasets::dataset_remove_dir,
+            datasets::dataset_get,
+            datasets::dataset_update,
+            datasets::dataset_delete,
+            datasets::dataset_create,
+            datasets::dictation::dictation_list_media,
+            datasets::dictation::dictation_get_data,
+            datasets::dictation::listen_list_media,
+            datasets::dictation::listen_get_media,
+            datasets::dictation::listen_get_subtitles,
+            datasets::dictation::listen_get_cues,
+            datasets::dictation::listen_get_dictation,
+            datasets::dictation::listen_get_dataset_dictation_status,
+            datasets::dictation::listen_save_media,
+            datasets::dictation::listen_rename_media,
+            datasets::dictation::listen_save_cue,
+            datasets::dictation::listen_delete_cue,
+            datasets::dictation::listen_delete_media,
+            datasets::dictation::listen_save_dictation,
+            datasets::dictation::listen_get_waveform,
+            datasets::dictation::dictation_add_cue_to_favorites,
+            datasets::dictation::dictation_list_favorite_cues,
+            datasets::dictation::subtitle_create_version,
+            datasets::dictation::subtitle_finalize_version,
+            datasets::dictation::subtitle_get_versions,
+            datasets::dictation::subtitle_get_cues_at_version,
+            datasets::dictation::subtitle_rollback_to_version,
             auth::auth_open_login,
             auth::auth_login_password,
             auth::auth_get_user,
             auth::auth_logout,
-            llm::llm_check_connection,
-            llm::llm_list_models,
-            llm::llm_pull_model,
-            llm::llm_delete_model,
-            llm::llm_chat,
-            llm::llm_chat_stream,
+            ai::llm::llm_check_connection,
+            ai::llm::llm_list_models,
+            ai::llm::llm_pull_model,
+            ai::llm::llm_delete_model,
+            ai::llm::llm_chat,
+            ai::llm::llm_chat_stream,
             edge_tts::edge_tts_list_voices,
             edge_tts::edge_tts_synthesize,
             edge_tts::edge_tts_preview,
-            book::book_list,
-            book::book_create,
-            book::book_rename,
-            book::book_delete,
-            book::book_list_chapters,
-            book::book_save_chapter,
-            book::book_delete_chapter,
-            book::book_list_sentences,
-            book::book_save_sentence,
-            book::book_save_sentences,
-            book::book_delete_sentence,
-            book::book_list_words,
-            book::book_save_word,
-            book::book_delete_word,
-            book::book_write_audio,
-            book::book_import_audio,
-            book::book_delete_audio,
-            read_aloud::read_aloud_list,
-            read_aloud::read_aloud_create,
-            read_aloud::read_aloud_update,
-            read_aloud::read_aloud_delete,
-            read_aloud::read_aloud_list_texts,
-            read_aloud::read_aloud_save_text,
-            read_aloud::read_aloud_delete_text,
-            read_aloud::read_aloud_list_attempts,
-            read_aloud::read_aloud_delete_attempt,
-            read_aloud::read_aloud_score,
-            read_aloud::read_aloud_submit,
+            datasets::book::book_list,
+            datasets::book::book_create,
+            datasets::book::book_rename,
+            datasets::book::book_delete,
+            datasets::book::book_list_chapters,
+            datasets::book::book_save_chapter,
+            datasets::book::book_delete_chapter,
+            datasets::book::book_list_sentences,
+            datasets::book::book_save_sentence,
+            datasets::book::book_save_sentences,
+            datasets::book::book_delete_sentence,
+            datasets::book::book_list_words,
+            datasets::book::book_save_word,
+            datasets::book::book_delete_word,
+            datasets::book::book_write_audio,
+            datasets::book::book_import_audio,
+            datasets::book::book_delete_audio,
+            datasets::read_aloud::read_aloud_list,
+            datasets::read_aloud::read_aloud_create,
+            datasets::read_aloud::read_aloud_update,
+            datasets::read_aloud::read_aloud_delete,
+            datasets::read_aloud::read_aloud_list_texts,
+            datasets::read_aloud::read_aloud_save_text,
+            datasets::read_aloud::read_aloud_delete_text,
+            datasets::read_aloud::read_aloud_list_attempts,
+            datasets::read_aloud::read_aloud_delete_attempt,
+            datasets::read_aloud::read_aloud_score,
+            datasets::read_aloud::read_aloud_submit,
             xp::xp_get_user,
             xp::xp_get_history,
             xp::xp_award_dictation_cue,
@@ -702,32 +684,32 @@ macro_rules! mobile_invoke_handler {
             workspace::workspace_rename,
             workspace::workspace_claim,
             workspace::workspace_set_auto_login,
-            cards::card_dataset_list,
-            cards::card_dataset_create,
-            cards::card_dataset_update,
-            cards::card_dataset_add_subscriber,
-            cards::card_dataset_remove_subscriber,
-            cards::card_dataset_delete,
-            cards::card_dataset_move,
-            cards::card_list,
-            cards::card_get,
-            cards::card_save,
-            cards::card_delete,
-            cards::card_fork,
-            cards::card_tag_list,
-            cards::card_tag_save,
-            cards::card_tag_delete,
-            cards::card_set_tags,
-            cards::card_get_tags,
-            cards::card_test_get,
-            cards::card_test_stats,
-            cards::card_test_submit,
-            cards::card_sync_status,
-            cards::card_sync_get_changes,
-            cards::card_search,
-            cards::card_fts_rebuild,
-            cards_sync::card_sync_full,
-            cards_sync::card_sync_all,
+            datasets::cards::card_dataset_list,
+            datasets::cards::card_dataset_create,
+            datasets::cards::card_dataset_update,
+            datasets::cards::card_dataset_add_subscriber,
+            datasets::cards::card_dataset_remove_subscriber,
+            datasets::cards::card_dataset_delete,
+            datasets::cards::card_dataset_move,
+            datasets::cards::card_list,
+            datasets::cards::card_get,
+            datasets::cards::card_save,
+            datasets::cards::card_delete,
+            datasets::cards::card_fork,
+            datasets::cards::card_tag_list,
+            datasets::cards::card_tag_save,
+            datasets::cards::card_tag_delete,
+            datasets::cards::card_set_tags,
+            datasets::cards::card_get_tags,
+            datasets::cards::card_test_get,
+            datasets::cards::card_test_stats,
+            datasets::cards::card_test_submit,
+            datasets::cards::card_sync_status,
+            datasets::cards::card_sync_get_changes,
+            datasets::cards::card_search,
+            datasets::cards::card_fts_rebuild,
+            datasets::cards::sync::card_sync_full,
+            datasets::cards::sync::card_sync_all,
             simple_words::simple_words_get_config,
             simple_words::simple_words_save_config,
             simple_words::simple_words_load_language,
@@ -737,23 +719,23 @@ macro_rules! mobile_invoke_handler {
             simple_words::simple_words_filter,
             simple_words::simple_words_reload,
             // PC sync + discovery client.
-            sync::dataset_sync_snapshot,
-            sync::sync_run_round,
-            sync::writeback_flush,
-            sync::writeback_pending_count,
-            sync::dataset_sync_state,
-            sync::pc_check_status,
-            sync::pc_list_datasets,
-            sync::sync_status,
-            sync::sync_forget_dataset,
-            sync::pc_pair_start,
-            sync::pc_pair_reset_identity,
-            discover::pc_discover,
+            sync::client::dataset_sync_snapshot,
+            sync::client::sync_run_round,
+            sync::client::writeback_flush,
+            sync::client::writeback_pending_count,
+            sync::client::dataset_sync_state,
+            sync::client::pc_check_status,
+            sync::client::pc_list_datasets,
+            sync::client::sync_status,
+            sync::client::sync_forget_dataset,
+            sync::client::pc_pair_start,
+            sync::client::pc_pair_reset_identity,
+            sync::discover::pc_discover,
             // Cross-device chat: same command names as desktop, relayed to the PC.
-            chat::chat_list_messages,
-            chat::chat_send_message,
-            chat::chat_resolve_attachment,
-            chat::chat_save_attachment,
+            ai::chat::chat_list_messages,
+            ai::chat::chat_send_message,
+            ai::chat::chat_resolve_attachment,
+            ai::chat::chat_save_attachment,
             $($extra),*
         ]
     };
@@ -769,26 +751,26 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .manage(workspace::WorkspaceState::new())
         .manage(settings::SettingsState::new())
-        .manage(dataset::DatasetState::new())
+        .manage(datasets::DatasetState::new())
         .manage(simple_words::SimpleWordsState::new());
 
     // STT builds additionally manage ModelState and register the `model_*`
     // commands (see the mobile section header comment above).
     #[cfg(feature = "stt")]
     let builder = builder
-        .manage(model::ModelState::new())
+        .manage(models::ModelState::new())
         .invoke_handler(mobile_invoke_handler!(
-            model::model_get_status,
-            model::model_select_version,
-            model::model_set_default,
-            model::model_download,
-            model::model_start,
-            model::model_stop,
-            model::model_delete,
-            model::model_cancel_download,
-            model::model_transcribe,
-            model_index::model_index_get,
-            model_index::model_index_refresh
+            models::model_get_status,
+            models::model_select_version,
+            models::model_set_default,
+            models::model_download,
+            models::model_start,
+            models::model_stop,
+            models::model_delete,
+            models::model_cancel_download,
+            models::model_transcribe,
+            models::index::model_index_get,
+            models::index::model_index_refresh
         ));
     #[cfg(not(feature = "stt"))]
     let builder = builder.invoke_handler(mobile_invoke_handler!());
@@ -804,11 +786,11 @@ pub fn run() {
             app.state::<settings::SettingsState>().reload();
             // ModelState is only managed on STT builds (see builder above).
             #[cfg(feature = "stt")]
-            app.state::<model::ModelState>().reload();
+            app.state::<models::ModelState>().reload();
             #[cfg(feature = "stt")]
             {
                 let persisted_model = app.state::<settings::SettingsState>().selected_model();
-                app.state::<model::ModelState>().apply_persisted_default(&persisted_model);
+                app.state::<models::ModelState>().apply_persisted_default(&persisted_model);
             }
             let log_buffer = logger::init_logger(app.handle().clone());
             app.handle().manage(log_buffer);
@@ -839,17 +821,17 @@ pub fn run() {
             // on first run) ──
             #[cfg(feature = "stt")]
             {
-                let model_root = model_index::model_root();
-                let index_state = model_index::ModelIndexState::new(&model_root);
+                let model_root = models::index::model_root();
+                let index_state = models::index::ModelIndexState::new(&model_root);
                 {
                     let idx = index_state.index.lock().unwrap();
                     if idx.models.is_empty() {
                         drop(idx);
                         log::info!("[ModelIndex] Empty index, running initial scan...");
-                        let scanned = model_index::scan_models(&model_root);
+                        let scanned = models::index::scan_models(&model_root);
                         let mut idx = index_state.index.lock().unwrap();
                         *idx = scanned;
-                        let _ = model_index::ModelIndexState::save(&*idx, &index_state.index_path);
+                        let _ = models::index::ModelIndexState::save(&*idx, &index_state.index_path);
                     }
                 }
                 app.handle().manage(index_state);

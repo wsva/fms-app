@@ -190,7 +190,7 @@ pub fn xp_award_internal(
             "source": source,
             "reference_id": reference_id,
         });
-        let _ = crate::sync_log::commit_change(settings, "xp", dataset_uuid.unwrap_or(""), &payload);
+        let _ = crate::sync::change_log::commit_change(settings, "xp", dataset_uuid.unwrap_or(""), &payload);
     }
 
     Ok(XpAwardResult {
@@ -334,7 +334,7 @@ pub async fn xp_get_user(
     // On a follower, overlay how much of the displayed total the hub has not
     // confirmed yet (§3.6 reconcile-on-ack). The hub role has no queue.
     let pending_xp = if _settings.role() != "hub" {
-        crate::sync::pending_xp_delta(&_settings, &user_id).unwrap_or(0)
+        crate::sync::client::pending_xp_delta(&_settings, &user_id).unwrap_or(0)
     } else {
         0
     };

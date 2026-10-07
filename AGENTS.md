@@ -49,18 +49,87 @@ npx tsc --noEmit
 
 ### Backend Structure (`src-tauri/src/`)
 
-| File | Responsibility |
-|------|---------------|
-| `lib.rs` | Tauri setup, plugin registration, command handler registration |
-| `settings.rs` | App settings persistence (JSON file at `dirs::config_dir()/fms-app/settings.json`) |
-| `dataset.rs` | Dataset CRUD, subtitle generation, waveform generation (Symphonia peak detection), database generation |
-| `dictation.rs` | Dictation commands: media/subtitle/cue queries, dictation progress (app-level DB) |
-| `model.rs` | STT model management: download, status, transcription via `transcribe-rs` |
-| `model_download.rs` | Streaming model download with progress events |
-| `model_list.rs` | Model catalog listing |
-| `audio.rs` | Audio decoding via Symphonia |
-| `align.rs` | Cue alignment (multi-pass anchor DP): `dataset_align_cues` (shared `book.txt`/`book_sentences.txt` reference) and `dataset_align_cues_transcript` (per-subtitle transcripts) |
-| `tools.rs` | Dataset tooling: book splitting (`dataset_parse_book`, built-in Rust or bundled `split_book.py` via NLTK), Python script execution (`write_transcripts.py`) |
+Modules are grouped by domain. Each group's `mod.rs` declares its children and
+carries their `#[cfg(feature = "...")]` gates, so `lib.rs` only gates a group when
+the *whole* group is gated (`models`). The `datasets/` tree mirrors the on-disk
+`<datasets_dir>/{dictation,card,book,read_aloud}/` layout.
+
+```
+src-tauri/src/
+├── lib.rs                  # Tauri setup, plugin + command registration (desktop & mobile run())
+├── main.rs
+│
+├── datasets/               # One submodule per dataset type + the shared core
+│   ├── mod.rs              # dataset_roots()/DatasetType/meta.json discovery, dataset CRUD,
+│   │                       #   subtitle generation, waveform generation (Symphonia peaks), DB generation
+│   ├── dictation/
+│   │   ├── mod.rs          # Dictation commands: media/subtitle/cue queries, progress (app-level DB)
+│   │   ├── align.rs        # Cue alignment (multi-pass anchor DP): `dataset_align_cues` (shared
+│   │   │                   #   `book.txt`/`book_sentences.txt`) + `dataset_align_cues_transcript` — desktop
+│   │   └── adjust.rs       # Cue-time adjustment: energy envelope, silence snapping — desktop
+│   ├── cards/
+│   │   ├── mod.rs          # Card CRUD, tags, SM-2 review, FTS5 search, multi-location discovery
+│   │   └── sync.rs         # Bidirectional card dataset sync (last-write-wins, per-dataset sync_state)
+│   ├── book.rs             # Book chapters/sentences/words and their audio
+│   ├── read_aloud.rs       # Read-aloud datasets: recorded takes, STT scoring, XP awards
+│   ├── tools.rs            # Book splitting (`dataset_parse_book`, Rust or bundled `split_book.py`
+│   │                       #   via NLTK), Python script execution (`write_transcripts.py`) — desktop
+│   └── textsim.rs          # Ratcliff-Obershelp similarity, shared by align + read_aloud
+│
+├── models/                 # Whole group is `stt`-gated
+│   ├── mod.rs              # STT model management: download, status, transcription via `transcribe-rs`
+│   ├── download.rs         # Streaming model download with progress events
+│   ├── catalog.rs          # HuggingFace catalog of non-STT models (OCR, TTS)
+│   ├── catalog_stt.rs      # STT model catalog
+│   └── index.rs            # Unified `{model_root}/index.json` over every downloaded model
+│
+├── sync/                   # Cross-device sync; owns `PROTOCOL_VERSION`
+│   ├── mod.rs              # Group declarations + wire protocol version
+│   ├── client.rs           # Snapshot pull + writeback queue (all platforms; the Android thin client)
+│   ├── discover.rs         # PC auto-discovery: UDP probe, multicast, Tailscale
+│   ├── change_log.rs       # Hub-side append-only change journal (`sync_log` table in the app DB)
+│   ├── server.rs           # PC axum HTTP service hosting REST + MCP, enforces trust zones — desktop
+│   ├── rest.rs             # `/api/v1` dataset snapshot + batched-writeback endpoints — desktop
+│   └── pairing.rs          # Ed25519 device pairing and trust zones — desktop
+│
+├── ai/
+│   ├── mod.rs
+│   ├── llm.rs              # Ollama: connection check, model list/pull/delete, chat + streaming
+│   ├── chat.rs             # Cross-device chat thread persisted on the PC hub
+│   ├── goose_llm.rs        # Goose SDK LLM bridge — desktop
+│   └── agent_acp.rs        # Goose ACP client over WebSocket to `goose serve` — desktop
+│
+├── mcp/                    # Built-in MCP server (rmcp), nested at `/mcp` — desktop
+│   ├── mod.rs              # `DatasetMcpServer`, params shared by 2+ domains, `tool_router()`
+│   │                       #   merging the domain routers, `ServerHandler` impl, `create_mcp_service()`
+│   ├── datasets.rs         # dataset discovery/CRUD + subtitle & waveform pipeline (24 tools)
+│   ├── dictation.rs        # cue adjust/align, dictation progress, favourites, subtitle versions (15)
+│   ├── cards.rs            # card CRUD, tags, FTS5 search, SM-2 review, online sync (24)
+│   ├── books.rs            # book chapters/sentences/words + read-aloud texts & scoring (24)
+│   ├── models.rs           # STT model status/download/load/default/delete/transcribe (7)
+│   ├── ai.rs               # Ollama chat & model management, Edge TTS, cross-device chat (10)
+│   ├── wiki.rs             # wiki dirs, read/write/delete, search, index (9)
+│   ├── sync.rs             # web service, pairing registry, PC scan/connect/pull, incremental sync (14)
+│   └── system.rs           # settings, auth, logs, OCR, screenshot, app UI control (15)
+│
+├── app_paths.rs            # Platform-correct base dirs (desktop `dirs`, mobile app-private)
+├── settings.rs             # Two-tier settings: global JSON + per-workspace JSON overlay
+├── workspace.rs            # Workspace registry, selection, claim/auto-login
+├── auth.rs                 # OAuth2 login, token storage, workspace identity
+├── logger.rs               # Rotating file log + in-memory buffer + `log_*` commands
+├── db.rs                   # rusqlite wrappers with write-contention logging, adjustment guard
+├── audio.rs                # Audio decoding via Symphonia
+├── wiki.rs                 # Wiki documents; own root + `meta.json` linkage (not a dataset type)
+├── xp.rs                   # XP ledger in the app-level SQLite
+├── simple_words.rs         # "Known simple" words sourced from selected card datasets
+├── edge_tts.rs             # Edge TTS voices + synthesis
+├── capture.rs              # Screenshot / clipboard image capture — desktop
+└── ocr.rs                  # Tesseract OCR — desktop
+```
+
+Feature gates: `default = ["stt"]`, `desktop = ["stt", ..., "server"]`. Android builds with
+`--no-default-features --features stt`, which is the same module set as a plain `cargo check`.
+Verify both: `cargo check --offline` and `cargo check --offline --features desktop`.
 
 ### Frontend Structure (`src/`)
 
@@ -147,10 +216,16 @@ When adding new colors, define the CSS variable in all 4 theme blocks in `global
 ### Rust Backend
 
 - Commands use `State<'_, SettingsState>` to access settings and resolve dataset paths
-- `find_dataset_dir()` resolves the filesystem path from settings + dataset UUID
+- `datasets::find_dataset_dir()` resolves the filesystem path from settings + dataset UUID
 - Error handling: return `Result<T, String>` — errors become frontend toast messages
 - `open_db()` opens dataset-level SQLite; `open_app_db()` opens the app-level SQLite
 - Inner functions are extracted for reuse across commands (see Tauri command extraction pattern)
+- New files go into the matching group directory, not the crate root; a group's children are
+  declared `pub(crate) mod` in its `mod.rs` (a private `mod` would be invisible outside the group)
+- A directory earns its place only with 2+ files or a planned split — don't wrap a single file in
+  a `mod.rs` (this is why `wiki.rs`, `xp.rs`, `ocr.rs` are still flat)
+- `mcp/` is the exception to the `pub(crate) mod` rule: its submodules are plain private `mod`s,
+  since nothing outside the group names them — it only exposes `create_mcp_service`
 
 ### Frontend
 
@@ -163,8 +238,10 @@ When adding new colors, define the CSS variable in all 4 theme blocks in `global
 
 ### Adding a New Tauri Command
 
-1. Write the function in the appropriate `src-tauri/src/*.rs` file with `#[tauri::command]`
-2. Register it in `src-tauri/src/lib.rs` inside `tauri::generate_handler![...]`
+1. Write the function in the appropriate module under `src-tauri/src/` (see the group tree above)
+   with `#[tauri::command]`
+2. Register it in `src-tauri/src/lib.rs` inside `tauri::generate_handler![...]` — in **both** the
+   desktop `run()` and, if it compiles on Android, the `mobile_invoke_handler!` list
 3. Call it from frontend with `invoke("command_name", { params })`
 
 ## Agent-Friendly Design Principle
@@ -181,6 +258,18 @@ Key rules:
 - **Status/discovery tools** — agents need to determine state before acting
 
 When adding a new Tauri command, simultaneously add the corresponding MCP tool.
+
+### Adding an MCP Tool
+
+1. Add the parameter struct and the `#[tool(name = "...", description = "...")]` method to the
+   `src-tauri/src/mcp/<domain>.rs` submodule that owns the domain (see the tree above)
+2. Nothing else to register: each submodule's `#[tool_router(router = <domain>_router, vis = "pub(crate)")]`
+   impl block is already merged by `mcp::tool_router()`. Only a **new** submodule needs a `mod`
+   declaration plus a `+ Self::<domain>_router()` line in `mcp/mod.rs`
+3. Tool names must be unique across all submodules — `ToolRouter::merge` silently overwrites a
+   duplicate, so a collision costs you a tool with no compile error
+4. A parameter struct used by two domains belongs in `mcp/mod.rs` as `pub(crate) struct`, imported
+   via `use super::{...}`
 
 ## External Dependencies
 

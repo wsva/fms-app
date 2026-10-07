@@ -1,3 +1,14 @@
+//! Dictation practice: media/subtitle/cue queries, subtitle versioning, and
+//! dictation progress (app-level DB).
+//!
+//! The desktop-only cue tooling lives alongside: [`align`] (multi-pass anchor DP
+//! against a reference text) and [`adjust`] (energy-envelope cue-time snapping).
+
+#[cfg(feature = "desktop")]
+pub(crate) mod adjust;
+#[cfg(feature = "desktop")]
+pub(crate) mod align;
+
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -5,7 +16,7 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::auth::workspace_identity;
-use crate::dataset::find_dataset_dir;
+use crate::datasets::find_dataset_dir;
 use crate::settings::SettingsState;
 
 // ============================================================
@@ -414,7 +425,7 @@ pub async fn listen_save_cue(
     )
     .map_err(|e| e.to_string())?;
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "cue_save",
             &dataset_uuid,
@@ -436,7 +447,7 @@ pub async fn listen_delete_cue(
     conn.execute("DELETE FROM listen_subtitle_cue WHERE uuid = ?1", [&cue_uuid])
         .map_err(|e| e.to_string())?;
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "cue_delete",
             &dataset_uuid,
@@ -573,7 +584,7 @@ pub async fn listen_save_dictation_as(
     )
     .map_err(|e| e.to_string())?;
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             settings,
             "dictation",
             dataset_uuid,
@@ -1052,12 +1063,12 @@ pub async fn dictation_add_cue_to_favorites(
     }
 
     // 3. Resolve (or create) the Favorites dataset and open its DB + schema.
-    let (fav_dir, fav_uuid) = crate::dataset::ensure_favorites_dataset(&settings)?;
+    let (fav_dir, fav_uuid) = crate::datasets::ensure_favorites_dataset(&settings)?;
     let fav_db_path = fav_dir.join("data.sqlite3");
     let db_existed = fav_db_path.exists();
     let fav_conn = Connection::open(&fav_db_path).map_err(|e| e.to_string())?;
     if !db_existed {
-        crate::dataset::create_db_schema(&fav_conn)?;
+        crate::datasets::create_db_schema(&fav_conn)?;
     }
 
     // 4. De-duplicate. The favorite cue REUSES the source cue's uuid as its primary
@@ -1161,7 +1172,7 @@ pub async fn dictation_add_cue_to_favorites(
             if let Err(e) = std::fs::write(&wf_path, &peaks_json) {
                 log::warn!("[favorites] waveform file write failed: {}", e);
             }
-            if let Err(e) = crate::dataset::write_waveform_to_db(
+            if let Err(e) = crate::datasets::write_waveform_to_db(
                 &fav_conn,
                 &fav_media_dir,
                 &wav_path,
@@ -1204,7 +1215,7 @@ pub async fn dictation_add_cue_to_favorites(
 pub async fn dictation_list_favorite_cues(
     settings: State<'_, SettingsState>,
 ) -> Result<Vec<String>, String> {
-    let found = match crate::dataset::find_favorites_dataset(&settings) {
+    let found = match crate::datasets::find_favorites_dataset(&settings) {
         Some(f) => f,
         None => return Ok(Vec::new()),
     };

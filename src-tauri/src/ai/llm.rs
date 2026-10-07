@@ -258,7 +258,7 @@ pub async fn llm_chat(
     #[cfg(feature = "desktop")]
     {
         let (provider, api_key, base_url) = get_llm_config(&state);
-        crate::goose_llm::chat_once(
+        crate::ai::goose_llm::chat_once(
             &provider,
             &api_key,
             &base_url,
@@ -294,7 +294,7 @@ pub async fn llm_chat_stream(
     #[cfg(feature = "desktop")]
     {
         let (provider, api_key, base_url) = get_llm_config(&state);
-        crate::goose_llm::chat_stream(
+        crate::ai::goose_llm::chat_stream(
             &app,
             &id,
             &provider,

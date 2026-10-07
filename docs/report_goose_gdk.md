@@ -2,8 +2,8 @@
 
 > Report generated from the goose Development Kit docs (https://goose-docs.ai/docs/gdk/)
 > — Overview, SDK, ACP, and the generated goose ACP Reference — cross-checked against
-> this project's current architecture (`src-tauri/src/mcp.rs`, the Ollama-based
-> `ChatPage.tsx`, the STT `model.rs`, and the Android thin-client `sync.rs`).
+> this project's current architecture (`src-tauri/src/mcp/`, the Ollama-based
+> `ChatPage.tsx`, the STT `models/mod.rs`, and the Android thin-client `sync/client.rs`).
 
 ## 1. What the GDK actually is (and what it isn't)
 
@@ -16,7 +16,7 @@ around the same goose agent runtime:
 | **ACP (Agent Client Protocol)** | Connect to a *separate* goose process over **stdio / HTTP / WebSocket**. Full agent runtime: sessions, extensions (MCP), tools, memory, recipes, schedules, dictation, local inference. | Any (JSON-RPC) | Stable-ish, `unstable/` namespace |
 
 Key point: **fms-app already speaks both sides of this.** The Rust backend already runs
-an **MCP server** (`rmcp` StreamableHttp in `mcp.rs`) — that's the *extension/tool* side.
+an **MCP server** (`rmcp` StreamableHttp in `mcp/`) — that's the *extension/tool* side.
 What the GDK adds is the *agent/orchestration* side that is currently hand-rolled against
 Ollama.
 
@@ -65,13 +65,13 @@ multi-step agent job" — a recipe with a schedule, rather than bespoke UI.
 
 The reference exposes `dictation/transcribe`, `dictation/models/download|list|delete`,
 and `local-inference/models/*` (HF search/download/evict, per-model sampling settings).
-This is functionally what `model.rs` + `model_download.rs` do for STT. Worth studying
+This is functionally what `models/mod.rs` + `models/download.rs` do for STT. Worth studying
 their API shape (and possibly consuming a provider) rather than reinventing model
 management — though don't assume drop-in for the Parakeet/`transcribe-rs` stack.
 
 ### E. Android thin-client architecture — a strong precedent, not a dependency
 
-The PC↔phone sync (`sync.rs`, REST + device pairing + token auth) is architecturally the
+The PC↔phone sync (`sync/client.rs`, REST + device pairing + token auth) is architecturally the
 **same pattern** goose uses for `goose serve` over HTTP/WebSocket with a secret key and
 `--allowed-origin`. Two implications:
 
@@ -103,4 +103,4 @@ The PC↔phone sync (`sync.rs`, REST + device pairing + token auth) is architect
 3. **Exploratory:** Prototype **recipes/schedules** for the read-aloud scoring +
    daily-review workflows in `todo.md`.
 4. **Research only:** Compare goose's `dictation/*` and `local-inference/*` ACP APIs
-   against `model.rs` before investing further in custom STT model management.
+   against `models/mod.rs` before investing further in custom STT model management.

@@ -20,7 +20,7 @@ Nothing here is mandatory. Where v8 and reality disagree, reality wins.
   REST API (`/api/v1`); Android thin clients and other PCs are callers. There is no
   elected leader concept yet — the "hub" is simply the machine whose address you
   typed or discovered (`settings.pc_url`).
-- **Pairing & trust** (`pairing.rs`, `web_service.rs::zone_guard`):
+- **Pairing & trust** (`sync/pairing.rs`, `sync/server.rs::zone_guard`):
   - Loopback trusted only with a Host-header check (DNS-rebinding guard);
     Tailscale (100.64.0.0/10) trusted outright; LAN/Tailscale-other-subnet require
     a signed request.
@@ -30,15 +30,15 @@ Nothing here is mandatory. Where v8 and reality disagree, reality wins.
   - Approval is a confirm dialog on the PC owner's side (`/pair/request` →
     poll `/pair/status`); the device registry lives in the app DB, revocable from
     Settings and via MCP (`pairing_list_devices`, `pairing_revoke_device`).
-- **Discovery** (`discover.rs`): UDP probe to broadcast+multicast on port **35712**
+- **Discovery** (`sync/discover.rs`): UDP probe to broadcast+multicast on port **35712**
   for LAN, Tailscale /24 TCP probe as fallback, manual address entry as last resort.
   Self-discovery is filtered out.
 
 ### 1.2 Dataset sync
 
 Unit of sync: one **dataset directory** (`<datasets>/<type>/<uuid>`, type ∈
-`dictation | card | book`). Flow today (`sync.rs::dataset_sync_snapshot` ⇄
-`rest.rs`):
+`dictation | card | book`). Flow today (`sync/client.rs::dataset_sync_snapshot` ⇄
+`sync/rest.rs`):
 
 1. `GET /api/v1/datasets/{uuid}/manifest` → `{ overall_hash, total_bytes,
    file_count, dataset_type }`.
@@ -76,7 +76,7 @@ datasets; `find_dataset_dir_typed` resolves any uuid.
 ### 1.4 Device chat
 
 - Store lives **only on the hub PC**: `<workspace>/chat/messages.sqlite3` +
-  `chat/attachments/<att-uuid>--<name>` (`chat.rs`).
+  `chat/attachments/<att-uuid>--<name>` (`ai/chat.rs`).
 - The thread is a single shared conversation; `sender_device`/`sender_name` mark
   provenance; `created_at` (ISO-8601 UTC ms) doubles as the poll cursor
   (`chat_list_messages(after=...)`).
@@ -93,7 +93,7 @@ datasets; `find_dataset_dir_typed` resolves any uuid.
 
 ### 1.5 Agent-friendliness
 
-All of the above has MCP twins (`mcp.rs`): `pc_sync_scan / pc_sync_connect /
+All of the above has MCP twins (`mcp/sync.rs`; chat in `mcp/ai.rs`): `pc_sync_scan / pc_sync_connect /
 pc_sync_status / pc_sync_pull / pc_sync_pull_all`, pairing tools, chat tools. Keep
 this parity rule for everything added below.
 
@@ -231,7 +231,7 @@ Keep all existing endpoints; add:
 | `POST /api/v1/sync/changes` | exists ✅ — becomes the universal push (queue→log), accepts follower-enqueued rows too |
 
 **Signature must cover the body and query string.** Today the Ed25519 request signs
-only `ts\nMETHOD\npath` ([`sync.rs::with_device_auth`](../src-tauri/src/sync.rs))
+only `ts\nMETHOD\npath` ([`sync/client.rs::with_device_auth`](../src-tauri/src/sync/client.rs))
 — no body, no query. Now that `/sync/changes` mutates a lot, extend the signed
 message to include a **hash of the request body and the query string**, or a captured
 POST is replayable verbatim. (`applied_changes` §3.6 already blunts *idempotent*
@@ -276,12 +276,12 @@ is good):
   so subsequent conflict comparisons are consistent on every node. This requires the
   replayed command functions to **accept an `updated_at`/`edit_time` override** —
   today they compute their own `now` internally (e.g.
-  [`card_save`](../src-tauri/src/cards.rs),
-  [`card_test_submit`](../src-tauri/src/cards.rs)), so last-write-wins silently
+  [`card_save`](../src-tauri/src/datasets/cards/mod.rs),
+  [`card_test_submit`](../src-tauri/src/datasets/cards/mod.rs)), so last-write-wins silently
   doesn't work until that parameter is threaded through.
 
 **Snapshot consistency:** the current streamer does `PRAGMA wal_checkpoint(TRUNCATE)`
-and then tars the live directory ([rest.rs `checkpoint_db`](../src-tauri/src/rest.rs)).
+and then tars the live directory ([sync/rest.rs `checkpoint_db`](../src-tauri/src/sync/rest.rs)).
 A checkpoint does **not** stop concurrent writers, so once the hub is written to
 constantly the tar can capture a **torn** `data.sqlite3`. The fix is to archive a
 point-in-time copy made with `VACUUM INTO` / the backup API instead of the live file
@@ -405,7 +405,7 @@ offline send/receive without a second writable replica.
    position.
 3. **Cursor: use a hub-side insertion counter (rowid/seq), not `created_at`.**
    Today `created_at` is stamped hub-side at insert
-   ([`chat.rs::insert_message`](../src-tauri/src/chat.rs)), so it is already
+   ([`ai/chat.rs::insert_message`](../src-tauri/src/ai/chat.rs)), so it is already
    monotonic — but a cursor that reads a client-supplied `created_at` (the earlier
    draft's "accept client-time as final") would break the poll: a message composed
    offline at 10:00 and flushed at 10:30 lands with `created_at` 10:00, and a peer
@@ -433,7 +433,7 @@ offline send/receive without a second writable replica.
    do not write to a local copy of the chat DB. One thread, one store.
 9. **Multi-user note**: if a second *person* ever shares the hub, chat needs
    per-workspace threads (store is already `<workspace>/chat`, so this is a
-   routing change in `zone_guard`/`rest.rs`, not a schema change). Out of scope now.
+   routing change in `zone_guard`/`sync/rest.rs`, not a schema change). Out of scope now.
 
 ---
 
@@ -506,7 +506,7 @@ offline send/receive without a second writable replica.
 ## 8. Snapshot correctness: `VACUUM INTO` (now in-scope, not deferred)
 
 The tar streamer takes `wal_checkpoint(TRUNCATE)` then archives the live DB
-([rest.rs](../src-tauri/src/rest.rs)) — safe only while the hub is idle. Under
+([sync/rest.rs](../src-tauri/src/sync/rest.rs)) — safe only while the hub is idle. Under
 constant writes the tar can capture a **torn** `data.sqlite3`. The fix: archive a
 **point-in-time copy** made with `VACUUM INTO` / the SQLite backup API, which reads a
 consistent snapshot without blocking writers. This also opens the door to the larger

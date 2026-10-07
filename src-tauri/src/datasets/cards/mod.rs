@@ -1,3 +1,12 @@
+//! Card datasets: CRUD, tags, SM-2 spaced repetition, FTS5 search, and
+//! multi-location discovery (same `meta.json` pattern as the other dataset
+//! types, via [`crate::datasets::dataset_roots`]).
+//!
+//! Bidirectional dataset sync — Last-Write-Wins conflict resolution plus
+//! per-dataset `sync_state` tracking — lives in [`sync`].
+
+pub(crate) mod sync;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
 
-use crate::dataset::{dataset_roots, DatasetInfo};
+use crate::datasets::{dataset_roots, DatasetInfo};
 use crate::settings::SettingsState;
 
 // ---------------------------------------------------------------------------
@@ -143,7 +152,7 @@ impl Default for CardFilter {
 
 /// Find a card dataset directory by UUID across all configured locations.
 pub(crate) fn find_card_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
-    for root in dataset_roots(settings, crate::dataset::DatasetType::Card) {
+    for root in dataset_roots(settings, crate::datasets::DatasetType::Card) {
         if !root.exists() {
             continue;
         }
@@ -306,7 +315,7 @@ pub(crate) fn search_cards_fts(
 ) -> Result<Vec<CardSearchResult>, String> {
     let mut results = Vec::new();
 
-    for root in dataset_roots(settings, crate::dataset::DatasetType::Card) {
+    for root in dataset_roots(settings, crate::datasets::DatasetType::Card) {
         let search_db_path = root.join("search.sqlite3");
         if !search_db_path.exists() {
             continue;
@@ -389,7 +398,7 @@ pub(crate) fn rebuild_fts_index(
     let roots = if let Some(loc) = location {
         vec![PathBuf::from(loc)]
     } else {
-        dataset_roots(settings, crate::dataset::DatasetType::Card)
+        dataset_roots(settings, crate::datasets::DatasetType::Card)
     };
 
     for root in roots {
@@ -570,7 +579,7 @@ fn create_card_schema(conn: &Connection) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     // §3.4: a per-dataset tombstone table (travels with snapshots) so a delete
     // is durable and can collide with a resurrected offline edit.
-    crate::sync_log::ensure_tombstones(conn)?;
+    crate::sync::change_log::ensure_tombstones(conn)?;
     Ok(())
 }
 
@@ -609,7 +618,7 @@ fn compute_question_hash(question: &str) -> String {
 
 /// List all card datasets across every configured location.
 pub(crate) fn list_card_datasets(settings: &SettingsState) -> Vec<CardDatasetSummary> {
-    let roots = dataset_roots(settings, crate::dataset::DatasetType::Card);
+    let roots = dataset_roots(settings, crate::datasets::DatasetType::Card);
     let mut datasets = Vec::new();
 
     for root in roots {
@@ -749,7 +758,7 @@ pub async fn card_dataset_create(
         return Err("Dataset name must not be empty".into());
     }
 
-    let roots = dataset_roots(&settings, crate::dataset::DatasetType::Card);
+    let roots = dataset_roots(&settings, crate::datasets::DatasetType::Card);
     let root = match location {
         Some(loc) if !loc.trim().is_empty() => {
             let p = PathBuf::from(loc.trim());
@@ -912,7 +921,7 @@ pub async fn card_dataset_delete(
     log::info!("[Cards] Deleting dataset at '{}'", path.display());
     
     // Remove all cards in this dataset from the FTS index
-    for root in dataset_roots(&settings, crate::dataset::DatasetType::Card) {
+    for root in dataset_roots(&settings, crate::datasets::DatasetType::Card) {
         if path.starts_with(&root) {
             if let Ok(search_conn) = open_search_db(&root) {
                 let _ = remove_dataset_from_fts(&search_conn, &uuid);
@@ -941,7 +950,7 @@ pub async fn card_dataset_move(
     }
 
     // Verify target is a known dataset root
-    let roots = dataset_roots(&settings, crate::dataset::DatasetType::Card);
+    let roots = dataset_roots(&settings, crate::datasets::DatasetType::Card);
     let target_root_canonical = target_root.canonicalize().map_err(|e| e.to_string())?;
     let is_known_root = roots.iter().any(|r| {
         r.canonicalize().map(|c| c == target_root_canonical).unwrap_or(false)
@@ -1169,7 +1178,7 @@ pub async fn card_save(
     // Update FTS index
     if let Ok(info) = read_card_dataset_info(&path) {
         // Find the location (root) for this dataset
-        for root in dataset_roots(&settings, crate::dataset::DatasetType::Card) {
+        for root in dataset_roots(&settings, crate::datasets::DatasetType::Card) {
             if path.starts_with(&root) {
                 if let Ok(search_conn) = open_search_db(&root) {
                     let _ = index_card_in_fts(
@@ -1207,7 +1216,7 @@ pub async fn card_save(
     // Thin-client writeback: queue the change for the PC. Mobile only — desktop
     // is the source of truth and already wrote straight to its DB.
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "card_save",
             &dataset_uuid,
@@ -1238,7 +1247,7 @@ pub async fn card_delete(
     update_dataset_timestamp(&path)?;
 
     // Remove from FTS index
-    for root in dataset_roots(&settings, crate::dataset::DatasetType::Card) {
+    for root in dataset_roots(&settings, crate::datasets::DatasetType::Card) {
         if path.starts_with(&root) {
             if let Ok(search_conn) = open_search_db(&root) {
                 let _ = remove_card_from_fts(&search_conn, &dataset_uuid, &card_uuid);
@@ -1249,7 +1258,7 @@ pub async fn card_delete(
 
     log::info!("[Cards] Deleted card '{}' in dataset '{}'", card_uuid, dataset_uuid);
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "card_delete",
             &dataset_uuid,
@@ -1390,7 +1399,7 @@ pub async fn card_tag_save(
         updated_at: now,
     };
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "card_tag_save",
             &dataset_uuid,
@@ -1418,7 +1427,7 @@ pub async fn card_tag_delete(
     .map_err(|e| e.to_string())?;
 
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "card_tag_delete",
             &dataset_uuid,
@@ -1460,7 +1469,7 @@ pub async fn card_set_tags(
     }
 
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "card_set_tags",
             &dataset_uuid,
@@ -1757,7 +1766,7 @@ pub async fn card_test_submit(
     );
 
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "card_review",
             &dataset_uuid,

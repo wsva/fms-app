@@ -531,12 +531,12 @@ pub(crate) fn send_pc_message(
     if settings.role() != "hub" {
         let conn = open_mirror(settings)?;
         enqueue_outbox(settings, &conn, &uuid, &text, &files)?;
-        let me = crate::sync::local_device_id(settings).unwrap_or_default();
+        let me = crate::sync::client::local_device_id(settings).unwrap_or_default();
         return Ok(ChatMessage {
             id: 0,
             uuid,
             sender_device: me,
-            sender_name: crate::sync::device_name(),
+            sender_name: crate::sync::client::device_name(),
             text,
             created_at: chrono::Utc::now().to_rfc3339(),
             attachments: Vec::new(),
@@ -574,7 +574,7 @@ pub async fn chat_list_messages(
     // so the returned thread reflects the flush + the latest sync (§4).
     flush_pending(&settings).await;
     let _ = pull_into_mirror(&settings).await;
-    let me = crate::sync::local_device_id(&settings).unwrap_or_default();
+    let me = crate::sync::client::local_device_id(&settings).unwrap_or_default();
     let (mut messages, pending) = {
         let conn = open_mirror(&settings)?;
         (list_mirror(&conn, limit.unwrap_or(200))?, pending_outbox(&conn, &me)?)
@@ -604,7 +604,7 @@ pub async fn chat_send_message(
     if text.trim().is_empty() && file_paths.is_empty() {
         return Err("Nothing to send — pass text or at least one file.".into());
     }
-    if crate::sync::pc_base(&settings).is_empty() {
+    if crate::sync::client::pc_base(&settings).is_empty() {
         return Err("No PC configured — connect on the Datasets page first.".into());
     }
     let uuid = uuid.unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -634,7 +634,7 @@ pub async fn chat_send_message(
         // it shows at the thread end, and a later poll flushes it.
         Err(e) => {
             log::debug!("[chat] send queued offline ({uuid}): {e}");
-            let me = crate::sync::local_device_id(&settings).unwrap_or_default();
+            let me = crate::sync::client::local_device_id(&settings).unwrap_or_default();
             let conn = open_mirror(&settings)?;
             if let Some(m) = pending_outbox(&conn, &me)?.into_iter().find(|m| m.uuid == uuid) {
                 return Ok(m);
@@ -643,7 +643,7 @@ pub async fn chat_send_message(
                 id: 0,
                 uuid,
                 sender_device: me,
-                sender_name: crate::sync::device_name(),
+                sender_name: crate::sync::client::device_name(),
                 text,
                 created_at: chrono::Utc::now().to_rfc3339(),
                 attachments: Vec::new(),
@@ -989,7 +989,7 @@ fn enqueue_outbox(
         .execute(
             "INSERT OR REPLACE INTO chat_outbox(uuid, text, edit_time, sender_name) \
              VALUES(?1, ?2, ?3, ?4)",
-            params![uuid, text, edit_time, crate::sync::device_name()],
+            params![uuid, text, edit_time, crate::sync::client::device_name()],
         )
         .map_err(|e| e.to_string())?;
     for (src, orig) in files {
@@ -1041,7 +1041,7 @@ fn drop_outbox(settings: &SettingsState, conn: &Connection, uuid: &str) {
 // workspace runs `role = "follower"` (a demoted PC relays chat over REST), so
 // they compile on both targets and are reached from the unified commands below.
 async fn flush_one(settings: &SettingsState, uuid: &str) -> Result<ChatMessage, String> {
-    let base = crate::sync::pc_base(settings);
+    let base = crate::sync::client::pc_base(settings);
     if base.is_empty() {
         return Err("no PC configured".to_string());
     }
@@ -1074,7 +1074,7 @@ async fn flush_one(settings: &SettingsState, uuid: &str) -> Result<ChatMessage, 
     let mut form = reqwest::multipart::Form::new()
         .text("uuid", uuid.to_string())
         .text("text", text)
-        .text("device_name", crate::sync::device_name());
+        .text("device_name", crate::sync::client::device_name());
     for (stored_name, filename) in &files {
         let bytes = tokio::fs::read(dir.join(stored_name))
             .await
@@ -1085,7 +1085,7 @@ async fn flush_one(settings: &SettingsState, uuid: &str) -> Result<ChatMessage, 
         .connect_timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
-    let req = crate::sync::with_device_auth(
+    let req = crate::sync::client::with_device_auth(
         client.post(format!("{base}/api/v1/chat/message")),
         settings,
         "POST",
@@ -1161,7 +1161,7 @@ async fn pull_into_mirror(settings: &SettingsState) -> Result<(), String> {
         mirror_cursor(&conn)
     };
     let query = vec![("after_id", after.to_string()), ("limit", "500".to_string())];
-    let resp = crate::sync::pc_get_json(settings, "/api/v1/chat/messages", &query).await?;
+    let resp = crate::sync::client::pc_get_json(settings, "/api/v1/chat/messages", &query).await?;
     let arr = resp.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let msgs: Vec<ChatMessage> =
         arr.into_iter().filter_map(|i| serde_json::from_value(i).ok()).collect();
@@ -1260,7 +1260,7 @@ async fn download_to(
         .ok_or_else(|| "attachment path has no directory".to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
 
-    let base = crate::sync::pc_base(settings);
+    let base = crate::sync::client::pc_base(settings);
     if base.is_empty() {
         return Err("No PC configured — connect on the Datasets page first.".into());
     }
@@ -1269,7 +1269,7 @@ async fn download_to(
         .connect_timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
-    let req = crate::sync::with_device_auth(
+    let req = crate::sync::client::with_device_auth(
         client.get(format!("{base}{api_path}")),
         settings,
         "GET",

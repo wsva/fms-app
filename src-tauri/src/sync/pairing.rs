@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
-use crate::dictation;
+use crate::datasets;
 use crate::settings::SettingsState;
 
 /// Lifetime of a pending confirm dialog, in seconds.
@@ -143,7 +143,7 @@ impl AuthContext {
             bound_user_id: None,
             role: None,
             cluster_id: None,
-            protocol_version: crate::PROTOCOL_VERSION,
+            protocol_version: crate::sync::PROTOCOL_VERSION,
         }
     }
 }
@@ -186,7 +186,7 @@ fn cached_registry(
             return Ok(map.clone());
         }
     }
-    let conn = dictation::open_app_db(settings)?;
+    let conn = datasets::dictation::open_app_db(settings)?;
     ensure_table(&conn)?;
     let mut stmt = conn
         .prepare("SELECT device_id, pubkey, status, bound_user_id FROM paired_devices")
@@ -218,7 +218,7 @@ fn upsert_device(
     status: &str,
     bound_user_id: &str,
 ) -> Result<(), String> {
-    let conn = dictation::open_app_db(settings)?;
+    let conn = datasets::dictation::open_app_db(settings)?;
     ensure_table(&conn)?;
     let bound = if bound_user_id.is_empty() { None } else { Some(bound_user_id) };
     conn.execute(
@@ -379,7 +379,7 @@ impl AuthError {
 
 /// Verify a signed request. Legacy (`peer_protocol < 2`) signs
 /// `"{ts}\n{METHOD}\n{path}"`; v2 folds in the request payload,
-/// `"{ts}\n{METHOD}\n{path}\nsha256(query\nbody)"` (see `sync::signed_message`).
+/// `"{ts}\n{METHOD}\n{path}\nsha256(query\nbody)"` (see `sync::client::signed_message`).
 /// `query` is the raw URL query string and `body` the exact received bytes; for
 /// streaming multipart uploads the caller passes an empty slice to match the
 /// client, which cannot pre-hash a body it is still streaming. Checks the
@@ -416,7 +416,7 @@ pub fn verify_request(
     let pubkey = hex_decode(&pubkey_hex).map_err(|_| AuthError::BadSignature)?;
     let sig = hex_decode(sig_hex).map_err(|_| AuthError::BadSignature)?;
     let msg = if peer_protocol >= 2 {
-        crate::sync::signed_message(ts_num.max(0) as u64, method, path, query, body)
+        crate::sync::client::signed_message(ts_num.max(0) as u64, method, path, query, body)
     } else {
         format!("{}\n{}\n{}", ts, method.to_uppercase(), path)
     };
@@ -443,7 +443,7 @@ fn touch_last_seen(settings: &SettingsState, device_id: &str) {
         }
     };
     if due {
-        if let Ok(conn) = dictation::open_app_db(settings) {
+        if let Ok(conn) = datasets::dictation::open_app_db(settings) {
             let _ = conn.execute(
                 "UPDATE paired_devices SET last_seen_at = datetime('now') WHERE device_id = ?1",
                 rusqlite::params![device_id],
@@ -457,7 +457,7 @@ fn touch_last_seen(settings: &SettingsState, device_id: &str) {
 // ---------------------------------------------------------------------------
 
 pub fn list_devices(settings: &SettingsState) -> Result<Vec<PairedDevice>, String> {
-    let conn = dictation::open_app_db(settings)?;
+    let conn = datasets::dictation::open_app_db(settings)?;
     ensure_table(&conn)?;
     let mut stmt = conn
         .prepare(
@@ -481,7 +481,7 @@ pub fn list_devices(settings: &SettingsState) -> Result<Vec<PairedDevice>, Strin
 }
 
 pub fn revoke(settings: &SettingsState, device_id: &str) -> Result<(), String> {
-    let conn = dictation::open_app_db(settings)?;
+    let conn = datasets::dictation::open_app_db(settings)?;
     ensure_table(&conn)?;
     conn.execute("DELETE FROM paired_devices WHERE device_id = ?1", rusqlite::params![device_id])
         .map_err(|e| e.to_string())?;
@@ -490,7 +490,7 @@ pub fn revoke(settings: &SettingsState, device_id: &str) -> Result<(), String> {
 }
 
 pub fn remove_denied(settings: &SettingsState, device_id: &str) -> Result<(), String> {
-    let conn = dictation::open_app_db(settings)?;
+    let conn = datasets::dictation::open_app_db(settings)?;
     ensure_table(&conn)?;
     conn.execute(
         "DELETE FROM paired_devices WHERE device_id = ?1 AND status = 'denied'",

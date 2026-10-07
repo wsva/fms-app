@@ -48,7 +48,7 @@ pub async fn wiki_list_dirs(
     }
     #[cfg(not(feature = "desktop"))]
     {
-        crate::sync::wiki_remote_list_dirs(state.inner()).await
+        crate::sync::client::wiki_remote_list_dirs(state.inner()).await
     }
 }
 
@@ -65,7 +65,7 @@ pub async fn wiki_list_dir(
     }
     #[cfg(not(feature = "desktop"))]
     {
-        crate::sync::wiki_remote_list_dir(state.inner(), &path).await
+        crate::sync::client::wiki_remote_list_dir(state.inner(), &path).await
     }
 }
 
@@ -82,7 +82,7 @@ pub async fn wiki_read_file(
     }
     #[cfg(not(feature = "desktop"))]
     {
-        crate::sync::wiki_remote_read_file(state.inner(), &path).await
+        crate::sync::client::wiki_remote_read_file(state.inner(), &path).await
     }
 }
 
@@ -149,7 +149,7 @@ pub async fn wiki_search(
     }
     #[cfg(not(feature = "desktop"))]
     {
-        crate::sync::wiki_remote_search(state.inner(), &keyword).await
+        crate::sync::client::wiki_remote_search(state.inner(), &keyword).await
     }
 }
 

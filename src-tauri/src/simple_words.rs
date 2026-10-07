@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
 
-use crate::cards::open_card_db;
+use crate::datasets::cards::open_card_db;
 use crate::settings::SettingsState;
 
 // ============================================================
@@ -108,7 +108,7 @@ fn load_words_for_language(
     settings: &SettingsState,
     lang_cfg: &LanguageConfig,
 ) -> HashSet<String> {
-    let all_datasets = crate::cards::list_card_datasets(settings);
+    let all_datasets = crate::datasets::cards::list_card_datasets(settings);
     let mut words = HashSet::new();
 
     for ds in &all_datasets {
@@ -273,7 +273,7 @@ pub fn simple_words_add_word(
         return Err(format!("No default dataset set for language '{}'", lang));
     }
 
-    let all_datasets = crate::cards::list_card_datasets(&settings);
+    let all_datasets = crate::datasets::cards::list_card_datasets(&settings);
     let ds = all_datasets
         .iter()
         .find(|d| d.info.uuid == *default_uuid)

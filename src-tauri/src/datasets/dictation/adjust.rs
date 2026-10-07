@@ -13,10 +13,10 @@ use rusqlite::Connection;
 use tauri::{Emitter, State};
 use uuid::Uuid;
 
-use crate::dataset::{find_dataset_dir, parse_vtt, DatasetProgress};
-use crate::model::ModelState;
+use crate::datasets::{find_dataset_dir, parse_vtt, DatasetProgress};
+use crate::models::ModelState;
 use crate::settings::SettingsState;
-use crate::align::similarity_score;
+use crate::datasets::dictation::align::similarity_score;
 
 // ---------------------------------------------------------------------------
 // Configuration (mirrors lib/adjust_session.py)
@@ -963,7 +963,7 @@ fn dataset_adjust_cue_time_sync(
     // Touch info.json timestamp (best-effort).
     let info_path = dataset_dir.join("info.json");
     if let Ok(data) = fs::read_to_string(&info_path) {
-        if let Ok(mut info) = serde_json::from_str::<crate::dataset::DatasetInfo>(&data) {
+        if let Ok(mut info) = serde_json::from_str::<crate::datasets::DatasetInfo>(&data) {
             info.updated = Utc::now().to_rfc3339();
             if let Ok(out) = serde_json::to_string_pretty(&info) {
                 let _ = fs::write(&info_path, out);
@@ -1307,7 +1307,7 @@ pub async fn dataset_sync_cue_times_word_level(
 
         // Transcribe with word-level timestamps.
         let word_result =
-            crate::model::transcribe_file_word_level(&model_state, &media_path)?;
+            crate::models::transcribe_file_word_level(&model_state, &media_path)?;
         let stt_words = match word_result.segments {
             Some(segs) if !segs.is_empty() => segs,
             _ => {
@@ -1591,7 +1591,7 @@ pub async fn dataset_sync_cue_times_word_level(
     // Touch info.json timestamp.
     let info_path = dataset_dir.join("info.json");
     if let Ok(data) = fs::read_to_string(&info_path) {
-        if let Ok(mut info) = serde_json::from_str::<crate::dataset::DatasetInfo>(&data) {
+        if let Ok(mut info) = serde_json::from_str::<crate::datasets::DatasetInfo>(&data) {
             info.updated = Utc::now().to_rfc3339();
             if let Ok(out) = serde_json::to_string_pretty(&info) {
                 let _ = fs::write(&info_path, out);
@@ -1739,7 +1739,7 @@ pub async fn dataset_sync_cue_times(
         // Match each DB cue to the best fresh cue by text similarity.
         for (cue_uuid, old_start, old_end, db_content) in &db_cues {
             let mut best_score: f64 = 0.0;
-            let mut best_fresh: Option<&crate::dataset::VttCue> = None;
+            let mut best_fresh: Option<&crate::datasets::VttCue> = None;
 
             for fc in &fresh_cues {
                 let score = similarity_score(db_content, &fc.content);
@@ -1818,7 +1818,7 @@ pub async fn dataset_sync_cue_times(
     // Touch info.json timestamp.
     let info_path = dataset_dir.join("info.json");
     if let Ok(data) = fs::read_to_string(&info_path) {
-        if let Ok(mut info) = serde_json::from_str::<crate::dataset::DatasetInfo>(&data) {
+        if let Ok(mut info) = serde_json::from_str::<crate::datasets::DatasetInfo>(&data) {
             info.updated = Utc::now().to_rfc3339();
             if let Ok(out) = serde_json::to_string_pretty(&info) {
                 let _ = fs::write(&info_path, out);

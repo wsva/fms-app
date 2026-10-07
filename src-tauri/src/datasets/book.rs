@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
 
-use crate::dataset::{dataset_roots, DatasetType};
+use crate::datasets::{dataset_roots, DatasetType};
 use crate::settings::SettingsState;
 
 // ============================================================
@@ -176,7 +176,7 @@ fn open_book_db(book_dir: &Path) -> Result<Connection, String> {
     .map_err(|e| e.to_string())?;
     // §3.4: a per-dataset tombstone table (travels with snapshots) so a delete
     // is durable and can collide with a resurrected offline edit.
-    crate::sync_log::ensure_tombstones(&conn)?;
+    crate::sync::change_log::ensure_tombstones(&conn)?;
     Ok(conn)
 }
 
@@ -402,7 +402,7 @@ pub async fn book_save_chapter(
     )
     .map_err(|e| e.to_string())?;
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "book_chapter_save",
             &book_uuid,
@@ -436,7 +436,7 @@ pub async fn book_delete_chapter(
     conn.execute("DELETE FROM book_chapter WHERE uuid = ?1", [&uuid])
         .map_err(|e| e.to_string())?;
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "book_chapter_delete",
             &book_uuid,
@@ -539,7 +539,7 @@ pub async fn book_save_sentence(
     let conn = open_book_db(&dir)?;
     save_sentence_row(&conn, &sentence)?;
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "book_sentence_save",
             &book_uuid,
@@ -564,7 +564,7 @@ pub async fn book_save_sentences(
     }
     tx.commit().map_err(|e| e.to_string())?;
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "book_sentences_save",
             &book_uuid,
@@ -601,7 +601,7 @@ pub async fn book_delete_sentence(
     conn.execute("DELETE FROM book_sentence WHERE uuid = ?1", [&uuid])
         .map_err(|e| e.to_string())?;
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "book_sentence_delete",
             &book_uuid,
@@ -668,7 +668,7 @@ pub async fn book_save_word(
     )
     .map_err(|e| e.to_string())?;
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "book_word_save",
             &book_uuid,
@@ -690,7 +690,7 @@ pub async fn book_delete_word(
     conn.execute("DELETE FROM book_sentence_word WHERE uuid = ?1", [&uuid])
         .map_err(|e| e.to_string())?;
     {
-        let _ = crate::sync_log::commit_change(
+        let _ = crate::sync::change_log::commit_change(
             &settings,
             "book_word_delete",
             &book_uuid,

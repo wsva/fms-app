@@ -21,9 +21,9 @@ use tauri::{Emitter, State};
 use uuid::Uuid;
 
 use crate::auth::workspace_identity;
-use crate::dataset::{dataset_roots, DatasetType};
+use crate::datasets::{dataset_roots, DatasetType};
 use crate::settings::SettingsState;
-use crate::textsim::similarity_score;
+use crate::datasets::textsim::similarity_score;
 use crate::xp::{xp_award_internal, XpAwardResult};
 
 const READ_ALOUD_STRUCTURE: &str = "read-aloud-v1";

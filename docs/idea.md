@@ -54,7 +54,7 @@ All material is normalized into the **dataset** format (see §6) so that every d
 
 **Dictation flow** is the most mature part of the app:
 `src/components/listen_speak/dictation/` (`DictationPage`, `CueEditor`, `Subtitle`,
-`WaveformCanvas`) backed by `src-tauri/src/dictation.rs`.
+`WaveformCanvas`) backed by `src-tauri/src/datasets/dictation/mod.rs`.
 
 **Comprehension flow (planned):**
 
@@ -74,7 +74,7 @@ question-generation prompt pipeline, a storage table for Q&A sets, and a UI to t
 | **Web text / news** | Capture a text from the internet or a newspaper, read it, take notes, learn new words and expressions. | 🟡 |
 
 Reading is implemented under `src/components/read_book/` (`BookManager`, `ReadingView`,
-`ParagraphList`, `SentenceDrawer`) backed by `src-tauri/src/book.rs`. Books have chapters →
+`ParagraphList`, `SentenceDrawer`) backed by `src-tauri/src/datasets/book.rs`. Books have chapters →
 sentences → words, and sentences can be voiced with Edge TTS (`book_write_audio`,
 `book_import_audio`).
 

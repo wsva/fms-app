@@ -19,13 +19,12 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_util::io::ReaderStream;
 
-use crate::dataset::{self, DatasetSummary};
-use crate::book::{self, BookChapter};
+use crate::datasets::{self, DatasetSummary};
+use crate::datasets::book::BookChapter;
 use crate::edge_tts;
-use crate::model::{self, ModelState};
-use crate::pairing;
-use crate::rest;
+use crate::models::{self, ModelState};
 use crate::settings::SettingsState;
+use crate::sync;
 
 /// Default port the web server binds to.
 const DEFAULT_PORT: u16 = 35711;
@@ -287,7 +286,7 @@ fn build_router(app: AppHandle, config: WebServiceConfig) -> Router {
     // PC-side REST API for the Android thin client (snapshot + writeback).
     // Carries its own state, so it is nested after the main router's state is
     // applied below.
-    let rest_router = rest::router(app.clone());
+    let rest_router = sync::rest::router(app.clone());
 
     // MCP server (always enabled when web service is running)
     let mcp_service = crate::mcp::create_mcp_service(app);
@@ -390,19 +389,19 @@ async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) ->
         }
         // Trusted zone: no device binding. Handlers fall back to the PC's own
         // workspace identity for writeback attribution.
-        req.extensions_mut().insert(pairing::AuthContext::trusted());
+        req.extensions_mut().insert(sync::pairing::AuthContext::trusted());
         return next.run(req).await;
     }
 
     if zone_trusted(peer) {
-        req.extensions_mut().insert(pairing::AuthContext::trusted());
+        req.extensions_mut().insert(sync::pairing::AuthContext::trusted());
         return next.run(req).await;
     }
 
     // Untrusted zone: pairing handshake routes stay open, everything else
     // requires a valid per-device Ed25519 signature.
     if path == "/api/v1/status" || path.starts_with("/api/v1/pair/") {
-        req.extensions_mut().insert(pairing::AuthContext::trusted());
+        req.extensions_mut().insert(sync::pairing::AuthContext::trusted());
         return next.run(req).await;
     }
     let get_header = |name: &str| {
@@ -418,7 +417,7 @@ async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) ->
     if device_id.is_empty() || ts.is_empty() || sig.is_empty() {
         return json_error(
             StatusCode::UNAUTHORIZED,
-            pairing::AuthError::Unpaired.message(),
+            sync::pairing::AuthError::Unpaired.message(),
         );
     }
     // v2 signatures cover `sha256(query\nbody)`, so read the declared protocol
@@ -461,7 +460,7 @@ async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) ->
     let verify_body = body_bytes.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let settings = app.state::<SettingsState>();
-        pairing::verify_request(
+        sync::pairing::verify_request(
             &settings,
             &device_id,
             &method,
@@ -474,7 +473,7 @@ async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) ->
         )
     })
     .await
-    .unwrap_or_else(|_| Err(pairing::AuthError::BadSignature));
+    .unwrap_or_else(|_| Err(sync::pairing::AuthError::BadSignature));
     match result {
         Ok(bound_user_id) => {
             // Paired device: expose its identity binding to the handler so
@@ -493,7 +492,7 @@ async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) ->
                     authed_device_id, peer_cluster, our_cluster
                 );
             }
-            req.extensions_mut().insert(pairing::AuthContext {
+            req.extensions_mut().insert(sync::pairing::AuthContext {
                 device_id: Some(authed_device_id),
                 bound_user_id,
                 role: if peer_role.is_empty() { None } else { Some(peer_role) },
@@ -571,7 +570,7 @@ async fn index_handler(State(s): State<AppState>) -> Response {
 
     // Fetch datasets for the dashboard.
     let settings = s.app.state::<SettingsState>();
-    let datasets = dataset::list_datasets(&settings);
+    let datasets = datasets::list_datasets(&settings);
 
     // --- Build sections dynamically based on enabled services ---
     let mut services_html = String::new();
@@ -601,7 +600,7 @@ async fn index_handler(State(s): State<AppState>) -> Response {
     }
 
     // Books section (always shown) — read-only reading library browser.
-    let books = book::list_books(&settings);
+    let books = datasets::book::list_books(&settings);
     let mut book_rows = String::new();
     for b in &books {
         book_rows.push_str(&format!(
@@ -890,7 +889,7 @@ async fn stt_handler(State(s): State<AppState>, mut multipart: Multipart) -> Res
     let app = s.app.clone();
     let joined = tauri::async_runtime::spawn_blocking(move || {
         let model_state = app.state::<ModelState>();
-        model::transcribe_wav_bytes(&model_state, &wav)
+        models::transcribe_wav_bytes(&model_state, &wav)
     })
     .await;
 
@@ -932,7 +931,7 @@ struct FileEntry {
 async fn datasets_list(State(s): State<AppState>) -> Response {
     log::debug!("[web_service] GET /datasets");
     let settings = s.app.state::<SettingsState>();
-    let datasets: Vec<DatasetSummary> = dataset::list_datasets(&settings);
+    let datasets: Vec<DatasetSummary> = datasets::list_datasets(&settings);
     let entries: Vec<DatasetEntry> = datasets
         .into_iter()
         .map(|d| DatasetEntry {
@@ -949,7 +948,7 @@ async fn datasets_list(State(s): State<AppState>) -> Response {
 async fn dataset_detail(State(s): State<AppState>, AxPath(uuid): AxPath<String>) -> Response {
     log::debug!("[web_service] GET /datasets/{}", uuid);
     let settings = s.app.state::<SettingsState>();
-    let dir = match dataset::find_dataset_dir(&settings, &uuid) {
+    let dir = match datasets::find_dataset_dir(&settings, &uuid) {
         Ok(d) => d,
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
@@ -991,7 +990,7 @@ async fn dataset_detail(State(s): State<AppState>, AxPath(uuid): AxPath<String>)
 
 async fn dataset_file_list(State(s): State<AppState>, AxPath(uuid): AxPath<String>) -> Response {
     let settings = s.app.state::<SettingsState>();
-    let dir = match dataset::find_dataset_dir(&settings, &uuid) {
+    let dir = match datasets::find_dataset_dir(&settings, &uuid) {
         Ok(d) => d,
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
@@ -1006,7 +1005,7 @@ async fn dataset_file(
     AxPath((uuid, rel)): AxPath<(String, String)>,
 ) -> Response {
     let settings = s.app.state::<SettingsState>();
-    let dir = match dataset::find_dataset_dir(&settings, &uuid) {
+    let dir = match datasets::find_dataset_dir(&settings, &uuid) {
         Ok(d) => d,
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
@@ -1156,7 +1155,7 @@ pub fn spawn_discovery(app: AppHandle, http_port: u16) {
                 "ips": [local_ip().unwrap_or_default()],
                 "role": settings.role(),
                 "cluster_id": settings.cluster_id(),
-                "protocol_version": crate::PROTOCOL_VERSION,
+                "protocol_version": crate::sync::PROTOCOL_VERSION,
             })
             .to_string()
         };
@@ -1317,7 +1316,7 @@ fn flatten_chapters(chapters: &[BookChapter]) -> Vec<(usize, &BookChapter)> {
 async fn books_list(State(s): State<AppState>) -> Response {
     log::debug!("[web_service] GET /books");
     let settings = s.app.state::<SettingsState>();
-    let books = book::list_books(&settings);
+    let books = datasets::book::list_books(&settings);
 
     let mut rows = String::new();
     for b in &books {
@@ -1349,11 +1348,11 @@ async fn books_list(State(s): State<AppState>) -> Response {
 async fn book_chapters_page(State(s): State<AppState>, AxPath(uuid): AxPath<String>) -> Response {
     log::debug!("[web_service] GET /books/{}", uuid);
     let settings = s.app.state::<SettingsState>();
-    let chapters = match book::list_chapters(&settings, &uuid) {
+    let chapters = match datasets::book::list_chapters(&settings, &uuid) {
         Ok(c) => c,
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
-    let book_title = book::list_books(&settings)
+    let book_title = datasets::book::list_books(&settings)
         .into_iter()
         .find(|b| b.uuid == uuid)
         .map(|b| b.title)
@@ -1392,17 +1391,17 @@ async fn book_chapter_content(
 ) -> Response {
     log::debug!("[web_service] GET /books/{}/{}", uuid, chapter);
     let settings = s.app.state::<SettingsState>();
-    let sentences = match book::list_sentences(&settings, &uuid, &chapter) {
+    let sentences = match datasets::book::list_sentences(&settings, &uuid, &chapter) {
         Ok(x) => x,
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
-    let chapter_title = book::list_chapters(&settings, &uuid)
+    let chapter_title = datasets::book::list_chapters(&settings, &uuid)
         .unwrap_or_default()
         .into_iter()
         .find(|c| c.uuid == chapter)
         .map(|c| c.title)
         .unwrap_or_else(|| "Chapter".to_string());
-    let book_title = book::list_books(&settings)
+    let book_title = datasets::book::list_books(&settings)
         .into_iter()
         .find(|b| b.uuid == uuid)
         .map(|b| b.title)

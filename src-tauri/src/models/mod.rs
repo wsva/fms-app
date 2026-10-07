@@ -1,3 +1,14 @@
+//! STT model management: download, lifecycle, and transcription via
+//! `transcribe-rs`, plus the download catalogs and the unified index of every
+//! model on disk.
+//!
+//! The whole group is `stt`-gated (see `lib.rs`); `desktop` implies `stt`.
+
+pub(crate) mod catalog;
+pub(crate) mod catalog_stt;
+pub(crate) mod download;
+pub(crate) mod index;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
@@ -22,8 +33,8 @@ use transcribe_rs::onnx::{
 };
 use transcribe_rs::{SpeechModel, TranscribeOptions, TranscriptionResult, TranscriptionSegment};
 
-use crate::model_list_stt::{self, EngineType};
-use crate::model_index::{self, ModelIndexEntry, ModelIndexState};
+use crate::models::catalog_stt::EngineType;
+use crate::models::index::{ModelIndexEntry, ModelIndexState};
 use crate::settings::SettingsState;
 
 // ---------------------------------------------------------------------------
@@ -142,11 +153,11 @@ impl ModelState {
             download_status.insert(model_def.id.to_string(), status);
         }
 
-        let selected = model_list_stt::MODELS
+        let selected = catalog_stt::MODELS
             .iter()
             .find(|m| cfg!(feature = "desktop") || m.engine != EngineType::TranscribeCpp)
             .map(|m| m.id.to_string())
-            .unwrap_or_else(|| model_list_stt::MODELS[0].id.to_string());
+            .unwrap_or_else(|| catalog_stt::MODELS[0].id.to_string());
 
         Self {
             download_status: Mutex::new(download_status),
@@ -171,7 +182,7 @@ impl ModelState {
     }
 
     /// Whether this model's files are present in the (current) model directory.
-    fn downloaded_on_disk(model_def: &model_list_stt::ModelDef) -> bool {
+    fn downloaded_on_disk(model_def: &catalog_stt::ModelDef) -> bool {
         let Some(dir) = Self::model_dir(model_def.id) else {
             return false;
         };
@@ -205,8 +216,8 @@ impl ModelState {
 
     /// Models loadable in this build. ONNX-only builds (e.g. the Android `stt`
     /// experiment) hide Whisper GGUF entries since transcribe-cpp is desktop-only.
-    pub fn available_models() -> impl Iterator<Item = &'static model_list_stt::ModelDef> {
-        model_list_stt::MODELS
+    pub fn available_models() -> impl Iterator<Item = &'static catalog_stt::ModelDef> {
+        catalog_stt::MODELS
             .iter()
             .filter(|def| cfg!(feature = "desktop") || def.engine != EngineType::TranscribeCpp)
     }
@@ -331,7 +342,7 @@ pub async fn model_select_version(
     state: State<'_, ModelState>,
     version: String,
 ) -> Result<(), String> {
-    if model_list_stt::find_model(&version).is_none() {
+    if catalog_stt::find_model(&version).is_none() {
         return Err(format!("Unknown model version: {}", version));
     }
     let mut sel = state.selected_version.lock().unwrap();
@@ -371,7 +382,7 @@ pub(crate) fn set_default_version_core(
         return settings.set_selected_model("");
     }
 
-    let def = model_list_stt::find_model(version)
+    let def = catalog_stt::find_model(version)
         .ok_or_else(|| format!("Unknown model version: {}", version))?;
     if !(cfg!(feature = "desktop") || def.engine != EngineType::TranscribeCpp) {
         return Err(format!("Model '{}' cannot be loaded in this build", version));
@@ -422,7 +433,7 @@ pub async fn model_download_inner(
     index: &ModelIndexState,
     version: String,
 ) -> Result<(), String> {
-    let def = model_list_stt::find_model(&version)
+    let def = catalog_stt::find_model(&version)
         .ok_or_else(|| format!("Unknown model version: {}", version))?;
 
     log::info!("Starting download of model '{}' ({} MB)", version, def.size_mb);
@@ -465,7 +476,7 @@ pub async fn model_download_inner(
         flags.insert(version.clone(), cancel_flag.clone());
     }
 
-    match crate::model_download::download_blob_model(
+    match crate::models::download::download_blob_model(
         &app,
         &state.download_progress,
         &model_dir,
@@ -494,9 +505,9 @@ pub async fn model_download_inner(
     }
 
     // Update unified model index
-    let root = model_index::model_root();
-    let files = model_index::collect_files(&model_dir, &root);
-    let key = model_index::make_key("stt", &version);
+    let root = index::model_root();
+    let files = index::collect_files(&model_dir, &root);
+    let key = index::make_key("stt", &version);
     let entry = ModelIndexEntry {
         model_type: "stt".to_string(),
         id: version.clone(),
@@ -505,7 +516,7 @@ pub async fn model_download_inner(
         provider: Some("cdn".to_string()),
         files,
     };
-    if let Err(e) = model_index::upsert_entry(index, key, entry) {
+    if let Err(e) = index::upsert_entry(index, key, entry) {
         log::warn!("Failed to update model index after download: {}", e);
     }
 
@@ -537,7 +548,7 @@ pub fn load_model_core(state: &ModelState, version: &str) -> Result<String, Stri
         }
     }
 
-    let def = model_list_stt::find_model(version)
+    let def = catalog_stt::find_model(version)
         .ok_or_else(|| format!("Unknown model version: {}", version))?;
 
     {
@@ -666,8 +677,8 @@ pub fn delete_model_core(state: &ModelState, index: &ModelIndexState, version: &
     }
 
     // Remove from unified model index
-    let key = model_index::make_key("stt", version);
-    if let Err(e) = model_index::remove_entry(index, &key) {
+    let key = index::make_key("stt", version);
+    if let Err(e) = index::remove_entry(index, &key) {
         log::warn!("Failed to update model index after delete: {}", e);
     }
 

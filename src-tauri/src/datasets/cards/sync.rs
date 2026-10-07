@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::cards::{find_card_dataset_dir, open_card_db, CardDatasetInfo};
+use crate::datasets::cards::{find_card_dataset_dir, open_card_db, CardDatasetInfo};
 use crate::settings::SettingsState;
 
 // ---------------------------------------------------------------------------
@@ -409,7 +409,7 @@ pub async fn card_sync_full(
 pub async fn card_sync_all(
     settings: State<'_, SettingsState>,
 ) -> Result<Vec<(String, Result<SyncResult, String>)>, String> {
-    let datasets = crate::cards::list_card_datasets(&settings);
+    let datasets = crate::datasets::cards::list_card_datasets(&settings);
     let mut results = Vec::new();
 
     // Get access token once

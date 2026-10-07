@@ -47,7 +47,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::settings::SettingsState;
-use crate::web_service::WebServiceState;
+use crate::sync::server::WebServiceState;
 
 /// How long to wait for a normal JSON-RPC response (initialize / session/new).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);

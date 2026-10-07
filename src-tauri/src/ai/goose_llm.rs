@@ -16,7 +16,7 @@ use goose_sdk::bindings::{
 };
 use tauri::{AppHandle, Emitter};
 
-use crate::llm::{ChatMessage, LlmChatResponse};
+use crate::ai::llm::{ChatMessage, LlmChatResponse};
 
 /// Build a goose provider from the app's LLM settings.
 ///

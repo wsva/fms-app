@@ -27,7 +27,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use crate::dictation;
+use crate::datasets;
 use crate::settings::SettingsState;
 
 /// Set while a **follower is applying changes pulled from the hub** (§3.3 apply
@@ -551,7 +551,7 @@ pub fn table_for_kind(kind: &str) -> &'static str {
 /// delete can record a tombstone that travels with future snapshots.
 #[cfg(feature = "desktop")]
 fn open_dataset_db(settings: &SettingsState, dataset_uuid: &str) -> Result<Connection, String> {
-    let (dir, _ty) = crate::dataset::find_dataset_dir_typed(settings, dataset_uuid)?;
+    let (dir, _ty) = crate::datasets::find_dataset_dir_typed(settings, dataset_uuid)?;
     let db = dir.join("data.sqlite3");
     if !db.exists() {
         return Err(format!("no dataset db for {dataset_uuid}"));
@@ -629,7 +629,7 @@ pub fn commit_change(
             let object_id = object_id_for(kind, payload);
             let edit_time = chrono::Utc::now().to_rfc3339();
             let user_key = crate::auth::workspace_identity(settings);
-            let conn = dictation::open_app_db(settings)?;
+            let conn = datasets::dictation::open_app_db(settings)?;
             append(
                 &conn,
                 dataset_uuid,
@@ -651,11 +651,11 @@ pub fn commit_change(
             // for writeback exactly like a phone does — the enqueue gate is the
             // runtime `role`, not a compile-time `cfg`. The hub role never gets
             // here, so it never enqueues to itself.
-            crate::sync::enqueue_change(settings, kind, dataset_uuid, payload)
+            crate::sync::client::enqueue_change(settings, kind, dataset_uuid, payload)
         }
     }
     #[cfg(not(feature = "desktop"))]
     {
-        crate::sync::enqueue_change(settings, kind, dataset_uuid, payload)
+        crate::sync::client::enqueue_change(settings, kind, dataset_uuid, payload)
     }
 }

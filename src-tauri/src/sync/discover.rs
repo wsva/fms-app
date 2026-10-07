@@ -5,7 +5,7 @@
 //! finds the PC `web_service` in three ways and returns ranked candidates:
 //!
 //! 1. **LAN / WLAN** — UDP probe `fms-probe` to the broadcast + multicast group
-//!    on port 35712 and collect the JSON replies (`web_service::spawn_discovery`).
+//!    on port 35712 and collect the JSON replies (`sync::server::spawn_discovery`).
 //! 2. **Tailscale** — if a tailnet address (100.64.0.0/10) is active, TCP-probe
 //!    the phone's own tailnet /24 on the HTTP port and validate via
 //!    `GET /api/v1/status`.

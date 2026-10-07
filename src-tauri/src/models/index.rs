@@ -18,8 +18,8 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::model_list;
-use crate::model_list_stt;
+use crate::models::{catalog, catalog_stt};
+
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -169,7 +169,7 @@ pub fn scan_models(root: &Path) -> ModelIndex {
     }
 
     // 1. Scan STT models (known IDs from model_list_stt)
-    for def in model_list_stt::MODELS {
+    for def in catalog_stt::MODELS {
         let model_dir = root.join(def.id);
         if !model_dir.exists() {
             continue;
@@ -191,7 +191,7 @@ pub fn scan_models(root: &Path) -> ModelIndex {
     }
 
     // 2. Scan HuggingFace models from catalog (candle-ocr, candle-tts, etc.)
-    for def in model_list::MODELS {
+    for def in catalog::MODELS {
         let model_dir = root.join("candle").join(def.folder);
         if !model_dir.exists() {
             continue;

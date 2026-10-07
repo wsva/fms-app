@@ -1,3 +1,23 @@
+//! Dataset infrastructure shared by every dataset type, plus the dictation
+//! dataset pipeline (import, STT subtitles, waveforms, cue DB generation).
+//!
+//! This module tree mirrors the on-disk layout: every type resolves through
+//! [`dataset_roots`] to `<datasets_dir>/{dictation,card,book,read_aloud}/` plus
+//! the linked directories listed in that folder's `meta.json`.
+//!
+//! TODO: the shared core ([`DatasetType`], [`dataset_roots`], the `meta.json`
+//! read/write helpers, `find_dataset_dir*` and the `dataset_*_dir` commands)
+//! still lives in this file next to the dictation pipeline, so every sibling
+//! depends on a ~2k-line parent. Split it out as a follow-up.
+
+pub(crate) mod book;
+pub(crate) mod cards;
+pub(crate) mod dictation;
+pub(crate) mod read_aloud;
+pub(crate) mod textsim;
+#[cfg(feature = "desktop")]
+pub(crate) mod tools;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -9,7 +29,7 @@ use uuid::Uuid;
 
 use crate::settings::SettingsState;
 #[cfg(feature = "desktop")]
-use crate::model::ModelState;
+use crate::models::ModelState;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1087,7 +1107,7 @@ pub async fn dataset_generate_subtitles(
             },
         );
 
-        let result = crate::model::transcribe_file(&model_state, file_path)?;
+        let result = crate::models::transcribe_file(&model_state, file_path)?;
 
         // Mirror the media sub-directory under subtitle/ before writing.
         if let Some(parent) = vtt_path.parent() {
@@ -1165,7 +1185,7 @@ pub async fn dataset_generate_subtitle_single(
         },
     );
 
-    let result = crate::model::transcribe_file(&model_state, &media_path)?;
+    let result = crate::models::transcribe_file(&model_state, &media_path)?;
 
     // Mirror the media sub-directory under subtitle/
     let vtt_path = sibling_path(&media_dir, &subtitle_dir, Path::new(&source), "vtt");
@@ -1239,7 +1259,7 @@ pub async fn dataset_delete_waveforms(
 
 /// audiowaveform-compatible waveform JSON (v2 layout). Serialised from the
 /// peaks computed in `audio::generate_waveform`; consumed by the frontend
-/// `WaveformCanvas` and by `adjust::load_waveform`.
+/// `WaveformCanvas` and by `datasets::dictation::adjust::load_waveform`.
 #[allow(dead_code)]
 #[derive(Serialize)]
 struct WaveformJson<'a> {
@@ -1645,7 +1665,7 @@ pub(crate) fn create_db_schema(conn: &rusqlite::Connection) -> Result<(), String
 
     // §3.4: a per-dataset tombstone table (travels with snapshots) so a delete
     // is durable and can collide with a resurrected offline edit.
-    crate::sync_log::ensure_tombstones(conn)?;
+    crate::sync::change_log::ensure_tombstones(conn)?;
 
     Ok(())
 }
