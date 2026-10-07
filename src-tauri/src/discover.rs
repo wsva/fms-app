@@ -1,6 +1,7 @@
-//! Phone-side PC auto-discovery.
+//! PC auto-discovery for the dataset sync page.
 //!
-//! Compiled on all platforms; used primarily by the Android thin client. It
+//! Compiled on all platforms; used by the Android thin client and by a desktop
+//! that wants to pull datasets from another desktop. It
 //! finds the PC `web_service` in three ways and returns ranked candidates:
 //!
 //! 1. **LAN / WLAN** — UDP probe `fms-probe` to the broadcast + multicast group
@@ -62,14 +63,45 @@ pub async fn pc_discover(
         candidates.push(c);
     }
 
-    // Deduplicate by URL, preserving the earlier (higher-ranked) source.
+    // Deduplicate by URL, preserving the earlier (higher-ranked) source, and
+    // drop candidates that point back at this very machine.
+    let my_ip = local_ip();
     let mut out: Vec<Candidate> = Vec::new();
     for c in candidates {
+        if is_self(&c.url, my_ip) {
+            log::debug!("[discover] ignoring self candidate {}", c.url);
+            continue;
+        }
         if !out.iter().any(|e| e.url == c.url) {
             out.push(c);
         }
     }
     Ok(out)
+}
+
+/// Best-effort primary local address (no packet leaves the socket).
+fn local_ip() -> Option<IpAddr> {
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    Some(sock.local_addr().ok()?.ip())
+}
+
+/// Does `url` address this machine? A desktop running the sync page also runs
+/// the discovery beacon, so its own web service answers its own broadcast and
+/// multicast probe; without this check the PC would be offered as a sync source
+/// for the datasets it already holds.
+fn is_self(url: &str, my_ip: Option<IpAddr>) -> bool {
+    let Some(rest) = url.split("://").nth(1) else {
+        return false;
+    };
+    let host = rest.split('/').next().unwrap_or(rest).split(':').next().unwrap_or("");
+    if host == "localhost" || host.starts_with("127.") {
+        return true;
+    }
+    match (host.parse::<IpAddr>().ok(), my_ip) {
+        (Some(h), Some(m)) => h == m,
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------

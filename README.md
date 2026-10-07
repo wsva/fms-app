@@ -43,6 +43,8 @@ and ships for **Windows and Linux** (plus an experimental **Android** client tha
 **Tooling**
 - **Dataset Studio** — staged pipeline: import → generate subtitles (STT) → waveforms → database,
   plus transcript alignment and book splitting.
+- **Datasets Sync** — pull datasets from another FmS machine over the LAN or tailnet (phone ↔ PC,
+  PC ↔ PC) with discovery, device pairing, and snapshot progress.
 - **STT Models** — download, load, and manage local ONNX models (Parakeet family via `transcribe-rs`).
 - **LLM Chat** — Ollama (local) or cloud providers through the goose SDK provider layer.
 - **OCR, Edge TTS, Wiki** — capture text from images, synthesize speech, keep notes.

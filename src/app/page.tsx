@@ -220,7 +220,10 @@ export default function Home() {
           <DictationPage active={activeTab === "dictation"} />
         </div>
         <div style={{ display: activeTab === "studio" ? "flex" : "none" }} className="flex-1 min-h-0">
-          {mobile ? <DatasetsSyncPage /> : <StudioPage />}
+          <StudioPage />
+        </div>
+        <div style={{ display: activeTab === "datasets-sync" ? "flex" : "none" }} className="flex-1 min-h-0">
+          <DatasetsSyncPage />
         </div>
         <div style={{ display: activeTab === "simple-words" ? "flex" : "none" }} className="flex-1 min-h-0">
           <SimpleWordsPage />

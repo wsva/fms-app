@@ -1,9 +1,12 @@
-//! Phone-side snapshot + batched-writeback client for the Android thin build.
+//! Snapshot + batched-writeback client for another FmS machine.
 //!
 //! Compiled on **all** platforms (it only needs `reqwest`, `tar`, `flate2`,
-//! `rusqlite` — all Android-portable). On desktop it registers cleanly but is
-//! normally unused; the mutation-queue helpers below are only fed on mobile
-//! (the `dictation`/`xp` write commands enqueue under `#[cfg(not(feature = "desktop"))]`).
+//! `rusqlite` — all Android-portable) and driven from the Datasets Sync page on
+//! both shells: the Android thin client pulls from its PC, a desktop pulls from
+//! another desktop. Only the mutation queue stays mobile-specific — the
+//! `dictation`/`xp` write commands enqueue under
+//! `#[cfg(not(feature = "desktop"))]`, because desktop writes go straight to the
+//! DB and would need last-write-wins rules between two full copies.
 //!
 //! Model:
 //! * `dataset_sync_snapshot` pulls the PC's whole dataset directory (media
@@ -643,7 +646,15 @@ pub(crate) fn device_name() -> String {
             .or_else(|| probe("ro.product.model"))
         {
             Some(m) => m,
-            None => format!("{} device", std::env::consts::OS),
+            // Desktop (PC-to-PC pairing): name the machine, so the dialog says
+            // *which* of the owner's computers is asking.
+            None => std::env::var("COMPUTERNAME")
+                .or_else(|_| std::env::var("HOSTNAME"))
+                .ok()
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty())
+                .map(|h| format!("{} ({})", h, std::env::consts::OS))
+                .unwrap_or_else(|| format!("{} device", std::env::consts::OS)),
         }
     }).clone()
 }

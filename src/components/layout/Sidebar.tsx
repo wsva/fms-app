@@ -24,6 +24,7 @@ import {
   Star,
   FolderKanban,
   Type,
+  RefreshCw,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 
@@ -33,6 +34,7 @@ export type TabId =
   | "read-aloud"
   | "cards"
   | "studio"
+  | "datasets-sync"
   | "simple-words"
   | "models"
   | "edge-tts"
@@ -66,6 +68,7 @@ const navGroups: NavGroup[] = [
     tabs: [
       { id: "workspaces", label: "Workspaces", icon: FolderKanban },
       { id: "studio", label: "Dataset Studio", icon: SlidersHorizontal },
+      { id: "datasets-sync", label: "Datasets Sync", icon: RefreshCw },
       { id: "simple-words", label: "Simple Words", icon: Type },
       { id: "wiki", label: "Wiki", icon: BookOpenText },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
@@ -89,7 +92,6 @@ const rootTabs: TabDef[] = [
 
 // Tabs reachable in the Android thin client. Everything else (OCR,
 // Edge TTS, LLM Chat, Logs, Simple Words, Dataset Studio pipeline) is hidden.
-// "studio" is repurposed on mobile as the dataset *sync* list.
 // "models" is enabled to verify local STT (transcribe-rs/ONNX) on Android.
 const MOBILE_VISIBLE_TABS: TabId[] = [
   "dictation",
@@ -99,14 +101,10 @@ const MOBILE_VISIBLE_TABS: TabId[] = [
   "wiki",
   "chat",
   "workspaces",
-  "studio",
+  "datasets-sync",
   "models",
   "settings",
 ];
-
-const MOBILE_TAB_LABELS: Partial<Record<TabId, string>> = {
-  studio: "Datasets",
-};
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
 const DEFAULT_EXPANDED_WIDTH = 176; // w-44 = 11rem = 176px
@@ -205,7 +203,7 @@ export default function Sidebar({
     if (mobile && !MOBILE_VISIBLE_TABS.includes(tab.id)) return null;
     const Icon = tab.icon;
     const isActive = activeTab === tab.id;
-    const label = (mobile && MOBILE_TAB_LABELS[tab.id]) || tab.label;
+    const label = tab.label;
     return (
       <div
         key={tab.id}

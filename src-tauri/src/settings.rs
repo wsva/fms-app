@@ -70,9 +70,11 @@ pub struct AppSettings {
     /// Whether the Agent (goose ACP) integration is enabled.
     #[serde(default)]
     pub goose_acp_enabled: bool,
-    /// PC snapshot server base URL (e.g. `http://192.168.1.20:35711`). Global,
-    /// not workspace-scoped. On Android this is a remembered/manual fallback
-    /// filled by `pc_discover`; left empty until discovery or manual entry.
+    /// Snapshot server base URL of the machine we sync datasets *from*
+    /// (e.g. `http://192.168.1.20:35711`). Global, not workspace-scoped. Filled
+    /// by `pc_discover` or the manual field on the Datasets Sync page, and left
+    /// empty until then. Set on the Android thin client (source = its PC) and on
+    /// a desktop that pulls datasets from another desktop.
     #[serde(default)]
     pub pc_url: String,
     /// Optional shared token sent as `x-fms-token` to the PC REST API.

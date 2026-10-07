@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
+import { isMobileApp } from "@/lib/platform";
 import { Download, RefreshCw, Upload, CloudOff, Search, ChevronDown, Link2, KeyRound } from "lucide-react";
 import { logInfo, logError } from "@/lib/logger";
 
@@ -66,8 +67,15 @@ interface PairResult {
 // Component
 // ---------------------------------------------------------------------------
 
+/**
+ * Pull datasets from another FmS machine and push local progress back.
+ * Reachable from both shells: the Android thin client syncs with its paired PC,
+ * and a desktop syncs with another desktop (the remote side just needs its web
+ * service enabled in Settings — see `web_service`).
+ */
 export default function DatasetsSyncPage() {
   const [mounted, setMounted] = useState(false);
+  const [mobile, setMobile] = useState(false);
   const [global, setGlobal] = useState<GlobalSettings | null>(null);
 
   // PC connection / discovery state.
@@ -93,8 +101,9 @@ export default function DatasetsSyncPage() {
   const [progress, setProgress] = useState<Record<string, SyncProgress>>({});
   const [message, setMessage] = useState<string>("");
 
-  // Which dataset section is shown (Dictation / Cards / Books). On the narrow
-  // Android screen these are exposed as tabs instead of stacked vertically.
+  // Which dataset section is shown (Dictation / Cards / Books). Exposed as tabs
+  // instead of stacked vertically, which keeps the narrow Android screen and the
+  // desktop page alike from turning into an endless scroll.
   const [activeSection, setActiveSection] = useState<string>("dictation");
 
   const pcUrl = (global?.pc_url ?? "").trim();
@@ -149,7 +158,7 @@ export default function DatasetsSyncPage() {
       const text = String(e);
       const notPaired = text.includes("not paired") || text.includes("pairing denied");
       setUnpaired(notPaired);
-      setListError(notPaired ? "This device is not paired with the PC yet." : `Cannot reach PC at ${pcUrl}.`);
+      setListError(notPaired ? "This device is not paired with the source PC yet." : `Cannot reach the PC at ${pcUrl}.`);
       setPcDatasets([]);
     } finally {
       setLoadingList(false);
@@ -242,6 +251,7 @@ export default function DatasetsSyncPage() {
 
   useEffect(() => {
     setMounted(true);
+    setMobile(isMobileApp());
     (async () => {
       const g = await loadSettings();
       loadLocalState();
@@ -392,33 +402,40 @@ export default function DatasetsSyncPage() {
     <div className="flex flex-col w-full h-full min-h-0 p-4 gap-3">
       {/* Header */}
       <div className="flex items-center gap-3 shrink-0 flex-wrap">
-        <h1 className="text-[1.3em] font-bold">Datasets</h1>
-        <button
-          className="ml-auto inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50"
-          onClick={handleUpload}
-          disabled={uploading || pending === 0 || !pcUrl}
-        >
-          <Upload size={14} />
-          {uploading ? "Uploading…" : `Upload changes${pending > 0 ? ` (${pending})` : ""}`}
-        </button>
-        <button
-          className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50"
-          onClick={() => {
-            loadSettings();
-            loadLocalState();
-            fetchPcDatasets();
-          }}
-          disabled={loadingList}
-        >
-          <RefreshCw size={14} className={loadingList ? "animate-spin" : undefined} />
-          Refresh
-        </button>
+        <h1 className="text-[1.3em] font-bold">Datasets Sync</h1>
+        <div className="ml-auto flex items-center gap-3">
+          {/* Pushing local progress back relies on the writeback queue, which is
+              only fed by the thin-client build (desktop writes straight to its
+              own DB), so the action is mobile-only. */}
+          {mobile && (
+            <button
+              className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50"
+              onClick={handleUpload}
+              disabled={uploading || pending === 0 || !pcUrl}
+            >
+              <Upload size={14} />
+              {uploading ? "Uploading…" : `Upload changes${pending > 0 ? ` (${pending})` : ""}`}
+            </button>
+          )}
+          <button
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50"
+            onClick={() => {
+              loadSettings();
+              loadLocalState();
+              fetchPcDatasets();
+            }}
+            disabled={loadingList}
+          >
+            <RefreshCw size={14} className={loadingList ? "animate-spin" : undefined} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* PC connection selector */}
       <div className="shrink-0 flex flex-col gap-2 p-3 rounded-lg border border-border-default bg-bg-card">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-sm font-medium shrink-0">PC</span>
+          <span className="text-sm font-medium shrink-0">Source PC</span>
           <select
             className="flex-1 min-w-0 px-2 py-1.5 text-sm rounded-md border border-border-light bg-bg-input text-text-primary"
             value={pcUrl}
@@ -439,7 +456,7 @@ export default function DatasetsSyncPage() {
             className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50 shrink-0"
             onClick={discover}
             disabled={discovering}
-            title="Scan for nearby PCs"
+            title="Scan for nearby FmS machines (requires the web service enabled there)"
           >
             <Search size={14} className={discovering ? "animate-spin" : undefined} />
             {discovering ? "Scanning…" : "Scan"}
@@ -447,7 +464,7 @@ export default function DatasetsSyncPage() {
           <button
             className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover shrink-0"
             onClick={() => setShowManual((s) => !s)}
-            title="Enter PC address manually"
+            title="Enter the source PC address manually"
           >
             <ChevronDown size={14} className={showManual ? "rotate-180 transition-transform" : "transition-transform"} />
             Manual
@@ -513,12 +530,12 @@ export default function DatasetsSyncPage() {
       </div>
 
       {!mounted ? null : !isTauri() ? (
-        <p className="text-text-secondary">Datasets are only available in the app.</p>
+        <p className="text-text-secondary">Datasets Sync is only available in the app.</p>
       ) : !pcUrl ? (
         <div className="flex flex-col items-center gap-2 py-12 text-text-secondary">
           <CloudOff size={32} />
-          <p>{discovering ? "Scanning for nearby PCs…" : "Not connected to a PC."}</p>
-          <p className="text-sm">Pick a PC from the selector above, tap Scan, or use Manual address.</p>
+          <p>{discovering ? "Scanning for nearby PCs…" : "Not connected to a source PC."}</p>
+          <p className="text-sm">Pick a PC from the selector above, tap Scan, or use Manual address. On the other machine, enable the web service in Settings so it can be found.</p>
         </div>
       ) : (
         <>
@@ -549,13 +566,12 @@ export default function DatasetsSyncPage() {
 
           <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4">
             {pcDatasets.length === 0 && !loadingList && (
-              <p className="text-sm text-text-tertiary">No datasets available on the PC.</p>
+              <p className="text-sm text-text-tertiary">No datasets available on the source PC.</p>
             )}
             {pcDatasets.length > 0 && (
               <>
                 {/* Section tabs: Dictation / Cards / Books. Only the active
-                    section's datasets are listed, keeping the narrow Android
-                    screen uncluttered. */}
+                    section's datasets are listed. */}
                 <div className="shrink-0 flex gap-1 border-b border-border-default">
                   {sections.map((section) => (
                     <button
