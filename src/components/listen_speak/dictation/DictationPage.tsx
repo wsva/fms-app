@@ -273,15 +273,62 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
     }, [d.videoRef, d.hasMedia]);
 
     return (
-        <div className="flex flex-col flex-1 min-h-0 p-4 overflow-hidden">
+        <div className="flex h-full w-full bg-bg-body min-w-0">
+          <div className="flex-1 flex flex-col min-h-0 min-w-0">
             {mobile && pendingUpload > 0 && (
-                <div className="mb-3 px-3 py-1.5 rounded-md text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300 w-fit">
+                <div className="shrink-0 px-4 py-1.5 text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300 border-b border-border-default">
                     {pendingUpload} change(s) pending upload
                 </div>
             )}
+            {/* Breadcrumb navigation — wiki-style full-width bar sitting above the
+                toolbar: Datasets › dataset › media › subtitle trail. */}
+            {!collapsed && (
+            <nav className="shrink-0 flex items-center justify-start gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
+                <button
+                    className={`shrink-0 cursor-pointer hover:underline ${d.selectedDatasetUuid ? "text-accent" : "text-text-primary font-medium"}`}
+                    onClick={() => d.setSelectedDatasetUuid("")}
+                >
+                    Datasets
+                </button>
+                {d.selectedDataset && (
+                    <>
+                        <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                        <button
+                            className={`cursor-pointer hover:underline truncate min-w-0 ${d.stateMediaUUID ? "max-w-[240px] text-accent" : "flex-1 text-text-primary font-medium"}`}
+                            onClick={() => { d.setStateMediaUUID(""); d.handleReload(); }}
+                            title={d.selectedDataset.info.name}
+                        >
+                            {d.selectedDataset.info.name}
+                        </button>
+                    </>
+                )}
+                {d.selectedDataset && d.stateMediaUUID && (
+                    <>
+                        <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                        {d.stateSubtitle ? (
+                            <span
+                                className="text-text-primary font-medium truncate min-w-0 flex-1"
+                                title={`${selectedMediaLabel} — ${d.stateSubtitle.name || d.stateSubtitle.uuid}`}
+                            >
+                                {selectedMediaLabel} <span className="text-text-tertiary font-normal">&rsaquo;</span> {d.stateSubtitle.name || d.stateSubtitle.uuid}
+                            </span>
+                        ) : (
+                            <span
+                                className="text-text-primary font-medium truncate min-w-0 flex-1"
+                                title={selectedMediaLabel}
+                            >
+                                {selectedMediaLabel}
+                            </span>
+                        )}
+                    </>
+                )}
+                {d.stateLoading && <ProgressCircle size="sm" aria-label="Loading" />}
+            </nav>
+            )}
             {/* Toolbar — sections are mutually exclusive: Location on the datasets view,
-                Dataset on the media-list view, Dictation on the cue view. */}
-            <div className="@container flex flex-row items-center gap-3 w-full px-3 py-2 mb-4 rounded-lg bg-bg-card border border-border-light">
+                Dataset on the media-list view, Dictation on the cue view. Wiki-style
+                full-width bar sitting under the breadcrumb. */}
+            <div className="@container shrink-0 flex flex-row items-center gap-3 px-4 py-2 border-b border-border-default bg-bg-card">
                 {/* ── Location section (datasets view) ── */}
                 {!d.selectedDatasetUuid && (
                     <div className="flex items-center gap-1">
@@ -384,51 +431,9 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 )}
             </div>
 
-            {/* Breadcrumb navigation */}
-            {!collapsed && (
-            <nav className="flex flex-row items-center gap-2 mb-4 text-sm select-none min-w-0">
-                <button
-                    className={`shrink-0 cursor-pointer hover:underline ${d.selectedDatasetUuid ? "text-accent" : "text-text-primary font-medium"}`}
-                    onClick={() => d.setSelectedDatasetUuid("")}
-                >
-                    Datasets
-                </button>
-                {d.selectedDataset && (
-                    <>
-                        <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-                        <button
-                            className={`cursor-pointer hover:underline truncate min-w-0 max-w-[240px] ${d.stateMediaUUID ? "text-accent" : "text-text-primary font-medium"}`}
-                            onClick={() => { d.setStateMediaUUID(""); d.handleReload(); }}
-                            title={d.selectedDataset.info.name}
-                        >
-                            {d.selectedDataset.info.name}
-                        </button>
-                    </>
-                )}
-                {d.selectedDataset && d.stateMediaUUID && (
-                    <>
-                        <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-                        {d.stateSubtitle ? (
-                            <span
-                                className="text-text-primary font-medium truncate min-w-0 max-w-[320px]"
-                                title={`${selectedMediaLabel} — ${d.stateSubtitle.name || d.stateSubtitle.uuid}`}
-                            >
-                                {selectedMediaLabel} <span className="text-text-tertiary font-normal">&rsaquo;</span> {d.stateSubtitle.name || d.stateSubtitle.uuid}
-                            </span>
-                        ) : (
-                            <span
-                                className="text-text-primary font-medium truncate min-w-0 max-w-[320px]"
-                                title={selectedMediaLabel}
-                            >
-                                {selectedMediaLabel}
-                            </span>
-                        )}
-                    </>
-                )}
-                {d.stateLoading && <ProgressCircle size="sm" aria-label="Loading" />}
-            </nav>
-            )}
-
+            {/* Content area — padded below the wiki-style header bars. The three
+                mutually exclusive views (datasets / media list / dictation) render here. */}
+            <div className="flex-1 flex flex-col min-h-0 overflow-hidden p-4 gap-4">
             {/* Datasets view (initial) — grouped by location */}
             {!d.selectedDatasetUuid && (
                 <div className="flex flex-col gap-4 flex-1 min-h-0 overflow-y-auto">
@@ -739,8 +744,10 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                     </div>
                 </div>
             )}
+            </div>
 
             <ConfirmDialog request={confirmReq} onClose={() => setConfirmReq(null)} />
+          </div>
         </div>
     );
 }
