@@ -470,6 +470,17 @@ export default function DevicesHubPage() {
   // UI falls back to offering a plain Pair rather than claiming a state it lacks.
   const hubPaired = status?.hub.paired === true;
   const hubUnpaired = status?.hub.paired === false;
+  // The single word on the Hub line. Reachability is already carried by the colored
+  // dot, so the word goes to what a dot cannot show: whether that hub accepts this
+  // device's signature. "Reachable" is the honest remainder — the hub answered but
+  // the signed catalog call failed for a non-auth reason, so nothing is known.
+  const hubLinkState = !status?.hub.reachable
+    ? "Unreachable"
+    : hubPaired
+    ? "Paired"
+    : hubUnpaired
+    ? "Not paired"
+    : "Reachable";
   // Drives both the manual hint and the auto-commit guard above.
   const manualOrigin = parseHubOrigin(manualUrl);
   const currentHubOrigin = parseHubOrigin(pcUrl);
@@ -558,7 +569,10 @@ export default function DevicesHubPage() {
         <section className="shrink-0 flex flex-col gap-3 p-4 rounded-lg border border-border-default bg-bg-card">
           <h2 className="text-base font-semibold">Hub</h2>
 
-          {/* Follower→upstream-hub link: reachability, pending work, error. */}
+          {/* Follower→upstream-hub link: one state word, the address, then any
+              pending work and the probe error. The hub's dataset count used to be
+              tacked on here; it describes the hub rather than this link, and the
+              Datasets sync page lists what is on the other side. */}
           {status && (
             <div className="flex flex-col gap-1.5 text-sm">
               <div className="flex items-center gap-2 flex-wrap text-xs">
@@ -568,12 +582,8 @@ export default function DevicesHubPage() {
                   }`}
                 />
                 <span className="text-text-secondary">
-                  hub{" "}
+                  {hubLinkState}:{" "}
                   <span className="font-mono">{status.hub.address || "not configured"}</span>
-                  {" "}
-                  {status.hub.reachable
-                    ? `· reachable${status.hub.dataset_count != null ? ` · ${status.hub.dataset_count} datasets` : ""}`
-                    : "· unreachable"}
                 </span>
                 {status.queued_count > 0 && (
                   <span className="text-amber-600 dark:text-amber-400">
