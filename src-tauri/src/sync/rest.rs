@@ -100,6 +100,9 @@ struct StatusResp {
     role: String,
     /// Cluster (hub identity group) this workspace belongs to (§3.1).
     cluster_id: String,
+    /// Hostname of this machine, so a scanned candidate can be labelled with
+    /// *which* PC it is. Empty if the OS did not report one.
+    machine: String,
 }
 
 async fn status(State(st): State<RestState>) -> Response {
@@ -115,6 +118,7 @@ async fn status(State(st): State<RestState>) -> Response {
             protocol_version: crate::sync::PROTOCOL_VERSION,
             role: settings.role(),
             cluster_id: settings.cluster_id(),
+            machine: crate::sync::machine_name(),
         }),
     )
         .into_response()

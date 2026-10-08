@@ -1151,6 +1151,9 @@ pub fn spawn_discovery(app: AppHandle, http_port: u16) {
             serde_json::json!({
                 "app": "fms-app",
                 "name": name,
+                // Which machine this is, so a scanned list can name it instead of
+                // showing the app name on every row (`name` is the package name).
+                "machine": crate::sync::machine_name(),
                 "http_port": http_port,
                 "ips": [local_ip().unwrap_or_default()],
                 "role": settings.role(),

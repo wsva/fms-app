@@ -112,7 +112,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({ "status": "ok", "revoked": param.device_id }).to_string())
     }
 
-    #[tool(name = "pc_sync_scan", description = "Scan the LAN (and tailnet) for other FmS machines that expose the dataset web service. Returns candidates as { url, source, name }. Machines that have no web service running cannot be found.")]
+    #[tool(name = "pc_sync_scan", description = "Scan the LAN (and tailnet) for other FmS machines that expose the dataset web service. Returns candidates as { url, source, name, machine, role, cluster_id }. `machine` is the peer's hostname — the only name that distinguishes two rows, since `name` is the app package name (identical everywhere) and may be empty for peers predating it; present candidates as `machine` + `url`, falling back to `url` alone. Machines that have no web service running cannot be found.")]
     async fn pc_sync_scan(&self, Parameters(param): Parameters<PcScanParam>) -> Result<String, String> {
         let timeout_ms = if param.timeout_ms == 0 { 2500 } else { param.timeout_ms };
         log::info!("[MCP] pc_sync_scan: timeout_ms={}", timeout_ms);

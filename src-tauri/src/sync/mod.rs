@@ -37,3 +37,37 @@ pub(crate) mod discover;
 /// * `2` (Phase 2): adds `/datasets/{uuid}/changes`, `/file`, per-file manifest
 ///   hashes, and the **hardened signature** covering `sha256(query\nbody)`.
 pub const PROTOCOL_VERSION: u32 = 2;
+
+/// Hostname of this machine, as advertised in the discovery beacon and
+/// `/api/v1/status` so a scanned list can say *which* PC it found rather than
+/// only "fms-app". Empty when it cannot be determined — callers must then fall
+/// back to the address, which is always unique.
+///
+/// Same source the pairing device name uses (`client::device_name`), kept as an
+/// env lookup plus a unix fallback. Desktop-only because only the beacon and the
+/// `/api/v1/status` handler report it — a phone never advertises itself.
+#[cfg(feature = "desktop")]
+pub(crate) fn machine_name() -> String {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        for key in ["COMPUTERNAME", "HOSTNAME"] {
+            if let Ok(v) = std::env::var(key) {
+                let v = v.trim().to_string();
+                if !v.is_empty() {
+                    return v;
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            if let Ok(out) = std::process::Command::new("hostname").output() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return s;
+                }
+            }
+        }
+        String::new()
+    })
+    .clone()
+}

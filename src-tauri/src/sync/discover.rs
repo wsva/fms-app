@@ -34,6 +34,12 @@ pub struct Candidate {
     /// "lan" | "tailscale" | "saved"
     pub source: String,
     pub name: String,
+    /// Hostname the machine advertises. `name` is the *app* name — identical on
+    /// every candidate — so this is what tells two rows apart in a scanned list.
+    /// Empty for peers that predate the field. Additive, so it costs no protocol
+    /// version bump.
+    #[serde(default)]
+    pub machine: String,
     /// Sync role advertised by that machine ("hub" | "follower"). Both desktops
     /// run the web service, so the phone uses this to offer only hubs as sync
     /// targets (§3.1). Empty for beacons/status predating the field.
@@ -157,10 +163,12 @@ fn parse_beacon(bytes: &[u8], peer: SocketAddr) -> Option<Candidate> {
     let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("FmS PC").to_string();
     let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string();
     let cluster_id = v.get("cluster_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let machine = v.get("machine").and_then(|m| m.as_str()).unwrap_or("").to_string();
     Some(Candidate {
         url: format!("http://{}:{}", peer.ip(), port),
         source: "lan".to_string(),
         name,
+        machine,
         role,
         cluster_id,
     })
@@ -215,6 +223,7 @@ async fn discover_tailscale(timeout: Duration) -> Vec<Candidate> {
                     url: url.trim_end_matches("/api/v1/status").to_string(),
                     source: "tailscale".to_string(),
                     name: "FmS PC".to_string(),
+                    machine: v.get("machine").and_then(|m| m.as_str()).unwrap_or("").to_string(),
                     role: v.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string(),
                     cluster_id: v.get("cluster_id").and_then(|c| c.as_str()).unwrap_or("").to_string(),
                 })
@@ -251,6 +260,7 @@ async fn discover_saved(url: &str, token: &str, timeout: Duration) -> Option<Can
             .and_then(|a| a.as_str())
             .unwrap_or("Saved PC")
             .to_string(),
+        machine: v.get("machine").and_then(|m| m.as_str()).unwrap_or("").to_string(),
         role: v.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string(),
         cluster_id: v.get("cluster_id").and_then(|c| c.as_str()).unwrap_or("").to_string(),
     })

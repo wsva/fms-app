@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
-import { Search, ChevronDown, Link2, KeyRound, Unplug, RefreshCw, Loader2, Users, ShieldCheck } from "lucide-react";
+import { Search, Link2, KeyRound, Unplug, RefreshCw, Loader2, Users, ShieldCheck } from "lucide-react";
 import { logInfo, logError } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
@@ -72,7 +72,12 @@ interface SyncStatusDetail {
 interface PcCandidate {
   url: string;
   source: string; // "lan" | "tailscale" | "saved"
+  /** App package name — the same string on every candidate, kept for peers that
+   * predate `machine`. */
   name: string;
+  /** Hostname the peer advertises in its beacon / `/api/v1/status`; empty when
+   * it predates the field or the OS reported none. */
+  machine?: string;
 }
 
 // Result of the `pc_pair_start` command.
@@ -83,6 +88,45 @@ interface PairResult {
    * different cluster — trust-on-first-use refuses a silent switch. Pairing
    * succeeded, so it arrives as a warning rather than a failed call. */
   cluster_warning?: string | null;
+}
+
+// A typed hub address is only worth committing once it is a complete, plain
+// origin. The backend merely trims a trailing slash (`pc_base`), so whatever we
+// store is spliced straight into `{base}/api/v1/...` — a missing scheme, a stray
+// path, query or credentials would silently break every signed request. Demand
+// the scheme explicitly: `new URL("192.168.1.20:35711")` happily parses, as a
+// protocol called "192168120:", which would be stored as garbage.
+function parseHubOrigin(raw: string): string | null {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (!trimmed || /\s/.test(trimmed) || !/^https?:\/\//i.test(trimmed)) return null;
+  let u: URL;
+  try {
+    u = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (!u.hostname || u.username || u.password || u.search || u.hash) return null;
+  if (u.pathname !== "" && u.pathname !== "/") return null;
+  return u.origin;
+}
+
+// Names a scanned machine reports about itself that say nothing about *which*
+// machine it is: the app package name and the discovery layer's stand-ins for
+// peers too old to advertise a hostname.
+const GENERIC_CANDIDATE_NAMES = ["fms-app", "fms", "fms pc", "saved pc"];
+
+// Label a scan result by the machine and address, not by the app: every peer
+// used to answer with the package name, so the list read "fms-app · lan" for
+// every PC on the network. `url` is the one field that is always distinct, so it
+// is shown whenever a row is picked; the source is only worth naming when it is
+// not the plain LAN case (Tailscale, or a remembered address).
+function candidateLabel(c: PcCandidate): string {
+  const host = c.url.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+  const machine = (c.machine || "").trim() || (c.name || "").trim();
+  if (!machine || GENERIC_CANDIDATE_NAMES.includes(machine.toLowerCase())) {
+    return c.source === "lan" ? host : `${host} · ${c.source}`;
+  }
+  return `${machine} · ${host}`;
 }
 
 // One `Label: value` line of the Current Workspace Status block, with the
@@ -133,7 +177,9 @@ export default function DevicesHubPage() {
   // PC connection / discovery state.
   const [candidates, setCandidates] = useState<PcCandidate[]>([]);
   const [discovering, setDiscovering] = useState(false);
-  const [showManual, setShowManual] = useState(false);
+  // Manual entry replaces the selector instead of stacking under it, so the two
+  // ways of choosing a hub never compete for the same slot on a narrow screen.
+  const [entryMode, setEntryMode] = useState<"selector" | "manual">("selector");
   const [manualUrl, setManualUrl] = useState("");
 
   // Pairing state (Bluetooth-style device identity, see sync.rs / pairing.rs).
@@ -305,6 +351,28 @@ export default function DevicesHubPage() {
     [global, loadStatus],
   );
 
+  // There is no "Use address" button any more: a finished address is itself the
+  // gesture. Debounced because `savePc` also probes the hub — committing per
+  // keystroke would fire a request for every character and would latch onto
+  // mid-typing values like `http://1`, which already parse. Enter and blur commit
+  // immediately. An unchanged or empty field commits nothing, so emptying the
+  // box can never silently disconnect you.
+  const commitManual = useCallback(() => {
+    const origin = parseHubOrigin(manualUrl);
+    if (origin && origin !== parseHubOrigin(pcUrl)) savePc(origin);
+  }, [manualUrl, pcUrl, savePc]);
+
+  useEffect(() => {
+    if (entryMode !== "manual") return;
+    const origin = parseHubOrigin(manualUrl);
+    // Compare normalized origins on both sides: a stored `pc_url` may carry a
+    // trailing slash, and treating that as "different" would make simply opening
+    // the Manual field rewrite the setting and probe the hub.
+    if (!origin || origin === parseHubOrigin(pcUrl)) return;
+    const timer = setTimeout(() => savePc(origin), 600);
+    return () => clearTimeout(timer);
+  }, [entryMode, manualUrl, pcUrl, savePc]);
+
   // Ask the hub to pair this device: the owner gets a confirm dialog and the
   // command polls until they answer.
   const pair = useCallback(
@@ -402,6 +470,9 @@ export default function DevicesHubPage() {
   // UI falls back to offering a plain Pair rather than claiming a state it lacks.
   const hubPaired = status?.hub.paired === true;
   const hubUnpaired = status?.hub.paired === false;
+  // Drives both the manual hint and the auto-commit guard above.
+  const manualOrigin = parseHubOrigin(manualUrl);
+  const currentHubOrigin = parseHubOrigin(pcUrl);
 
   return (
     <div className="flex flex-col w-full h-full min-h-0 overflow-y-auto p-4 gap-4">
@@ -521,31 +592,78 @@ export default function DevicesHubPage() {
             </div>
           )}
 
-          {/* Hub selector + scan + manual connect. On a narrow (phone) screen the
-              Scan and Manual buttons drop onto their own row under the selector;
-              from `sm:` up they sit inline again. */}
+          {/* One slot, two mutually exclusive ways to fill it: the list shows scan
+              results and, through its empty entry, the only way to disconnect; Manual
+              swaps in a text field that commits itself once the address is complete.
+              Either way, choosing an address connects it and adopts the hub's cluster.
+              On a narrow (phone) screen the Scan and Manual buttons drop onto their own
+              row under whichever control is showing; from `sm:` up they sit inline. */}
           <div className="flex flex-col gap-2 pt-1 border-t border-border-light">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <select
-                className="flex-1 min-w-0 px-2 py-1.5 text-sm rounded-md border border-border-light bg-bg-input text-text-primary"
-                value={pcUrl}
-                onChange={(e) => savePc(e.target.value)}
-                disabled={discovering && !pcUrl}
-              >
-                <option value="">{pcUrl ? "Select a PC…" : "Not connected"}</option>
-                {candidates.map((c) => (
-                  <option key={c.url} value={c.url}>
-                    {c.name} · {c.source}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+              {entryMode === "manual" ? (
+                <div className="flex-1 min-w-0 flex flex-col gap-1">
+                  <input
+                    type="text"
+                    inputMode="url"
+                    autoComplete="off"
+                    autoFocus
+                    className="w-full min-w-0 px-3 py-1.5 text-sm border border-border-light rounded-md bg-bg-input text-text-primary"
+                    value={manualUrl}
+                    onChange={(e) => setManualUrl(e.target.value)}
+                    onBlur={commitManual}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        commitManual();
+                      }
+                    }}
+                    placeholder="http://192.168.1.20:35711"
+                  />
+                  <p
+                    className={`text-xs leading-relaxed ${
+                      manualOrigin ? "text-text-tertiary" : "text-amber-600 dark:text-amber-400"
+                    }`}
+                  >
+                    {manualOrigin
+                      ? manualOrigin === currentHubOrigin
+                        ? "Already the connected hub."
+                        : "Address complete — connecting…"
+                      : manualUrl.trim()
+                      ? "Not a full address yet — include the scheme, e.g. http://192.168.1.20:35711"
+                      : "Type an address and it connects by itself. An empty field does nothing — disconnect from the list you get back by pressing Manual."}
+                  </p>
+                </div>
+              ) : (
+                <select
+                  className="flex-1 min-w-0 px-2 py-1.5 text-sm rounded-md border border-border-light bg-bg-input text-text-primary"
+                  value={pcUrl}
+                  onChange={(e) => savePc(e.target.value)}
+                  disabled={discovering && !pcUrl}
+                >
+                  <option value="">
+                    {pcUrl ? "— Disconnect (stops syncing) —" : "Not connected"}
                   </option>
-                ))}
-                {pcUrl && !candidates.some((c) => c.url === pcUrl) && (
-                  <option value={pcUrl}>{pcUrl} · saved</option>
-                )}
-              </select>
-              <div className="flex items-center gap-2 shrink-0">
+                  {candidates.map((c) => (
+                    <option key={c.url} value={c.url}>
+                      {candidateLabel(c)}
+                    </option>
+                  ))}
+                  {pcUrl && !candidates.some((c) => c.url === pcUrl) && (
+                    <option value={pcUrl}>{pcUrl} · saved</option>
+                  )}
+                </select>
+              )}
+              <div className="flex items-center gap-2 shrink-0 sm:mt-0">
                 <button
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50 shrink-0"
-                  onClick={discover}
+                  className={`inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md border hover:bg-bg-hover disabled:opacity-50 shrink-0 ${
+                    entryMode === "selector"
+                      ? "bg-bg-hover border-border-default"
+                      : "bg-bg-body border-border-light"
+                  }`}
+                  onClick={() => {
+                    setEntryMode("selector");
+                    discover();
+                  }}
                   disabled={discovering}
                   title="Scan for nearby FmS machines (requires the web service enabled there)"
                 >
@@ -553,44 +671,22 @@ export default function DevicesHubPage() {
                   {discovering ? "Scanning…" : "Scan"}
                 </button>
                 <button
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover shrink-0"
-                  onClick={() => setShowManual((s) => !s)}
-                  title="Enter the hub address manually"
+                  className={`inline-flex items-center px-3 py-1.5 text-sm rounded-md border hover:bg-bg-hover shrink-0 ${
+                    entryMode === "manual"
+                      ? "bg-bg-hover border-border-default"
+                      : "bg-bg-body border-border-light"
+                  }`}
+                  onClick={() => setEntryMode((m) => (m === "manual" ? "selector" : "manual"))}
+                  title={
+                    entryMode === "manual"
+                      ? "Back to the scanned-address list"
+                      : "Type the hub address; it is used as soon as it is complete"
+                  }
                 >
-                  <ChevronDown size={14} className={showManual ? "rotate-180 transition-transform" : "transition-transform"} />
                   Manual
                 </button>
-                {pcUrl && (
-                  <button
-                    className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover text-red-600 dark:text-red-400 shrink-0"
-                    onClick={() => savePc("")}
-                    title="Disconnect from the hub (keeps the cluster binding — use 'Forget hub / re-pair' to fully detach)"
-                  >
-                    Disconnect
-                  </button>
-                )}
               </div>
             </div>
-
-            {showManual && (
-              <div className="flex items-center gap-2 flex-wrap pt-1">
-                <input
-                  type="text"
-                  className="flex-1 min-w-[12rem] px-3 py-1.5 text-sm border border-border-light rounded-md bg-bg-input text-text-primary"
-                  value={manualUrl}
-                  onChange={(e) => setManualUrl(e.target.value)}
-                  placeholder="http://192.168.1.20:35711"
-                />
-                <button
-                  className="inline-flex items-center px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
-                  onClick={() => savePc(manualUrl.trim())}
-                  disabled={!manualUrl.trim()}
-                  title="Save this address as the hub to sync against (does not authorize this device)"
-                >
-                  Use address
-                </button>
-              </div>
-            )}
 
             {/* Pairing row: the device identity is generated automatically; the
                 only user gesture is asking the hub owner to approve this device.
@@ -659,17 +755,19 @@ export default function DevicesHubPage() {
                 ? "Authorized — the hub accepts this device’s signature, so pulls and writebacks go through. Reaching a hub over Tailscale, or the machine it runs on, is trusted the same way without any pairing."
                 : hubUnpaired
                 ? "Reachable but not authorized: the hub rejects this device’s signature, so sync stays blocked until Pair is approved on the PC."
-                : "Setting the address only decides whether the hub is reachable; Pairing is what lets this device read and write its data. Approve the pairing once, then sync runs unattended."}
+                : "Connecting only decides which machine this device can reach; Pairing is what lets it read and write the hub’s data. Approve the pairing once, then sync runs unattended."}
             </p>
 
-            {/* Disconnect and Forget hub look interchangeable but undo different
-                amounts of state — spell it out rather than leaving it in a tooltip. */}
+            {/* Only Forget hub gets explained. The list's empty entry disconnects by
+                clearing the address, and since connecting adopts the hub's cluster id
+                again, that temporary detach needs no caption of its own. Unpairing is
+                a hub-side action, so the text points there instead. */}
             {(pcUrl || clusterId) && (
               <p className="text-xs text-text-tertiary leading-relaxed">
-                <span className="font-medium text-text-secondary">Disconnect</span> clears only the hub
-                address — the cluster binding stays, so reconnecting needs no new pairing.{" "}
-                <span className="font-medium text-text-secondary">Forget hub / re-pair</span> also drops
-                the cluster id, which is what you want when moving this device to a different hub.
+                <span className="font-medium text-text-secondary">Forget hub / re-pair</span> drops
+                the cluster id, which is what you want before attaching a different hub. Choosing
+                the same hub back re-adopts it, and it leaves this device paired — to remove it
+                for good, revoke it from the hub’s own “Devices paired to me” list.
               </p>
             )}
 
