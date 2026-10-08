@@ -22,6 +22,11 @@ export const viewport: Viewport = {
 // React's own deferred platform flag arrives too late. See .app-boot-splash in
 // globals.css and the `booted` state in page.tsx.
 
+// pageZoom is read here as well as in usePageZoom() so a restored zoom level
+// lands before first paint instead of jumping — same anti-flash reason as the
+// theme attribute, and the key plus the 0.5–2 clamp must stay in sync with
+// src/hooks/usePageZoom.ts.
+
 export default function RootLayout({
   children,
 }: {
@@ -31,7 +36,7 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: `
-          (function(){var t=localStorage.getItem('theme');if(t&&t!=='light')document.documentElement.setAttribute('data-theme',t);if(/android/i.test(navigator.userAgent))document.documentElement.setAttribute('data-mobile','1');})()
+          (function(){var t=localStorage.getItem('theme');if(t&&t!=='light')document.documentElement.setAttribute('data-theme',t);if(/android/i.test(navigator.userAgent))document.documentElement.setAttribute('data-mobile','1');var z=parseFloat(localStorage.getItem('pageZoom'));if(z>=0.5&&z<=2&&z!==1)document.documentElement.style.zoom=String(z);})()
         `}} />
       </head>
       <body>

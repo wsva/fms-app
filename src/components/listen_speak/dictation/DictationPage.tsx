@@ -398,6 +398,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                                         <span>Voice Input: Ctrl+c</span>
                                         <span>Go to Previous/Next: Ctrl+⬆/⬇</span>
                                         <span>Show Content/Reference: Ctrl+⬅/➡</span>
+                                        <span>Zoom Page: Ctrl + / Ctrl - (Ctrl+0 resets)</span>
                                     </div>
                                 </Tooltip.Content>
                             </Tooltip>
