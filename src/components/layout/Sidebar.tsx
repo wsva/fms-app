@@ -74,7 +74,6 @@ const navGroups: NavGroup[] = [
       { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown },
       { id: "chat", label: "Cross-Device Chat", icon: MessagesSquare },
       { id: "simple-words", label: "Simple Words", icon: Type },
-      { id: "wiki", label: "Wiki", icon: BookOpenText },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
       { id: "ocr", label: "OCR", icon: ScanText },
@@ -90,6 +89,7 @@ const rootTabs: TabDef[] = [
   { id: "read-book", label: "Read a Book", icon: BookOpen },
   { id: "read-aloud", label: "Read Aloud", icon: MicGlyph },
   { id: "cards", label: "Cards", icon: Layers },
+  { id: "wiki", label: "Wiki", icon: BookOpenText },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -304,7 +304,7 @@ export default function Sidebar({
           handleToggle();
         }}
       >
-      <nav className="flex flex-col w-full items-center gap-1 pt-2">
+      <nav className="flex flex-col w-full items-center gap-1 pt-2 flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
         {/* Auth button at top */}
         {authUser ? (
           <div className="flex flex-col w-full items-center gap-0.5">
@@ -374,14 +374,14 @@ export default function Sidebar({
 
         <div className="w-full border-b border-border-default my-1" />
 
-        {/* Root tabs above groups: Dictation, Read a Book, Read Aloud, Cards */}
-        {rootTabs.slice(0, 4).map((tab) => renderTab(tab, false))}
+        {/* Root tabs above groups: Dictation, Read a Book, Read Aloud, Cards, Wiki */}
+        {rootTabs.slice(0, 5).map((tab) => renderTab(tab, false))}
 
         {/* Navigation groups */}
         {navGroups.map(renderGroup)}
 
         {/* Settings at bottom of nav */}
-        {rootTabs.slice(4).map((tab) => renderTab(tab, false))}
+        {rootTabs.slice(5).map((tab) => renderTab(tab, false))}
       </nav>
 
       {/* Resize handle */}
