@@ -35,10 +35,9 @@ mod logger;
 mod settings;
 mod workspace;
 
-// Content and learning state that is *not* stored as a dataset: the wiki has its
-// own root + `meta.json` linkage, XP lives in the app-level SQLite.
+// Content and learning state that is *not* stored as a dataset: simple_words
+// reads across card datasets, XP lives in the app-level SQLite.
 mod simple_words;
-mod wiki;
 mod xp;
 
 // Voice synthesis (all platforms).
@@ -106,39 +105,6 @@ async fn handle_deep_link_login(app: tauri::AppHandle, url: &str) -> Result<(), 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Deep link handler for wiki navigation
-// ---------------------------------------------------------------------------
-
-/// Parse `fms-app://wiki/path/to/file.md` and emit event to navigate to that wiki page.
-fn handle_deep_link_wiki(app: tauri::AppHandle, url: &str) -> Result<(), String> {
-    use tauri::Emitter;
-
-    // Extract path after "fms-app://wiki/"
-    let wiki_prefix = "fms-app://wiki/";
-    if !url.starts_with(wiki_prefix) {
-        return Err("Invalid wiki deep link URL".to_string());
-    }
-
-    let relative_path = &url[wiki_prefix.len()..];
-    if relative_path.is_empty() {
-        return Err("No file path in wiki deep link URL".to_string());
-    }
-
-    // URL-decode the path
-    let decoded_path = urlencoding::decode(relative_path)
-        .map(|cow| cow.into_owned())
-        .unwrap_or_else(|_| relative_path.to_string());
-
-    log::info!("[DeepLink] Wiki navigation to: {}", decoded_path);
-
-    // Emit event for frontend to handle
-    app.emit("wiki-navigate", &decoded_path)
-        .map_err(|e| format!("Failed to emit wiki-navigate event: {}", e))?;
-
-    Ok(())
-}
-
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -167,10 +133,6 @@ pub fn run() {
                         if url.starts_with("fms-app://login") {
                             if let Err(e) = handle_deep_link_login(app_handle, &url).await {
                                 log::error!("[SingleInstance] Deep link handling failed: {}", e);
-                            }
-                        } else if url.starts_with("fms-app://wiki") {
-                            if let Err(e) = handle_deep_link_wiki(app_handle, &url) {
-                                log::error!("[SingleInstance] Wiki deep link handling failed: {}", e);
                             }
                         }
                     });
@@ -312,15 +274,6 @@ pub fn run() {
             logger::log_frontend_message,
             logger::log_get_file_path,
             logger::log_read_file_history,
-            wiki::wiki_list_dirs,
-            wiki::wiki_list_dir,
-            wiki::wiki_read_file,
-            wiki::wiki_write_file,
-            wiki::wiki_delete_file,
-            wiki::wiki_search,
-            wiki::wiki_index,
-            wiki::wiki_add_dir,
-            wiki::wiki_remove_dir,
             // Wiki datasets (syncable markdown trees) — cross-platform.
             datasets::wiki::wiki_dataset_list,
             datasets::wiki::wiki_dataset_create,
@@ -531,12 +484,6 @@ pub fn run() {
                                 log::error!("[DeepLink] Login failed: {}", e);
                             }
                         });
-                    } else if url_str.starts_with("fms-app://wiki") {
-                        let handle = dl_handle.clone();
-                        let url_str = url_str.clone();
-                        if let Err(e) = handle_deep_link_wiki(handle, &url_str) {
-                            log::error!("[DeepLink] Wiki navigation failed: {}", e);
-                        }
                     }
                 }
             });
@@ -553,12 +500,6 @@ pub fn run() {
                                 log::error!("[DeepLink] Login failed: {}", e);
                             }
                         });
-                    } else if url_str.starts_with("fms-app://wiki") {
-                        let handle = app.handle().clone();
-                        let url_str = url_str.clone();
-                        if let Err(e) = handle_deep_link_wiki(handle, &url_str) {
-                            log::error!("[DeepLink] Wiki navigation failed: {}", e);
-                        }
                     }
                 }
             }
@@ -686,15 +627,6 @@ macro_rules! mobile_invoke_handler {
             logger::log_frontend_message,
             logger::log_get_file_path,
             logger::log_read_file_history,
-            wiki::wiki_list_dirs,
-            wiki::wiki_list_dir,
-            wiki::wiki_read_file,
-            wiki::wiki_write_file,
-            wiki::wiki_delete_file,
-            wiki::wiki_search,
-            wiki::wiki_index,
-            wiki::wiki_add_dir,
-            wiki::wiki_remove_dir,
             // Wiki datasets (syncable markdown trees) — cross-platform.
             datasets::wiki::wiki_dataset_list,
             datasets::wiki::wiki_dataset_create,
@@ -904,12 +836,6 @@ pub fn run() {
                                 log::error!("[DeepLink] Login failed: {}", e);
                             }
                         });
-                    } else if url_str.starts_with("fms-app://wiki") {
-                        let handle = dl_handle.clone();
-                        let url_str = url_str.clone();
-                        if let Err(e) = handle_deep_link_wiki(handle, &url_str) {
-                            log::error!("[DeepLink] Wiki navigation failed: {}", e);
-                        }
                     }
                 }
             });

@@ -24,7 +24,6 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::settings::SettingsState;
-use crate::wiki::WikiSearchResult;
 
 use super::{dataset_roots, DatasetType};
 
@@ -34,6 +33,18 @@ const FTS_DB: &str = "fts5.sqlite3";
 // ---------------------------------------------------------------------------
 // Wire types
 // ---------------------------------------------------------------------------
+
+/// One ranked full-text search hit. `file_path`/`relative_path` are
+/// dataset-relative paths so the same value is meaningful on a follower copy
+/// and in the hub's REST browse responses.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct WikiSearchResult {
+    pub file_path: String,
+    pub file_name: String,
+    pub relative_path: String,
+    pub snippet: String,
+    pub rank: f64,
+}
 
 /// Minimal `info.json` shape. Kept lenient (`find_dataset_dir_typed` only ever
 /// contracts on `uuid`) but rich enough for the UI list.
@@ -408,7 +419,7 @@ pub(crate) fn list_dir(settings: &SettingsState, uuid: &str, rel: &str) -> Resul
             modified: get_modified_time(&path),
         });
     }
-    // Directories first, then files, both alphabetically (legacy wiki order).
+    // Directories first, then files, both alphabetically.
     result.sort_by(|a, b| match (a.is_dir, b.is_dir) {
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
@@ -598,9 +609,9 @@ pub(crate) fn index_dataset(settings: &SettingsState, uuid: &str) -> Result<u32,
     Ok(count)
 }
 
-/// Build an FTS5 MATCH expression from a raw keyword, same rules as the
-/// legacy wiki search: quoted phrases pass through, bare words get prefix
-/// matching, FTS operators survive, dangling operators are stripped.
+/// Build an FTS5 MATCH expression from a raw keyword: quoted phrases pass
+/// through, bare words get prefix matching, FTS operators survive, dangling
+/// operators are stripped.
 fn build_fts_query(keyword: &str) -> Option<String> {
     let trimmed = keyword.trim();
     if trimmed.is_empty() {
@@ -643,8 +654,7 @@ fn build_fts_query(keyword: &str) -> Option<String> {
     Some(cleaned.join(" "))
 }
 
-/// Full-text search over one dataset's markdown. Indexes on first use, like
-/// `wiki_search_local` does for the legacy wiki.
+/// Full-text search over one dataset's markdown. Indexes on first use.
 pub(crate) fn search_dataset(settings: &SettingsState, uuid: &str, keyword: &str) -> Result<Vec<WikiSearchResult>, String> {
     let ds_dir = find_dataset_dir(settings, uuid)?;
     let fts_query = match build_fts_query(keyword) {

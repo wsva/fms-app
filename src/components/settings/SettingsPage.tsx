@@ -62,7 +62,6 @@ interface WorkspaceSettings {
   recordings_dir: string;
   datasets_dir: string;
   books_dir: string;
-  wiki_dir: string;
   // Sync role + cluster identity (docs/my_sync_design.md §3.1). Workspace-
   // scoped: `role` is "hub"|"follower" (empty ⇒ follower); `cluster_id` is a
   // UUID issued once when a workspace is first designated hub.
@@ -597,12 +596,6 @@ export default function SettingsPage() {
             label="Books Directory"
             description="Default: <workspace>/datasets/book. Additional locations can be linked from the Read a Book > Manage page."
             value={workspaceSettings?.books_dir ?? ""}
-          />
-
-          <DirField
-            label="Wiki Directory"
-            description="Root directory for wiki markdown documents."
-            value={workspaceSettings?.wiki_dir ?? ""}
           />
         </section>
 

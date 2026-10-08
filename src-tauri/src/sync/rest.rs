@@ -18,9 +18,7 @@
 //! * `GET  /api/v1/chat/messages`              - cross-device chat thread page
 //! * `POST /api/v1/chat/message`               - post a chat message (multipart: uuid/text/device_name/file parts)
 //! * `GET  /api/v1/chat/attachment/{uuid}`     - stream one stored attachment
-//! * `GET  /api/v1/wiki/dirs`                  - legacy wiki roots (read-only browse)
-//! * `GET  /api/v1/wiki/search`                - legacy wiki full-text search
-//! * `GET  /api/v1/wiki/datasets`              - hub wiki datasets + legacy roots (read-only browse)
+//! * `GET  /api/v1/wiki/datasets`              - hub wiki datasets (read-only browse)
 //! * `GET  /api/v1/wiki/dataset/dir`           - one directory of a hub wiki dataset
 //! * `GET  /api/v1/wiki/dataset/file`          - one markdown file of a hub wiki dataset
 //! * `GET  /api/v1/wiki/dataset/search`        - full-text search inside one hub wiki dataset
@@ -86,10 +84,6 @@ pub fn router(app: AppHandle) -> Router {
             post(chat_message).layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
         )
         .route("/chat/attachment/{uuid}", get(chat_attachment))
-        .route("/wiki/dirs", get(wiki_dirs))
-        .route("/wiki/dir", get(wiki_dir_list))
-        .route("/wiki/file", get(wiki_file))
-        .route("/wiki/search", get(wiki_search))
         .route("/wiki/datasets", get(wiki_datasets_hub))
         .route("/wiki/dataset/dir", get(wiki_dataset_dir_hub))
         .route("/wiki/dataset/file", get(wiki_dataset_file_hub))
@@ -1295,107 +1289,13 @@ fn extract_cue_uuid(payload: &serde_json::Value) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
-// GET /wiki/*  (read-only wiki browsing for the paired Android client)
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct WikiPathQuery {
-    path: String,
-}
-
-#[derive(Deserialize)]
-struct WikiSearchQuery {
-    keyword: String,
-}
-
-/// Path-containment guard: a paired device must only reach files/dirs that live
-/// inside one of the allowed wiki roots (the default wiki directory plus every
-/// linked dir recorded in `meta.json`). `require_md` additionally restricts the
-/// target to a markdown file, so the file endpoint can't be turned into an
-/// arbitrary-file reader. Returns `Err(response)` ready to be sent back.
-fn check_wiki_path(settings: &SettingsState, raw: &str, require_md: bool) -> Result<(), Response> {
-    let target = match Path::new(raw).canonicalize() {
-        Ok(t) => t,
-        Err(_) => return Err(json_error(StatusCode::NOT_FOUND, &format!("path not found: {raw}"))),
-    };
-    let roots = crate::wiki::local_impl::wiki_root_paths(settings);
-    if !roots.iter().any(|r| target.starts_with(r)) {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "path is outside the allowed wiki roots",
-        ));
-    }
-    if require_md {
-        let is_md = target
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("md"))
-            .unwrap_or(false);
-        if !is_md {
-            return Err(json_error(
-                StatusCode::BAD_REQUEST,
-                "only markdown (.md) files can be read",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// `GET /wiki/dirs` — top-level wiki roots (default dir + linked dirs).
-async fn wiki_dirs(State(st): State<RestState>) -> Response {
-    let settings = st.app.state::<SettingsState>();
-    match crate::wiki::local_impl::wiki_list_dirs_local(&settings) {
-        Ok(entries) => (StatusCode::OK, Json(entries)).into_response(),
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
-    }
-}
-
-/// `GET /wiki/dir?path=` — contents of one wiki directory.
-async fn wiki_dir_list(State(st): State<RestState>, Query(q): Query<WikiPathQuery>) -> Response {
-    let settings = st.app.state::<SettingsState>();
-    if let Err(resp) = check_wiki_path(&settings, &q.path, false) {
-        return resp;
-    }
-    match crate::wiki::local_impl::wiki_list_dir_local(&q.path) {
-        Ok(entries) => (StatusCode::OK, Json(entries)).into_response(),
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
-    }
-}
-
-/// `GET /wiki/file?path=` — markdown content of one file, wrapped as `{ content }`.
-async fn wiki_file(State(st): State<RestState>, Query(q): Query<WikiPathQuery>) -> Response {
-    let settings = st.app.state::<SettingsState>();
-    if let Err(resp) = check_wiki_path(&settings, &q.path, true) {
-        return resp;
-    }
-    match crate::wiki::local_impl::wiki_read_file_local(&q.path) {
-        Ok(content) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "content": content })),
-        )
-            .into_response(),
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
-    }
-}
-
-/// `GET /wiki/search?keyword=` — full-text search across the PC's wiki index.
-async fn wiki_search(State(st): State<RestState>, Query(q): Query<WikiSearchQuery>) -> Response {
-    let settings = st.app.state::<SettingsState>();
-    match crate::wiki::local_impl::wiki_search_local(&settings, &q.keyword) {
-        Ok(results) => (StatusCode::OK, Json(results)).into_response(),
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // GET /wiki/dataset/*  (read-only wiki-dataset browsing for followers)
 //
-// Same security posture as the legacy /wiki/* proxy, but addressed by
-// dataset uuid + relative path instead of absolute paths: the uuid must
-// resolve through `find_dataset_dir_typed` to a `wiki` dataset on this
-// machine, so a paired device can neither escape the wiki roots nor reach
-// any other dataset type. No mutating route is exposed here — editing a
-// hub wiki dataset requires downloading it (snapshot + writeback).
+// Addressed by dataset uuid + relative path: the uuid must resolve through
+// `find_dataset_dir` to a `wiki` dataset on this machine, so a paired device
+// can only reach wiki datasets it is allowed to browse, never arbitrary files.
+// No mutating route is exposed here — editing a hub wiki dataset requires
+// downloading it (snapshot + writeback).
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -1411,14 +1311,13 @@ struct WikiDatasetSearchQuery {
     keyword: String,
 }
 
-/// `GET /wiki/datasets` — the hub's wiki datasets plus the legacy wiki roots.
+/// `GET /wiki/datasets` — the hub's wiki datasets.
 async fn wiki_datasets_hub(State(st): State<RestState>) -> Response {
     let settings = st.app.state::<SettingsState>();
     let datasets = datasets::wiki::list_datasets(&settings);
-    let legacy_roots = crate::wiki::local_impl::wiki_list_dirs_local(&settings).unwrap_or_default();
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "datasets": datasets, "legacy_roots": legacy_roots })),
+        Json(serde_json::json!({ "datasets": datasets })),
     )
         .into_response()
 }

@@ -35,9 +35,6 @@ pub struct AppSettings {
     /// Root directory of the reading library (each book is a sub-directory).
     #[serde(default)]
     pub books_dir: String,
-    /// Root directory of the wiki (markdown documents).
-    #[serde(default)]
-    pub wiki_dir: String,
     /// Preferred default STT model ID (auto-loaded when nothing is loaded).
     #[serde(default)]
     pub selected_model: String,
@@ -244,9 +241,6 @@ pub struct WorkspaceSettings {
     /// Root directory of the reading library (each book is a sub-directory).
     #[serde(default)]
     pub books_dir: String,
-    /// Root directory of the wiki (markdown documents).
-    #[serde(default)]
-    pub wiki_dir: String,
     /// Sync role for this workspace (`"hub"` | `"follower"`; see
     /// `AppSettings::role`). Workspace-scoped.
     #[serde(default)]
@@ -263,7 +257,6 @@ impl Default for WorkspaceSettings {
             recordings_dir: data_dir.join("recordings").to_string_lossy().into_owned(),
             datasets_dir: data_dir.join("datasets").to_string_lossy().into_owned(),
             books_dir: data_dir.join("datasets").join("book").to_string_lossy().into_owned(),
-            wiki_dir: data_dir.join("wiki").to_string_lossy().into_owned(),
             role: String::new(),
             cluster_id: String::new(),
         }
@@ -276,7 +269,6 @@ impl WorkspaceSettings {
             recordings_dir: s.recordings_dir.clone(),
             datasets_dir: s.datasets_dir.clone(),
             books_dir: s.books_dir.clone(),
-            wiki_dir: s.wiki_dir.clone(),
             role: s.role.clone(),
             cluster_id: s.cluster_id.clone(),
         }
@@ -286,7 +278,6 @@ impl WorkspaceSettings {
         s.recordings_dir = self.recordings_dir.clone();
         s.datasets_dir = self.datasets_dir.clone();
         s.books_dir = self.books_dir.clone();
-        s.wiki_dir = self.wiki_dir.clone();
         s.role = self.role.clone();
         s.cluster_id = self.cluster_id.clone();
     }
@@ -301,7 +292,6 @@ impl Default for AppSettings {
             recordings_dir: data_dir.join("recordings").to_string_lossy().into_owned(),
             datasets_dir: data_dir.join("datasets").to_string_lossy().into_owned(),
             books_dir: data_dir.join("datasets").join("book").to_string_lossy().into_owned(),
-            wiki_dir: data_dir.join("wiki").to_string_lossy().into_owned(),
             selected_model: String::new(),
             model_unload_timeout: ModelUnloadTimeout::default(),
             onboarding_completed: false,
@@ -410,12 +400,6 @@ impl SettingsState {
     pub fn books_dir(&self) -> PathBuf {
         let configured = self.settings.lock().unwrap().books_dir.clone();
         self.workspace_subdir("books", &configured)
-    }
-
-    /// Effective wiki directory (workspace-derived).
-    pub fn wiki_dir(&self) -> PathBuf {
-        let configured = self.settings.lock().unwrap().wiki_dir.clone();
-        self.workspace_subdir("wiki", &configured)
     }
 
     /// This workspace's sync role (§3.1). Empty means "not yet designated" and
@@ -612,7 +596,6 @@ pub async fn settings_get(
     s.datasets_dir = state.datasets_dir().to_string_lossy().into_owned();
     s.recordings_dir = state.recordings_dir().to_string_lossy().into_owned();
     s.books_dir = state.books_dir().to_string_lossy().into_owned();
-    s.wiki_dir = state.wiki_dir().to_string_lossy().into_owned();
     Ok(s)
 }
 
@@ -645,7 +628,6 @@ pub async fn settings_pick_folder(
         "recordings_dir" => "Select Recordings Directory",
         "datasets_dir" => "Select Datasets Directory",
         "books_dir" => "Select Books Library Directory",
-        "wiki_dir" => "Select Wiki Directory",
         "dataset_location" => "Select Datasets Location",
         _ => return Err(format!("Unknown field: {}", field)),
     };
@@ -719,7 +701,6 @@ pub async fn settings_get_workspace(
     result.datasets_dir = state.datasets_dir().to_string_lossy().into_owned();
     result.recordings_dir = state.recordings_dir().to_string_lossy().into_owned();
     result.books_dir = state.books_dir().to_string_lossy().into_owned();
-    result.wiki_dir = state.wiki_dir().to_string_lossy().into_owned();
     // Suppress unused variable warning
     let _ = s;
     Ok(result)

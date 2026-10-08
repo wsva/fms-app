@@ -2,23 +2,16 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { message } from "@tauri-apps/plugin-dialog";
+import { ask, message } from "@tauri-apps/plugin-dialog";
 import {
   RefreshCw, ArrowLeft, ArrowRight, Cloud, Download, Pencil, Eye,
-  Folder, FileText, BookMarked,
+  Folder, FileText, BookMarked, FilePlus, FolderPlus, Plus, Trash2,
 } from "lucide-react";
-import WikiSidebar from "./WikiSidebar";
 import WikiSearch from "./WikiSearch";
 import MdEditor from "./MdEditor";
 import MarkdownViewer from "./markdown/markdown";
 import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
-import {
-  useCollapsibleSidebar,
-  CollapsibleSidebar,
-  SidebarToggleButton,
-} from "@/components/layout/CollapsibleSidebar";
 import {
   WikiDatasetSummary, HubWikiList, Selection, WikiSource, WikiFileEntry,
 } from "@/lib/wiki/types";
@@ -27,28 +20,27 @@ function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-interface AppSettings {
-  wiki_dir: string;
-  [key: string]: unknown;
-}
-
-// Mirrors the backend `WikiEntry`; used on mobile to resolve the PC wiki root
-// (the non-linked entry) as the base for in-content link / deep-link resolution.
-interface WikiDirEntry {
-  name: string;
-  path: string;
-  is_dir: boolean;
-  is_linked: boolean;
-  modified: string | null;
-}
-
 // Strip a dataset-root-relative wiki link to a clean rel path.
 function normalizeWikiRel(relativePath: string): string {
   return relativePath.replace(/^\.?\//, "").replace(/\\/g, "/");
 }
 
+// Backend sanitize_rel rejects these; mirror the guard in the UI so a name
+// prompt can't produce a path the backend would refuse.
+function sanitizeName(raw: string): string {
+  return raw.replace(/[\\/:*?"<>|]/g, "").replace(/\.\./g, "").trim();
+}
+
+function joinRel(dirRel: string, name: string): string {
+  return dirRel ? `${dirRel}/${name}` : name;
+}
+
+interface PromptState {
+  title: string;
+  submit: (name: string) => Promise<void>;
+}
+
 export default function WikiPage() {
-  const [wikiDir, setWikiDir] = useState<string>("");
   const [selection, setSelection] = useState<Selection | null>(null);
   const [fileContent, setFileContent] = useState<string>("");
   const [isLoading, setIsLoading] = useState(false);
@@ -68,6 +60,16 @@ export default function WikiPage() {
   const [browseEntries, setBrowseEntries] = useState<WikiFileEntry[] | null>(null);
   const [browseLoading, setBrowseLoading] = useState(false);
   const [browseError, setBrowseError] = useState<string | null>(null);
+  // Bumping this re-runs the directory fetch without changing `datasetBrowse`
+  // (e.g. the toolbar's Refresh button on the same folder).
+  const [browseReloadNonce, setBrowseReloadNonce] = useState(0);
+
+  // Inline name prompt for the toolbar's New dataset/file/folder actions —
+  // browser prompt() isn't available in webviews and the dialog plugin has no
+  // prompt variant, so a tiny controlled row is used (same pattern as the sidebar).
+  const [prompt, setPrompt] = useState<PromptState | null>(null);
+  const [promptValue, setPromptValue] = useState("");
+  const [promptBusy, setPromptBusy] = useState(false);
 
   // Dual-mode content: rendered HTML view vs. the ported markdown editor.
   // Editing is only ever offered for a locally stored wiki dataset file.
@@ -75,13 +77,12 @@ export default function WikiPage() {
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const sidebar = useCollapsibleSidebar({
-    storageKey: "wiki-sidebar-width",
-    defaultWidth: 240,
-    minWidth: 160,
-    maxWidth: 420,
-  });
-  const mobile = sidebar.mobile;
+  // `isMobileApp()` is false during prerender (no navigator) and only turns true
+  // inside the webview, so resolve it in an effect to avoid a hydration mismatch.
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    setMobile(isMobileApp());
+  }, []);
 
   // Navigation history (now over typed selections, not just paths).
   const [history, setHistory] = useState<Selection[]>([]);
@@ -92,26 +93,6 @@ export default function WikiPage() {
   useEffect(() => {
     historyIndexRef.current = historyIndex;
   }, [historyIndex]);
-
-  // Resolve the wiki directory used as the base for link / deep-link handling.
-  useEffect(() => {
-    if (!isTauri()) return;
-    const loadWikiDir = async () => {
-      try {
-        if (isMobileApp()) {
-          const dirs = await invoke<WikiDirEntry[]>("wiki_list_dirs");
-          const root = dirs.find((d) => !d.is_linked);
-          setWikiDir(root ? root.path : "");
-        } else {
-          const settings = await invoke<AppSettings>("settings_get");
-          setWikiDir(settings.wiki_dir || "");
-        }
-      } catch (err) {
-        logError(`Failed to load wiki directory: ${err instanceof Error ? err.message : String(err)}`, "wiki");
-      }
-    };
-    loadWikiDir();
-  }, []);
 
   // Load locally stored wiki datasets (downloaded or hub-owned). Cross-platform.
   const loadLocalDatasets = useCallback(async () => {
@@ -138,8 +119,6 @@ export default function WikiPage() {
   // Read one file for a given source, dispatching to the right backend command.
   const readSource = useCallback(async (source: WikiSource): Promise<string> => {
     switch (source.kind) {
-      case "legacy":
-        return await invoke<string>("wiki_read_file", { path: source.path });
       case "dataset":
         return await invoke<string>("wiki_dataset_read_file", { uuid: source.uuid, rel: source.rel });
       case "hub-dataset":
@@ -150,7 +129,7 @@ export default function WikiPage() {
   // Load a selection's content, leaving view mode, and push navigation history.
   const loadSelection = useCallback(async (sel: Selection, pushHistory: boolean) => {
     if (!isTauri()) return;
-    if (sel.source.kind !== "legacy" && sel.source.rel === "") {
+    if (sel.source.rel === "") {
       // A dataset root placeholder (used to clear a deleted file) — nothing to read.
       setSelection(null);
       setFileContent("");
@@ -186,9 +165,8 @@ export default function WikiPage() {
   }, [readSource]);
 
   const handleFileSelect = useCallback((sel: Selection) => {
-    sidebar.closeOnSelect();
     loadSelection(sel, true);
-  }, [sidebar, loadSelection]);
+  }, [loadSelection]);
 
   const restoreFromHistory = useCallback((sel: Selection) => {
     isHistoryNavRef.current = true;
@@ -227,21 +205,8 @@ export default function WikiPage() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [goBack, goForward, editing]);
 
-  // Listen for wiki deep link navigation (fms-app://wiki/path/to/file.md).
-  useEffect(() => {
-    if (!isTauri()) return;
-    const unlisten = listen<string>("wiki-navigate", (event) => {
-      const relativePath = event.payload;
-      if (!relativePath || !wikiDir) return;
-      loadSelection({ source: { kind: "legacy", path: wikiDir + "/" + relativePath }, label: relativePath }, true);
-    });
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, [wikiDir, loadSelection]);
-
   // Handle wiki link clicks within markdown content. Resolve against the
-  // selected dataset dir (or the hub root in Hub mode), not only wiki_dir.
+  // selected dataset dir (or the hub root in Hub mode).
   const handleWikiLink = useCallback((relativePath: string) => {
     const rel = normalizeWikiRel(relativePath);
     const cur = selection?.source;
@@ -251,12 +216,8 @@ export default function WikiPage() {
     }
     if (cur && cur.kind === "hub-dataset") {
       loadSelection({ source: { kind: "hub-dataset", uuid: cur.uuid, rel, name: cur.name }, label: rel.split("/").pop() || rel }, true);
-      return;
     }
-    if (wikiDir) {
-      loadSelection({ source: { kind: "legacy", path: wikiDir + "/" + rel }, label: rel.split("/").pop() || rel }, true);
-    }
-  }, [selection, wikiDir, loadSelection]);
+  }, [selection, loadSelection]);
 
   // Whether the current selection is an editable local dataset file.
   const canEdit =
@@ -330,20 +291,19 @@ export default function WikiPage() {
     }
   }, [hubMode]);
 
+  // The local dataset whose FTS index to refresh: the open file's dataset, or
+  // the one currently being browsed. Null when neither is a local dataset.
+  const indexableDatasetUuid =
+    selection?.source.kind === "dataset"
+      ? selection.source.uuid
+      : !hubMode ? datasetBrowse?.uuid ?? null : null;
+
   const handleIndexWiki = async () => {
-    if (!isTauri()) return;
+    if (!isTauri() || !indexableDatasetUuid) return;
     setIsIndexing(true);
     try {
-      // When a local dataset file is open, index just that dataset; otherwise
-      // refresh the legacy wiki index (unchanged behavior).
-      const sel = selection?.source;
-      if (sel && sel.kind === "dataset") {
-        const count = await invoke<number>("wiki_dataset_index", { uuid: sel.uuid });
-        console.log(`Indexed ${count} dataset files`);
-      } else {
-        const count = await invoke<number>("wiki_index");
-        console.log(`Indexed ${count} files`);
-      }
+      const count = await invoke<number>("wiki_dataset_index", { uuid: indexableDatasetUuid });
+      console.log(`Indexed ${count} dataset files`);
     } catch (err) {
       console.error("Failed to index wiki:", err);
     } finally {
@@ -354,25 +314,25 @@ export default function WikiPage() {
   // Sidebar dataset tree source: hub datasets while browsing, else local.
   const treeDatasets = hubMode ? hubDatasets : localDatasets;
 
-  // Search mode follows the current selection's scope.
-  const searchMode: { kind: "legacy" } | { kind: "dataset"; uuid: string } | { kind: "hub"; uuid: string } = (() => {
+  // Search is scoped to a dataset: the open file's dataset, else the one being
+  // browsed. Null (search disabled) when no dataset is in context.
+  const searchMode: { kind: "dataset"; uuid: string } | { kind: "hub"; uuid: string } | null = (() => {
     const src = selection?.source;
-    if (hubMode && src && src.kind === "hub-dataset") return { kind: "hub", uuid: src.uuid };
-    if (!hubMode && src && src.kind === "dataset") return { kind: "dataset", uuid: src.uuid };
-    return { kind: "legacy" };
+    if (hubMode) {
+      const uuid = src && src.kind === "hub-dataset" ? src.uuid : datasetBrowse?.uuid;
+      return uuid ? { kind: "hub", uuid } : null;
+    }
+    const uuid = src && src.kind === "dataset" ? src.uuid : datasetBrowse?.uuid;
+    return uuid ? { kind: "dataset", uuid } : null;
   })();
 
   const handleSearchResult = useCallback((source: WikiSource) => {
-    const label = source.kind === "legacy"
-      ? source.path.split(/[\\/]/).pop() || source.path
-      : source.rel.split("/").pop() || source.rel;
+    const label = source.rel.split("/").pop() || source.rel;
     handleFileSelect({ source, label });
   }, [handleFileSelect]);
 
   const headerLabel = selection
-    ? (selection.label || (selection.source.kind === "legacy"
-        ? selection.source.path.split(/[\\/]/).pop()
-        : selection.source.rel.split("/").pop()))
+    ? (selection.label || selection.source.rel.split("/").pop())
     : "";
 
   // Narrow once so JSX callbacks see a concrete hub-dataset source.
@@ -388,10 +348,9 @@ export default function WikiPage() {
       : "datasets";
 
   // Which dataset the breadcrumb refers to — from the open file's source when
-  // viewing a file, else the dataset being browsed. Null for legacy sources,
-  // which have no dataset hierarchy to fall back to.
+  // viewing a file, else the dataset being browsed.
   const activeDatasetUuid =
-    selection && selection.source.kind !== "legacy"
+    selection
       ? selection.source.uuid
       : datasetBrowse?.uuid ?? null;
   const activeDatasetName = activeDatasetUuid
@@ -401,7 +360,7 @@ export default function WikiPage() {
   // Directory path segments shown in the breadcrumb: taken from the open
   // file's parent dirs, or from the directory being browsed.
   const currentDirSegments = (() => {
-    if (selection && selection.source.kind !== "legacy") {
+    if (selection) {
       return selection.source.rel.split("/").filter(Boolean).slice(0, -1);
     }
     if (datasetBrowse) {
@@ -461,16 +420,126 @@ export default function WikiPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [viewMode, datasetBrowse, hubMode]);
+  }, [viewMode, datasetBrowse, hubMode, browseReloadNonce]);
 
-  const isLegacyView = selection?.source.kind === "legacy";
+  const canMutateRoots = !mobile && !hubMode;
+
+  // Shared sub-toolbar actions: shown under the breadcrumb for every dataset
+  // view, not just while viewing a file's rendered markdown.
+  const refreshBrowse = useCallback(() => setBrowseReloadNonce((n) => n + 1), []);
+
+  const openPrompt = useCallback((title: string, submit: (name: string) => Promise<void>) => {
+    setPromptValue("");
+    setPrompt({ title, submit });
+  }, []);
+
+  const submitPrompt = useCallback(async () => {
+    if (!prompt || promptBusy) return;
+    const name = sanitizeName(promptValue);
+    if (!name) return;
+    setPromptBusy(true);
+    try {
+      await prompt.submit(name);
+      setPrompt(null);
+    } catch (err) {
+      await message(err instanceof Error ? err.message : String(err), { title: "Error", kind: "error" });
+    } finally {
+      setPromptBusy(false);
+    }
+  }, [prompt, promptBusy, promptValue]);
+
+  const handleCreateDataset = useCallback(() => {
+    openPrompt("New wiki dataset name", async (name) => {
+      await invoke<WikiDatasetSummary>("wiki_dataset_create", { name });
+      loadLocalDatasets();
+    });
+  }, [openPrompt, loadLocalDatasets]);
+
+  const handleCreateFile = useCallback(() => {
+    if (!datasetBrowse) return;
+    const { uuid, rel } = datasetBrowse;
+    openPrompt("New file (name without .md will get the extension)", async (raw) => {
+      const fileName = raw.endsWith(".md") ? raw : `${raw}.md`;
+      await invoke("wiki_dataset_create_file", { uuid, rel: joinRel(rel, fileName) });
+      refreshBrowse();
+      loadLocalDatasets();
+    });
+  }, [datasetBrowse, openPrompt, refreshBrowse, loadLocalDatasets]);
+
+  const handleCreateDir = useCallback(() => {
+    if (!datasetBrowse) return;
+    const { uuid, rel } = datasetBrowse;
+    openPrompt("New folder", async (name) => {
+      await invoke("wiki_dataset_create_dir", { uuid, rel: joinRel(rel, name) });
+      refreshBrowse();
+    });
+  }, [datasetBrowse, openPrompt, refreshBrowse]);
+
+  // Download the whole dataset currently being browsed, so it becomes
+  // locally readable/editable without first opening one of its files.
+  const handleDownloadDataset = useCallback(async () => {
+    if (!datasetBrowse) return;
+    setIsLoading(true);
+    try {
+      await invoke("dataset_sync_snapshot", { uuid: datasetBrowse.uuid });
+      await loadLocalDatasets();
+      setHubMode(false);
+      refreshBrowse();
+    } catch (err) {
+      await message(err instanceof Error ? err.message : String(err), { title: "Download failed", kind: "error" });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [datasetBrowse, loadLocalDatasets, refreshBrowse]);
+
+  // Delete the currently-open local dataset file (moves it to trash), then
+  // navigate back to its parent directory.
+  const handleDeleteCurrentFile = useCallback(() => {
+    const src = selection?.source;
+    if (!src || src.kind !== "dataset") return;
+    void (async () => {
+      const confirmed = await ask(`Delete this file?\n${src.rel}\n\nIt is moved to trash, not permanently deleted.`, { title: "Delete File", kind: "warning" });
+      if (!confirmed) return;
+      try {
+        await invoke("wiki_dataset_delete_file", { uuid: src.uuid, rel: src.rel });
+        const parent = src.rel.includes("/") ? src.rel.slice(0, src.rel.lastIndexOf("/")) : "";
+        loadLocalDatasets();
+        goToDatasetDir(src.uuid, parent);
+      } catch (err) {
+        await message(err instanceof Error ? err.message : String(err), { title: "Error", kind: "error" });
+      }
+    })();
+  }, [selection, loadLocalDatasets, goToDatasetDir]);
+
+  // Delete the wiki dataset currently being browsed (moves it to trash).
+  const handleDeleteDataset = useCallback(() => {
+    if (!datasetBrowse) return;
+    const { uuid } = datasetBrowse;
+    const name = activeDatasetName;
+    void (async () => {
+      const confirmed = await ask(`Delete wiki dataset "${name}"?\n\nThe folder is moved to trash, not permanently deleted.`, { title: "Delete Wiki Dataset", kind: "warning" });
+      if (!confirmed) return;
+      try {
+        await invoke("wiki_dataset_delete", { uuid });
+        loadLocalDatasets();
+        goDatasets();
+      } catch (err) {
+        await message(err instanceof Error ? err.message : String(err), { title: "Error", kind: "error" });
+      }
+    })();
+  }, [datasetBrowse, activeDatasetName, loadLocalDatasets, goDatasets]);
+
+  const browseItemCount = browseEntries?.length ?? 0;
+  const toolbarLabel =
+    viewMode === "file" ? headerLabel
+      : viewMode === "browse" ? `${browseItemCount} item${browseItemCount === 1 ? "" : "s"}`
+        : `${treeDatasets.length} dataset${treeDatasets.length === 1 ? "" : "s"}`;
 
   return (
     <div className="flex h-full w-full bg-bg-body min-w-0">
       <div className="flex-1 flex flex-col min-h-0 min-w-0">
-        {/* Top bar with sidebar toggle, navigation, search and controls */}
+        {/* Top bar with navigation, search and controls */}
         <div className="flex items-center gap-3 px-4 py-2 border-b border-border-default bg-bg-card">
-          <SidebarToggleButton sidebar={sidebar} title="Show/hide wiki files" />
           <div className="flex items-center gap-1">
             <button
               onClick={goBack}
@@ -514,9 +583,9 @@ export default function WikiPage() {
           {!mobile && !hubMode && (
             <button
               onClick={handleIndexWiki}
-              disabled={isIndexing}
+              disabled={isIndexing || !indexableDatasetUuid}
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors disabled:opacity-50"
-              title="Re-index wiki files for search"
+              title="Re-index this dataset's wiki files for search"
             >
               <RefreshCw size={14} className={isIndexing ? "animate-spin" : ""} />
               <span>{isIndexing ? "Indexing..." : "Index"}</span>
@@ -533,77 +602,199 @@ export default function WikiPage() {
         )}
 
         <div className="relative flex flex-1 min-h-0 overflow-hidden">
-          <CollapsibleSidebar sidebar={sidebar}>
-            <WikiSidebar
-              wikiDir={wikiDir}
-              selection={selection}
-              onFileSelect={handleFileSelect}
-              hubMode={hubMode}
-              datasets={treeDatasets}
-              canMutateRoots={!mobile && !hubMode}
-              onDatasetsChanged={loadLocalDatasets}
-            />
-          </CollapsibleSidebar>
-
           {/* Content column: breadcrumb nav on top, scrollable view below */}
           <div className="flex-1 flex flex-col min-h-0 min-w-0">
             {/* Breadcrumb navigation — mirrors the dictation page's
-                Datasets › dataset › directory › file trail. Hidden while
-                viewing a legacy (non-dataset) wiki file, which has no
-                dataset hierarchy to fall back to. */}
-            {isLegacyView ? (
-              <div className="shrink-0 px-4 py-2 text-xs text-text-tertiary truncate border-b border-border-default bg-bg-card">
-                {headerLabel}
-              </div>
-            ) : (
-              <nav className="shrink-0 flex items-center gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
+                Wiki › dataset › directory › file trail. */}
+            <nav className="shrink-0 flex items-center gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
+              <button
+                className={`shrink-0 cursor-pointer hover:underline ${viewMode === "datasets" ? "text-text-primary font-medium" : "text-accent"}`}
+                onClick={goDatasets}
+              >
+                Wiki
+              </button>
+              {activeDatasetUuid && (
+                <>
+                  <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                  <button
+                    className={`cursor-pointer hover:underline truncate min-w-0 max-w-[240px] ${viewMode === "file" || currentDirSegments.length > 0 ? "text-accent" : "text-text-primary font-medium"}`}
+                    onClick={() => goToDatasetDir(activeDatasetUuid, "")}
+                    title={activeDatasetName}
+                  >
+                    {activeDatasetName}
+                  </button>
+                </>
+              )}
+              {activeDatasetUuid && currentDirSegments.map((seg, i) => {
+                const isLastDir = i === currentDirSegments.length - 1 && viewMode !== "file";
+                const path = currentDirSegments.slice(0, i + 1).join("/");
+                return (
+                  <span key={path} className="flex items-center gap-2 min-w-0 shrink-0">
+                    <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                    {isLastDir ? (
+                      <span className="text-text-primary font-medium truncate max-w-[240px]" title={seg}>{seg}</span>
+                    ) : (
+                      <button
+                        className="cursor-pointer hover:underline text-accent truncate max-w-[240px]"
+                        onClick={() => goToDatasetDir(activeDatasetUuid, path)}
+                        title={seg}
+                      >
+                        {seg}
+                      </button>
+                    )}
+                  </span>
+                );
+              })}
+              {viewMode === "file" && (
+                <>
+                  <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                  <span className="text-text-primary font-medium truncate min-w-0 max-w-[320px]" title={headerLabel}>
+                    {headerLabel}
+                  </span>
+                </>
+              )}
+            </nav>
+
+            {/* Shared sub-toolbar: always shown under the breadcrumb, whether
+                viewing the dataset list, a dataset's directory, or a file. */}
+            <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card">
+              <div className="text-xs text-text-tertiary truncate flex-1">{toolbarLabel}</div>
+
+              {viewMode === "file" && hubSrc && (
                 <button
-                  className={`shrink-0 cursor-pointer hover:underline ${viewMode === "datasets" ? "text-text-primary font-medium" : "text-accent"}`}
-                  onClick={goDatasets}
+                  onClick={() => handleDownload(hubSrc.uuid, hubSrc.rel)}
+                  disabled={isLoading}
+                  className="flex items-center gap-1.5 px-3 py-1 text-sm bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50"
+                  title="Download this dataset to edit locally"
                 >
-                  Wiki
+                  <Download size={14} /> Download
                 </button>
-                {activeDatasetUuid && (
-                  <>
-                    <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-                    <button
-                      className={`cursor-pointer hover:underline truncate min-w-0 max-w-[240px] ${viewMode === "file" || currentDirSegments.length > 0 ? "text-accent" : "text-text-primary font-medium"}`}
-                      onClick={() => goToDatasetDir(activeDatasetUuid, "")}
-                      title={activeDatasetName}
-                    >
-                      {activeDatasetName}
-                    </button>
-                  </>
-                )}
-                {activeDatasetUuid && currentDirSegments.map((seg, i) => {
-                  const isLastDir = i === currentDirSegments.length - 1 && viewMode !== "file";
-                  const path = currentDirSegments.slice(0, i + 1).join("/");
-                  return (
-                    <span key={path} className="flex items-center gap-2 min-w-0 shrink-0">
-                      <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-                      {isLastDir ? (
-                        <span className="text-text-primary font-medium truncate max-w-[240px]" title={seg}>{seg}</span>
-                      ) : (
-                        <button
-                          className="cursor-pointer hover:underline text-accent truncate max-w-[240px]"
-                          onClick={() => goToDatasetDir(activeDatasetUuid, path)}
-                          title={seg}
-                        >
-                          {seg}
-                        </button>
-                      )}
-                    </span>
-                  );
-                })}
-                {viewMode === "file" && selection && selection.source.kind !== "legacy" && (
-                  <>
-                    <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-                    <span className="text-text-primary font-medium truncate min-w-0 max-w-[320px]" title={headerLabel}>
-                      {headerLabel}
-                    </span>
-                  </>
-                )}
-              </nav>
+              )}
+
+              {viewMode === "file" && canEdit && !editing && (
+                <button
+                  onClick={startEdit}
+                  className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
+                  title="Edit this file"
+                >
+                  <Pencil size={14} /> Edit
+                </button>
+              )}
+
+              {viewMode === "file" && canEdit && !editing && (
+                <button
+                  onClick={handleDeleteCurrentFile}
+                  className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-error-text hover:bg-bg-hover rounded-md transition-colors"
+                  title="Delete this file (moves to trash)"
+                >
+                  <Trash2 size={14} /> Delete
+                </button>
+              )}
+
+              {viewMode === "file" && canEdit && editing && (
+                <button
+                  onClick={() => setEditing(false)}
+                  className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
+                  title="Return to view"
+                >
+                  <Eye size={14} /> View
+                </button>
+              )}
+
+              {viewMode === "browse" && hubMode && (
+                <button
+                  onClick={handleDownloadDataset}
+                  disabled={isLoading}
+                  className="flex items-center gap-1.5 px-3 py-1 text-sm bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50"
+                  title="Download this dataset to edit locally"
+                >
+                  <Download size={14} /> Download
+                </button>
+              )}
+
+              {viewMode === "browse" && !hubMode && (
+                <>
+                  <button
+                    onClick={handleCreateFile}
+                    className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
+                    title="New file in this folder"
+                  >
+                    <FilePlus size={14} /> New File
+                  </button>
+                  <button
+                    onClick={handleCreateDir}
+                    className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
+                    title="New folder in this folder"
+                  >
+                    <FolderPlus size={14} /> New Folder
+                  </button>
+                </>
+              )}
+
+              {viewMode === "browse" && canMutateRoots && !hubMode && (
+                <button
+                  onClick={handleDeleteDataset}
+                  className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-error-text hover:bg-bg-hover rounded-md transition-colors"
+                  title="Delete this dataset (moves to trash)"
+                >
+                  <Trash2 size={14} /> Delete Dataset
+                </button>
+              )}
+
+              {viewMode === "datasets" && canMutateRoots && !hubMode && (
+                <button
+                  onClick={handleCreateDataset}
+                  className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
+                  title="New wiki dataset"
+                >
+                  <Plus size={14} /> New Dataset
+                </button>
+              )}
+
+              {viewMode !== "file" && (
+                <button
+                  onClick={viewMode === "browse" ? refreshBrowse : loadLocalDatasets}
+                  disabled={viewMode === "browse" ? browseLoading : isLoading}
+                  className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors disabled:opacity-50"
+                  title="Refresh"
+                >
+                  <RefreshCw size={14} className={(viewMode === "browse" ? browseLoading : isLoading) ? "animate-spin" : ""} />
+                  <span>Refresh</span>
+                </button>
+              )}
+            </div>
+
+            {/* Inline name prompt backing the New dataset/file/folder actions */}
+            {prompt && (
+              <div className="shrink-0 px-4 py-2 border-b border-border-default bg-bg-body space-y-2">
+                <div className="text-xs font-semibold text-text-primary">{prompt.title}</div>
+                <input
+                  type="text"
+                  autoFocus
+                  value={promptValue}
+                  onChange={(e) => setPromptValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void submitPrompt();
+                    else if (e.key === "Escape") setPrompt(null);
+                  }}
+                  className="w-full px-2 py-1 text-sm bg-bg-input border border-border-default rounded-md outline-none focus:border-accent"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => void submitPrompt()}
+                    disabled={!sanitizeName(promptValue) || promptBusy}
+                    className="flex-1 px-2 py-1 text-xs bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {promptBusy ? "…" : "OK"}
+                  </button>
+                  <button
+                    onClick={() => setPrompt(null)}
+                    className="flex-1 px-2 py-1 text-xs bg-bg-input border border-border-default rounded-md hover:bg-bg-hover transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
             )}
 
             {/* Scrollable content */}
@@ -633,45 +824,9 @@ export default function WikiPage() {
                     )}
                   </div>
                 </div>
-              ) : selection && selection.source.kind !== "legacy" && selection.source.rel === "" ? null
+              ) : selection && selection.source.rel === "" ? null
                 : selection ? (
                 <div className="h-full flex flex-col min-h-0">
-                  {/* Content header: View/Edit / Download */}
-                  <div className="flex items-center gap-2 px-6 py-2 border-b border-border-default bg-bg-card shrink-0">
-                    <div className="text-xs text-text-tertiary truncate flex-1">{headerLabel}</div>
-
-                    {hubSrc && (
-                      <button
-                        onClick={() => handleDownload(hubSrc.uuid, hubSrc.rel)}
-                        disabled={isLoading}
-                        className="flex items-center gap-1.5 px-3 py-1 text-sm bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50"
-                        title="Download this dataset to edit locally"
-                      >
-                        <Download size={14} /> Download
-                      </button>
-                    )}
-
-                    {canEdit && !editing && (
-                      <button
-                        onClick={startEdit}
-                        className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
-                        title="Edit this file"
-                      >
-                        <Pencil size={14} /> Edit
-                      </button>
-                    )}
-
-                    {canEdit && editing && (
-                      <button
-                        onClick={() => setEditing(false)}
-                        className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
-                        title="Return to view"
-                      >
-                        <Eye size={14} /> View
-                      </button>
-                    )}
-                  </div>
-
                   {/* Body: editor (edit mode) or rendered markdown (view mode) */}
                   <div className="flex-1 overflow-y-auto min-h-0">
                     {editing ? (
@@ -724,7 +879,7 @@ export default function WikiPage() {
                     <p className="text-text-secondary">
                       {hubMode
                         ? "The hub has no wiki datasets."
-                        : "No wiki datasets yet. Create one from the sidebar, or download one from the hub."}
+                        : "No wiki datasets yet. Create one with the New Dataset button, or download one from the hub."}
                     </p>
                   ) : (
                     treeDatasets.map((ds) => (

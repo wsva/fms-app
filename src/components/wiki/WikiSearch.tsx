@@ -14,9 +14,9 @@ interface WikiSearchResult {
 }
 
 type SearchMode =
-  | { kind: "legacy" }
   | { kind: "dataset"; uuid: string }
-  | { kind: "hub"; uuid: string };
+  | { kind: "hub"; uuid: string }
+  | null;
 
 interface WikiSearchProps {
   mode: SearchMode;
@@ -27,12 +27,10 @@ function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-// Map one raw FTS row to a WikiSource for the current search mode. Legacy rows
-// carry an absolute `file_path`; dataset/hub rows carry a dataset-relative one.
-function toSource(mode: SearchMode, r: WikiSearchResult): WikiSource {
+// Map one raw FTS row to a WikiSource for the current search mode. Dataset/hub
+// rows carry a dataset-relative `file_path`.
+function toSource(mode: NonNullable<SearchMode>, r: WikiSearchResult): WikiSource {
   switch (mode.kind) {
-    case "legacy":
-      return { kind: "legacy", path: r.file_path };
     case "dataset":
       return { kind: "dataset", uuid: mode.uuid, rel: r.file_path };
     case "hub":
@@ -48,7 +46,7 @@ export default function WikiSearch({ mode, onResultClick }: WikiSearchProps) {
   const [showHelp, setShowHelp] = useState(false);
 
   const performSearch = useCallback(async (keyword: string) => {
-    if (!isTauri() || !keyword.trim()) {
+    if (!isTauri() || !mode || !keyword.trim()) {
       setResults([]);
       setShowResults(false);
       return;
@@ -62,13 +60,9 @@ export default function WikiSearch({ mode, onResultClick }: WikiSearchProps) {
           uuid: mode.uuid,
           keyword: keyword.trim(),
         });
-      } else if (mode.kind === "hub") {
+      } else {
         searchResults = await invoke<WikiSearchResult[]>("wiki_hub_search", {
           uuid: mode.uuid,
-          keyword: keyword.trim(),
-        });
-      } else {
-        searchResults = await invoke<WikiSearchResult[]>("wiki_search", {
           keyword: keyword.trim(),
         });
       }
@@ -103,9 +97,9 @@ export default function WikiSearch({ mode, onResultClick }: WikiSearchProps) {
   };
 
   const placeholder =
-    mode.kind === "dataset" ? "Search this wiki dataset..."
-    : mode.kind === "hub" ? "Search hub wiki dataset..."
-    : "Search wiki...";
+    !mode ? "Open a wiki dataset to search..."
+    : mode.kind === "dataset" ? "Search this wiki dataset..."
+    : "Search hub wiki dataset...";
 
   return (
     <div className="relative">
@@ -116,7 +110,8 @@ export default function WikiSearch({ mode, onResultClick }: WikiSearchProps) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder={placeholder}
-          className="flex-1 bg-transparent outline-none text-sm text-text-primary placeholder:text-text-tertiary"
+          disabled={!mode}
+          className="flex-1 bg-transparent outline-none text-sm text-text-primary placeholder:text-text-tertiary disabled:cursor-not-allowed"
         />
         {query && (
           <button
@@ -185,10 +180,10 @@ export default function WikiSearch({ mode, onResultClick }: WikiSearchProps) {
             <div className="py-1">
               {results.map((result) => (
                 <button
-                  key={`${mode.kind}:${result.file_path}`}
+                  key={`${mode?.kind}:${result.file_path}`}
                   className="w-full px-3 py-2 text-left hover:bg-bg-hover transition-colors border-b border-border-light last:border-b-0"
                   onClick={() => {
-                    onResultClick(toSource(mode, result));
+                    if (mode) onResultClick(toSource(mode, result));
                     setShowResults(false);
                   }}
                 >

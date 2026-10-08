@@ -2376,13 +2376,13 @@ pub async fn pc_pair_reset_identity(settings: State<'_, SettingsState>) -> Resul
 }
 
 // ---------------------------------------------------------------------------
-// Remote wiki browsing (Android thin client)
+// Remote PC browsing helper
 // ---------------------------------------------------------------------------
-// The wiki page on the phone is a pure read-through proxy: listing, reading,
-// and searching all hit the paired PC's `/api/v1/wiki/*` REST endpoints over
+// The wiki and chat pages on the phone are pure read-through proxies: listing,
+// reading, and searching hit the paired PC's `/api/v1/*` REST endpoints over
 // native reqwest (WebView `fetch()` would be CORS-blocked — see module docs),
 // and nothing is ever stored locally. Compiled only on mobile; the desktop
-// build serves the same data straight from `wiki::local_impl`.
+// build serves the same data straight from its own subsystems.
 
 /// Issue a signed GET against a PC `/api/v1/*` endpoint and return the raw
 /// JSON value. The request path (excluding the query string) is what gets
@@ -2427,59 +2427,16 @@ pub(crate) async fn pc_get_json(
         .map_err(|e| format!("Unexpected response from PC: {e}"))
 }
 
-/// `GET /api/v1/wiki/dirs` — top-level wiki roots on the PC.
-#[cfg(not(feature = "desktop"))]
-pub(crate) async fn wiki_remote_list_dirs(
-    settings: &SettingsState,
-) -> Result<Vec<crate::wiki::WikiEntry>, String> {
-    let v = pc_get_json(settings, "/api/v1/wiki/dirs", &[]).await?;
-    serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/dirs response: {e}"))
-}
-
-/// `GET /api/v1/wiki/dir?path=` — contents of one wiki directory on the PC.
-#[cfg(not(feature = "desktop"))]
-pub(crate) async fn wiki_remote_list_dir(
-    settings: &SettingsState,
-    path: &str,
-) -> Result<Vec<crate::wiki::WikiEntry>, String> {
-    let v =
-        pc_get_json(settings, "/api/v1/wiki/dir", &[("path", path.to_string())]).await?;
-    serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/dir response: {e}"))
-}
-
-/// `GET /api/v1/wiki/file?path=` — markdown content of one file on the PC.
-/// The PC wraps the body as `{ "content": "..." }`.
-#[cfg(not(feature = "desktop"))]
-pub(crate) async fn wiki_remote_read_file(settings: &SettingsState, path: &str) -> Result<String, String> {
-    let v = pc_get_json(settings, "/api/v1/wiki/file", &[("path", path.to_string())]).await?;
-    v.get("content")
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "PC wiki/file response missing 'content'".to_string())
-}
-
-/// `GET /api/v1/wiki/search?keyword=` — full-text results from the PC.
-#[cfg(not(feature = "desktop"))]
-pub(crate) async fn wiki_remote_search(
-    settings: &SettingsState,
-    keyword: &str,
-) -> Result<Vec<crate::wiki::WikiSearchResult>, String> {
-    let v =
-        pc_get_json(settings, "/api/v1/wiki/search", &[("keyword", keyword.to_string())]).await?;
-    serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/search response: {e}"))
-}
-
 // ---------------------------------------------------------------------------
 // Hub wiki browse (read-only) — `wiki_hub_*` commands
 //
-// The "Hub" button in the wiki page: browse and search *every* wiki root on
-// the hub (its syncable wiki datasets plus the legacy wiki directories)
-// without downloading anything. Deliberately not `cfg`-gated: a desktop
-// running `role = "follower"` uses the same proxies to reach the hub. Reads
-// only — there is no mutating wiki-dataset route on the hub.
+// The "Hub" button in the wiki page: browse and search the hub's syncable wiki
+// datasets without downloading anything. Deliberately not `cfg`-gated: a
+// desktop running `role = "follower"` uses the same proxies to reach the hub.
+// Reads only — there is no mutating wiki-dataset route on the hub.
 // ---------------------------------------------------------------------------
 
-/// `GET /api/v1/wiki/datasets` — hub wiki datasets + legacy wiki roots.
+/// `GET /api/v1/wiki/datasets` — the hub's wiki datasets.
 #[tauri::command]
 pub async fn wiki_hub_list(settings: State<'_, SettingsState>) -> Result<Value, String> {
     pc_get_json(settings.inner(), "/api/v1/wiki/datasets", &[]).await
@@ -2527,7 +2484,7 @@ pub async fn wiki_hub_search(
     settings: State<'_, SettingsState>,
     uuid: String,
     keyword: String,
-) -> Result<Vec<crate::wiki::WikiSearchResult>, String> {
+) -> Result<Vec<crate::datasets::wiki::WikiSearchResult>, String> {
     let v = pc_get_json(
         settings.inner(),
         "/api/v1/wiki/dataset/search",
