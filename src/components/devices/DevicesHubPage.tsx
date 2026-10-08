@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
@@ -74,6 +75,20 @@ interface PcCandidate {
 interface PairResult {
   state: "approved" | "pending" | "denied" | "none";
   fingerprint?: string;
+}
+
+// One `Label: value` line of the Current Workspace Status block, with the
+// human-facing explanation rendered as a muted caption underneath.
+function StatusRow({ label, value, explanation }: { label: string; value: ReactNode; explanation: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-2 text-sm flex-wrap">
+        <span className="text-text-secondary font-medium w-20 shrink-0">{label}</span>
+        <span className="text-text-primary">{value}</span>
+      </div>
+      <p className="text-xs text-text-tertiary leading-relaxed sm:pl-20">{explanation}</p>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -348,63 +363,71 @@ export default function DevicesHubPage() {
     <div className="flex flex-col w-full h-full min-h-0 overflow-y-auto p-4 gap-4">
       <h1 className="text-[1.3em] font-bold shrink-0">Devices &amp; Hub</h1>
 
-      {/* ── 1. My role ───────────────────────────────────────────── */}
+      {/* ── 1. Current Workspace Status ──────────────────────── */}
       <section className="shrink-0 flex flex-col gap-3 p-4 rounded-lg border border-border-default bg-bg-card">
-        <h2 className="text-base font-semibold">My role</h2>
+        <h2 className="text-base font-semibold">Current Workspace Status</h2>
 
-        {/* Read-only status line — every platform, so a phone still sees where
-            it stands even though it cannot change its role. */}
+        {/* Read-only status — every platform, so a phone still sees where it
+            stands even though it cannot change its role. */}
         {mounted && status && (
-          <div className="flex items-center gap-2 flex-wrap text-sm">
-            <span className="px-2 py-0.5 rounded-full bg-bg-hover text-text-secondary capitalize font-medium">
-              {role}
-            </span>
-            <span className="text-text-secondary">
-              cluster{" "}
-              <span
-                className="font-mono underline decoration-dotted underline-offset-2 cursor-help"
-                title={
-                  clusterId
-                    ? `Cluster ${clusterId}\n\nIssued once when a workspace is promoted to hub; followers adopt it on first pairing. Every sync request carries this id so a device only talks to the hub it belongs to.`
-                    : "Not in a cluster yet. Pair with a hub to adopt its cluster id (trust-on-first-use), or promote this workspace to hub to issue one."
-                }
-              >
-                {clusterId ? clusterId.slice(0, 8) : "unbound"}
-              </span>
-            </span>
-            <span className="text-xs text-text-tertiary ml-auto">protocol v{status.protocol_version}</span>
+          <div className="flex flex-col gap-3">
+            <StatusRow
+              label="Role:"
+              value={
+                <span className="px-2 py-0.5 rounded-full bg-bg-hover text-text-secondary capitalize font-medium">
+                  {role}
+                </span>
+              }
+              explanation={
+                mobile
+                  ? "This device is always a follower — it syncs from its hub and can\u2019t serve datasets to others."
+                  : isHub
+                  ? "The hub holds the authoritative copy that followers sync against."
+                  : "A follower pulls data from the hub and pushes its edits back."
+              }
+            />
+
+            <StatusRow
+              label="Cluster:"
+              value={<span className="font-mono">{clusterId ? clusterId.slice(0, 8) : "Unbound"}</span>}
+              explanation={
+                clusterId
+                  ? "Issued once when a workspace is promoted to hub; followers adopt it on first pairing. Every sync request carries this id so a device only talks to the hub it belongs to."
+                  : "Not in a cluster yet. Pair with a hub to adopt its cluster id (trust-on-first-use), or promote this workspace to hub to issue one."
+              }
+            />
+
+            <StatusRow
+              label="Protocol:"
+              value={<span className="font-mono">v{status.protocol_version}</span>}
+              explanation="Wire protocol version this build speaks. A device and its hub must share the same version to sync."
+            />
           </div>
         )}
 
-        {mobile ? (
-          <p className="text-sm text-text-tertiary">
-            This device is always a <span className="font-medium">follower</span> — it syncs from
-            its hub and can't serve datasets to others.
-          </p>
-        ) : (
-          mounted && (
-            <div className="flex flex-col gap-3">
-              <p className="text-text-secondary text-sm">
-                Choose which machine holds the authoritative copy. The <strong>hub</strong> is the
-                source of truth that followers sync against; a <strong>follower</strong> pulls from
-                the hub and pushes edits back. Promoting to hub issues a cluster id once.
-              </p>
-              <div className="flex items-center gap-3 flex-wrap">
-                <label className="text-sm font-medium shrink-0">Sync Role</label>
-                <select
-                  className="px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary max-w-xs w-full"
-                  value={workspaceSettings?.role && workspaceSettings.role !== "" ? workspaceSettings.role : "follower"}
-                  disabled={!!savingRole || !workspaceSettings}
-                  onChange={(e) => handleSetRole(e.target.value === "hub" ? "hub" : "follower")}
-                >
-                  <option value="follower">Follower (syncs from the hub)</option>
-                  <option value="hub">Hub (authoritative copy)</option>
-                </select>
-                {savingRole && <span className="text-sm text-text-secondary">Applying…</span>}
-              </div>
-              {roleMsg && <p className="text-sm text-green-500">{roleMsg}</p>}
+        {/* Role designation control — desktop only (a phone is always a follower). */}
+        {!mobile && mounted && (
+          <div className="flex flex-col gap-3 pt-1 border-t border-border-light">
+            <p className="text-text-secondary text-sm">
+              Choose which machine holds the authoritative copy. The <strong>hub</strong> is the
+              source of truth that followers sync against; a <strong>follower</strong> pulls from
+              the hub and pushes edits back. Promoting to hub issues a cluster id once.
+            </p>
+            <div className="flex items-center gap-3 flex-wrap">
+              <label className="text-sm font-medium shrink-0">Sync Role</label>
+              <select
+                className="px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary max-w-xs w-full"
+                value={workspaceSettings?.role && workspaceSettings.role !== "" ? workspaceSettings.role : "follower"}
+                disabled={!!savingRole || !workspaceSettings}
+                onChange={(e) => handleSetRole(e.target.value === "hub" ? "hub" : "follower")}
+              >
+                <option value="follower">Follower (syncs from the hub)</option>
+                <option value="hub">Hub (authoritative copy)</option>
+              </select>
+              {savingRole && <span className="text-sm text-text-secondary">Applying…</span>}
             </div>
-          )
+            {roleMsg && <p className="text-sm text-green-500">{roleMsg}</p>}
+          </div>
         )}
       </section>
 
