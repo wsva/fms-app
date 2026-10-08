@@ -1,0 +1,159 @@
+# Dictation dataset processing workflow — a workflow.yaml definition (see workflow.md).
+#
+# One illustrative *instance* of the generic framework: it takes raw audio, produces
+# subtitles / waveforms / the cue database, aligns and adjusts cue times, and validates
+# the result into a practice-ready dictation dataset.
+#
+# Every `action` names an existing MCP tool (mcp/datasets.rs, mcp/dictation.rs,
+# mcp/models.rs) or the matching Tauri command; the run is driven agent-in-the-loop:
+# `workflow_next` hands the agent the step, the agent calls the tool, then reports back
+# with `workflow_record`. Skipped steps satisfy their dependents by default, so the
+# optional align branches may both skip without stalling `validate`.
+
+name: process_dictation_dataset
+version: 1
+
+steps:
+  # ── Stage 0: STT model readiness ────────────────────────────────────────────
+  - id: ensure_model
+    description: >-
+      Check model_status; if the preferred model is not downloaded, model_download it,
+      then model_load it. transcribe steps below fail without a loaded model.
+    action: model_status
+    params:
+      then: ["model_download", "model_load"]
+    outputs:
+      - model_version
+    retry: { attempts: 2, backoff: "30s" }
+
+  # ── Stage 1: dataset skeleton ───────────────────────────────────────────────
+  - id: create_dataset
+    description: >-
+      Create the empty dictation dataset (dataset_import instead, if the directory
+      already exists with an info.json).
+    action: dataset_create
+    params:
+      name: "my_dictation"
+      description: "Dictation dataset processed by workflow"
+    outputs:
+      - dataset_uuid
+
+  - id: import_media
+    description: Import audio/video files from a source directory into the dataset.
+    action: dataset_import_media
+    depends_on:
+      - create_dataset
+    inputs:
+      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+    params:
+      source_dir: "C:/path/to/audio"   # EDIT: your media folder
+      link: false                      # true = symlink instead of copy
+    outputs:
+      - media_count
+
+  # ── Stage 2: two independent artifact branches off import_media ─────────────
+  - id: generate_subtitles
+    description: >-
+      STT-transcribe every media file into VTT subtitles (long-running; progress via
+      dataset progress events).
+    action: dataset_generate_subtitles
+    depends_on:
+      - ensure_model
+      - import_media
+    inputs:
+      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+    retry: { attempts: 2, backoff: "1m" }
+
+  - id: generate_waveforms
+    description: Generate waveform JSON for all media via Symphonia peak detection.
+    action: dataset_generate_waveforms
+    depends_on:
+      - import_media
+    inputs:
+      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+
+  # ── Stage 3: cue database ───────────────────────────────────────────────────
+  - id: generate_database
+    description: >-
+      Parse the VTT subtitles and write listen_media / listen_subtitle /
+      listen_subtitle_cue into data.sqlite3.
+    action: dataset_generate_database
+    depends_on:
+      - generate_subtitles
+    inputs:
+      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+
+  # ── Stage 4: optional text alignment (guarded by reference material) ────────
+  - id: detect_reference
+    description: >-
+      List dataset files to see whether book.txt and/or transcript/ exist; record
+      "true"/"false" in the outputs so the guards below can skip cleanly.
+    action: dataset_list_files
+    depends_on:
+      - generate_database
+    inputs:
+      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+    outputs:
+      - has_book
+      - has_transcript
+
+  - id: align_cues
+    description: Align cue text against book.txt with multi-pass anchor DP matching.
+    action: dataset_align_cues
+    depends_on:
+      - detect_reference
+    when: "${steps.detect_reference.outputs.has_book}"
+    inputs:
+      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+
+  - id: align_cues_transcript
+    description: Align cue text against per-subtitle files in transcript/ instead.
+    action: dataset_align_cues_transcript
+    depends_on:
+      - detect_reference
+    when: "${steps.detect_reference.outputs.has_transcript}"
+    inputs:
+      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+
+  # ── Stage 5: cue-time refinement (independent of text alignment) ────────────
+  - id: adjust_cue_times
+    description: >-
+      Snap cue boundaries to silence detected in the audio. mode=new writes adjusted
+      cues alongside the originals; re-run with force=true only deliberately.
+    action: dataset_adjust_cue_time
+    depends_on:
+      - generate_database
+    inputs:
+      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+    params:
+      mode: "new"
+      strategy: "noise_floor"          # or: dual_bound | peak_relative | otsu
+
+  # ── Stage 6: join & validate ────────────────────────────────────────────────
+  - id: validate
+    description: >-
+      Summarize the dataset (media / subtitle / cue counts) and spot-check cues of one
+      media with dataset_list_cues: every media has a subtitle, cue texts non-empty,
+      start_ms < end_ms and monotonically ordered per subtitle.
+    action: dataset_get_summary
+    depends_on:
+      - generate_waveforms
+      - align_cues
+      - align_cues_transcript
+      - adjust_cue_times
+    inputs:
+      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+    on_failure: stop
+
+  # ── Stage 7: done ───────────────────────────────────────────────────────────
+  - id: mark_ready
+    description: >-
+      Record the final counts and, optionally, adjust the description to note the
+      dataset is processed and practice-ready in the Dictation page.
+    action: dataset_update
+    depends_on:
+      - validate
+    inputs:
+      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+    params:
+      description: "Processed: subtitles + waveforms + cue DB generated and validated."
