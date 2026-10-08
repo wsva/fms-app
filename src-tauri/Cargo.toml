@@ -123,6 +123,14 @@ arboard = { version = "3", optional = true }
 [target.'cfg(not(windows))'.dependencies]
 xcap = { version = "0.9", optional = true }
 
+# Android: read SAF `content://` URIs picked by the file dialog through the
+# ContentResolver (the OS gives no plain filesystem path for them). Both crates
+# are already in the tree via Tauri's Android runtime, so this adds no new
+# offline-registry fetches; the JNI bridge lives in `ai/chat.rs`.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

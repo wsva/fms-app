@@ -508,13 +508,7 @@ pub(crate) fn send_pc_message(
 ) -> Result<ChatMessage, String> {
     let files: Vec<(PathBuf, String)> = file_paths
         .iter()
-        .map(|p| {
-            let name = Path::new(p)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "file".to_string());
-            (PathBuf::from(p), name)
-        })
+        .map(|p| (PathBuf::from(p), derive_attachment_name(p)))
         .collect();
     if text.trim().is_empty() && files.is_empty() {
         return Err("Nothing to send — pass text or at least one file.".into());
@@ -596,6 +590,12 @@ pub async fn chat_send_message(
     file_paths: Vec<String>,
     uuid: Option<String>,
 ) -> Result<ChatMessage, String> {
+    log::info!(
+        "[chat] chat_send_message: text_len={} files={} paths={:?}",
+        text.trim().chars().count(),
+        file_paths.len(),
+        file_paths,
+    );
     #[cfg(feature = "desktop")]
     if settings.role() == "hub" {
         return send_pc_message(&app, &settings, text, file_paths, uuid);
@@ -610,20 +610,17 @@ pub async fn chat_send_message(
     let uuid = uuid.unwrap_or_else(|| Uuid::new_v4().to_string());
     let files: Vec<(PathBuf, String)> = file_paths
         .iter()
-        .map(|p| {
-            let name = Path::new(p)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "file".to_string());
-            (PathBuf::from(p), name)
-        })
+        .map(|p| (PathBuf::from(p), derive_attachment_name(p)))
         .collect();
 
     // Stage in the durable outbox first, then release the connection before the
     // delivery await (no `!Send` `Connection` across `.await`).
     {
         let conn = open_mirror(&settings)?;
-        enqueue_outbox(&settings, &conn, &uuid, &text, &files)?;
+        if let Err(e) = enqueue_outbox(&settings, &conn, &uuid, &text, &files) {
+            log::error!("[chat] enqueue_outbox failed for {uuid}: {e}");
+            return Err(e);
+        }
     }
 
     match flush_one(&settings, &uuid).await {
@@ -633,7 +630,7 @@ pub async fn chat_send_message(
         // Offline / transient: the entry stays queued; echo its pending view so
         // it shows at the thread end, and a later poll flushes it.
         Err(e) => {
-            log::debug!("[chat] send queued offline ({uuid}): {e}");
+            log::warn!("[chat] send queued offline ({uuid}): {e}");
             let me = crate::sync::client::local_device_id(&settings).unwrap_or_default();
             let conn = open_mirror(&settings)?;
             if let Some(m) = pending_outbox(&conn, &me)?.into_iter().find(|m| m.uuid == uuid) {
@@ -997,11 +994,17 @@ fn enqueue_outbox(
         let filename = sanitize_filename(orig);
         let mime = guess_mime(&filename).to_string();
         let stored_name = format!("{att_uuid}--{filename}");
-        std::fs::copy(src, dir.join(&stored_name))
-            .map_err(|e| format!("cannot stage {filename}: {e}"))?;
-        let size = std::fs::metadata(dir.join(&stored_name))
-            .map(|m| m.len() as i64)
-            .unwrap_or(0);
+        let dest = dir.join(&stored_name);
+        if let Err(e) = stage_source(src, &dest) {
+            log::error!("[chat] cannot stage {orig}: {e}");
+            let _ = std::fs::remove_file(&dest);
+            // The outbox row was inserted above; drop it (and any files staged
+            // so far) so a failed send never lingers as a permanent "pending"
+            // ghost that a later poll keeps trying to flush.
+            drop_outbox(settings, conn, uuid);
+            return Err(format!("cannot stage {filename}: {e}"));
+        }
+        let size = std::fs::metadata(&dest).map(|m| m.len() as i64).unwrap_or(0);
         conn.execute(
             "INSERT OR REPLACE INTO chat_outbox_file(uuid, outbox_uuid, stored_name, filename, mime, size) \
              VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1009,6 +1012,132 @@ fn enqueue_outbox(
         )
         .map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// Stage one attachment source into `dest`. A plain filesystem path (desktop,
+/// or any already-materialized file) is copied directly; an Android SAF
+/// `content://` URI carries no readable path, so it is streamed through the OS
+/// ContentResolver into a real file (see [`copy_content_uri`]).
+fn stage_source(src: &Path, dest: &Path) -> Result<(), String> {
+    if src.is_file() {
+        return std::fs::copy(src, dest)
+            .map(|_| ())
+            .map_err(|e| format!("copy {}: {e}", src.display()));
+    }
+    let raw = src.to_string_lossy().into_owned();
+    #[cfg(target_os = "android")]
+    if raw.starts_with("content://") || raw.starts_with("android.resource://") {
+        return copy_content_uri(&raw, dest);
+    }
+    Err(format!("attachment not readable: {raw}"))
+}
+
+/// Derive a display filename from a picked attachment path. A SAF `content://`
+/// URI percent-encodes the real document tail (`…/primary%3ADCIM%2FCamera%2FIMG.jpg`),
+/// so it is percent-decoded and the last path segment taken; anything else falls
+/// back to the plain filesystem basename.
+fn derive_attachment_name(raw: &str) -> String {
+    if raw.starts_with("content://")
+        || raw.starts_with("android.resource://")
+        || raw.starts_with("file://")
+    {
+        let decoded = urlencoding::decode(raw)
+            .map(|c| c.into_owned())
+            .unwrap_or_else(|_| raw.to_string());
+        if let Some(last) = decoded.rsplit(['/', '\\']).next().map(str::trim) {
+            if !last.is_empty() {
+                return last.to_string();
+            }
+        }
+    }
+    Path::new(raw)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string())
+}
+
+/// Read a SAF `content://` URI into `dest` via the Android ContentResolver over
+/// JNI. `openFileDescriptor` yields a native fd copied with `std::io::copy`
+/// (streaming, so large files don't load into RAM); ownership is returned to
+/// Java with `mem::forget` so Rust never closes an fd the `ParcelFileDescriptor`
+/// still owns, and the descriptor is closed on the Java side afterwards.
+#[cfg(target_os = "android")]
+fn copy_content_uri(uri: &str, dest: &Path) -> Result<(), String> {
+    use jni::objects::{JObject, JValue};
+
+    let ctx = ndk_context::android_context();
+    let vm =
+        unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| format!("jni vm: {e}"))?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| format!("jni attach: {e}"))?;
+    let context = unsafe { JObject::from_raw(ctx.context().cast()) };
+    let err = |e: jni::errors::Error| e.to_string();
+
+    // android.net.Uri uri = android.net.Uri.parse(path)
+    let uri_str = env.new_string(uri).map_err(err)?;
+    let uri_obj: &JObject = &uri_str;
+    let uri_cls = env.find_class("android/net/Uri").map_err(err)?;
+    let juri = env
+        .call_static_method(
+            uri_cls,
+            "parse",
+            "(Ljava/lang/String;)Landroid/net/Uri;",
+            &[JValue::Object(uri_obj)],
+        )
+        .map_err(err)?
+        .l()
+        .map_err(err)?;
+
+    // ContentResolver r = context.getContentResolver()
+    let resolver = env
+        .call_method(
+            &context,
+            "getContentResolver",
+            "()Landroid/content/ContentResolver;",
+            &[],
+        )
+        .map_err(err)?
+        .l()
+        .map_err(err)?;
+
+    // ParcelFileDescriptor pfd = r.openFileDescriptor(uri, "r")
+    let mode = env.new_string("r").map_err(err)?;
+    let mode_obj: &JObject = &mode;
+    let pfd = env
+        .call_method(
+            &resolver,
+            "openFileDescriptor",
+            "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;",
+            &[JValue::Object(&juri), JValue::Object(mode_obj)],
+        )
+        .map_err(err)?
+        .l()
+        .map_err(err)?;
+    if pfd.is_null() {
+        return Err(format!("openFileDescriptor returned null for {uri}"));
+    }
+
+    // int fd = pfd.getFd() -> copy the fd straight into dest, then hand the fd
+    // back to Java (mem::forget) before closing the descriptor on the JVM side.
+    let fd = env
+        .call_method(&pfd, "getFd", "()I", &[])
+        .map_err(err)?
+        .i()
+        .map_err(err)?;
+    let copied = (|| -> Result<(), String> {
+        use std::os::unix::io::FromRawFd;
+        let mut src = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut out = std::fs::File::create(dest).map_err(|e| format!("create {dest:?}: {e}"))?;
+        std::io::copy(&mut src, &mut out).map_err(|e| format!("read {uri}: {e}"))?;
+        std::mem::forget(src);
+        Ok(())
+    })();
+
+    let _ = env.call_method(&pfd, "close", "()V", &[]);
+    copied?;
+    log::info!("[chat] staged content uri {uri} -> {dest:?}");
     Ok(())
 }
 
@@ -1130,6 +1259,23 @@ async fn flush_pending(settings: &SettingsState) {
             Ok(c) => c,
             Err(_) => return,
         };
+        // Drop ghost entries left by earlier failed sends: empty text and no
+        // staged attachment bytes. They can never flush, so clearing them stops
+        // the thread showing a permanent "pending" bubble.
+        let ghosts: Vec<String> = conn
+            .prepare(
+                "SELECT uuid FROM chat_outbox \
+                 WHERE trim(text) = '' AND uuid NOT IN (SELECT outbox_uuid FROM chat_outbox_file)",
+            )
+            .and_then(|mut s| {
+                s.query_map([], |r| r.get::<_, String>(0))
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            })
+            .unwrap_or_default();
+        for g in &ghosts {
+            log::info!("[chat] dropping stale empty outbox entry {g}");
+            drop_outbox(settings, &conn, g);
+        }
         let mut stmt = match conn.prepare("SELECT uuid FROM chat_outbox ORDER BY edit_time") {
             Ok(s) => s,
             Err(_) => return,

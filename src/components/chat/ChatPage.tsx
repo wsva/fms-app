@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
-import { logError } from "@/lib/logger";
+import { logError, logInfo } from "@/lib/logger";
 
 // ── Types (mirror src-tauri/src/chat.rs) ────────────────────────────────────
 
@@ -97,6 +97,21 @@ function humanSize(bytes: number): string {
 
 function isImage(att: ChatAttachment): boolean {
   return att.mime.startsWith("image/");
+}
+
+/** Human label for a picked attachment. Android SAF hands back a `content://`
+ *  URI whose tail is percent-encoded (`…/primary%3ADCIM%2FCamera%2FIMG.jpg`), so
+ *  decode it and keep the last path segment; real filesystem paths pass through. */
+function attachmentDisplayName(p: string): string {
+  if (p.startsWith("content://") || p.startsWith("file://")) {
+    try {
+      const last = decodeURIComponent(p).split(/[\\/]/).pop();
+      if (last) return last;
+    } catch {
+      /* malformed escapes — fall through to the raw basename */
+    }
+  }
+  return p.split(/[\\/]/).pop() || p;
 }
 
 function formatTime(iso: string): string {
@@ -284,6 +299,7 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
   // Attachment uuid -> save/download progress, fed by `chat-save-progress`.
   const [saves, setSaves] = useState<Record<string, SaveState>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
   // Pages stay mounted (display toggling), so the poll must know whether this
   // tab is actually on screen.
@@ -399,6 +415,32 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
       .catch(() => {});
   }, [mobile]);
 
+  // Android soft keyboard: the WebView often does not resize when the IME
+  // opens, so the composer would sit behind it. Track the visual viewport and
+  // pad the page bottom by the keyboard height, lifting the input forward into
+  // view while keeping the newest messages pinned above it.
+  useEffect(() => {
+    if (!isTauri() || !mobile) return;
+    const viewport = window.visualViewport;
+    const root = rootRef.current;
+    if (!viewport || !root) return;
+    const onViewportChange = () => {
+      const inset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+      root.style.paddingBottom = inset > 0 ? `${inset}px` : "";
+      if (inset > 0 && atBottomRef.current && scrollRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }
+    };
+    viewport.addEventListener("resize", onViewportChange);
+    viewport.addEventListener("scroll", onViewportChange);
+    onViewportChange();
+    return () => {
+      viewport.removeEventListener("resize", onViewportChange);
+      viewport.removeEventListener("scroll", onViewportChange);
+      root.style.paddingBottom = "";
+    };
+  }, [mobile]);
+
   const clearSave = useCallback((uuid: string) => {
     setSaves((prev) => {
       if (!(uuid in prev)) return prev;
@@ -441,13 +483,16 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
       const selected = await open({ multiple: true, title: "Attach files" });
       if (!selected) return;
       const paths = Array.isArray(selected) ? selected : [selected];
+      // Log the raw picker result: on Android SAF often returns `content://`
+      // URIs instead of filesystem paths, which the backend copy cannot read.
+      logInfo(`chat: picked ${paths.length} file(s): ${paths.join(" | ")}`, "chat");
       setPendingFiles((prev) => {
         const seen = new Set(prev.map((p) => p.path));
         return [
           ...prev,
           ...paths
             .filter((p): p is string => !!p && !seen.has(p))
-            .map((p) => ({ path: p, name: p.split(/[\\/]/).pop() || p })),
+            .map((p) => ({ path: p, name: attachmentDisplayName(p) })),
         ];
       });
     } catch (e) {
@@ -460,6 +505,12 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
       const id = uuid ?? crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
       const inflight: OutboxSend = { uuid: id, text, files };
       setOutbox((prev) => [...prev, inflight]);
+      logInfo(
+        `chat: sending ${id} text_len=${text.trim().length} files=${files.length} [${files
+          .map((f) => f.path)
+          .join(" | ")}]`,
+        "chat",
+      );
       try {
         const msg = await invoke<ChatMessage>("chat_send_message", {
           text,
@@ -469,6 +520,7 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
         mergeMessages([msg]);
         setFailed((prev) => prev.filter((f) => f.uuid !== id));
       } catch (e) {
+        logError(`chat: send ${id} failed: ${String(e)}`, "chat");
         setFailed((prev) => [...prev.filter((f) => f.uuid !== id), { uuid: id, text, files, error: String(e) }]);
       } finally {
         setOutbox((prev) => prev.filter((o) => o.uuid !== id));
@@ -563,7 +615,7 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
   }
 
   return (
-    <div className="flex flex-col w-full h-full min-h-0 bg-bg-base">
+    <div ref={rootRef} className="flex flex-col w-full h-full min-h-0 bg-bg-base">
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border-default shrink-0">
         <h1 className="text-[1.1em] font-bold text-text-primary">Device Chat</h1>
