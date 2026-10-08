@@ -24,7 +24,7 @@ import {
   Star,
   FolderKanban,
   Type,
-  RefreshCw,
+  ArrowUpDown,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 
@@ -68,7 +68,7 @@ const navGroups: NavGroup[] = [
     tabs: [
       { id: "workspaces", label: "Workspaces", icon: FolderKanban },
       { id: "studio", label: "Dataset Studio", icon: SlidersHorizontal },
-      { id: "datasets-sync", label: "Datasets Sync", icon: RefreshCw },
+      { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown },
       { id: "simple-words", label: "Simple Words", icon: Type },
       { id: "wiki", label: "Wiki", icon: BookOpenText },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },

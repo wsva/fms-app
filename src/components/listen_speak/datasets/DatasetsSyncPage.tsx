@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
-import { Download, RefreshCw, Search, ChevronDown, Link2, KeyRound, CloudOff, Trash2, Unplug, Loader2, ServerCog } from "lucide-react";
+import { Download, RefreshCw, ArrowUpDown, Search, ChevronDown, Link2, KeyRound, CloudOff, Trash2, Unplug, Loader2, ServerCog } from "lucide-react";
 import { logInfo, logError } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
@@ -396,7 +396,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   // local dataset, so it is only ever offered deliberately, never automatic.
   async function handleAdopt(uuid: string, name: string) {
     if (busyUuid) return;
-    if (!confirm(`Adopt the hub's copy of "${name}"? This overwrites the local dataset.`)) {
+    if (!confirm(`Download the hub's copy of "${name}"? This overwrites the local dataset.`)) {
       return;
     }
     setBusyUuid(uuid);
@@ -407,10 +407,10 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
         { uuid }
       );
       setMessage(
-        res.updated ? `Adopted hub copy (${res.file_count} file(s)).` : "Already up to date."
+        res.updated ? `Downloaded hub copy (${res.file_count} file(s)).` : "Already up to date."
       );
     } catch (e) {
-      setMessage(`Adopt failed: ${String(e)}`);
+      setMessage(`Download failed: ${String(e)}`);
     } finally {
       setBusyUuid("");
       setProgress((prev) => {
@@ -512,24 +512,29 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
               {countLabel(ds)} · {syncedLine}
             </span>
           </div>
-          {meta && (
-            <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${meta.cls}`}>
-              {meta.label}
-            </span>
-          )}
-          {/* "Adopt hub copy" overwrites the local dataset — shown only when a
-              local copy is absent or awaiting a resync, never silently applied. */}
-          {(state === "not_downloaded" || state === "needs_resync") && (
-            <button
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
-              onClick={() => handleAdopt(ds.uuid, ds.name)}
-              disabled={!!busyUuid}
-              title="Pull the hub's full copy (overwrites local)"
-            >
-              <Download size={14} />
-              {busyUuid === ds.uuid ? "Adopting…" : "Adopt hub copy"}
-            </button>
-          )}
+          {/* Status + adopt action. On a narrow (phone) screen the label and the
+              "Adopt hub copy" button don't fit beside the name, so stack them
+              vertically; widen back to a single row from `sm:` up. */}
+          <div className="flex flex-col items-end gap-2 shrink-0 sm:flex-row sm:items-center">
+            {meta && (
+              <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${meta.cls}`}>
+                {meta.label}
+              </span>
+            )}
+            {/* "Adopt hub copy" overwrites the local dataset — shown only when a
+                local copy is absent or awaiting a resync, never silently applied. */}
+            {(state === "not_downloaded" || state === "needs_resync") && (
+              <button
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
+                onClick={() => handleAdopt(ds.uuid, ds.name)}
+                disabled={!!busyUuid}
+                title="Pull the hub's full copy (overwrites local)"
+              >
+                <Download size={14} />
+                {busyUuid === ds.uuid ? "Downloading…" : "Download"}
+              </button>
+            )}
+          </div>
         </div>
 
         {detail?.hub_ahead && state === "downloaded" && (
@@ -589,7 +594,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
               disabled={syncing || !pcUrl}
               title="Run one incremental sync round (push + pull)"
             >
-              {syncing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+              {syncing ? <Loader2 size={14} className="animate-spin" /> : <ArrowUpDown size={14} />}
               {syncing ? "Syncing…" : "Sync now"}
             </button>
           )}

@@ -12,7 +12,7 @@ import {
   Settings,
   FileText,
   Box,
-  RefreshCw,
+  ArrowUpDown,
   User,
   LogOut,
   Star,
@@ -40,7 +40,7 @@ const PRIMARY_TABS: NavItem[] = [
 const OVERFLOW_TABS: NavItem[] = [
   { id: "read-book", label: "Read a Book", icon: BookOpen },
   { id: "read-aloud", label: "Read Aloud", icon: MicGlyph },
-  { id: "datasets-sync", label: "Datasets Sync", icon: RefreshCw },
+  { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown },
   { id: "wiki", label: "Wiki", icon: BookOpenText },
   { id: "chat", label: "Cross-Device Chat", icon: MessagesSquare },
   { id: "workspaces", label: "Workspaces", icon: FolderKanban },
