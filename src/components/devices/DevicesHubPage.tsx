@@ -26,7 +26,7 @@ interface GlobalSettings {
   onboarding_completed: boolean;
 }
 
-// Workspace-scoped role + cluster identity (docs/my_sync_design.md §3.1). We
+// Workspace-scoped role + cluster identity (docs/design/sync.md §3.1). We
 // only read/display it here; the role is written via `settings_set_role`.
 interface WorkspaceSettings {
   role: string;

@@ -62,7 +62,7 @@ interface WorkspaceSettings {
   recordings_dir: string;
   datasets_dir: string;
   books_dir: string;
-  // Sync role + cluster identity (docs/my_sync_design.md §3.1). Workspace-
+  // Sync role + cluster identity (docs/design/sync.md §3.1). Workspace-
   // scoped: `role` is "hub"|"follower" (empty ⇒ follower); `cluster_id` is a
   // UUID issued once when a workspace is first designated hub.
   role: string;

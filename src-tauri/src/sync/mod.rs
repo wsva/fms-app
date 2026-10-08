@@ -1,7 +1,7 @@
 //! Cross-device sync: the PC-side server stack and the client that pulls from it.
 //!
 //! Both halves speak one wire protocol — see [`PROTOCOL_VERSION`] and
-//! `docs/my_sync_design.md`. The split:
+//! `docs/design/sync.md`. The split:
 //!
 //! * [`server`] — the axum HTTP service (desktop only) that hosts the REST API,
 //!   the MCP endpoint, and the discovery beacon; [`rest`] implements the
@@ -29,7 +29,7 @@ pub(crate) mod discover;
 /// Wire protocol version for the hub<->follower sync REST API and the request
 /// signature format. Carried by `/status`, the discovery beacon, and every
 /// signed request header, so a follower can refuse `/changes`, `/file`, and the
-/// chat `after_id` path against a hub that predates them (see docs/my_sync_design.md
+/// chat `after_id` path against a hub that predates them (see docs/design/sync.md
 /// §3.1, §7). Bump only on backwards-incompatible protocol changes.
 ///
 /// * `1` (Phase 1): role/cluster/protocol headers + `/status` fields; request

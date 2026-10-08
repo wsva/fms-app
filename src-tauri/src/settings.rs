@@ -416,7 +416,7 @@ impl SettingsState {
     }
 
     /// This workspace's cluster id (empty until designated hub or adopted from
-    /// a hub on first successful signed contact — see docs/my_sync_design.md §7).
+    /// a hub on first successful signed contact — see docs/design/sync.md §7).
     pub fn cluster_id(&self) -> String {
         self.settings.lock().unwrap().cluster_id.clone()
     }
@@ -728,7 +728,7 @@ pub async fn settings_set_workspace(
 }
 
 // ---------------------------------------------------------------------------
-// Sync role + cluster designation (docs/my_sync_design.md §3.1)
+// Sync role + cluster designation (docs/design/sync.md §3.1)
 // ---------------------------------------------------------------------------
 
 /// Designate this workspace's sync role. `"hub"` makes it the authority copy:

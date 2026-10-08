@@ -1,4 +1,4 @@
-//! Hub-side change machinery (`docs/my_sync_design.md` §3.2, §3.6).
+//! Hub-side change machinery (`docs/design/sync.md` §3.2, §3.6).
 //!
 //! The hub records every dataset-row mutation in an append-only `sync_log`
 //! living in the **app DB** (`<workspace>/app.sqlite3`), so followers can pull

@@ -481,7 +481,7 @@ async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) ->
             // Also capture the declared role/cluster/protocol headers for the
             // status surface (§3.1). A cluster mismatch is logged, not yet
             // hard-rejected — the client enforces its own refusal + TOFU
-            // adoption (docs/my_sync_design.md §7).
+            // adoption (docs/design/sync.md §7).
             let peer_role = get_header("x-fms-role");
             let peer_cluster = get_header("x-fms-cluster");
             let settings = st.app.state::<SettingsState>();
