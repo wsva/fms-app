@@ -6,15 +6,17 @@ import { ask, message } from "@tauri-apps/plugin-dialog";
 import {
   RefreshCw, ArrowLeft, ArrowRight, Cloud, Download, Pencil, Eye,
   Folder, FileText, BookMarked, FilePlus, FolderPlus, Plus, Trash2,
-  Save, Maximize2, Minimize2, CircleHelp,
+  Save, Maximize2, Minimize2, CircleHelp, Search,
 } from "lucide-react";
 import WikiSearch from "./WikiSearch";
 import MdEditor from "./MdEditor";
+import { insertAround, insertAtLineStart } from "./mdEditorInserts";
 import MarkdownViewer from "./markdown/markdown";
 import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
 import {
   WikiDatasetSummary, HubWikiList, Selection, WikiSource, WikiFileEntry,
+  selectionKey,
 } from "@/lib/wiki/types";
 
 function isTauri(): boolean {
@@ -39,6 +41,48 @@ function joinRel(dirRel: string, name: string): string {
 interface PromptState {
   title: string;
   submit: (name: string) => Promise<void>;
+}
+
+// Symbol / character sets backing the wiki page's Tools sub-toolbar row. These
+// used to live inside MdEditor; pulling them up here lets the row sit alongside
+// the other sub-toolbars and call the shared textarea-insert helpers directly.
+const char1 = ["#", "⬌", "■", "=", "≈", "➤", "🡆"];
+const char1Tips = ["heading", "left-right arrow", "square", "equals", "approx.", "right arrow", "right arrow"];
+
+const char2 = ["ä", "Ä", "ö", "Ö", "ü", "Ü", "ß", "é", "€"];
+
+const char3 = [
+  { label: "B", start: "**", end: "**", tip: "bold (Ctrl+B)" },
+  { label: "„“", start: "„", end: "“", tip: "German double quotes" },
+  { label: "‚‘", start: "‚", end: "‘", tip: "German single quotes" },
+  { label: "`c`", start: "`", end: "`", tip: "inline code (Ctrl+`)" },
+  { label: "C", start: "`````\n", end: "\n`````", tip: "code block" },
+];
+
+const char4 = [
+  { label: "I", start: "*", end: "*", tip: "italic (Ctrl+I)" },
+  { label: "~~", start: "~~", end: "~~", tip: "strikethrough" },
+  { label: "🔗", start: "[", end: "](url)", tip: "link" },
+  { label: "---", start: "\n---\n", end: "", tip: "horizontal rule" },
+];
+
+// One step in the Back/Forward trail. Files, directories and the top-level
+// datasets list are all tracked so navigation buttons survive folder hops.
+type NavEntry =
+  | { kind: "file"; selection: Selection }
+  | { kind: "directory"; uuid: string; rel: string }
+  | { kind: "datasets" };
+
+function sameNavEntry(a: NavEntry, b: NavEntry): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "datasets") return true;
+  if (a.kind === "directory" && b.kind === "directory") {
+    return a.uuid === b.uuid && a.rel === b.rel;
+  }
+  if (a.kind === "file" && b.kind === "file") {
+    return selectionKey(a.selection.source) === selectionKey(b.selection.source);
+  }
+  return false;
 }
 
 export default function WikiPage() {
@@ -72,6 +116,11 @@ export default function WikiPage() {
   const [promptValue, setPromptValue] = useState("");
   const [promptBusy, setPromptBusy] = useState(false);
 
+  // Search-row visibility. The sub-toolbar shows a compact search icon that
+  // toggles a second row hosting the WikiSearch input and the Index button —
+  // folding the old top navigation bar into the same vertical stack.
+  const [searchOpen, setSearchOpen] = useState(false);
+
   // Dual-mode content: rendered HTML view vs. the ported markdown editor.
   // Editing is only ever offered for a locally stored wiki dataset file.
   const [editing, setEditing] = useState(false);
@@ -86,6 +135,15 @@ export default function WikiPage() {
   const [mdFullscreen, setMdFullscreen] = useState(false);
   const [mdSpellCheck, setMdSpellCheck] = useState(false);
   const [mdShortcutsOpen, setMdShortcutsOpen] = useState(false);
+
+  // WikiPage owns the ref so the Tools sub-toolbar can call the shared insert
+  // helpers directly on the textarea, without routing through MdEditor.
+  const mdTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const runInsert = (fn: (ta: HTMLTextAreaElement) => void) => {
+    const ta = mdTextareaRef.current;
+    if (ta) fn(ta);
+  };
 
   // Every exit path funnels through `editing === false`, so clearing the five
   // toggles there keeps a subsequent Edit click starting from a clean state.
@@ -106,15 +164,33 @@ export default function WikiPage() {
     setMobile(isMobileApp());
   }, []);
 
-  // Navigation history (now over typed selections, not just paths).
-  const [history, setHistory] = useState<Selection[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-  const historyIndexRef = useRef(-1);
+  // Navigation history over files, directories and the top-level datasets view.
+  // Seeded with a datasets entry so Back from the first folder returns cleanly
+  // and historyIndex starts at 0 (Back button disabled at the trail's head).
+  const [history, setHistory] = useState<NavEntry[]>([{ kind: "datasets" }]);
+  const [historyIndex, setHistoryIndex] = useState(0);
+  const historyIndexRef = useRef(0);
   const isHistoryNavRef = useRef(false);
 
   useEffect(() => {
     historyIndexRef.current = historyIndex;
   }, [historyIndex]);
+
+  // Append a step to the trail, truncating any forward branch and de-duplicating
+  // against the current entry so breadcrumb re-clicks don't spam history.
+  const pushNavHistory = useCallback((entry: NavEntry) => {
+    setHistory((prev) => {
+      const currentIndex = historyIndexRef.current;
+      const last = prev[currentIndex];
+      if (last && sameNavEntry(last, entry)) return prev;
+      const newHistory = prev.slice(0, currentIndex + 1);
+      newHistory.push(entry);
+      const newIndex = newHistory.length - 1;
+      setHistoryIndex(newIndex);
+      historyIndexRef.current = newIndex;
+      return newHistory;
+    });
+  }, []);
 
   // Load locally stored wiki datasets (downloaded or hub-owned). Cross-platform.
   const loadLocalDatasets = useCallback(async () => {
@@ -166,15 +242,7 @@ export default function WikiPage() {
       setFileContent(content);
       setSelection(sel);
       if (pushHistory && !isHistoryNavRef.current) {
-        setHistory((prev) => {
-          const currentIndex = historyIndexRef.current;
-          const newHistory = prev.slice(0, currentIndex + 1);
-          newHistory.push(sel);
-          const newIndex = newHistory.length - 1;
-          setHistoryIndex(newIndex);
-          historyIndexRef.current = newIndex;
-          return newHistory;
-        });
+        pushNavHistory({ kind: "file", selection: sel });
       }
     } catch (err) {
       console.error("Failed to read file:", err);
@@ -184,30 +252,44 @@ export default function WikiPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [readSource]);
+  }, [readSource, pushNavHistory]);
 
   const handleFileSelect = useCallback((sel: Selection) => {
     loadSelection(sel, true);
   }, [loadSelection]);
 
-  const restoreFromHistory = useCallback((sel: Selection) => {
+  const restoreFromHistory = useCallback((entry: NavEntry) => {
     isHistoryNavRef.current = true;
-    loadSelection(sel, false);
+    if (entry.kind === "file") {
+      loadSelection(entry.selection, false);
+    } else {
+      // Directory / datasets-list entries reset the content pane without
+      // touching history (the trail is already positioned by the caller).
+      if (entry.kind === "directory") {
+        setDatasetBrowse({ uuid: entry.uuid, rel: entry.rel });
+      } else {
+        setDatasetBrowse(null);
+      }
+      setSelection(null);
+      setFileContent("");
+      setEditing(false);
+      setError(null);
+    }
     isHistoryNavRef.current = false;
   }, [loadSelection]);
 
   const goBack = useCallback(() => {
     if (historyIndex <= 0) return;
-    const sel = history[historyIndex - 1];
+    const entry = history[historyIndex - 1];
     setHistoryIndex(historyIndex - 1);
-    restoreFromHistory(sel);
+    restoreFromHistory(entry);
   }, [history, historyIndex, restoreFromHistory]);
 
   const goForward = useCallback(() => {
     if (historyIndex >= history.length - 1) return;
-    const sel = history[historyIndex + 1];
+    const entry = history[historyIndex + 1];
     setHistoryIndex(historyIndex + 1);
-    restoreFromHistory(sel);
+    restoreFromHistory(entry);
   }, [history, historyIndex, restoreFromHistory]);
 
   // Keyboard shortcuts: Alt+Left = back, Alt+Right = forward. Suppressed while
@@ -419,12 +501,14 @@ export default function WikiPage() {
   const goDatasets = useCallback(() => {
     setDatasetBrowse(null);
     clearSelection();
-  }, [clearSelection]);
+    if (!isHistoryNavRef.current) pushNavHistory({ kind: "datasets" });
+  }, [clearSelection, pushNavHistory]);
 
   const goToDatasetDir = useCallback((uuid: string, rel: string) => {
     setDatasetBrowse({ uuid, rel });
     clearSelection();
-  }, [clearSelection]);
+    if (!isHistoryNavRef.current) pushNavHistory({ kind: "directory", uuid, rel });
+  }, [clearSelection, pushNavHistory]);
 
   const openBrowseFile = useCallback((entry: WikiFileEntry) => {
     if (!datasetBrowse) return;
@@ -581,61 +665,6 @@ export default function WikiPage() {
   return (
     <div className="flex h-full w-full bg-bg-body min-w-0">
       <div className="flex-1 flex flex-col min-h-0 min-w-0">
-        {/* Top bar with navigation, search and controls */}
-        <div className="flex items-center gap-3 px-4 py-2 border-b border-border-default bg-bg-card">
-          <div className="flex items-center gap-1">
-            <button
-              onClick={goBack}
-              disabled={historyIndex <= 0 || editing}
-              className="p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors disabled:opacity-30 disabled:cursor-default"
-              title="Back (Alt+Left)"
-            >
-              <ArrowLeft size={16} />
-            </button>
-            <button
-              onClick={goForward}
-              disabled={historyIndex >= history.length - 1 || editing}
-              className="p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors disabled:opacity-30 disabled:cursor-default"
-              title="Forward (Alt+Right)"
-            >
-              <ArrowRight size={16} />
-            </button>
-          </div>
-          <div className="flex-1 max-w-md">
-            <WikiSearch mode={searchMode} onResultClick={handleSearchResult} />
-          </div>
-
-          {/* Hub browse toggle — read-only view of the paired hub's wiki. Hidden
-              for the hub itself (it already sees everything locally). */}
-          {!isHub && (
-            <button
-              onClick={toggleHubMode}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors ${
-                hubMode
-                  ? "bg-accent text-white hover:bg-accent/90"
-                  : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
-              }`}
-              title={hubMode ? "Leave hub browse" : "Browse the hub's wiki (read-only)"}
-            >
-              <Cloud size={14} />
-              <span>{hubMode ? "Local" : "Hub"}</span>
-            </button>
-          )}
-
-          {/* Indexing is a local operation; hidden in hub read-only mode. */}
-          {!mobile && !hubMode && (
-            <button
-              onClick={handleIndexWiki}
-              disabled={isIndexing || !indexableDatasetUuid}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors disabled:opacity-50"
-              title="Re-index this dataset's wiki files for search"
-            >
-              <RefreshCw size={14} className={isIndexing ? "animate-spin" : ""} />
-              <span>{isIndexing ? "Indexing..." : "Index"}</span>
-            </button>
-          )}
-        </div>
-
         {/* Hub read-only banner */}
         {hubMode && (
           <div className="px-4 py-1.5 text-xs bg-accent/10 text-accent border-b border-border-default flex items-center gap-2">
@@ -702,9 +731,59 @@ export default function WikiPage() {
             )}
 
             {/* Shared sub-toolbar: always shown under the breadcrumb, whether
-                viewing the dataset list, a dataset's directory, or a file. */}
+                viewing the dataset list, a dataset's directory, or a file.
+                Left side carries the old top-bar controls (Back / Forward /
+                Search toggle / Hub browse); right side keeps the contextual
+                file/dataset actions. */}
             <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card">
-              <div className="text-xs text-text-tertiary truncate flex-1">{toolbarLabel}</div>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  onClick={goBack}
+                  disabled={historyIndex <= 0 || editing}
+                  className="p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors disabled:opacity-30 disabled:cursor-default"
+                  title="Back (Alt+Left)"
+                >
+                  <ArrowLeft size={16} />
+                </button>
+                <button
+                  onClick={goForward}
+                  disabled={historyIndex >= history.length - 1 || editing}
+                  className="p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors disabled:opacity-30 disabled:cursor-default"
+                  title="Forward (Alt+Right)"
+                >
+                  <ArrowRight size={16} />
+                </button>
+                <button
+                  onClick={() => setSearchOpen((v) => !v)}
+                  className={`p-1.5 rounded-md transition-colors ${
+                    searchOpen
+                      ? "bg-bg-hover text-text-primary"
+                      : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
+                  }`}
+                  title={searchOpen ? "Hide search" : "Show search"}
+                >
+                  <Search size={16} />
+                </button>
+              </div>
+
+              {/* Hub browse toggle — read-only view of the paired hub's wiki.
+                  Hidden for the hub itself (it already sees everything locally). */}
+              {!isHub && (
+                <button
+                  onClick={toggleHubMode}
+                  className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors shrink-0 ${
+                    hubMode
+                      ? "bg-accent text-white hover:bg-accent/90"
+                      : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
+                  }`}
+                  title={hubMode ? "Leave hub browse" : "Browse the hub's wiki (read-only)"}
+                >
+                  <Cloud size={14} />
+                  <span>{hubMode ? "Local" : "Hub"}</span>
+                </button>
+              )}
+
+              <div className="text-xs text-text-tertiary truncate flex-1 min-w-0">{toolbarLabel}</div>
 
               {viewMode === "file" && hubSrc && (
                 <button
@@ -880,6 +959,103 @@ export default function WikiPage() {
               )}
             </div>
 
+            {/* Tools row: revealed by the sub-toolbar's Tools button while
+                editing. Mirrors the search-row pattern — a compact strip
+                hosting the Symbols / German / Format / Lists button groups
+                that operate directly on MdEditor's textarea via the shared
+                insert helpers, so this panel now sits alongside the other
+                sub-toolbars instead of squeezing in above the textarea. */}
+            {editing && mdToolsOpen && (
+              <div className="shrink-0 flex flex-wrap gap-x-6 gap-y-3 px-4 py-2 border-b border-border-default bg-bg-card">
+                <div>
+                  <div className="text-xs text-text-tertiary uppercase tracking-wide mb-1">Symbols</div>
+                  <div className="flex flex-wrap gap-1">
+                    {char1.map((v, i) => (
+                      <button
+                        key={`c1-${i}`}
+                        onClick={() => runInsert((ta) => insertAround(ta, v, ""))}
+                        className="px-2 py-1 text-base rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
+                        title={char1Tips[i]}
+                      >
+                        {v}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-text-tertiary uppercase tracking-wide mb-1">German</div>
+                  <div className="flex flex-wrap gap-1">
+                    {char2.map((v, i) => (
+                      <button
+                        key={`c2-${i}`}
+                        onClick={() => runInsert((ta) => insertAround(ta, v, ""))}
+                        className="px-2 py-1 text-base rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
+                        title={v}
+                      >
+                        {v}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-text-tertiary uppercase tracking-wide mb-1">Format</div>
+                  <div className="flex flex-wrap gap-1">
+                    {[...char3, ...char4].map((v, i) => (
+                      <button
+                        key={`c34-${i}`}
+                        onClick={() => runInsert((ta) => insertAround(ta, v.start, v.end))}
+                        className="px-2 py-1 text-base rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
+                        title={v.tip}
+                      >
+                        {v.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-text-tertiary uppercase tracking-wide mb-1">Lists</div>
+                  <div className="flex flex-wrap gap-1">
+                    <button
+                      onClick={() => runInsert((ta) => insertAtLineStart(ta, "- "))}
+                      className="px-2 py-1 text-sm font-mono rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
+                      title="unordered list"
+                    >
+                      -
+                    </button>
+                    <button
+                      onClick={() => runInsert((ta) => insertAtLineStart(ta, "1. "))}
+                      className="px-2 py-1 text-sm font-mono rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
+                      title="ordered list"
+                    >
+                      1.
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Search row: revealed by the sub-toolbar's search icon. Hosts the
+                WikiSearch input and the Index button (a local operation, so
+                hidden on mobile and in hub read-only mode). */}
+            {searchOpen && (
+              <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card">
+                <div className="flex-1 min-w-0 max-w-xl">
+                  <WikiSearch mode={searchMode} onResultClick={handleSearchResult} />
+                </div>
+                {!mobile && !hubMode && (
+                  <button
+                    onClick={handleIndexWiki}
+                    disabled={isIndexing || !indexableDatasetUuid}
+                    className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors disabled:opacity-50 shrink-0"
+                    title="Re-index this dataset's wiki files for search"
+                  >
+                    <RefreshCw size={14} className={isIndexing ? "animate-spin" : ""} />
+                    <span>{isIndexing ? "Indexing..." : "Index"}</span>
+                  </button>
+                )}
+              </div>
+            )}
+
             {/* Inline name prompt backing the New dataset/file/folder actions */}
             {prompt && (
               <div className="shrink-0 px-4 py-2 border-b border-border-default bg-bg-body space-y-2">
@@ -948,9 +1124,9 @@ export default function WikiPage() {
                     {editing ? (
                       <div className={inEditorFullscreen ? "flex-1 flex flex-col min-h-0 px-4 py-3" : "px-4 py-3"}>
                         <MdEditor
+                          ref={mdTextareaRef}
                           value={editContent}
                           onChange={setEditContent}
-                          toolsOpen={mdToolsOpen}
                           preview={mdPreview}
                           fullscreen={mdFullscreen}
                           spellCheck={mdSpellCheck}

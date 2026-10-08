@@ -1,44 +1,23 @@
 "use client";
 
-// Body of the wiki markdown editor. All header chrome (Save / Tools / Preview /
-// Fullscreen / Spell-check / Help toggles) now lives on the wiki page's
-// sub-toolbar, so this component is fully controlled for those five flags and
-// exposes only the textarea, the inline Tools + Shortcuts panels, the Markdown
-// preview, and the word/char counter.
+// Body of the wiki markdown editor. Header chrome (Save / Preview / Fullscreen /
+// Spell-check / Help toggles) and the Symbols/German/Format/Lists Tools panel
+// both live on the wiki page's sub-toolbars now, so this component is
+// controlled for those flags and exposes only the textarea, the Shortcuts
+// panel, the Markdown preview, and the word/char counter.
 
 import { forwardRef, useCallback, useEffect, useRef } from "react";
-import { Button, Tooltip } from "@heroui/react";
 import MarkdownViewer from "./markdown/markdown";
+import { insertAround, insertAtLineStart, replaceRange } from "./mdEditorInserts";
 
 type Props = {
     value: string;
     onChange: (value: string) => void;
     preview: boolean;
-    toolsOpen: boolean;
     fullscreen: boolean;
     spellCheck: boolean;
     shortcutsOpen: boolean;
 };
-
-const char1 = ["#", "⬌", "■", "=", "≈", "➤", "🡆"];
-const char1Tips = ["heading", "left-right arrow", "square", "equals", "approx.", "right arrow", "right arrow"];
-
-const char2 = ["ä", "Ä", "ö", "Ö", "ü", "Ü", "ß", "é", "€"];
-
-const char3 = [
-    { label: "B", start: "**", end: "**", tip: "bold (Ctrl+B)" },
-    { label: "„“", start: "„", end: "“", tip: "German double quotes" },
-    { label: "‚‘", start: "‚", end: "‘", tip: "German single quotes" },
-    { label: "`c`", start: "`", end: "`", tip: "inline code (Ctrl+`)" },
-    { label: "C", start: "`````\n", end: "\n`````", tip: "code block" },
-];
-
-const char4 = [
-    { label: "I", start: "*", end: "*", tip: "italic (Ctrl+I)" },
-    { label: "~~", start: "~~", end: "~~", tip: "strikethrough" },
-    { label: "🔗", start: "[", end: "](url)", tip: "link" },
-    { label: "---", start: "\n---\n", end: "", tip: "horizontal rule" },
-];
 
 const shortcutList = [
     ["Ctrl+B", "bold"],
@@ -49,7 +28,7 @@ const shortcutList = [
     ["Enter", "continue list"],
 ];
 
-const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, preview, toolsOpen, fullscreen, spellCheck, shortcutsOpen }, forwardedRef) => {
+const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, preview, fullscreen, spellCheck, shortcutsOpen }, forwardedRef) => {
     const innerRef = useRef<HTMLTextAreaElement | null>(null);
 
     const wordCount = value.trim() ? value.trim().split(/\s+/).length : 0;
@@ -71,41 +50,6 @@ const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, prev
             autoResize(innerRef.current);
         }
     }, [value, autoResize]);
-
-    const replaceRange = (textarea: HTMLTextAreaElement, text: string, from?: number, to?: number) => {
-        const s = from ?? textarea.selectionStart;
-        const e = to ?? textarea.selectionEnd;
-        textarea.setRangeText(text, s, e, "end");
-        // setRangeText does not fire `input`; dispatch it so React's controlled
-        // value updates through onChange instead of being clobbered on rerender.
-        textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    };
-
-    const insertToAnswer = (startText: string, endText: string) => {
-        const textarea = innerRef.current;
-        if (!textarea) return;
-        textarea.focus();
-        const start = textarea.selectionStart;
-        const end = textarea.selectionEnd;
-        const selected = textarea.value.slice(start, end);
-        replaceRange(textarea, startText + selected + endText, start, end);
-        setTimeout(() => {
-            if (start === end) {
-                textarea.setSelectionRange(start + startText.length, start + startText.length);
-            } else {
-                textarea.setSelectionRange(start, start + startText.length + selected.length + endText.length);
-            }
-        }, 0);
-    };
-
-    const insertAtLineStart = (prefix: string) => {
-        const textarea = innerRef.current;
-        if (!textarea) return;
-        textarea.focus();
-        const start = textarea.selectionStart;
-        const lineStart = textarea.value.lastIndexOf("\n", start - 1) + 1;
-        replaceRange(textarea, prefix, lineStart, lineStart);
-    };
 
     const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
         const html = e.clipboardData.getData("text/html");
@@ -165,82 +109,19 @@ const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, prev
         }
 
         if (ctrl) {
-            if (e.key === "b") { e.preventDefault(); insertToAnswer("**", "**"); }
-            else if (e.key === "i") { e.preventDefault(); insertToAnswer("*", "*"); }
-            else if (e.key === "`") { e.preventDefault(); insertToAnswer("`", "`"); }
+            const ta = innerRef.current;
+            if (!ta) return;
+            if (e.key === "b") { e.preventDefault(); insertAround(ta, "**", "**"); }
+            else if (e.key === "i") { e.preventDefault(); insertAround(ta, "*", "*"); }
+            else if (e.key === "`") { e.preventDefault(); insertAround(ta, "`", "`"); }
         }
     };
-
-    const toolbar = (
-        <div className="flex flex-wrap gap-x-6 gap-y-3 px-1 py-2 border-b border-border-default">
-            <div>
-                <div className="text-xs text-text-tertiary uppercase tracking-wide mb-1">Symbols</div>
-                <div className="flex flex-wrap gap-1">
-                    {char1.map((v, i) => (
-                        <Tooltip key={`c1-${i}`}>
-                            <Tooltip.Trigger>
-                                <Button size="sm" variant="ghost" isIconOnly className="text-xl" onPress={() => insertToAnswer(v, "")}>{v}</Button>
-                            </Tooltip.Trigger>
-                            <Tooltip.Content>{char1Tips[i]}</Tooltip.Content>
-                        </Tooltip>
-                    ))}
-                </div>
-            </div>
-            <div>
-                <div className="text-xs text-text-tertiary uppercase tracking-wide mb-1">German</div>
-                <div className="flex flex-wrap gap-1">
-                    {char2.map((v, i) => (
-                        <Tooltip key={`c2-${i}`}>
-                            <Tooltip.Trigger>
-                                <Button size="sm" variant="ghost" isIconOnly className="text-xl" onPress={() => insertToAnswer(v, "")}>{v}</Button>
-                            </Tooltip.Trigger>
-                            <Tooltip.Content>{v}</Tooltip.Content>
-                        </Tooltip>
-                    ))}
-                </div>
-            </div>
-            <div>
-                <div className="text-xs text-text-tertiary uppercase tracking-wide mb-1">Format</div>
-                <div className="flex flex-wrap gap-1">
-                    {[...char3, ...char4].map((v, i) => (
-                        <Tooltip key={`c34-${i}`}>
-                            <Tooltip.Trigger>
-                                <Button size="sm" variant="ghost" isIconOnly className="text-xl" onPress={() => insertToAnswer(v.start, v.end)}>{v.label}</Button>
-                            </Tooltip.Trigger>
-                            <Tooltip.Content>{v.tip}</Tooltip.Content>
-                        </Tooltip>
-                    ))}
-                </div>
-            </div>
-            <div>
-                <div className="text-xs text-text-tertiary uppercase tracking-wide mb-1">Lists</div>
-                <div className="flex flex-wrap gap-1">
-                    <Tooltip>
-                        <Tooltip.Trigger>
-                            <Button size="sm" variant="ghost" isIconOnly className="text-base font-mono" onPress={() => insertAtLineStart("- ")}>-</Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>unordered list</Tooltip.Content>
-                    </Tooltip>
-                    <Tooltip>
-                        <Tooltip.Trigger>
-                            <Button size="sm" variant="ghost" isIconOnly className="text-base font-mono" onPress={() => insertAtLineStart("1. ")}>1.</Button>
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>ordered list</Tooltip.Content>
-                    </Tooltip>
-                </div>
-            </div>
-        </div>
-    );
-
+    
     return (
         <div className={fullscreen
             ? "flex flex-col min-h-0 flex-1 w-full bg-bg-body"
             : "flex flex-col py-0.5 bg-bg-card w-full"
         }>
-            {/* Toolbar (Symbols / German / Format / Lists) — visibility toggled
-                by the wiki page's Tools button. */}
-            {toolsOpen && toolbar}
-
             {/* Shortcuts panel — toggled by the wiki page's Help button. */}
             {shortcutsOpen && (
                 <div className="flex flex-wrap gap-x-6 gap-y-1 px-2 py-2 text-sm text-text-secondary border-b border-border-default">
