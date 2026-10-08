@@ -361,7 +361,14 @@ export default function DevicesHubPage() {
             </span>
             <span className="text-text-secondary">
               cluster{" "}
-              <span className="font-mono" title={clusterId || undefined}>
+              <span
+                className="font-mono underline decoration-dotted underline-offset-2 cursor-help"
+                title={
+                  clusterId
+                    ? `Cluster ${clusterId}\n\nIssued once when a workspace is promoted to hub; followers adopt it on first pairing. Every sync request carries this id so a device only talks to the hub it belongs to.`
+                    : "Not in a cluster yet. Pair with a hub to adopt its cluster id (trust-on-first-use), or promote this workspace to hub to issue one."
+                }
+              >
                 {clusterId ? clusterId.slice(0, 8) : "unbound"}
               </span>
             </span>
@@ -404,7 +411,7 @@ export default function DevicesHubPage() {
       {/* ── 2. Hub connection (follower side) ────────────────────── */}
       {!isHub && (
         <section className="shrink-0 flex flex-col gap-3 p-4 rounded-lg border border-border-default bg-bg-card">
-          <h2 className="text-base font-semibold">Hub connection</h2>
+          <h2 className="text-base font-semibold">Connection with Hub</h2>
 
           {/* Follower→upstream-hub link: reachability, pending work, error. */}
           {status && (
@@ -440,10 +447,11 @@ export default function DevicesHubPage() {
             </div>
           )}
 
-          {/* Source PC selector + scan + manual connect. */}
+          {/* Hub selector + scan + manual connect. On a narrow (phone) screen the
+              Scan and Manual buttons drop onto their own row under the selector;
+              from `sm:` up they sit inline again. */}
           <div className="flex flex-col gap-2 pt-1 border-t border-border-light">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm font-medium shrink-0">Source PC</span>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <select
                 className="flex-1 min-w-0 px-2 py-1.5 text-sm rounded-md border border-border-light bg-bg-input text-text-primary"
                 value={pcUrl}
@@ -460,23 +468,34 @@ export default function DevicesHubPage() {
                   <option value={pcUrl}>{pcUrl} · saved</option>
                 )}
               </select>
-              <button
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50 shrink-0"
-                onClick={discover}
-                disabled={discovering}
-                title="Scan for nearby FmS machines (requires the web service enabled there)"
-              >
-                <Search size={14} className={discovering ? "animate-spin" : undefined} />
-                {discovering ? "Scanning…" : "Scan"}
-              </button>
-              <button
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover shrink-0"
-                onClick={() => setShowManual((s) => !s)}
-                title="Enter the source PC address manually"
-              >
-                <ChevronDown size={14} className={showManual ? "rotate-180 transition-transform" : "transition-transform"} />
-                Manual
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50 shrink-0"
+                  onClick={discover}
+                  disabled={discovering}
+                  title="Scan for nearby FmS machines (requires the web service enabled there)"
+                >
+                  <Search size={14} className={discovering ? "animate-spin" : undefined} />
+                  {discovering ? "Scanning…" : "Scan"}
+                </button>
+                <button
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover shrink-0"
+                  onClick={() => setShowManual((s) => !s)}
+                  title="Enter the hub address manually"
+                >
+                  <ChevronDown size={14} className={showManual ? "rotate-180 transition-transform" : "transition-transform"} />
+                  Manual
+                </button>
+                {pcUrl && (
+                  <button
+                    className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover text-red-600 dark:text-red-400 shrink-0"
+                    onClick={() => savePc("")}
+                    title="Disconnect from the hub (keeps the cluster binding — use 'Forget hub / re-pair' to fully detach)"
+                  >
+                    Disconnect
+                  </button>
+                )}
+              </div>
             </div>
 
             {showManual && (

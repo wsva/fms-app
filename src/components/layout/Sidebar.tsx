@@ -70,8 +70,8 @@ const navGroups: NavGroup[] = [
     tabs: [
       { id: "workspaces", label: "Workspaces", icon: FolderKanban },
       { id: "studio", label: "Dataset Studio", icon: SlidersHorizontal },
-      { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown },
       { id: "devices-hub", label: "Devices & Hub", icon: Users },
+      { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown },
       { id: "chat", label: "Cross-Device Chat", icon: MessagesSquare },
       { id: "simple-words", label: "Simple Words", icon: Type },
       { id: "wiki", label: "Wiki", icon: BookOpenText },
