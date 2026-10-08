@@ -18,6 +18,12 @@
 //! * `GET  /api/v1/chat/messages`              - cross-device chat thread page
 //! * `POST /api/v1/chat/message`               - post a chat message (multipart: uuid/text/device_name/file parts)
 //! * `GET  /api/v1/chat/attachment/{uuid}`     - stream one stored attachment
+//! * `GET  /api/v1/wiki/dirs`                  - legacy wiki roots (read-only browse)
+//! * `GET  /api/v1/wiki/search`                - legacy wiki full-text search
+//! * `GET  /api/v1/wiki/datasets`              - hub wiki datasets + legacy roots (read-only browse)
+//! * `GET  /api/v1/wiki/dataset/dir`           - one directory of a hub wiki dataset
+//! * `GET  /api/v1/wiki/dataset/file`          - one markdown file of a hub wiki dataset
+//! * `GET  /api/v1/wiki/dataset/search`        - full-text search inside one hub wiki dataset
 //!
 //! Auth is owned by the outer trust-zone layer in `web_service.rs`: loopback +
 //! Tailscale pass unauthenticated; other networks need a valid per-device
@@ -84,6 +90,10 @@ pub fn router(app: AppHandle) -> Router {
         .route("/wiki/dir", get(wiki_dir_list))
         .route("/wiki/file", get(wiki_file))
         .route("/wiki/search", get(wiki_search))
+        .route("/wiki/datasets", get(wiki_datasets_hub))
+        .route("/wiki/dataset/dir", get(wiki_dataset_dir_hub))
+        .route("/wiki/dataset/file", get(wiki_dataset_file_hub))
+        .route("/wiki/dataset/search", get(wiki_dataset_search_hub))
         .with_state(RestState { app })
 }
 
@@ -295,6 +305,18 @@ async fn datasets_list(
         });
     }
 
+    // Wiki datasets (syncable markdown trees; content is the .md files).
+    for d in crate::datasets::wiki::list_datasets(&settings) {
+        items.push(DatasetListItem {
+            uuid: d.uuid,
+            name: d.name,
+            updated: d.updated,
+            dataset_type: "wiki".into(),
+            media_count: if lite { 0 } else { d.file_count },
+            status: "ready".into(),
+        });
+    }
+
     (StatusCode::OK, Json(items)).into_response()
 }
 
@@ -321,8 +343,11 @@ struct Manifest {
 
 /// The dataset SQLite file + its WAL/SHM sidecars are excluded from the hashed
 /// file set (§3.2): they are content the row log and snapshot own, not media.
+/// The wiki datasets' `fts5.sqlite3` index joins them — it is fully derived
+/// per copy and rebuilt locally, so it must never ship or be hashed.
 fn is_db_file(rel: &str) -> bool {
     rel == "data.sqlite3" || rel == "data.sqlite3-wal" || rel == "data.sqlite3-shm"
+        || rel == "fts5.sqlite3" || rel == "fts5.sqlite3-wal" || rel == "fts5.sqlite3-shm"
 }
 
 /// SHA-256 (hex) of a file's contents, streamed in chunks.
@@ -529,9 +554,14 @@ async fn snapshot(State(st): State<RestState>, axum::extract::Path(uuid): axum::
 
     // Archive the frozen copy under the name `data.sqlite3` and never the live
     // sidecars (the vacuum image is self-contained, WAL off on the receiver).
+    // The wiki's derived `fts5.sqlite3` family never ships at all.
     let files: Vec<(String, PathBuf)> = collect_rel_files(&dir)
         .into_iter()
-        .filter(|(rel, _)| rel != "data.sqlite3-wal" && rel != "data.sqlite3-shm")
+        .filter(|(rel, _)| {
+            rel != "data.sqlite3-wal"
+                && rel != "data.sqlite3-shm"
+                && !rel.starts_with("fts5.sqlite3")
+        })
         .map(|(rel, p)| {
             if rel == "data.sqlite3" {
                 if let Some(sp) = &snap_db {
@@ -1230,6 +1260,15 @@ async fn replay(
             datasets::read_aloud::read_aloud_delete_attempt(settings.clone(), dataset_uuid, uuid)
                 .await
         }
+        "wiki_file_save" => {
+            let rel = extract_str(&ch.payload, "rel_path")?;
+            let content = ch.payload.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            datasets::wiki::write_file(settings.inner(), &dataset_uuid, &rel, &content)
+        }
+        "wiki_file_delete" => {
+            let rel = extract_str(&ch.payload, "rel_path")?;
+            datasets::wiki::delete_file(settings.inner(), &dataset_uuid, &rel)
+        }
         other => Err(format!("unknown change kind: {}", other)),
     }
 }
@@ -1345,6 +1384,86 @@ async fn wiki_search(State(st): State<RestState>, Query(q): Query<WikiSearchQuer
     match crate::wiki::local_impl::wiki_search_local(&settings, &q.keyword) {
         Ok(results) => (StatusCode::OK, Json(results)).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /wiki/dataset/*  (read-only wiki-dataset browsing for followers)
+//
+// Same security posture as the legacy /wiki/* proxy, but addressed by
+// dataset uuid + relative path instead of absolute paths: the uuid must
+// resolve through `find_dataset_dir_typed` to a `wiki` dataset on this
+// machine, so a paired device can neither escape the wiki roots nor reach
+// any other dataset type. No mutating route is exposed here — editing a
+// hub wiki dataset requires downloading it (snapshot + writeback).
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct WikiDatasetDirQuery {
+    uuid: String,
+    #[serde(default)]
+    rel: String,
+}
+
+#[derive(Deserialize)]
+struct WikiDatasetSearchQuery {
+    uuid: String,
+    keyword: String,
+}
+
+/// `GET /wiki/datasets` — the hub's wiki datasets plus the legacy wiki roots.
+async fn wiki_datasets_hub(State(st): State<RestState>) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    let datasets = datasets::wiki::list_datasets(&settings);
+    let legacy_roots = crate::wiki::local_impl::wiki_list_dirs_local(&settings).unwrap_or_default();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "datasets": datasets, "legacy_roots": legacy_roots })),
+    )
+        .into_response()
+}
+
+/// `GET /wiki/dataset/dir?uuid=&rel=` — one directory of a hub wiki dataset.
+async fn wiki_dataset_dir_hub(
+    State(st): State<RestState>,
+    Query(q): Query<WikiDatasetDirQuery>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    match datasets::wiki::list_dir(&settings, &q.uuid, &q.rel) {
+        Ok(entries) => (StatusCode::OK, Json(entries)).into_response(),
+        Err(e) => json_error(StatusCode::NOT_FOUND, &e),
+    }
+}
+
+/// `GET /wiki/dataset/file?uuid=&rel=` — markdown content, wrapped as `{ content }`.
+async fn wiki_dataset_file_hub(
+    State(st): State<RestState>,
+    Query(q): Query<WikiDatasetDirQuery>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    if !datasets::wiki::is_markdown(&q.rel) {
+        return json_error(StatusCode::BAD_REQUEST, "only markdown (.md) files can be read");
+    }
+    match datasets::wiki::read_file(&settings, &q.uuid, &q.rel) {
+        Ok(content) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "content": content })),
+        )
+            .into_response(),
+        Err(e) => json_error(StatusCode::NOT_FOUND, &e),
+    }
+}
+
+/// `GET /wiki/dataset/search?uuid=&keyword=` — FTS inside one hub wiki dataset
+/// (the hub indexes that dataset on demand; the index never ships).
+async fn wiki_dataset_search_hub(
+    State(st): State<RestState>,
+    Query(q): Query<WikiDatasetSearchQuery>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    match datasets::wiki::search_dataset(&settings, &q.uuid, &q.keyword) {
+        Ok(results) => (StatusCode::OK, Json(results)).into_response(),
+        Err(e) => json_error(StatusCode::NOT_FOUND, &e),
     }
 }
 

@@ -321,6 +321,19 @@ pub fn run() {
             wiki::wiki_index,
             wiki::wiki_add_dir,
             wiki::wiki_remove_dir,
+            // Wiki datasets (syncable markdown trees) — cross-platform.
+            datasets::wiki::wiki_dataset_list,
+            datasets::wiki::wiki_dataset_create,
+            datasets::wiki::wiki_dataset_import_dir,
+            datasets::wiki::wiki_dataset_delete,
+            datasets::wiki::wiki_dataset_list_dir,
+            datasets::wiki::wiki_dataset_read_file,
+            datasets::wiki::wiki_dataset_write_file,
+            datasets::wiki::wiki_dataset_create_file,
+            datasets::wiki::wiki_dataset_create_dir,
+            datasets::wiki::wiki_dataset_delete_file,
+            datasets::wiki::wiki_dataset_index,
+            datasets::wiki::wiki_dataset_search,
             // Workspace management
             workspace::workspace_list,
             workspace::workspace_get_current,
@@ -386,6 +399,11 @@ pub fn run() {
             sync::client::pc_pair_start,
             sync::client::pc_pair_reset_identity,
             sync::discover::pc_discover,
+            // Read-only hub wiki browse (works from any follower role/platform).
+            sync::client::wiki_hub_list,
+            sync::client::wiki_hub_list_dir,
+            sync::client::wiki_hub_read_file,
+            sync::client::wiki_hub_search,
             // Device pairing (PC owner side). Approval is deliberately only
             // ever granted by answering the confirm dialog.
             sync::pairing::pairing_list,
@@ -677,6 +695,19 @@ macro_rules! mobile_invoke_handler {
             wiki::wiki_index,
             wiki::wiki_add_dir,
             wiki::wiki_remove_dir,
+            // Wiki datasets (syncable markdown trees) — cross-platform.
+            datasets::wiki::wiki_dataset_list,
+            datasets::wiki::wiki_dataset_create,
+            datasets::wiki::wiki_dataset_import_dir,
+            datasets::wiki::wiki_dataset_delete,
+            datasets::wiki::wiki_dataset_list_dir,
+            datasets::wiki::wiki_dataset_read_file,
+            datasets::wiki::wiki_dataset_write_file,
+            datasets::wiki::wiki_dataset_create_file,
+            datasets::wiki::wiki_dataset_create_dir,
+            datasets::wiki::wiki_dataset_delete_file,
+            datasets::wiki::wiki_dataset_index,
+            datasets::wiki::wiki_dataset_search,
             workspace::workspace_list,
             workspace::workspace_get_current,
             workspace::workspace_create,
@@ -733,6 +764,11 @@ macro_rules! mobile_invoke_handler {
             sync::client::pc_pair_start,
             sync::client::pc_pair_reset_identity,
             sync::discover::pc_discover,
+            // Read-only hub wiki browse (works from any follower role/platform).
+            sync::client::wiki_hub_list,
+            sync::client::wiki_hub_list_dir,
+            sync::client::wiki_hub_read_file,
+            sync::client::wiki_hub_search,
             // Cross-device chat: same command names as desktop, relayed to the PC.
             ai::chat::chat_list_messages,
             ai::chat::chat_send_message,

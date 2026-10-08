@@ -1521,6 +1521,18 @@ async fn apply_change(
             let uuid = str_field("uuid")?;
             crate::datasets::read_aloud::read_aloud_delete_attempt(settings.clone(), ds, uuid).await.map(|_| true)
         }
+        // Wiki datasets: the .md files *are* the rows. Both arms resolve the
+        // local copy under <datasets>/wiki and journal through commit_change,
+        // which the caller's ApplyGuard turns into a no-op here.
+        "wiki_file_save" => {
+            let rel = str_field("rel_path")?;
+            let content = payload.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            crate::datasets::wiki::write_file(settings.inner(), &ds, &rel, &content).map(|_| true)
+        }
+        "wiki_file_delete" => {
+            let rel = str_field("rel_path")?;
+            crate::datasets::wiki::delete_file(settings.inner(), &ds, &rel).map(|_| true)
+        }
         other => {
             log::warn!("[sync_round] skipping unknown change kind '{other}'");
             Ok(false)
@@ -1556,7 +1568,7 @@ fn has_pending_local_edit(conn: &Connection, dataset_uuid: &str, kind: &str, obj
 /// Remove a local dataset the hub no longer offers: delete its directory under
 /// every type root and drop its `dataset_sync_state` row (prune-by-absence).
 fn prune_local_dataset(settings: &SettingsState, conn: &Connection, uuid: &str) {
-    for ty in ["dictation", "card", "book", "read_aloud"] {
+    for ty in ["dictation", "card", "book", "read_aloud", "wiki"] {
         let dir = type_root(settings, ty).join(uuid);
         if dir.exists() {
             let _ = std::fs::remove_dir_all(&dir);
@@ -2455,4 +2467,72 @@ pub(crate) async fn wiki_remote_search(
     let v =
         pc_get_json(settings, "/api/v1/wiki/search", &[("keyword", keyword.to_string())]).await?;
     serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/search response: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Hub wiki browse (read-only) — `wiki_hub_*` commands
+//
+// The "Hub" button in the wiki page: browse and search *every* wiki root on
+// the hub (its syncable wiki datasets plus the legacy wiki directories)
+// without downloading anything. Deliberately not `cfg`-gated: a desktop
+// running `role = "follower"` uses the same proxies to reach the hub. Reads
+// only — there is no mutating wiki-dataset route on the hub.
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v1/wiki/datasets` — hub wiki datasets + legacy wiki roots.
+#[tauri::command]
+pub async fn wiki_hub_list(settings: State<'_, SettingsState>) -> Result<Value, String> {
+    pc_get_json(settings.inner(), "/api/v1/wiki/datasets", &[]).await
+}
+
+/// `GET /api/v1/wiki/dataset/dir?uuid=&rel=` — one directory of a hub wiki dataset.
+#[tauri::command]
+pub async fn wiki_hub_list_dir(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+    rel: String,
+) -> Result<Vec<crate::datasets::wiki::WikiFileEntry>, String> {
+    let v = pc_get_json(
+        settings.inner(),
+        "/api/v1/wiki/dataset/dir",
+        &[("uuid", uuid), ("rel", rel)],
+    )
+    .await?;
+    serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/dataset/dir response: {e}"))
+}
+
+/// `GET /api/v1/wiki/dataset/file?uuid=&rel=` — markdown content from the hub.
+/// The hub wraps the body as `{ "content": "..." }`.
+#[tauri::command]
+pub async fn wiki_hub_read_file(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+    rel: String,
+) -> Result<String, String> {
+    let v = pc_get_json(
+        settings.inner(),
+        "/api/v1/wiki/dataset/file",
+        &[("uuid", uuid), ("rel", rel)],
+    )
+    .await?;
+    v.get("content")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "PC wiki/dataset/file response missing 'content'".to_string())
+}
+
+/// `GET /api/v1/wiki/dataset/search?uuid=&keyword=` — FTS inside one hub dataset.
+#[tauri::command]
+pub async fn wiki_hub_search(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+    keyword: String,
+) -> Result<Vec<crate::wiki::WikiSearchResult>, String> {
+    let v = pc_get_json(
+        settings.inner(),
+        "/api/v1/wiki/dataset/search",
+        &[("uuid", uuid), ("keyword", keyword)],
+    )
+    .await?;
+    serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/dataset/search response: {e}"))
 }

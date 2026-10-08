@@ -2,7 +2,7 @@
 //! dataset pipeline (import, STT subtitles, waveforms, cue DB generation).
 //!
 //! This module tree mirrors the on-disk layout: every type resolves through
-//! [`dataset_roots`] to `<datasets_dir>/{dictation,card,book,read_aloud}/` plus
+//! [`dataset_roots`] to `<datasets_dir>/{dictation,card,book,read_aloud,wiki}/` plus
 //! the linked directories listed in that folder's `meta.json`.
 //!
 //! TODO: the shared core ([`DatasetType`], [`dataset_roots`], the `meta.json`
@@ -15,6 +15,7 @@ pub(crate) mod cards;
 pub(crate) mod dictation;
 pub(crate) mod read_aloud;
 pub(crate) mod textsim;
+pub(crate) mod wiki;
 #[cfg(feature = "desktop")]
 pub(crate) mod tools;
 
@@ -176,6 +177,7 @@ pub(crate) enum DatasetType {
     Dictation,
     Book,
     Read,
+    Wiki,
 }
 
 impl DatasetType {
@@ -185,6 +187,7 @@ impl DatasetType {
             DatasetType::Dictation => "dictation",
             DatasetType::Book => "book",
             DatasetType::Read => "read_aloud",
+            DatasetType::Wiki => "wiki",
         }
     }
 }
@@ -224,6 +227,7 @@ pub async fn dataset_list_dirs(
         "dictation" => DatasetType::Dictation,
         "book" => DatasetType::Book,
         "read_aloud" => DatasetType::Read,
+        "wiki" => DatasetType::Wiki,
         _ => return Err(format!("Invalid dataset type: {}", dataset_type)),
     };
     
@@ -1029,6 +1033,7 @@ pub(crate) fn find_dataset_dir_typed(
         DatasetType::Card,
         DatasetType::Book,
         DatasetType::Read,
+        DatasetType::Wiki,
     ] {
         for root in dataset_roots(settings, ty) {
             if !root.exists() {

@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Search, X, FileText, CircleHelp } from "lucide-react";
+import type { WikiSource } from "@/lib/wiki/types";
 
 interface WikiSearchResult {
   file_path: string;
@@ -12,16 +13,34 @@ interface WikiSearchResult {
   rank: number;
 }
 
+type SearchMode =
+  | { kind: "legacy" }
+  | { kind: "dataset"; uuid: string }
+  | { kind: "hub"; uuid: string };
+
 interface WikiSearchProps {
-  wikiDir: string;
-  onResultClick: (path: string) => void;
+  mode: SearchMode;
+  onResultClick: (source: WikiSource) => void;
 }
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-export default function WikiSearch({ wikiDir, onResultClick }: WikiSearchProps) {
+// Map one raw FTS row to a WikiSource for the current search mode. Legacy rows
+// carry an absolute `file_path`; dataset/hub rows carry a dataset-relative one.
+function toSource(mode: SearchMode, r: WikiSearchResult): WikiSource {
+  switch (mode.kind) {
+    case "legacy":
+      return { kind: "legacy", path: r.file_path };
+    case "dataset":
+      return { kind: "dataset", uuid: mode.uuid, rel: r.file_path };
+    case "hub":
+      return { kind: "hub-dataset", uuid: mode.uuid, rel: r.file_path, name: "" };
+  }
+}
+
+export default function WikiSearch({ mode, onResultClick }: WikiSearchProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<WikiSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -37,9 +56,22 @@ export default function WikiSearch({ wikiDir, onResultClick }: WikiSearchProps) 
 
     setIsSearching(true);
     try {
-      const searchResults = await invoke<WikiSearchResult[]>("wiki_search", {
-        keyword: keyword.trim(),
-      });
+      let searchResults: WikiSearchResult[];
+      if (mode.kind === "dataset") {
+        searchResults = await invoke<WikiSearchResult[]>("wiki_dataset_search", {
+          uuid: mode.uuid,
+          keyword: keyword.trim(),
+        });
+      } else if (mode.kind === "hub") {
+        searchResults = await invoke<WikiSearchResult[]>("wiki_hub_search", {
+          uuid: mode.uuid,
+          keyword: keyword.trim(),
+        });
+      } else {
+        searchResults = await invoke<WikiSearchResult[]>("wiki_search", {
+          keyword: keyword.trim(),
+        });
+      }
       setResults(searchResults);
       setShowResults(true);
     } catch (err) {
@@ -48,7 +80,7 @@ export default function WikiSearch({ wikiDir, onResultClick }: WikiSearchProps) 
     } finally {
       setIsSearching(false);
     }
-  }, []);
+  }, [mode]);
 
   // Debounced search
   useEffect(() => {
@@ -70,6 +102,11 @@ export default function WikiSearch({ wikiDir, onResultClick }: WikiSearchProps) 
     setShowResults(false);
   };
 
+  const placeholder =
+    mode.kind === "dataset" ? "Search this wiki dataset..."
+    : mode.kind === "hub" ? "Search hub wiki dataset..."
+    : "Search wiki...";
+
   return (
     <div className="relative">
       <div className="flex items-center gap-2 px-3 py-2 bg-bg-input border border-border-default rounded-lg">
@@ -78,7 +115,7 @@ export default function WikiSearch({ wikiDir, onResultClick }: WikiSearchProps) 
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search wiki..."
+          placeholder={placeholder}
           className="flex-1 bg-transparent outline-none text-sm text-text-primary placeholder:text-text-tertiary"
         />
         {query && (
@@ -148,10 +185,10 @@ export default function WikiSearch({ wikiDir, onResultClick }: WikiSearchProps) 
             <div className="py-1">
               {results.map((result) => (
                 <button
-                  key={result.file_path}
+                  key={`${mode.kind}:${result.file_path}`}
                   className="w-full px-3 py-2 text-left hover:bg-bg-hover transition-colors border-b border-border-light last:border-b-0"
                   onClick={() => {
-                    onResultClick(result.file_path);
+                    onResultClick(toSource(mode, result));
                     setShowResults(false);
                   }}
                 >

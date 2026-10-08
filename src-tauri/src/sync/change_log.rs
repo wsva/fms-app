@@ -27,6 +27,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
+#[cfg(feature = "desktop")]
 use crate::datasets;
 use crate::settings::SettingsState;
 
@@ -147,6 +148,8 @@ impl ChangeClass {
             | "book_word_delete"
             | "read_text_save"
             | "read_text_delete"
+            | "wiki_file_save"
+            | "wiki_file_delete"
             | "dictation" => ChangeClass::State,
             // counter: XP is enqueued as an amount delta (§3.6).
             "xp" => ChangeClass::Counter,
@@ -243,6 +246,8 @@ pub fn object_id_for(kind: &str, payload: &Value, user_key: &str) -> String {
         // Both carry their own uuid, as does each delete payload.
         "read_text_save" | "read_text_delete"
         | "read_attempt_save" | "read_attempt_delete" => get("uuid"),
+        // Wiki files are content-addressed by their dataset-relative path.
+        "wiki_file_save" | "wiki_file_delete" => get("rel_path"),
         // A counter delta is never folded, but it still needs an id that is
         // unique per award: an empty one would collide with every other pending
         // delta in the pull-side guard and silently suppress inbound XP rows.
