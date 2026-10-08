@@ -109,7 +109,7 @@ src-tauri/src/
 │   ├── models.rs           # STT model status/download/load/default/delete/transcribe (7)
 │   ├── ai.rs               # Ollama chat & model management, Edge TTS, cross-device chat (10)
 │   ├── wiki.rs             # wiki dirs, read/write/delete, search, index (9)
-│   ├── sync.rs             # web service, pairing registry, PC scan/connect/pull, incremental sync (14)
+│   ├── sync.rs             # web service, pairing registry, PC scan/connect/pull, incremental sync (15)
 │   └── system.rs           # settings, auth, logs, OCR, screenshot, app UI control (15)
 │
 ├── app_paths.rs            # Platform-correct base dirs (desktop `dirs`, mobile app-private)

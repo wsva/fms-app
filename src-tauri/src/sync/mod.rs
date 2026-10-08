@@ -41,13 +41,22 @@ pub(crate) mod discover;
 ///   and makes those two kinds' conflict keys per-user (`user_key:…`) so one user
 ///   can never overwrite another's row. `xp` payloads now carry `dataset_uuid`,
 ///   since the scope no longer encodes it.
+/// * `4`: adds `GET /api/v1/app/state`, the **state-based** read that hands one
+///   identity its whole per-user history (current `dictation` rows + the `xp`
+///   ledger) regardless of journal retention — `/app/changes` is forward-only and
+///   pruned, so it can never backfill the past. Wire-compatible with v3; the bump
+///   exists so a follower can tell whether the route is there. (The matching local
+///   change — `lifetime_xp` is now recomputed from the ledger instead of accumulated
+///   — touches no wire format at all.)
 ///
 /// Mixed versions degrade safely in both directions: a v3 follower only pulls
 /// `/app/changes` when the hub's `/status` reports `protocol_version >= 3`, and a
-/// v2 follower's app-data pushes still land in the v3 hub's journal — under `@app`
-/// rather than the dataset scope, so they are no longer echoed through that
-/// device's per-dataset pull. Everyone converges once the whole cluster is on v3.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// v4 follower only asks for `/app/state` at `>= 4`, so an older hub is never
+/// probed with a route it lacks. A v2 follower's app-data pushes still land in the
+/// v3+ hub's journal — under `@app` rather than the dataset scope, so they are no
+/// longer echoed through that device's per-dataset pull. Everyone converges once
+/// the whole cluster is on the same version.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Hostname of this machine, as advertised in the discovery beacon and
 /// `/api/v1/status` so a scanned list can say *which* PC it found rather than

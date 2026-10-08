@@ -375,6 +375,7 @@ pub fn run() {
             // PC sync + discovery (available on desktop too, for testing).
             sync::client::dataset_sync_snapshot,
             sync::client::sync_run_round,
+            sync::client::sync_backfill_history,
             sync::client::writeback_flush,
             sync::client::writeback_pending_count,
             sync::client::dataset_sync_state,
@@ -721,6 +722,7 @@ macro_rules! mobile_invoke_handler {
             // PC sync + discovery client.
             sync::client::dataset_sync_snapshot,
             sync::client::sync_run_round,
+            sync::client::sync_backfill_history,
             sync::client::writeback_flush,
             sync::client::writeback_pending_count,
             sync::client::dataset_sync_state,

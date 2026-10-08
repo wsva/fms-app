@@ -227,6 +227,7 @@ Keep all existing endpoints; add:
 |---|---|
 | `GET /api/v1/datasets/{uuid}/changes?after=S` | Row changes for D after seq S (from `sync_log`); response carries `pruned_up_to` |
 | `GET /api/v1/app/changes?after=S` ✅ (protocol v3) | The same page for the **`@app` journal scope** — per-user `dictation` progress + `xp`, which live in the app DB and are therefore in no dataset snapshot. Served from a fixed scope key, so there is no dataset uuid to resolve and delivery does not depend on a subscription. Same `{ entries, pruned_up_to, hub_seq, resync_required }` shape |
+| `GET /api/v1/app/state?user_key=K` ✅ (protocol v4) | **State, not deltas**: one identity's whole app-data history — the current `listen_dictation` row per `(media, subtitle)` pair plus every `xp_ledger` row — regardless of journal retention, for the history backfill (§3.3). `user_key` is only a fallback for a device paired while logged out; a real `bound_user_id` always wins, so a client cannot name whose history it reads. Carries `{ user_key, dictation[], xp[], lifetime_xp }` plus a next rowid cursor per table, and the follower pages until both are `null` — the limit caps one request, not the history |
 | `GET /api/v1/file?dataset=D&path=P` | One non-DB file's bytes. **Must** canonicalize `path` and reject anything resolving outside the dataset dir (path traversal), and honour `Range` so a multi-GB media fetch on phone Wi-Fi can resume. On a **client-side hash mismatch**: refetch once; if it mismatches again, mark the dataset for resync (do not accept a corrupt file) |
 | `GET /api/v1/chat/messages?after_id=N` | exists ✅ as `after=C` (timestamp) — add a distinct **`after_id`** integer param for the rowid cursor (§4.3). Do *not* overload `after`: an old phone sends a timestamp and a new hub would read it as an integer |
 | `POST /api/v1/sync/changes` | exists ✅ — becomes the universal push (queue→log), accepts follower-enqueued rows too |
@@ -243,6 +244,27 @@ longer encodes it. Consequences: per-user object ids must fold in `user_key`
 later-wins contest against another user's row; and a gap in the app journal cannot be
 healed by a snapshot, so a follower skips the pruned range (or restarts from 0 when
 the hub seq regresses) and relies on every app-scope replay being idempotent.
+
+**History is state, not deltas** (protocol v4). A forward-only, retention-pruned row
+log cannot deliver the past twice over: rows below `pruned_up_to` are gone, and a
+subscription that starts today begins at the hub's current `seq`, so everything
+before it is invisible forever. So the app scope gets a state read beside the delta
+read — `GET /app/state` ships the hub's *current* knowledge of one identity's
+progress and XP ledger, and the follower folds it through the same idempotent write
+paths under an apply guard (imported rows must not be re-pushed as fresh edits).
+Three details make it safe rather than destructive: an un-pushed local progress edit
+**outranks** the imported state for its pair (offline practice is not undone by a
+backfill); awards dedup on `(user, source, reference_id)`, so re-importing an award
+made here is a no-op; and `xp_user.lifetime_xp` is **recomputed from the ledger**
+instead of accumulated, because a bulk import that skips duplicates would otherwise
+leave the total permanently ahead of the rows behind it — the ledger is the source of
+truth, so the total follows it. The read is **paged** (a per-table rowid cursor, so a
+20k-row cap bounds one request rather than the history). Only a **complete** import is
+stamped (`app_sync_state.backfilled_at`): a failed row, a mid-pagination transport
+error, or the client's page budget leaving it exhausted leaves the stamp unset, so the
+next round retries from the beginning — safe because every row is idempotent. The round
+runs it when the journal says it owes one (never pulled, a prune gap, a regressed hub
+seq), and `sync_history_backfill` forces one.
 
 **Signature must cover the body and query string.** Today the Ed25519 request signs
 only `ts\nMETHOD\npath` ([`sync/client.rs::with_device_auth`](../src-tauri/src/sync/client.rs))
@@ -271,7 +293,10 @@ is good):
 4. App scope: `GET /app/changes?after=appCursor` → apply rows → advance cursor.
    Independent of the dataset loop (skipped entirely against a hub reporting
    `protocol_version < 3`, since the route would 404 every round).
-5. Refresh catalog (`GET /datasets` with a `lite=1` flag that skips per-dataset
+5. App history (when owed): `GET /app/state` → fold progress + replay the XP ledger
+   → recompute the total → stamp `backfilled_at`. Runs only if step 4 could not have
+   delivered the past, and never against a hub reporting `protocol_version < 4`.
+6. Refresh catalog (`GET /datasets` with a `lite=1` flag that skips per-dataset
    row counts, so this stays one cheap query).
 
 **Apply rules (the pull must never clobber an unsent local edit):**
@@ -379,6 +404,14 @@ writeback `kind` explicitly — getting this wrong silently loses data:
 | **state** | cue save/delete, card save/delete/tags, book chapter/sentence/word, read-aloud text save/delete | coalesce by `object_id`, keep latest | later `edit_time` wins |
 | **append-only** | card_review, read-aloud attempt save/delete and any history rows | **never** coalesce; safe **only because inserted by uuid** (idempotent PK) | no conflict — all kept |
 | **counter** | XP (enqueued as an `amount` **delta**, see `xp.rs`) | never coalesce | sum the deltas |
+
+**Counter totals are derived, not accumulated** (implemented). `xp_user.lifetime_xp`
+is recomputed as `SUM(amount)` over that user's `xp_ledger` rows on every award, so
+the total is a pure function of the rows a node holds and dedup *is* convergence: a
+delta that fails to apply — duplicate, rejected, or skipped by a pending-edit guard —
+can no longer leave the total ahead of the ledger behind it. The `current + amount`
+increment was only ever safe while deltas arrived one at a time; once the history
+backfill (§3.3) can import a whole ledger in one pass, the drift becomes permanent.
 
 **Replay deduplication (mandatory, because acks are lossy):** the flush deletes a
 queue row only *after* the ack arrives. If that response is lost in transit, the

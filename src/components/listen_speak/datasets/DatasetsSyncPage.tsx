@@ -80,6 +80,10 @@ interface SyncStatusDetail {
   /** Cursor into the hub's per-user app-data journal (dictation progress + XP);
       null until the first round has pulled it. */
   app_cursor: number | null;
+  /** When this device imported the hub's whole app-data history (a state read,
+      since the journal above is pruned); null = never, which for a follower means
+      its older practice/XP is still not here. */
+  history_backfilled_at: string | null;
 }
 
 interface SyncProgress {
@@ -267,6 +271,11 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
         applied?: number;
         resynced?: string[];
         pruned?: string[];
+        history?: {
+          progress_applied?: number;
+          xp_applied?: number;
+          complete?: boolean;
+        } | null;
         errors?: { stage: string; error: string }[];
       }>("sync_run_round");
       const bits: string[] = [];
@@ -274,6 +283,12 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       if (r.applied) bits.push(`applied ${r.applied}`);
       if (r.resynced?.length) bits.push(`${r.resynced.length} resynced`);
       if (r.pruned?.length) bits.push(`${r.pruned.length} pruned`);
+      // The history read only runs when the journal could not deliver the past, so
+      // anything here is worth saying out loud — including an unfinished import.
+      if (r.history) {
+        const h = `${r.history.progress_applied ?? 0} progress, ${r.history.xp_applied ?? 0} XP`;
+        bits.push(r.history.complete === false ? `history partial (${h}, retrying)` : `history ${h}`);
+      }
       if (r.errors?.length) bits.push(`${r.errors.length} error(s)`);
       setMessage(bits.length ? `Round done — ${bits.join(", ")}.` : "Round done — already up to date.");
     } catch (e) {
@@ -519,6 +534,8 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
           {!isHub && (
             <span className="text-text-tertiary">
               app data {status.app_cursor == null ? "not pulled yet" : `cursor ${status.app_cursor}`}
+              {" · "}
+              history {status.history_backfilled_at ? `imported ${status.history_backfilled_at}` : "not imported"}
             </span>
           )}
           {onNavigate && (

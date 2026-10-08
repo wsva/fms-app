@@ -273,11 +273,14 @@ fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
         /* Single-row cursor for the app-wide journal scope (per-user dictation
            progress + XP). Kept out of `dataset_sync_state` deliberately: that
            table is keyed by real dataset uuids and the round prunes rows whose
-           dataset vanished from the hub catalog, which would delete this. */
+           dataset vanished from the hub catalog, which would delete this.
+           `backfilled_at` records that the state-based history read (§3.6) has
+           run once, so the round does not re-download a whole ledger every round. */
         CREATE TABLE IF NOT EXISTS app_sync_state (
-            id          INTEGER PRIMARY KEY CHECK (id = 1),
-            cursor_seq  INTEGER,
-            updated_at  TEXT NOT NULL
+            id            INTEGER PRIMARY KEY CHECK (id = 1),
+            cursor_seq    INTEGER,
+            backfilled_at TEXT,
+            updated_at    TEXT NOT NULL
         );",
     )
     .map_err(|e| e.to_string())?;
@@ -315,6 +318,17 @@ fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
         conn.execute("ALTER TABLE writeback_queue ADD COLUMN object_id TEXT", [])
             .map_err(|e| e.to_string())?;
     }
+    // Migration: `app_sync_state` shipped without `backfilled_at`; a device that
+    // pulled the app scope before the history read existed gets the column here
+    // (NULL = never backfilled, which is the truth for those rows).
+    let has_backfilled_at: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('app_sync_state') WHERE name = 'backfilled_at'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if !has_backfilled_at {
+        conn.execute("ALTER TABLE app_sync_state ADD COLUMN backfilled_at TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -335,6 +349,32 @@ fn set_app_cursor(conn: &Connection, seq: i64) -> Result<(), String> {
          VALUES (1, ?1, datetime('now')) \
          ON CONFLICT(id) DO UPDATE SET cursor_seq = excluded.cursor_seq, updated_at = excluded.updated_at",
         params![seq],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// When this device last folded the hub's *whole* app-data history into its own
+/// (`None` = never). See [`backfill_app_history`].
+fn app_history_backfilled(conn: &Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT backfilled_at FROM app_sync_state WHERE id = 1",
+        [],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .unwrap_or(None)
+}
+
+/// Stamp the history backfill as done. Kept separate from `set_app_cursor` rather
+/// than folded into it: a journal pull advances the cursor on every round, while
+/// the backfill is a once-per-device (or once-per-gap) event, and conflating the two
+/// would silently stop the retry after a *truncated* fetch.
+fn set_app_history_backfilled(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO app_sync_state (id, backfilled_at, updated_at) \
+         VALUES (1, datetime('now'), datetime('now')) \
+         ON CONFLICT(id) DO UPDATE SET backfilled_at = excluded.backfilled_at, updated_at = excluded.updated_at",
+        [],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -842,6 +882,10 @@ pub struct SyncStatusDetail {
     /// dictation progress + XP). `None` until the first app-data pull of a round
     /// has advanced it — mirrors a dataset's `needs_resync` cursor being unknown.
     pub app_cursor: Option<i64>,
+    /// When this device last folded the hub's *whole* app-data history into its own
+    /// (`GET /app/state`, §3.6). `None` = never: nothing has owed it, or the hub
+    /// predates protocol v4 and cannot serve it — the round result says which.
+    pub history_backfilled_at: Option<String>,
 }
 
 /// Assemble the full [`SyncStatusDetail`]. Awaits (hub `/status` + catalog) run
@@ -969,6 +1013,7 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
         .query_row("SELECT COUNT(*) FROM writeback_queue", [], |r| r.get(0))
         .unwrap_or(0);
     let app_cursor = app_cursor(&conn);
+    let history_backfilled_at = app_history_backfilled(&conn);
     drop(conn);
 
     let chat_pending = if role == "hub" {
@@ -1055,6 +1100,7 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
         chat_pending,
         devices,
         app_cursor,
+        history_backfilled_at,
     })
 }
 
@@ -1563,6 +1609,32 @@ async fn hub_lists_dataset(settings: &SettingsState, uuid: &str) -> bool {
 /// on the hub.
 const APP_SCOPE_PROTOCOL: u32 = 3;
 
+/// Wire protocol version that introduced `GET /api/v1/app/state`, the state-based
+/// history read. Same reasoning as [`APP_SCOPE_PROTOCOL`]: a pre-v4 hub has no such
+/// route, and asking for it every round would log a 404 where the honest answer is
+/// "this hub cannot backfill your history".
+const HISTORY_PROTOCOL: u32 = 4;
+
+/// Upper bound on `/app/state` pages one backfill fetches (the hub caps each page at
+/// 20k rows per table, so 50 pages is far past any real history). A cursor that
+/// never settles means a bug on one side; stopping here marks the import explicitly
+/// incomplete and lets the next round retry, instead of spinning inside one round.
+const HISTORY_PAGE_BUDGET: i64 = 50;
+
+/// What one app-scope journal pull achieved.
+struct AppPull {
+    /// Journal rows folded into the local app DB.
+    applied: i64,
+    /// The journal cannot deliver this device's whole history — it has never
+    /// completed a state read, and/or this round met a gap (never pulled, a range
+    /// pruned away, a regressed hub seq) — so the state-based backfill
+    /// ([`backfill_app_history`]) is owed.
+    needs_history: bool,
+    /// The hub's protocol as probed this round, handed to the backfill so it does
+    /// not need a second `/status` GET.
+    hub_protocol: Option<u32>,
+}
+
 /// The hub's advertised `protocol_version`, read off its unsigned `/status` (so
 /// it works before pairing). `None` when the hub is unreachable or predates the
 /// field — both mean "do not assume new endpoints exist".
@@ -1586,8 +1658,8 @@ async fn hub_protocol_version(settings: &SettingsState) -> Option<u32> {
 /// awards. Those tables live in the app DB, so they are never part of a dataset
 /// snapshot — the row log is their only route. Runs separately from the dataset
 /// loop, so a device that subscribes to no dataset still converges, and awards
-/// with no dataset at all (book reading) are finally delivered. Returns the number
-/// of changes applied.
+/// with no dataset at all (book reading) are finally delivered. Reports how many
+/// changes were applied and whether a history backfill is owed.
 ///
 /// Every replay here is idempotent (`xp` dedups on (user, source, reference),
 /// `dictation` is an upsert), which is what makes the two gap recoveries below
@@ -1595,39 +1667,47 @@ async fn hub_protocol_version(settings: &SettingsState) -> Option<u32> {
 async fn pull_app_scope(
     settings: &State<'_, SettingsState>,
     errors: &mut Vec<Value>,
-) -> Result<i64, String> {
+) -> Result<AppPull, String> {
     let scope = crate::sync::change_log::APP_SCOPE;
-    match hub_protocol_version(settings.inner()).await {
+    let hub_protocol = hub_protocol_version(settings.inner()).await;
+    match hub_protocol {
         Some(p) if p >= APP_SCOPE_PROTOCOL => {}
         // Skipping silently is deliberate: against a v2 hub this is the expected
         // state, not a fault, and the hub still receives this device's pushes.
         Some(p) => {
             log::info!("[sync] hub protocol v{p} has no /app/changes — skipping app-data pull");
-            return Ok(0);
+            return Ok(AppPull { applied: 0, needs_history: false, hub_protocol });
         }
         None => {
             log::info!("[sync] hub /status unreadable — skipping app-data pull");
-            return Ok(0);
+            return Ok(AppPull { applied: 0, needs_history: false, hub_protocol });
         }
     }
 
-    let cursor = {
+    let (cursor, stamped) = {
         let conn = datasets::dictation::open_app_db(settings.inner())?;
         ensure_sync_tables(&conn)?;
-        app_cursor(&conn)
+        (app_cursor(&conn), app_history_backfilled(&conn).is_some())
     };
-
+    // A device that has never completed a state read is missing everything older
+    // than the retained journal, whatever its cursor says; the gap branches below
+    // raise the same flag for devices that were stamped but then lost rows.
+    let mut needs_history = !stamped || cursor.is_none();
+    let mut after = cursor.unwrap_or(0);
     // Bounded retry: a regressed hub seq restarts at 0, a prune gap jumps to the
     // prune mark and re-reads what is still retained. Each branch moves `after`
     // strictly, so this cannot spin.
-    let mut after = cursor.unwrap_or(0);
     let mut page: Option<Value> = None;
     for attempt in 0..3 {
         let p = match pc_changes_since(settings.clone(), scope.to_string(), after).await {
             Ok(p) => p,
             Err(e) => {
                 errors.push(json!({ "scope": scope, "stage": "changes", "error": e }));
-                return Ok(0);
+                // The hub just refused or failed this device — a state read would
+                // fail the same way and only double-report one fault. `needs_history`
+                // stays a per-round decision: the flag is recomputed next round from
+                // the cursor and the stamp, so a transient failure is retried anyway.
+                return Ok(AppPull { applied: 0, needs_history: false, hub_protocol });
             }
         };
         let hub_seq = p["hub_seq"].as_i64().unwrap_or(after);
@@ -1640,21 +1720,24 @@ async fn pull_app_scope(
                 "[sync] {scope}: hub_seq {hub_seq} < local cursor {after} — journal regressed, restarting from 0"
             );
             errors.push(json!({ "scope": scope, "stage": "alarm", "error": format!("hub seq {hub_seq} regressed below cursor {after}; re-pulling from 0") }));
+            needs_history = true;
             after = 0;
             continue;
         }
         let pruned_up_to = p["pruned_up_to"].as_i64().unwrap_or(0);
         if p["resync_required"].as_bool().unwrap_or(false) && pruned_up_to > after {
-            // Gap: rows below the mark are gone for good and nothing can backfill
-            // them (the app DB never ships in a snapshot) — report the loss, then
-            // re-read from the mark so the retained tail still lands. That also
-            // gives a never-pulled device the whole retained journal instead of
-            // nothing, which a snapshot-based resync could not do here.
+            // Gap: journal rows below the mark are gone, so the delta path can no
+            // longer reach this device's older history — report it, then re-read
+            // from the mark so the retained tail still lands. The state read in
+            // [`backfill_app_history`] (flagged by `needs_history`) is what actually
+            // recovers the past; that also gives a never-pulled device the whole
+            // retained journal instead of nothing.
             errors.push(json!({
                 "scope": scope,
                 "stage": "prune",
                 "error": format!("hub pruned the app-data journal up to {pruned_up_to}; cursor {after} is behind — older rows are unrecoverable, continuing from the mark"),
             }));
+            needs_history = true;
             after = pruned_up_to;
             continue;
         }
@@ -1669,7 +1752,7 @@ async fn pull_app_scope(
             let conn = datasets::dictation::open_app_db(settings.inner())?;
             ensure_sync_tables(&conn)?;
             let _ = set_app_cursor(&conn, after);
-            return Ok(0);
+            return Ok(AppPull { applied: 0, needs_history, hub_protocol });
         }
     };
     let hub_seq = page["hub_seq"].as_i64().unwrap_or(after);
@@ -1705,7 +1788,188 @@ async fn pull_app_scope(
     let conn = datasets::dictation::open_app_db(settings.inner())?;
     ensure_sync_tables(&conn)?;
     let _ = set_app_cursor(&conn, hub_seq.max(after));
-    Ok(applied)
+    Ok(AppPull { applied, needs_history, hub_protocol })
+}
+
+/// Fold the hub's *whole* history for this identity into the local app DB (§3.6).
+///
+/// The journal pull above is forward-only and retention-pruned, so it can only ever
+/// deliver changes newer than the cursor. A device paired after a year of practice —
+/// or one that fell through a prune gap — gets the rest from `/app/state`, which
+/// ships state rather than deltas: the current progress row per (media, subtitle)
+/// pair, plus the XP ledger. Both halves are paged to the end (the hub caps one
+/// request, not the history) and land through their ordinary idempotent write paths
+/// under an [`crate::sync::change_log::ApplyGuard`], so importing years of history is
+/// not immediately re-pushed to the hub as a storm of fresh edits, and the XP total
+/// is derived from the merged ledger instead of accumulated.
+///
+/// `Ok(None)` means "nothing to do": already stamped (unless `force`) or the hub
+/// predates the endpoint. Neither is an error worth warning every round about.
+///
+/// `hub_lifetime_xp` may come out **ahead** of the local `lifetime_xp` and that is
+/// not a bug: the hub's ledger can hold two rows for one award (written before
+/// dedup, or pushed from two devices), while importing the second is correctly
+/// skipped. The gap is reported instead of hidden, and only the deduped local total
+/// is what the user sees.
+async fn backfill_app_history(
+    settings: &SettingsState,
+    hub_protocol: Option<u32>,
+    force: bool,
+) -> Result<Option<Value>, String> {
+    let scope = crate::sync::change_log::APP_SCOPE;
+    let conn = datasets::dictation::open_app_db(settings)?;
+    ensure_sync_tables(&conn)?;
+    if !force && app_history_backfilled(&conn).is_some() {
+        return Ok(None);
+    }
+    let proto = match hub_protocol {
+        Some(p) => Some(p),
+        None => hub_protocol_version(settings).await,
+    };
+    if !matches!(proto, Some(p) if p >= HISTORY_PROTOCOL) {
+        log::info!("[sync] hub has no /app/state (protocol {proto:?}) — history backfill skipped");
+        return Ok(None);
+    }
+
+    let user_key = crate::auth::workspace_identity(settings);
+
+    // Page both tables to the end: the hub caps one *request*, not the history, so a
+    // large ledger arrives over several GETs. The two cursors advance independently
+    // because the lists differ in length and end on different pages.
+    let mut after_dictation = 0i64;
+    let mut after_xp = 0i64;
+    let mut pages = 0i64;
+    let mut progress_rows = 0i64;
+    let mut xp_row_count = 0i64;
+    let mut progress_applied = 0i64;
+    let mut xp_applied = 0i64;
+    let mut skipped = 0i64;
+    let mut hub_total: Option<i64> = None;
+    let mut unfinished = false;
+    let mut failures: Vec<String> = Vec::new();
+    let _guard = crate::sync::change_log::ApplyGuard::new();
+    loop {
+        pages += 1;
+        let page = match pc_get_json(
+            settings,
+            "/api/v1/app/state",
+            &[
+                ("user_key", user_key.clone()),
+                ("after_dictation", after_dictation.to_string()),
+                ("after_xp", after_xp.to_string()),
+            ],
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                failures.push(e);
+                unfinished = true;
+                break;
+            }
+        };
+        hub_total = page["lifetime_xp"].as_i64().or(hub_total);
+        let dictation = page["dictation"].as_array().cloned().unwrap_or_default();
+        let xp_rows = page["xp"].as_array().cloned().unwrap_or_default();
+        progress_rows += dictation.len() as i64;
+        xp_row_count += xp_rows.len() as i64;
+        for row in &dictation {
+            // An un-pushed local edit to this pair beats the hub's stored state:
+            // an import must never undo practice done here while offline.
+            let object_id = crate::sync::change_log::object_id_for("dictation", row, &user_key);
+            if has_pending_local_edit(&conn, scope, "dictation", &object_id) {
+                skipped += 1;
+                continue;
+            }
+            let Ok(d) = serde_json::from_value::<datasets::dictation::ListenDictation>(row.clone())
+            else {
+                skipped += 1;
+                continue;
+            };
+            match datasets::dictation::listen_save_dictation_as(settings, "", &d, &user_key).await {
+                Ok(_) => progress_applied += 1,
+                Err(e) => failures.push(format!("dictation {}: {e}", d.media_uuid)),
+            }
+        }
+        for row in &xp_rows {
+            let source = row["source"].as_str().unwrap_or("");
+            let reference = row["reference_id"].as_str().unwrap_or("");
+            let amount = row["amount"].as_i64().unwrap_or(0);
+            if source.is_empty() || amount == 0 {
+                continue;
+            }
+            let ds = row["dataset_uuid"].as_str().filter(|s| !s.is_empty());
+            // No pending-edit guard on this half: the award path dedups on exactly
+            // (user, source, reference), so re-importing an award made here and not
+            // yet pushed is a no-op rather than a double count.
+            match crate::xp::xp_award_internal(settings, &user_key, amount, source, reference, ds) {
+                Ok(r) if r.is_new => xp_applied += 1,
+                Ok(_) => skipped += 1,
+                Err(e) => failures.push(format!("xp {source}/{reference}: {e}")),
+            }
+        }
+        let next_dictation = page["next_dictation_after"].as_i64();
+        let next_xp = page["next_xp_after"].as_i64();
+        if next_dictation.is_none() && next_xp.is_none() {
+            break;
+        }
+        if pages >= HISTORY_PAGE_BUDGET {
+            log::warn!("[sync] app history hit the {pages}-page budget with rows still pending");
+            unfinished = true;
+            break;
+        }
+        after_dictation = next_dictation.unwrap_or(after_dictation);
+        after_xp = next_xp.unwrap_or(after_xp);
+    }
+    // The ledger is now the union of local and imported awards, so read the total
+    // back off it. Falls back to the hub's figure if the local recompute failed —
+    // this number is reporting only, and a report of 0 would look like data loss.
+    let lifetime_xp = crate::xp::recompute_totals(settings, &user_key).unwrap_or_else(|e| {
+        log::warn!("[sync] could not recompute XP total after backfill: {e}");
+        hub_total.unwrap_or(0)
+    });
+    // Only stamp a *complete* import: a failed row or an interrupted page walk means
+    // the next round should retry rather than treat the history as settled.
+    let complete = failures.is_empty() && !unfinished;
+    if complete {
+        set_app_history_backfilled(&conn)?;
+    }
+
+    let result = json!({
+        "user_key": user_key,
+        "progress_rows": progress_rows,
+        "progress_applied": progress_applied,
+        "xp_rows": xp_row_count,
+        "xp_applied": xp_applied,
+        "skipped": skipped,
+        "pages": pages,
+        "lifetime_xp": lifetime_xp,
+        "hub_lifetime_xp": hub_total,
+        "complete": complete,
+        "failures": failures.iter().take(5).cloned().collect::<Vec<_>>(),
+    });
+    log::info!("[sync] app history backfill: {result}");
+    Ok(Some(result))
+}
+
+/// Manual "fetch my history now" entry point (Sync page + MCP): pulls the hub's
+/// whole app-data history for this identity, ignoring the once-per-device stamp.
+/// Re-running it is harmless — every row lands through an idempotent write path.
+#[tauri::command]
+pub async fn sync_backfill_history(
+    settings: State<'_, SettingsState>,
+) -> Result<Value, String> {
+    if pc_base(&settings).is_empty() {
+        return Err("No PC configured. Use Discover PC or set the PC address.".into());
+    }
+    let unavailable = json!({
+        "status": "unavailable",
+        "reason": "the hub does not serve /app/state (predates sync protocol v4)",
+        "next": "update the PC app, run a sync round, then retry",
+    });
+    Ok(backfill_app_history(&settings, None, true)
+        .await?
+        .unwrap_or(unavailable))
 }
 
 /// Run one full incremental sync round against the connected hub. Triggers:
@@ -1721,6 +1985,7 @@ pub async fn sync_round_inner(
     let mut resynced: Vec<String> = Vec::new();
     let mut pruned: Vec<String> = Vec::new();
     let mut applied = 0i64;
+    let mut history: Option<Value> = None;
 
     // 1. Push local edits first so the hub holds our changes before we pull.
     let pushed = writeback_flush_inner(&settings).await.unwrap_or_else(|e| {
@@ -1864,10 +2129,26 @@ pub async fn sync_round_inner(
     // 5. Per-user app data (`dictation` progress + `xp` awards) journals under its
     //    own scope, so it is pulled once per round regardless of which datasets
     //    this device subscribes to (see [`pull_app_scope`]).
-    applied += pull_app_scope(&settings, &mut errors).await.unwrap_or_else(|e| {
+    let app = pull_app_scope(&settings, &mut errors).await.unwrap_or_else(|e| {
         errors.push(json!({ "scope": "@app", "stage": "app_changes", "error": e }));
-        0
+        AppPull { applied: 0, needs_history: false, hub_protocol: None }
     });
+    applied += app.applied;
+
+    // 6. History backfill (§3.6): the journal is forward-only and pruned, so a
+    //    device that has never completed a state read — new, or behind a gap — is
+    //    still missing everything older than its cursor. One extra GET until it
+    //    succeeds, then the stamp in `app_sync_state` keeps it out of every
+    //    following round.
+    if app.needs_history {
+        match backfill_app_history(settings.inner(), app.hub_protocol, false).await {
+            Ok(Some(v)) => history = Some(v),
+            // `Ok(None)` = hub predates the endpoint, already stamped. Expected,
+            // not a fault — `pull_app_scope` logged the reason at info level.
+            Ok(None) => {}
+            Err(e) => errors.push(json!({ "scope": "@app", "stage": "history", "error": e })),
+        }
+    }
 
     Ok(json!({
         "status": if errors.is_empty() { "ok" } else { "partial" },
@@ -1875,6 +2156,7 @@ pub async fn sync_round_inner(
         "applied": applied,
         "resynced": resynced,
         "pruned": pruned,
+        "history": history,
         "errors": errors,
     }))
 }

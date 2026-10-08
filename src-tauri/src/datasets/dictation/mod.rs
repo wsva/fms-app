@@ -287,6 +287,55 @@ pub async fn listen_get_dataset_dictation_status(
     Ok(media_uuids)
 }
 
+/// Every progress row recorded for `user_id`, newest state first.
+///
+/// This is the hub-side read behind the history backfill (`GET /api/v1/app/state`),
+/// which has to serve *state* rather than journal deltas because the row log is
+/// pruned: a device that subscribes late can only be told the current status of
+/// each pair. `UNIQUE(user_id, media_uuid, subtitle_uuid)` means one row per pair.
+/// Paginated by `rowid` (at most `limit` rows after cursor `after`, 0 = from the
+/// start) and returns the next cursor, `Some` only when the page was full — a
+/// follower keeps asking until it gets `None`, so no progress row is cut off.
+/// Page-stable because a rowid only moves when its pair is re-saved, which re-sends
+/// a row the apply path treats as an idempotent upsert at worst.
+// Hub-side read: only `sync::rest` calls it, so the mobile build has no caller.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) fn dictation_rows_for_user(
+    settings: &SettingsState,
+    user_id: &str,
+    after: i64,
+    limit: i64,
+) -> Result<(Vec<ListenDictation>, Option<i64>), String> {
+    let conn = open_app_db(settings)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT rowid, media_uuid, subtitle_uuid, status, completed FROM listen_dictation \
+             WHERE user_id = ?1 AND rowid > ?2 ORDER BY rowid ASC LIMIT ?3",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![user_id, after, limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                ListenDictation {
+                    media_uuid: row.get(1)?,
+                    subtitle_uuid: row.get(2)?,
+                    status: row.get(3)?,
+                    completed: row.get(4)?,
+                },
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out: Vec<ListenDictation> = Vec::new();
+    let mut last_id = after;
+    for r in rows.filter_map(|r| r.ok()) {
+        last_id = r.0;
+        out.push(r.1);
+    }
+    let next = if out.len() as i64 >= limit { Some(last_id) } else { None };
+    Ok((out, next))
+}
+
 // ============================================================
 // Write commands
 // ============================================================

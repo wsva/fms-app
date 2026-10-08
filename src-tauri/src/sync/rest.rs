@@ -12,6 +12,7 @@
 //! * `GET  /api/v1/datasets/{uuid}/manifest`   - snapshot metadata + overall hash
 //! * `GET  /api/v1/datasets/{uuid}/changes`    - incremental row-log page for one dataset
 //! * `GET  /api/v1/app/changes`                - same page for the per-user app-data scope
+//! * `GET  /api/v1/app/state`                  - one identity's full app-data history (backfill)
 //! * `GET  /api/v1/datasets/{uuid}/snapshot`   - the whole dataset dir as tar.gz
 //! * `POST /api/v1/sync/changes`               - replay queued writeback changes
 //! * `GET  /api/v1/chat/messages`              - cross-device chat thread page
@@ -67,6 +68,7 @@ pub fn router(app: AppHandle) -> Router {
         .route("/datasets/{uuid}/manifest", get(manifest))
         .route("/datasets/{uuid}/changes", get(changes))
         .route("/app/changes", get(app_changes))
+        .route("/app/state", get(app_state))
         .route("/datasets/{uuid}/snapshot", get(snapshot))
         .route("/file", get(file_endpoint))
         .route("/sync/changes", post(sync_changes))
@@ -652,6 +654,119 @@ async fn app_changes(
         Ok(page) => (StatusCode::OK, Json(page)).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
+}
+
+// ---------------------------------------------------------------------------
+// GET /app/state  (per-user history backfill, §3.2 / §3.6)
+// ---------------------------------------------------------------------------
+
+/// Row cap per table per `/app/state` page. A ledger grows with every award, so one
+/// unbounded read could hand a follower a body far larger than the rest of a sync
+/// round; the response carries a next cursor for each table and the follower pages
+/// through them, so the cap bounds one request, not the history.
+const HISTORY_ROW_LIMIT: i64 = 20_000;
+
+#[derive(Deserialize)]
+struct AppStateQuery {
+    /// Only a *fallback* — see [`resolve_read_identity`]. A device bound to a real
+    /// account can never use it to read somebody else's history.
+    user_key: Option<String>,
+    /// Rowid cursors for the two tables (`0` = from the start). Independent
+    /// because the two lists have different lengths and different page ends.
+    after_dictation: Option<i64>,
+    after_xp: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct AppStateResp {
+    /// Whose history this is, as resolved from the device binding.
+    user_key: String,
+    /// Current progress per (media, subtitle) pair — state, not deltas, since the
+    /// journal that would carry the history is pruned.
+    dictation: Vec<ListenDictation>,
+    /// XP deltas oldest-first, replayable through the ordinary award path.
+    xp: Vec<xp::XpHistoryRow>,
+    /// Next rowid cursors, `Some` only when that page was full. `None` for both
+    /// means the follower has the whole history.
+    next_dictation_after: Option<i64>,
+    next_xp_after: Option<i64>,
+    /// The hub's stored total, so a follower can compare it after recomputing and
+    /// notice a divergence instead of reporting a clean backfill.
+    lifetime_xp: i64,
+    generated_at: String,
+}
+
+/// Resolve whose per-user history a read may return.
+///
+/// Stricter than [`resolve_write_identity`] by design: a write carries a declared
+/// `user_key` that can be *compared* against the binding and rejected on mismatch,
+/// whereas a GET has no such body — so a client-chosen key must never override a
+/// real binding. It is only consulted when the binding is itself the transient
+/// `"local"` sentinel (device paired while logged out), mirroring the adoption rule
+/// the write path uses. With no device binding (trusted zone) the PC's own
+/// workspace identity is served.
+fn resolve_read_identity(
+    auth: &sync::pairing::AuthContext,
+    requested: &str,
+    settings: &SettingsState,
+) -> String {
+    let Some(bound) = auth.bound_user_id.as_deref() else {
+        return crate::auth::workspace_identity(settings);
+    };
+    let bound_real = !bound.is_empty() && bound != "local";
+    let requested_real = !requested.is_empty() && requested != "local";
+    if bound_real {
+        bound.to_string()
+    } else if requested_real {
+        requested.to_string()
+    } else {
+        bound.to_string()
+    }
+}
+
+/// The state-based counterpart to `/app/changes`: everything the hub still knows
+/// about one identity's per-user history, regardless of journal retention. The row
+/// log is forward-only and pruned, and a fresh subscription starts at the hub's
+/// current seq, so deltas alone can never deliver history older than that point —
+/// this endpoint is how a new device gets its past.
+async fn app_state(
+    State(st): State<RestState>,
+    Extension(auth): Extension<sync::pairing::AuthContext>,
+    Query(q): Query<AppStateQuery>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    let user_key = resolve_read_identity(&auth, q.user_key.as_deref().unwrap_or(""), &settings);
+    let (dictation, next_dictation_after) = match datasets::dictation::dictation_rows_for_user(
+        &settings,
+        &user_key,
+        q.after_dictation.unwrap_or(0),
+        HISTORY_ROW_LIMIT,
+    ) {
+        Ok(page) => page,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let (xp_rows, next_xp_after) = match xp::ledger_rows_for_user(
+        &settings,
+        &user_key,
+        q.after_xp.unwrap_or(0),
+        HISTORY_ROW_LIMIT,
+    ) {
+        Ok(page) => page,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    // Best-effort: this number is a cross-check for the follower's log, so a read
+    // failure must not fail the backfill.
+    let hub_total = xp::user_total(&settings, &user_key).unwrap_or(0);
+    let resp = AppStateResp {
+        user_key,
+        lifetime_xp: hub_total,
+        dictation,
+        xp: xp_rows,
+        next_dictation_after,
+        next_xp_after,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+    };
+    (StatusCode::OK, Json(resp)).into_response()
 }
 
 // ---------------------------------------------------------------------------
