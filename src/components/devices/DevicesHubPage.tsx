@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
-import { Search, ChevronDown, Link2, KeyRound, Unplug, RefreshCw, Loader2, Users } from "lucide-react";
+import { Search, ChevronDown, Link2, KeyRound, Unplug, RefreshCw, Loader2, Users, ShieldCheck } from "lucide-react";
 import { logInfo, logError } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
@@ -41,6 +41,10 @@ interface HubStatus {
   protocol_version?: number | null;
   dataset_count?: number | null;
   error?: string | null;
+  /** Whether the hub accepts this device's signature. `null`/absent = unknown
+   * (no hub configured, unreachable, or a non-auth failure). Trusted zones
+   * (loopback / Tailscale) report `true` without ever needing a pairing. */
+  paired?: boolean | null;
 }
 
 interface PairedDevice {
@@ -75,6 +79,10 @@ interface PcCandidate {
 interface PairResult {
   state: "approved" | "pending" | "denied" | "none";
   fingerprint?: string;
+  /** Set when the PC approved the pairing but this device is already bound to a
+   * different cluster — trust-on-first-use refuses a silent switch. Pairing
+   * succeeded, so it arrives as a warning rather than a failed call. */
+  cluster_warning?: string | null;
 }
 
 // One `Label: value` line of the Current Workspace Status block, with the
@@ -255,7 +263,13 @@ export default function DevicesHubPage() {
   // ---- Connection + pairing (follower side) ---------------------------
 
   // Persist pc_url to global settings so the sync commands (which read settings
-  // on the backend) can resolve the target hub.
+  // on the backend) can resolve the target hub, then probe the hub once so its
+  // cluster id gets adopted (trust-on-first-use, §3.1/§7). That adoption lives in
+  // `pc_check_status`, and calling it here is the only way a device that reaches
+  // its hub through a trusted zone (loopback / Tailscale — where no pairing ever
+  // happens) ever binds a cluster at all. Best-effort by design: a hub that is
+  // merely offline keeps the address we just saved and the status row says so,
+  // while a cluster refusal is a real conflict and gets surfaced.
   const savePc = useCallback(
     async (url: string) => {
       if (!global) return;
@@ -264,7 +278,24 @@ export default function DevicesHubPage() {
       setManualUrl(url);
       try {
         await invoke("settings_set_global", { global: next });
-        setMessage(url ? `Connected to ${url}.` : "Disconnected.");
+        if (!url) {
+          setMessage("Disconnected.");
+          loadStatus();
+          return;
+        }
+        let note = `Connected to ${url}.`;
+        try {
+          await invoke("pc_check_status", { pcUrl: url });
+        } catch (e) {
+          const msg = String(e);
+          if (msg.includes("belongs to cluster")) {
+            note = msg;
+            logError(`Cluster binding refused: ${msg}`, "devices");
+          } else {
+            logInfo(`Hub not reachable right after connect: ${msg}`, "devices");
+          }
+        }
+        setMessage(note);
         loadStatus();
       } catch (e) {
         logError(`Failed to save PC url: ${String(e)}`, "devices");
@@ -286,7 +317,11 @@ export default function DevicesHubPage() {
         const res = await invoke<PairResult>("pc_pair_start", { pcUrl: url });
         if (res.fingerprint) setPairFingerprint(res.fingerprint);
         if (res.state === "approved") {
-          setPairMessage("Paired with the PC.");
+          setPairMessage(
+            res.cluster_warning
+              ? `Paired with the PC, but the cluster stayed as it was: ${res.cluster_warning}`
+              : "Paired with the PC."
+          );
           setUnpaired(false);
           loadSettings();
           loadStatus();
@@ -358,6 +393,15 @@ export default function DevicesHubPage() {
   }
 
   const clusterId = status?.cluster_id || workspaceSettings?.cluster_id || "";
+  // The hub's own cluster id, advertised on `/status`. Kept separate from our
+  // `clusterId` so an unbound device can say *which* hub it has not bound yet.
+  const hubCluster = status?.hub.cluster_id || "";
+  // Two separate gates onto the hub, now distinguishable: the address decides
+  // reachability (unsigned `/status`), the device signature decides authorization
+  // (`hub.paired`, read off the first signed call). `null` stays undefined so the
+  // UI falls back to offering a plain Pair rather than claiming a state it lacks.
+  const hubPaired = status?.hub.paired === true;
+  const hubUnpaired = status?.hub.paired === false;
 
   return (
     <div className="flex flex-col w-full h-full min-h-0 overflow-y-auto p-4 gap-4">
@@ -393,6 +437,13 @@ export default function DevicesHubPage() {
               explanation={
                 clusterId
                   ? "Issued once when a workspace is promoted to hub; followers adopt it on first pairing. Every sync request carries this id so a device only talks to the hub it belongs to."
+                  : hubCluster
+                  ? `Nothing bound here yet, while the hub advertises ‘${hubCluster.slice(
+                      0,
+                      8,
+                    )}’. Pairing or reconnecting adopts it; until then this device sends an empty cluster id, so the hub cannot place it in any cluster.`
+                  : status?.hub.reachable
+                  ? "The reachable hub advertises no cluster id, so there is nothing to adopt yet — that machine has not been promoted to hub, and only a hub issues a cluster id. Promote it there, then pair or reconnect here to bind."
                   : "Not in a cluster yet. Pair with a hub to adopt its cluster id (trust-on-first-use), or promote this workspace to hub to issue one."
               }
             />
@@ -434,7 +485,7 @@ export default function DevicesHubPage() {
       {/* ── 2. Hub connection (follower side) ────────────────────── */}
       {!isHub && (
         <section className="shrink-0 flex flex-col gap-3 p-4 rounded-lg border border-border-default bg-bg-card">
-          <h2 className="text-base font-semibold">Connection with Hub</h2>
+          <h2 className="text-base font-semibold">Hub</h2>
 
           {/* Follower→upstream-hub link: reachability, pending work, error. */}
           {status && (
@@ -534,29 +585,52 @@ export default function DevicesHubPage() {
                   className="inline-flex items-center px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
                   onClick={() => savePc(manualUrl.trim())}
                   disabled={!manualUrl.trim()}
+                  title="Save this address as the hub to sync against (does not authorize this device)"
                 >
-                  Connect
+                  Use address
                 </button>
               </div>
             )}
 
             {/* Pairing row: the device identity is generated automatically; the
-                only user gesture is asking the hub owner to approve this device. */}
+                only user gesture is asking the hub owner to approve this device.
+                The control now says which side of the authorization gate you are
+                on: while the hub still rejects this signature Pair is the primary
+                action; once accepted it collapses to a chip with Re-pair demoted to
+                a secondary button, so it can't read as a second way to connect. */}
             <div className="flex items-center gap-2 flex-wrap pt-2 border-t border-border-light">
               <span className="text-xs text-text-tertiary flex items-center gap-1 shrink-0">
                 <KeyRound size={13} />
                 {deviceId ? `code ${deviceId.slice(0, 6)}` : "new device"}
               </span>
-              <button
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
-                onClick={() => pair(pcUrl)}
-                disabled={pairing || !pcUrl}
-                title="Ask the PC to pair this device"
-              >
-                <Link2 size={14} className={pairing ? "animate-spin" : undefined} />
-                {pairing ? "Pairing…" : "Pair"}
-              </button>
-              {(unpaired || status?.hub.error?.includes("not paired")) && (
+              {hubPaired ? (
+                <>
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400 shrink-0">
+                    <ShieldCheck size={13} />
+                    Paired
+                  </span>
+                  <button
+                    className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50 shrink-0"
+                    onClick={() => pair(pcUrl)}
+                    disabled={pairing || !pcUrl}
+                    title="Start a fresh pairing request — the PC owner confirms again"
+                  >
+                    <Link2 size={14} className={pairing ? "animate-spin" : undefined} />
+                    {pairing ? "Pairing…" : "Re-pair"}
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
+                  onClick={() => pair(pcUrl)}
+                  disabled={pairing || !pcUrl}
+                  title="Ask the PC to pair this device"
+                >
+                  <Link2 size={14} className={pairing ? "animate-spin" : undefined} />
+                  {pairing ? "Pairing…" : "Pair"}
+                </button>
+              )}
+              {(unpaired || hubUnpaired || status?.hub.error?.includes("not paired")) && (
                 <button
                   className="ml-auto text-xs text-text-secondary underline disabled:opacity-50"
                   onClick={resetIdentity}
@@ -577,6 +651,27 @@ export default function DevicesHubPage() {
                 </button>
               )}
             </div>
+
+            {/* Which gate is still owed, stated outright. Reachability alone used to
+                look like a working setup while every sync quietly 401'd. */}
+            <p className="text-xs text-text-tertiary leading-relaxed">
+              {hubPaired
+                ? "Authorized — the hub accepts this device’s signature, so pulls and writebacks go through. Reaching a hub over Tailscale, or the machine it runs on, is trusted the same way without any pairing."
+                : hubUnpaired
+                ? "Reachable but not authorized: the hub rejects this device’s signature, so sync stays blocked until Pair is approved on the PC."
+                : "Setting the address only decides whether the hub is reachable; Pairing is what lets this device read and write its data. Approve the pairing once, then sync runs unattended."}
+            </p>
+
+            {/* Disconnect and Forget hub look interchangeable but undo different
+                amounts of state — spell it out rather than leaving it in a tooltip. */}
+            {(pcUrl || clusterId) && (
+              <p className="text-xs text-text-tertiary leading-relaxed">
+                <span className="font-medium text-text-secondary">Disconnect</span> clears only the hub
+                address — the cluster binding stays, so reconnecting needs no new pairing.{" "}
+                <span className="font-medium text-text-secondary">Forget hub / re-pair</span> also drops
+                the cluster id, which is what you want when moving this device to a different hub.
+              </p>
+            )}
 
             {pairing && (
               <div className="text-sm text-text-secondary">

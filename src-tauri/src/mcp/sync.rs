@@ -129,7 +129,7 @@ impl DatasetMcpServer {
         .to_string())
     }
 
-    #[tool(name = "pc_sync_connect", description = "Set the machine this app syncs datasets from (base URL such as http://192.168.1.20:35711); pass an empty string to disconnect. Persisted to global settings — it is the same target as the source selector on the Datasets Sync page. Confirm with pc_sync_status.")]
+    #[tool(name = "pc_sync_connect", description = "Set the machine this app syncs datasets from (base URL such as http://192.168.1.20:35711); pass an empty string to disconnect. Persisted to global settings — it is the same target as the source selector on the Datasets Sync page. Also probes the hub and adopts its cluster id on first contact (trust-on-first-use), so connecting is what binds a follower to a hub; an already-bound device that disagrees reports it in `warning` instead of silently switching. Confirm with pc_sync_status.")]
     async fn pc_sync_connect(&self, Parameters(param): Parameters<PcUrlParam>) -> Result<String, String> {
         let url = param.pc_url.trim().trim_end_matches('/').to_string();
         log::info!("[MCP] pc_sync_connect: {}", if url.is_empty() { "<disconnect>" } else { &url });
@@ -142,13 +142,33 @@ impl DatasetMcpServer {
         let ws_dir = settings.workspace_dir.lock().unwrap().clone();
         SettingsState::save(&snapshot, ws_dir.as_ref())?;
         let _ = self.app.emit("settings-changed", ());
+        // Trust-on-first-use binding rides on the same probe the UI's source
+        // selector performs, so an agent connecting over MCP ends up bound exactly
+        // like a human who picked the hub in the page. Both sides are reported: an
+        // unreachable hub and a genuine cluster disagreement need different fixes.
+        let (hub_cluster, warning) = if url.is_empty() {
+            (String::new(), None)
+        } else {
+            match sync::client::pc_check_status(self.app.state::<SettingsState>(), Some(url.clone())).await {
+                Ok(v) => (
+                    v.get("cluster_id").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                    None,
+                ),
+                Err(e) => (String::new(), Some(e)),
+            }
+        };
         Ok(serde_json::json!({
             "status": "ok",
             "pc_url": url,
+            "cluster_id": settings.cluster_id(),
+            "hub_cluster_id": hub_cluster,
+            "warning": warning,
             "next": if url.is_empty() {
                 "Call pc_sync_scan to find a source machine."
-            } else {
+            } else if !hub_cluster.is_empty() {
                 "Call pc_sync_status to see what that machine offers."
+            } else {
+                "Address saved, but the hub did not answer /status: verify its web service is running (web_service_get_status), then retry. A follower also needs pairing (pc_pair_start) before data calls succeed."
             }
         })
         .to_string())
@@ -293,7 +313,7 @@ impl DatasetMcpServer {
         Ok(v.to_string())
     }
 
-    #[tool(name = "sync_status_detail", description = "JSON twin of the Datasets Sync status screen (§3.5): this device's role/cluster/protocol, hub address + reachability, per-dataset sync state (downloaded / needs_resync / not_downloaded / removed_on_hub) with row-log cursors, queued writeback + pending chat counts, and (on a hub) the paired-device registry. Read-only and richer than pc_sync_status; use it to diagnose sync without driving the UI.")]
+    #[tool(name = "sync_status_detail", description = "JSON twin of the Datasets Sync status screen (§3.5): this device's role/cluster/protocol, hub address + reachability + whether the hub actually accepts this device's signature (hub.paired: true authorized, false = pairing still owed so every data call 401s, null = unknown because the hub is unreachable or unset), per-dataset sync state (downloaded / needs_resync / not_downloaded / removed_on_hub) with row-log cursors, queued writeback + pending chat counts, and (on a hub) the paired-device registry. Read-only and richer than pc_sync_status; use it to diagnose sync without driving the UI — a reachable hub with paired=false means call pc_pair_start next, not sync_run_round.")]
     async fn sync_status_detail(&self) -> Result<String, String> {
         log::info!("[MCP] sync_status_detail");
         let settings = self.app.state::<SettingsState>();

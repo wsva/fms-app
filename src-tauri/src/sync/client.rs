@@ -769,6 +769,18 @@ pub struct HubStatus {
     pub dataset_count: Option<i64>,
     /// Set when the probe failed — the reason surfaced on the Status page.
     pub error: Option<String>,
+    /// Whether this device is **authorized** against the hub, i.e. whether the
+    /// zone guard accepts our signed data requests. `Some(true)` covers both a
+    /// paired device and a hub reached from a trusted zone (loopback / Tailscale),
+    /// where signatures are not even required — either way nothing is left to pair.
+    /// `Some(false)` is the hub's `401 device not paired` answer. `None` means
+    /// unknown: no hub configured, unreachable, or a failure unrelated to auth.
+    ///
+    /// `/status` cannot report this by itself — it is deliberately unsigned so it
+    /// works before pairing, which is exactly why the old UI had no way to tell
+    /// "connected" from "connected and allowed". The state is read off the first
+    /// *signed* call of the round instead of being guessed from an empty catalog.
+    pub paired: Option<bool>,
 }
 
 /// Aggregated local + hub sync state for the Status surface (§3.5).
@@ -807,6 +819,7 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
         protocol_version: None,
         dataset_count: None,
         error: None,
+        paired: None,
     };
     if base.is_empty() {
         hub.error = Some("no hub configured — use Settings › Discover PC".to_string());
@@ -844,14 +857,24 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
     }
 
     // 2. Pull the hub catalog (cheap `lite` list). Empty when unreachable/unpaired
-    //    — the merge below still reports local-only datasets.
+    //    — the merge below still reports local-only datasets. This is also the
+    //    round's first *signed* call, so its outcome doubles as the pairing probe:
+    //    accepted ⇒ authorized, `not paired` ⇒ Pair is still owed. Any other
+    //    failure leaves `paired` unknown rather than guessing at it.
     let mut catalog: Vec<Value> = Vec::new();
     if hub.reachable {
-        catalog = pc_get_json(settings, "/api/v1/datasets", &[("lite", "1".to_string())])
-            .await
-            .ok()
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default();
+        match pc_get_json(settings, "/api/v1/datasets", &[("lite", "1".to_string())]).await {
+            Ok(v) => {
+                hub.paired = Some(true);
+                catalog = v.as_array().cloned().unwrap_or_default();
+            }
+            Err(e) => {
+                if e.contains("not paired") {
+                    hub.paired = Some(false);
+                }
+                log::info!("[sync] catalog fetch skipped: {e}");
+            }
+        }
     }
 
     // 3. Everything below is synchronous SQLite / in-process reads.
@@ -1675,8 +1698,55 @@ pub(crate) fn device_name() -> String {
     }).clone()
 }
 
+/// The hub's advertised `cluster_id`, read from its unsigned `/status`. Empty on
+/// any failure: a hub that predates the field, or one that is momentarily
+/// unreachable, must not turn a completed pairing into an error.
+async fn hub_cluster_id(client: &reqwest::Client, base: &str) -> String {
+    match client.get(format!("{base}/api/v1/status")).send().await {
+        Ok(resp) => resp
+            .json::<Value>()
+            .await
+            .unwrap_or(Value::Null)
+            .get("cluster_id")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Trust-on-first-use cluster binding on the **pairing** path (§3.1, §7): a
+/// follower adopts the id of the hub that has just approved it, and refuses a hub
+/// belonging to a different cluster instead of silently switching.
+///
+/// This hook is what makes the binding real. Adoption previously lived only
+/// inside [`pc_check_status`], which no screen has called since the connect UI
+/// moved out of Settings, so followers ran with an empty `x-fms-cluster`: the hub's
+/// mis-pairing check never fired and nothing recorded which hub they belonged to.
+/// Pairing has already succeeded by the time this runs, so a mismatch is returned
+/// as a warning next to the approval rather than an error that would misreport the
+/// pairing itself as failed.
+async fn bind_cluster_after_pairing(
+    settings: &SettingsState,
+    client: &reqwest::Client,
+    base: &str,
+) -> Option<String> {
+    let hub_cluster = hub_cluster_id(client, base).await;
+    if hub_cluster.is_empty() {
+        return None;
+    }
+    match adopt_or_verify_cluster(settings, &hub_cluster) {
+        Ok(()) => None,
+        Err(e) => {
+            log::warn!("[sync] pair approved but cluster binding refused: {e}");
+            Some(e)
+        }
+    }
+}
+
 /// Pair this device with the PC. The PC owner gets a confirm dialog; we poll
-/// `/pair/status` every 2 s (up to 120 s) until they answer.
+/// `/pair/status` every 2 s (up to 120 s) until they answer. An approval also
+/// binds this device to the hub's cluster (see [`bind_cluster_after_pairing`]).
 #[tauri::command]
 pub async fn pc_pair_start(
     settings: State<'_, SettingsState>,
@@ -1718,8 +1788,20 @@ pub async fn pc_pair_start(
 
     let state = v["state"].as_str().unwrap_or("none").to_string();
     if state != "pending" {
-        // Re-pair (already approved) and denied short-circuit — no dialog.
-        return Ok(json!({ "state": state, "fingerprint": v["fingerprint"] }));
+        // Re-pair (already approved) and denied short-circuit — no dialog. An
+        // already-approved device still binds: the trust event is what adoption
+        // belongs to, and devices that paired before this hook existed have no
+        // cluster id of their own yet.
+        let cluster_warning = if state == "approved" {
+            bind_cluster_after_pairing(&settings, &client, &base).await
+        } else {
+            None
+        };
+        return Ok(json!({
+            "state": state,
+            "fingerprint": v["fingerprint"],
+            "cluster_warning": cluster_warning,
+        }));
     }
 
     // Dialog path: poll until the PC owner answers (or we give up).
@@ -1743,7 +1825,17 @@ pub async fn pc_pair_start(
             .map_err(|e| e.to_string())?;
         let state = s["state"].as_str().unwrap_or("pending").to_string();
         if state != "pending" {
-            return Ok(json!({ "state": state, "fingerprint": fingerprint, "request_id": request_id }));
+            let cluster_warning = if state == "approved" {
+                bind_cluster_after_pairing(&settings, &client, &base).await
+            } else {
+                None
+            };
+            return Ok(json!({
+                "state": state,
+                "fingerprint": fingerprint,
+                "request_id": request_id,
+                "cluster_warning": cluster_warning,
+            }));
         }
     }
     Err("Timed out waiting for the PC owner to confirm pairing.".into())
