@@ -186,6 +186,9 @@ fn open_db(dir: &Path) -> Result<Connection, String> {
         ",
     )
     .map_err(|e| e.to_string())?;
+    // §3.4: a per-dataset tombstone table (travels with snapshots) so a delete
+    // is durable and can collide with a resurrected offline edit.
+    crate::sync::change_log::ensure_tombstones(&conn)?;
     Ok(conn)
 }
 
@@ -408,7 +411,19 @@ pub async fn read_aloud_save_text(
     dataset_uuid: String,
     text: ReadText,
 ) -> Result<(), String> {
-    let dir = find_dataset_dir(&settings, &dataset_uuid)?;
+    save_text_row(&settings, &dataset_uuid, &text)
+}
+
+/// Write one text row and journal the change (§3.2 choke point). Shared by the
+/// command and both sync apply paths (hub replay, follower pull-apply), so an
+/// edit made on any device reaches the journal exactly once — `commit_change`
+/// self-suppresses while a remote change is being applied.
+pub(crate) fn save_text_row(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    text: &ReadText,
+) -> Result<(), String> {
+    let dir = find_dataset_dir(settings, dataset_uuid)?;
     let conn = open_db(&dir)?;
     conn.execute(
         "INSERT INTO read_text \
@@ -434,6 +449,14 @@ pub async fn read_aloud_save_text(
     )
     .map_err(|e| e.to_string())?;
     touch_info(&dir);
+    {
+        let _ = crate::sync::change_log::commit_change(
+            settings,
+            "read_text_save",
+            dataset_uuid,
+            &serde_json::to_value(text).unwrap_or_default(),
+        );
+    }
     Ok(())
 }
 
@@ -462,6 +485,16 @@ pub async fn read_aloud_delete_text(
     conn.execute("DELETE FROM read_text WHERE uuid = ?1", [&uuid])
         .map_err(|e| e.to_string())?;
     touch_info(&dir);
+    // The attempt rows go with it by cascade, so one change entry suffices — the
+    // apply path deletes the same way.
+    {
+        let _ = crate::sync::change_log::commit_change(
+            &settings,
+            "read_text_delete",
+            &dataset_uuid,
+            &serde_json::json!({ "uuid": uuid }),
+        );
+    }
     Ok(())
 }
 
@@ -522,7 +555,83 @@ pub async fn read_aloud_delete_attempt(
     }
     conn.execute("DELETE FROM read_attempt WHERE uuid = ?1", [&uuid])
         .map_err(|e| e.to_string())?;
+    {
+        let _ = crate::sync::change_log::commit_change(
+            &settings,
+            "read_attempt_delete",
+            &dataset_uuid,
+            &serde_json::json!({ "uuid": uuid }),
+        );
+    }
     Ok(())
+}
+
+/// Persist one attempt row, roll the text's `best_score` forward, and journal the
+/// change. Shared by `read_aloud_submit` and both sync apply paths (hub replay,
+/// follower pull-apply) so an attempt recorded on any device converges the same
+/// way everywhere.
+///
+/// The recording itself is not part of the change: the WAV lives in the dataset's
+/// `media/` and travels as an ordinary file through the manifest (§3.2). Only
+/// `audio_path` is stored — `audio_url` in the payload is the sender's absolute
+/// path and is ignored, since each device re-resolves it on read. Attempts are
+/// per-user history, so an apply path overwrites `user_id` with the identity the
+/// hub bound the device to (like the `dictation` kind) rather than trusting it.
+pub(crate) fn save_attempt_row(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    attempt: &ReadAttempt,
+) -> Result<(), String> {
+    let dir = find_dataset_dir(settings, dataset_uuid)?;
+    let conn = open_db(&dir)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO read_attempt \
+         (uuid, text_uuid, user_id, audio_path, recognized, score, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            attempt.uuid,
+            attempt.text_uuid,
+            attempt.user_id,
+            attempt.audio_path,
+            attempt.recognized,
+            attempt.score,
+            attempt.created_at
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Track the best score seen for this text.
+    conn.execute(
+        "UPDATE read_text SET best_score = MAX(COALESCE(best_score, 0), ?1), \
+         updated_at = datetime('now') WHERE uuid = ?2",
+        rusqlite::params![attempt.score, attempt.text_uuid],
+    )
+    .map_err(|e| e.to_string())?;
+    touch_info(&dir);
+
+    {
+        let _ = crate::sync::change_log::commit_change(
+            settings,
+            "read_attempt_save",
+            dataset_uuid,
+            &serde_json::to_value(attempt).unwrap_or_default(),
+        );
+    }
+    Ok(())
+}
+
+/// Number of texts in a dataset. Used as the read-aloud `media_count` in the
+/// REST sync catalog; best-effort, so an unreadable dataset reports 0.
+pub(crate) fn count_texts(settings: &SettingsState, dataset_uuid: &str) -> usize {
+    find_dataset_dir(settings, dataset_uuid)
+        .and_then(|dir| {
+            let conn = open_db(&dir)?;
+            conn
+                .query_row("SELECT COUNT(*) FROM read_text", [], |r| r.get::<_, i64>(0))
+                .map(|n| n as usize)
+                .map_err(|e| e.to_string())
+        })
+        .unwrap_or(0)
 }
 
 /// Pure similarity score (0-100) between a reference text and a transcript.
@@ -548,16 +657,19 @@ pub async fn read_aloud_submit(
     recognized: String,
 ) -> Result<ReadAloudSubmitResult, String> {
     let dir = find_dataset_dir(&settings, &dataset_uuid)?;
-    let conn = open_db(&dir)?;
 
-    // Load the reference text.
-    let content: String = conn
-        .query_row(
+    // Load the reference text. The read handle is scoped to this block so the
+    // attempt write below gets a fresh connection instead of two live handles
+    // on the same dataset DB.
+    let content: String = {
+        let conn = open_db(&dir)?;
+        conn.query_row(
             "SELECT content FROM read_text WHERE uuid = ?1",
             [&text_uuid],
             |row| row.get(0),
         )
-        .map_err(|_| format!("Text {} not found in dataset", text_uuid))?;
+        .map_err(|_| format!("Text {} not found in dataset", text_uuid))?
+    };
 
     let score = similarity_score(&content, &recognized);
 
@@ -578,29 +690,6 @@ pub async fn read_aloud_submit(
 
     let user_id = workspace_identity(&settings);
     let now = Utc::now().to_rfc3339();
-    conn.execute(
-        "INSERT INTO read_attempt (uuid, text_uuid, user_id, audio_path, recognized, score, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![
-            attempt_uuid,
-            text_uuid,
-            user_id,
-            audio_path,
-            recognized,
-            score,
-            now
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Track the best score seen for this text.
-    conn.execute(
-        "UPDATE read_text SET best_score = MAX(COALESCE(best_score, 0), ?1), \
-         updated_at = datetime('now') WHERE uuid = ?2",
-        rusqlite::params![score, text_uuid],
-    )
-    .map_err(|e| e.to_string())?;
-    touch_info(&dir);
 
     let attempt = ReadAttempt {
         uuid: attempt_uuid,
@@ -612,6 +701,9 @@ pub async fn read_aloud_submit(
         score,
         created_at: now,
     };
+    // Row write + `best_score` roll-up + change journal, through the same path a
+    // synced attempt arrives by.
+    save_attempt_row(&settings, &dataset_uuid, &attempt)?;
 
     // Scaled XP: 1 XP for passing (>=60), +1 more for a strong read (>=80).
     // Each tier is deduped per text via xp_earned, so repeating never farms XP

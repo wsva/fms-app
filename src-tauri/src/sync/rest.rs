@@ -43,6 +43,7 @@ use crate::datasets;
 use crate::datasets::book::{BookChapter, BookSentence, BookSentenceWord};
 use crate::datasets::cards::{Card, Tag};
 use crate::datasets::dictation::{ListenCue, ListenDictation};
+use crate::datasets::read_aloud::{ReadAttempt, ReadText};
 use crate::settings::SettingsState;
 use crate::sync;
 use crate::xp;
@@ -197,12 +198,13 @@ struct DatasetListItem {
     uuid: String,
     name: String,
     updated: String,
-    /// One of `dictation` | `card` | `book` — lets the phone group the list and
-    /// know which local root to unpack a snapshot into.
+    /// One of `dictation` | `card` | `book` | `read_aloud` — lets the follower
+    /// group the list and know which local root to unpack a snapshot into.
     dataset_type: String,
-    /// Dictation: media file count. Card: card count. Book: 0 (not tracked).
-    /// Zeroed under `?lite=1` (the incremental sync round only needs uuid +
-    /// type + updated, so counting rows per dataset is wasted work).
+    /// Dictation: media file count. Card: card count. Read-aloud: text count.
+    /// Book: 0 (not tracked). Zeroed under `?lite=1` (the incremental sync round
+    /// only needs uuid + type + updated, so counting rows per dataset is wasted
+    /// work).
     media_count: usize,
     status: String,
 }
@@ -269,6 +271,21 @@ async fn datasets_list(
         });
     }
 
+    // Read-aloud datasets (texts + recorded attempts, attempts' WAVs in media/).
+    for d in crate::datasets::read_aloud::list_datasets(&settings) {
+        if d.uuid.is_empty() {
+            continue;
+        }
+        items.push(DatasetListItem {
+            uuid: d.uuid.clone(),
+            name: d.name,
+            updated: d.updated_at,
+            dataset_type: "read_aloud".into(),
+            media_count: if lite { 0 } else { crate::datasets::read_aloud::count_texts(&settings, &d.uuid) },
+            status: "ready".into(),
+        });
+    }
+
     (StatusCode::OK, Json(items)).into_response()
 }
 
@@ -282,8 +299,8 @@ struct Manifest {
     total_bytes: u64,
     overall_hash: String,
     updated_at: String,
-    /// Dataset type (`dictation` | `card` | `book`) so the phone unpacks the
-    /// snapshot into the matching local root.
+    /// Dataset type (`dictation` | `card` | `book` | `read_aloud`) so the
+    /// follower unpacks the snapshot into the matching local root.
     #[serde(default)]
     dataset_type: String,
     /// Per non-DB file content hash (`{ rel_path: sha256 }`), for incremental
@@ -1011,6 +1028,28 @@ async fn replay(
         "book_word_delete" => {
             let uuid = extract_str(&ch.payload, "uuid")?;
             datasets::book::book_delete_word(settings.clone(), dataset_uuid, uuid).await
+        }
+        "read_text_save" => {
+            let text: ReadText =
+                serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
+            datasets::read_aloud::save_text_row(settings.inner(), &dataset_uuid, &text)
+        }
+        "read_text_delete" => {
+            let uuid = extract_str(&ch.payload, "uuid")?;
+            datasets::read_aloud::read_aloud_delete_text(settings.clone(), dataset_uuid, uuid).await
+        }
+        "read_attempt_save" => {
+            let mut attempt: ReadAttempt =
+                serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
+            // Per-user history: attribute to the enforced identity, never to the
+            // `user_id` the device declared (same rule as the `dictation` kind).
+            attempt.user_id = write_identity.to_string();
+            datasets::read_aloud::save_attempt_row(settings.inner(), &dataset_uuid, &attempt)
+        }
+        "read_attempt_delete" => {
+            let uuid = extract_str(&ch.payload, "uuid")?;
+            datasets::read_aloud::read_aloud_delete_attempt(settings.clone(), dataset_uuid, uuid)
+                .await
         }
         other => Err(format!("unknown change kind: {}", other)),
     }

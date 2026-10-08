@@ -1010,9 +1010,9 @@ pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<P
 }
 
 /// Find a dataset directory by UUID across every dataset type (dictation, card,
-/// book). Returns the resolved path together with its type so callers — the REST
-/// manifest/snapshot endpoints and the phone sync client — know both where the
-/// dataset lives and which local root it belongs to.
+/// book, read-aloud). Returns the resolved path together with its type so
+/// callers — the REST manifest/snapshot endpoints and the sync client — know
+/// both where the dataset lives and which local root it belongs to.
 ///
 /// `info.json` shapes differ per type (books have no `name`/`description`), so
 /// only the `uuid` field is read via a lenient JSON parse.
@@ -1021,7 +1021,15 @@ pub(crate) fn find_dataset_dir_typed(
     settings: &SettingsState,
     uuid: &str,
 ) -> Result<(PathBuf, DatasetType), String> {
-    for ty in [DatasetType::Dictation, DatasetType::Card, DatasetType::Book] {
+    // Every type the sync transport can serve. A type missing here cannot be
+    // resolved by `/manifest`, `/snapshot`, `/changes` or `/file`, so it is
+    // effectively unsyncable even when the catalog advertises it.
+    for ty in [
+        DatasetType::Dictation,
+        DatasetType::Card,
+        DatasetType::Book,
+        DatasetType::Read,
+    ] {
         for root in dataset_roots(settings, ty) {
             if !root.exists() {
                 continue;

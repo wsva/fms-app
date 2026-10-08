@@ -37,7 +37,7 @@ Nothing here is mandatory. Where v8 and reality disagree, reality wins.
 ### 1.2 Dataset sync
 
 Unit of sync: one **dataset directory** (`<datasets>/<type>/<uuid>`, type ∈
-`dictation | card | book`). Flow today (`sync/client.rs::dataset_sync_snapshot` ⇄
+`dictation | card | book | read_aloud`). Flow today (`sync/client.rs::dataset_sync_snapshot` ⇄
 `sync/rest.rs`):
 
 1. `GET /api/v1/datasets/{uuid}/manifest` → `{ overall_hash, total_bytes,
@@ -49,8 +49,8 @@ Unit of sync: one **dataset directory** (`<datasets>/<type>/<uuid>`, type ∈
    streamed, never written to disk on the PC).
 4. Phone/desktop extracts to `<uuid>.tmp`, atomically swaps it in, records the hash.
 
-Server side is type-agnostic: `datasets_list` aggregates dictation, card, and book
-datasets; `find_dataset_dir_typed` resolves any uuid.
+Server side is type-agnostic: `datasets_list` aggregates dictation, card, book
+and read-aloud datasets; `find_dataset_dir_typed` resolves any uuid.
 
 ### 1.3 Writeback (follower → hub)
 
@@ -359,8 +359,8 @@ writeback `kind` explicitly — getting this wrong silently loses data:
 
 | Class | Kinds | Queue rule | Conflict rule |
 |---|---|---|---|
-| **state** | cue save/delete, card save/delete/tags, book chapter/sentence/word | coalesce by `object_id`, keep latest | later `edit_time` wins |
-| **append-only** | card_review and any history rows | **never** coalesce; safe **only because inserted by uuid** (idempotent PK) | no conflict — all kept |
+| **state** | cue save/delete, card save/delete/tags, book chapter/sentence/word, read-aloud text save/delete | coalesce by `object_id`, keep latest | later `edit_time` wins |
+| **append-only** | card_review, read-aloud attempt save/delete and any history rows | **never** coalesce; safe **only because inserted by uuid** (idempotent PK) | no conflict — all kept |
 | **counter** | XP (enqueued as an `amount` **delta**, see `xp.rs`) | never coalesce | sum the deltas |
 
 **Replay deduplication (mandatory, because acks are lossy):** the flush deletes a

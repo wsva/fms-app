@@ -145,11 +145,13 @@ impl ChangeClass {
             | "book_sentence_delete"
             | "book_word_save"
             | "book_word_delete"
+            | "read_text_save"
+            | "read_text_delete"
             | "dictation" => ChangeClass::State,
             // counter: XP is enqueued as an amount delta (§3.6).
             "xp" => ChangeClass::Counter,
             // append-only: review history + anything unrecognised (safe: keep).
-            "card_review" => ChangeClass::AppendOnly,
+            "card_review" | "read_attempt_save" | "read_attempt_delete" => ChangeClass::AppendOnly,
             _ => ChangeClass::AppendOnly,
         }
     }
@@ -198,6 +200,10 @@ pub fn object_id_for(kind: &str, payload: &Value) -> String {
         | "book_sentence_save" | "book_sentence_delete"
         | "book_word_save" | "book_word_delete" => get("uuid"),
         "book_sentences_save" => String::new(),
+        // Read-aloud texts are editable rows; attempts are insert-once history.
+        // Both carry their own uuid, as does each delete payload.
+        "read_text_save" | "read_text_delete"
+        | "read_attempt_save" | "read_attempt_delete" => get("uuid"),
         "xp" => String::new(),
         _ => get("uuid"),
     }
@@ -543,6 +549,8 @@ pub fn table_for_kind(kind: &str) -> &'static str {
         "book_chapter_save" | "book_chapter_delete" => "book_chapters",
         "book_sentence_save" | "book_sentences_save" | "book_sentence_delete" => "book_sentences",
         "book_word_save" | "book_word_delete" => "book_sentence_words",
+        "read_text_save" | "read_text_delete" => "read_text",
+        "read_attempt_save" | "read_attempt_delete" => "read_attempt",
         _ => "row",
     }
 }

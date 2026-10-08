@@ -1270,6 +1270,7 @@ async fn apply_change(
     use crate::datasets::book::{BookChapter, BookSentence, BookSentenceWord};
     use crate::datasets::cards::{Card, Tag};
     use crate::datasets::dictation::{ListenCue, ListenDictation};
+    use crate::datasets::read_aloud::{ReadAttempt, ReadText};
     let ds = dataset_uuid.to_string();
     let str_field = |k: &str| -> Result<String, String> {
         payload
@@ -1370,6 +1371,25 @@ async fn apply_change(
             let uuid = str_field("uuid")?;
             crate::datasets::book::book_delete_word(settings.clone(), ds, uuid).await.map(|_| true)
         }
+        "read_text_save" => {
+            let text: ReadText = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+            crate::datasets::read_aloud::save_text_row(settings.inner(), &ds, &text).map(|_| true)
+        }
+        "read_text_delete" => {
+            let uuid = str_field("uuid")?;
+            crate::datasets::read_aloud::read_aloud_delete_text(settings.clone(), ds, uuid).await.map(|_| true)
+        }
+        "read_attempt_save" => {
+            let mut attempt: ReadAttempt = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+            // Per-user history: rebind to this device's identity, mirroring the
+            // hub's `dictation` rule rather than trusting the payload.
+            attempt.user_id = write_identity.to_string();
+            crate::datasets::read_aloud::save_attempt_row(settings.inner(), &ds, &attempt).map(|_| true)
+        }
+        "read_attempt_delete" => {
+            let uuid = str_field("uuid")?;
+            crate::datasets::read_aloud::read_aloud_delete_attempt(settings.clone(), ds, uuid).await.map(|_| true)
+        }
         other => {
             log::warn!("[sync_round] skipping unknown change kind '{other}'");
             Ok(false)
@@ -1405,7 +1425,7 @@ fn has_pending_local_edit(conn: &Connection, dataset_uuid: &str, kind: &str, obj
 /// Remove a local dataset the hub no longer offers: delete its directory under
 /// every type root and drop its `dataset_sync_state` row (prune-by-absence).
 fn prune_local_dataset(settings: &SettingsState, conn: &Connection, uuid: &str) {
-    for ty in ["dictation", "card", "book"] {
+    for ty in ["dictation", "card", "book", "read_aloud"] {
         let dir = type_root(settings, ty).join(uuid);
         if dir.exists() {
             let _ = std::fs::remove_dir_all(&dir);
