@@ -4,8 +4,8 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import {
-  ChevronRight, ChevronDown, Folder, FileText, RefreshCw, Link, Plus, X,
-  FolderInput, FilePlus, FolderPlus, Trash2, BookMarked,
+  ChevronRight, ChevronDown, Folder, FileText, RefreshCw, Link, Plus,
+  FilePlus, FolderPlus, Trash2, BookMarked,
 } from "lucide-react";
 import { logError } from "@/lib/logger";
 import { isMobileApp } from "@/lib/platform";
@@ -21,7 +21,7 @@ interface WikiSidebarProps {
   hubMode: boolean;
   /** Locally stored wiki datasets (downloaded or hub-owned). Empty in hub mode. */
   datasets: WikiDatasetSummary[];
-  /** Whether this device is the hub (desktop, non-follower): gates create/convert. */
+  /** Whether this device is the hub (desktop, non-follower): gates dataset creation. */
   canMutateRoots: boolean;
   /** Called after dataset tree mutations so the page can refresh its dataset list. */
   onDatasetsChanged: () => void;
@@ -67,10 +67,6 @@ export default function WikiSidebar({
   const [dirContents, setDirContents] = useState<Record<string, WikiEntry[]>>({});
   const [loading, setLoading] = useState(false);
   const [mobile, setMobile] = useState(false);
-  const [showAddDialog, setShowAddDialog] = useState(false);
-  const [newDirName, setNewDirName] = useState("");
-  const [newDirPath, setNewDirPath] = useState("");
-
   // Wiki dataset trees: expanded dirs keyed by `${uuid}:${rel}` and their children.
   const [expandedDsDirs, setExpandedDsDirs] = useState<Set<string>>(new Set());
   const [dsRootOpen, setDsRootOpen] = useState<Set<string>>(new Set());
@@ -81,7 +77,8 @@ export default function WikiSidebar({
   const [promptBusy, setPromptBusy] = useState(false);
 
   const loadRootEntries = useCallback(async () => {
-    if (!isTauri() || !wikiDir) return;
+    // Legacy wiki roots are only browsed in the mobile hub view.
+    if (!isTauri() || !wikiDir || !hubMode) return;
     setLoading(true);
     try {
       const result = await invoke<WikiEntry[]>("wiki_list_dirs");
@@ -93,7 +90,7 @@ export default function WikiSidebar({
     } finally {
       setLoading(false);
     }
-  }, [wikiDir]);
+  }, [wikiDir, hubMode]);
 
   useEffect(() => {
     setMobile(isMobileApp());
@@ -172,18 +169,6 @@ export default function WikiSidebar({
             </>
           )}
           <span className="truncate flex-1">{entry.name}</span>
-          {!mobile && !hubMode && entry.is_linked && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleRemoveLinkedDir(entry.path);
-              }}
-              className="p-0.5 rounded hover:bg-bg-hover text-text-tertiary hover:text-text-primary transition-colors opacity-0 group-hover:opacity-100"
-              title="Remove linked directory"
-            >
-              <X size={12} />
-            </button>
-          )}
         </div>
         {entry.is_dir && isExpanded && children && (
           <div>
@@ -322,22 +307,6 @@ export default function WikiSidebar({
     });
   };
 
-  const handleImportDir = async () => {
-    if (!isTauri()) return;
-    try {
-      const path = await invoke<string>("settings_pick_folder", { field: "wiki_dir" });
-      const name = path.split(/[\\/]/).filter(Boolean).pop() || "wiki";
-      await invoke<WikiDatasetSummary>("wiki_dataset_import_dir", { name, path });
-      onDatasetsChanged();
-    } catch (err) {
-      // A cancelled folder picker isn't an error.
-      if (String(err).toLowerCase().includes("cancel")) return;
-      const errorMsg = `Failed to convert folder: ${err instanceof Error ? err.message : String(err)}`;
-      logError(errorMsg, "wiki");
-      await message(errorMsg, { title: "Error", kind: "error" });
-    }
-  };
-
   const renderDsFileEntry = (uuid: string, entry: WikiFileEntry, depth: number) => {
     const key = dsKey(uuid, entry.rel_path);
     const isExpanded = expandedDsDirs.has(key);
@@ -470,50 +439,6 @@ export default function WikiSidebar({
     await loadRootEntries();
   };
 
-  const handlePickFolder = async () => {
-    if (!isTauri()) return;
-    try {
-      const path = await invoke<string>("settings_pick_folder", { field: "wiki_dir" });
-      setNewDirPath(path);
-      // Use the last segment as default name
-      const name = path.split(/[\\/]/).filter(Boolean).pop() || "linked";
-      setNewDirName(name);
-    } catch (err) {
-      const errorMsg = `Failed to pick folder: ${err instanceof Error ? err.message : String(err)}`;
-      logError(errorMsg, "wiki");
-      await message(errorMsg, { title: "Error", kind: "error" });
-    }
-  };
-
-  const handleAddLinkedDir = async () => {
-    if (!isTauri() || !newDirName.trim() || !newDirPath.trim()) return;
-    try {
-      await invoke("wiki_add_dir", { name: newDirName.trim(), path: newDirPath.trim() });
-      setShowAddDialog(false);
-      setNewDirName("");
-      setNewDirPath("");
-      await handleRefresh();
-    } catch (err) {
-      const errorMsg = `Failed to add linked directory: ${err instanceof Error ? err.message : String(err)}`;
-      logError(errorMsg, "wiki");
-      await message(errorMsg, { title: "Error", kind: "error" });
-    }
-  };
-
-  const handleRemoveLinkedDir = async (path: string) => {
-    if (!isTauri()) return;
-    const confirmed = await ask(`Remove linked directory?\n${path}\n\nThe directory itself will not be deleted.`, { title: "Remove Linked Directory", kind: "warning" });
-    if (!confirmed) return;
-    try {
-      await invoke("wiki_remove_dir", { path });
-      await handleRefresh();
-    } catch (err) {
-      const errorMsg = `Failed to remove linked directory: ${err instanceof Error ? err.message : String(err)}`;
-      logError(errorMsg, "wiki");
-      await message(errorMsg, { title: "Error", kind: "error" });
-    }
-  };
-
   // The dataset list shown in the tree: local datasets, or the hub's in hub mode.
   const treeDatasets = datasets;
 
@@ -531,20 +456,6 @@ export default function WikiSidebar({
               >
                 <Plus size={14} />
               </button>
-              <button
-                onClick={handleImportDir}
-                className="p-1 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
-                title="Convert an existing markdown folder into a wiki dataset (in place)"
-              >
-                <FolderInput size={14} />
-              </button>
-              <button
-                onClick={() => setShowAddDialog(true)}
-                className="p-1 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
-                title="Link external directory (legacy wiki)"
-              >
-                <Link size={14} />
-              </button>
             </>
           )}
           <button
@@ -557,49 +468,6 @@ export default function WikiSidebar({
           </button>
         </div>
       </div>
-      {showAddDialog && (
-        <div className="px-3 py-2 border-b border-border-default bg-bg-body space-y-2">
-          <div className="text-xs font-semibold text-text-primary">Link External Directory</div>
-          <div>
-            <input
-              type="text"
-              placeholder="Display name (letters, numbers, hyphens, underscores)"
-              value={newDirName}
-              onChange={(e) => {
-                // Only allow URL-compatible characters: letters, numbers, hyphens, underscores
-                const value = e.target.value.replace(/[^a-zA-Z0-9_-]/g, "");
-                setNewDirName(value);
-              }}
-              className="w-full px-2 py-1 text-sm bg-bg-input border border-border-default rounded-md outline-none focus:border-accent"
-            />
-          </div>
-          <button
-            onClick={handlePickFolder}
-            className="w-full px-2 py-2 text-sm bg-bg-input border border-border-default rounded-md hover:bg-bg-hover transition-colors text-left truncate"
-          >
-            {newDirPath || "Select directory..."}
-          </button>
-          <div className="flex gap-2">
-            <button
-              onClick={handleAddLinkedDir}
-              disabled={!newDirName.trim() || !newDirPath.trim()}
-              className="flex-1 px-2 py-1 text-xs bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              Add
-            </button>
-            <button
-              onClick={() => {
-                setShowAddDialog(false);
-                setNewDirName("");
-                setNewDirPath("");
-              }}
-              className="flex-1 px-2 py-1 text-xs bg-bg-input border border-border-default rounded-md hover:bg-bg-hover transition-colors"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
       {prompt && (
         <div className="px-3 py-2 border-b border-border-default bg-bg-body space-y-2">
           <div className="text-xs font-semibold text-text-primary">{prompt.title}</div>
@@ -640,7 +508,7 @@ export default function WikiSidebar({
             </div>
             {treeDatasets.length === 0 ? (
               <div className="text-xs text-text-tertiary px-2 py-1">
-                None yet — create one or convert a folder.
+                None yet — create one.
               </div>
             ) : (
               treeDatasets.map(renderDataset)
@@ -659,25 +527,8 @@ export default function WikiSidebar({
             )}
           </div>
         )}
-        {/* Legacy wiki roots (hidden in hub mode where they're read through REST) */}
-        {!hubMode && (
-          <div>
-            <div className="text-[10px] uppercase tracking-wide text-text-tertiary font-semibold px-2 py-1">
-              Wiki Folders
-            </div>
-            {loading ? (
-              <div className="text-sm text-text-tertiary text-center py-4">Loading...</div>
-            ) : entries.length === 0 ? (
-              <div className="text-sm text-text-tertiary text-center py-4">
-                No files found.
-                <br />
-                <span className="text-xs">Add markdown files to your wiki directory.</span>
-              </div>
-            ) : (
-              entries.map((entry) => renderEntry(entry))
-            )}
-          </div>
-        )}
+        {/* Legacy wiki roots are only browsed in hub mode (through the mobile
+            path-proxy commands); the sidebar's own tree is dataset-based. */}
         {hubMode && (
           <div>
             <div className="text-[10px] uppercase tracking-wide text-text-tertiary font-semibold px-2 py-1">
