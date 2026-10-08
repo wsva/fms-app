@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
-import { Download, RefreshCw, Search, ChevronDown, Link2, KeyRound, CloudOff, Trash2, Unplug, Loader2 } from "lucide-react";
+import { Download, RefreshCw, Search, ChevronDown, Link2, KeyRound, CloudOff, Trash2, Unplug, Loader2, ServerCog } from "lucide-react";
 import { logInfo, logError } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
@@ -15,7 +15,7 @@ interface PcDataset {
   uuid: string;
   name: string;
   updated: string;
-  /** One of "dictation" | "card" | "book" — drives section grouping. */
+  /** One of "dictation" | "card" | "book" | "read_aloud" — drives section grouping. */
   dataset_type: string;
   media_count: number;
   status: string;
@@ -121,8 +121,13 @@ interface PairResult {
  * Reachable from both shells: the Android thin client syncs with its paired PC,
  * and a desktop syncs with another desktop (the remote side just needs its web
  * service enabled in Settings — see `web_service`).
+ *
+ * The whole surface is follower-side: it selects a source hub and pulls from it.
+ * A workspace designated the hub is the authority that *serves* data, so when
+ * `role === "hub"` we keep the read-only status overview and hide every pull
+ * control, pointing the user at Settings to demote or manage paired devices.
  */
-export default function DatasetsSyncPage() {
+export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: string) => void }) {
   const [mounted, setMounted] = useState(false);
   const [global, setGlobal] = useState<GlobalSettings | null>(null);
 
@@ -154,9 +159,9 @@ export default function DatasetsSyncPage() {
   // page never mutates it directly, it reloads after each round/action.
   const [status, setStatus] = useState<SyncStatusDetail | null>(null);
 
-  // Which dataset section is shown (Dictation / Cards / Books). Exposed as tabs
-  // instead of stacked vertically, which keeps the narrow Android screen and the
-  // desktop page alike from turning into an endless scroll.
+  // Which dataset section is shown (Dictation / Cards / Books / Read). Exposed
+  // as tabs instead of stacked vertically, which keeps the narrow Android screen
+  // and the desktop page alike from turning into an endless scroll.
   const [activeSection, setActiveSection] = useState<string>("dictation");
 
   const pcUrl = (global?.pc_url ?? "").trim();
@@ -460,6 +465,7 @@ export default function DatasetsSyncPage() {
   // Human-readable count label per dataset type.
   function countLabel(ds: PcDataset): string {
     if (ds.dataset_type === "card") return `${ds.media_count} cards`;
+    if (ds.dataset_type === "read_aloud") return `${ds.media_count} texts`;
     if (ds.dataset_type === "book") return "book";
     return `${ds.media_count} media`;
   }
@@ -475,6 +481,11 @@ export default function DatasetsSyncPage() {
   // Index the status detail rows by uuid for per-card lookup.
   const statusByUuid: Record<string, DatasetStatus> = {};
   for (const d of status?.datasets ?? []) statusByUuid[d.dataset_uuid] = d;
+
+  // A designated hub is the authority that serves data — it never pulls, so the
+  // entire follower surface (source selector, Sync now, adopt/pull lists) is
+  // hidden. Defaults to false while status is still loading or on non-Tauri.
+  const isHub = status?.role === "hub";
 
   function renderDatasetCard(ds: PcDataset, i: number) {
     const st = syncState[ds.uuid];
@@ -552,13 +563,14 @@ export default function DatasetsSyncPage() {
   // cards so it can offer "remove local copy" without appearing as a source.
   const removedLocal = (status?.datasets ?? []).filter((d) => d.state === "removed_on_hub");
 
-  // Datasets grouped into the three sync sections, in display order. A local
+  // Datasets grouped into the four sync sections, in display order. A local
   // copy with no hub catalog entry carries an empty `dataset_type`, so it is
   // caught by the Dictation bucket and rendered with its removed-on-hub badge.
   const sections: { key: string; label: string; items: PcDataset[] }[] = [
     { key: "dictation", label: "Dictation", items: pcDatasets.filter((d) => d.dataset_type === "dictation" || d.dataset_type === "") },
     { key: "card", label: "Cards", items: pcDatasets.filter((d) => d.dataset_type === "card") },
     { key: "book", label: "Books", items: pcDatasets.filter((d) => d.dataset_type === "book") },
+    { key: "read_aloud", label: "Read", items: pcDatasets.filter((d) => d.dataset_type === "read_aloud") },
   ];
 
   return (
@@ -568,16 +580,19 @@ export default function DatasetsSyncPage() {
         <h1 className="text-[1.3em] font-bold">Datasets Sync</h1>
         <div className="ml-auto flex items-center gap-2 flex-wrap">
           {/* One round moves everything it can in both directions (push queue +
-              pull deltas), replacing the old per-dataset Pull / Upload buttons. */}
-          <button
-            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50"
-            onClick={handleSyncNow}
-            disabled={syncing || !pcUrl}
-            title="Run one incremental sync round (push + pull)"
-          >
-            {syncing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-            {syncing ? "Syncing…" : "Sync now"}
-          </button>
+              pull deltas), replacing the old per-dataset Pull / Upload buttons.
+              Follower-only — a hub serves data, it doesn't pull. */}
+          {!isHub && (
+            <button
+              className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50"
+              onClick={handleSyncNow}
+              disabled={syncing || !pcUrl}
+              title="Run one incremental sync round (push + pull)"
+            >
+              {syncing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+              {syncing ? "Syncing…" : "Sync now"}
+            </button>
+          )}
           <button
             className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50"
             onClick={() => {
@@ -613,6 +628,13 @@ export default function DatasetsSyncPage() {
               protocol v{status.protocol_version}
             </span>
           </div>
+          {/* Hub-connection status (reachability + error) describes the
+              follower→upstream-hub link. A hub has no upstream hub, so this
+              whole block — including the "no hub configured" message — is
+              meaningless for it and is hidden. Queued/chat counts live here too
+              and are always 0 on a hub (it never enqueues writeback). */}
+          {!isHub && (
+            <>
           <div className="flex items-center gap-2 flex-wrap text-xs">
             <span
               className={`inline-block w-2 h-2 rounded-full ${
@@ -640,6 +662,8 @@ export default function DatasetsSyncPage() {
           </div>
           {status.hub.error && (
             <div className="text-xs text-red-600 dark:text-red-400">{status.hub.error}</div>
+          )}
+            </>
           )}
           {status.role === "hub" && status.devices.length > 0 && (
             <details className="text-xs text-text-secondary">
@@ -669,6 +693,30 @@ export default function DatasetsSyncPage() {
         </div>
       )}
 
+      {isHub ? (
+        /* Hub workspace: it serves datasets, it doesn't pull — hide the whole
+           follower surface and point the user at Settings. */
+        <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
+          <ServerCog size={40} className="text-text-tertiary" />
+          <p className="text-text-secondary max-w-md">
+            This workspace is the sync <span className="font-semibold">hub</span>. It serves
+            datasets to follower devices — only followers can use this page to pull data.
+          </p>
+          <p className="text-sm text-text-tertiary max-w-md">
+            To sync datasets into this machine, designate it as a follower in Settings first.
+            Manage paired devices and the hub role there too.
+          </p>
+          {onNavigate && (
+            <button
+              className="mt-1 inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover"
+              onClick={() => onNavigate("settings")}
+            >
+              Open Settings
+            </button>
+          )}
+        </div>
+      ) : (
+        <>
       {/* PC connection selector */}
       <div className="shrink-0 flex flex-col gap-2 p-3 rounded-lg border border-border-default bg-bg-card">
         <div className="flex items-center gap-2 flex-wrap">
@@ -807,8 +855,8 @@ export default function DatasetsSyncPage() {
             )}
             {pcDatasets.length > 0 && (
               <>
-                {/* Section tabs: Dictation / Cards / Books. Only the active
-                    section's datasets are listed. */}
+                {/* Section tabs: Dictation / Cards / Books / Read. Only the
+                    active section's datasets are listed. */}
                 <div className="shrink-0 flex gap-1 border-b border-border-default">
                   {sections.map((section) => (
                     <button
@@ -879,6 +927,8 @@ export default function DatasetsSyncPage() {
               </div>
             )}
           </div>
+        </>
+      )}
         </>
       )}
     </div>
