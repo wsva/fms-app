@@ -156,11 +156,12 @@ export default function LogPage() {
   const filteredLogs = logs.filter((entry) => activeFilters.has(entry.level as LevelFilter));
 
   return (
-    <div className="flex flex-col h-full bg-bg-base">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border-default shrink-0">
-        <h2 className="text-lg font-semibold text-text-primary">Logs</h2>
-        <div className="flex items-center gap-2">
+    <div className="flex flex-1 min-w-0 flex-col h-full bg-bg-base">
+      {/* Header — wraps on narrow screens so the filter chips never push the
+          toolbar past the viewport. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 py-3 border-b border-border-default shrink-0">
+        <h2 className="text-lg font-semibold text-text-primary shrink-0">Logs</h2>
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
           {/* Level filters */}
           {ALL_LEVELS.map((level) => (
             <button
@@ -220,12 +221,12 @@ export default function LogPage() {
       </div>
 
       {/* Log count bar */}
-      <div className="flex items-center justify-between px-4 py-1 text-xs text-text-tertiary border-b border-border-default/50 shrink-0">
-        <span>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 px-4 py-1 text-xs text-text-tertiary border-b border-border-default/50 shrink-0">
+        <span className="shrink-0">
           {filteredLogs.length} entries{filteredLogs.length !== logs.length && ` (${logs.length} total)`}
         </span>
         {source === "file" ? (
-          <span className="truncate max-w-[50%] font-mono" title={logFilePath}>
+          <span className="truncate max-w-full sm:max-w-[50%] min-w-0 font-mono" title={logFilePath}>
             file: {logFilePath}
           </span>
         ) : autoScroll ? (
@@ -236,7 +237,7 @@ export default function LogPage() {
       </div>
 
       {/* Log output */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-2 font-mono text-xs min-h-0">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden p-2 font-mono text-xs min-h-0 min-w-0">
         {filteredLogs.length === 0 ? (
           <div className="flex items-center justify-center h-full text-text-tertiary">
             {logs.length === 0 ? (source === "file" ? "Log file is empty" : "No logs yet") : "No entries match the current filters"}
@@ -259,7 +260,7 @@ export default function LogPage() {
                   {entry.level}
                 </span>
               </div>
-              <span className={`${levelColor(entry.level)} break-all`}>{entry.message}</span>
+              <span className={`${levelColor(entry.level)} min-w-0 flex-1 break-all`}>{entry.message}</span>
               <span className="text-text-tertiary/50 shrink-0 sm:ml-auto pl-2 hidden xl:inline">
                 {entry.module}
               </span>
