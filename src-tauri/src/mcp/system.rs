@@ -154,10 +154,10 @@ impl DatasetMcpServer {
         serde_json::to_string_pretty(&entries).unwrap_or_default()
     }
 
-    #[tool(name = "app_navigate", description = "Switch the app to another page/tab. Valid tabs: dictation, read-book, read-aloud, cards, studio, datasets-sync, simple-words, models, edge-tts, llm-chat, chat, ocr, wiki, workspaces, logs, settings. Use this to bring the user to the right screen before/while acting. The agent itself has no tab — it lives in a dock always available on every screen.")]
+    #[tool(name = "app_navigate", description = "Switch the app to another page/tab. Valid tabs: dictation, read-book, read-aloud, cards, studio, datasets-sync, devices-hub, simple-words, models, edge-tts, llm-chat, chat, ocr, wiki, workspaces, logs, settings. Use this to bring the user to the right screen before/while acting. The agent itself has no tab — it lives in a dock always available on every screen.")]
     async fn app_navigate(&self, Parameters(param): Parameters<AppNavigateParam>) -> Result<String, String> {
-        const VALID: [&str; 16] = [
-            "dictation", "read-book", "read-aloud", "cards", "studio", "datasets-sync", "simple-words",
+        const VALID: [&str; 17] = [
+            "dictation", "read-book", "read-aloud", "cards", "studio", "datasets-sync", "devices-hub", "simple-words",
             "models", "edge-tts", "llm-chat", "chat", "ocr", "wiki", "workspaces", "logs", "settings",
         ];
         let tab = param.tab.trim();

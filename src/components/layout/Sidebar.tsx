@@ -25,6 +25,7 @@ import {
   FolderKanban,
   Type,
   ArrowUpDown,
+  Users,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 
@@ -35,6 +36,7 @@ export type TabId =
   | "cards"
   | "studio"
   | "datasets-sync"
+  | "devices-hub"
   | "simple-words"
   | "models"
   | "edge-tts"
@@ -69,11 +71,12 @@ const navGroups: NavGroup[] = [
       { id: "workspaces", label: "Workspaces", icon: FolderKanban },
       { id: "studio", label: "Dataset Studio", icon: SlidersHorizontal },
       { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown },
+      { id: "devices-hub", label: "Devices & Hub", icon: Users },
+      { id: "chat", label: "Cross-Device Chat", icon: MessagesSquare },
       { id: "simple-words", label: "Simple Words", icon: Type },
       { id: "wiki", label: "Wiki", icon: BookOpenText },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
-      { id: "chat", label: "Cross-Device Chat", icon: MessagesSquare },
       { id: "ocr", label: "OCR", icon: ScanText },
       { id: "models", label: "Models", icon: Box },
       { id: "logs", label: "Logs", icon: FileText },
@@ -102,6 +105,7 @@ const MOBILE_VISIBLE_TABS: TabId[] = [
   "chat",
   "workspaces",
   "datasets-sync",
+  "devices-hub",
   "models",
   "settings",
 ];

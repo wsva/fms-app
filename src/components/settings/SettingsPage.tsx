@@ -8,7 +8,6 @@ import {
   Palette,
   Server,
   Settings as SettingsIcon,
-  Users,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import {
@@ -71,17 +70,6 @@ interface WorkspaceSettings {
   cluster_id: string;
 }
 
-// A row of the PC's paired-device registry (pairing.rs `PairedDevice`).
-interface PairedDevice {
-  device_id: string;
-  name: string;
-  status: string; // "approved" | "denied"
-  created_at: string;
-  last_seen_at: string | null;
-  // Identity this device is bound to for writeback (null for legacy pairings).
-  bound_user_id: string | null;
-}
-
 type ThemeId = "light" | "dark" | "solarized" | "gruvbox";
 
 const themes: { id: ThemeId; label: string; preview: string }[] = [
@@ -126,21 +114,16 @@ export default function SettingsPage() {
   const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings | null>(null);
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [savedGlobal, setSavedGlobal] = useState(false);
-  // Sync role designation (desktop only): pending role while the invoke runs,
-  // plus a short-lived confirmation string.
-  const [savingRole, setSavingRole] = useState<"" | "hub" | "follower">("");
-  const [roleMsg, setRoleMsg] = useState("");
   const [agentTest, setAgentTest] = useState<{ kind: "ok" | "err" | "busy"; text: string } | null>(null);
   const [currentTheme, setCurrentTheme] = useState<ThemeId>("light");
 
-  // ---- Pairing (desktop only) ----
+  // ---- Platform (mobile vs desktop) ----
   // `isMobileApp()` is false during prerendering (no navigator) and only turns
   // true inside the Android WebView, so reading it while rendering would make
   // the server HTML and the first client render disagree (hydration error).
-  // Defer it to an effect, like Sidebar / DictationPage do.
+  // Defer it to an effect, like Sidebar / DictationPage do. The desktop-only
+  // Agent (Goose ACP) section is hidden with it.
   const [mobile, setMobile] = useState(false);
-  const [devices, setDevices] = useState<PairedDevice[]>([]);
-  const [pairError, setPairError] = useState("");
 
   useEffect(() => {
     setMobile(isMobileApp());
@@ -170,27 +153,12 @@ export default function SettingsPage() {
     { id: "global", label: "Global Settings", icon: Globe },
     { id: "workspace", label: "Workspace Settings", icon: Server },
     { id: "microphone", label: "Microphone", icon: MicGlyph },
-    // Pairing is a PC-side feature, so the phone has no such section.
-    ...(sidebar.mobile ? [] : [{ id: "pairing", label: "Device Pairing", icon: Users }]),
   ];
 
   // Section hidden while another one is selected? Visibility is toggled with
   // a class instead of unmounting, so form state and "Saved!" toasts survive
   // switching between sections.
   const showSection = (id: string) => activeSection === "all" || activeSection === id;
-
-  const loadDevices = useCallback(async () => {
-    if (!isTauri() || isMobileApp()) return;
-    try {
-      setDevices(await invoke<PairedDevice[]>("pairing_list"));
-    } catch (e) {
-      console.error("Failed to load paired devices:", e);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadDevices();
-  }, [loadDevices]);
 
   // ---- Microphone (voice input) ----
   // Stored in localStorage, not in the backend settings file: the input device
@@ -249,24 +217,6 @@ export default function SettingsPage() {
 
   const selectedMicMissing = micDeviceId !== "" && !micDevices.some((d) => d.deviceId === micDeviceId);
 
-  async function handleRevoke(deviceId: string) {
-    try {
-      await invoke("pairing_revoke", { deviceId });
-      loadDevices();
-    } catch (e) {
-      setPairError(`Failed to revoke device: ${String(e)}`);
-    }
-  }
-
-  async function handleRemoveDenied(deviceId: string) {
-    try {
-      await invoke("pairing_remove_denied", { deviceId });
-      loadDevices();
-    } catch (e) {
-      setPairError(`Failed to remove device: ${String(e)}`);
-    }
-  }
-
   // ---- Load settings ----
 
   const fetchSettings = useCallback(async () => {
@@ -315,26 +265,6 @@ export default function SettingsPage() {
       console.error("Failed to save global settings:", e);
     } finally {
       setSavingGlobal(false);
-    }
-  }
-
-  // Designate this workspace as hub or follower. The backend generates the
-  // `cluster_id` once on the first promotion to hub, then persists the role.
-  // Re-fetch the workspace so the freshly-issued cluster id shows up.
-  async function handleSetRole(role: "hub" | "follower") {
-    if (!isTauri() || savingRole) return;
-    setSavingRole(role);
-    setRoleMsg("");
-    try {
-      await invoke("settings_set_role", { role });
-      const w = await invoke<WorkspaceSettings>("settings_get_workspace");
-      setWorkspaceSettings(w);
-      setRoleMsg(role === "hub" ? "This workspace is now the sync hub." : "This workspace is now a follower.");
-      setTimeout(() => setRoleMsg(""), 4000);
-    } catch (e) {
-      setRoleMsg(`Failed to set role: ${String(e)}`);
-    } finally {
-      setSavingRole("");
     }
   }
 
@@ -674,39 +604,6 @@ export default function SettingsPage() {
             description="Root directory for wiki markdown documents."
             value={workspaceSettings?.wiki_dir ?? ""}
           />
-
-          {/* Sync role (desktop only) — designate this workspace as the hub or a
-              follower. A phone is always a follower, so the control is hidden on
-              mobile (docs/my_sync_design.md §3.1). */}
-          {!mobile && (
-            <div className="mb-4 mt-6 pt-4 border-t border-border-light">
-              <label className="block font-medium mb-1">Sync Role</label>
-              <p className="text-text-secondary text-sm mb-3">
-                Choose which machine holds the authoritative copy. The <strong>hub</strong> is the
-                source of truth that followers sync against; a <strong>follower</strong> pulls from
-                the hub and pushes edits back. Promoting to hub issues a cluster id once.
-              </p>
-              <div className="flex items-center gap-3 flex-wrap">
-                <select
-                  className="px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary max-w-xs w-full"
-                  value={workspaceSettings?.role && workspaceSettings.role !== "" ? workspaceSettings.role : "follower"}
-                  disabled={!!savingRole || !workspaceSettings}
-                  onChange={(e) => handleSetRole(e.target.value === "hub" ? "hub" : "follower")}
-                >
-                  <option value="follower">Follower (syncs from the hub)</option>
-                  <option value="hub">Hub (authoritative copy)</option>
-                </select>
-                {savingRole && <span className="text-sm text-text-secondary">Applying…</span>}
-              </div>
-              <div className="mt-3 text-sm">
-                <span className="text-text-secondary">Cluster ID: </span>
-                <code className="px-1.5 py-0.5 rounded bg-bg-muted border border-border-light select-all">
-                  {workspaceSettings?.cluster_id || "— (not yet a hub)"}
-                </code>
-              </div>
-              {roleMsg && <p className="mt-2 text-sm text-green-500">{roleMsg}</p>}
-            </div>
-          )}
         </section>
 
         {/* ── Microphone section ─────────────────────────────── */}
@@ -766,99 +663,6 @@ export default function SettingsPage() {
           {/* Zoom-style audio check on the currently selected device. */}
           <MicTestPanel />
         </section>
-
-        {/* ── Device pairing section (PC only) ──────────────────── */}
-        {!mobile && (
-          <section className={`mb-8${showSection("pairing") ? "" : " hidden"}`}>
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-[1.3em] font-semibold">Device Pairing</h2>
-              <button
-                className="px-3 py-1 text-xs rounded-md border border-border-light hover:bg-bg-hover cursor-pointer"
-                onClick={loadDevices}
-              >
-                Refresh
-              </button>
-            </div>
-            <p className="text-text-secondary text-sm mb-4">
-              Devices on the LAN/WLAN must pair before they can read or write data — like
-              Bluetooth headphones. A phone that asks to connect pops a confirmation dialog here,
-              and it can work once you allow it. Requests from this computer (localhost) and from
-              Tailscale are always allowed, so local automations need no pairing.
-            </p>
-
-            {pairError && (
-              <p className="text-sm text-red-600 mb-3">{pairError}</p>
-            )}
-
-            <table className="w-full text-sm border-collapse">
-              <thead>
-                <tr className="text-left text-text-secondary border-b border-border-light">
-                  <th className="py-2 pr-4 font-medium">Device</th>
-                  <th className="py-2 pr-4 font-medium">Code</th>
-                  <th className="py-2 pr-4 font-medium">Status</th>
-                  <th className="py-2 pr-4 font-medium">Syncs as</th>
-                  <th className="py-2 pr-4 font-medium">Last seen</th>
-                  <th className="py-2 font-medium"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {devices.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="py-3 text-text-tertiary">
-                      No devices paired yet.
-                    </td>
-                  </tr>
-                )}
-                {devices.map((d) => (
-                  <tr key={d.device_id} className="border-b border-border-light">
-                    <td className="py-2 pr-4">
-                      <div className="font-medium">{d.name}</div>
-                      <div className="text-xs text-text-tertiary font-mono">{d.device_id}</div>
-                    </td>
-                    {/* Fingerprint = the device_id hash prefix: both sides show the same code. */}
-                    <td className="py-2 pr-4 font-mono">{d.device_id.slice(0, 6)}</td>
-                    <td className="py-2 pr-4">
-                      <span
-                        className={`px-2 py-0.5 rounded text-xs ${
-                          d.status === "approved"
-                            ? "bg-green-100 text-green-700"
-                            : "bg-red-100 text-red-700"
-                        }`}
-                      >
-                        {d.status}
-                      </span>
-                    </td>
-                    <td className="py-2 pr-4 text-text-secondary">
-                      {d.bound_user_id && d.bound_user_id !== "local"
-                        ? d.bound_user_id
-                        : "this PC's user"}
-                    </td>
-                    <td className="py-2 pr-4 text-text-secondary">
-                      {d.last_seen_at ?? "never"}
-                    </td>
-                    <td className="py-2 text-right">
-                      {d.status === "approved" ? (
-                        <button
-                          className="px-3 py-1 text-xs rounded-md border border-border-light hover:bg-bg-hover cursor-pointer"
-                          onClick={() => handleRevoke(d.device_id)}
-                        >
-                          Revoke
-                        </button>
-                      ) : (
-                        <button
-                          className="px-3 py-1 text-xs rounded-md border border-border-light hover:bg-bg-hover cursor-pointer"
-                          onClick={() => handleRemoveDenied(d.device_id)}
-                        >
-                          Remove
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
-        )}
         </div>
       </div>
     </main>

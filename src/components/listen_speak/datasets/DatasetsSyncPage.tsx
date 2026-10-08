@@ -4,8 +4,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
-import { Download, RefreshCw, ArrowUpDown, Search, ChevronDown, Link2, KeyRound, CloudOff, Trash2, Unplug, Loader2, ServerCog } from "lucide-react";
-import { logInfo, logError } from "@/lib/logger";
+import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog } from "lucide-react";
+import { logError } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
 // Types (mirror the PC REST API + sync commands)
@@ -86,13 +86,6 @@ interface SyncProgress {
   phase: "download" | "extract" | "done";
 }
 
-// A discovered PC returned by the `pc_discover` command.
-interface PcCandidate {
-  url: string;
-  source: string; // "lan" | "tailscale" | "saved"
-  name: string;
-}
-
 // Subset of the global settings this page needs (mirrors settings.rs).
 interface GlobalSettings {
   ollama_url: string;
@@ -104,12 +97,6 @@ interface GlobalSettings {
   model_dir: string;
   model_unload_timeout: unknown;
   onboarding_completed: boolean;
-}
-
-// Result of the `pc_pair_start` command.
-interface PairResult {
-  state: "approved" | "pending" | "denied" | "none";
-  fingerprint?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,23 +111,13 @@ interface PairResult {
  *
  * The whole surface is follower-side: it selects a source hub and pulls from it.
  * A workspace designated the hub is the authority that *serves* data, so when
- * `role === "hub"` we keep the read-only status overview and hide every pull
- * control, pointing the user at Settings to demote or manage paired devices.
+ * `role === "hub"` we hide every pull control and point the user at the
+ * Devices & Hub page to demote or manage paired devices. Cluster identity, the
+ * hub role, and pairing all live there now.
  */
 export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: string) => void }) {
   const [mounted, setMounted] = useState(false);
   const [global, setGlobal] = useState<GlobalSettings | null>(null);
-
-  // PC connection / discovery state.
-  const [candidates, setCandidates] = useState<PcCandidate[]>([]);
-  const [discovering, setDiscovering] = useState(false);
-  const [showManual, setShowManual] = useState(false);
-  const [manualUrl, setManualUrl] = useState("");
-
-  // Pairing state (Bluetooth-style device identity, see sync.rs / pairing.rs).
-  const [pairing, setPairing] = useState(false);
-  const [pairFingerprint, setPairFingerprint] = useState("");
-  const [pairMessage, setPairMessage] = useState("");
 
   // Dataset + sync state.
   const [pcDatasets, setPcDatasets] = useState<PcDataset[]>([]);
@@ -165,7 +142,6 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   const [activeSection, setActiveSection] = useState<string>("dictation");
 
   const pcUrl = (global?.pc_url ?? "").trim();
-  const deviceId = global?.device_id ?? "";
 
   // ---- Loaders ----------------------------------------------------------
 
@@ -174,7 +150,6 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     try {
       const g = await invoke<GlobalSettings>("settings_get_global");
       setGlobal(g);
-      setManualUrl(g.pc_url ?? "");
       return g;
     } catch (e) {
       logError(`Failed to load settings: ${String(e)}`, "datasets");
@@ -234,100 +209,16 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     }
   }, [pcUrl]);
 
-  // ---- Pairing ----------------------------------------------------------
-
-  // Ask the PC to pair this device: the owner gets a confirm dialog and the
-  // command polls until they answer.
-  const pair = useCallback(
-    async (url: string) => {
-      if (!isTauri() || pairing) return;
-      setPairing(true);
-      setPairMessage("");
-      setPairFingerprint("");
-      try {
-        const res = await invoke<PairResult>("pc_pair_start", { pcUrl: url });
-        if (res.fingerprint) setPairFingerprint(res.fingerprint);
-        if (res.state === "approved") {
-          setPairMessage("Paired with the PC.");
-          setUnpaired(false);
-          setListError("");
-          loadSettings();
-          fetchPcDatasets();
-        } else if (res.state === "denied") {
-          setPairMessage("The PC owner denied this pairing. Ask them to remove the block, or start a new pairing request.");
-        } else {
-          setPairMessage("Pairing did not complete.");
-        }
-      } catch (e) {
-        setPairMessage(`Pairing failed: ${String(e)}`);
-      } finally {
-        setPairing(false);
-      }
-    },
-    [pairing, loadSettings, fetchPcDatasets],
-  );
-
-  // Recovery path after a denial: regenerate the device identity so the next
-  // request pops a fresh dialog.
-  const resetIdentity = useCallback(async () => {
-    if (!isTauri()) return;
-    try {
-      await invoke<string>("pc_pair_reset_identity");
-      setPairMessage("Generated a new device identity. Pair again.");
-      loadSettings();
-    } catch (e) {
-      setPairMessage(`Failed to reset device identity: ${String(e)}`);
-    }
-  }, [loadSettings]);
-
-  // ---- Discovery + connection ------------------------------------------
-
-  const discover = useCallback(async () => {
-    if (!isTauri()) return;
-    setDiscovering(true);
-    try {
-      const res = await invoke<PcCandidate[]>("pc_discover", { timeoutMs: 2500 });
-      setCandidates(res);
-      if (res.length === 0) logInfo("No FmS PC found on this network.", "datasets");
-    } catch (e) {
-      logError(`Discovery failed: ${String(e)}`, "datasets");
-      setCandidates([]);
-    } finally {
-      setDiscovering(false);
-    }
-  }, []);
-
-  // Persist pc_url to global settings so the sync commands (which read
-  // settings on the backend) can resolve the target PC.
-  const savePc = useCallback(
-    async (url: string) => {
-      if (!global) return;
-      const next: GlobalSettings = { ...global, pc_url: url };
-      setGlobal(next);
-      setManualUrl(url);
-      try {
-        await invoke("settings_set_global", { global: next });
-        setMessage(url ? `Connected to ${url}.` : "Disconnected.");
-      } catch (e) {
-        logError(`Failed to save PC url: ${String(e)}`, "datasets");
-        setMessage(`Failed to save PC address: ${String(e)}`);
-      }
-    },
-    [global],
-  );
-
   // ---- Lifecycle --------------------------------------------------------
 
   useEffect(() => {
     setMounted(true);
     (async () => {
-      const g = await loadSettings();
+      await loadSettings();
       loadLocalState();
       loadStatus();
-      // Auto-discover on open when no PC is connected yet.
-      if (!g || !(g.pc_url ?? "").trim()) discover();
     })();
-  }, [loadSettings, loadLocalState, loadStatus, discover]);
+  }, [loadSettings, loadLocalState, loadStatus]);
 
   useEffect(() => {
     fetchPcDatasets();
@@ -437,26 +328,6 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       loadStatus();
     } catch (e) {
       setMessage(`Could not remove: ${String(e)}`);
-    }
-  }
-
-  // "Forget hub / re-pair" (§7): clear the TOFU cluster binding + hub address so
-  // this device can attach to a different hub. Keeps local data untouched.
-  async function handleForgetHub() {
-    if (!confirm("Forget the current hub? This clears the cluster binding and hub address so you can re-pair. Local data is kept.")) {
-      return;
-    }
-    setMessage("");
-    try {
-      await invoke("settings_forget_hub");
-      setPcDatasets([]);
-      setStatus(await invoke<SyncStatusDetail>("sync_status").catch(() => null));
-      const g = await loadSettings();
-      setManualUrl(g?.pc_url ?? "");
-      discover();
-      setMessage("Forgot the hub. Scan or enter an address to re-pair.");
-    } catch (e) {
-      setMessage(`Failed to forget hub: ${String(e)}`);
     }
   }
 
@@ -614,85 +485,37 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
         </div>
       </div>
 
-      {/* Sync status overview (§3.5) — role, cluster, hub reachability, and
-          pending work. Renders whenever status detail is loaded, so a follower
-          with no hub reachable still sees its own role + cluster. */}
+      {/* Compact connection status strip. Full cluster identity, the hub role,
+          and pairing all live on the Devices & Hub page now — this only
+          summarizes the link and jumps there. */}
       {status && (
-        <div className="shrink-0 flex flex-col gap-1.5 p-3 rounded-lg border border-border-default bg-bg-card text-sm">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="px-2 py-0.5 rounded-full bg-bg-hover text-text-secondary capitalize font-medium">
-              {status.role}
-            </span>
-            <span className="text-text-secondary">
-              cluster{" "}
-              <span className="font-mono" title={status.cluster_id || undefined}>
-                {status.cluster_id ? status.cluster_id.slice(0, 8) || "—" : "unbound"}
-              </span>
-            </span>
-            <span className="text-xs text-text-tertiary ml-auto">
-              protocol v{status.protocol_version}
-            </span>
-          </div>
-          {/* Hub-connection status (reachability + error) describes the
-              follower→upstream-hub link. A hub has no upstream hub, so this
-              whole block — including the "no hub configured" message — is
-              meaningless for it and is hidden. Queued/chat counts live here too
-              and are always 0 on a hub (it never enqueues writeback). */}
-          {!isHub && (
-            <>
-          <div className="flex items-center gap-2 flex-wrap text-xs">
-            <span
-              className={`inline-block w-2 h-2 rounded-full ${
-                status.hub.reachable ? "bg-emerald-500" : "bg-red-500"
-              }`}
-            />
-            <span className="text-text-secondary">
-              hub{" "}
-              <span className="font-mono">{status.hub.address || "not configured"}</span>
-              {" "}
-              {status.hub.reachable
-                ? `· reachable${status.hub.dataset_count != null ? ` · ${status.hub.dataset_count} datasets` : ""}`
-                : `· unreachable`}
-            </span>
-            {(status.queued_count > 0 || queued > 0) && (
-              <span className="text-amber-600 dark:text-amber-400">
-                {Math.max(status.queued_count, queued)} change(s) queued
-              </span>
+        <div className="shrink-0 flex items-center gap-2 flex-wrap p-2.5 rounded-lg border border-border-default bg-bg-card text-xs">
+          <span
+            className={`inline-block w-2 h-2 rounded-full ${
+              isHub ? "bg-blue-500" : status.hub.reachable ? "bg-emerald-500" : "bg-red-500"
+            }`}
+          />
+          <span className="text-text-secondary">
+            {isHub ? (
+              "hub · serving datasets to paired devices"
+            ) : (
+              <>
+                hub <span className="font-mono">{status.hub.address || "not configured"}</span>
+                {status.hub.reachable ? " · reachable" : " · unreachable"}
+              </>
             )}
-            {status.chat_pending > 0 && (
-              <span className="text-amber-600 dark:text-amber-400">
-                {status.chat_pending} chat message(s) pending
-              </span>
-            )}
-          </div>
-          {status.hub.error && (
-            <div className="text-xs text-red-600 dark:text-red-400">{status.hub.error}</div>
+          </span>
+          {!isHub && (status.queued_count > 0 || queued > 0) && (
+            <span className="text-amber-600 dark:text-amber-400">
+              {Math.max(status.queued_count, queued)} change(s) queued
+            </span>
           )}
-            </>
-          )}
-          {status.role === "hub" && status.devices.length > 0 && (
-            <details className="text-xs text-text-secondary">
-              <summary className="cursor-pointer">
-                {status.devices.length} paired device(s)
-              </summary>
-              <ul className="mt-1 flex flex-col gap-0.5 pl-3">
-                {status.devices.map((d) => (
-                  <li key={d.device_id} className="truncate">
-                    <span className="font-medium">{d.name || d.device_id}</span> · {d.status}
-                    {d.last_seen_at ? ` · seen ${d.last_seen_at}` : ""}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
-          {status.role !== "hub" && status.cluster_id && (
+          {onNavigate && (
             <button
-              className="self-start mt-1 inline-flex items-center gap-1 text-xs text-text-secondary hover:text-text-primary underline"
-              onClick={handleForgetHub}
-              title="Clear the cluster binding + hub address to attach to a different hub"
+              className="ml-auto inline-flex items-center gap-1 text-text-secondary hover:text-text-primary underline"
+              onClick={() => onNavigate("devices-hub")}
             >
-              <Unplug size={13} />
-              Forget hub / re-pair
+              Devices &amp; Hub →
             </button>
           )}
         </div>
@@ -700,7 +523,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
 
       {isHub ? (
         /* Hub workspace: it serves datasets, it doesn't pull — hide the whole
-           follower surface and point the user at Settings. */
+           follower surface and point the user at Devices & Hub. */
         <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
           <ServerCog size={40} className="text-text-tertiary" />
           <p className="text-text-secondary max-w-md">
@@ -708,144 +531,51 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
             datasets to follower devices — only followers can use this page to pull data.
           </p>
           <p className="text-sm text-text-tertiary max-w-md">
-            To sync datasets into this machine, designate it as a follower in Settings first.
-            Manage paired devices and the hub role there too.
+            To sync datasets into this machine, designate it as a follower on the Devices &amp; Hub
+            page first. Manage paired devices and the hub role there too.
           </p>
           {onNavigate && (
             <button
               className="mt-1 inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover"
-              onClick={() => onNavigate("settings")}
+              onClick={() => onNavigate("devices-hub")}
             >
-              Open Settings
+              Open Devices &amp; Hub
             </button>
           )}
         </div>
       ) : (
         <>
-      {/* PC connection selector */}
-      <div className="shrink-0 flex flex-col gap-2 p-3 rounded-lg border border-border-default bg-bg-card">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-sm font-medium shrink-0">Source PC</span>
-          <select
-            className="flex-1 min-w-0 px-2 py-1.5 text-sm rounded-md border border-border-light bg-bg-input text-text-primary"
-            value={pcUrl}
-            onChange={(e) => savePc(e.target.value)}
-            disabled={discovering && !pcUrl}
-          >
-            <option value="">{pcUrl ? "Select a PC…" : "Not connected"}</option>
-            {candidates.map((c) => (
-              <option key={c.url} value={c.url}>
-                {c.name} · {c.source}
-              </option>
-            ))}
-            {pcUrl && !candidates.some((c) => c.url === pcUrl) && (
-              <option value={pcUrl}>{pcUrl} · saved</option>
-            )}
-          </select>
-          <button
-            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50 shrink-0"
-            onClick={discover}
-            disabled={discovering}
-            title="Scan for nearby FmS machines (requires the web service enabled there)"
-          >
-            <Search size={14} className={discovering ? "animate-spin" : undefined} />
-            {discovering ? "Scanning…" : "Scan"}
-          </button>
-          <button
-            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover shrink-0"
-            onClick={() => setShowManual((s) => !s)}
-            title="Enter the source PC address manually"
-          >
-            <ChevronDown size={14} className={showManual ? "rotate-180 transition-transform" : "transition-transform"} />
-            Manual
-          </button>
-        </div>
-
-        {showManual && (
-          <div className="flex items-center gap-2 flex-wrap pt-1">
-            <input
-              type="text"
-              className="flex-1 min-w-[12rem] px-3 py-1.5 text-sm border border-border-light rounded-md bg-bg-input text-text-primary"
-              value={manualUrl}
-              onChange={(e) => setManualUrl(e.target.value)}
-              placeholder="http://192.168.1.20:35711"
-            />
-            <button
-              className="inline-flex items-center px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
-              onClick={() => savePc(manualUrl.trim())}
-              disabled={!manualUrl.trim()}
-            >
-              Connect
-            </button>
-          </div>
-        )}
-
-        {/* Pairing row: the device identity is generated automatically; the
-            only user gesture is asking the PC owner to approve this device. */}
-        <div className="flex items-center gap-2 flex-wrap pt-2 border-t border-border-light">
-          <span className="text-xs text-text-tertiary flex items-center gap-1 shrink-0">
-            <KeyRound size={13} />
-            {deviceId ? `code ${deviceId.slice(0, 6)}` : "new device"}
-          </span>
-          <button
-            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
-            onClick={() => pair(pcUrl)}
-            disabled={pairing || !pcUrl}
-            title="Ask the PC to pair this device"
-          >
-            <Link2 size={14} className={pairing ? "animate-spin" : undefined} />
-            {pairing ? "Pairing…" : "Pair"}
-          </button>
-          {unpaired && (
-            <button
-              className="ml-auto text-xs text-text-secondary underline disabled:opacity-50"
-              onClick={resetIdentity}
-              disabled={pairing}
-              title="Regenerate this device's identity (use after the PC denied the pairing)"
-            >
-              New identity
-            </button>
-          )}
-        </div>
-
-        {pairing && (
-          <div className="text-sm text-text-secondary">
-            Waiting for the PC owner to confirm. Compare the code{" "}
-            <span className="font-mono font-semibold">
-              {pairFingerprint || deviceId.slice(0, 6) || "------"}
-            </span>{" "}
-            with the one on the PC.
-          </div>
-        )}
-      </div>
-
+      {/* The source-PC selector, scan, connect, and pairing all live on the
+          Devices & Hub page now — this page only lists and syncs datasets. */}
       {!mounted ? null : !isTauri() ? (
         <p className="text-text-secondary">Datasets Sync is only available in the app.</p>
       ) : !pcUrl ? (
         <div className="flex flex-col items-center gap-2 py-12 text-text-secondary">
           <CloudOff size={32} />
-          <p>{discovering ? "Scanning for nearby PCs…" : "Not connected to a source PC."}</p>
-          <p className="text-sm">Pick a PC from the selector above, tap Scan, or use Manual address. On the other machine, enable the web service in Settings so it can be found.</p>
+          <p>Not connected to a hub.</p>
+          <p className="text-sm">Connect and pair with a hub on the Devices &amp; Hub page. On the other machine, enable the web service in Settings so it can be found.</p>
+          {onNavigate && (
+            <button
+              className="mt-1 inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover"
+              onClick={() => onNavigate("devices-hub")}
+            >
+              Open Devices &amp; Hub
+            </button>
+          )}
         </div>
       ) : (
         <>
           {listError && (
             <div className="px-3 py-2 text-sm rounded-md bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300">
               {listError}
-              {unpaired && (
+              {unpaired && onNavigate && (
                 <button
                   className="ml-2 underline font-medium"
-                  onClick={() => pair(pcUrl)}
-                  disabled={pairing}
+                  onClick={() => onNavigate("devices-hub")}
                 >
-                  {pairing ? "Pairing…" : "Pair now"}
+                  Pair in Devices &amp; Hub
                 </button>
               )}
-            </div>
-          )}
-          {pairMessage && (
-            <div className="px-3 py-2 text-sm rounded-md bg-bg-hover text-text-primary">
-              {pairMessage}
             </div>
           )}
           {message && (
