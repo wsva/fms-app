@@ -606,7 +606,7 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
   if (!isTauri()) {
     return (
       <div className="flex flex-col w-full h-full bg-bg-base p-4">
-        <h1 className="text-[1.3em] font-bold text-text-primary">Device Chat</h1>
+        <h1 className="text-[1.3em] font-bold text-text-primary">Cross-Device Chat</h1>
         <p className="text-text-secondary text-sm mt-2">
           The message store lives on the PC — open the chat inside the app.
         </p>
@@ -618,10 +618,7 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
     <div ref={rootRef} className="flex flex-col w-full h-full min-h-0 bg-bg-base">
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border-default shrink-0">
-        <h1 className="text-[1.1em] font-bold text-text-primary">Device Chat</h1>
-        <span className="text-xs text-text-tertiary">
-          {mobile ? "synced with the PC" : "this PC · shared with paired devices"}
-        </span>
+        <h1 className="text-[1.1em] font-bold text-text-primary">Cross-Device Chat</h1>
         <button
           onClick={() => void reload()}
           disabled={loading}

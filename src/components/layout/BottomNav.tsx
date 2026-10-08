@@ -42,7 +42,7 @@ const OVERFLOW_TABS: NavItem[] = [
   { id: "read-aloud", label: "Read Aloud", icon: MicGlyph },
   { id: "datasets-sync", label: "Datasets Sync", icon: RefreshCw },
   { id: "wiki", label: "Wiki", icon: BookOpenText },
-  { id: "chat", label: "Device Chat", icon: MessagesSquare },
+  { id: "chat", label: "Cross-Device Chat", icon: MessagesSquare },
   { id: "workspaces", label: "Workspaces", icon: FolderKanban },
   { id: "logs", label: "Logs", icon: FileText },
   { id: "models", label: "Models", icon: Box },

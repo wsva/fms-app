@@ -73,7 +73,7 @@ const navGroups: NavGroup[] = [
       { id: "wiki", label: "Wiki", icon: BookOpenText },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
-      { id: "chat", label: "Device Chat", icon: MessagesSquare },
+      { id: "chat", label: "Cross-Device Chat", icon: MessagesSquare },
       { id: "ocr", label: "OCR", icon: ScanText },
       { id: "models", label: "Models", icon: Box },
       { id: "logs", label: "Logs", icon: FileText },
