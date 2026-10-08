@@ -77,6 +77,9 @@ interface SyncStatusDetail {
   queued_count: number;
   chat_pending: number;
   devices: PairedDevice[];
+  /** Cursor into the hub's per-user app-data journal (dictation progress + XP);
+      null until the first round has pulled it. */
+  app_cursor: number | null;
 }
 
 interface SyncProgress {
@@ -508,6 +511,14 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
           {!isHub && (status.queued_count > 0 || queued > 0) && (
             <span className="text-amber-600 dark:text-amber-400">
               {Math.max(status.queued_count, queued)} change(s) queued
+            </span>
+          )}
+          {/* Per-user practice data (dictation progress, XP) travels in its own
+              journal scope, not in a dataset snapshot — so it converges even when
+              nothing is subscribed. `null` = no app-data pull has landed yet. */}
+          {!isHub && (
+            <span className="text-text-tertiary">
+              app data {status.app_cursor == null ? "not pulled yet" : `cursor ${status.app_cursor}`}
             </span>
           )}
           {onNavigate && (

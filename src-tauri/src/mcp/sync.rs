@@ -48,7 +48,8 @@ struct PcUrlParam {
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct SyncChangesParam {
-    /// Dataset uuid whose hub change log to read.
+    /// Dataset uuid whose hub change log to read, or `"@app"` for the app-wide
+    /// scope holding per-user dictation progress + XP (`GET /api/v1/app/changes`).
     uuid: String,
     /// Return entries with seq > this value (-1 = from the beginning).
     #[serde(default)]
@@ -282,7 +283,7 @@ impl DatasetMcpServer {
         .to_string())
     }
 
-    #[tool(name = "sync_changes_since", description = "Read one incremental page of a hub dataset's change log (GET /datasets/{uuid}/changes?after=SEQ). Returns { entries, pruned_up_to, hub_seq, resync_required }. Protocol diagnostics for the v2 incremental path — use pc_sync_pull for a real sync.")]
+    #[tool(name = "sync_changes_since", description = "Read one incremental page of a hub change log (GET /datasets/{uuid}/changes?after=SEQ; pass uuid `@app` for the app-wide scope holding per-user dictation progress + XP, served at GET /app/changes which needs no dataset subscription). Returns { entries, pruned_up_to, hub_seq, resync_required }. Protocol diagnostics for the incremental path — use pc_sync_pull for a real sync.")]
     async fn sync_changes_since(&self, Parameters(param): Parameters<SyncChangesParam>) -> Result<String, String> {
         log::info!("[MCP] sync_changes_since: uuid={} after={}", param.uuid, param.after);
         let v = sync::client::pc_changes_since(self.app.state::<SettingsState>(), param.uuid.clone(), param.after).await?;
@@ -306,14 +307,14 @@ impl DatasetMcpServer {
         .to_string())
     }
 
-    #[tool(name = "sync_run_round", description = "Run one full incremental sync round against the connected hub: flush local edits, pull each subscribed dataset's row-log delta (advancing the cursor), re-snapshot only datasets whose files actually changed, and prune datasets the hub removed. This is the normal 'sync now' action; use pc_sync_pull to force one whole dataset and pc_sync_pull_all for a bulk first-time import.")]
+    #[tool(name = "sync_run_round", description = "Run one full incremental sync round against the connected hub: flush local edits, pull each subscribed dataset's row-log delta (advancing the cursor), pull the app-wide per-user journal once (dictation progress + XP, independent of dataset subscriptions, skipped when the hub predates it), re-snapshot only datasets whose files actually changed, and prune datasets the hub removed. This is the normal 'sync now' action; use pc_sync_pull to force one whole dataset and pc_sync_pull_all for a bulk first-time import.")]
     async fn sync_run_round(&self) -> Result<String, String> {
         log::info!("[MCP] sync_run_round");
         let v = sync::client::sync_round_inner(self.app.clone(), self.app.state::<SettingsState>()).await?;
         Ok(v.to_string())
     }
 
-    #[tool(name = "sync_status_detail", description = "JSON twin of the Datasets Sync status screen (§3.5): this device's role/cluster/protocol, hub address + reachability + whether the hub actually accepts this device's signature (hub.paired: true authorized, false = pairing still owed so every data call 401s, null = unknown because the hub is unreachable or unset), per-dataset sync state (downloaded / needs_resync / not_downloaded / removed_on_hub) with row-log cursors, queued writeback + pending chat counts, and (on a hub) the paired-device registry. Read-only and richer than pc_sync_status; use it to diagnose sync without driving the UI — a reachable hub with paired=false means call pc_pair_start next, not sync_run_round.")]
+    #[tool(name = "sync_status_detail", description = "JSON twin of the Datasets Sync status screen (§3.5): this device's role/cluster/protocol, hub address + reachability + whether the hub actually accepts this device's signature (hub.paired: true authorized, false = pairing still owed so every data call 401s, null = unknown because the hub is unreachable or unset), per-dataset sync state (downloaded / needs_resync / not_downloaded / removed_on_hub) with row-log cursors, `app_cursor` (this device's position in the hub's per-user dictation/XP journal, null until the first app-data pull), queued writeback + pending chat counts, and (on a hub) the paired-device registry. Read-only and richer than pc_sync_status; use it to diagnose sync without driving the UI — a reachable hub with paired=false means call pc_pair_start next, not sync_run_round.")]
     async fn sync_status_detail(&self) -> Result<String, String> {
         log::info!("[MCP] sync_status_detail");
         let settings = self.app.state::<SettingsState>();

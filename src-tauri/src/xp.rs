@@ -137,14 +137,31 @@ pub fn xp_award_internal(
     let conn = open_app_db(settings)?;
     ensure_user_row(&conn, user_id)?;
 
-    // Try to insert into xp_earned (unique constraint prevents duplicates).
-    let inserted = conn
-        .execute(
+    // Duplicate check. The `xp_earned` UNIQUE index alone is not enough: SQLite
+    // treats NULLs as distinct, so an award with no dataset (book reading) would
+    // re-insert every time it is replayed — and now that app data travels through
+    // the hub's `@app` journal scope, that replay is on the live path (an echo of
+    // our own award would double-count XP). Dedup is therefore explicit on
+    // (user, source, reference): the reference is already a globally unique row
+    // uuid, so `dataset_uuid` is attribution, not identity, and NULL / '' are
+    // compared as the same value so a legacy row still blocks a re-award.
+    let already_earned: bool = conn
+        .prepare_cached(
+            "SELECT 1 FROM xp_earned WHERE user_id = ?1 AND source = ?2 AND reference_id = ?3 \
+             AND COALESCE(dataset_uuid, '') = COALESCE(?4, '') LIMIT 1",
+        )
+        .and_then(|mut s| s.exists(rusqlite::params![user_id, source, reference_id, dataset_uuid]))
+        .map_err(|e| e.to_string())?;
+    let inserted = if already_earned {
+        0
+    } else {
+        conn.execute(
             "INSERT OR IGNORE INTO xp_earned (user_id, source, reference_id, dataset_uuid) \
              VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![user_id, source, reference_id, dataset_uuid],
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+    };
 
     if inserted == 0 {
         // Already earned — return current state without awarding.
@@ -184,13 +201,18 @@ pub fn xp_award_internal(
         // Queue/record the award: a follower enqueues it for the next push;
         // the hub appends it to `sync_log` as a counter delta (§3.6). PC-side
         // deduplication is by (user_id, source, reference_id).
+        //
+        // `dataset_uuid` travels inside the payload because the award journals
+        // under the app-wide scope, not the dataset — the replay side reads it
+        // back from here to keep the ledger's dataset attribution intact.
         let payload = serde_json::json!({
             "user_id": user_id,
             "amount": amount,
             "source": source,
             "reference_id": reference_id,
+            "dataset_uuid": dataset_uuid.unwrap_or(""),
         });
-        let _ = crate::sync::change_log::commit_change(settings, "xp", dataset_uuid.unwrap_or(""), &payload);
+        let _ = crate::sync::change_log::commit_change_as(settings, "xp", dataset_uuid.unwrap_or(""), &payload, user_id);
     }
 
     Ok(XpAwardResult {

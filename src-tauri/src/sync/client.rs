@@ -269,6 +269,15 @@ fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
             synced_at    TEXT NOT NULL,
             bytes        INTEGER NOT NULL DEFAULT 0,
             file_count   INTEGER NOT NULL DEFAULT 0
+        );
+        /* Single-row cursor for the app-wide journal scope (per-user dictation
+           progress + XP). Kept out of `dataset_sync_state` deliberately: that
+           table is keyed by real dataset uuids and the round prunes rows whose
+           dataset vanished from the hub catalog, which would delete this. */
+        CREATE TABLE IF NOT EXISTS app_sync_state (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            cursor_seq  INTEGER,
+            updated_at  TEXT NOT NULL
         );",
     )
     .map_err(|e| e.to_string())?;
@@ -309,6 +318,28 @@ fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Read this device's cursor into the app-wide journal scope (`None` = never
+/// pulled). The single-row table is inserted on first advance, so a fresh device
+/// simply has no row yet.
+fn app_cursor(conn: &Connection) -> Option<i64> {
+    conn.query_row("SELECT cursor_seq FROM app_sync_state WHERE id = 1", [], |r| {
+        r.get::<_, Option<i64>>(0)
+    })
+    .unwrap_or(None)
+}
+
+/// Advance the app-wide journal cursor to the hub's high-water `seq`.
+fn set_app_cursor(conn: &Connection, seq: i64) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO app_sync_state (id, cursor_seq, updated_at) \
+         VALUES (1, ?1, datetime('now')) \
+         ON CONFLICT(id) DO UPDATE SET cursor_seq = excluded.cursor_seq, updated_at = excluded.updated_at",
+        params![seq],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Writeback queue (producer side, called from the mobile write commands)
 // ---------------------------------------------------------------------------
@@ -316,19 +347,26 @@ fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
 /// Append a queued change to the writeback queue. Both mobile clients and a
 /// desktop running `role = "follower"` funnel here via
 /// [`crate::sync::change_log::commit_change`]; the hub role never enqueues. State kinds
-/// coalesce (§3.4): a newer edit to the same `(kind, dataset, object_id)`
+/// coalesce (§3.4): a newer edit to the same `(kind, scope, object_id)`
 /// replaces the still-pending older one instead of stacking, while append-only
 /// and counter kinds keep every distinct row.
+///
+/// `scope` is the journal scope already resolved by the caller (a dataset uuid for
+/// shared content, [`crate::sync::change_log::APP_SCOPE`] for per-user app data),
+/// and `user_key` the identity the change belongs to — both are stamped into the
+/// row so the hub's conflict lookup and the pull-side guard see the same ids this
+/// device computed.
 pub fn enqueue_change(
     settings: &SettingsState,
     kind: &str,
-    dataset_uuid: &str,
+    scope: &str,
     payload: &Value,
+    user_key: &str,
 ) -> Result<(), String> {
     let conn = datasets::dictation::open_app_db(settings)?;
     ensure_sync_tables(&conn)?;
     let edit_time = chrono::Utc::now().to_rfc3339();
-    let object_id = crate::sync::change_log::object_id_for(kind, payload);
+    let object_id = crate::sync::change_log::object_id_for(kind, payload, user_key);
     // Fold repeat edits to one mutable row so we neither ship stale intermediate
     // payloads nor grow the queue without bound between flushes. An empty
     // `object_id` (bulk inserts) is left uncoalesced by the guard.
@@ -336,7 +374,7 @@ pub fn enqueue_change(
         conn.execute(
             "DELETE FROM writeback_queue \
              WHERE kind = ?1 AND dataset_uuid = ?2 AND object_id = ?3",
-            params![kind, dataset_uuid, &object_id],
+            params![kind, scope, &object_id],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -345,7 +383,7 @@ pub fn enqueue_change(
         "INSERT INTO writeback_queue \
          (id, kind, dataset_uuid, payload, queued_at, edit_time, object_id) \
          VALUES (?1, ?2, ?3, ?4, datetime('now'), ?5, ?6)",
-        params![id, kind, dataset_uuid, payload.to_string(), &edit_time, &object_id],
+        params![id, kind, scope, payload.to_string(), &edit_time, &object_id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -800,6 +838,10 @@ pub struct SyncStatusDetail {
     /// `Value` (not `sync::pairing::PairedDevice`) because `pairing` is desktop-only;
     /// the hub serializes its `Vec<PairedDevice>` into this JSON array.
     pub devices: Value,
+    /// This device's cursor into the hub's app-wide journal scope (per-user
+    /// dictation progress + XP). `None` until the first app-data pull of a round
+    /// has advanced it — mirrors a dataset's `needs_resync` cursor being unknown.
+    pub app_cursor: Option<i64>,
 }
 
 /// Assemble the full [`SyncStatusDetail`]. Awaits (hub `/status` + catalog) run
@@ -926,6 +968,7 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
     let queued_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM writeback_queue", [], |r| r.get(0))
         .unwrap_or(0);
+    let app_cursor = app_cursor(&conn);
     drop(conn);
 
     let chat_pending = if role == "hub" {
@@ -1011,6 +1054,7 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
         queued_count,
         chat_pending,
         devices,
+        app_cursor,
     })
 }
 
@@ -1134,6 +1178,10 @@ pub async fn pc_list_datasets(
 /// hardening). Returns the hub's `{ entries, pruned_up_to, hub_seq,
 /// resync_required }` JSON. A follower refuses this against a hub reporting an
 /// older `protocol_version` — enforced by the caller (Phase 4 round).
+///
+/// Passing [`crate::sync::change_log::APP_SCOPE`] as the uuid pulls the app-wide
+/// per-user journal from `GET /api/v1/app/changes` instead — same page shape, no
+/// dataset to resolve.
 pub async fn pc_changes_since(
     settings: State<'_, SettingsState>,
     uuid: String,
@@ -1143,7 +1191,11 @@ pub async fn pc_changes_since(
     if base.is_empty() {
         return Err("pc_url is not set — use Settings › Discover PC".to_string());
     }
-    let api_path = format!("/api/v1/datasets/{uuid}/changes");
+    let api_path = if uuid == crate::sync::change_log::APP_SCOPE {
+        "/api/v1/app/changes".to_string()
+    } else {
+        format!("/api/v1/datasets/{uuid}/changes")
+    };
     let qs = build_query(&[("after", after.to_string())]);
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(8))
@@ -1331,7 +1383,17 @@ async fn apply_change(
                 .and_then(|v| v.as_str())
                 .unwrap_or("sync")
                 .to_string();
-            let dsref = if ds.is_empty() { None } else { Some(ds.as_str()) };
+            // Awards journal under the app-wide scope, so the dataset a pull was
+            // made for says nothing about attribution — take it from the payload,
+            // mirroring the hub's `rest.rs::replay`.
+            let ds_payload = payload.get("dataset_uuid").and_then(|v| v.as_str()).unwrap_or("");
+            let dsref = if !ds.is_empty() {
+                Some(ds.as_str())
+            } else if !ds_payload.is_empty() {
+                Some(ds_payload)
+            } else {
+                None
+            };
             crate::xp::xp_award_internal(settings.inner(), write_identity, amount, &source, &reference_id, dsref)
                 .map(|_| true)
                 .map_err(|e| e.to_string())
@@ -1424,25 +1486,25 @@ async fn apply_change(
 /// the same (kind, dataset, object) is still un-pushed, the local edit wins and
 /// the pulled row is skipped (it will be reconciled once our push lands and
 /// echoes back). Phase 5 sharpens this with a real `edit_time` column.
+/// A kind with no single-row identity (`book_sentences_save` bulk inserts) can
+/// never be matched meaningfully, so an empty `object_id` on either side must not
+/// participate in the guard — comparing "" to "" would suppress every pulled row
+/// of that kind for as long as one un-pushed row sat in the queue. Matching is on
+/// the `object_id` column `enqueue_change` stamped at queue time, so both sides
+/// are compared in the same per-user form (see
+/// [`crate::sync::change_log::object_id_for`]); pre-Phase-6 rows carry a NULL id
+/// and simply never block a pull.
 fn has_pending_local_edit(conn: &Connection, dataset_uuid: &str, kind: &str, object_id: &str) -> bool {
-    let mut stmt = match conn.prepare(
-        "SELECT payload FROM writeback_queue WHERE kind = ?1 AND dataset_uuid = ?2",
-    ) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let rows = match stmt.query_map(params![kind, dataset_uuid], |r| r.get::<_, String>(0)) {
-        Ok(r) => r,
-        Err(_) => return false,
-    };
-    for payload_str in rows.flatten() {
-        let payload: Value = serde_json::from_str(&payload_str).unwrap_or(Value::Null);
-        let local_obj = crate::sync::change_log::object_id_for(kind, &payload);
-        if local_obj == object_id {
-            return true;
-        }
+    if object_id.is_empty() {
+        return false;
     }
-    false
+    conn
+        .prepare_cached(
+            "SELECT 1 FROM writeback_queue \
+             WHERE kind = ?1 AND dataset_uuid = ?2 AND object_id = ?3 LIMIT 1",
+        )
+        .and_then(|mut s| s.exists(params![kind, dataset_uuid, object_id]))
+        .unwrap_or(false)
 }
 
 /// Remove a local dataset the hub no longer offers: delete its directory under
@@ -1489,6 +1551,161 @@ async fn hub_lists_dataset(settings: &SettingsState, uuid: &str) -> bool {
             .unwrap_or(false),
         Err(_) => false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// App-wide journal pull (§3.2): per-user dictation progress + XP
+// ---------------------------------------------------------------------------
+
+/// Wire protocol version that introduced the hub's `GET /api/v1/app/changes`
+/// endpoint. A follower must not pull that path from an older hub: the route does
+/// not exist there, so every round would log a 404 while the data it guards stays
+/// on the hub.
+const APP_SCOPE_PROTOCOL: u32 = 3;
+
+/// The hub's advertised `protocol_version`, read off its unsigned `/status` (so
+/// it works before pairing). `None` when the hub is unreachable or predates the
+/// field — both mean "do not assume new endpoints exist".
+async fn hub_protocol_version(settings: &SettingsState) -> Option<u32> {
+    let base = pc_base(settings);
+    if base.is_empty() {
+        return None;
+    }
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(6))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let resp = client.get(format!("{base}/api/v1/status")).send().await.ok()?;
+    let v: Value = resp.error_for_status().ok()?.json().await.ok()?;
+    v.get("protocol_version").and_then(|p| p.as_u64()).map(|p| p as u32)
+}
+
+/// Pull the app-wide journal scope (`sync_log` rows logged under
+/// [`crate::sync::change_log::APP_SCOPE`]): per-user `dictation` progress and `xp`
+/// awards. Those tables live in the app DB, so they are never part of a dataset
+/// snapshot — the row log is their only route. Runs separately from the dataset
+/// loop, so a device that subscribes to no dataset still converges, and awards
+/// with no dataset at all (book reading) are finally delivered. Returns the number
+/// of changes applied.
+///
+/// Every replay here is idempotent (`xp` dedups on (user, source, reference),
+/// `dictation` is an upsert), which is what makes the two gap recoveries below
+/// (restart from 0, jump to the prune mark) safe without a snapshot fallback.
+async fn pull_app_scope(
+    settings: &State<'_, SettingsState>,
+    errors: &mut Vec<Value>,
+) -> Result<i64, String> {
+    let scope = crate::sync::change_log::APP_SCOPE;
+    match hub_protocol_version(settings.inner()).await {
+        Some(p) if p >= APP_SCOPE_PROTOCOL => {}
+        // Skipping silently is deliberate: against a v2 hub this is the expected
+        // state, not a fault, and the hub still receives this device's pushes.
+        Some(p) => {
+            log::info!("[sync] hub protocol v{p} has no /app/changes — skipping app-data pull");
+            return Ok(0);
+        }
+        None => {
+            log::info!("[sync] hub /status unreadable — skipping app-data pull");
+            return Ok(0);
+        }
+    }
+
+    let cursor = {
+        let conn = datasets::dictation::open_app_db(settings.inner())?;
+        ensure_sync_tables(&conn)?;
+        app_cursor(&conn)
+    };
+
+    // Bounded retry: a regressed hub seq restarts at 0, a prune gap jumps to the
+    // prune mark and re-reads what is still retained. Each branch moves `after`
+    // strictly, so this cannot spin.
+    let mut after = cursor.unwrap_or(0);
+    let mut page: Option<Value> = None;
+    for attempt in 0..3 {
+        let p = match pc_changes_since(settings.clone(), scope.to_string(), after).await {
+            Ok(p) => p,
+            Err(e) => {
+                errors.push(json!({ "scope": scope, "stage": "changes", "error": e }));
+                return Ok(0);
+            }
+        };
+        let hub_seq = p["hub_seq"].as_i64().unwrap_or(after);
+        // Safety alarm (§3.5): a hub seq *below* our cursor means its journal
+        // regressed (reset, re-install, or a different machine answering the same
+        // address). A dataset would take a snapshot here; app data has no
+        // snapshot, so restart the cursor at 0 and re-apply the retained journal.
+        if attempt == 0 && hub_seq < after {
+            log::error!(
+                "[sync] {scope}: hub_seq {hub_seq} < local cursor {after} — journal regressed, restarting from 0"
+            );
+            errors.push(json!({ "scope": scope, "stage": "alarm", "error": format!("hub seq {hub_seq} regressed below cursor {after}; re-pulling from 0") }));
+            after = 0;
+            continue;
+        }
+        let pruned_up_to = p["pruned_up_to"].as_i64().unwrap_or(0);
+        if p["resync_required"].as_bool().unwrap_or(false) && pruned_up_to > after {
+            // Gap: rows below the mark are gone for good and nothing can backfill
+            // them (the app DB never ships in a snapshot) — report the loss, then
+            // re-read from the mark so the retained tail still lands. That also
+            // gives a never-pulled device the whole retained journal instead of
+            // nothing, which a snapshot-based resync could not do here.
+            errors.push(json!({
+                "scope": scope,
+                "stage": "prune",
+                "error": format!("hub pruned the app-data journal up to {pruned_up_to}; cursor {after} is behind — older rows are unrecoverable, continuing from the mark"),
+            }));
+            after = pruned_up_to;
+            continue;
+        }
+        page = Some(p);
+        break;
+    }
+    let page = match page {
+        Some(p) => p,
+        // Retries exhausted: keep the position we reached so the next round
+        // continues from it instead of re-walking the same gaps.
+        None => {
+            let conn = datasets::dictation::open_app_db(settings.inner())?;
+            ensure_sync_tables(&conn)?;
+            let _ = set_app_cursor(&conn, after);
+            return Ok(0);
+        }
+    };
+    let hub_seq = page["hub_seq"].as_i64().unwrap_or(after);
+
+    let entries = page["entries"].as_array().cloned().unwrap_or_default();
+    let mut applied = 0i64;
+    if !entries.is_empty() {
+        let _guard = crate::sync::change_log::ApplyGuard::new();
+        let conn = datasets::dictation::open_app_db(settings.inner())?;
+        ensure_sync_tables(&conn)?;
+        for ent in &entries {
+            let kind = ent["kind"].as_str().unwrap_or("");
+            let object_id = ent["object_id"].as_str().unwrap_or("");
+            let user_key = ent["user_key"].as_str().unwrap_or("");
+            let payload = ent["payload"].clone();
+            // A local edit to the same row that has not been pushed yet wins; it
+            // lands on the hub with the next push and echoes back afterwards.
+            if has_pending_local_edit(&conn, scope, kind, object_id) {
+                continue;
+            }
+            // `dictation` needs no dataset and `xp` carries its own, so the row is
+            // applied with an empty dataset argument.
+            match apply_change(settings, "", kind, &payload, user_key).await {
+                Ok(true) => applied += 1,
+                Ok(false) => {}
+                Err(e) => errors.push(json!({ "scope": scope, "kind": kind, "error": e })),
+            }
+        }
+    }
+    // Advance even when the page was empty: `after` may have moved past a prune
+    // mark this round, and a stale cursor would re-walk (and re-report) the same
+    // gap on every following round.
+    let conn = datasets::dictation::open_app_db(settings.inner())?;
+    ensure_sync_tables(&conn)?;
+    let _ = set_app_cursor(&conn, hub_seq.max(after));
+    Ok(applied)
 }
 
 /// Run one full incremental sync round against the connected hub. Triggers:
@@ -1643,6 +1860,14 @@ pub async fn sync_round_inner(
             _ => {}
         }
     }
+
+    // 5. Per-user app data (`dictation` progress + `xp` awards) journals under its
+    //    own scope, so it is pulled once per round regardless of which datasets
+    //    this device subscribes to (see [`pull_app_scope`]).
+    applied += pull_app_scope(&settings, &mut errors).await.unwrap_or_else(|e| {
+        errors.push(json!({ "scope": "@app", "stage": "app_changes", "error": e }));
+        0
+    });
 
     Ok(json!({
         "status": if errors.is_empty() { "ok" } else { "partial" },

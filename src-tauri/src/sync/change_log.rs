@@ -162,6 +162,42 @@ impl ChangeClass {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Journal scopes
+// ---------------------------------------------------------------------------
+
+/// Change-log scope for **per-user app data** (`dictation` progress, `xp`
+/// awards). Those tables live in the app DB, not in any dataset DB, so binding
+/// their journal rows to a dataset uuid made delivery depend on the receiver
+/// having subscribed to that dataset — and awards with no dataset at all (book
+/// reading XP) landed under the empty scope, which no route served and no puller
+/// ever read. They all share one named scope the hub serves from its own
+/// endpoint (`GET /api/v1/app/changes`) and every device pulls once per round,
+/// dataset subscriptions or not.
+///
+/// The scope is a *journal* key only: the dataset a change refers to stays inside
+/// the payload (`xp` carries `dataset_uuid`; `dictation` needs none, its media +
+/// subtitle uuids are globally unique and the app-DB row is keyed by them).
+pub const APP_SCOPE: &str = "@app";
+
+/// Whether `kind` mutates per-user app data and therefore journals under
+/// [`APP_SCOPE`] instead of under a dataset uuid.
+pub fn is_app_scope_kind(kind: &str) -> bool {
+    matches!(kind, "dictation" | "xp")
+}
+
+/// The journal scope a change of `kind` belongs to: [`APP_SCOPE`] for per-user
+/// app data, the dataset uuid for shared dataset content. Both sides of the wire
+/// (hub append, follower enqueue, hub conflict lookup) must resolve the scope
+/// through this one function, or a change gets logged where no puller looks.
+pub fn scope_for<'a>(kind: &str, dataset_uuid: &'a str) -> &'a str {
+    if is_app_scope_kind(kind) {
+        APP_SCOPE
+    } else {
+        dataset_uuid
+    }
+}
+
 /// Derive the mutation op from the kind name (mirrors the naming convention:
 /// every delete kind ends in `_delete`).
 pub fn op_for(kind: &str) -> &'static str {
@@ -174,10 +210,13 @@ pub fn op_for(kind: &str) -> &'static str {
 
 /// Stable per-row identifier for conflict coalescing / later-wins. Extracted
 /// from the change payload so call sites need not pass it. `book_sentences_save`
-/// (a bulk insert) and `xp` have no single natural id; fall back to the batch
-/// dataset scope, which keeps them out of state-coalescing (they are append /
-/// counter kinds anyway).
-pub fn object_id_for(kind: &str, payload: &Value) -> String {
+/// (a bulk insert) has no single natural id and gets an empty one, which keeps it
+/// out of both coalescing and the pull-side pending-edit guard (an empty id never
+/// matches). Per-user kinds must fold `user_key` into the id: the scope they
+/// journal under is shared by every user, so an id derived from content alone
+/// would let one user's push lose a later-wins contest against another user's row
+/// (see [`APP_SCOPE`]).
+pub fn object_id_for(kind: &str, payload: &Value, user_key: &str) -> String {
     let get = |k: &str| payload.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     match kind {
         "cue_save" => get("uuid"),
@@ -185,12 +224,12 @@ pub fn object_id_for(kind: &str, payload: &Value) -> String {
             let u = get("cue_uuid");
             if u.is_empty() { get("uuid") } else { u }
         }
+        // Progress rows are keyed by (user, media, subtitle) — the same triple
+        // the app-DB upsert deletes on.
         "dictation" => {
-            // Progress rows are keyed by (media, subtitle); the user is the
-            // separate `user_key`, so it is not part of the object id.
             let m = get("media_uuid");
             let s = get("subtitle_uuid");
-            format!("{m}:{s}")
+            format!("{user_key}:{m}:{s}")
         }
         "card_save" => get("uuid"),
         "card_delete" | "card_review" | "card_set_tags" => get("card_uuid"),
@@ -204,7 +243,10 @@ pub fn object_id_for(kind: &str, payload: &Value) -> String {
         // Both carry their own uuid, as does each delete payload.
         "read_text_save" | "read_text_delete"
         | "read_attempt_save" | "read_attempt_delete" => get("uuid"),
-        "xp" => String::new(),
+        // A counter delta is never folded, but it still needs an id that is
+        // unique per award: an empty one would collide with every other pending
+        // delta in the pull-side guard and silently suppress inbound XP rows.
+        "xp" => format!("{user_key}:{}", get("reference_id")),
         _ => get("uuid"),
     }
 }
@@ -617,6 +659,11 @@ pub fn is_tombstoned_at_least(
 /// * **everything else (followers)** → append to `writeback_queue` to be pushed
 ///   to the hub.
 ///
+/// The journal is attributed to this machine's own workspace identity. Callers
+/// that write *on behalf of another user* — a hub replaying a paired device's
+/// writeback — must use [`commit_change_as`] instead, or the row gets logged
+/// under the wrong `user_key` and every reader that trusts it mis-attributes it.
+///
 /// Unknown/unclassified kinds are logged best-effort (object id derived from the
 /// payload). Never fails the caller's write: the DB row is already committed,
 /// and the drift check (§3.2) reconciles a missed log append.
@@ -626,30 +673,49 @@ pub fn commit_change(
     dataset_uuid: &str,
     payload: &Value,
 ) -> Result<(), String> {
+    let user_key = crate::auth::workspace_identity(settings);
+    commit_change_as(settings, kind, dataset_uuid, payload, &user_key)
+}
+
+/// [`commit_change`] with the acting identity supplied explicitly. Used by the
+/// per-user write paths (`dictation` progress, XP awards), which know whose row
+/// they are touching independently of who happens to be logged in here: a hub
+/// replaying a phone's writeback passes the phone's bound identity, so the
+/// journal entry — and the per-user `object_id` derived from it — describes the
+/// real owner rather than the hub's current workspace user.
+pub fn commit_change_as(
+    settings: &SettingsState,
+    kind: &str,
+    dataset_uuid: &str,
+    payload: &Value,
+    user_key: &str,
+) -> Result<(), String> {
     // A row landing because we just *pulled* it from the hub must not be
     // re-queued/re-logged — that would echo the change back to its source.
     if is_applying_remote() {
         return Ok(());
     }
+    // Per-user app data journals under one shared scope, not under the dataset
+    // that happens to be nearby (see [`APP_SCOPE`]).
+    let scope = scope_for(kind, dataset_uuid);
     #[cfg(feature = "desktop")]
     {
         if settings.role() == "hub" {
-            let object_id = object_id_for(kind, payload);
+            let object_id = object_id_for(kind, payload, user_key);
             let edit_time = chrono::Utc::now().to_rfc3339();
-            let user_key = crate::auth::workspace_identity(settings);
             let conn = datasets::dictation::open_app_db(settings)?;
             append(
                 &conn,
-                dataset_uuid,
+                scope,
                 &object_id,
                 kind,
                 &edit_time,
-                &user_key,
+                user_key,
                 &payload.to_string(),
             )?;
             // Deletes also land in the dataset DB's `tombstones` (§3.4) so a
             // delete survives as an explicit record inside snapshots, not only in
-            // the app-level log.
+            // the app-level log. Only dataset-scoped kinds can be deletes.
             if op_for(kind) == "delete" {
                 record_delete_tombstone(settings, dataset_uuid, &object_id, kind, &edit_time);
             }
@@ -659,11 +725,11 @@ pub fn commit_change(
             // for writeback exactly like a phone does — the enqueue gate is the
             // runtime `role`, not a compile-time `cfg`. The hub role never gets
             // here, so it never enqueues to itself.
-            crate::sync::client::enqueue_change(settings, kind, dataset_uuid, payload)
+            crate::sync::client::enqueue_change(settings, kind, scope, payload, user_key)
         }
     }
     #[cfg(not(feature = "desktop"))]
     {
-        crate::sync::client::enqueue_change(settings, kind, dataset_uuid, payload)
+        crate::sync::client::enqueue_change(settings, kind, scope, payload, user_key)
     }
 }

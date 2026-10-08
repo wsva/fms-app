@@ -10,6 +10,8 @@
 //! * `POST /api/v1/pair/request`               - device pairing handshake (confirm dialog)
 //! * `GET  /api/v1/pair/status`                - poll a pending pairing request
 //! * `GET  /api/v1/datasets/{uuid}/manifest`   - snapshot metadata + overall hash
+//! * `GET  /api/v1/datasets/{uuid}/changes`    - incremental row-log page for one dataset
+//! * `GET  /api/v1/app/changes`                - same page for the per-user app-data scope
 //! * `GET  /api/v1/datasets/{uuid}/snapshot`   - the whole dataset dir as tar.gz
 //! * `POST /api/v1/sync/changes`               - replay queued writeback changes
 //! * `GET  /api/v1/chat/messages`              - cross-device chat thread page
@@ -64,6 +66,7 @@ pub fn router(app: AppHandle) -> Router {
         .route("/datasets", get(datasets_list))
         .route("/datasets/{uuid}/manifest", get(manifest))
         .route("/datasets/{uuid}/changes", get(changes))
+        .route("/app/changes", get(app_changes))
         .route("/datasets/{uuid}/snapshot", get(snapshot))
         .route("/file", get(file_endpoint))
         .route("/sync/changes", post(sync_changes))
@@ -622,6 +625,36 @@ async fn changes(
 }
 
 // ---------------------------------------------------------------------------
+// GET /app/changes  (per-user app-data journal, §3.2 / §3.3)
+// ---------------------------------------------------------------------------
+
+/// The journal page for [`sync::change_log::APP_SCOPE`] — `dictation` progress and
+/// `xp` awards, which live in the app DB and therefore belong to no dataset.
+/// Followers pull it once per round regardless of which datasets they subscribe
+/// to, so per-user state no longer depends on a dataset copy being present (and
+/// awards with no dataset at all, e.g. book reading XP, finally have a route that
+/// serves them). Same page shape as `/datasets/{uuid}/changes`; there is no
+/// dataset to resolve, because the scope is a fixed key.
+async fn app_changes(
+    State(st): State<RestState>,
+    Query(q): Query<ChangesQuery>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    let conn = match crate::datasets::dictation::open_app_db(&settings) {
+        Ok(c) => c,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let after = q.after.unwrap_or(-1);
+    if settings.role() == "hub" {
+        crate::sync::change_log::maybe_prune(&conn);
+    }
+    match crate::sync::change_log::read_changes(&conn, sync::change_log::APP_SCOPE, after) {
+        Ok(page) => (StatusCode::OK, Json(page)).into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GET /file  (one non-DB file's bytes, resumable, §3.3)
 // ---------------------------------------------------------------------------
 
@@ -857,10 +890,16 @@ async fn sync_changes(
         // drops it and re-converges from the winner on its next `/changes` pull.
         if crate::sync::change_log::ChangeClass::of(&ch.kind).coalescible() {
             let dataset_uuid = ch.dataset_uuid.clone().unwrap_or_default();
-            let object_id = crate::sync::change_log::object_id_for(&ch.kind, &ch.payload);
+            // Compare keys the way both sides write them: the journal scope
+            // (per-user app data lives under `@app`, not the dataset) plus the
+            // per-user object id resolved against *this* batch's enforced
+            // identity — otherwise one user's push can lose a later-wins contest
+            // against another user's row.
+            let scope = crate::sync::change_log::scope_for(&ch.kind, &dataset_uuid).to_string();
+            let object_id = crate::sync::change_log::object_id_for(&ch.kind, &ch.payload, &write_identity);
             if !object_id.is_empty() {
                 let incoming = normalize_edit_time(&ch.edit_time, hub_now);
-                let latest = crate::sync::change_log::latest_for_object(&ledger, &dataset_uuid, &object_id)
+                let latest = crate::sync::change_log::latest_for_object(&ledger, &scope, &object_id)
                     .ok()
                     .flatten();
                 if let Some((winner_seq, winner_edit, _op, winner_payload)) = latest {
@@ -876,6 +915,7 @@ async fn sync_changes(
                         continue;
                     }
                 } else if crate::sync::change_log::op_for(&ch.kind) == "upsert"
+                    && !crate::sync::change_log::is_app_scope_kind(&ch.kind)
                     && crate::sync::change_log::is_tombstoned_at_least(
                         settings.inner(),
                         &dataset_uuid,
@@ -917,7 +957,15 @@ async fn replay(
     write_identity: &str,
     ch: &Change,
 ) -> Result<(), String> {
-    let dataset_uuid = ch.dataset_uuid.clone().unwrap_or_default();
+    // Per-user app data journals under the `@app` scope, so the scope field says
+    // nothing about which dataset the row belongs to: `dictation` needs no
+    // dataset at all (its app-DB row is keyed by media + subtitle), and `xp`
+    // carries its own `dataset_uuid` inside the payload.
+    let dataset_uuid = if sync::change_log::is_app_scope_kind(&ch.kind) {
+        String::new()
+    } else {
+        ch.dataset_uuid.clone().unwrap_or_default()
+    };
     match ch.kind.as_str() {
         "cue_save" => {
             let cue: ListenCue =
@@ -955,9 +1003,21 @@ async fn replay(
                 .unwrap_or(ch.id.as_str())
                 .to_string();
             // The enforced identity is authoritative; a client-supplied
-            // `user_id` in the payload is never trusted.
+            // `user_id` in the payload is never trusted. The dataset attribution
+            // does come from the payload, since the change arrived under the
+            // `@app` scope.
+            let ds_payload = ch
+                .payload
+                .get("dataset_uuid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let ds = if dataset_uuid.is_empty() {
-                None
+                if ds_payload.is_empty() {
+                    None
+                } else {
+                    Some(ds_payload.as_str())
+                }
             } else {
                 Some(dataset_uuid.as_str())
             };

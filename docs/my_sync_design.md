@@ -226,9 +226,23 @@ Keep all existing endpoints; add:
 | Call | Purpose |
 |---|---|
 | `GET /api/v1/datasets/{uuid}/changes?after=S` | Row changes for D after seq S (from `sync_log`); response carries `pruned_up_to` |
+| `GET /api/v1/app/changes?after=S` ✅ (protocol v3) | The same page for the **`@app` journal scope** — per-user `dictation` progress + `xp`, which live in the app DB and are therefore in no dataset snapshot. Served from a fixed scope key, so there is no dataset uuid to resolve and delivery does not depend on a subscription. Same `{ entries, pruned_up_to, hub_seq, resync_required }` shape |
 | `GET /api/v1/file?dataset=D&path=P` | One non-DB file's bytes. **Must** canonicalize `path` and reject anything resolving outside the dataset dir (path traversal), and honour `Range` so a multi-GB media fetch on phone Wi-Fi can resume. On a **client-side hash mismatch**: refetch once; if it mismatches again, mark the dataset for resync (do not accept a corrupt file) |
 | `GET /api/v1/chat/messages?after_id=N` | exists ✅ as `after=C` (timestamp) — add a distinct **`after_id`** integer param for the rowid cursor (§4.3). Do *not* overload `after`: an old phone sends a timestamp and a new hub would read it as an integer |
 | `POST /api/v1/sync/changes` | exists ✅ — becomes the universal push (queue→log), accepts follower-enqueued rows too |
+
+**Per-user app data needs its own scope, not a dataset's** (protocol v3). `dictation`
+and `xp` mutate the app DB, so journaling them under "the dataset nearby" made
+delivery depend on the receiver subscribing to that dataset — and awards with no
+dataset at all (book reading) landed under the empty scope, which no route served and
+no puller read. They now share the `@app` scope (`change_log::scope_for`), the scope
+is stored in `writeback_queue.dataset_uuid` so both sides resolve conflict keys the
+same way, and `xp` carries `dataset_uuid` **inside the payload** because the scope no
+longer encodes it. Consequences: per-user object ids must fold in `user_key`
+(`user_key:media:subtitle`, `user_key:reference_id`) or one user's push loses a
+later-wins contest against another user's row; and a gap in the app journal cannot be
+healed by a snapshot, so a follower skips the pruned range (or restarts from 0 when
+the hub seq regresses) and relies on every app-scope replay being idempotent.
 
 **Signature must cover the body and query string.** Today the Ed25519 request signs
 only `ts\nMETHOD\npath` ([`sync/client.rs::with_device_auth`](../src-tauri/src/sync/client.rs))
@@ -254,7 +268,10 @@ is good):
       deleted. **Skip pruning entirely when the hash-map fetch was incomplete**
       (partial map ⇒ treat every absent entry as unknown, not deleted).
 3. Chat: pull `messages?after_id=rowidCursor`, flush chat outbox (§4).
-4. Refresh catalog (`GET /datasets` with a `lite=1` flag that skips per-dataset
+4. App scope: `GET /app/changes?after=appCursor` → apply rows → advance cursor.
+   Independent of the dataset loop (skipped entirely against a hub reporting
+   `protocol_version < 3`, since the route would 404 every round).
+5. Refresh catalog (`GET /datasets` with a `lite=1` flag that skips per-dataset
    row counts, so this stays one cheap query).
 
 **Apply rules (the pull must never clobber an unsent local edit):**

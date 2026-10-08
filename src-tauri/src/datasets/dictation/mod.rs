@@ -584,11 +584,16 @@ pub async fn listen_save_dictation_as(
     )
     .map_err(|e| e.to_string())?;
     {
-        let _ = crate::sync::change_log::commit_change(
+        // Journal under the row's own owner, not whoever is logged in here: on a
+        // hub replaying a phone's writeback `user_id` is the phone's bound
+        // identity, and the per-user object id must match the one the hub
+        // resolves on the next conflict check.
+        let _ = crate::sync::change_log::commit_change_as(
             settings,
             "dictation",
             dataset_uuid,
             &serde_json::to_value(dictation).unwrap_or_default(),
+            user_id,
         );
     }
     Ok(())
