@@ -1,6 +1,6 @@
 # FmS Sync Design v1 (actual-situations edition)
 
-This document replaces [sync_design.md](./sync_design.md) as the working blueprint.
+This document replaces [sync_design.md](../sync_design.md) as the working blueprint.
 v8 is a good general reference, but it was written before fms-app had any sync and
 assumes machinery we do not have (seq counters, row-level change logs, per-file hash
 stores). This version starts from **what is actually implemented today**, names the
