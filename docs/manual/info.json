@@ -1,6 +1,6 @@
 {
-  "uuid": "fms-app-manual",
-  "name": "manual",
+  "uuid": "fms-manual",
+  "name": "fms-manual",
   "structure": "wiki-v1",
   "updated": "2026-10-08T10:11:59.426342600+00:00"
 }
