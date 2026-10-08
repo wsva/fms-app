@@ -6,6 +6,7 @@ import { ask, message } from "@tauri-apps/plugin-dialog";
 import {
   RefreshCw, ArrowLeft, ArrowRight, Cloud, Download, Pencil, Eye,
   Folder, FileText, BookMarked, FilePlus, FolderPlus, Plus, Trash2,
+  Save, Maximize2, Minimize2, CircleHelp,
 } from "lucide-react";
 import WikiSearch from "./WikiSearch";
 import MdEditor from "./MdEditor";
@@ -76,6 +77,27 @@ export default function WikiPage() {
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
+
+  // Editor chrome toggles. MdEditor is fully controlled for these five flags;
+  // the sub-toolbar below owns the buttons and this page owns the state so the
+  // editor itself can stay a body-only component.
+  const [mdToolsOpen, setMdToolsOpen] = useState(false);
+  const [mdPreview, setMdPreview] = useState(false);
+  const [mdFullscreen, setMdFullscreen] = useState(false);
+  const [mdSpellCheck, setMdSpellCheck] = useState(false);
+  const [mdShortcutsOpen, setMdShortcutsOpen] = useState(false);
+
+  // Every exit path funnels through `editing === false`, so clearing the five
+  // toggles there keeps a subsequent Edit click starting from a clean state.
+  useEffect(() => {
+    if (!editing) {
+      setMdToolsOpen(false);
+      setMdPreview(false);
+      setMdFullscreen(false);
+      setMdSpellCheck(false);
+      setMdShortcutsOpen(false);
+    }
+  }, [editing]);
 
   // `isMobileApp()` is false during prerender (no navigator) and only turns true
   // inside the webview, so resolve it in an effect to avoid a hydration mismatch.
@@ -245,6 +267,24 @@ export default function WikiPage() {
       setSaving(false);
     }
   };
+
+  // Ctrl+S (Cmd+S on Mac) still triggers Save while editing, now that the
+  // button lives on the sub-toolbar. Uses a ref so the effect only re-binds on
+  // edit-mode transitions instead of every keystroke.
+  const handleSaveRef = useRef(handleSave);
+  handleSaveRef.current = handleSave;
+  useEffect(() => {
+    if (!editing) return;
+    const onKey = (e: KeyboardEvent) => {
+      const ctrl = navigator.userAgent.includes("Mac") ? e.metaKey : e.ctrlKey;
+      if (ctrl && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void handleSaveRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [editing]);
 
   // Download a hub dataset to this device (requirement 2), then flip the root
   // to local so Edit becomes available.
@@ -535,6 +575,9 @@ export default function WikiPage() {
       : viewMode === "browse" ? `${browseItemCount} item${browseItemCount === 1 ? "" : "s"}`
         : `${treeDatasets.length} dataset${treeDatasets.length === 1 ? "" : "s"}`;
 
+  const mdDirty = editContent !== fileContent;
+  const inEditorFullscreen = editing && mdFullscreen;
+
   return (
     <div className="flex h-full w-full bg-bg-body min-w-0">
       <div className="flex-1 flex flex-col min-h-0 min-w-0">
@@ -605,7 +648,9 @@ export default function WikiPage() {
           {/* Content column: breadcrumb nav on top, scrollable view below */}
           <div className="flex-1 flex flex-col min-h-0 min-w-0">
             {/* Breadcrumb navigation — mirrors the dictation page's
-                Wiki › dataset › directory › file trail. */}
+                Wiki › dataset › directory › file trail. Hidden while the
+                editor is in fullscreen to reclaim vertical space. */}
+            {!inEditorFullscreen && (
             <nav className="shrink-0 flex items-center gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
               <button
                 className={`shrink-0 cursor-pointer hover:underline ${viewMode === "datasets" ? "text-text-primary font-medium" : "text-accent"}`}
@@ -654,6 +699,7 @@ export default function WikiPage() {
                 </>
               )}
             </nav>
+            )}
 
             {/* Shared sub-toolbar: always shown under the breadcrumb, whether
                 viewing the dataset list, a dataset's directory, or a file. */}
@@ -692,13 +738,83 @@ export default function WikiPage() {
               )}
 
               {viewMode === "file" && canEdit && editing && (
-                <button
-                  onClick={() => setEditing(false)}
-                  className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
-                  title="Return to view"
-                >
-                  <Eye size={14} /> View
-                </button>
+                <>
+                  <button
+                    onClick={() => void handleSave()}
+                    disabled={saving || !mdDirty}
+                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors disabled:opacity-50 ${
+                      mdDirty
+                        ? "bg-accent text-white hover:bg-accent/90"
+                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
+                    }`}
+                    title="Save this file (Ctrl+S)"
+                  >
+                    <Save size={14} /> {saving ? "Saving..." : "Save"}
+                  </button>
+                  <button
+                    onClick={() => setMdToolsOpen((v) => !v)}
+                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
+                      mdToolsOpen
+                        ? "bg-bg-hover text-text-primary"
+                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
+                    }`}
+                    title="Toggle symbols/format toolbar"
+                  >
+                    Tools
+                  </button>
+                  <button
+                    onClick={() => setMdPreview((v) => !v)}
+                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
+                      mdPreview
+                        ? "bg-bg-hover text-text-primary"
+                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
+                    }`}
+                    title={mdPreview ? "Return to editor" : "Preview rendered markdown"}
+                  >
+                    {mdPreview ? "Editor" : "Preview"}
+                  </button>
+                  <button
+                    onClick={() => setMdFullscreen((v) => !v)}
+                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
+                      mdFullscreen
+                        ? "bg-bg-hover text-text-primary"
+                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
+                    }`}
+                    title={mdFullscreen ? "Exit fullscreen" : "Fullscreen editor"}
+                  >
+                    {mdFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                    <span>{mdFullscreen ? "Minimize" : "Fullscreen"}</span>
+                  </button>
+                  <button
+                    onClick={() => setMdSpellCheck((v) => !v)}
+                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
+                      mdSpellCheck
+                        ? "bg-bg-hover text-text-primary"
+                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
+                    }`}
+                    title={mdSpellCheck ? "Disable spell check" : "Enable spell check"}
+                  >
+                    ABC
+                  </button>
+                  <button
+                    onClick={() => setMdShortcutsOpen((v) => !v)}
+                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
+                      mdShortcutsOpen
+                        ? "bg-bg-hover text-text-primary"
+                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
+                    }`}
+                    title="Keyboard shortcuts"
+                  >
+                    <CircleHelp size={14} />
+                  </button>
+                  <button
+                    onClick={() => setEditing(false)}
+                    className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
+                    title="Return to view"
+                  >
+                    <Eye size={14} /> View
+                  </button>
+                </>
               )}
 
               {viewMode === "browse" && hubMode && (
@@ -828,16 +944,17 @@ export default function WikiPage() {
                 : selection ? (
                 <div className="h-full flex flex-col min-h-0">
                   {/* Body: editor (edit mode) or rendered markdown (view mode) */}
-                  <div className="flex-1 overflow-y-auto min-h-0">
+                  <div className={inEditorFullscreen ? "flex-1 flex flex-col min-h-0" : "flex-1 overflow-y-auto min-h-0"}>
                     {editing ? (
-                      <div className="px-4 py-3">
+                      <div className={inEditorFullscreen ? "flex-1 flex flex-col min-h-0 px-4 py-3" : "px-4 py-3"}>
                         <MdEditor
                           value={editContent}
                           onChange={setEditContent}
-                          onSave={handleSave}
-                          saving={saving}
-                          dirty={editContent !== fileContent}
-                          label={headerLabel}
+                          toolsOpen={mdToolsOpen}
+                          preview={mdPreview}
+                          fullscreen={mdFullscreen}
+                          spellCheck={mdSpellCheck}
+                          shortcutsOpen={mdShortcutsOpen}
                         />
                       </div>
                     ) : (
