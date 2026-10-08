@@ -2458,24 +2458,34 @@ pub async fn wiki_hub_list_dir(
     serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/dataset/dir response: {e}"))
 }
 
-/// `GET /api/v1/wiki/dataset/file?uuid=&rel=` — markdown content from the hub.
-/// The hub wraps the body as `{ "content": "..." }`.
+/// `GET /api/v1/wiki/dataset/file?uuid=&rel=` — classified file preview from the hub
+/// (`{ kind, content, size, truncated }`). A pre-classification hub replies with
+/// only `{ content }`, which is treated as markdown; the hub-side absolute path
+/// is never sent, so `path` stays None and images/media degrade to the
+/// unsupported preview message on followers.
 #[tauri::command]
 pub async fn wiki_hub_read_file(
     settings: State<'_, SettingsState>,
     uuid: String,
     rel: String,
-) -> Result<String, String> {
+) -> Result<crate::datasets::wiki::WikiFileContent, String> {
     let v = pc_get_json(
         settings.inner(),
         "/api/v1/wiki/dataset/file",
         &[("uuid", uuid), ("rel", rel)],
     )
     .await?;
-    v.get("content")
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "PC wiki/dataset/file response missing 'content'".to_string())
+    Ok(crate::datasets::wiki::WikiFileContent {
+        kind: v
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .unwrap_or("markdown")
+            .to_string(),
+        content: v.get("content").and_then(|c| c.as_str()).map(String::from),
+        size: v.get("size").and_then(|s| s.as_u64()).unwrap_or_default(),
+        truncated: v.get("truncated").and_then(|t| t.as_bool()).unwrap_or_default(),
+        path: None,
+    })
 }
 
 /// `GET /api/v1/wiki/dataset/search?uuid=&keyword=` — FTS inside one hub dataset.

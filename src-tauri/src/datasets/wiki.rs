@@ -81,6 +81,32 @@ pub struct WikiFileEntry {
     pub modified: Option<String>,
 }
 
+/// Cap on preview text bytes returned to the UI, MCP and the hub REST — a
+/// huge log-like file must never freeze the renderer.
+pub(crate) const MAX_TEXT_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
+
+/// Extensions streamed by the webview itself (via the asset protocol), never
+/// decoded into the JSON response.
+const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif"];
+const MEDIA_EXTS: &[&str] = &["mp3", "wav", "m4a", "m4b", "ogg", "opus", "flac", "mp4", "webm", "mov"];
+
+/// One wiki file read, classified for previewing. `kind` is decided by
+/// extension first and by a strict UTF-8 decode second (a `.md` that turns out
+/// binary degrades to `binary`); `content` carries decoded text only for
+/// `markdown`/`text`. `path` is the absolute file path on *this* machine —
+/// set by local reads so the UI can stream images/media or offer "open with
+/// default app", and deliberately absent from hub REST responses.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct WikiFileContent {
+    /// "markdown" | "text" | "image" | "media" | "binary"
+    pub kind: String,
+    pub content: Option<String>,
+    pub size: u64,
+    pub truncated: bool,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -120,6 +146,15 @@ pub(crate) fn is_markdown(name: &str) -> bool {
         .rsplit('.').next()
         .map(|ext| ext.eq_ignore_ascii_case("md"))
         .unwrap_or(false)
+}
+
+/// Lowercased extension of a dataset-relative file name ("" when none; dotfiles
+/// like `.gitignore` have no extension per `Path::extension`).
+fn extension_of(name: &str) -> String {
+    Path::new(name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
 }
 
 fn is_hidden(name: &str) -> bool {
@@ -428,14 +463,75 @@ pub(crate) fn list_dir(settings: &SettingsState, uuid: &str, rel: &str) -> Resul
     Ok(result)
 }
 
-pub(crate) fn read_file(settings: &SettingsState, uuid: &str, rel: &str) -> Result<String, String> {
+pub(crate) fn read_file(settings: &SettingsState, uuid: &str, rel: &str) -> Result<WikiFileContent, String> {
     let ds_dir = find_dataset_dir(settings, uuid)?;
     let clean = sanitize_rel(rel)?;
     let path = ds_dir.join(&clean);
     if !path.is_file() {
         return Err(format!("File does not exist: {}", rel));
     }
-    fs::read_to_string(&path).map_err(|e| e.to_string())
+    let mut content = read_file_classified(&path, &clean)?;
+    content.path = Some(path.to_string_lossy().into_owned());
+    Ok(content)
+}
+
+/// Read one file and classify it for preview. Images/media are answered from
+/// the extension alone (the UI streams them via the asset protocol); anything
+/// else is decoded only when it looks like UTF-8 text — a NUL byte in the
+/// first 8 KiB or invalid UTF-8 yields `binary` instead of a raw io error, so
+/// the UI can show a friendly unsupported message.
+pub(crate) fn read_file_classified(path: &Path, rel: &str) -> Result<WikiFileContent, String> {
+    use std::io::Read;
+    let size = fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let ext = extension_of(rel);
+    if IMAGE_EXTS.contains(&ext.as_str()) {
+        return Ok(WikiFileContent { kind: "image".into(), content: None, size, truncated: false, path: None });
+    }
+    if MEDIA_EXTS.contains(&ext.as_str()) {
+        return Ok(WikiFileContent { kind: "media".into(), content: None, size, truncated: false, path: None });
+    }
+    // Read one byte past the cap to detect truncation without loading a huge
+    // file fully into memory.
+    let mut buf: Vec<u8> = Vec::new();
+    fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take((MAX_TEXT_PREVIEW_BYTES + 1) as u64)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    let truncated = buf.len() > MAX_TEXT_PREVIEW_BYTES;
+    if truncated {
+        buf.truncate(MAX_TEXT_PREVIEW_BYTES);
+    }
+    let binary = buf.iter().take(8192).any(|b| *b == 0);
+    let content = if binary { None } else { decode_utf8_prefix(&buf, truncated) };
+    match content {
+        Some(text) => Ok(WikiFileContent {
+            kind: if is_markdown(rel) { "markdown" } else { "text" }.into(),
+            content: Some(text),
+            size,
+            truncated,
+            path: None,
+        }),
+        None => Ok(WikiFileContent { kind: "binary".into(), content: None, size, truncated: false, path: None }),
+    }
+}
+
+/// Strict UTF-8 decode of a possibly mid-character-truncated buffer. An
+/// "unexpected end" error at the cap boundary is the cut itself — keep the
+/// valid prefix; any *invalid* sequence means the file is not text.
+fn decode_utf8_prefix(buf: &[u8], truncated: bool) -> Option<String> {
+    match std::str::from_utf8(buf) {
+        Ok(s) => Some(s.trim_start_matches('\u{FEFF}').to_string()),
+        Err(e) => {
+            if truncated && e.error_len().is_none() {
+                String::from_utf8(buf[..e.valid_up_to()].to_vec())
+                    .ok()
+                    .map(|s| s.trim_start_matches('\u{FEFF}').to_string())
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// Write a markdown file and journal the change. Every copy of the dataset
@@ -748,13 +844,13 @@ pub async fn wiki_dataset_list_dir(
     list_dir(settings.inner(), &uuid, &rel)
 }
 
-/// Read a markdown file from a wiki dataset.
+/// Read a wiki file, classified for preview (markdown/text/image/media/binary).
 #[tauri::command]
 pub async fn wiki_dataset_read_file(
     settings: State<'_, SettingsState>,
     uuid: String,
     rel: String,
-) -> Result<String, String> {
+) -> Result<WikiFileContent, String> {
     read_file(settings.inner(), &uuid, &rel)
 }
 

@@ -93,12 +93,20 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&entries).unwrap_or_default())
     }
 
-    #[tool(name = "wiki_dataset_read_file", description = "Read a markdown file from a wiki dataset. 'rel' is the dataset-relative file path (e.g. 'notes/idea.md'). Returns the full file content.")]
+    #[tool(name = "wiki_dataset_read_file", description = "Read a wiki file, auto-classified for preview. 'kind' is 'markdown', 'text', 'image', 'media' or 'binary' (extension first, then a UTF-8 sniff). 'content' carries decoded text (max 2 MB; 'truncated' flags the cut) only for markdown/text; image/media/binary return content=null — use the returned absolute 'path' to open them externally. 'rel' is the dataset-relative file path (e.g. 'notes/idea.md').")]
     async fn wiki_dataset_read_file(&self, Parameters(param): Parameters<WikiDatasetRelParam>) -> Result<String, String> {
         log::info!("[MCP] wiki_dataset_read_file: uuid={}, rel={}", param.uuid, param.rel);
         let state = self.app.state::<SettingsState>();
-        let content = crate::datasets::wiki::wiki_dataset_read_file(state.into(), param.uuid, param.rel).await?;
-        Ok(serde_json::json!({"status": "ok", "content": content}).to_string())
+        let file = crate::datasets::wiki::wiki_dataset_read_file(state.into(), param.uuid, param.rel).await?;
+        Ok(serde_json::json!({
+            "status": "ok",
+            "kind": file.kind,
+            "content": file.content,
+            "size": file.size,
+            "truncated": file.truncated,
+            "path": file.path,
+        })
+        .to_string())
     }
 
     #[tool(name = "wiki_dataset_write_file", description = "Write or overwrite a markdown file in a wiki dataset, creating parent directories as needed. The change is journaled for sync (last-write-wins per path). Fails with an actionable error if the dataset is not downloaded on this device.")]

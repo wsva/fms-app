@@ -20,6 +20,21 @@ export interface WikiFileEntry {
   modified: string | null;
 }
 
+// Mirrors datasets::wiki::WikiFileContent — one wiki file read, classified for
+// preview: extension decides the renderer, a UTF-8 sniff vetoes it for unknown
+// files. `content` is decoded text only for markdown/text (max 2 MB, see
+// `truncated`); `path` is an absolute path on the local machine and always
+// null for hub-served files (the hub never leaks its own paths).
+export type WikiFileKind = "markdown" | "text" | "image" | "media" | "binary";
+
+export interface WikiFileContent {
+  kind: WikiFileKind;
+  content: string | null;
+  size: number;
+  truncated: boolean;
+  path: string | null;
+}
+
 // GET /api/v1/wiki/datasets (wiki_hub_list)
 export interface HubWikiList {
   datasets: WikiDatasetSummary[];

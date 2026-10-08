@@ -20,7 +20,7 @@
 //! * `GET  /api/v1/chat/attachment/{uuid}`     - stream one stored attachment
 //! * `GET  /api/v1/wiki/datasets`              - hub wiki datasets (read-only browse)
 //! * `GET  /api/v1/wiki/dataset/dir`           - one directory of a hub wiki dataset
-//! * `GET  /api/v1/wiki/dataset/file`          - one markdown file of a hub wiki dataset
+//! * `GET  /api/v1/wiki/dataset/file`          - one classified wiki file of a hub dataset
 //! * `GET  /api/v1/wiki/dataset/search`        - full-text search inside one hub wiki dataset
 //!
 //! Auth is owned by the outer trust-zone layer in `web_service.rs`: loopback +
@@ -1334,19 +1334,25 @@ async fn wiki_dataset_dir_hub(
     }
 }
 
-/// `GET /wiki/dataset/file?uuid=&rel=` — markdown content, wrapped as `{ content }`.
+/// `GET /wiki/dataset/file?uuid=&rel=` — classified file preview wrapped as
+/// `{ kind, content, size, truncated }`. Non-UTF-8 files answer `binary`
+/// instead of erroring, and images/media answer with their kind only (a
+/// follower cannot stream across the hub link yet). The hub-side absolute
+/// path is never leaked.
 async fn wiki_dataset_file_hub(
     State(st): State<RestState>,
     Query(q): Query<WikiDatasetDirQuery>,
 ) -> Response {
     let settings = st.app.state::<SettingsState>();
-    if !datasets::wiki::is_markdown(&q.rel) {
-        return json_error(StatusCode::BAD_REQUEST, "only markdown (.md) files can be read");
-    }
     match datasets::wiki::read_file(&settings, &q.uuid, &q.rel) {
-        Ok(content) => (
+        Ok(f) => (
             StatusCode::OK,
-            Json(serde_json::json!({ "content": content })),
+            Json(serde_json::json!({
+                "kind": f.kind,
+                "content": f.content,
+                "size": f.size,
+                "truncated": f.truncated,
+            })),
         )
             .into_response(),
         Err(e) => json_error(StatusCode::NOT_FOUND, &e),

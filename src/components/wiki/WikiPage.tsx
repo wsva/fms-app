@@ -1,12 +1,13 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { ask, message } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
 import {
   RefreshCw, ArrowLeft, ArrowRight, Cloud, Download, Pencil, Eye,
   Folder, FileText, BookMarked, FilePlus, FolderPlus, Plus, Trash2,
-  Save, Maximize2, Minimize2, CircleHelp, Search,
+  Save, Maximize2, Minimize2, CircleHelp, Search, ExternalLink,
 } from "lucide-react";
 import WikiSearch from "./WikiSearch";
 import MdEditor from "./MdEditor";
@@ -16,7 +17,7 @@ import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
 import {
   WikiDatasetSummary, HubWikiList, Selection, WikiSource, WikiFileEntry,
-  selectionKey,
+  WikiFileContent, selectionKey,
 } from "@/lib/wiki/types";
 
 function isTauri(): boolean {
@@ -36,6 +37,82 @@ function sanitizeName(raw: string): string {
 
 function joinRel(dirRel: string, name: string): string {
   return dirRel ? `${dirRel}/${name}` : name;
+}
+
+// Media extensions that get a <video> element instead of <audio> in the wiki
+// file view (must stay in sync with MEDIA_EXTS in datasets/wiki.rs).
+const VIDEO_EXTS = ["mp4", "webm", "mov"];
+
+function isVideoPath(rel: string): boolean {
+  const name = rel.split("/").pop() || rel;
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && VIDEO_EXTS.includes(name.slice(dot + 1).toLowerCase());
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+// Banner shown when the backend cut a large text file at its preview cap.
+function TruncatedNote() {
+  return (
+    <div className="mb-4 px-3 py-2 text-xs text-text-secondary bg-bg-input border border-border-default rounded-md">
+      Showing the first 2 MiB of this file — open it externally to see the rest.
+    </div>
+  );
+}
+
+// Fallback preview for files the webview cannot show inline: local binaries
+// (unsupported format) and hub-served images/media (no stream path across the
+// REST link). Offers an actionable escape hatch depending on where the file
+// lives: open it in the OS default app, or download the hub dataset.
+function UnsupportedFilePanel({ fileName, size, path, onDownload }: {
+  fileName: string;
+  size: number;
+  path: string | null;
+  onDownload: (() => void) | null;
+}) {
+  const openExternal = async () => {
+    if (!path) return;
+    try {
+      await openPath(path);
+    } catch (err) {
+      logError(`Failed to open ${fileName}: ${err instanceof Error ? err.message : String(err)}`, "wiki");
+    }
+  };
+  return (
+    <div className="flex items-center justify-center h-full p-6">
+      <div className="max-w-lg w-full text-center">
+        <FileText size={32} className="mx-auto mb-3 text-text-tertiary" />
+        <p className="text-sm text-text-secondary mb-1">
+          Cannot show the content of this file — unsupported file format.
+        </p>
+        {size > 0 && <p className="text-xs text-text-tertiary mb-4">{formatBytes(size)}</p>}
+        {path ? (
+          <button
+            onClick={() => void openExternal()}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-accent text-white rounded-md hover:bg-accent/90"
+          >
+            <ExternalLink size={14} /> Open with default app
+          </button>
+        ) : onDownload ? (
+          <>
+            <p className="text-sm text-text-secondary mb-3">
+              This file lives on the hub. Download the dataset to open it locally.
+            </p>
+            <button
+              onClick={onDownload}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-accent text-white rounded-md hover:bg-accent/90"
+            >
+              <Download size={14} /> Download dataset
+            </button>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 interface PromptState {
@@ -88,6 +165,12 @@ function sameNavEntry(a: NavEntry, b: NavEntry): boolean {
 export default function WikiPage() {
   const [selection, setSelection] = useState<Selection | null>(null);
   const [fileContent, setFileContent] = useState<string>("");
+  // Classification of the open file (see WikiFileContent): drives which
+  // renderer the body area uses and whether editing is offered at all.
+  const [fileKind, setFileKind] = useState<WikiFileContent["kind"]>("markdown");
+  const [filePath, setFilePath] = useState<string | null>(null);
+  const [fileSize, setFileSize] = useState(0);
+  const [fileTruncated, setFileTruncated] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isIndexing, setIsIndexing] = useState(false);
@@ -215,13 +298,24 @@ export default function WikiPage() {
   }, []);
 
   // Read one file for a given source, dispatching to the right backend command.
-  const readSource = useCallback(async (source: WikiSource): Promise<string> => {
+  // Both commands return the same classified WikiFileContent shape.
+  const readSource = useCallback(async (source: WikiSource): Promise<WikiFileContent> => {
     switch (source.kind) {
       case "dataset":
-        return await invoke<string>("wiki_dataset_read_file", { uuid: source.uuid, rel: source.rel });
+        return await invoke<WikiFileContent>("wiki_dataset_read_file", { uuid: source.uuid, rel: source.rel });
       case "hub-dataset":
-        return await invoke<string>("wiki_hub_read_file", { uuid: source.uuid, rel: source.rel });
+        return await invoke<WikiFileContent>("wiki_hub_read_file", { uuid: source.uuid, rel: source.rel });
     }
+  }, []);
+
+  // Reset the classified file view — every path that leaves a file funnels
+  // here so a stale kind/path can never leak into the next render.
+  const resetFileView = useCallback(() => {
+    setFileContent("");
+    setFileKind("markdown");
+    setFilePath(null);
+    setFileSize(0);
+    setFileTruncated(false);
   }, []);
 
   // Load a selection's content, leaving view mode, and push navigation history.
@@ -230,7 +324,7 @@ export default function WikiPage() {
     if (sel.source.rel === "") {
       // A dataset root placeholder (used to clear a deleted file) — nothing to read.
       setSelection(null);
-      setFileContent("");
+      resetFileView();
       setEditing(false);
       return;
     }
@@ -238,8 +332,12 @@ export default function WikiPage() {
     setError(null);
     setEditing(false);
     try {
-      const content = await readSource(sel.source);
-      setFileContent(content);
+      const file = await readSource(sel.source);
+      setFileContent(file.content ?? "");
+      setFileKind(file.kind);
+      setFilePath(file.path);
+      setFileSize(file.size);
+      setFileTruncated(file.truncated);
       setSelection(sel);
       if (pushHistory && !isHistoryNavRef.current) {
         pushNavHistory({ kind: "file", selection: sel });
@@ -247,12 +345,12 @@ export default function WikiPage() {
     } catch (err) {
       console.error("Failed to read file:", err);
       setError(err instanceof Error ? err.message : String(err));
-      setFileContent("");
+      resetFileView();
       setSelection(sel);
     } finally {
       setIsLoading(false);
     }
-  }, [readSource, pushNavHistory]);
+  }, [readSource, resetFileView, pushNavHistory]);
 
   const handleFileSelect = useCallback((sel: Selection) => {
     loadSelection(sel, true);
@@ -271,12 +369,12 @@ export default function WikiPage() {
         setDatasetBrowse(null);
       }
       setSelection(null);
-      setFileContent("");
+      resetFileView();
       setEditing(false);
       setError(null);
     }
     isHistoryNavRef.current = false;
-  }, [loadSelection]);
+  }, [loadSelection, resetFileView]);
 
   const goBack = useCallback(() => {
     if (historyIndex <= 0) return;
@@ -323,9 +421,10 @@ export default function WikiPage() {
     }
   }, [selection, loadSelection]);
 
-  // Whether the current selection is an editable local dataset file.
+  // Whether the current selection is an editable local dataset file. The
+  // backend only ever writes .md, so non-markdown files are view-only here.
   const canEdit =
-    !hubMode && selection?.source.kind === "dataset" && selection.source.rel !== "";
+    !hubMode && selection?.source.kind === "dataset" && selection.source.rel !== "" && fileKind === "markdown";
 
   const startEdit = () => {
     setEditContent(fileContent);
@@ -403,7 +502,7 @@ export default function WikiPage() {
       const list = await invoke<HubWikiList>("wiki_hub_list");
       setHubDatasets(list.datasets || []);
       setSelection(null);
-      setFileContent("");
+      resetFileView();
       setDatasetBrowse(null);
       setHubMode(true);
     } catch (err) {
@@ -411,7 +510,7 @@ export default function WikiPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [hubMode]);
+  }, [hubMode, resetFileView]);
 
   // The local dataset whose FTS index to refresh: the open file's dataset, or
   // the one currently being browsed. Null when neither is a local dataset.
@@ -454,7 +553,7 @@ export default function WikiPage() {
   }, [handleFileSelect]);
 
   const headerLabel = selection
-    ? (selection.label || selection.source.rel.split("/").pop())
+    ? (selection.label || selection.source.rel.split("/").pop() || "")
     : "";
 
   // Narrow once so JSX callbacks see a concrete hub-dataset source.
@@ -493,10 +592,10 @@ export default function WikiPage() {
 
   const clearSelection = useCallback(() => {
     setSelection(null);
-    setFileContent("");
+    resetFileView();
     setEditing(false);
     setError(null);
-  }, []);
+  }, [resetFileView]);
 
   const goDatasets = useCallback(() => {
     setDatasetBrowse(null);
@@ -1133,10 +1232,39 @@ export default function WikiPage() {
                           shortcutsOpen={mdShortcutsOpen}
                         />
                       </div>
-                    ) : (
+                    ) : fileKind === "markdown" ? (
                       <div className="px-6 pt-6 pb-[50vh]">
+                        {fileTruncated && <TruncatedNote />}
                         <MarkdownViewer content={fileContent} withTOC={true} onWikiLink={handleWikiLink} />
                       </div>
+                    ) : fileKind === "text" ? (
+                      <div className="px-6 pt-6 pb-[50vh]">
+                        {fileTruncated && <TruncatedNote />}
+                        <pre className="whitespace-pre-wrap break-words font-mono text-sm leading-6 text-text-primary">{fileContent}</pre>
+                      </div>
+                    ) : fileKind === "image" && filePath ? (
+                      <div className="p-6 flex justify-center">
+                        <img
+                          src={convertFileSrc(filePath)}
+                          alt={headerLabel}
+                          className="max-w-full h-auto rounded-md border border-border-default"
+                        />
+                      </div>
+                    ) : fileKind === "media" && filePath ? (
+                      <div className="p-6 flex flex-col items-center gap-3">
+                        {isVideoPath(selection.source.rel) ? (
+                          <video src={convertFileSrc(filePath)} controls className="max-w-full max-h-[70vh] rounded-md" />
+                        ) : (
+                          <audio src={convertFileSrc(filePath)} controls className="w-full max-w-xl" />
+                        )}
+                      </div>
+                    ) : (
+                      <UnsupportedFilePanel
+                        fileName={headerLabel}
+                        size={fileSize}
+                        path={filePath}
+                        onDownload={hubSrc ? () => handleDownload(hubSrc.uuid, hubSrc.rel) : null}
+                      />
                     )}
                   </div>
                 </div>
