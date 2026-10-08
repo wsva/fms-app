@@ -1,0 +1,176 @@
+//! Workflow state-machine tools: drive a persistent, resumable, file-based DAG
+//! run (see `docs/design/workflow.md`). Agent-in-the-loop — the framework does
+//! bookkeeping + scheduling; the agent performs each step's action and reports
+//! the outcome. Every tool returns structured JSON with actionable hints.
+
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::{tool, tool_router};
+use serde::Deserialize;
+use serde_json::Value;
+use tauri::Manager;
+
+use crate::settings::SettingsState;
+
+use super::{DatasetMcpServer, JsonValue};
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct WorkflowCreateParam {
+    /// Optional run id (single directory name). Generated from the definition
+    /// name when omitted.
+    #[serde(default)]
+    run_id: Option<String>,
+    /// The full `workflow.yaml` definition text.
+    definition_yaml: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct WorkflowRunParam {
+    run_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct WorkflowAdvanceParam {
+    run_id: String,
+    step: String,
+    /// Optional lease owner id; distinguishes concurrent agents.
+    #[serde(default)]
+    agent_id: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct WorkflowRecordParam {
+    run_id: String,
+    step: String,
+    /// One of: `completed`, `failed`, `blocked`.
+    event: String,
+    /// Optional outcome detail: `{ outputs?: {...}, reason?/error?: "..." }`.
+    #[serde(default)]
+    detail: JsonValue,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct WorkflowInterveneParam {
+    run_id: String,
+    step: String,
+    /// One of: `retry`, `unblock`, `skip`, `reset`.
+    op: String,
+}
+
+fn ok(v: &Value) -> Result<String, String> {
+    Ok(serde_json::to_string_pretty(v).unwrap_or_default())
+}
+
+#[tool_router(router = workflow_router, vis = "pub(crate)")]
+impl DatasetMcpServer {
+    #[tool(name = "workflow_list", description = "List every workflow run under the workspace's workflows directory. Returns each run's id, definition name/version, overall run_status (in_progress|completed|failed|blocked) and per-status counts. Use this to discover runs before loading one.")]
+    async fn workflow_list(&self) -> Result<String, String> {
+        log::info!("[MCP] workflow_list");
+        let state = self.app.state::<SettingsState>();
+        let v = crate::workflow::list_runs(state.inner())?;
+        ok(&v)
+    }
+
+    #[tool(name = "workflow_create", description = "Create a new workflow run from a YAML definition. Validates the DAG (unique ids, existing references, acyclic), writes workflow.yaml/state.json/events.jsonl, and returns the initial status with the first ready steps. Pass run_id to choose the directory name, or omit it to auto-generate one.")]
+    async fn workflow_create(
+        &self,
+        Parameters(param): Parameters<WorkflowCreateParam>,
+    ) -> Result<String, String> {
+        log::info!("[MCP] workflow_create: run_id={:?}", param.run_id);
+        let state = self.app.state::<SettingsState>();
+        let v = crate::workflow::create_run(
+            state.inner(),
+            param.run_id,
+            &param.definition_yaml,
+        )?;
+        ok(&v)
+    }
+
+    #[tool(name = "workflow_status", description = "Load a run and return its definition metadata, per-step statuses, and what is ready/blocked/failed with actionable reasons and hints. Recomputes derived statuses and reaps expired leases, so it is always safe to call after a restart to resume.")]
+    async fn workflow_status(
+        &self,
+        Parameters(param): Parameters<WorkflowRunParam>,
+    ) -> Result<String, String> {
+        log::info!("[MCP] workflow_status: run_id={}", param.run_id);
+        let state = self.app.state::<SettingsState>();
+        let v = crate::workflow::status(state.inner(), &param.run_id)?;
+        ok(&v)
+    }
+
+    #[tool(name = "workflow_next", description = "Return the runnable (ready, unclaimed) steps of a run with their resolved action, static params and data-flow inputs, ready for the agent to execute. Empty when nothing is runnable; the hint explains the current run_status.")]
+    async fn workflow_next(
+        &self,
+        Parameters(param): Parameters<WorkflowRunParam>,
+    ) -> Result<String, String> {
+        log::info!("[MCP] workflow_next: run_id={}", param.run_id);
+        let state = self.app.state::<SettingsState>();
+        let v = crate::workflow::next_steps(state.inner(), &param.run_id)?;
+        ok(&v)
+    }
+
+    #[tool(name = "workflow_advance", description = "Claim a ready step (single-flight via a lease) and hand its resolved action + inputs back to you to perform. This does NOT execute anything: after doing the work, report the outcome with workflow_record. Errors if the step is not ready or is already claimed by a live lease.")]
+    async fn workflow_advance(
+        &self,
+        Parameters(param): Parameters<WorkflowAdvanceParam>,
+    ) -> Result<String, String> {
+        log::info!(
+            "[MCP] workflow_advance: run_id={}, step={}",
+            param.run_id,
+            param.step
+        );
+        let state = self.app.state::<SettingsState>();
+        let v = crate::workflow::advance(
+            state.inner(),
+            &param.run_id,
+            &param.step,
+            param.agent_id,
+        )?;
+        ok(&v)
+    }
+
+    #[tool(name = "workflow_record", description = "Report the outcome of a claimed step: event=completed (optionally with detail.outputs), failed (with detail.reason/error; auto-retries while attempts remain), or blocked (waiting on something external). Re-evaluates the DAG, appends events, and atomically rewrites state. Returns the updated status.")]
+    async fn workflow_record(
+        &self,
+        Parameters(param): Parameters<WorkflowRecordParam>,
+    ) -> Result<String, String> {
+        log::info!(
+            "[MCP] workflow_record: run_id={}, step={}, event={}",
+            param.run_id,
+            param.step,
+            param.event
+        );
+        let state = self.app.state::<SettingsState>();
+        let detail: Option<Value> = match Value::from(param.detail) {
+            Value::Null => None,
+            v => Some(v),
+        };
+        let v = crate::workflow::record(
+            state.inner(),
+            &param.run_id,
+            &param.step,
+            &param.event,
+            detail,
+        )?;
+        ok(&v)
+    }
+
+    #[tool(name = "workflow_intervene", description = "Manually recover a step: op=retry (make a failed/blocked step runnable again, resetting its attempt count), unblock (re-derive a blocked step once its condition cleared), skip (mark it skipped and propagate to dependents), or reset (clear all of the step's state back to pending). Returns the updated status.")]
+    async fn workflow_intervene(
+        &self,
+        Parameters(param): Parameters<WorkflowInterveneParam>,
+    ) -> Result<String, String> {
+        log::info!(
+            "[MCP] workflow_intervene: run_id={}, step={}, op={}",
+            param.run_id,
+            param.step,
+            param.op
+        );
+        let state = self.app.state::<SettingsState>();
+        let v = crate::workflow::intervene(
+            state.inner(),
+            &param.run_id,
+            &param.step,
+            &param.op,
+        )?;
+        ok(&v)
+    }
+}

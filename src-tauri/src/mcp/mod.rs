@@ -7,9 +7,9 @@
 //!
 //! # Layout
 //!
-//! The 142 tools live one submodule per domain (`datasets`, `dictation`,
-//! `cards`, `books`, `models`, `ai`, `wiki`, `sync`, `system`). Each submodule
-//! holds the parameter structs for its own tools plus one
+//! The tools live one submodule per domain (`datasets`, `dictation`,
+//! `cards`, `books`, `models`, `ai`, `wiki`, `sync`, `system`, `workflow`).
+//! Each submodule holds the parameter structs for its own tools plus one
 //! `#[tool_router(router = <domain>_router, vis = "pub(crate)")]` impl block on
 //! [`DatasetMcpServer`]; [`DatasetMcpServer::tool_router`] merges those routers
 //! with `+` into the single `ServerHandler` implemented at the bottom of this
@@ -43,6 +43,7 @@ mod ai;
 mod wiki;
 mod sync;
 mod system;
+mod workflow;
 
 // ---------------------------------------------------------------------------
 // MCP server state — shared across all connections
@@ -113,6 +114,7 @@ impl DatasetMcpServer {
             + Self::wiki_router()
             + Self::sync_router()
             + Self::system_router()
+            + Self::workflow_router()
     }
 }
 

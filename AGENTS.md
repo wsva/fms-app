@@ -110,7 +110,16 @@ src-tauri/src/
 │   ├── ai.rs               # Ollama chat & model management, Edge TTS, cross-device chat (10)
 │   ├── wiki.rs             # wiki dirs, read/write/delete, search, index (9)
 │   ├── sync.rs             # web service, pairing registry, PC scan/connect/pull, incremental sync (15)
-│   └── system.rs           # settings, auth, logs, OCR, screenshot, app UI control (15)
+│   ├── system.rs           # settings, auth, logs, OCR, screenshot, app UI control (15)
+│   └── workflow.rs         # persistent workflow state machine: list/create/status/next/advance/record/intervene (7)
+│
+├── workflow/              # Persistent workflow state machine (file-based, resumable DAG) — desktop
+│   ├── mod.rs             # group root: `pub(crate) mod core;` + re-export the run-scoped API
+│   └── core/              # domain-free framework (steps/deps/statuses, not what a step does)
+│       ├── mod.rs         # schema (Definition/RunState/Event) + public API (list/create/status/next/advance/record/intervene)
+│       ├── validate.rs    # pre-run structural validation: unique ids, refs exist, acyclic
+│       ├── engine.rs      # readiness recompute, transitions, retry/propagation, lease recovery, data flow
+│       └── persist.rs     # run-dir resolution, YAML/JSON parse, atomic state write, append-only events
 │
 ├── app_paths.rs            # Platform-correct base dirs (desktop `dirs`, mobile app-private)
 ├── settings.rs             # Two-tier settings: global JSON + per-workspace JSON overlay

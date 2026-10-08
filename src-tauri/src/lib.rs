@@ -24,6 +24,11 @@ mod models;
 /// service, so it is desktop-only exactly like `sync::server`.
 #[cfg(feature = "desktop")]
 mod mcp;
+/// Persistent workflow state machine: a domain-free, file-based, resumable DAG
+/// runner driven through the `workflow_*` MCP tools. Reachable only via the
+/// desktop-gated MCP server, so it is desktop-only too.
+#[cfg(feature = "desktop")]
+mod workflow;
 
 // App infrastructure (cross-cutting: paths, DB helpers, settings, logging,
 // workspaces, auth, audio decoding).
