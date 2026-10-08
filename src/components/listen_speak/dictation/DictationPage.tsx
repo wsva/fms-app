@@ -74,7 +74,9 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
     const [mobile, setMobile] = useState(false);
     const [pendingUpload, setPendingUpload] = useState(0);
     // "Cues only" mode: a phone screen barely fits one cue, so hide the
-    // breadcrumb, player, waveform and progress line behind a toolbar toggle.
+    // player, waveform and progress line behind a toolbar toggle. The
+    // breadcrumb stays visible — it is a compact nav bar and its dataset/media
+    // trail is needed for navigation even when everything else is collapsed.
     // Default collapsed on mobile (vertical space is the scarce resource),
     // expanded on desktop — where the toggle itself is not rendered.
     // Always expanded on the first render (SSR-safe), then restored from storage.
@@ -281,11 +283,11 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 </div>
             )}
             {/* Breadcrumb navigation — wiki-style full-width bar sitting above the
-                toolbar: Datasets › dataset › media › subtitle trail. */}
-            {!collapsed && (
+                toolbar: Datasets › dataset › media › subtitle trail. Always shown,
+                including mobile "cues only" mode, so the navigation trail stays reachable. */}
             <nav className="shrink-0 flex items-center justify-start gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
                 <button
-                    className={`shrink-0 cursor-pointer hover:underline ${d.selectedDatasetUuid ? "text-accent" : "text-text-primary font-medium"}`}
+                    className={`shrink-0 cursor-pointer hover:underline text-left ${d.selectedDatasetUuid ? "text-accent" : "text-text-primary font-medium"}`}
                     onClick={() => d.setSelectedDatasetUuid("")}
                 >
                     Datasets
@@ -294,7 +296,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                     <>
                         <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
                         <button
-                            className={`cursor-pointer hover:underline truncate min-w-0 ${d.stateMediaUUID ? "max-w-[240px] text-accent" : "flex-1 text-text-primary font-medium"}`}
+                            className={`cursor-pointer hover:underline truncate min-w-0 text-left ${d.stateMediaUUID ? "max-w-[240px] text-accent" : "flex-1 text-text-primary font-medium"}`}
                             onClick={() => { d.setStateMediaUUID(""); d.handleReload(); }}
                             title={d.selectedDataset.info.name}
                         >
@@ -324,7 +326,6 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 )}
                 {d.stateLoading && <ProgressCircle size="sm" aria-label="Loading" />}
             </nav>
-            )}
             {/* Toolbar — sections are mutually exclusive: Location on the datasets view,
                 Dataset on the media-list view, Dictation on the cue view. Wiki-style
                 full-width bar sitting under the breadcrumb. */}
@@ -421,7 +422,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                         <Button
                             size="sm"
                             variant={collapsed ? "primary" : "ghost"}
-                            aria-label={collapsed ? "Show player, waveform and breadcrumb" : "Hide everything except the cues"}
+                            aria-label={collapsed ? "Show player and waveform" : "Hide everything except the cues"}
                             aria-pressed={collapsed}
                             onPress={handleToggleCollapsed}
                         >
