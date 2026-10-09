@@ -63,6 +63,15 @@ struct DatasetCreateParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct DatasetInfoSaveParam {
+    uuid: String,
+    /// The whole `info.json` document as JSON text. Identity fields (uuid, type,
+    /// format, created_at) are ignored on write — the server keeps the existing
+    /// ones — and `updated_at` is refreshed.
+    content: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct DatasetInfoUpdateParam {
     uuid: String,
     /// Empty means "leave this field alone" — the same convention every other
@@ -539,6 +548,24 @@ impl DatasetMcpServer {
         let summary = datasets::dataset_create(settings, param.name, desc, loc).await?;
         let _ = self.app.emit("dataset-list-changed", ());
         Ok(serde_json::to_string_pretty(&summary).unwrap_or_default())
+    }
+
+    #[tool(name = "dataset_init_dir", description = "Initialize a raw media folder IN PLACE as a dictation dataset: mint a server-side uuid and write a default info.json into the folder where it already lives (no copy — unlike dataset_import). The folder must sit directly inside a configured dataset location and contain media/. Idempotent: if a readable info.json already exists its summary is returned unchanged. Follow with dataset_info_save to edit the metadata.")]
+    async fn dataset_init_dir(&self, Parameters(param): Parameters<PathParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_init_dir: path={}", param.path);
+        let settings = self.app.state::<SettingsState>();
+        let summary = datasets::dataset_init_dir(settings, param.path).await?;
+        let _ = self.app.emit("dataset-list-changed", ());
+        Ok(serde_json::to_string_pretty(&summary).unwrap_or_default())
+    }
+
+    #[tool(name = "dataset_info_save", description = "Overwrite a dataset's info.json with a full JSON document (any type). The text must parse as a dataset descriptor; identity fields uuid/type/format/created_at are always taken from disk and updated_at is refreshed. Returns the authoritative saved descriptor.")]
+    async fn dataset_info_save(&self, Parameters(param): Parameters<DatasetInfoSaveParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_info_save: uuid={}", param.uuid);
+        let settings = self.app.state::<SettingsState>();
+        let info = datasets::dataset_info_save(settings, param.uuid, param.content).await?;
+        let _ = self.app.emit("dataset-list-changed", ());
+        Ok(serde_json::to_string_pretty(&info).unwrap_or_default())
     }
 
     #[tool(name = "dataset_info_update", description = "Update a dataset's info.json metadata — any type. Settable: name, description, language, visibility ('private' | 'shared' | 'public') and owner_id. Empty fields are left unchanged. 'subscribers' is deliberately not settable: the website owns it and a local edit would dirty the dataset for every follower.")]

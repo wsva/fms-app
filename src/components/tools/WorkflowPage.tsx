@@ -4,10 +4,12 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import dynamic from "next/dynamic";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { isTauri } from "@/lib/tauri";
 import {
   type DatasetSummary,
   type DatasetDetail,
+  type DatasetInfo,
   btnSmPrimary,
   btnSmSecondary,
   btnSmDanger,
@@ -27,7 +29,7 @@ import {
   buildPrompt,
   statusLabel,
 } from "@/lib/workflow/steps";
-import { RefreshCw, Workflow as WorkflowIcon, Play, RotateCcw, SkipForward, Check, Copy, Send } from "lucide-react";
+import { RefreshCw, Workflow as WorkflowIcon, Play, RotateCcw, SkipForward, Check, Copy, Send, Plus, FileJson, Save } from "lucide-react";
 
 // react-flow touches browser layout APIs on mount; keep it out of the SSG pass.
 const WorkflowGraph = dynamic(() => import("./WorkflowGraph"), { ssr: false });
@@ -49,13 +51,20 @@ function runIdFor(uuid: string): string {
 export default function WorkflowPage() {
   const [mounted, setMounted] = useState(false);
   const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
-  const [selectedUuid, setSelectedUuid] = useState("");
+  // Selection key = the dataset uuid when it has one, otherwise the folder path
+  // (a raw media folder not yet initialized has an empty uuid and is addressed
+  // only by its path).
+  const [selectedKey, setSelectedKey] = useState("");
   const [facts, setFacts] = useState<DatasetFacts | null>(null);
   const [committed, setCommitted] = useState<StatusMap>(initialStatuses());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [initing, setIniting] = useState(false);
   const [notice, setNotice] = useState<string>("");
   const [prompt, setPrompt] = useState("");
+  const [infoText, setInfoText] = useState("");
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [savingInfo, setSavingInfo] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -68,61 +77,137 @@ export default function WorkflowPage() {
     [committed, facts],
   );
 
-  const selectedName = datasets.find((d) => d.info.uuid === selectedUuid)?.info.name ?? selectedUuid;
+  const selectedDataset = useMemo(
+    () => datasets.find((d) => (d.info.uuid || d.path) === selectedKey),
+    [datasets, selectedKey],
+  );
+  const selectedUuid = selectedDataset?.info.uuid ?? "";
+  const selectedPath = selectedDataset?.path ?? "";
+  const isRaw = !!selectedDataset && !selectedDataset.info.uuid;
+  const selectedName = selectedDataset?.info.name ?? selectedKey;
 
-  // ---- Load dictation datasets (Favorites is an internal dataset, hide it) ----
+  // Frontend diagnostics → the app log (module "workflow"), so a dataset that
+  // won't select can be traced from the Logs page without a debugger.
+  const appendLog = useCallback((text: string, level: string = "INFO") => {
+    if (!isTauri()) return;
+    for (const line of text.split("\n")) {
+      invoke("log_frontend_message", { message: line, level, module: "workflow" }).catch(() => {});
+    }
+  }, []);
+
+  // ---- Load dictation datasets ----
+  // `dataset_list` already scans only the dictation roots, so every entry is a
+  // dictation dataset (ready AND not_ready). Favorites is internal — hide it. A
+  // raw media folder that was never imported has an EMPTY uuid (it isn't a
+  // dataset yet); keep it visible but disabled rather than letting its "" option
+  // collide with the placeholder and silently block selection.
   const fetchDatasets = useCallback(async () => {
     if (!isTauri()) return;
     try {
       const res = await invoke<DatasetSummary[]>("dataset_list");
-      setDatasets(
-        res.filter(
-          (d) => d.info.type === "dictation" && d.info.uuid !== "dictation-favorites",
+      appendLog(`dataset_list returned ${res.length} entr(ies):`);
+      res.forEach((d) =>
+        appendLog(
+          `  - name='${d.info.name}' type='${d.info.type}' status='${d.status}' uuid='${d.info.uuid || "(EMPTY)"}' path='${d.path}'`,
         ),
       );
+      const kept = res.filter((d) => d.info.uuid !== "dictation-favorites");
+      const noUuid = kept.filter((d) => !d.info.uuid);
+      if (noUuid.length) {
+        appendLog(
+          `${noUuid.length} folder(s) have no uuid (not imported yet) — shown but disabled: ${noUuid.map((d) => d.info.name).join(", ")}`,
+          "WARN",
+        );
+      }
+      setDatasets(kept);
     } catch (e) {
+      appendLog(`dataset_list failed: ${String(e)}`, "ERROR");
       setNotice(`Failed to list datasets: ${String(e)}`);
     }
-  }, []);
+  }, [appendLog]);
 
   useEffect(() => {
     fetchDatasets();
   }, [fetchDatasets]);
 
-  // ---- Scan: probe the dataset's on-disk facts and seed step status ----
+  // ---- Load dataset: probe on-disk facts, seed steps, and read its info.json ----
+  const loadDataset = useCallback(async (uuid: string) => {
+    const detail = await invoke<DatasetDetail>("dataset_get", { uuid });
+    const probed: DatasetFacts = {
+      hasMedia: (detail.media?.length ?? 0) > 0,
+      hasSubtitles: !!detail.has_subtitles,
+      hasDatabase: !!detail.has_database,
+      hasWaveforms: !!detail.has_waveforms,
+      hasBook: !!detail.has_book,
+      hasTranscript: !!detail.media?.some((m) => m.has_transcript),
+    };
+    setFacts(probed);
+    setCommitted(seedFromDataset(probed));
+    setInfoText(JSON.stringify(detail.info, null, 2));
+    setPrompt("");
+    return probed;
+  }, []);
+
   const scan = useCallback(async () => {
     if (!isTauri() || !selectedUuid) return;
     setScanning(true);
     setNotice("");
+    appendLog(`scan: dataset_get uuid='${selectedUuid}' name='${selectedName}'`);
     try {
-      const detail = await invoke<DatasetDetail>("dataset_get", { uuid: selectedUuid });
-      const probed: DatasetFacts = {
-        hasMedia: (detail.media?.length ?? 0) > 0,
-        hasSubtitles: !!detail.has_subtitles,
-        hasDatabase: !!detail.has_database,
-        hasWaveforms: !!detail.has_waveforms,
-        hasBook: !!detail.has_book,
-        hasTranscript: !!detail.media?.some((m) => m.has_transcript),
-      };
-      setFacts(probed);
-      setCommitted(seedFromDataset(probed));
-      setPrompt("");
+      const probed = await loadDataset(selectedUuid);
+      appendLog(`scan: facts=${JSON.stringify(probed)}`);
       setNotice("Scanned dataset — step status seeded from files on disk. Adjust any node, then generate the prompt.");
     } catch (e) {
+      appendLog(`scan failed for uuid='${selectedUuid}': ${String(e)}`, "ERROR");
       setNotice(`Scan failed: ${String(e)}`);
     } finally {
       setScanning(false);
     }
-  }, [selectedUuid]);
+  }, [selectedUuid, selectedName, appendLog, loadDataset]);
 
-  // Reset graph when switching dataset (forces a fresh scan).
-  useEffect(() => {
-    setFacts(null);
-    setCommitted(initialStatuses());
-    setSelectedId(null);
-    setPrompt("");
-    setNotice("");
-  }, [selectedUuid]);
+  // ---- Initialize a raw folder in place, then load it as the new dataset ----
+  const handleInit = async () => {
+    if (!isTauri() || !isRaw) return;
+    const ok = await ask(
+      `Initialize this folder as a dictation dataset?\n\n${selectedPath}\n\nThis writes a default info.json (with a new app-generated uuid) into the folder — no files are copied or deleted. You can edit it next.`,
+      { title: "Initialize dataset", kind: "info", okLabel: "Initialize", cancelLabel: "Cancel" },
+    );
+    if (!ok) return;
+    setIniting(true);
+    appendLog(`init: dataset_init_dir path='${selectedPath}'`);
+    try {
+      const summary = await invoke<DatasetSummary>("dataset_init_dir", { path: selectedPath });
+      appendLog(`init ok: uuid='${summary.info.uuid}'`);
+      await fetchDatasets();
+      setSelectedKey(summary.info.uuid);
+      await loadDataset(summary.info.uuid);
+      setInfoOpen(true);
+      setNotice(`Initialized dataset “${summary.info.name}” (uuid ${summary.info.uuid}). Edit its info.json, then generate the Agent prompt.`);
+    } catch (e) {
+      appendLog(`init failed for path='${selectedPath}': ${String(e)}`, "ERROR");
+      setNotice(`Initialize failed: ${String(e)}`);
+    } finally {
+      setIniting(false);
+    }
+  };
+
+  // ---- Save edited info.json (identity fields are enforced server-side) ----
+  const saveInfo = async () => {
+    if (!isTauri() || !selectedUuid) return;
+    setSavingInfo(true);
+    appendLog(`info save: uuid='${selectedUuid}'`);
+    try {
+      const saved = await invoke<DatasetInfo>("dataset_info_save", { uuid: selectedUuid, content: infoText });
+      setInfoText(JSON.stringify(saved, null, 2));
+      appendLog("info save ok");
+      setNotice("info.json saved.");
+    } catch (e) {
+      appendLog(`info save failed: ${String(e)}`, "ERROR");
+      setNotice(`Save failed: ${String(e)}`);
+    } finally {
+      setSavingInfo(false);
+    }
+  };
 
   // ---- Node controls: mutate the committed status, recompute drives the view ----
   const setStep = (id: string, status: StepStatus) => {
@@ -194,25 +279,50 @@ export default function WorkflowPage() {
             <div className="ml-auto flex items-center gap-2">
               <select
                 className="px-2 py-1 text-sm rounded-md bg-bg-body border border-border-light text-text-primary focus:border-accent outline-none min-w-[220px]"
-                value={selectedUuid}
-                onChange={(e) => setSelectedUuid(e.target.value)}
-                disabled={scanning}
+                value={selectedKey}
+                onChange={(e) => {
+                  const key = e.target.value;
+                  setSelectedKey(key);
+                  // Clear the derived view only on an explicit user switch, so a
+                  // programmatic re-select after "Initialize" is not wiped.
+                  setFacts(null);
+                  setCommitted(initialStatuses());
+                  setSelectedId(null);
+                  setPrompt("");
+                  setNotice("");
+                  setInfoText("");
+                  setInfoOpen(false);
+                  appendLog(`selection changed to '${key}'`);
+                }}
+                disabled={scanning || initing}
               >
                 <option value="">Select a dictation dataset…</option>
                 {datasets.map((ds) => (
-                  <option key={ds.path} value={ds.info.uuid}>
+                  <option key={ds.path} value={ds.info.uuid || ds.path}>
                     {ds.info.name}
+                    {ds.info.uuid ? (ds.status === "ready" ? "" : " · not ready") : " · not imported"}
                   </option>
                 ))}
               </select>
-              <button
-                className={`${btnSmPrimary} inline-flex items-center gap-1`}
-                onClick={scan}
-                disabled={!selectedUuid || scanning}
-              >
-                <RefreshCw size={14} className={scanning ? "animate-spin" : undefined} />
-                {facts ? "Re-scan status" : "Scan status"}
-              </button>
+              {isRaw ? (
+                <button
+                  className={`${btnSmPrimary} inline-flex items-center gap-1`}
+                  onClick={handleInit}
+                  disabled={initing}
+                >
+                  <Plus size={14} className={initing ? "animate-spin" : undefined} />
+                  {initing ? "Initializing…" : "Initialize as dataset"}
+                </button>
+              ) : (
+                <button
+                  className={`${btnSmPrimary} inline-flex items-center gap-1`}
+                  onClick={scan}
+                  disabled={!selectedUuid || scanning}
+                >
+                  <RefreshCw size={14} className={scanning ? "animate-spin" : undefined} />
+                  {facts ? "Re-scan status" : "Scan status"}
+                </button>
+              )}
             </div>
           </div>
 
@@ -223,10 +333,12 @@ export default function WorkflowPage() {
           )}
 
           {!facts ? (
-            <div className="flex-1 min-h-0 flex items-center justify-center text-sm text-text-tertiary">
-              {selectedUuid
-                ? "Click “Scan status” to read the dataset and lay out the pipeline."
-                : "Select a Dataset Dictation dataset above to view its workflow graph."}
+            <div className="flex-1 min-h-0 flex items-center justify-center text-sm text-text-tertiary px-6 text-center">
+              {isRaw
+                ? "This folder has media but no info.json yet — click “Initialize as dataset” to create it, then edit its metadata and lay out the pipeline."
+                : selectedUuid
+                  ? "Click “Scan status” to read the dataset and lay out the pipeline."
+                  : "Select a Dataset Dictation dataset above to view its workflow graph."}
             </div>
           ) : (
             <div className="flex-1 min-h-0 flex gap-3">
@@ -246,6 +358,46 @@ export default function WorkflowPage() {
 
               {/* Inspector + prompt */}
               <div className="w-[340px] shrink-0 min-h-0 overflow-y-auto flex flex-col gap-3">
+                <section className="rounded-lg border border-border-light bg-bg-card p-3 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-xs font-semibold uppercase tracking-wide text-text-secondary inline-flex items-center gap-1">
+                      <FileJson size={13} /> info.json
+                    </h2>
+                    <button
+                      className={`${btnSmSecondary} inline-flex items-center gap-1`}
+                      onClick={() => setInfoOpen((o) => !o)}
+                    >
+                      {infoOpen ? "Hide" : "Edit"}
+                    </button>
+                  </div>
+                  {infoOpen ? (
+                    <>
+                      <textarea
+                        className="w-full h-48 text-[11px] font-mono p-2 rounded-md bg-bg-body border border-border-light text-text-primary focus:border-accent outline-none resize-y"
+                        value={infoText}
+                        onChange={(e) => setInfoText(e.target.value)}
+                        spellCheck={false}
+                      />
+                      <div className="flex items-center gap-2">
+                        <button
+                          className={`${btnSmPrimary} inline-flex items-center gap-1`}
+                          onClick={saveInfo}
+                          disabled={savingInfo || !infoText.trim()}
+                        >
+                          <Save size={14} /> {savingInfo ? "Saving…" : "Save"}
+                        </button>
+                        <span className="text-[10px] text-text-tertiary leading-tight">
+                          uuid / type / format / created_at are kept by the app
+                        </span>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-xs text-text-tertiary leading-relaxed">
+                      View or edit this dataset’s metadata as raw JSON.
+                    </p>
+                  )}
+                </section>
+
                 <section className="rounded-lg border border-border-light bg-bg-card p-3 flex flex-col gap-2">
                   <h2 className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
                     Step

@@ -885,6 +885,95 @@ pub async fn dataset_create(
     })
 }
 
+/// Initialize a raw media folder **in place** as a dictation dataset.
+///
+/// Unlike `dataset_import` (which copies the folder into the managed datasets
+/// directory), this writes a default `info.json` — with a freshly minted,
+/// server-assigned uuid — into the folder exactly where it already sits. The
+/// folder must live directly under a configured dictation root and contain at
+/// least one media file, mirroring what `scan_dataset_dir` surfaces as a
+/// no-uuid candidate. Idempotent: if a readable `info.json` already exists, its
+/// summary is returned unchanged, so re-running is safe.
+#[tauri::command]
+pub async fn dataset_init_dir(
+    settings: State<'_, SettingsState>,
+    path: String,
+) -> Result<DatasetSummary, String> {
+    let dir = PathBuf::from(path.trim());
+    if !dir.is_dir() {
+        return Err(format!("Not a directory: {}", dir.display()));
+    }
+
+    // Only touch folders the app already treats as dataset candidates: they sit
+    // directly inside a configured dictation root (default dir or a linked dir).
+    let location = dataset_roots(&settings, DatasetType::Dictation)
+        .into_iter()
+        .find(|root| dir.parent() == Some(root.as_path()))
+        .ok_or_else(|| "Folder is not directly inside a configured dataset location".to_string())?;
+
+    let media_dir = dir.join("media");
+    let media_files = list_media_files(&media_dir);
+    if media_files.is_empty() {
+        return Err(format!("No media files found in '{}'", media_dir.display()));
+    }
+
+    let info = if dir.join(INFO_FILE).exists() {
+        read_info(&dir)?
+    } else {
+        let uuid = Uuid::new_v4().to_string();
+        assert_uuid_free(&settings, &uuid)?;
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| uuid.clone());
+        let fresh = DatasetInfo::new(uuid, DatasetType::Dictation, FORMAT_DICTATION, name);
+        write_info(&dir, &fresh)?;
+        log::info!(
+            "Initialized dataset '{}' (uuid {}) in place at '{}'",
+            fresh.name, fresh.uuid, dir.display()
+        );
+        fresh
+    };
+
+    Ok(DatasetSummary {
+        info,
+        media_count: media_files.len(),
+        path: dir.to_string_lossy().into_owned(),
+        location: location.to_string_lossy().into_owned(),
+        status: "not_ready".into(),
+    })
+}
+
+/// Overwrite a dataset's `info.json` from a full JSON document edited as text
+/// (e.g. the Workflow page's editor). The text must parse as a `DatasetInfo`;
+/// identity fields (`uuid`, `type`, `format`, `created_at`) are always taken from
+/// what is already on disk — an edit can never re-key or re-type a dataset — and
+/// `updated_at` is refreshed. The authoritative descriptor is returned so the
+/// caller sees exactly what was written.
+#[tauri::command]
+pub async fn dataset_info_save(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+    content: String,
+) -> Result<DatasetInfo, String> {
+    let dir = find_dataset_dir(&settings, &uuid)?;
+    let existing = read_info(&dir)?;
+
+    let trimmed = content.trim_start_matches('\u{FEFF}');
+    let mut parsed: DatasetInfo =
+        serde_json::from_str(trimmed).map_err(|e| format!("Invalid info.json: {}", e))?;
+
+    parsed.uuid = existing.uuid;
+    parsed.dataset_type = existing.dataset_type;
+    parsed.format = existing.format;
+    parsed.created_at = existing.created_at;
+    parsed.updated_at = now_stamp();
+
+    write_info(&dir, &parsed)?;
+    log::info!("Saved info.json for dataset '{}'", parsed.uuid);
+    Ok(parsed)
+}
+
 /// Locate the built-in "Favorites" dataset WITHOUT creating it.
 ///
 /// It is an ordinary dataset addressed by the reserved id [`FAVORITES_DATASET_UUID`]
