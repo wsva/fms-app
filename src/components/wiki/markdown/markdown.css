@@ -7,9 +7,9 @@
 #table-of-contents {
     position: fixed;
     right: 1.5rem;
-    top: 10rem;
+    top: 6rem;
     z-index: 200;
-    max-height: calc(100vh - 10rem);
+    max-height: calc(100vh - 6rem);
     overflow: hidden;
     background: var(--bg-card);
     box-shadow: 0 0 1em rgba(0, 0, 0, 0.15);
