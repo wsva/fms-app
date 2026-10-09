@@ -405,7 +405,9 @@ pub fn enqueue_change(
 ) -> Result<(), String> {
     let conn = datasets::dictation::open_app_db(settings)?;
     ensure_sync_tables(&conn)?;
-    let edit_time = chrono::Utc::now().to_rfc3339();
+    // The row-stamp shape (see `datasets::row_stamp_at`): the hub parses it, but a
+    // pulled `edit_time` also lands in live row columns, which compare as text.
+    let edit_time = datasets::now_row_stamp();
     let object_id = crate::sync::change_log::object_id_for(kind, payload, user_key);
     // Fold repeat edits to one mutable row so we neither ship stale intermediate
     // payloads nor grow the queue without bound between flushes. An empty

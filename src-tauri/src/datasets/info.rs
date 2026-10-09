@@ -26,13 +26,14 @@
 //!   stays the routing authority; `type` makes the file self-describing for a
 //!   reader that only has the file — and discovery warns on mismatch.
 
+use std::cmp::Ordering;
 use std::fs;
 use std::path::Path;
 // Only the desktop cross-type scan produces owned paths.
 #[cfg(feature = "desktop")]
 use std::path::PathBuf;
 
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -73,6 +74,79 @@ pub(crate) const FAVORITES_DATASET_UUID: &str = "dictation-favorites";
 /// nanoseconds), which made any string comparison of stamps unreliable.
 pub(crate) fn now_stamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+// ---------------------------------------------------------------------------
+// Row timestamps — the ones code has to compare
+// ---------------------------------------------------------------------------
+
+/// Row-level counterpart of [`now_stamp`]: UTC, millisecond precision, `Z`.
+///
+/// Descriptor stamps are only displayed and hashed, so second precision is
+/// enough. Row stamps are different: `card.updated_at` decides which side of a
+/// conflict wins, and it is compared two ways — as text inside SQLite
+/// (`WHERE updated_at > ?1`, which no Rust-side parsing can help) and in Rust.
+/// Text order is chronological only if every stored value has the same width
+/// and the same suffix, so the shape is a storage contract, not a style choice.
+/// Milliseconds plus `Z` is the one shape the three writers here agree on byte
+/// for byte: `chrono` with `SecondsFormat::Millis`, JavaScript's
+/// `Date.toISOString()` (what the frontend binds into `updated_at`), and
+/// SQLite's `strftime('%Y-%m-%dT%H:%M:%fZ','now')`.
+pub(crate) fn row_stamp_at(dt: DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+/// [`row_stamp_at`] for the current instant.
+pub(crate) fn now_row_stamp() -> String {
+    row_stamp_at(Utc::now())
+}
+
+/// Read any stamp a sync peer, the frontend or SQLite may have produced as a UTC
+/// instant.
+///
+/// An explicit offset is honoured rather than assumed away, which is what makes
+/// a phone on Asia/Shanghai time comparable with a PC on Europe/Berlin: a peer
+/// that stamps `2026-10-09T15:12:34.567+08:00` means the same instant as one
+/// that stamps `2026-10-09T07:12:34.567Z`. A value already in UTC needs no
+/// timezone knowledge at all — no writer here emits local time — but a peer or a
+/// future server might, so the offset is parsed instead of trusted.
+///
+/// The two naive forms are SQLite's `datetime('now')` and an RFC-3339-shaped
+/// value with no zone; SQLite documents both of its forms as UTC, so a naive
+/// stamp is read as UTC rather than as local wall time.
+pub(crate) fn parse_stamp(raw: &str) -> Option<DateTime<Utc>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let with_offset =
+        DateTime::parse_from_rfc3339(trimmed).map(|dt| dt.with_timezone(&Utc));
+    match with_offset {
+        Ok(dt) => Some(dt),
+        Err(_) => ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"]
+            .iter()
+            .find_map(|fmt| chrono::NaiveDateTime::parse_from_str(trimmed, fmt).ok())
+            .map(|naive| naive.and_utc()),
+    }
+}
+
+/// `a` versus `b` as instants, or `None` when either side is unreadable.
+pub(crate) fn stamps_cmp(a: &str, b: &str) -> Option<Ordering> {
+    Some(parse_stamp(a)?.cmp(&parse_stamp(b)?))
+}
+
+/// Re-shape a stamp into [`row_stamp_at`] form before storing it, so a column
+/// keeps one width and one suffix however many producers feed it.
+///
+/// Truncates to milliseconds: the remainder is below what any of the three
+/// producers can express, and keeping it would only re-mix the shapes this
+/// exists to prevent. An unparseable value is returned as-is rather than replaced
+/// by a plausible instant — a garbage stamp should stay visibly garbage.
+pub(crate) fn canonical_stamp(raw: &str) -> String {
+    match parse_stamp(raw) {
+        Some(dt) => row_stamp_at(dt),
+        None => raw.trim().to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -289,4 +363,112 @@ pub(crate) fn scan_datasets(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bug this codec exists for: text order is not instant order once two
+    /// shapes meet. `'Z'` (0x5A) out-ranks `'+'` (0x2B) and every digit (0x30-39),
+    /// so a finer-grained local edit loses to a coarser remote stamp no matter
+    /// which one actually happened later.
+    #[test]
+    fn text_order_and_instant_order_disagree_across_shapes() {
+        let local = "2026-10-09T07:12:34.100500000+00:00"; // chrono, nanoseconds
+        let remote = "2026-10-09T07:12:34.100Z"; // JavaScript, milliseconds
+        assert_eq!(local.cmp(remote), Ordering::Less, "text crowns the remote");
+        assert_eq!(
+            stamps_cmp(local, remote),
+            Some(Ordering::Greater),
+            "the instant keeps the newer local edit"
+        );
+    }
+
+    /// A phone on Asia/Shanghai time and a PC on Europe/Berlin time recording the
+    /// same instant must not be able to disagree about which edit is newer.
+    #[test]
+    fn explicit_offsets_resolve_to_one_instant() {
+        let utc = "2026-10-09T07:12:34.567Z";
+        for peer in [
+            "2026-10-09T15:12:34.567+08:00", // Shanghai
+            "2026-10-09T09:12:34.567+02:00", // Berlin, before the DST switch
+        ] {
+            assert_eq!(stamps_cmp(utc, peer), Some(Ordering::Equal), "{peer}");
+        }
+        assert_eq!(
+            stamps_cmp(utc, "2026-10-09T07:12:35.000Z"),
+            Some(Ordering::Less),
+            "a real difference still shows up after the offset maths"
+        );
+    }
+
+    #[test]
+    fn every_shape_a_producer_emits_canonicalizes() {
+        for (raw, want) in [
+            ("2026-10-09T07:12:34.567Z", "2026-10-09T07:12:34.567Z"), // JS, our rows
+            ("2026-10-09T07:12:34.567890+00:00", "2026-10-09T07:12:34.567Z"), // chrono micros
+            ("2026-10-09T07:12:34.567890123+00:00", "2026-10-09T07:12:34.567Z"), // chrono nanos
+            ("2026-10-09T07:12:34+00:00", "2026-10-09T07:12:34.000Z"), // chrono, whole second
+            ("2026-10-09T07:12:34Z", "2026-10-09T07:12:34.000Z"), // now_stamp(), Python
+            ("2026-10-09 07:12:34", "2026-10-09T07:12:34.000Z"), // SQLite datetime('now')
+            ("2026-10-09T15:12:34.567+08:00", "2026-10-09T07:12:34.567Z"), // non-UTC offset
+        ] {
+            assert_eq!(canonical_stamp(raw), want, "canonicalizing {raw}");
+        }
+        // An unreadable stamp stays visibly unreadable rather than acquiring a
+        // plausible instant.
+        assert_eq!(canonical_stamp("not a stamp"), "not a stamp");
+        assert_eq!(canonical_stamp("  "), "");
+        assert!(parse_stamp("2026-10-09").is_none(), "a bare date is not a stamp");
+    }
+
+    /// Fixed width plus one suffix is the whole reason text order may be trusted
+    /// inside SQLite, where `updated_at > ?1` has no parser to lean on.
+    #[test]
+    fn row_stamps_are_fixed_width() {
+        let stamp = now_row_stamp();
+        assert_eq!(stamp.len(), 24, "{stamp}");
+        assert_eq!(&stamp[10..11], "T");
+        assert!(stamp.ends_with('Z'));
+        assert_eq!("2020-01-01T00:00:00.000Z".cmp(stamp.as_str()), Ordering::Less);
+    }
+
+    /// The descriptor keeps second precision on purpose: nothing compares it, and
+    /// `docs/design/dataset-info.md` plus the migration scripts are written to it.
+    #[test]
+    fn descriptor_stamps_stay_second_precision() {
+        let stamp = now_stamp();
+        assert_eq!(stamp.len(), 20, "{stamp}");
+        assert!(stamp.ends_with('Z'));
+    }
+
+    /// The card tables fall back to `strftime('%Y-%m-%dT%H:%M:%fZ','now')` for a
+    /// stamp they were not given, so that expression must agree with what Rust
+    /// writes into the same column — otherwise a defaulted row sorts against its
+    /// siblings for the wrong reason. `%f` is SQLite's `SS.SSS`, seconds included.
+    #[test]
+    fn sqlite_default_matches_the_rust_writer() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.len(), 24, "{stored}");
+        assert_eq!(canonical_stamp(&stored), stored, "already canonical");
+        assert_eq!(
+            parse_stamp(&stored).unwrap().to_rfc3339_opts(SecondsFormat::Millis, true),
+            stored,
+            "round-trips through the codec"
+        );
+        // The naive form the old default produced still reads as the instant SQLite
+        // means by it (UTC), and lands on this shape.
+        assert_eq!(
+            canonical_stamp("2026-10-09 07:12:34"),
+            "2026-10-09T07:12:34.000Z"
+        );
+    }
 }

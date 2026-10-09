@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fs;
 
 use rusqlite::Connection;
@@ -5,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::datasets::cards::{find_card_dataset_dir, open_card_db};
-use crate::datasets::touch_info;
+use crate::datasets::{canonical_stamp, stamps_cmp, touch_info};
 use crate::settings::SettingsState;
 
 // ---------------------------------------------------------------------------
@@ -146,6 +147,19 @@ async fn push_changes(
         .map_err(|e| format!("Failed to parse push response: {}", e))
 }
 
+/// Order a local and a remote `updated_at` as instants rather than as text.
+///
+/// The two sides come from different producers: Rust writes
+/// `2026-10-09T07:12:34.567890+00:00`, while an HTTP peer may send
+/// `2026-10-09T07:12:34.567Z` or a stamp carrying its own offset. Text order
+/// across those shapes is not instant order — `'Z'` out-ranks `'+'` and every
+/// digit — and the answer decides whether a local edit survives, so both sides
+/// are parsed whenever they can be. A stamp that no form can read falls back to
+/// text, which keeps the change flowing instead of dropping it.
+fn stamp_order(local: &str, remote: &str) -> Ordering {
+    stamps_cmp(local, remote).unwrap_or_else(|| local.cmp(remote))
+}
+
 /// Apply pulled cards to the local database.
 fn apply_pulled_cards(conn: &Connection, cards: &[SyncCard]) -> Result<i32, String> {
     let mut count = 0i32;
@@ -179,8 +193,11 @@ fn apply_pulled_cards(conn: &Connection, cards: &[SyncCard]) -> Result<i32, Stri
                             card.question_hash,
                             card.source_card_uuid,
                             card.source_dataset_uuid,
-                            card.created_at,
-                            card.updated_at,
+                            // Stored in one shape: the incremental cursor below
+                            // (`updated_at > ?1`) is a text comparison SQLite can
+                            // only win if every row shares a width and a suffix.
+                            canonical_stamp(&card.created_at),
+                            canonical_stamp(&card.updated_at),
                         ],
                     )
                     .map_err(|e| e.to_string())?;
@@ -188,19 +205,22 @@ fn apply_pulled_cards(conn: &Connection, cards: &[SyncCard]) -> Result<i32, Stri
                 }
             }
             Some(local_updated_at) => {
-                // Card exists - compare timestamps
+                // Card exists - compare the two stamps as instants.
+                let order = stamp_order(&local_updated_at, &card.updated_at);
                 if let Some(ref remote_deleted) = card.deleted_at {
-                    // Remote deleted the card
-                    if local_updated_at <= card.updated_at {
+                    // Remote deleted the card. An equal stamp honours the delete:
+                    // the tombstone is not newer than the local row, so the local
+                    // edit cannot have happened after it.
+                    if order != Ordering::Greater {
                         conn.execute(
                             "UPDATE card SET deleted_at = ?1, updated_at = ?1 WHERE uuid = ?2",
-                            rusqlite::params![remote_deleted, card.uuid],
+                            rusqlite::params![canonical_stamp(remote_deleted), card.uuid],
                         )
                         .map_err(|e| e.to_string())?;
                         count += 1;
                     }
                     // else: local is newer, keep local
-                } else if local_updated_at < card.updated_at {
+                } else if order == Ordering::Less {
                     // Remote is newer - update local
                     conn.execute(
                         "UPDATE card SET question = ?2, suggestion = ?3, answer = ?4, note = ?5, \
@@ -217,7 +237,10 @@ fn apply_pulled_cards(conn: &Connection, cards: &[SyncCard]) -> Result<i32, Stri
                             card.question_hash,
                             card.source_card_uuid,
                             card.source_dataset_uuid,
-                            card.updated_at,
+                            // Same rule as the insert above: whatever shape the
+                            // peer's stamp arrives in, the row keeps ours, or the
+                            // next `updated_at > ?1` cursor can read past it.
+                            canonical_stamp(&card.updated_at),
                         ],
                     )
                     .map_err(|e| e.to_string())?;
@@ -233,6 +256,10 @@ fn apply_pulled_cards(conn: &Connection, cards: &[SyncCard]) -> Result<i32, Stri
 
 /// Get local changes to push (cards updated since last sync).
 fn get_local_changes(conn: &Connection, since: &str) -> Result<Vec<SyncCard>, String> {
+    // The cursor arrives from the server's clock, so it may carry a shape this
+    // side never writes. SQLite compares `updated_at` as text, and a suffix-only
+    // difference can exclude a row that is genuinely newer than the cursor.
+    let since = canonical_stamp(since);
     let mut stmt = conn
         .prepare(
             "SELECT uuid, question, suggestion, answer, note, familiarity, question_hash, \
@@ -277,7 +304,7 @@ fn update_sync_state(
          VALUES (?1, ?2, ?3, 0) \
          ON CONFLICT(dataset_uuid) DO UPDATE SET \
             last_synced_at = ?2, clock_offset_ms = ?3, pending_push = 0",
-        rusqlite::params![dataset_uuid, last_synced_at, clock_offset_ms],
+        rusqlite::params![dataset_uuid, canonical_stamp(last_synced_at), clock_offset_ms],
     )
     .map_err(|e| e.to_string())?;
     Ok(())

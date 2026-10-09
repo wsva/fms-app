@@ -632,11 +632,11 @@ pub fn record_delete_tombstone(
     }
 }
 
-/// Whether `object_id` carries a tombstone at least as new as `deleted_at_str`
-/// (RFC3339 UTC). Used as a legacy safety net when a hub has *no* `sync_log`
-/// entry for the object — e.g. a row deleted before incremental sync existed —
-/// so a resurrected offline edit is dropped against the recorded delete rather
-/// than silently recreating the row (§3.4).
+/// Whether `object_id` carries a tombstone at least as new as `deleted_at_str`.
+/// Used as a legacy safety net when a hub has *no* `sync_log` entry for the
+/// object — e.g. a row deleted before incremental sync existed — so a
+/// resurrected offline edit is dropped against the recorded delete rather than
+/// silently recreating the row (§3.4).
 #[cfg(feature = "desktop")]
 pub fn is_tombstoned_at_least(
     settings: &SettingsState,
@@ -647,8 +647,18 @@ pub fn is_tombstoned_at_least(
     let Ok(conn) = open_dataset_db(settings, dataset_uuid) else {
         return false;
     };
+    // Both sides are read as instants, not as text. The stored tombstone may have
+    // been written by any producer the delete passed through, and text order
+    // across those shapes is not time order (`datasets::parse_stamp`). A
+    // tombstone that cannot be dated does not block a fresh edit — the same
+    // reading the `sync_log` path above gives an unreadable entry.
     match tombstone_of(&conn, object_id) {
-        Ok(Some(deleted_at)) => deleted_at.as_str() >= deleted_at_str,
+        Ok(Some(deleted_at)) => {
+            match (datasets::parse_stamp(&deleted_at), datasets::parse_stamp(deleted_at_str)) {
+                (Some(tombstone), Some(incoming)) => tombstone >= incoming,
+                _ => false,
+            }
+        }
         _ => false,
     }
 }
@@ -707,7 +717,10 @@ pub fn commit_change_as(
     {
         if settings.role() == "hub" {
             let object_id = object_id_for(kind, payload, user_key);
-            let edit_time = chrono::Utc::now().to_rfc3339();
+            // One shape for every stamp that leaves the hub: `edit_time` is
+            // compared as an instant here, but a follower writes it into row
+            // columns that SQLite then compares as text (`datasets::row_stamp_at`).
+            let edit_time = datasets::now_row_stamp();
             let conn = datasets::dictation::open_app_db(settings)?;
             append(
                 &conn,

@@ -911,27 +911,19 @@ impl ChangeResult {
 }
 
 /// Parse a client `edit_time` into a comparable UTC instant, tolerating both
-/// RFC3339 and SQLite `datetime('now')` (`YYYY-MM-DD HH:MM:SS`, assumed UTC)
-/// formats, and clamping anything dated in the future to the hub's now (§3.4: a
-/// follower with a fast clock must not win every later conflict forever). An
-/// empty or unparseable stamp is treated as "arrived now".
+/// RFC 3339 (with any offset) and SQLite `datetime('now')` (`YYYY-MM-DD HH:MM:SS`,
+/// assumed UTC) formats, and clamping anything dated in the future to the hub's
+/// now (§3.4: a follower with a fast clock must not win every later conflict
+/// forever). An empty or unparseable stamp is treated as "arrived now".
+///
+/// Reading the stamp is the shared codec's job (`datasets::parse_stamp`), so a
+/// peer that ever starts sending its own local offset is understood here as well
+/// as in the card conflict resolution.
 fn normalize_edit_time(raw: &str, hub_now: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return hub_now;
-    }
-    let parsed = chrono::DateTime::parse_from_rfc3339(trimmed)
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .or_else(|_| {
-            chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S").map(|n| n.and_utc())
-        })
-        .or_else(|_| {
-            chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S").map(|n| n.and_utc())
-        });
-    match parsed {
-        Ok(dt) if dt > hub_now => hub_now,
-        Ok(dt) => dt,
-        Err(_) => hub_now,
+    match datasets::parse_stamp(raw) {
+        Some(dt) if dt > hub_now => hub_now,
+        Some(dt) => dt,
+        None => hub_now,
     }
 }
 

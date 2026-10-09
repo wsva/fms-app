@@ -17,8 +17,8 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::datasets::{
-    assert_uuid_free, dataset_roots, now_stamp, read_info, read_info_opt, touch_info, write_info,
-    DatasetInfo, FORMAT_CARD, INFO_FILE,
+    assert_uuid_free, canonical_stamp, dataset_roots, now_row_stamp, now_stamp, read_info,
+    read_info_opt, row_stamp_at, touch_info, write_info, DatasetInfo, FORMAT_CARD, INFO_FILE,
 };
 use crate::settings::SettingsState;
 
@@ -476,8 +476,8 @@ fn create_card_schema(conn: &Connection) -> Result<(), String> {
             source_card_uuid      TEXT,
             source_dataset_uuid   TEXT,
             deleted_at            TEXT,
-            created_at            TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
         CREATE INDEX IF NOT EXISTS idx_card_hash ON card(question_hash);
         CREATE INDEX IF NOT EXISTS idx_card_familiarity ON card(familiarity);
@@ -503,8 +503,8 @@ fn create_card_schema(conn: &Connection) -> Result<(), String> {
             name         TEXT NOT NULL,
             color        TEXT,
             deleted_at   TEXT,
-            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         );
 
         CREATE TABLE IF NOT EXISTS card_tag (
@@ -512,8 +512,8 @@ fn create_card_schema(conn: &Connection) -> Result<(), String> {
             card_uuid   TEXT NOT NULL,
             tag_uuid    TEXT NOT NULL,
             deleted_at  TEXT,
-            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             FOREIGN KEY (card_uuid) REFERENCES card(uuid) ON DELETE CASCADE,
             FOREIGN KEY (tag_uuid) REFERENCES tag(uuid) ON DELETE CASCADE,
             UNIQUE(card_uuid, tag_uuid)
@@ -1057,7 +1057,7 @@ pub async fn card_save(
 ) -> Result<Card, String> {
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
-    let now = Utc::now().to_rfc3339();
+    let now = now_row_stamp();
 
     let uuid = if card.uuid.is_empty() {
         Uuid::new_v4().to_string()
@@ -1159,7 +1159,7 @@ pub async fn card_delete(
 ) -> Result<(), String> {
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
-    let now = Utc::now().to_rfc3339();
+    let now = now_row_stamp();
 
     conn.execute(
         "UPDATE card SET deleted_at = ?1, updated_at = ?1 WHERE uuid = ?2",
@@ -1297,7 +1297,7 @@ pub async fn card_tag_save(
 ) -> Result<Tag, String> {
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
-    let now = Utc::now().to_rfc3339();
+    let now = now_row_stamp();
 
     let uuid = if tag.uuid.is_empty() {
         Uuid::new_v4().to_string()
@@ -1341,7 +1341,7 @@ pub async fn card_tag_delete(
 ) -> Result<(), String> {
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
-    let now = Utc::now().to_rfc3339();
+    let now = now_row_stamp();
 
     conn.execute(
         "UPDATE tag SET deleted_at = ?1, updated_at = ?1 WHERE uuid = ?2",
@@ -1371,7 +1371,7 @@ pub async fn card_set_tags(
 ) -> Result<(), String> {
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
-    let now = Utc::now().to_rfc3339();
+    let now = now_row_stamp();
 
     // Soft-delete existing tags
     conn.execute(
@@ -1450,8 +1450,17 @@ pub async fn card_get_tags(
 const REVIEW_ELIGIBLE: &str = "c.deleted_at IS NULL AND c.familiarity < 6 \
     AND length(c.question) > 0 AND length(c.answer) > 0";
 
-/// A reviewed card that has come back due. Requires the review row aliased `cr`.
-const REVIEW_DUE: &str = "cr.next_review_at <= datetime('now')";
+/// A reviewed card that has come back due. Requires the review row aliased `cr`
+/// and one bound parameter: the moment to measure against, in
+/// [`crate::datasets::now_row_stamp`] form.
+///
+/// The bound comes from Rust rather than from `datetime('now')` because the
+/// comparison SQLite performs is textual, and its naive
+/// `2026-10-09 07:12:34` sorts before *every* RFC 3339 stamp (`' '` 0x20 <
+/// `'T'` 0x54): a card due at 06:00 would compare as later than "now 07:12" and
+/// never come back due until the date rolled over. One shape on both sides makes
+/// text order mean instant order again.
+const REVIEW_DUE: &str = "cr.next_review_at <= ?1";
 
 /// A card no review has ever been recorded for. Requires the card row aliased `c`.
 const REVIEW_FRESH: &str = "NOT EXISTS (SELECT 1 FROM card_review cr WHERE cr.card_uuid = c.uuid)";
@@ -1466,6 +1475,7 @@ pub async fn card_test_get(
     let conn = open_card_db(&path)?;
 
     // First try to find a card that is due for review
+    let due_now = now_row_stamp();
     let due_sql = format!(
         "SELECT c.*, cr.uuid, cr.card_uuid, cr.familiarity, cr.interval_days, \
          cr.ease_factor, cr.repetitions, cr.last_review_at, cr.next_review_at \
@@ -1478,7 +1488,7 @@ pub async fn card_test_get(
     );
     let due_result = conn.query_row(
         &due_sql,
-        [],
+        rusqlite::params![due_now],
         |row| {
             let card = Card {
                 uuid: row.get(0)?,
@@ -1561,6 +1571,7 @@ pub async fn card_test_stats(
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
 
+    let due_now = now_row_stamp();
     let sql = format!(
         "SELECT \
            (SELECT COUNT(*) FROM card c JOIN card_review cr ON cr.card_uuid = c.uuid WHERE {} AND {}), \
@@ -1576,7 +1587,7 @@ pub async fn card_test_stats(
     );
 
     let (due, fresh, mature, incomplete, total) = conn
-        .query_row(&sql, [], |row| {
+        .query_row(&sql, rusqlite::params![due_now], |row| {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
@@ -1615,7 +1626,7 @@ pub async fn card_test_submit(
 ) -> Result<CardReview, String> {
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
-    let now = Utc::now().to_rfc3339();
+    let now = now_row_stamp();
 
     // Get existing review or create defaults
     let existing = conn.query_row(
@@ -1643,8 +1654,8 @@ pub async fn card_test_submit(
     };
 
     // Calculate next_review_at
-    let next_review = chrono::Utc::now() + chrono::Duration::days(interval_days as i64);
-    let next_review_at = next_review.to_rfc3339();
+    let next_review = Utc::now() + chrono::Duration::days(interval_days as i64);
+    let next_review_at = row_stamp_at(next_review);
 
     let review_uuid = existing
         .as_ref()
@@ -1749,6 +1760,10 @@ pub async fn card_sync_get_changes(
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
 
+    // A caller-supplied cursor is re-shaped before it reaches SQLite, whose
+    // `updated_at > ?1` has no parser to help it: a `…+00:00` cursor would
+    // exclude or include rows on the strength of its suffix rather than its time.
+    let since = canonical_stamp(&since);
     let mut stmt = conn
         .prepare(
             "SELECT * FROM card WHERE updated_at > ?1 ORDER BY updated_at ASC",

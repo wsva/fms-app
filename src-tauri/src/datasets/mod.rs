@@ -38,10 +38,15 @@ use crate::models::ModelState;
 // The shared descriptor and its helpers are addressed through this module root by
 // every dataset type and by the sync layer.
 pub(crate) use info::{
-    assert_uuid_free, now_stamp, read_info, read_info_opt, touch_info, write_info, DatasetInfo,
+    assert_uuid_free, canonical_stamp, now_row_stamp, now_stamp, read_info, read_info_opt,
+    row_stamp_at, stamps_cmp, touch_info, write_info, DatasetInfo,
     FAVORITES_DATASET_UUID, FORMAT_BOOK, FORMAT_CARD, FORMAT_DICTATION, FORMAT_READ_ALOUD,
     FORMAT_WIKI, INFO_FILE,
 };
+// The hub's edit-time normalizer is the only caller outside this group; the row
+// stamps every type writes come through the ungated names above.
+#[cfg(feature = "desktop")]
+pub(crate) use info::parse_stamp;
 // The cross-type enumerator's only caller is the desktop MCP listing; an ungated
 // re-export would warn in the mobile build.
 #[cfg(feature = "desktop")]

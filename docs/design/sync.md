@@ -349,6 +349,24 @@ Adopt v8's rule with amendments that fit our data:
 - **Clamp any incoming `edit_time` more than a few minutes in the future to the
   hub's `now`.** One phone with a wrong clock would otherwise win every conflict
   against every other device forever.
+- **Store one timestamp shape, compare stamps as instants.** Every synced stamp
+  (`updated_at`, `deleted_at`, the pull/push cursors) is
+  `YYYY-MM-DDTHH:MM:SS.mmmZ` — UTC, milliseconds, `Z` — because that is the form
+  `chrono` with `SecondsFormat::Millis`, JavaScript's `Date.toISOString()` and
+  SQLite's `strftime('%Y-%m-%dT%H:%M:%fZ','now')` all produce byte for byte, and
+  SQLite compares those columns *as text* (`WHERE updated_at > ?1`), which is
+  chronological only while every value shares a width and a suffix. Rust-side
+  conflict resolution parses both sides (`datasets::stamps_cmp`) rather than
+  trusting text: `'Z'` (0x5A) out-ranks `'+'` (0x2B) and every digit, so a
+  nanosecond-grained local edit would otherwise lose to a millisecond-grained
+  remote one that happened earlier. Parsing also honours an explicit offset, so a
+  device stamped in its own local time (`…+08:00`) and one stamped UTC (`…Z`)
+  agree on which edit is newer; the timezone of a machine never enters a value.
+  A value that arrives in another shape is rewritten into this one on store
+  (`datasets::canonical_stamp`) — insert, update and tombstone alike — so a
+  peer's spelling never lands in a column SQLite orders as text.
+  Dataset descriptors keep second precision (`now_stamp`) — nothing compares them,
+  and `updated_at` in an `info.json` is display and manifest-hash material only.
 - On the hub, compare an incoming edit against **the live row's own `updated_at`**,
   not "the latest `sync_log` entry" — that log entry can be pruned (§3.5), and the
   row's `updated_at` is the durable current state. `sync_log` is the transport
