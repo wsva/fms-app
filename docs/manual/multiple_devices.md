@@ -5,7 +5,7 @@ FmS runs on your desktop(s) and phone at the same time and keeps your datasets, 
 Everything related to multi-device setup lives under **Tools** in the sidebar:
 
 - **Devices & Hub** — role, cluster identity, pairing, and the device list.
-- **Datasets Sync** — pulling datasets down and pushing edits back up.
+- **Datasets Sync** — pulling datasets down and pushing edits back up, wiki datasets included.
 - **Cross-Device Chat** — messaging between your own devices.
 
 ---
@@ -70,7 +70,7 @@ The Hub owner can block a device by mistake. On the follower, click **New identi
 
 Once paired, go to **Tools → Datasets Sync** on the follower.
 
-- The page lists every dataset the Hub currently offers, grouped into tabs: **Dictation**, **Cards**, **Books**, **Read**.
+- The page lists every dataset the Hub currently offers, grouped into tabs: **Dictation**, **Cards**, **Books**, **Read**, **Wiki**.
 - Each dataset row shows its sync state:
   - **Not downloaded** — you've never pulled a copy. Click **Download** to get the Hub's full copy of it (this replaces anything you had locally).
   - **Downloaded** — you have a local copy. If the Hub has newer changes, the row will say "Hub has newer changes — run 'Sync now' to pull them."
@@ -81,9 +81,18 @@ Once paired, go to **Tools → Datasets Sync** on the follower.
 
 ### What "sync" covers
 
-- **Dataset content** (media files, subtitles, cues, cards, books, read-aloud recordings) moves between the Hub and followers.
+- **Dataset content** (media files, subtitles, cues, cards, books, read-aloud recordings, wiki pages) moves between the Hub and followers.
 - **Your personal progress** — dictation history and XP — is stored centrally on the Hub and shared with every follower that pairs under the same user account (the "Syncs as" column on the Hub's device list shows which account a device writes progress as).
 - **Heavy structural operations are follower-only-in-one-direction**: creating, deleting, or moving whole datasets, and downloading/importing new media should be done on the Hub itself. A follower's edits to existing content (text changes, reviews, answers) are what get pushed back.
+
+### Wiki datasets
+
+A wiki dataset is a folder of Markdown files instead of a database, so the pages themselves are the content that syncs — every page you save is a syncable change.
+
+- Editing a page on a follower is an ordinary local edit: it is queued and lands on the Hub the next time you run **Sync now**. Pages changed on the Hub travel down the same way. Within one file the later write wins, and a page you have edited locally but not yet pushed is never overwritten by something pulled down — your own change goes up first.
+- You don't need to download a wiki in order to read it. On a follower, the **Hub** button in the Wiki page's toolbar switches the browser and search over to a read-only view of the Hub's wiki datasets; it then reads **Local** to take you back. This button never appears on the Hub itself, since its copies are already local.
+- **Download** pulls the whole wiki you're browsing onto this device. That is what makes it editable, and it is also what subscribes this copy to future sync rounds — until you download it, the Wiki page only shows you the Hub's copy over the network.
+- Each device keeps its own full-text search index for a wiki. That index is derived, never transferred, and is built automatically the first time you search a copy on that machine — so search works on a freshly downloaded wiki without any extra step.
 
 ### Conflicts
 
