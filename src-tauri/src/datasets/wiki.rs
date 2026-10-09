@@ -371,8 +371,9 @@ pub(crate) fn import_dir(settings: &SettingsState, name: &str, path: &str) -> Re
 }
 
 /// Delete a wiki dataset: drop its `meta.json` link when it lives in a linked
-/// directory, then move the whole folder to the trash.
-pub(crate) fn delete_dataset(settings: &SettingsState, uuid: &str) -> Result<(), String> {
+/// directory, then move the whole folder into the shared trash instead of destroying
+/// it, so the operation stays undoable (see [`move_to_trash`]). Returns the trash path.
+pub(crate) fn delete_dataset(settings: &SettingsState, uuid: &str) -> Result<String, String> {
     let dir = find_dataset_dir(settings, uuid)?;
     let type_dir = settings.datasets_dir().join(DatasetType::Wiki.as_str());
     let type_dir_str = type_dir.to_string_lossy().to_string();
@@ -384,8 +385,8 @@ pub(crate) fn delete_dataset(settings: &SettingsState, uuid: &str) -> Result<(),
         super::write_dataset_meta(&type_dir_str, &meta)?;
     }
     let trash_path = move_to_trash(&dir)?;
-    log::info!("[WikiDataset] Deleted dataset {} -> {}", uuid, trash_path.display());
-    Ok(())
+    log::info!("[WikiDataset] Dataset {} moved to trash '{}'", uuid, trash_path.display());
+    Ok(trash_path.to_string_lossy().into_owned())
 }
 
 pub(crate) fn list_dir(settings: &SettingsState, uuid: &str, rel: &str) -> Result<Vec<WikiFileEntry>, String> {
@@ -796,9 +797,10 @@ pub async fn wiki_dataset_import_dir(
     import_dir(settings.inner(), &name, &path)
 }
 
-/// Delete a wiki dataset (moved to trash).
+/// Delete a wiki dataset, moving its folder into the shared trash. Returns the
+/// trash path.
 #[tauri::command]
-pub async fn wiki_dataset_delete(settings: State<'_, SettingsState>, uuid: String) -> Result<(), String> {
+pub async fn wiki_dataset_delete(settings: State<'_, SettingsState>, uuid: String) -> Result<String, String> {
     delete_dataset(settings.inner(), &uuid)
 }
 

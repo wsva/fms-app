@@ -77,12 +77,12 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&summary).unwrap_or_default())
     }
 
-    #[tool(name = "wiki_dataset_delete", description = "Delete a wiki dataset. The dataset folder is moved to trash (not permanently deleted) for safety.")]
+    #[tool(name = "wiki_dataset_delete", description = "Delete a wiki dataset by moving its whole directory into the app trash folder — not permanently removed, so this is recoverable. Returns `trashed_to`. Also drops the directory's `meta.json` link when it lives in a linked location. Use `wiki_dataset_list` first to get the UUID.")]
     async fn wiki_dataset_delete(&self, Parameters(param): Parameters<WikiDatasetUuidParam>) -> Result<String, String> {
-        log::info!("[MCP] wiki_dataset_delete: uuid={}", param.uuid);
+        log::warn!("[MCP] wiki_dataset_delete: uuid={}", param.uuid);
         let state = self.app.state::<SettingsState>();
-        crate::datasets::wiki::wiki_dataset_delete(state.into(), param.uuid).await?;
-        Ok(serde_json::json!({"status": "ok", "message": "Dataset moved to trash"}).to_string())
+        let trashed_to = crate::datasets::wiki::wiki_dataset_delete(state.into(), param.uuid).await?;
+        Ok(serde_json::json!({"status": "ok", "message": "Dataset moved to trash", "trashed_to": trashed_to}).to_string())
     }
 
     #[tool(name = "wiki_dataset_list_dir", description = "List one directory inside a wiki dataset. 'rel' is dataset-relative ('' or omitted = root). Returns entries with name, rel_path, is_dir, modified.")]

@@ -30,17 +30,34 @@
 `````
 
 # format of info.json
+
+One shape describes every dataset type, so this file is no longer dictation-specific. The authoritative contract is [design/dataset-info.md](./design/dataset-info.md), with [design/info.schema.json](./design/info.schema.json) as its machine-readable form: the fields, who reads each one, and the old-to-new mapping all live there and are not repeated below. This is only what such a file looks like now:
+
 `````
 {
-    "name": "test1",
-    "uuid": "b76a0a93-20e0-4d1a-bd16-ab6f18197952",
-    "description": "a short description of this dataset",
-    "parent_uuid": "",
-    "version": 1,
-    "structure": "dictation-v1",
-    "updated": "YYYY-MM-DDTHH:MM:SSZ"
+  "spec": 2,
+  "uuid": "b76a0a93-20e0-4d1a-bd16-ab6f18197952",
+  "type": "dictation",
+  "format": "dictation-v2",
+  "name": "test1",
+  "description": "a short description of this dataset",
+  "language": "de",
+  "created_at": "2026-10-01T18:18:18Z",
+  "updated_at": "2026-10-01T18:18:18Z",
+  "sharing": {
+    "visibility": "private",
+    "owner_id": "",
+    "subscribers": []
+  }
 }
 `````
+
+`version` and `parent_uuid` are dropped because nothing read them, and `structure` split into `type` plus `format`. `updated` is now `updated_at`, and `title` is now `name`.
+
+Two things worth knowing before writing one by hand:
+
+- A file in the old shape does not parse at all. `type`, `format` and `name` are required with no defaults, so a pre-unification `info.json` makes `read_info_opt` return `None` and the folder is skipped by discovery rather than half-read. There is no compatibility reader and no automatic migration.
+- Stamps are UTC with second precision and a `Z` suffix. Files written before that rule took hold may carry a `+00:00` stamp with sub-second digits; `touch_info` rewrites `updated_at` in the canonical form on the next mutation but never touches `created_at`, so an old `created_at` is expected to persist. It is still parsed as an instant, so it stays comparable.
 
 # tables in database
 `````

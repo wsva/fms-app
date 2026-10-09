@@ -18,7 +18,7 @@ This document describes the redesigned dataset schema with efficient subtitle ve
 
 ```
 <dataset>/
-├── info.json              # Dataset metadata (uuid, name, description, version)
+├── info.json              # Dataset descriptor — one shape for every type, see design/dataset-info.md
 ├── data.sqlite3           # SQLite database (all structured data)
 ├── media/                 # Audio/video files (organized by subfolder)
 │   ├── A1.1/
