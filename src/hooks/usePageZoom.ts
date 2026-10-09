@@ -9,8 +9,15 @@ import { useCallback, useEffect, useState } from "react";
  * WebView's own zoom control, because Tauri's `zoom_hotkeys_enabled` is a
  * WebView2-only feature (unsupported on Android/iOS and off by default). CSS
  * zoom is supported by every engine this app ships on (WebView2, WKWebView,
- * WebKitGTK, Android WebView) and scales the whole page, viewport units
- * included, so no layout has to be re-tuned per level.
+ * WebKitGTK, Android WebView) and scales the whole page uniformly.
+ *
+ * One caveat shapes the layout: `zoom` multiplies viewport units by the zoom
+ * factor without changing the window, so a box sized with `100vh` overshoots
+ * the viewport at any level above 1 and the window grows a scrollbar of its
+ * own — which scrolls the whole shell, chrome included, instead of the page
+ * body. Full-height layout therefore uses percentages (`h-full`, plus the
+ * html/body rule in globals.css), which resolve against a viewport already
+ * corrected for the zoom factor. Do not reintroduce `h-screen`.
  *
  * The value lives in localStorage under `pageZoom` and is applied before first
  * paint by the head script in app/layout.tsx, which must keep the same key and

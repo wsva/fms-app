@@ -612,7 +612,7 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
       {/* Dock panel — overlays the content area on the right. */}
       {open && (
         <aside
-          className="fixed top-0 right-0 h-screen z-[100] flex flex-col bg-bg-card border-l border-border-default shadow-xl"
+          className="fixed top-0 right-0 h-full z-[100] flex flex-col bg-bg-card border-l border-border-default shadow-xl"
           style={{ width: dockWidth }}
         >
           {/* Resize handle on the left edge (mouse-drag only; not useful on touch) */}

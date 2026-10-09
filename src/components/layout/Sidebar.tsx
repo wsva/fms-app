@@ -292,7 +292,7 @@ export default function Sidebar({
   return (
     <>
       <aside
-        className="fixed left-0 top-0 flex flex-col h-screen border-r border-border-default items-center px-2 z-10 bg-bg-card select-none"
+        className="fixed left-0 top-0 flex flex-col h-full border-r border-border-default items-center px-2 z-10 bg-bg-card select-none"
         style={{
           width: sidebarWidth,
           transition: isDragging ? "none" : "width 200ms",

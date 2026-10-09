@@ -9,7 +9,9 @@
     right: 1.5rem;
     top: 6rem;
     z-index: 200;
-    max-height: calc(100vh - 6rem);
+    /* Percentage rather than 100vh: this box is fixed, so it resolves against
+       the viewport already corrected for the global page zoom. */
+    max-height: calc(100% - 6rem);
     overflow: hidden;
     background: var(--bg-card);
     box-shadow: 0 0 1em rgba(0, 0, 0, 0.15);

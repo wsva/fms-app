@@ -201,7 +201,11 @@ export default function Home() {
 
   return (
     <div
-      className={`flex h-screen ${mobile ? "flex-col" : ""}`}
+      // `h-full` rather than `h-screen` — see the html/body rule in globals.css:
+      // a viewport unit is multiplied by the global page zoom while a percentage
+      // resolves against a viewport already divided by it, so 100vh overshoots
+      // the window at any zoom above 1 and the window itself starts scrolling.
+      className={`flex h-full ${mobile ? "flex-col" : ""}`}
       // Edge-to-edge WebView draws under the status bar; push the shell below it.
       style={mobile ? { paddingTop: "env(safe-area-inset-top)" } : undefined}
     >
