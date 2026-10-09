@@ -337,11 +337,12 @@ struct Manifest {
 
 /// The dataset SQLite file + its WAL/SHM sidecars are excluded from the hashed
 /// file set (§3.2): they are content the row log and snapshot own, not media.
-/// The wiki datasets' `fts5.sqlite3` index joins them — it is fully derived
-/// per copy and rebuilt locally, so it must never ship or be hashed.
+/// The derived per-copy indexes join them via [`crate::datasets::is_derived_index`]
+/// — that predicate is the single place naming them, because a hub must refuse
+/// to hash, ship or serve one, whichever module owns it.
 fn is_db_file(rel: &str) -> bool {
     rel == "data.sqlite3" || rel == "data.sqlite3-wal" || rel == "data.sqlite3-shm"
-        || rel == "fts5.sqlite3" || rel == "fts5.sqlite3-wal" || rel == "fts5.sqlite3-shm"
+        || crate::datasets::is_derived_index(rel)
 }
 
 /// SHA-256 (hex) of a file's contents, streamed in chunks.
@@ -547,13 +548,13 @@ async fn snapshot(State(st): State<RestState>, axum::extract::Path(uuid): axum::
 
     // Archive the frozen copy under the name `data.sqlite3` and never the live
     // sidecars (the vacuum image is self-contained, WAL off on the receiver).
-    // The wiki's derived `fts5.sqlite3` family never ships at all.
+    // Derived indexes never ship at all — the receiver rebuilds its own.
     let files: Vec<(String, PathBuf)> = collect_rel_files(&dir)
         .into_iter()
         .filter(|(rel, _)| {
             rel != "data.sqlite3-wal"
                 && rel != "data.sqlite3-shm"
-                && !rel.starts_with("fts5.sqlite3")
+                && !crate::datasets::is_derived_index(rel)
         })
         .map(|(rel, p)| {
             if rel == "data.sqlite3" {

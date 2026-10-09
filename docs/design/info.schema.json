@@ -105,7 +105,7 @@
     },
     "card-v1": {
       "title": "card dataset (v1 layout)",
-      "description": "data.sqlite3 with cards, tags and SM-2 reviews; a per-root search.sqlite3 FTS index (derived, never shipped). Was 'cards-v1'.",
+      "description": "data.sqlite3 with cards, tags and SM-2 reviews; a per-location fts5.sqlite3 FTS index (derived, never shipped). Was 'cards-v1'.",
       "allOf": [
         { "$ref": "#/$defs/base" },
         {

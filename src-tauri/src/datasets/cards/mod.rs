@@ -22,6 +22,15 @@ use crate::datasets::{
 };
 use crate::settings::SettingsState;
 
+/// The derived FTS5 card index, one per *location* dir (not per dataset): a card
+/// search spans every dataset in the location, so the index has to sit above them.
+/// Shares its file name with the wiki dataset index, which is fine because a
+/// location root is never a dataset dir — and one name means one rule in
+/// [`crate::datasets::is_derived_index`]. Being outside the dataset dir already
+/// keeps it out of the sync manifest structurally; the predicate covers the guards
+/// that work from a dataset-relative path.
+pub(crate) const FTS_DB: &str = "fts5.sqlite3";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -166,7 +175,7 @@ pub(crate) fn open_card_db(dataset_dir: &Path) -> Result<Connection, String> {
 
 /// Open or create the FTS search database for a location.
 pub(crate) fn open_search_db(location: &Path) -> Result<Connection, String> {
-    let db_path = location.join("search.sqlite3");
+    let db_path = location.join(FTS_DB);
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     create_fts_schema(&conn)?;
     Ok(conn)
@@ -275,8 +284,7 @@ pub(crate) fn search_cards_fts(
     let mut results = Vec::new();
 
     for root in dataset_roots(settings, crate::datasets::DatasetType::Card) {
-        let search_db_path = root.join("search.sqlite3");
-        if !search_db_path.exists() {
+        if !root.join(FTS_DB).exists() {
             continue;
         }
 

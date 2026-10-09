@@ -28,7 +28,7 @@ The base directory is workspace-scoped: with a workspace selected, everything de
 │   │   └── <dataset dir>/
 │   ├── card/
 │   │   ├── meta.json
-│   │   ├── search.sqlite3   # FTS index over every card dataset in this location
+│   │   ├── fts5.sqlite3     # FTS index over every card dataset in this location
 │   │   └── <dataset dir>/
 │   ├── book/
 │   ├── read_aloud/
@@ -64,7 +64,7 @@ Two more facts about identity:
 | Type | Root dir | `structure` | Content lives in | Extra files |
 |------|----------|-------------|------------------|-------------|
 | Dictation | `dictation/` | `dictation-v1` | `data.sqlite3` + `media/`, `subtitle/`, `waveform/` | `book.txt`, `book_sentences.txt`, `transcript/` |
-| Card | `card/` | `cards-v1` | `data.sqlite3` (`card`, `card_review`, `tag`, `card_tag`) | `search.sqlite3` at the location root |
+| Card | `card/` | `cards-v1` | `data.sqlite3` (`card`, `card_review`, `tag`, `card_tag`) | `fts5.sqlite3` at the location root |
 | Book | `book/` | `reading-v1` | `data.sqlite3` (`book_chapter`, `book_sentence`, `book_sentence_word`) | `media/` for per-sentence audio |
 | Read aloud | `read_aloud/` | `read-aloud-v1` | `data.sqlite3` (`read_text`, `read_attempt`) | `media/` for recorded takes |
 | Wiki | `wiki/` | `wiki-v1` | the `.md` files themselves — no `data.sqlite3` | `fts5.sqlite3` (derived index) |
@@ -136,11 +136,25 @@ Timestamps are text (`datetime('now')` defaults, RFC3339 written by Rust), prima
 | `book_sentences.txt` | derived | split book (Rust or bundled NLTK script) | yes, hashed |
 | `waveform/*.json` | derived | generate waveforms | yes, hashed |
 | `data.sqlite3` | derived *and* edited | build database | shipped whole by snapshot, then maintained by the row log; excluded from hashing |
-| `fts5.sqlite3` (wiki) | derived | built on first search | **never** — excluded from hashing and from the tar |
-| `search.sqlite3` (cards) | derived | `card_fts_rebuild` | outside the dataset dir, so never shipped |
+| `fts5.sqlite3` (wiki) | derived | built on first search | **never** — refused by hash, tar and file read |
+| `fts5.sqlite3` (cards) | derived | `card_fts_rebuild` | **never** — normally not even inside a dataset dir, and named in the same predicate if some peer drops one there |
 | dictation progress, XP | device/user state | — | lives in `app.sqlite3`, not the dataset |
 
 The rule worth restating: a derived index belongs to the copy it indexes. Shipping one would spend bandwidth on something the receiver can rebuild, and it would put a machine-local artifact into the content hash that the whole sync round is keyed on.
+
+Enforcement is one predicate: `datasets::is_derived_index` is the only place the
+exclusion is written down, and the four sites that need it — the manifest hash,
+the snapshot tar, the `/file` read guard, the wiki path guard — ask it rather than
+carrying their own literal. The owning modules keep their consts
+(`wiki::FTS_DB`, `cards::FTS_DB`) because they also *open* those files, and both
+now hold the same name: `fts5.sqlite3`. That is safe because a location root is
+never a dataset dir, so no tree can contain both indexes. The topology stays
+different on purpose: card search spans a whole location, so its index sits above
+the datasets; wiki search spans one dir's files, so its index sits beside them.
+
+A third index costs one line in the predicate, not a new literal in four places.
+The card index used to be `search.sqlite3`; every location has been moved to the
+shared name, so the old one is ordinary content now.
 
 ## The processing pipeline
 
@@ -203,7 +217,6 @@ These are real, verified against the code, and each is a candidate for cleanup r
 - **`dataset_delete` destroys the folder.** `fs::remove_dir_all`, and the MCP tool says so. Wiki datasets and workspaces both move to the shared trash directory first; the other four types should do the same to satisfy the "backup before destroy" rule.
 - **Rebuilding the database orphans progress.** `dataset_generate_database` mints fresh media uuids, while `listen_dictation` keys on `media_uuid`. Practice history recorded before a rebuild no longer matches anything afterwards, and the XP ledger still cites the dataset by uuid, so history and progress diverge.
 - **Two write-only tables.** `listen_waveform` is populated alongside the waveform JSON but the read path (`listen_get_waveform`) only ever reads the file, and `listen_note` is created by the schema and touched by nothing.
-- **Two different full-text index conventions.** Cards keep one `search.sqlite3` per *location* covering every dataset in it; wiki keeps one `fts5.sqlite3` per *dataset*. Both are derived and both are excluded from sync, but by different mechanisms — the wiki index because it is filtered by name, the card index because it sits outside the dataset directory.
 - **`status` means different things.** For dictation it is computed (`ready` iff `data.sqlite3` exists); in the sync catalog the other four types report `ready` unconditionally, so a broken card dataset advertises itself as fine.
 - **Two `sync_state` concepts with similar names.** `sync_state` inside a card dataset's database tracks the online card-service link; `dataset_sync_state` in `app.sqlite3` tracks the device hub link. Nothing relates them, and the naming invites confusion.
 

@@ -26,12 +26,14 @@ use uuid::Uuid;
 use crate::settings::SettingsState;
 
 use super::{
-    assert_uuid_free, dataset_roots, read_info_opt, touch_info, write_info, DatasetInfo,
-    DatasetType, FORMAT_WIKI, INFO_FILE,
+    assert_uuid_free, dataset_roots, is_derived_index, read_info_opt, touch_info, write_info,
+    DatasetInfo, DatasetType, FORMAT_WIKI, INFO_FILE,
 };
 
 /// The derived FTS index inside a wiki dataset dir. Never synced, never listed.
-const FTS_DB: &str = "fts5.sqlite3";
+/// Named here because wiki owns it, and by [`crate::datasets::is_derived_index`]
+/// because the sync guards must be able to refuse it without hardcoding the name.
+pub(crate) const FTS_DB: &str = "fts5.sqlite3";
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -126,7 +128,7 @@ fn sanitize_rel(rel: &str) -> Result<String, String> {
     }
     // Derived index + identity file are never addressable content.
     let last = parts[parts.len() - 1];
-    if last == FTS_DB || last == INFO_FILE || last.starts_with('.') {
+    if is_derived_index(last) || last == INFO_FILE || last.starts_with('.') {
         return Err(format!("{last} is not editable wiki content"));
     }
     Ok(parts.join("/"))
@@ -149,7 +151,7 @@ fn extension_of(name: &str) -> String {
 }
 
 fn is_hidden(name: &str) -> bool {
-    name.starts_with('.') || name == FTS_DB || name == INFO_FILE
+    name.starts_with('.') || is_derived_index(name) || name == INFO_FILE
 }
 
 fn get_modified_time(path: &Path) -> Option<String> {

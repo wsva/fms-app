@@ -62,6 +62,29 @@ pub(crate) const FORMAT_BOOK: &str = "book-v1";
 pub(crate) const FORMAT_READ_ALOUD: &str = "read_aloud-v1";
 pub(crate) const FORMAT_WIKI: &str = "wiki-v1";
 
+/// A derived, per-copy, rebuildable SQLite index — never hashed, never shipped,
+/// never addressable as content. Both kinds now answer to one file name, at
+/// deliberately different levels, because each sits where its query pattern needs
+/// it: [`cards::FTS_DB`](super::cards::FTS_DB) is one per *location* (a card
+/// search spans every dataset in it), [`wiki::FTS_DB`](super::wiki::FTS_DB) is one
+/// per wiki *dataset* (a search covers that dir's files). They can never collide,
+/// since a location root is not a dataset dir.
+///
+/// The rule is shared even though the topology is not: this is the single place
+/// that names what to exclude, so adding an index is one line here instead of a
+/// new literal in the manifest hash, the snapshot filter and the file-read guard.
+/// The consts are listed rather than the literal, so renaming either one fails to
+/// compile here instead of silently narrowing the exclusion.
+///
+/// Matches the root-level name only (and its WAL/SHM sidecars), which is where
+/// both are opened. A nested file that happens to share a name stays content:
+/// excluding it would silently drop real data from the hash.
+pub(crate) fn is_derived_index(rel: &str) -> bool {
+    [super::cards::FTS_DB, super::wiki::FTS_DB]
+    .iter()
+    .any(|db| rel == *db || rel.starts_with(&format!("{db}-")))
+}
+
 /// The app-owned "Favorites" dataset. Identified by this reserved id instead of a
 /// boolean flag, so finding it is an ordinary uuid lookup rather than a scan, and
 /// every device refers to the same logical dataset — favorited clips therefore
@@ -368,6 +391,28 @@ pub(crate) fn scan_datasets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exclusion list is the only thing keeping a per-copy index out of the
+    /// manifest hash, so both naming conventions must clear the one predicate —
+    /// and real content must not.
+    #[test]
+    fn derived_indexes_are_recognised_by_name() {
+        for rel in ["fts5.sqlite3", "fts5.sqlite3-wal", "fts5.sqlite3-shm"] {
+            assert!(is_derived_index(rel), "{rel} should be excluded");
+        }
+        for rel in [
+            "data.sqlite3",          // the owned DB, handled separately
+            "media/a.mp3",
+            "info.json",
+            "book.txt",
+            "sub/fts5.sqlite3",      // nested: same name, still content
+            "search.sqlite3",        // the card index's retired name
+            "search.sqlite3.bak",
+            "fts5.sqlite",
+        ] {
+            assert!(!is_derived_index(rel), "{rel} should be hashed");
+        }
+    }
 
     /// The bug this codec exists for: text order is not instant order once two
     /// shapes meet. `'Z'` (0x5A) out-ranks `'+'` (0x2B) and every digit (0x30-39),
