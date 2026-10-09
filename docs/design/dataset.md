@@ -46,31 +46,24 @@ This covers dataset directories only. Deletes *inside* a dataset (a book chapter
 
 ## Identity: info.json
 
-Each dataset directory carries an `info.json` written and re-written by whichever command last touched the dataset. The five shapes are not identical — this is the single most consequential inconsistency in the model, described under "Known rough edges" — but the fields in common are:
+Each dataset directory carries an `info.json`, and **one shape describes all five types**: `DatasetInfo` in `src-tauri/src/datasets/info.rs`, at `spec` 2. [`dataset-info.md`](./dataset-info.md) is the contract for that file — the fields and who reads each one, the format tags, the old → new migration mapping, and the reason `sync_url` had to be removed — with [`info.schema.json`](./info.schema.json) as its machine-readable form. None of that is repeated here on purpose. Five per-type structs disagreeing about the *name* of the same concept (`updated` vs `updated_at`, `name` vs `title`) is the disease the unification cured, and a second copy of the field table in this file is the same drift waiting to recur.
 
-| Field | Meaning |
-|-------|---------|
-| `uuid` | identity; v4 at creation; empty for raw-import folders |
-| `structure` | schema tag, `<type>-v1`; the filter that keeps one type's scanner from claiming another's folders |
-| `name` / `title` | display label (books use `title`) |
-| `updated` / `updated_at` | RFC3339 stamp of the last write |
-| `version`, `description`, `parent_uuid` | dictation and card only |
-| `is_favorites` | dictation only; marks the special clip dataset |
-| `sync_url`, `visibility`, `owner_id`, `subscribers` | card only; the online card-service link |
+What this document does own is the effect the descriptor has on the dataset model:
 
-Two more facts about identity:
-
-- **A folder with `media/` but no `info.json` is still a dataset** in the list (a raw import), with an empty uuid. It can be browsed and practiced, but nothing that resolves a uuid — the database commands, the MCP tools, the sync transport — can address it, and the hub's catalog endpoint skips those entries rather than advertising dead rows.
+- **The file is hashed, so it stays declarative.** `info.json` is part of the sync manifest's hashed file set, which is why counts, scores and progress live in `data.sqlite3` instead: a field that moved on every user action would re-hash the dataset and look like content churn to every follower. `updated_at` is the one field allowed to move.
+- **`type` is enforced, not just recorded.** `find_dataset_dir_typed` logs and *skips* any folder whose `type` disagrees with the root it was found under. A mistyped dataset is therefore not merely mislabeled — it vanishes from every uuid lookup, which means from `/manifest`, `/snapshot`, `/changes` and `/file` alike. The directory stays the routing authority; the field exists to make the file self-describing to a reader holding only the file.
+- **A legacy descriptor is refused, not half-read.** There is no compatibility reader and no automatic migration. `type` and `format` are required with no defaults, so a pre-unification file fails to parse, `read_info_opt` returns `None`, and the folder drops out of discovery as if it did not exist. `PROTOCOL_VERSION` went 4 → 5 with it, so a mixed-version cluster refuses each other rather than silently mis-parsing. Migrating the files on disk is therefore what makes a dataset visible at all — and the contract's *Out of scope* section records which generators are still emitting the old shape.
+- **A folder with `media/` but no `info.json` is still listed** (a raw import) under a synthesized dictation descriptor with an empty uuid and `status: not_ready`. It can be browsed, but nothing that resolves a uuid — the database commands, the MCP tools, the sync transport — can address it, and the hub's catalog endpoint skips every uuid-less entry rather than advertising dead rows.
 - **Directory naming is not stable across origins.** A hub's own book dataset may live in `readable-book-title/` while the follower's pulled copy lives in `<uuid>/`. Both resolve, because resolution opens every `info.json` and compares uuids. Never build a path from a uuid by hand; call `find_dataset_dir` / `find_dataset_dir_typed`.
 
 ## The five types
 
-| Type | Root dir | `structure` | Content lives in | Extra files |
-|------|----------|-------------|------------------|-------------|
-| Dictation | `dictation/` | `dictation-v1` | `data.sqlite3` + `media/`, `subtitle/`, `waveform/` | `book.txt`, `book_sentences.txt`, `transcript/` |
-| Card | `card/` | `cards-v1` | `data.sqlite3` (`card`, `card_review`, `tag`, `card_tag`) | `fts5.sqlite3` at the location root |
-| Book | `book/` | `reading-v1` | `data.sqlite3` (`book_chapter`, `book_sentence`, `book_sentence_word`) | `media/` for per-sentence audio |
-| Read aloud | `read_aloud/` | `read-aloud-v1` | `data.sqlite3` (`read_text`, `read_attempt`) | `media/` for recorded takes |
+| Type | Root dir | `format` | Content lives in | Extra files |
+|------|----------|--------|------------------|-------------|
+| Dictation | `dictation/` | `dictation-v2` | `data.sqlite3` + `media/`, `subtitle/`, `waveform/` | `book.txt`, `book_sentences.txt`, `transcript/` |
+| Card | `card/` | `card-v1` | `data.sqlite3` (`card`, `card_review`, `tag`, `card_tag`) | `fts5.sqlite3` at the location root |
+| Book | `book/` | `book-v1` | `data.sqlite3` (`book_chapter`, `book_sentence`, `book_sentence_word`) | `media/` for per-sentence audio |
+| Read aloud | `read_aloud/` | `read_aloud-v1` | `data.sqlite3` (`read_text`, `read_attempt`) | `media/` for recorded takes |
 | Wiki | `wiki/` | `wiki-v1` | the `.md` files themselves — no `data.sqlite3` | `fts5.sqlite3` (derived index) |
 
 Card, book, and read-aloud open their `data.sqlite3` through an initializer that re-applies `CREATE TABLE IF NOT EXISTS` on every call, so a folder copied in from an older build heals itself the first time it is touched. Dictation is the exception: its `open_db` refuses a missing database with "generate the database first" and never creates schema, because for that type the database is a pipeline artifact rather than something to be lazily conjured.
@@ -107,7 +100,7 @@ Two different bases exist and mixing them up is the classic bug in this area:
 | `audio_path` | dataset directory (`media/...`) | book sentences, read-aloud attempts |
 | `rel_path` | dataset directory, forward slashes | wiki files, and the wiki REST browse responses |
 
-The Favorites dataset is an ordinary dictation dataset and obeys the dictation convention: its clip rows store the bare file name in `listen_media.source`. It reuses the *source cue's* uuid as the primary key of the copied cue row, which is what makes adding the same cue twice a no-op instead of a duplicate.
+The Favorites dataset is an ordinary dictation dataset and obeys the dictation convention: its clip rows store the bare file name in `listen_media.source`. It is identified by the reserved uuid `dictation-favorites` rather than a flag — the reason and the consequences for sync merging are in [dataset-info.md](./dataset-info.md) — and it reuses the *source cue's* uuid as the primary key of the copied cue row, which is what makes adding the same cue twice a no-op instead of a duplicate.
 
 Wiki paths additionally pass `sanitize_rel`, which rejects absolute paths, any `..` component, and any colon-bearing component, so a request can never escape the dataset directory.
 
@@ -128,7 +121,9 @@ Wiki paths additionally pass `sanitize_rel`, which rejects absolute paths, any `
 
 One media can carry several tracks (different STT models, a manual correction, an aligned variant), and exactly one is `is_active`, which is the track the dictation page practices. Cues use the effective-range versioning pattern rather than whole-track copies: a cue row records `version_created` and, once replaced, `version_superseded`, so the current state is `version_superseded IS NULL`, an old state is reconstructible by range, and re-running STT over unchanged audio duplicates nothing.
 
-Timestamps are text (`datetime('now')` defaults, RFC3339 written by Rust), primary keys are TEXT UUIDs everywhere, and card data uses `deleted_at` for soft deletes rather than removing rows, so a delete can be journalled and can conflict.
+Timestamps are text, primary keys are TEXT UUIDs everywhere, and card data uses `deleted_at` for soft deletes rather than removing rows, so a delete can be journalled and can conflict.
+
+Text order is chronological only if every stored value has the same width and the same suffix, so a stamp's *shape* is a storage contract, not a style choice — and there are two shapes for two different jobs. Descriptor stamps (`info.json`) use `now_stamp()`: UTC, second precision, `Z`; they are only displayed and hashed, so second precision is enough. Row stamps use `now_row_stamp()`: UTC, **millisecond** precision, `Z`, because `card.updated_at` decides which side of a conflict wins and is compared two ways that no Rust-side parsing can reconcile — as text inside SQLite (`WHERE updated_at > ?1`) and in Rust. Milliseconds plus `Z` is the one shape the three producers agree on byte for byte: `chrono`, JavaScript's `Date.toISOString()` (what the frontend binds into `updated_at`), and SQLite's `strftime('%Y-%m-%dT%H:%M:%fZ','now')`. `canonical_stamp` re-shapes a value before storing it, and an unparseable one is kept verbatim rather than replaced by a plausible instant — a garbage stamp should stay visibly garbage. Real data used to carry three shapes at once (`…35Z` from Python, `…519+00:00` from Rust with microseconds, `…524600+00:00` with nanoseconds), which made any string comparison of stamps unreliable; `stamps_cmp` is what code compares through now.
 
 ## Authored, derived, and shipped
 
@@ -196,9 +191,9 @@ Two consumers reach into datasets without owning them: `simple_words.rs` sources
 
 Sync is defined entirely in terms of datasets, and the coupling points are few and deliberate:
 
-- `GET /api/v1/datasets` advertises `uuid`, `name`, `updated`, `dataset_type`, `media_count`, `status` for all five types, skipping uuid-less raw imports. `dataset_type` is the *root directory name* (`dictation` | `card` | `book` | `read_aloud` | `wiki`), not the `structure` string, and it tells a follower which local root to unpack into.
+- `GET /api/v1/datasets` advertises `uuid`, `name`, `updated`, `dataset_type`, `media_count`, `status` for all five types, skipping uuid-less raw imports. `dataset_type` on the wire is the *root directory name* (`dictation` | `card` | `book` | `read_aloud` | `wiki`) — `rest.rs` hardcodes it per type loop rather than reading `info.type` — and it tells a follower which local root to unpack into. The wire key stays `updated` while the file field is `updated_at`, and every type now feeds it from `info.updated_at`; before the descriptor was unified, books and read-aloud reported an empty stamp because the manifest read a key their `info.json` did not have.
 - `?lite=1` drops the per-dataset counts, because the incremental round only needs uuid, type, and `updated`. `media_count` means different things per type — media count, card count, text count, markdown file count, and always 0 for books.
-- The manifest hashes every file except the databases and the wiki index, so a row edit inside `data.sqlite3` never forces a whole-file re-download; the row log carries it instead.
+- The manifest hashes every file except the databases and the derived full-text indexes, so a row edit inside `data.sqlite3` never forces a whole-file re-download; the row log carries it instead.
 - A snapshot is a tar of the whole directory, with `data.sqlite3` replaced by a `VACUUM INTO` copy taken inside a consistent snapshot transaction (`wal_checkpoint` alone would not block concurrent writers and could archive a torn image), and the `-wal`/`-shm` sidecars excluded because the receiver has none. It unpacks to `<datasets>/<type>/<uuid>` through a `.tmp` directory and a rename, so a failed download never leaves a half dataset behind.
 - Edits made on a follower queue in `writeback_queue` and are replayed on the hub; `commit_change` is the single choke point, role-aware, and wiki page saves and deletes journal as `wiki_file_save` / `wiki_file_delete` keyed by relative path with last-write-wins.
 - `prune_local_dataset` removes a dataset the hub stopped offering by looking in all five type roots — the type list is duplicated there and must be kept in step with `DatasetType`.
@@ -216,8 +211,7 @@ Each domain has a matching MCP submodule (`mcp/datasets.rs`, `mcp/dictation.rs`,
 
 These are real, verified against the code, and each is a candidate for cleanup rather than a hypothetical.
 
-- **`structure` strings disagree with the root directory names.** `card` ↔ `cards-v1`, `book` ↔ `reading-v1`, `read_aloud` ↔ `read-aloud-v1`. The sync wire and the UI use the root name, the file check uses the structure tag, and a newcomer has to know both.
-- **`info.json` shapes have drifted.** Books use `title`/`created_at`/`updated_at`; read-aloud uses `name`/`created_at`/`updated_at`; dictation, card, and wiki use `name`/`updated`. The hub's manifest reads the `updated` key specifically, so a book or read-aloud dataset reports an empty `updated_at` in its manifest even though its `info.json` is stamped.
+- **`format` carries a version number no code reads.** The tag is `<type-slug>-v<N>`, and dictation is the only type whose number is not `v1` — but nothing branches on it. Its only two readers, `cards::find_card_dataset_dir` and the card listing, compare `format == card-v1` purely as a *type* tag, a job `type` now does properly. So the two discovery paths validate different fields for the same purpose: `find_dataset_dir_typed` checks `type` and skips a mismatch, the card scanner checks `format` and never looks at `type`. The two version numbers in the file are unrelated scales that happen to agree — `spec` versions the descriptor, `format` versions the dataset's internal layout, and both read `2` for dictation.
 - **Only whole-dataset deletes are reversible.** `move_to_trash` guards the five dataset directories, but the deletes *inside* a dataset (`book_delete_chapter`, `book_delete_sentence`, `book_delete_audio`, `read_aloud_delete_text`, `read_aloud_delete_attempt`, `listen_delete_media`, `dataset_delete_subtitles`, `dataset_delete_database`) call `fs::remove_file`/`remove_dir_all` outright, while `docs/agent_friendly_design.md` §3 names "clear database" and "overwrite subtitles" among the operations that should be backed up first. The same spec section promises a `restore_from_trash` tool that does not exist yet, so recovering anything from the trash is still a manual filesystem operation.
 - **Rebuilding the database orphans progress.** `dataset_generate_database` mints fresh media uuids, while `listen_dictation` keys on `media_uuid`. Practice history recorded before a rebuild no longer matches anything afterwards, and the XP ledger still cites the dataset by uuid, so history and progress diverge.
 - **Two write-only tables.** `listen_waveform` is populated alongside the waveform JSON but the read path (`listen_get_waveform`) only ever reads the file, and `listen_note` is created by the schema and touched by nothing.
