@@ -259,12 +259,29 @@
     vertical-align: 0.3em;
 }
 
+/* Tailwind's Preflight resets `list-style: none` globally (same reason `ul`
+   above fakes its own bullet). Mirror that `display: block` + `::before`
+   marker technique for ordered lists too, so `ol` and `ul` line up with the
+   exact same indent and hanging text alignment instead of relying on the
+   browser's native list-item marker (which indents differently). */
 .md-body ol {
     margin-left: 1em;
+    counter-reset: md-ol;
 }
 
 .md-body ol li {
+    display: block;
     line-height: 1.6;
+    counter-increment: md-ol;
+}
+
+.md-body ol li::before {
+    content: counter(md-ol) ".";
+    color: var(--accent);
+    display: inline-block;
+    width: 1em;
+    margin-right: 0.5em;
+    text-align: right;
 }
 
 /* ─── Horizontal rule ────────────────────────────────────────── */

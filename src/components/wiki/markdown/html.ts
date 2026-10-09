@@ -206,7 +206,12 @@ function parseBlocks(text: string, keyStart = 0): ReactNode[] {
                 }
             }
             const olProps: Record<string, unknown> = { key: key++ };
-            if (startNum !== 1) olProps.start = startNum;
+            // Numbering is drawn via a CSS counter in markdown.css (see the
+            // `.md-body ol li::before` rule) so it matches `ul`'s `➤` indent
+            // exactly. That means `start` isn't a native attribute any more —
+            // seed the counter to startNum - 1 instead so `li::before` begins
+            // at the right number.
+            if (startNum !== 1) olProps.style = { counterReset: `md-ol ${startNum - 1}` };
             result.push(
                 createElement("ol", olProps,
                     ...items.map((item, idx) =>
