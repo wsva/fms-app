@@ -67,7 +67,8 @@ const StepNode = memo(({ data }: { data: StepNodeData }) => {
         outlineOffset: 2,
       }}
     >
-      <Handle type="target" position={Position.Left} className="!bg-[var(--border-default)]" />
+      {/* Top→down flow: edges enter the top edge of a node and leave its bottom. */}
+      <Handle type="target" position={Position.Top} className="!bg-[var(--border-default)]" />
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-semibold truncate" title={step.title}>
           {step.title}
@@ -82,7 +83,7 @@ const StepNode = memo(({ data }: { data: StepNodeData }) => {
       <div className="mt-0.5 font-mono text-[10px] opacity-80 truncate" title={step.action}>
         {step.action}
       </div>
-      <Handle type="source" position={Position.Right} className="!bg-[var(--border-default)]" />
+      <Handle type="source" position={Position.Bottom} className="!bg-[var(--border-default)]" />
     </div>
   );
 });
@@ -128,7 +129,12 @@ export default function WorkflowGraph({
         onNodeClick={(_, node) => onSelect(node.id)}
         onPaneClick={() => onSelect("")}
         fitView
+        // A vertical pipeline is taller than the pane, so fit only down to a
+        // readable zoom and let the rest be scrolled instead of shrunk away.
+        fitViewOptions={{ minZoom: 0.6, maxZoom: 1, padding: 0.15 }}
         minZoom={0.4}
+        zoomOnScroll={false}
+        panOnScroll
         proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="var(--border-default)" />

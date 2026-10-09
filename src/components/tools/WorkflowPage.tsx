@@ -356,8 +356,9 @@ export default function WorkflowPage() {
                 />
               </div>
 
-              {/* Inspector + prompt */}
-              <div className="w-[340px] shrink-0 min-h-0 overflow-y-auto flex flex-col gap-3">
+              {/* Inspector + prompt — wide, because the vertical graph only needs
+                  a narrow column and scrolls instead of spreading sideways. */}
+              <div className="w-[440px] max-w-[55%] shrink-0 min-h-0 overflow-y-auto flex flex-col gap-3">
                 <section className="rounded-lg border border-border-light bg-bg-card p-3 flex flex-col gap-2">
                   <div className="flex items-center justify-between">
                     <h2 className="text-xs font-semibold uppercase tracking-wide text-text-secondary inline-flex items-center gap-1">

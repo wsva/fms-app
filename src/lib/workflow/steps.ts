@@ -245,10 +245,23 @@ export interface PositionedStep {
   y: number;
 }
 
-const COL_WIDTH = 300;
-const ROW_HEIGHT = 110;
+// The graph flows top→down: a layer is a horizontal band, so the DAG grows into
+// the vertical scroll area and stays narrow enough to leave the inspector column
+// real width. Spacing is in flow units: bands separated by LAYER_GAP_Y, siblings
+// within a band separated by NODE_GAP_X.
+const LAYER_GAP_Y = 150;
+const NODE_GAP_X = 250;
 
-/** Longest-path layering into left→right columns; rows assigned within a column. */
+/**
+ * Longest-path layering, laid out top→down (`depth` → y, in-layer order → x).
+ *
+ * Within a layer, nodes are ordered by the barycenter — the mean x of the parents
+ * already placed in an earlier layer — so a step sits under the node it depends on
+ * and edges stay short and vertical instead of crossing. Roots and any layer whose
+ * parents are not placed yet fall back to declaration order, which keeps the result
+ * stable run to run. Each layer is centered on x, then the whole drawing is shifted
+ * to non-negative coordinates.
+ */
 export function layoutSteps(): PositionedStep[] {
   const depth = new Map<string, number>();
   for (const id of topoOrder()) {
@@ -258,13 +271,37 @@ export function layoutSteps(): PositionedStep[] {
       : 1 + Math.max(...step.dependsOn.map((dep) => depth.get(dep) ?? 0));
     depth.set(id, d);
   }
-  const rowsByCol = new Map<number, number>();
-  return DICTATION_STEPS.map((step) => {
-    const col = depth.get(step.id) ?? 0;
-    const row = rowsByCol.get(col) ?? 0;
-    rowsByCol.set(col, row + 1);
-    return { step, x: col * COL_WIDTH, y: row * ROW_HEIGHT };
-  });
+
+  const maxDepth = Math.max(0, ...DICTATION_STEPS.map((s) => depth.get(s.id) ?? 0));
+  const xOf = new Map<string, number>();
+
+  for (let layer = 0; layer <= maxDepth; layer++) {
+    const ordered = DICTATION_STEPS
+      .map((step, i) => ({ step, i }))
+      .filter(({ step }) => (depth.get(step.id) ?? 0) === layer)
+      .map(({ step, i }) => {
+        const parents = step.dependsOn
+          .map((dep) => xOf.get(dep))
+          .filter((x): x is number => x !== undefined);
+        const bary = parents.length
+          ? parents.reduce((a, b) => a + b, 0) / parents.length
+          : i * NODE_GAP_X;
+        return { step, i, bary };
+      })
+      .sort((a, b) => a.bary - b.bary || a.i - b.i);
+
+    ordered.forEach(({ step }, idx) => {
+      xOf.set(step.id, (idx - (ordered.length - 1) / 2) * NODE_GAP_X);
+    });
+  }
+
+  const placed = Array.from(xOf.values());
+  const minX = placed.length ? Math.min(...placed) : 0;
+  return DICTATION_STEPS.map((step) => ({
+    step,
+    x: (xOf.get(step.id) ?? 0) - minX,
+    y: (depth.get(step.id) ?? 0) * LAYER_GAP_Y,
+  }));
 }
 
 export interface Edge {
