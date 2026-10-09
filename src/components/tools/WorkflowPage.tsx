@@ -15,8 +15,10 @@ import {
   btnSmDanger,
 } from "@/lib/datasets/types";
 import {
-  DICTATION_STEPS,
-  DICTATION_DEFINITION,
+  DICTATION_YAML,
+  DICTATION_PARSED,
+  parseDefinition,
+  type WorkflowDefinition,
   type DatasetFacts,
   type StatusMap,
   type StepStatus,
@@ -29,20 +31,10 @@ import {
   buildPrompt,
   statusLabel,
 } from "@/lib/workflow/steps";
-import { RefreshCw, Workflow as WorkflowIcon, Play, RotateCcw, SkipForward, Check, Copy, Send, Plus, FileJson, Save, FolderSync } from "lucide-react";
+import { RefreshCw, Workflow as WorkflowIcon, Play, RotateCcw, SkipForward, Check, Copy, Send, Plus, FileJson, Save, FolderSync, Eye, Pencil } from "lucide-react";
 
 // react-flow touches browser layout APIs on mount; keep it out of the SSG pass.
 const WorkflowGraph = dynamic(() => import("./WorkflowGraph"), { ssr: false });
-
-// A workflow "section" — Dataset Dictation is the first; more get added later.
-interface WorkflowSection {
-  id: string;
-  label: string;
-  steps: typeof DICTATION_STEPS;
-}
-const SECTIONS: WorkflowSection[] = [
-  { id: "dictation", label: "Dataset Dictation", steps: DICTATION_STEPS },
-];
 
 function runIdFor(uuid: string): string {
   return `dictation-${uuid}`;
@@ -56,8 +48,15 @@ export default function WorkflowPage() {
   // only by its path).
   const [selectedKey, setSelectedKey] = useState("");
   const [facts, setFacts] = useState<DatasetFacts | null>(null);
-  const [committed, setCommitted] = useState<StatusMap>(initialStatuses());
+  const [committed, setCommitted] = useState<StatusMap>(() => initialStatuses(DICTATION_PARSED.steps));
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The workflow document is YAML-driven and session-local (no persistence in
+  // this cut): `definition` holds the last-good parse, `parseError` the live one.
+  const [mode, setMode] = useState<"view" | "edit">("view");
+  const [yamlText, setYamlText] = useState(DICTATION_YAML);
+  const [definition, setDefinition] = useState<WorkflowDefinition>(DICTATION_PARSED);
+  const [parseError, setParseError] = useState<string | null>(null);
+  const steps = definition.steps;
   const [scanning, setScanning] = useState(false);
   const [initing, setIniting] = useState(false);
   const [reloading, setReloading] = useState(false);
@@ -71,11 +70,11 @@ export default function WorkflowPage() {
     setMounted(true);
   }, []);
 
-  const positioned = useMemo(() => layoutSteps(), []);
-  const edges = useMemo(() => buildEdges(), []);
+  const positioned = useMemo(() => layoutSteps(steps), [steps]);
+  const edges = useMemo(() => buildEdges(steps), [steps]);
   const view: StatusMap = useMemo(
-    () => (facts ? recompute(committed, facts) : committed),
-    [committed, facts],
+    () => (facts ? recompute(committed, facts, steps) : committed),
+    [committed, facts, steps],
   );
 
   const selectedDataset = useMemo(
@@ -156,12 +155,12 @@ export default function WorkflowPage() {
   // being valid: an explicit switch, or a reload that finds the dataset moved.
   const clearView = useCallback(() => {
     setFacts(null);
-    setCommitted(initialStatuses());
+    setCommitted(initialStatuses(steps));
     setSelectedId(null);
     setPrompt("");
     setInfoText("");
     setInfoOpen(false);
-  }, []);
+  }, [steps]);
 
   const scan = useCallback(async () => {
     if (!isTauri() || !selectedUuid) return;
@@ -285,6 +284,20 @@ export default function WorkflowPage() {
     setPrompt("");
   };
 
+  // Parse-on-edit: a good parse swaps the whole graph/prompt over to the new
+  // document; a bad one keeps the last-good graph and surfaces the error inline.
+  const applyYaml = (text: string) => {
+    setYamlText(text);
+    try {
+      setDefinition(parseDefinition(text));
+      setParseError(null);
+    } catch (e) {
+      setParseError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const resetYaml = () => applyYaml(DICTATION_YAML);
+
   const generatePrompt = () => {
     if (!facts) return;
     const text = buildPrompt({
@@ -292,6 +305,8 @@ export default function WorkflowPage() {
       datasetUuid: selectedUuid,
       runId: runIdFor(selectedUuid),
       view,
+      steps,
+      definition: { name: definition.name, version: definition.version },
     });
     setPrompt(text);
   };
@@ -317,7 +332,7 @@ export default function WorkflowPage() {
     }
   };
 
-  const sel = selectedId ? stepById(selectedId) : undefined;
+  const sel = selectedId ? stepById(selectedId, steps) : undefined;
   const readyCount = Object.values(view).filter((s) => s === "ready").length;
 
   return (
@@ -337,15 +352,30 @@ export default function WorkflowPage() {
         <div className="flex-1 min-h-0 flex flex-col gap-3">
           {/* Sections — only Dataset Dictation for now */}
           <div className="flex items-center gap-3 flex-wrap shrink-0 rounded-lg border border-border-light bg-bg-card px-3 py-2">
-            {SECTIONS.map((s) => (
-              <span
-                key={s.id}
-                className="text-sm font-semibold text-text-primary px-2 py-1 rounded-md bg-bg-muted"
-                title={`${DICTATION_DEFINITION.name} v${DICTATION_DEFINITION.version}`}
+            <span
+              className="text-sm font-semibold text-text-primary px-2 py-1 rounded-md bg-bg-muted"
+              title={`${definition.name} v${definition.version}`}
+            >
+              {definition.name}
+              <span className="ml-1 text-[10px] font-normal text-text-tertiary">v{definition.version}</span>
+            </span>
+            {/* View ⇄ Edit: the graph vs. the workflow.yaml it is generated from. */}
+            <div className="inline-flex rounded-md border border-border-light overflow-hidden">
+              <button
+                className={`${mode === "view" ? btnSmPrimary : btnSmSecondary} inline-flex items-center gap-1 rounded-none border-0`}
+                onClick={() => setMode("view")}
+                title="View the pipeline as a graph"
               >
-                {s.label}
-              </span>
-            ))}
+                <Eye size={14} /> View
+              </button>
+              <button
+                className={`${mode === "edit" ? btnSmPrimary : btnSmSecondary} inline-flex items-center gap-1 rounded-none border-0`}
+                onClick={() => setMode("edit")}
+                title="Edit the workflow.yaml text (the graph previews live)"
+              >
+                <Pencil size={14} /> Edit
+              </button>
+            </div>
             <div className="ml-auto flex items-center gap-2">
               <button
                 className={`${btnSmSecondary} inline-flex items-center gap-1`}
@@ -406,7 +436,54 @@ export default function WorkflowPage() {
             </div>
           )}
 
-          {!facts ? (
+          {mode === "edit" ? (
+            <div className="flex-1 min-h-0 flex gap-3">
+              {/* YAML editor — the source of truth the graph is generated from. */}
+              <div className="flex-1 min-w-0 flex flex-col rounded-lg border border-border-light bg-bg-card overflow-hidden">
+                <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border-light shrink-0">
+                  <h2 className="text-xs font-semibold uppercase tracking-wide text-text-secondary inline-flex items-center gap-1">
+                    <FileJson size={13} /> workflow.yaml
+                  </h2>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-text-tertiary">
+                      {steps.length} step(s) · {parseError ? "showing last good graph" : "live"}
+                    </span>
+                    <button
+                      className={`${btnSmSecondary} inline-flex items-center gap-1`}
+                      onClick={resetYaml}
+                      title="Reset to the bundled Dataset Dictation workflow"
+                    >
+                      <RotateCcw size={13} /> Reset
+                    </button>
+                  </div>
+                </div>
+                {parseError && (
+                  <div className="shrink-0 text-[11px] px-3 py-2 bg-error-bg text-error-text border-b border-border-light font-mono">
+                    {parseError}
+                  </div>
+                )}
+                <textarea
+                  className="flex-1 min-h-0 w-full text-[12px] leading-relaxed font-mono p-3 bg-bg-body text-text-primary focus:outline-none resize-none"
+                  value={yamlText}
+                  onChange={(e) => applyYaml(e.target.value)}
+                  spellCheck={false}
+                />
+              </div>
+              {/* Live preview: the graph generated from the YAML on the left. */}
+              <div className="flex-1 min-w-0 rounded-lg border border-border-light overflow-hidden relative">
+                <div className="absolute left-2 top-2 z-10 text-[11px] px-2 py-1 rounded bg-bg-card/80 border border-border-light text-text-secondary">
+                  Preview · {definition.name} v{definition.version}
+                </div>
+                <WorkflowGraph
+                  positioned={positioned}
+                  edges={edges}
+                  view={view}
+                  selectedId={selectedId}
+                  onSelect={(id) => setSelectedId(id || null)}
+                />
+              </div>
+            </div>
+          ) : !facts ? (
             <div className="flex-1 min-h-0 flex items-center justify-center text-sm text-text-tertiary px-6 text-center">
               {isRaw
                 ? "This folder has media but no info.json yet — click “Initialize as dataset” to create it, then edit its metadata and lay out the pipeline."
@@ -419,7 +496,7 @@ export default function WorkflowPage() {
               {/* Graph */}
               <div className="flex-1 min-w-0 rounded-lg border border-border-light overflow-hidden relative">
                 <div className="absolute left-2 top-2 z-10 text-[11px] px-2 py-1 rounded bg-bg-card/80 border border-border-light text-text-secondary">
-                  {readyCount} step(s) ready · {DICTATION_DEFINITION.yamlPath}
+                  {readyCount} step(s) ready · {definition.name} v{definition.version}
                 </div>
                 <WorkflowGraph
                   positioned={positioned}

@@ -8,7 +8,15 @@
 // `engine::recompute` does (when-guards → skipped, satisfied deps → ready). When
 // the `workflow_*` Tauri command twins land, they replace `seedFromDataset` +
 // the local `recompute` with the real run state — the graph and prompt code stay.
+//
+// The DAG itself is NOT hardcoded here: it is parsed from `workflow.yaml`-shaped
+// text (`parseDefinition`), so the Workflow page's editor can drive any pipeline.
+// Every layout/engine helper takes the parsed `steps` as a parameter.
 // ---------------------------------------------------------------------------
+
+import { load as loadYaml } from "js-yaml";
+
+import { DICTATION_YAML } from "./seed";
 
 /** The seven step states, mirroring `workflow::core::Status`. */
 export type StepStatus =
@@ -45,118 +53,166 @@ export interface StepDef {
   params?: Record<string, unknown>;
 }
 
-// The `dataset_dictation.yaml` DAG (docs/ai/workflow/dataset_dictation.yaml),
-// kept in topological-ish source order. Edges are derived from `dependsOn`.
-export const DICTATION_STEPS: StepDef[] = [
-  {
-    id: "ensure_model",
-    title: "Ensure STT model",
-    action: "model_status",
-    description: "Check model_status; download + load the preferred STT model if needed.",
-    dependsOn: [],
-  },
-  {
-    id: "create_dataset",
-    title: "Create dataset",
-    action: "dataset_create",
-    description: "Create the empty dictation dataset (or import an existing one).",
-    dependsOn: [],
-    params: { name: "my_dictation" },
-  },
-  {
-    id: "import_media",
-    title: "Import media",
-    action: "dataset_import_media",
-    description: "Copy audio/video files from a source directory into the dataset.",
-    dependsOn: ["create_dataset"],
-    params: { source_dir: "C:/path/to/audio", link: false },
-  },
-  {
-    id: "generate_subtitles",
-    title: "Generate subtitles",
-    action: "dataset_generate_subtitles",
-    description: "STT-transcribe every media file into VTT subtitles (long-running).",
-    dependsOn: ["ensure_model", "import_media"],
-  },
-  {
-    id: "generate_waveforms",
-    title: "Generate waveforms",
-    action: "dataset_generate_waveforms",
-    description: "Generate waveform JSON via Symphonia peak detection.",
-    dependsOn: ["import_media"],
-  },
-  {
-    id: "generate_database",
-    title: "Build cue database",
-    action: "dataset_generate_database",
-    description: "Parse VTT subtitles into listen_media / listen_subtitle / cue tables.",
-    dependsOn: ["generate_subtitles"],
-  },
-  {
-    id: "detect_reference",
-    title: "Detect reference",
-    action: "dataset_list_files",
-    description: "List dataset files to see whether book.txt and/or transcript/ exist.",
-    dependsOn: ["generate_database"],
-  },
-  {
-    id: "align_cues",
-    title: "Align cues (book)",
-    action: "dataset_align_cues",
-    description: "Align cue text against book.txt with multi-pass anchor DP matching.",
-    dependsOn: ["detect_reference"],
-    when: "hasBook",
-  },
-  {
-    id: "align_cues_transcript",
-    title: "Align cues (transcript)",
-    action: "dataset_align_cues_transcript",
-    description: "Align cue text against per-subtitle files in transcript/ instead.",
-    dependsOn: ["detect_reference"],
-    when: "hasTranscript",
-  },
-  {
-    id: "adjust_cue_times",
-    title: "Adjust cue times",
-    action: "dataset_adjust_cue_time",
-    description: "Snap cue boundaries to silence detected in the audio.",
-    dependsOn: ["generate_database"],
-    params: { mode: "new", strategy: "noise_floor" },
-  },
-  {
-    id: "validate",
-    title: "Validate",
-    action: "dataset_get_summary",
-    description: "Summarize counts and spot-check cues: subtitle per media, ordered cues.",
-    dependsOn: ["generate_waveforms", "align_cues", "align_cues_transcript", "adjust_cue_times"],
-  },
-  {
-    id: "mark_ready",
-    title: "Mark ready",
-    action: "dataset_info_update",
-    description: "Record final counts and note the dataset is processed and practice-ready.",
-    dependsOn: ["validate"],
-    params: { description: "Processed: subtitles + waveforms + cue DB generated and validated." },
-  },
+/** A parsed `workflow.yaml`: identity + the ordered step list. */
+export interface WorkflowDefinition {
+  name: string;
+  version: number;
+  steps: StepDef[];
+}
+
+// ---------------------------------------------------------------------------
+// YAML → StepDef parsing (the editor's source of truth)
+// ---------------------------------------------------------------------------
+
+/** Raw shape of one YAML step (engine `workflow.yaml` schema + UI-only `title`). */
+interface RawStep {
+  id?: unknown;
+  action?: unknown;
+  title?: unknown;
+  description?: unknown;
+  depends_on?: unknown;
+  dependsOn?: unknown;
+  when?: unknown;
+  params?: unknown;
+}
+
+/** `align_cues_transcript` → `Align cues transcript` (fallback node label). */
+function humanize(id: string): string {
+  const s = id.replace(/[_-]+/g, " ").trim();
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : id;
+}
+
+/** Substring (engine `when` form) → the `DatasetFacts` key the client evaluates. */
+const FACT_GUARDS: Array<[string, keyof DatasetFacts]> = [
+  ["has_media", "hasMedia"],
+  ["has_subtitles", "hasSubtitles"],
+  ["has_database", "hasDatabase"],
+  ["has_waveforms", "hasWaveforms"],
+  ["has_book", "hasBook"],
+  ["has_transcript", "hasTranscript"],
 ];
 
+const FACT_KEYS = new Set<string>([
+  "hasMedia",
+  "hasSubtitles",
+  "hasDatabase",
+  "hasWaveforms",
+  "hasBook",
+  "hasTranscript",
+]);
+
+/**
+ * Map an engine `when` guard onto a `DatasetFacts` key the client projection can
+ * evaluate. The engine form is an output reference (`${steps.x.outputs.has_book}`);
+ * we match the known disk-probe guards by substring, and also accept a bare
+ * `DatasetFacts` key. Anything the client can't resolve becomes `undefined` (the
+ * step is always active) — arbitrary output references are only resolvable from a
+ * real run's `state.json`, which this client projection does not read.
+ */
+function normalizeWhen(when: unknown): keyof DatasetFacts | undefined {
+  if (typeof when !== "string") return undefined;
+  const trimmed = when.trim();
+  if (FACT_KEYS.has(trimmed)) return trimmed as keyof DatasetFacts;
+  const lower = trimmed.toLowerCase();
+  for (const [needle, key] of FACT_GUARDS) {
+    if (lower.includes(needle)) return key;
+  }
+  return undefined;
+}
+
+function asStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((x): x is string => typeof x === "string");
+}
+
+/**
+ * Parse a `workflow.yaml`-shaped document into a [`WorkflowDefinition`].
+ * Throws an actionable `Error` on malformed YAML, a missing step `id`/`action`,
+ * duplicate ids, or a `depends_on` referencing an unknown step — the editor
+ * surfaces the message inline and keeps the last-good graph.
+ */
+export function parseDefinition(yamlText: string): WorkflowDefinition {
+  let doc: unknown;
+  try {
+    doc = loadYaml(yamlText);
+  } catch (e) {
+    throw new Error(`Invalid YAML: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+    throw new Error("Expected a mapping with `name`, `version` and `steps`.");
+  }
+  const root = doc as { name?: unknown; version?: unknown; steps?: unknown };
+  const rawSteps = Array.isArray(root.steps) ? (root.steps as RawStep[]) : [];
+  if (rawSteps.length === 0) {
+    throw new Error("`steps` is empty — add at least one step.");
+  }
+
+  const steps: StepDef[] = rawSteps.map((raw, i) => {
+    const id = typeof raw.id === "string" ? raw.id.trim() : "";
+    if (!id) throw new Error(`Step #${i + 1} is missing an \`id\`.`);
+    const action = typeof raw.action === "string" ? raw.action.trim() : "";
+    if (!action) throw new Error(`Step "${id}" is missing an \`action\`.`);
+    const step: StepDef = {
+      id,
+      title:
+        typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : humanize(id),
+      action,
+      description: typeof raw.description === "string" ? raw.description.trim() : "",
+      dependsOn: asStringArray(raw.depends_on ?? raw.dependsOn),
+    };
+    const when = normalizeWhen(raw.when);
+    if (when) step.when = when;
+    if (raw.params && typeof raw.params === "object" && !Array.isArray(raw.params)) {
+      step.params = raw.params as Record<string, unknown>;
+    }
+    return step;
+  });
+
+  const ids = new Set<string>();
+  for (const s of steps) {
+    if (ids.has(s.id)) throw new Error(`Duplicate step id "${s.id}".`);
+    ids.add(s.id);
+  }
+  for (const s of steps) {
+    for (const dep of s.dependsOn) {
+      if (!ids.has(dep)) {
+        throw new Error(`Step "${s.id}" depends on unknown step "${dep}".`);
+      }
+    }
+  }
+
+  return {
+    name: typeof root.name === "string" && root.name.trim() ? root.name.trim() : "workflow",
+    version: typeof root.version === "number" ? root.version : 1,
+    steps,
+  };
+}
+
+/** The bundled Dataset Dictation definition, parsed from its seed YAML. */
+export const DICTATION_PARSED: WorkflowDefinition = parseDefinition(DICTATION_YAML);
+
+/** Re-exported so the editor has a single import surface for the seed text. */
+export { DICTATION_YAML };
+
+/** Steps of the bundled dictation workflow — the editor's default document. */
+export const DICTATION_STEPS: StepDef[] = DICTATION_PARSED.steps;
+
 export const DICTATION_DEFINITION = {
-  name: "process_dictation_dataset",
-  version: 1,
+  name: DICTATION_PARSED.name,
+  version: DICTATION_PARSED.version,
   yamlPath: "docs/ai/workflow/dataset_dictation.yaml",
 };
 
-const byId = new Map(DICTATION_STEPS.map((s) => [s.id, s]));
-
-export function stepById(id: string): StepDef | undefined {
-  return byId.get(id);
+/** Look a step up by id within a step list. */
+export function stepById(id: string, steps: StepDef[]): StepDef | undefined {
+  return steps.find((s) => s.id === id);
 }
 
 /** Committed statuses the UI mutates directly; readiness is derived on top. */
 export type StatusMap = Record<string, StepStatus>;
 
 /** Kahn's algorithm over `dependsOn`; source order preserved on ties. */
-export function topoOrder(steps: StepDef[] = DICTATION_STEPS): string[] {
+export function topoOrder(steps: StepDef[]): string[] {
   const indeg = new Map<string, number>(steps.map((s) => [s.id, 0]));
   const adj = new Map<string, string[]>();
   for (const s of steps) {
@@ -197,9 +253,10 @@ function satisfied(st: StepStatus | undefined): boolean {
  * `skipped`; a `pending` step whose deps are all satisfied becomes `ready`.
  * Committed states (completed/failed/running/skipped) are left untouched.
  */
-export function recompute(committed: StatusMap, facts: DatasetFacts): StatusMap {
+export function recompute(committed: StatusMap, facts: DatasetFacts, steps: StepDef[]): StatusMap {
+  const byId = new Map(steps.map((s) => [s.id, s]));
   const out: StatusMap = {};
-  for (const id of topoOrder()) {
+  for (const id of topoOrder(steps)) {
     const step = byId.get(id)!;
     let st = committed[id] ?? "pending";
     if (st === "pending" && step.when && facts[step.when] === false) {
@@ -219,6 +276,9 @@ export function recompute(committed: StatusMap, facts: DatasetFacts): StatusMap 
  * determine current progress" path. Steps the dataset can't prove (align / adjust /
  * validate / mark_ready) stay `pending`; `recompute` then marks the guard-skippable
  * and dependency-ready ones. The user fine-tunes the rest from the graph.
+ *
+ * Dictation-flavoured: it seeds by well-known step id, so a custom workflow whose
+ * ids differ simply seeds nothing and starts from all-`pending`.
  */
 export function seedFromDataset(facts: DatasetFacts): StatusMap {
   const seed: StatusMap = {};
@@ -233,9 +293,9 @@ export function seedFromDataset(facts: DatasetFacts): StatusMap {
 }
 
 /** Empty status map — nothing run yet. */
-export function initialStatuses(): StatusMap {
+export function initialStatuses(steps: StepDef[]): StatusMap {
   const m: StatusMap = {};
-  for (const s of DICTATION_STEPS) m[s.id] = "pending";
+  for (const s of steps) m[s.id] = "pending";
   return m;
 }
 
@@ -262,9 +322,10 @@ const NODE_GAP_X = 250;
  * stable run to run. Each layer is centered on x, then the whole drawing is shifted
  * to non-negative coordinates.
  */
-export function layoutSteps(): PositionedStep[] {
+export function layoutSteps(steps: StepDef[]): PositionedStep[] {
+  const byId = new Map(steps.map((s) => [s.id, s]));
   const depth = new Map<string, number>();
-  for (const id of topoOrder()) {
+  for (const id of topoOrder(steps)) {
     const step = byId.get(id)!;
     const d = step.dependsOn.length === 0
       ? 0
@@ -272,11 +333,11 @@ export function layoutSteps(): PositionedStep[] {
     depth.set(id, d);
   }
 
-  const maxDepth = Math.max(0, ...DICTATION_STEPS.map((s) => depth.get(s.id) ?? 0));
+  const maxDepth = Math.max(0, ...steps.map((s) => depth.get(s.id) ?? 0));
   const xOf = new Map<string, number>();
 
   for (let layer = 0; layer <= maxDepth; layer++) {
-    const ordered = DICTATION_STEPS
+    const ordered = steps
       .map((step, i) => ({ step, i }))
       .filter(({ step }) => (depth.get(step.id) ?? 0) === layer)
       .map(({ step, i }) => {
@@ -297,7 +358,7 @@ export function layoutSteps(): PositionedStep[] {
 
   const placed = Array.from(xOf.values());
   const minX = placed.length ? Math.min(...placed) : 0;
-  return DICTATION_STEPS.map((step) => ({
+  return steps.map((step) => ({
     step,
     x: (xOf.get(step.id) ?? 0) - minX,
     y: (depth.get(step.id) ?? 0) * LAYER_GAP_Y,
@@ -311,17 +372,17 @@ export interface Edge {
 }
 
 /** Directed edges derived from every step's `dependsOn`. */
-export function buildEdges(): Edge[] {
+export function buildEdges(steps: StepDef[]): Edge[] {
   const edges: Edge[] = [];
-  for (const s of DICTATION_STEPS) {
+  for (const s of steps) {
     for (const d of s.dependsOn) edges.push({ id: `${d}->${s.id}`, source: d, target: s.id });
   }
   return edges;
 }
 
 /** The steps the agent should advance + execute, given the current derivation. */
-export function readyStepIds(view: StatusMap): string[] {
-  return topoOrder().filter((id) => view[id] === "ready");
+export function readyStepIds(view: StatusMap, steps: StepDef[]): string[] {
+  return topoOrder(steps).filter((id) => view[id] === "ready");
 }
 
 const STATUS_LABEL: Record<StepStatus, string> = {
@@ -348,16 +409,19 @@ export function buildPrompt(opts: {
   datasetUuid: string;
   runId: string;
   view: StatusMap;
+  steps: StepDef[];
+  definition: { name: string; version: number; yamlPath?: string };
 }): string {
-  const { datasetName, datasetUuid, runId, view } = opts;
-  const ready = readyStepIds(view);
-  const skipped = topoOrder().filter((id) => view[id] === "skipped");
-  const done = topoOrder().filter((id) => view[id] === "completed");
+  const { datasetName, datasetUuid, runId, view, steps, definition } = opts;
+  const ready = readyStepIds(view, steps);
+  const order = topoOrder(steps);
+  const skipped = order.filter((id) => view[id] === "skipped");
+  const done = order.filter((id) => view[id] === "completed");
 
   const lines: string[] = [];
-  lines.push(`Drive the dictation workflow for dataset "${datasetName}" (uuid ${datasetUuid}).`);
+  lines.push(`Drive the "${definition.name}" workflow for dataset "${datasetName}" (uuid ${datasetUuid}).`);
   lines.push("");
-  lines.push(`Definition: ${DICTATION_DEFINITION.yamlPath} (name: ${DICTATION_DEFINITION.name}, version: ${DICTATION_DEFINITION.version}).`);
+  lines.push(`Definition: ${definition.yamlPath ?? definition.name} (name: ${definition.name}, version: ${definition.version}).`);
   lines.push(`Run id: ${runId}`);
   lines.push("");
   lines.push("Steps already known complete on disk (do NOT re-run unless I ask): " + (done.length ? done.join(", ") : "none") + ".");
@@ -372,7 +436,7 @@ export function buildPrompt(opts: {
   if (ready.length > 0) {
     lines.push("Start with these ready steps now:");
     for (const id of ready) {
-      const s = stepById(id)!;
+      const s = stepById(id, steps)!;
       const params = s.params ? ` — params: ${JSON.stringify(s.params)}` : "";
       lines.push(`  - ${id}: ${s.action} (${s.description})${params}`);
     }
