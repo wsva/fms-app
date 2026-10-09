@@ -29,7 +29,7 @@ import {
   buildPrompt,
   statusLabel,
 } from "@/lib/workflow/steps";
-import { RefreshCw, Workflow as WorkflowIcon, Play, RotateCcw, SkipForward, Check, Copy, Send, Plus, FileJson, Save } from "lucide-react";
+import { RefreshCw, Workflow as WorkflowIcon, Play, RotateCcw, SkipForward, Check, Copy, Send, Plus, FileJson, Save, FolderSync } from "lucide-react";
 
 // react-flow touches browser layout APIs on mount; keep it out of the SSG pass.
 const WorkflowGraph = dynamic(() => import("./WorkflowGraph"), { ssr: false });
@@ -60,6 +60,7 @@ export default function WorkflowPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [initing, setIniting] = useState(false);
+  const [reloading, setReloading] = useState(false);
   const [notice, setNotice] = useState<string>("");
   const [prompt, setPrompt] = useState("");
   const [infoText, setInfoText] = useState("");
@@ -97,12 +98,13 @@ export default function WorkflowPage() {
 
   // ---- Load dictation datasets ----
   // `dataset_list` already scans only the dictation roots, so every entry is a
-  // dictation dataset (ready AND not_ready). Favorites is internal — hide it. A
-  // raw media folder that was never imported has an EMPTY uuid (it isn't a
-  // dataset yet); keep it visible but disabled rather than letting its "" option
-  // collide with the placeholder and silently block selection.
-  const fetchDatasets = useCallback(async () => {
-    if (!isTauri()) return;
+  // dictation dataset (ready AND not_ready). Favorites is internal — hide it. A raw
+  // media folder that was never imported has an EMPTY uuid, so it is keyed by path
+  // in the picker (see `selectedKey`) and offered the in-place Initialize action.
+  // Returns the list it stored so callers can reconcile against it without waiting
+  // for the state to commit.
+  const fetchDatasets = useCallback(async (): Promise<DatasetSummary[] | null> => {
+    if (!isTauri()) return null;
     try {
       const res = await invoke<DatasetSummary[]>("dataset_list");
       appendLog(`dataset_list returned ${res.length} entr(ies):`);
@@ -115,14 +117,16 @@ export default function WorkflowPage() {
       const noUuid = kept.filter((d) => !d.info.uuid);
       if (noUuid.length) {
         appendLog(
-          `${noUuid.length} folder(s) have no uuid (not imported yet) — shown but disabled: ${noUuid.map((d) => d.info.name).join(", ")}`,
+          `${noUuid.length} folder(s) have no uuid (not imported yet) — selectable, but need Initialize first: ${noUuid.map((d) => d.info.name).join(", ")}`,
           "WARN",
         );
       }
       setDatasets(kept);
+      return kept;
     } catch (e) {
       appendLog(`dataset_list failed: ${String(e)}`, "ERROR");
       setNotice(`Failed to list datasets: ${String(e)}`);
+      return null;
     }
   }, [appendLog]);
 
@@ -146,6 +150,17 @@ export default function WorkflowPage() {
     setInfoText(JSON.stringify(detail.info, null, 2));
     setPrompt("");
     return probed;
+  }, []);
+
+  // Drop everything derived from the current selection. Used when the choice stops
+  // being valid: an explicit switch, or a reload that finds the dataset moved.
+  const clearView = useCallback(() => {
+    setFacts(null);
+    setCommitted(initialStatuses());
+    setSelectedId(null);
+    setPrompt("");
+    setInfoText("");
+    setInfoOpen(false);
   }, []);
 
   const scan = useCallback(async () => {
@@ -179,6 +194,8 @@ export default function WorkflowPage() {
       const summary = await invoke<DatasetSummary>("dataset_init_dir", { path: selectedPath });
       appendLog(`init ok: uuid='${summary.info.uuid}'`);
       await fetchDatasets();
+      // Tell the rest of the app a dataset appeared (StudioPage re-lists on this).
+      await emit("dataset-list-changed", {});
       setSelectedKey(summary.info.uuid);
       await loadDataset(summary.info.uuid);
       setInfoOpen(true);
@@ -200,12 +217,65 @@ export default function WorkflowPage() {
       const saved = await invoke<DatasetInfo>("dataset_info_save", { uuid: selectedUuid, content: infoText });
       setInfoText(JSON.stringify(saved, null, 2));
       appendLog("info save ok");
+      await emit("dataset-list-changed", {});
       setNotice("info.json saved.");
     } catch (e) {
       appendLog(`info save failed: ${String(e)}`, "ERROR");
       setNotice(`Save failed: ${String(e)}`);
     } finally {
       setSavingInfo(false);
+    }
+  };
+
+  // ---- Reload the dataset list from disk ----
+  // A dataset's uuid can change underneath us (its info.json edited by hand), and
+  // every lookup resolves *by uuid* — so the cached list, the current selection and
+  // any scanned state silently go stale, and the generated prompt would carry the
+  // old id. Re-list, then reconcile: the folder path is the stable identity here, so
+  // a dataset found at the same path under a different uuid is re-pointed at and
+  // re-scanned — which is what puts the correct uuid into the next prompt (its run id
+  // follows the uuid, so an already-created run dir is now orphaned).
+  const handleReload = async () => {
+    if (!isTauri()) return;
+    const prev = selectedDataset;
+    const prevKey = selectedKey;
+    setReloading(true);
+    try {
+      const kept = await fetchDatasets();
+      if (!kept) return;
+      // Broadcast the re-list so pages that cache the dataset list (Studio) drop
+      // their stale uuids too, not just this one.
+      await emit("dataset-list-changed", {});
+      if (!prev || kept.some((d) => (d.info.uuid || d.path) === prevKey)) {
+        setNotice(`Reloaded ${kept.length} dataset(s) from disk.`);
+        return;
+      }
+
+      const renamed = kept.find((d) => d.path === prev.path && d.info.uuid);
+      clearView();
+      if (!renamed) {
+        setSelectedKey("");
+        appendLog(`reload: selection '${prevKey}' is no longer listed`, "WARN");
+        setNotice("The selected dataset is no longer on disk — pick another one.");
+        return;
+      }
+
+      setSelectedKey(renamed.info.uuid);
+      appendLog(
+        `reload: uuid at path '${renamed.path}' is now '${renamed.info.uuid}' (was '${prev.info.uuid}')`,
+      );
+      try {
+        await loadDataset(renamed.info.uuid);
+      } catch (e) {
+        appendLog(`reload: re-scan failed for '${renamed.info.uuid}': ${String(e)}`, "ERROR");
+        setNotice(`Reloaded, but the re-scan failed: ${String(e)}`);
+        return;
+      }
+      setNotice(
+        `Dataset uuid changed on disk: “${renamed.info.name}” is now ${renamed.info.uuid}. Re-scanned — regenerate the prompt, since the run id follows the uuid.`,
+      );
+    } finally {
+      setReloading(false);
     }
   };
 
@@ -277,6 +347,15 @@ export default function WorkflowPage() {
               </span>
             ))}
             <div className="ml-auto flex items-center gap-2">
+              <button
+                className={`${btnSmSecondary} inline-flex items-center gap-1`}
+                onClick={handleReload}
+                disabled={reloading}
+                title="Re-read the dataset list from disk (picks up an info.json whose uuid was edited by hand)"
+              >
+                <FolderSync size={14} className={reloading ? "animate-spin" : undefined} />
+                Reload
+              </button>
               <select
                 className="px-2 py-1 text-sm rounded-md bg-bg-body border border-border-light text-text-primary focus:border-accent outline-none min-w-[220px]"
                 value={selectedKey}
@@ -285,13 +364,8 @@ export default function WorkflowPage() {
                   setSelectedKey(key);
                   // Clear the derived view only on an explicit user switch, so a
                   // programmatic re-select after "Initialize" is not wiped.
-                  setFacts(null);
-                  setCommitted(initialStatuses());
-                  setSelectedId(null);
-                  setPrompt("");
+                  clearView();
                   setNotice("");
-                  setInfoText("");
-                  setInfoOpen(false);
                   appendLog(`selection changed to '${key}'`);
                 }}
                 disabled={scanning || initing}
