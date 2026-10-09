@@ -15,7 +15,11 @@ const nextConfig = {
   },
 
   // Configure assetPrefix or else the server won't properly resolve your assets.
-  assetPrefix: isProd ? undefined : `http://${internalHost}:30000`,
+  assetPrefix: isProd ? undefined: `http://${internalHost}:30000`,
+
+  // @xyflow/react ships ESM that the Workflow page imports; transpile it so the
+  // static-export prerender resolves its modules the same way as on the client.
+  transpilePackages: ['@xyflow/react'],
 };
 
 export default nextConfig;

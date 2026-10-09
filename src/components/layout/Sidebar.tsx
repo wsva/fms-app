@@ -26,6 +26,7 @@ import {
   Type,
   ArrowUpDown,
   Users,
+  Workflow,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 
@@ -35,6 +36,7 @@ export type TabId =
   | "read-aloud"
   | "cards"
   | "studio"
+  | "workflow"
   | "datasets-sync"
   | "devices-hub"
   | "simple-words"
@@ -70,6 +72,7 @@ const navGroups: NavGroup[] = [
     tabs: [
       { id: "workspaces", label: "Workspaces", icon: FolderKanban },
       { id: "studio", label: "Dataset Studio", icon: SlidersHorizontal },
+      { id: "workflow", label: "Workflow", icon: Workflow },
       { id: "devices-hub", label: "Devices & Hub", icon: Users },
       { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown },
       { id: "chat", label: "Cross-Device Chat", icon: MessagesSquare },

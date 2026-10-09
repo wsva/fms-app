@@ -415,6 +415,12 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
     };
 
     reg<AgentStatus>("agent-status", (p) => setStatus(p));
+    // Another page (e.g. the Workflow page) hands us a reviewed prompt: load it
+    // into the input and bring the dock forward, but let the user do the send.
+    reg<{ text: string }>("agent-prefill", (p) => {
+      if (p?.text) setInput(p.text);
+      setOpen(true, false);
+    });
     reg<AgentMessageChunk>("agent-message-chunk", (p) => {
       appendStream("agent", p.text);
       markAgentOutput();
