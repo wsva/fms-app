@@ -15,7 +15,7 @@ interface PcDataset {
   uuid: string;
   name: string;
   updated: string;
-  /** One of "dictation" | "card" | "book" | "read_aloud" — drives section grouping. */
+  /** One of "dictation" | "card" | "book" | "read_aloud" | "wiki" — drives section grouping. */
   dataset_type: string;
   media_count: number;
   status: string;
@@ -143,7 +143,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   // page never mutates it directly, it reloads after each round/action.
   const [status, setStatus] = useState<SyncStatusDetail | null>(null);
 
-  // Which dataset section is shown (Dictation / Cards / Books / Read). Exposed
+  // Which dataset section is shown (Dictation / Cards / Books / Read / Wiki). Exposed
   // as tabs instead of stacked vertically, which keeps the narrow Android screen
   // and the desktop page alike from turning into an endless scroll.
   const [activeSection, setActiveSection] = useState<string>("dictation");
@@ -356,6 +356,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     if (ds.dataset_type === "card") return `${ds.media_count} cards`;
     if (ds.dataset_type === "read_aloud") return `${ds.media_count} texts`;
     if (ds.dataset_type === "book") return "book";
+    if (ds.dataset_type === "wiki") return `${ds.media_count} files`;
     return `${ds.media_count} media`;
   }
 
@@ -457,14 +458,17 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   // cards so it can offer "remove local copy" without appearing as a source.
   const removedLocal = (status?.datasets ?? []).filter((d) => d.state === "removed_on_hub");
 
-  // Datasets grouped into the four sync sections, in display order. A local
+  // Datasets grouped into the sync sections, in display order. A local
   // copy with no hub catalog entry carries an empty `dataset_type`, so it is
   // caught by the Dictation bucket and rendered with its removed-on-hub badge.
+  // Wiki datasets are syncable markdown trees — the hub serves them in the same
+  // catalog, so they need a bucket of their own rather than a new transport.
   const sections: { key: string; label: string; items: PcDataset[] }[] = [
     { key: "dictation", label: "Dictation", items: pcDatasets.filter((d) => d.dataset_type === "dictation" || d.dataset_type === "") },
     { key: "card", label: "Cards", items: pcDatasets.filter((d) => d.dataset_type === "card") },
     { key: "book", label: "Books", items: pcDatasets.filter((d) => d.dataset_type === "book") },
     { key: "read_aloud", label: "Read", items: pcDatasets.filter((d) => d.dataset_type === "read_aloud") },
+    { key: "wiki", label: "Wiki", items: pcDatasets.filter((d) => d.dataset_type === "wiki") },
   ];
 
   return (
@@ -618,7 +622,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
             )}
             {pcDatasets.length > 0 && (
               <>
-                {/* Section tabs: Dictation / Cards / Books / Read. Only the
+                {/* Section tabs: Dictation / Cards / Books / Read / Wiki. Only the
                     active section's datasets are listed. */}
                 <div className="shrink-0 flex gap-1 border-b border-border-default">
                   {sections.map((section) => (

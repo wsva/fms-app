@@ -1014,7 +1014,7 @@ pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<P
 }
 
 /// Find a dataset directory by UUID across every dataset type (dictation, card,
-/// book, read-aloud). Returns the resolved path together with its type so
+/// book, read-aloud, wiki). Returns the resolved path together with its type so
 /// callers — the REST manifest/snapshot endpoints and the sync client — know
 /// both where the dataset lives and which local root it belongs to.
 ///

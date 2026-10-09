@@ -211,11 +211,11 @@ struct DatasetListItem {
     uuid: String,
     name: String,
     updated: String,
-    /// One of `dictation` | `card` | `book` | `read_aloud` — lets the follower
+    /// One of `dictation` | `card` | `book` | `read_aloud` | `wiki` — lets the follower
     /// group the list and know which local root to unpack a snapshot into.
     dataset_type: String,
     /// Dictation: media file count. Card: card count. Read-aloud: text count.
-    /// Book: 0 (not tracked). Zeroed under `?lite=1` (the incremental sync round
+    /// Wiki: markdown file count. Book: 0 (not tracked). Zeroed under `?lite=1` (the incremental sync round
     /// only needs uuid + type + updated, so counting rows per dataset is wasted
     /// work).
     media_count: usize,
@@ -324,7 +324,7 @@ struct Manifest {
     total_bytes: u64,
     overall_hash: String,
     updated_at: String,
-    /// Dataset type (`dictation` | `card` | `book` | `read_aloud`) so the
+    /// Dataset type (`dictation` | `card` | `book` | `read_aloud` | `wiki`) so the
     /// follower unpacks the snapshot into the matching local root.
     #[serde(default)]
     dataset_type: String,
