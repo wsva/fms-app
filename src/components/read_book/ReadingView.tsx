@@ -674,7 +674,7 @@ export default function ReadingView({ books, sidebar }: Props) {
             className={bookBtnClass(bookUUID === book.uuid)}
             onClick={() => setBookUUID(bookUUID === book.uuid ? "" : book.uuid)}
           >
-            <BookOpen size={16} /> {book.title}
+            <BookOpen size={16} /> {book.name}
           </button>
           {bookUUID === book.uuid && flatChapters.length > 0 && (
             <div className="ml-2 mt-0.5 mb-1 flex flex-col gap-0.5 border-l-2 border-border-default pl-2">

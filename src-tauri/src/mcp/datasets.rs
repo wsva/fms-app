@@ -63,12 +63,23 @@ struct DatasetCreateParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
-struct DatasetUpdateParam {
+struct DatasetInfoUpdateParam {
     uuid: String,
+    /// Empty means "leave this field alone" — the same convention every other
+    /// update tool here uses, so an agent can set one field without resending
+    /// the rest.
     #[serde(default)]
     name: String,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    language: String,
+    /// `"private"` | `"shared"` | `"public"`. Sets `sharing.visibility`.
+    #[serde(default)]
+    visibility: String,
+    /// Sets `sharing.owner_id` (the account that may push this dataset).
+    #[serde(default)]
+    owner_id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -104,38 +115,57 @@ fn collect_files_recursive(
     }
 }
 
+/// `dataset_list` entry: the whole unified descriptor, plus the three things only
+/// a local scan can say — where the dataset is, which root it came from, and
+/// whether its primary store exists. Every type gets the same keys, so a caller
+/// needs no per-type schema.
+fn list_entry(
+    info: &datasets::DatasetInfo,
+    path: &std::path::Path,
+    location: &str,
+    is_wiki: bool,
+) -> serde_json::Value {
+    let mut v = serde_json::to_value(info).unwrap_or_else(|_| serde_json::json!({}));
+    // Wiki datasets hold their content in `.md` files and have no database by
+    // design, so absence of `data.sqlite3` is not "not ready" for them.
+    let status = if is_wiki || path.join("data.sqlite3").exists() {
+        "ready"
+    } else {
+        "not_ready"
+    };
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("path".into(), serde_json::json!(path.to_string_lossy()));
+        obj.insert("location".into(), serde_json::json!(location));
+        obj.insert("status".into(), serde_json::json!(status));
+    }
+    v
+}
+
 #[tool_router(router = datasets_router, vis = "pub(crate)")]
 impl DatasetMcpServer {
-    #[tool(name = "dataset_list", description = "List all datasets with their UUID, name, description, status, and path")]
+    #[tool(name = "dataset_list", description = "List every dataset of every type (dictation, card, book, read_aloud, wiki). Each entry carries the unified info.json fields (uuid, type, format, name, description, language, created_at, updated_at, sharing) plus path, location and status on this machine.")]
     async fn dataset_list(&self) -> String {
         log::info!("[MCP] dataset_list called");
         let settings = self.app.state::<SettingsState>();
-        let datasets = datasets::list_datasets(&settings);
-        let items: Vec<serde_json::Value> = datasets
+        let items: Vec<serde_json::Value> = datasets::DatasetType::ALL
             .iter()
-            .map(|d| {
-                serde_json::json!({
-                    "uuid": d.info.uuid,
-                    "name": d.info.name,
-                    "description": d.info.description,
-                    "status": d.status,
-                    "media_count": d.media_count,
-                    "path": d.path,
-                })
+            .flat_map(|ty| {
+                let is_wiki = *ty == datasets::DatasetType::Wiki;
+                datasets::scan_datasets(&settings, *ty)
+                    .into_iter()
+                    .map(move |d| list_entry(&d.info, &d.path, &d.location, is_wiki))
             })
             .collect();
         serde_json::to_string_pretty(&items).unwrap_or_default()
     }
 
-    #[tool(name = "dataset_get", description = "Get detailed info about a dataset: info.json contents and which artifacts exist")]
+    #[tool(name = "dataset_get", description = "Get detailed info about a dictation dataset: info.json contents and which artifacts exist")]
     async fn dataset_get(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::info!("[MCP] dataset_get: uuid={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
         let dir = datasets::find_dataset_dir(&settings, &param.uuid).map_err(|e| e)?;
-        let info_text =
-            std::fs::read_to_string(dir.join("info.json")).map_err(|e| e.to_string())?;
+        let info = datasets::read_info(&dir).map_err(|e| e)?;
         let has = |p: &str| dir.join(p).exists();
-        let info: serde_json::Value = serde_json::from_str(&info_text).unwrap_or(serde_json::json!({}));
         Ok(serde_json::json!({
             "info": info,
             "artifacts": {
@@ -147,6 +177,25 @@ impl DatasetMcpServer {
                 "transcript": has("transcript")
             }
         }).to_string())
+    }
+
+    #[tool(name = "dataset_info_get", description = "Read a dataset's unified info.json descriptor, whatever its type: spec, uuid, type, format, name, description, language, created_at, updated_at, sharing (visibility, owner_id, subscribers), plus its path and location on this machine.")]
+    async fn dataset_info_get(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_info_get: uuid={}", param.uuid);
+        let settings = self.app.state::<SettingsState>();
+        let (dir, _) = datasets::find_dataset_dir_typed(&settings, &param.uuid)?;
+        let info = datasets::read_info(&dir)?;
+        let location = dir
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Ok(serde_json::to_string_pretty(&list_entry(
+            &info,
+            &dir,
+            &location,
+            info.dataset_type == datasets::DatasetType::Wiki,
+        ))
+        .map_err(|e| e.to_string())?)
     }
 
     #[tool(name = "dataset_read_file", description = "Read a file from a dataset directory (e.g. info.json, a VTT subtitle, book.txt)")]
@@ -492,14 +541,45 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&summary).unwrap_or_default())
     }
 
-    #[tool(name = "dataset_update", description = "Update a dataset's name and/or description.")]
-    async fn dataset_update(&self, Parameters(param): Parameters<DatasetUpdateParam>) -> Result<String, String> {
-        log::info!("[MCP] dataset_update: uuid={}", param.uuid);
+    #[tool(name = "dataset_info_update", description = "Update a dataset's info.json metadata — any type. Settable: name, description, language, visibility ('private' | 'shared' | 'public') and owner_id. Empty fields are left unchanged. 'subscribers' is deliberately not settable: the website owns it and a local edit would dirty the dataset for every follower.")]
+    async fn dataset_info_update(
+        &self,
+        Parameters(param): Parameters<DatasetInfoUpdateParam>,
+    ) -> Result<String, String> {
+        log::info!("[MCP] dataset_info_update: uuid={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
-        let name = if param.name.is_empty() { None } else { Some(param.name) };
-        let desc = if param.description.is_empty() { None } else { Some(param.description) };
-        datasets::dataset_update(settings, param.uuid, name, desc).await?;
-        Ok(serde_json::json!({"status": "ok", "message": "Dataset updated"}).to_string())
+        let (dir, ty) = datasets::find_dataset_dir_typed(&settings, &param.uuid)?;
+        let mut info = datasets::read_info(&dir)?;
+        if !param.name.is_empty() {
+            info.name = param.name.clone();
+        }
+        if !param.description.is_empty() {
+            info.description = param.description.clone();
+        }
+        if !param.language.is_empty() {
+            info.language = param.language.clone();
+        }
+        if !param.visibility.is_empty() {
+            if !matches!(param.visibility.as_str(), "private" | "shared" | "public") {
+                return Err(format!(
+                    "Invalid visibility '{}' (expected private, shared or public)",
+                    param.visibility
+                ));
+            }
+            info.sharing.visibility = param.visibility.clone();
+        }
+        if !param.owner_id.is_empty() {
+            info.sharing.owner_id = param.owner_id.clone();
+        }
+        info.updated_at = datasets::now_stamp();
+        datasets::write_info(&dir, &info)?;
+        let _ = self.app.emit("dataset-list-changed", ());
+        log::info!(
+            "[MCP] dataset_info_update: {} ({}) updated",
+            param.uuid,
+            ty.as_str()
+        );
+        Ok(serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?)
     }
 
     #[tool(name = "dataset_delete", description = "Delete a dataset and all its files. This is irreversible — the dataset directory is removed from disk.")]

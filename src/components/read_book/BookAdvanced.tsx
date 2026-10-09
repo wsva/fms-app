@@ -216,7 +216,7 @@ export default function BookAdvanced({ books }: Props) {
           <option value="">Select a book...</option>
           {books.map((b) => (
             <option key={b.uuid} value={b.uuid}>
-              {b.title}
+              {b.name}
             </option>
           ))}
         </select>
@@ -232,7 +232,7 @@ export default function BookAdvanced({ books }: Props) {
             </h2>
           </div>
           <p className="text-sm text-text-secondary">
-            Walk through all sentences in <strong>{selectedBook.title}</strong> that have no
+            Walk through all sentences in <strong>{selectedBook.name}</strong> that have no
             vocabulary words yet, and generate words for each one using the LLM.
           </p>
 

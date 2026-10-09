@@ -2,13 +2,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
-use chrono::Utc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
 
-use crate::datasets::{dataset_roots, DatasetType};
+use crate::datasets::{
+    assert_uuid_free, dataset_roots, now_stamp, read_info, read_info_opt, write_info, DatasetInfo,
+    DatasetType, FORMAT_BOOK, INFO_FILE,
+};
 use crate::settings::SettingsState;
 
 // ============================================================
@@ -19,21 +21,12 @@ use crate::settings::SettingsState;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BookMeta {
     pub uuid: String,
-    pub title: String,
+    /// Display name — the `name` field of the dataset's `info.json`.
+    pub name: String,
     /// Absolute filesystem path of the book directory.
     pub path: String,
     pub created_at: String,
     pub updated_at: String,
-}
-
-/// Contents of a book directory's `info.json`.
-#[derive(Clone, Serialize, Deserialize)]
-struct BookInfoFile {
-    uuid: String,
-    title: String,
-    structure: String,
-    created_at: String,
-    updated_at: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -90,8 +83,6 @@ pub struct AudioWriteResult {
     pub abs_path: String,
 }
 
-const BOOK_STRUCTURE: &str = "reading-v1";
-
 // ============================================================
 // Helpers
 // ============================================================
@@ -110,22 +101,10 @@ fn find_book_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String
         let entries = fs::read_dir(&root).map_err(|e| e.to_string())?;
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
+            if !path.is_dir() || !path.join(INFO_FILE).exists() {
                 continue;
             }
-            let info_path = path.join("info.json");
-            if !info_path.exists() {
-                continue;
-            }
-            let data = match fs::read_to_string(&info_path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            let info: BookInfoFile = match serde_json::from_str(&data) {
-                Ok(i) => i,
-                Err(_) => continue,
-            };
-            if info.uuid == uuid {
+            if read_info_opt(&path).map(|i| i.uuid).as_deref() == Some(uuid) {
                 return Ok(path);
             }
         }
@@ -180,11 +159,6 @@ fn open_book_db(book_dir: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
-fn read_book_info(book_dir: &Path) -> Result<BookInfoFile, String> {
-    let data = fs::read_to_string(book_dir.join("info.json")).map_err(|e| e.to_string())?;
-    serde_json::from_str(&data).map_err(|e| e.to_string())
-}
-
 /// Resolve a stored relative audio path to an absolute path for playback.
 fn resolve_audio_url(book_dir: &Path, audio_path: &Option<String>) -> Option<String> {
     audio_path
@@ -235,16 +209,16 @@ pub(crate) fn list_books(settings: &SettingsState) -> Vec<BookMeta> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() || !path.join("info.json").exists() {
+            if !path.is_dir() || !path.join(INFO_FILE).exists() {
                 continue;
             }
-            if let Ok(info) = read_book_info(&path) {
-                if info.structure != BOOK_STRUCTURE {
+            if let Some(info) = read_info_opt(&path) {
+                if info.dataset_type != DatasetType::Book {
                     continue;
                 }
                 books.push(BookMeta {
                     uuid: info.uuid,
-                    title: info.title,
+                    name: info.name,
                     path: path.to_string_lossy().into_owned(),
                     created_at: info.created_at,
                     updated_at: info.updated_at,
@@ -252,7 +226,7 @@ pub(crate) fn list_books(settings: &SettingsState) -> Vec<BookMeta> {
             }
         }
     }
-    books.sort_by(|a, b| a.title.cmp(&b.title));
+    books.sort_by(|a, b| a.name.cmp(&b.name));
     books
 }
 
@@ -260,10 +234,10 @@ pub(crate) fn list_books(settings: &SettingsState) -> Vec<BookMeta> {
 #[tauri::command]
 pub async fn book_create(
     settings: State<'_, SettingsState>,
-    title: String,
+    name: String,
 ) -> Result<BookMeta, String> {
-    if title.trim().is_empty() {
-        return Err("Title is required".into());
+    if name.trim().is_empty() {
+        return Err("Book name is required".into());
     }
     let root = book_roots(&settings)
         .into_iter()
@@ -272,8 +246,8 @@ pub async fn book_create(
     fs::create_dir_all(&root).map_err(|e| format!("Failed to create books dir: {}", e))?;
 
     let uuid = Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
-    let base_name = sanitize_dir_name(&title);
+    assert_uuid_free(&settings, &uuid)?;
+    let base_name = sanitize_dir_name(&name);
 
     let mut dst = root.join(&base_name);
     if dst.exists() {
@@ -282,45 +256,36 @@ pub async fn book_create(
 
     fs::create_dir_all(dst.join("media")).map_err(|e| e.to_string())?;
 
-    let info = BookInfoFile {
-        uuid: uuid.clone(),
-        title: title.clone(),
-        structure: BOOK_STRUCTURE.into(),
-        created_at: now.clone(),
-        updated_at: now.clone(),
-    };
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(dst.join("info.json"), data).map_err(|e| e.to_string())?;
+    let info = DatasetInfo::new(uuid.clone(), DatasetType::Book, FORMAT_BOOK, name.clone());
+    write_info(&dst, &info)?;
 
     // Initialize the database schema.
     open_book_db(&dst)?;
 
     Ok(BookMeta {
         uuid,
-        title,
+        name,
         path: dst.to_string_lossy().into_owned(),
-        created_at: now.clone(),
-        updated_at: now,
+        created_at: info.created_at.clone(),
+        updated_at: info.updated_at,
     })
 }
 
-/// Rename a book (updates info.json title; directory name is unchanged).
+/// Rename a book (updates info.json `name`; directory name is unchanged).
 #[tauri::command]
 pub async fn book_rename(
     settings: State<'_, SettingsState>,
     uuid: String,
-    title: String,
+    name: String,
 ) -> Result<(), String> {
-    if title.trim().is_empty() {
-        return Err("Title is required".into());
+    if name.trim().is_empty() {
+        return Err("Book name is required".into());
     }
     let dir = find_book_dir(&settings, &uuid)?;
-    let mut info = read_book_info(&dir)?;
-    info.title = title;
-    info.updated_at = Utc::now().to_rfc3339();
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(dir.join("info.json"), data).map_err(|e| e.to_string())?;
-    Ok(())
+    let mut info = read_info(&dir)?;
+    info.name = name;
+    info.updated_at = now_stamp();
+    write_info(&dir, &info)
 }
 
 /// Delete a book and its entire directory.

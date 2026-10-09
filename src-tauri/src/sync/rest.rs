@@ -247,7 +247,7 @@ async fn datasets_list(
         items.push(DatasetListItem {
             uuid: d.info.uuid,
             name: d.info.name,
-            updated: d.info.updated,
+            updated: d.info.updated_at,
             dataset_type: "dictation".into(),
             media_count: if lite { 0 } else { d.media_count },
             status: d.status,
@@ -262,7 +262,7 @@ async fn datasets_list(
         items.push(DatasetListItem {
             uuid: d.info.uuid,
             name: d.info.name,
-            updated: d.info.updated,
+            updated: d.info.updated_at,
             dataset_type: "card".into(),
             media_count: if lite { 0 } else { d.card_count },
             status: "ready".into(),
@@ -276,7 +276,7 @@ async fn datasets_list(
         }
         items.push(DatasetListItem {
             uuid: b.uuid,
-            name: b.title,
+            name: b.name,
             updated: b.updated_at,
             dataset_type: "book".into(),
             media_count: 0,
@@ -397,8 +397,9 @@ fn cached_file_hash(
 
 /// Compute the manifest over the **non-DB** file set: file count, total bytes,
 /// a per-file `sha256` map, and an `overall_hash` folded from those hashes so
-/// it is a fast "nothing changed" short-circuit. `updated_at` comes from
-/// info.json when present.
+/// it is a fast "nothing changed" short-circuit. `updated_at` and `dataset_type`
+/// come from the shared `info.json` descriptor when one parses (a raw-import
+/// folder or a pre-migration file leaves both empty).
 fn compute_manifest(
     dir: &Path,
     dataset_uuid: &str,
@@ -429,19 +430,17 @@ fn compute_manifest(
     }
     let overall_hash = format!("{:x}", overall.finalize());
 
-    let info_path = dir.join("info.json");
-    let updated_at = std::fs::read_to_string(&info_path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("updated").and_then(|u| u.as_str()).map(String::from))
-        .unwrap_or_default();
+    let (updated_at, dataset_type) = match datasets::read_info(dir).ok() {
+        Some(info) => (info.updated_at, info.dataset_type.as_str().to_string()),
+        None => (String::new(), String::new()),
+    };
 
     Manifest {
         file_count: files.len(),
         total_bytes,
         overall_hash,
         updated_at,
-        dataset_type: String::new(),
+        dataset_type,
         files: map,
     }
 }

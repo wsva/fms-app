@@ -1,11 +1,11 @@
 use std::fs;
 
-use chrono::Utc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::datasets::cards::{find_card_dataset_dir, open_card_db, CardDatasetInfo};
+use crate::datasets::cards::{find_card_dataset_dir, open_card_db};
+use crate::datasets::touch_info;
 use crate::settings::SettingsState;
 
 // ---------------------------------------------------------------------------
@@ -79,16 +79,20 @@ pub struct SyncResult {
 // Sync Logic
 // ---------------------------------------------------------------------------
 
+// The origin is the compile-time `crate::auth::BASE_URL` — the same origin login is
+// verified against — and never a per-dataset field. These requests carry the OAuth
+// bearer token, so a `sync_url` inside an imported `info.json` could have sent that
+// token to a server of the importer's choosing.
+
 /// Pull changes from the online server for a dataset.
 async fn pull_changes(
-    sync_url: &str,
     dataset_uuid: &str,
     since: &str,
     access_token: &str,
 ) -> Result<SyncPullResponse, String> {
     let url = format!(
         "{}/api/card/sync/pull?dataset_uuid={}&since={}",
-        sync_url.trim_end_matches('/'),
+        crate::auth::BASE_URL.trim_end_matches('/'),
         dataset_uuid,
         since,
     );
@@ -113,14 +117,13 @@ async fn pull_changes(
 
 /// Push local changes to the online server.
 async fn push_changes(
-    sync_url: &str,
     dataset_uuid: &str,
     changes: &SyncPushRequest,
     access_token: &str,
 ) -> Result<SyncPushResponse, String> {
     let url = format!(
         "{}/api/card/sync/push?dataset_uuid={}",
-        sync_url.trim_end_matches('/'),
+        crate::auth::BASE_URL.trim_end_matches('/'),
         dataset_uuid,
     );
 
@@ -317,15 +320,6 @@ pub async fn card_sync_full(
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
 
-    // Read dataset info
-    let info_path = path.join("info.json");
-    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-    let info: CardDatasetInfo = serde_json::from_str(&data).map_err(|e| e.to_string())?;
-
-    if info.sync_url.is_empty() {
-        return Err("No sync URL configured for this dataset".into());
-    }
-
     // Get access token
     let access_token = get_access_token(&settings)?;
 
@@ -350,7 +344,7 @@ pub async fn card_sync_full(
         &last_synced_at
     );
 
-    let pull_result = pull_changes(&info.sync_url, &dataset_uuid, &last_synced_at, &access_token).await?;
+    let pull_result = pull_changes(&dataset_uuid, &last_synced_at, &access_token).await?;
     let server_time = pull_result.server_time.clone();
 
     // Calculate clock offset
@@ -375,7 +369,7 @@ pub async fn card_sync_full(
             tags: Vec::new(), // TODO: sync tags
         };
 
-        let push_result = push_changes(&info.sync_url, &dataset_uuid, &push_request, &access_token).await?;
+        let push_result = push_changes(&dataset_uuid, &push_request, &access_token).await?;
         log::info!(
             "[CardSync] Pushed {} card(s), {} conflict(s)",
             push_result.accepted,
@@ -391,10 +385,7 @@ pub async fn card_sync_full(
     update_sync_state(&conn, &dataset_uuid, &server_time, clock_offset_ms)?;
 
     // Update dataset timestamp
-    let mut info = info;
-    info.updated = Utc::now().to_rfc3339();
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(&info_path, data).map_err(|e| e.to_string())?;
+    touch_info(&path)?;
 
     Ok(SyncResult {
         pulled,
@@ -423,11 +414,7 @@ pub async fn card_sync_all(
     for ds in &datasets {
         // Only sync datasets owned by current user
         let user_id = crate::auth::get_stored_user_id(&settings).unwrap_or_default();
-        if ds.info.owner_id != user_id {
-            continue;
-        }
-
-        if ds.info.sync_url.is_empty() {
+        if ds.info.sharing.owner_id != user_id {
             continue;
         }
 
@@ -446,15 +433,6 @@ async fn card_sync_full_inner(
     let path = find_card_dataset_dir(settings, dataset_uuid)?;
     let conn = open_card_db(&path)?;
 
-    // Read dataset info
-    let info_path = path.join("info.json");
-    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-    let info: CardDatasetInfo = serde_json::from_str(&data).map_err(|e| e.to_string())?;
-
-    if info.sync_url.is_empty() {
-        return Err("No sync URL configured for this dataset".into());
-    }
-
     // Get access token
     let access_token = get_access_token(settings)?;
 
@@ -472,7 +450,7 @@ async fn card_sync_full_inner(
     });
 
     // Pull
-    let pull_result = pull_changes(&info.sync_url, dataset_uuid, &last_synced_at, &access_token).await?;
+    let pull_result = pull_changes(dataset_uuid, &last_synced_at, &access_token).await?;
     let server_time = pull_result.server_time.clone();
     let pulled = apply_pulled_cards(&conn, &pull_result.cards)?;
 
@@ -483,7 +461,7 @@ async fn card_sync_full_inner(
             cards: local_changes,
             tags: Vec::new(),
         };
-        let push_result = push_changes(&info.sync_url, dataset_uuid, &push_request, &access_token).await?;
+        let push_result = push_changes(dataset_uuid, &push_request, &access_token).await?;
         push_result.accepted
     } else {
         0
@@ -493,10 +471,7 @@ async fn card_sync_full_inner(
     update_sync_state(&conn, dataset_uuid, &server_time, clock_offset_ms)?;
 
     // Update dataset timestamp
-    let mut info = info;
-    info.updated = Utc::now().to_rfc3339();
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(&info_path, data).map_err(|e| e.to_string())?;
+    touch_info(&path)?;
 
     Ok(SyncResult {
         pulled,

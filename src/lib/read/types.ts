@@ -10,10 +10,10 @@
 // Persisted (DB) types
 // ---------------------------------------------------------------------------
 
-/** A book in the reading library. */
+/** A book in the reading library. Mirrors the `name` field of its info.json. */
 export interface BookMeta {
   uuid: string;
-  title: string;
+  name: string;
   /** Absolute filesystem path of the book directory. */
   path: string;
   created_at: string;

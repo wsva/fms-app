@@ -20,19 +20,6 @@ struct CardDatasetCreateParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
-struct CardDatasetUpdateParam {
-    uuid: String,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    sync_url: String,
-    #[serde(default)]
-    visibility: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct CardDatasetSubscriberParam {
     uuid: String,
     email: String,
@@ -107,7 +94,7 @@ struct CardFtsRebuildParam {
 
 #[tool_router(router = cards_router, vis = "pub(crate)")]
 impl DatasetMcpServer {
-    #[tool(name = "card_dataset_list", description = "List all card datasets from all locations (default + linked directories). Returns UUID, name, description, visibility, owner, card count, and location for each dataset.")]
+    #[tool(name = "card_dataset_list", description = "List all card datasets from all locations (default + linked directories). Returns UUID, name, description, sharing (visibility, owner_id), card count, and location for each dataset. Metadata edits go through dataset_info_update, which works on every type.")]
     async fn card_dataset_list(&self) -> Result<String, String> {
         log::info!("[MCP] card_dataset_list");
         let settings = self.app.state::<SettingsState>();
@@ -117,8 +104,9 @@ impl DatasetMcpServer {
                 "uuid": d.info.uuid,
                 "name": d.info.name,
                 "description": d.info.description,
-                "visibility": d.info.visibility,
-                "owner_id": d.info.owner_id,
+                "language": d.info.language,
+                "visibility": d.info.sharing.visibility,
+                "owner_id": d.info.sharing.owner_id,
                 "card_count": d.card_count,
                 "path": d.path,
                 "location": d.location,
@@ -140,18 +128,6 @@ impl DatasetMcpServer {
             "card_count": summary.card_count,
             "path": summary.path,
         }}).to_string())
-    }
-
-    #[tool(name = "card_dataset_update", description = "Update a card dataset's metadata: name, description, sync_url, and/or visibility ('private', 'shared', 'public').")]
-    async fn card_dataset_update(&self, Parameters(param): Parameters<CardDatasetUpdateParam>) -> Result<String, String> {
-        log::info!("[MCP] card_dataset_update: uuid={}", param.uuid);
-        let settings = self.app.state::<SettingsState>();
-        let name = if param.name.is_empty() { None } else { Some(param.name) };
-        let desc = if param.description.is_empty() { None } else { Some(param.description) };
-        let sync_url = if param.sync_url.is_empty() { None } else { Some(param.sync_url) };
-        let visibility = if param.visibility.is_empty() { None } else { Some(param.visibility) };
-        datasets::cards::card_dataset_update(settings, param.uuid, name, desc, sync_url, visibility).await?;
-        Ok(serde_json::json!({"status": "ok", "message": "Dataset updated"}).to_string())
     }
 
     #[tool(name = "card_dataset_delete", description = "Delete a card dataset and all its files (database, info.json). This is irreversible.")]

@@ -158,7 +158,7 @@ export default function BookManager({ books, onBooksChanged }: Props) {
     if (!addTitle.trim() || !isTauri()) return;
     setSaving(true);
     try {
-      await invoke<BookMeta>("book_create", { title: addTitle.trim() });
+      await invoke<BookMeta>("book_create", { name: addTitle.trim() });
       setAddTitle("");
       setShowAdd(false);
       onBooksChanged();
@@ -172,7 +172,7 @@ export default function BookManager({ books, onBooksChanged }: Props) {
     if (!editBookTitle.trim() || !isTauri()) return;
     setSaving(true);
     try {
-      await invoke("book_rename", { uuid: item.uuid, title: editBookTitle.trim() });
+      await invoke("book_rename", { uuid: item.uuid, name: editBookTitle.trim() });
       setEditBookUUID(null);
       onBooksChanged();
     } catch (e) {
@@ -682,7 +682,7 @@ export default function BookManager({ books, onBooksChanged }: Props) {
               <div className="flex flex-row items-center justify-between gap-2">
                 <div className="min-w-0">
                   <div className="text-base font-semibold text-text-primary truncate">
-                    {item.title}
+                    {item.name}
                   </div>
                   <div className="text-xs text-text-tertiary font-mono truncate">{item.uuid}</div>
                 </div>
@@ -691,7 +691,7 @@ export default function BookManager({ books, onBooksChanged }: Props) {
                     className={btnGhost}
                     onClick={() => {
                       setEditBookUUID(item.uuid);
-                      setEditBookTitle(item.title || "");
+                      setEditBookTitle(item.name || "");
                     }}
                   >
                     Edit
@@ -718,7 +718,7 @@ export default function BookManager({ books, onBooksChanged }: Props) {
         <div className="border-t border-border-default pt-4">
           <div className="flex flex-row flex-wrap items-center justify-between gap-2 mb-3">
             <h3 className="text-base font-semibold text-text-primary">
-              Chapters — <span className="font-normal text-text-secondary">{selectedBook.title}</span>
+              Chapters — <span className="font-normal text-text-secondary">{selectedBook.name}</span>
             </h3>
             <div className="flex gap-2 flex-wrap">
               <button

@@ -344,13 +344,8 @@ export default function CardsPage() {
         {/* Dataset info */}
         {selectedDataset && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-xs text-text-secondary">
-            <span>{selectedDataset.info.visibility}</span>
+            <span>{selectedDataset.info.sharing.visibility}</span>
             <span>{selectedDataset.card_count} cards</span>
-            {selectedDataset.info.sync_url && (
-              <span className="text-text-tertiary">
-                Sync: {selectedDataset.info.sync_url}
-              </span>
-            )}
           </div>
         )}
 
@@ -1128,7 +1123,6 @@ function DatasetCard({
   }, [dataset.info.uuid]);
 
   async function handleSync() {
-    if (!dataset.info.sync_url) return;
     setSyncing(true);
     try {
       const result = await invoke<{ pulled: number; pushed: number; conflicts: number; server_time: string }>(
@@ -1174,14 +1168,14 @@ function DatasetCard({
           <h3 className="text-sm font-semibold truncate">{dataset.info.name}</h3>
           <span
             className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${
-              dataset.info.visibility === "public"
+              dataset.info.sharing.visibility === "public"
                 ? "bg-green-500/10 text-green-600"
-                : dataset.info.visibility === "shared"
+                : dataset.info.sharing.visibility === "shared"
                   ? "bg-amber-500/10 text-amber-600"
                   : "bg-mid-gray/20 text-text-tertiary"
             }`}
           >
-            {dataset.info.visibility}
+            {dataset.info.sharing.visibility}
           </span>
           {isSelected && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-blue/10 text-accent-blue shrink-0">
@@ -1210,42 +1204,32 @@ function DatasetCard({
         <span className="font-mono text-[10px]">{dataset.info.uuid.slice(0, 8)}…</span>
       </div>
 
-      {/* Sync section */}
+      {/* Sync section — the hub is the login origin (auth::BASE_URL), not a
+          per-dataset URL, so there is nothing to configure per dataset here. */}
       <div className="flex items-center flex-wrap gap-x-4 gap-y-1 text-xs mb-3">
-        {dataset.info.sync_url ? (
-          <>
-            <span className="text-text-secondary">
-              Sync: <span className="font-mono text-text-tertiary">{dataset.info.sync_url}</span>
-            </span>
-            <span className="text-text-secondary">
-              Last synced:{" "}
-              {syncStatus?.last_synced_at
-                ? new Date(syncStatus.last_synced_at).toLocaleString()
-                : "Never"}
-            </span>
-            {(syncStatus?.pending_push ?? 0) > 0 && (
-              <span className="text-amber-500">
-                {syncStatus!.pending_push} pending
-              </span>
-            )}
-          </>
-        ) : (
-          <span className="text-text-tertiary italic">No sync URL configured</span>
+        <span className="text-text-secondary">
+          Last synced:{" "}
+          {syncStatus?.last_synced_at
+            ? new Date(syncStatus.last_synced_at).toLocaleString()
+            : "Never"}
+        </span>
+        {(syncStatus?.pending_push ?? 0) > 0 && (
+          <span className="text-amber-500">
+            {syncStatus!.pending_push} pending
+          </span>
         )}
       </div>
 
       {/* Action buttons */}
       <div className="flex items-center gap-2">
-        {dataset.info.sync_url && (
-          <button
-            onClick={handleSync}
-            disabled={syncing}
-            className="px-3 py-1 rounded border border-border-default text-xs hover:bg-mid-gray/20 disabled:opacity-50 flex items-center gap-1"
-          >
-            <RefreshCcw size={12} className={syncing ? "animate-spin" : ""} />
-            {syncing ? "Syncing..." : "Sync"}
-          </button>
-        )}
+        <button
+          onClick={handleSync}
+          disabled={syncing}
+          className="px-3 py-1 rounded border border-border-default text-xs hover:bg-mid-gray/20 disabled:opacity-50 flex items-center gap-1"
+        >
+          <RefreshCcw size={12} className={syncing ? "animate-spin" : ""} />
+          {syncing ? "Syncing..." : "Sync"}
+        </button>
         <button
           onClick={handleDelete}
           disabled={deleting}

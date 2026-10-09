@@ -150,7 +150,7 @@ steps:
     description: >-
       Record the final counts and, optionally, adjust the description to note the
       dataset is processed and practice-ready in the Dictation page.
-    action: dataset_update
+    action: dataset_info_update
     depends_on:
       - validate
     inputs:

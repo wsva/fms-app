@@ -17,13 +17,12 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use chrono::Utc;
 use rusqlite::Connection;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::datasets::{find_dataset_dir, DatasetInfo, DatasetProgress};
+use crate::datasets::{find_dataset_dir, touch_info, DatasetProgress};
 use crate::settings::SettingsState;
 use crate::datasets::textsim::normalize;
 
@@ -443,19 +442,6 @@ fn load_transcript_sentences(text: &str) -> Vec<Ref> {
     refs_from_sentences(split_book_sentences(text))
 }
 
-/// Bump info.json's `updated` timestamp (best-effort).
-fn touch_info(dataset_dir: &PathBuf) {
-    let info_path = dataset_dir.join("info.json");
-    if let Ok(data) = fs::read_to_string(&info_path) {
-        if let Ok(mut info) = serde_json::from_str::<DatasetInfo>(&data) {
-            info.updated = Utc::now().to_rfc3339();
-            if let Ok(out) = serde_json::to_string_pretty(&info) {
-                let _ = fs::write(&info_path, out);
-            }
-        }
-    }
-}
-
 /// Emit a per-media progress event so the Studio UI shows live alignment
 /// progress, matching the "subtitles"/"waveform"/"database" stages.
 fn emit_align_progress(app: &AppHandle, uuid: &str, index: usize, total: usize, media: &str) {
@@ -720,7 +706,7 @@ pub async fn dataset_align_cues_transcript(
     }
 
     drop(conn);
-    touch_info(&dataset_dir);
+    let _ = touch_info(&dataset_dir);
 
     let aligned = jobs.len();
     log::info!("Transcript alignment complete: {} media aligned, {} skipped", aligned, skipped);
@@ -884,7 +870,7 @@ pub async fn dataset_align_cues(
     }
 
     drop(conn);
-    touch_info(&dataset_dir);
+    let _ = touch_info(&dataset_dir);
 
     let total = jobs.len();
     log::info!("Book alignment complete: {} media, {} total matches", total, total_matches);

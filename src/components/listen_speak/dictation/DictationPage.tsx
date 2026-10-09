@@ -12,7 +12,7 @@ import { RefreshCw, Trash2, Database, Target, CheckCircle, FolderPlus, Folder, L
 import CueEditor from "./components/CueEditor";
 import WaveformCanvas from "./components/WaveformCanvas";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
-import type { Cue } from "@/lib/types";
+import { FAVORITES_DATASET_UUID, type Cue } from "@/lib/types";
 import { useDictationData } from "@/hooks/useDictationData";
 import { isAudio } from "@/lib/listen/utils";
 import { datasetStatusLabel, datasetStatusBadgeClasses, type DatasetStatus } from "@/lib/datasets/types";
@@ -162,7 +162,8 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
     const selectedMediaLabel = selectedMedia?.source || d.stateMedia.source || "...";
     // The Favorites dataset is where cue clips are cut INTO; adding a cue from it
     // back to itself is meaningless, so the button is disabled while viewing it.
-    const inFavoritesDataset = !!d.selectedDataset?.info.is_favorites;
+    // It is recognised by its reserved id, not by a flag in info.json.
+    const inFavoritesDataset = d.selectedDataset?.info.uuid === FAVORITES_DATASET_UUID;
 
     useEffect(() => {
         if (voiceError) {

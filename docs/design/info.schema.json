@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fms-app.invalid/schemas/dataset-info.schema.json",
+  "title": "fms-app dataset descriptor (info.json)",
+  "description": "The one info.json shape shared by every dataset type. Prose and the reason each field exists: dataset-info.md. A dataset directory is invalid for fms-app unless this file exists in it and parses against 'base' below with a 'format' one of the five pinned in 'oneOf'. Unknown top-level keys are allowed and round-trip verbatim through the backend's 'extra' map, so a newer generator may add fields without breaking an older reader.",
+  "oneOf": [
+    { "$ref": "#/$defs/dictation-v2" },
+    { "$ref": "#/$defs/card-v1" },
+    { "$ref": "#/$defs/book-v1" },
+    { "$ref": "#/$defs/read_aloud-v1" },
+    { "$ref": "#/$defs/wiki-v1" }
+  ],
+  "$defs": {
+    "stamp": {
+      "description": "Canonical timestamp: UTC, second precision, 'Z' suffix (Rust 'now_stamp()'). Microsecond or '+00:00' forms are pre-migration artifacts and are not accepted.",
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "language": {
+      "description": "BCP 47 primary subtag (optionally with an extlang), empty when unknown. Typed rather than a free label because code branches on it: simple_words maps a language to the card datasets that count for it.",
+      "type": "string",
+      "pattern": "^([a-z]{2,3}(-[a-z]{3,4})*)?$",
+      "default": ""
+    },
+    "sharing": {
+      "description": "Publication state. Authoritative on the website; local code reads 'subscribers' and never appends to it.",
+      "type": "object",
+      "required": ["visibility"],
+      "additionalProperties": false,
+      "properties": {
+        "visibility": {
+          "type": "string",
+          "enum": ["private", "shared", "public"],
+          "default": "private"
+        },
+        "owner_id": {
+          "description": "Owner's user id (email). Gates pushes: a device refuses to push a dataset whose owner is not the logged-in user.",
+          "type": "string",
+          "default": ""
+        },
+        "subscribers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        }
+      }
+    },
+    "base": {
+      "type": "object",
+      "required": ["uuid", "type", "format", "name"],
+      "properties": {
+        "spec": {
+          "description": "Descriptor schema version. Bump only on a removal or a change of meaning — an added field is invisible to old readers thanks to the open 'extra' keys.",
+          "type": "integer",
+          "const": 2,
+          "default": 2
+        },
+        "uuid": {
+          "description": "Globally unique dataset id. OPAQUE and deliberately not pattern-matched: it is a slug for the reserved Favorites dataset ('dictation-favorites') and for website-era ids ('de_a1_by_system'), and only its uniqueness matters — it keys the sync journal, the change log, and every /api/v1/datasets/{uuid}/… route. Creation and import are the moments uniqueness is asserted (assert_uuid_free).",
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "description": "Must equal the directory slug the dataset lives under (datasets/<type>/…). The directory is the routing authority; discovery warns and skips on mismatch.",
+          "type": "string",
+          "enum": ["dictation", "card", "book", "read_aloud", "wiki"]
+        },
+        "format": {
+          "description": "Internal layout tag, '<type-slug>-v<N>' with the directory slug verbatim (card, not cards; read_aloud, not read-aloud).",
+          "type": "string"
+        },
+        "name": {
+          "description": "Display name. Books called this 'title' before the unification.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-facing blurb only. Provenance belongs in a README.md inside the dataset, not smuggled in here.",
+          "type": "string",
+          "default": ""
+        },
+        "language": { "$ref": "#/$defs/language" },
+        "created_at": {
+          "description": "Set once at creation and never rewritten — a rebuild must not pretend a dataset is younger than it is.",
+          "$ref": "#/$defs/stamp"
+        },
+        "updated_at": {
+          "description": "The only field expected to move. Bumped by touch_info() on every mutation and shipped in the sync manifest.",
+          "$ref": "#/$defs/stamp"
+        },
+        "sharing": { "$ref": "#/$defs/sharing" }
+      }
+    },
+    "dictation-v2": {
+      "title": "dictation dataset (v2 layout)",
+      "description": "media/ audio, subtitle/ VTT, waveform/, transcript/ and data.sqlite3 with the listen_* rows. v2 is the current row layout; v1 files are migrated, not read. The Favorites dataset is an ordinary dictation dataset whose uuid is the reserved 'dictation-favorites' — no flag distinguishes it.",
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "properties": {
+            "type": { "const": "dictation" },
+            "format": { "const": "dictation-v2" }
+          }
+        }
+      ]
+    },
+    "card-v1": {
+      "title": "card dataset (v1 layout)",
+      "description": "data.sqlite3 with cards, tags and SM-2 reviews; a per-root search.sqlite3 FTS index (derived, never shipped). Was 'cards-v1'.",
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "properties": {
+            "type": { "const": "card" },
+            "format": { "const": "card-v1" }
+          }
+        }
+      ]
+    },
+    "book-v1": {
+      "title": "book dataset (v1 layout)",
+      "description": "book.txt plus data.sqlite3 with chapters, sentences and word rows. Was 'reading-v1'; its display name was 'title'.",
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "properties": {
+            "type": { "const": "book" },
+            "format": { "const": "book-v1" }
+          }
+        }
+      ]
+    },
+    "read_aloud-v1": {
+      "title": "read-aloud dataset (v1 layout)",
+      "description": "Texts to read aloud plus recorded attempts under media/. Was 'read-aloud-v1'.",
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "properties": {
+            "type": { "const": "read_aloud" },
+            "format": { "const": "read_aloud-v1" }
+          }
+        }
+      ]
+    },
+    "wiki-v1": {
+      "title": "wiki dataset (v1 layout)",
+      "description": "A nested tree of .md files — the files are the rows, there is no data.sqlite3. The per-dataset fts5.sqlite3 index is derived and excluded from sync.",
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "properties": {
+            "type": { "const": "wiki" },
+            "format": { "const": "wiki-v1" }
+          }
+        }
+      ]
+    }
+  }
+}

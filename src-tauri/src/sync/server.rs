@@ -606,7 +606,7 @@ async fn index_handler(State(s): State<AppState>) -> Response {
         book_rows.push_str(&format!(
             "<tr><td><a href=\"/books/{}\">{}</a></td><td>{}</td></tr>",
             html_escape(&b.uuid),
-            html_escape(&b.title),
+            html_escape(&b.name),
             html_escape(&b.updated_at),
         ));
     }
@@ -804,8 +804,10 @@ const MCP_SECTION_HTML: &str = r#"
 Connect AI agents via Streamable HTTP at <code>/mcp</code>. Built with <strong>rmcp v3.4</strong>.
 </p>
 <div class="tool-list">
-<div class="tool-item"><div class="name">dataset_list</div><div class="desc">List all datasets with UUID, name, status</div></div>
+<div class="tool-item"><div class="name">dataset_list</div><div class="desc">List every dataset of every type with its info.json fields</div></div>
 <div class="tool-item"><div class="name">dataset_get</div><div class="desc">Get detailed dataset info and artifacts</div></div>
+<div class="tool-item"><div class="name">dataset_info_get</div><div class="desc">Read a dataset's unified info.json descriptor</div></div>
+<div class="tool-item"><div class="name">dataset_info_update</div><div class="desc">Edit info.json metadata (name, description, language, sharing)</div></div>
 <div class="tool-item"><div class="name">dataset_read_file</div><div class="desc">Read a file from a dataset directory</div></div>
 <div class="tool-item"><div class="name">dataset_list_files</div><div class="desc">Recursive file listing with sizes</div></div>
 <div class="tool-item"><div class="name">dataset_list_subtitles</div><div class="desc">List subtitles with cue counts</div></div>
@@ -1326,7 +1328,7 @@ async fn books_list(State(s): State<AppState>) -> Response {
         rows.push_str(&format!(
             "<tr><td><a href=\"/books/{}\">{}</a></td><td>{}</td></tr>",
             url_encode_path(&b.uuid),
-            html_escape(&b.title),
+            html_escape(&b.name),
             html_escape(&b.updated_at),
         ));
     }
@@ -1358,7 +1360,7 @@ async fn book_chapters_page(State(s): State<AppState>, AxPath(uuid): AxPath<Stri
     let book_title = datasets::book::list_books(&settings)
         .into_iter()
         .find(|b| b.uuid == uuid)
-        .map(|b| b.title)
+        .map(|b| b.name)
         .unwrap_or_else(|| uuid.clone());
 
     let mut links = String::new();
@@ -1407,7 +1409,7 @@ async fn book_chapter_content(
     let book_title = datasets::book::list_books(&settings)
         .into_iter()
         .find(|b| b.uuid == uuid)
-        .map(|b| b.title)
+        .map(|b| b.name)
         .unwrap_or_else(|| uuid.clone());
 
     // Group sentences into paragraphs split on `paragraph_break` rows; each

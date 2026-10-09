@@ -1,7 +1,7 @@
 //! Wiki datasets: syncable markdown directory trees (dataset type `wiki`).
 //!
-//! A wiki dataset is a folder with an `info.json` (`uuid`, `name`, `updated`)
-//! plus an arbitrary nested tree of `.md` files, living under
+//! A wiki dataset is a folder with the shared `info.json` descriptor (see
+//! [`super::info`]) plus an arbitrary nested tree of `.md` files, living under
 //! `<datasets_dir>/wiki/` (or any directory linked in that root's `meta.json`).
 //! Unlike the other dataset types there is no `data.sqlite3`: the `.md` files
 //! *are* the rows, and mutations journal through
@@ -25,7 +25,10 @@ use uuid::Uuid;
 
 use crate::settings::SettingsState;
 
-use super::{dataset_roots, DatasetType};
+use super::{
+    assert_uuid_free, dataset_roots, read_info_opt, touch_info, write_info, DatasetInfo,
+    DatasetType, FORMAT_WIKI, INFO_FILE,
+};
 
 /// The derived FTS index inside a wiki dataset dir. Never synced, never listed.
 const FTS_DB: &str = "fts5.sqlite3";
@@ -44,18 +47,6 @@ pub struct WikiSearchResult {
     pub relative_path: String,
     pub snippet: String,
     pub rank: f64,
-}
-
-/// Minimal `info.json` shape. Kept lenient (`find_dataset_dir_typed` only ever
-/// contracts on `uuid`) but rich enough for the UI list.
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct WikiDatasetInfo {
-    pub uuid: String,
-    pub name: String,
-    #[serde(default)]
-    pub structure: String,
-    #[serde(default)]
-    pub updated: String,
 }
 
 #[derive(Clone, Serialize, Debug)]
@@ -135,7 +126,7 @@ fn sanitize_rel(rel: &str) -> Result<String, String> {
     }
     // Derived index + identity file are never addressable content.
     let last = parts[parts.len() - 1];
-    if last == FTS_DB || last == "info.json" || last.starts_with('.') {
+    if last == FTS_DB || last == INFO_FILE || last.starts_with('.') {
         return Err(format!("{last} is not editable wiki content"));
     }
     Ok(parts.join("/"))
@@ -158,7 +149,7 @@ fn extension_of(name: &str) -> String {
 }
 
 fn is_hidden(name: &str) -> bool {
-    name.starts_with('.') || name == FTS_DB || name == "info.json"
+    name.starts_with('.') || name == FTS_DB || name == INFO_FILE
 }
 
 fn get_modified_time(path: &Path) -> Option<String> {
@@ -174,23 +165,10 @@ fn get_modified_time(path: &Path) -> Option<String> {
         })
 }
 
-fn read_info(dir: &Path) -> Option<WikiDatasetInfo> {
-    let data = fs::read_to_string(dir.join("info.json")).ok()?;
-    serde_json::from_str(data.trim_start_matches('\u{FEFF}')).ok()
-}
-
-fn write_info(dir: &Path, info: &WikiDatasetInfo) -> Result<(), String> {
-    let data = serde_json::to_string_pretty(info).map_err(|e| e.to_string())?;
-    fs::write(dir.join("info.json"), data).map_err(|e| e.to_string())
-}
-
-/// Stamp a fresh `updated` time onto the dataset's `info.json` (best-effort:
-/// the file write already succeeded; a metadata hiccup must not fail it).
+/// Stamp a fresh `updated_at` onto the dataset's `info.json` (best-effort: the
+/// file write already succeeded; a metadata hiccup must not fail it).
 fn bump_updated(dir: &Path) {
-    if let Some(mut info) = read_info(dir) {
-        info.updated = Utc::now().to_rfc3339();
-        let _ = write_info(dir, &info);
-    }
+    let _ = touch_info(dir);
 }
 
 /// Resolve a wiki dataset directory by UUID across every configured wiki root.
@@ -208,7 +186,7 @@ pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<P
             if !path.is_dir() {
                 continue;
             }
-            if read_info(&path).map(|i| i.uuid).as_deref() == Some(uuid) {
+            if read_info_opt(&path).map(|i| i.uuid).as_deref() == Some(uuid) {
                 return Ok(path);
             }
         }
@@ -286,7 +264,7 @@ pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<WikiDatasetSummary>
             if !path.is_dir() {
                 continue;
             }
-            let Some(info) = read_info(&path) else {
+            let Some(info) = read_info_opt(&path) else {
                 continue;
             };
             if info.uuid.is_empty() {
@@ -295,7 +273,7 @@ pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<WikiDatasetSummary>
             out.push(WikiDatasetSummary {
                 uuid: info.uuid,
                 name: info.name,
-                updated: info.updated,
+                updated: info.updated_at,
                 file_count: count_markdown(&path),
                 path: path.to_string_lossy().into_owned(),
                 location: location.clone(),
@@ -327,12 +305,14 @@ pub(crate) fn create_dataset(settings: &SettingsState, name: &str) -> Result<Wik
     let dir = root.join(&folder);
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create dataset dir: {}", e))?;
 
-    let info = WikiDatasetInfo {
-        uuid: Uuid::new_v4().to_string(),
-        name: name.trim().to_string(),
-        structure: "wiki-v1".to_string(),
-        updated: Utc::now().to_rfc3339(),
-    };
+    let uuid = Uuid::new_v4().to_string();
+    assert_uuid_free(settings, &uuid)?;
+    let info = DatasetInfo::new(
+        uuid,
+        DatasetType::Wiki,
+        FORMAT_WIKI,
+        name.trim().to_string(),
+    );
     let result = write_info(&dir, &info);
     if let Err(e) = result {
         let _ = fs::remove_dir_all(&dir);
@@ -342,7 +322,7 @@ pub(crate) fn create_dataset(settings: &SettingsState, name: &str) -> Result<Wik
     Ok(WikiDatasetSummary {
         uuid: info.uuid,
         name: info.name,
-        updated: info.updated,
+        updated: info.updated_at,
         file_count: 0,
         path: dir.to_string_lossy().into_owned(),
         location: root.to_string_lossy().into_owned(),
@@ -360,7 +340,7 @@ pub(crate) fn import_dir(settings: &SettingsState, name: &str, path: &str) -> Re
     if !dir.is_dir() {
         return Err(format!("Path is not a directory: {}", path));
     }
-    if let Some(existing) = read_info(&dir) {
+    if let Some(existing) = read_info_opt(&dir) {
         if !existing.uuid.is_empty() {
             return Err(format!("Directory is already a dataset (uuid {})", existing.uuid));
         }
@@ -375,16 +355,18 @@ pub(crate) fn import_dir(settings: &SettingsState, name: &str, path: &str) -> Re
         return Err(format!("Directory already imported: {}", path));
     }
 
-    let info = WikiDatasetInfo {
-        uuid: Uuid::new_v4().to_string(),
-        name: if name.trim().is_empty() {
+    let uuid = Uuid::new_v4().to_string();
+    assert_uuid_free(settings, &uuid)?;
+    let info = DatasetInfo::new(
+        uuid,
+        DatasetType::Wiki,
+        FORMAT_WIKI,
+        if name.trim().is_empty() {
             dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "wiki".into())
         } else {
             name.trim().to_string()
         },
-        structure: "wiki-v1".to_string(),
-        updated: Utc::now().to_rfc3339(),
-    };
+    );
     write_info(&dir, &info).map_err(|e| format!("Failed to write info.json: {}", e))?;
     meta.linked_dirs.push(super::DatasetLinkedDir {
         name: info.name.clone(),
@@ -395,7 +377,7 @@ pub(crate) fn import_dir(settings: &SettingsState, name: &str, path: &str) -> Re
     Ok(WikiDatasetSummary {
         uuid: info.uuid.clone(),
         name: info.name.clone(),
-        updated: info.updated.clone(),
+        updated: info.updated_at.clone(),
         file_count: count_markdown(&dir),
         path: dir.to_string_lossy().into_owned(),
         location: type_dir_str,

@@ -16,40 +16,19 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
 
-use crate::datasets::{dataset_roots, DatasetInfo};
+use crate::datasets::{
+    assert_uuid_free, dataset_roots, now_stamp, read_info, read_info_opt, touch_info, write_info,
+    DatasetInfo, FORMAT_CARD, INFO_FILE,
+};
 use crate::settings::SettingsState;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/// Card dataset info.json — extends the base DatasetInfo with card-specific fields.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct CardDatasetInfo {
-    pub name: String,
-    pub uuid: String,
-    pub description: String,
-    pub parent_uuid: String,
-    pub version: u32,
-    pub structure: String,
-    pub updated: String,
-    #[serde(default)]
-    pub sync_url: String,
-    #[serde(default = "default_visibility")]
-    pub visibility: String,
-    #[serde(default)]
-    pub owner_id: String,
-    #[serde(default)]
-    pub subscribers: Vec<String>,
-}
-
-fn default_visibility() -> String {
-    "private".to_string()
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CardDatasetSummary {
-    pub info: CardDatasetInfo,
+    pub info: DatasetInfo,
     pub card_count: usize,
     pub path: String,
     pub location: String,
@@ -162,39 +141,19 @@ pub(crate) fn find_card_dataset_dir(settings: &SettingsState, uuid: &str) -> Res
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
+            if !path.is_dir() || !path.join(INFO_FILE).exists() {
                 continue;
             }
-            let info_path = path.join("info.json");
-            if !info_path.exists() {
-                continue;
-            }
-            let data = match fs::read_to_string(&info_path) {
-                Ok(d) => d,
-                Err(_) => continue,
+            let info = match read_info_opt(&path) {
+                Some(i) => i,
+                None => continue,
             };
-            // Try parsing as CardDatasetInfo first (has extra fields)
-            if let Ok(info) = serde_json::from_str::<CardDatasetInfo>(&data) {
-                if info.structure == "cards-v1" && info.uuid == uuid {
-                    return Ok(path);
-                }
-            }
-            // Fall back to base DatasetInfo for structure check
-            if let Ok(info) = serde_json::from_str::<DatasetInfo>(&data) {
-                if info.structure == "cards-v1" && info.uuid == uuid {
-                    return Ok(path);
-                }
+            if info.format == FORMAT_CARD && info.uuid == uuid {
+                return Ok(path);
             }
         }
     }
     Err(format!("Card dataset with UUID {} not found", uuid))
-}
-
-/// Read card dataset info from a dataset directory.
-fn read_card_dataset_info(dataset_dir: &Path) -> Result<CardDatasetInfo, String> {
-    let info_path = dataset_dir.join("info.json");
-    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&data).map_err(|e| e.to_string())
 }
 
 /// Open the card dataset SQLite database, ensuring the schema exists.
@@ -429,20 +388,14 @@ pub(crate) fn rebuild_fts_index(
                 continue;
             }
 
-            let info_path = path.join("info.json");
-            if !info_path.exists() {
+            if !path.join(INFO_FILE).exists() {
                 continue;
             }
 
             // Read dataset info
-            let data = match fs::read_to_string(&info_path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-
-            let info: CardDatasetInfo = match serde_json::from_str(&data) {
-                Ok(i) => i,
-                Err(_) => continue,
+            let info = match read_info_opt(&path) {
+                Some(i) => i,
+                None => continue,
             };
 
             // Open dataset DB
@@ -635,19 +588,14 @@ pub(crate) fn list_card_datasets(settings: &SettingsState) -> Vec<CardDatasetSum
             if !path.is_dir() {
                 continue;
             }
-            let info_path = path.join("info.json");
-            if !info_path.is_file() {
+            if !path.join(INFO_FILE).is_file() {
                 continue;
             }
-            let data = match fs::read_to_string(&info_path) {
-                Ok(d) => d,
-                Err(_) => continue,
+            let info = match read_info_opt(&path) {
+                Some(i) => i,
+                None => continue,
             };
-            let info: CardDatasetInfo = match serde_json::from_str(&data) {
-                Ok(i) => i,
-                Err(_) => continue,
-            };
-            if info.structure != "cards-v1" {
+            if info.format != FORMAT_CARD {
                 continue;
             }
 
@@ -775,7 +723,7 @@ pub async fn card_dataset_create(
     fs::create_dir_all(&root).map_err(|e| format!("Failed to create datasets dir: {}", e))?;
 
     let uuid = Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
+    assert_uuid_free(&settings, &uuid)?;
 
     // Sanitize directory name
     let dir_name: String = trimmed
@@ -798,22 +746,15 @@ pub async fn card_dataset_create(
     // Get current user for owner_id
     let owner_id = crate::auth::get_stored_user_id(&settings).unwrap_or_default();
 
-    let info = CardDatasetInfo {
-        name: trimmed.to_string(),
-        uuid: uuid.clone(),
-        description: description.unwrap_or_default(),
-        parent_uuid: String::new(),
-        version: 1,
-        structure: "cards-v1".into(),
-        updated: now.clone(),
-        sync_url: String::new(),
-        visibility: "private".to_string(),
-        owner_id,
-        subscribers: Vec::new(),
-    };
-
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(dst.join("info.json"), &data).map_err(|e| e.to_string())?;
+    let mut info = DatasetInfo::new(
+        uuid.clone(),
+        crate::datasets::DatasetType::Card,
+        FORMAT_CARD,
+        trimmed.to_string(),
+    );
+    info.description = description.unwrap_or_default();
+    info.sharing.owner_id = owner_id;
+    write_info(&dst, &info)?;
 
     // Create the database with schema
     let _conn = open_card_db(&dst)?;
@@ -827,21 +768,17 @@ pub async fn card_dataset_create(
     })
 }
 
-/// Update card dataset metadata (name, description, sync_url, visibility).
+/// Update card dataset metadata (name, description, visibility).
 #[tauri::command]
 pub async fn card_dataset_update(
     settings: State<'_, SettingsState>,
     uuid: String,
     name: Option<String>,
     description: Option<String>,
-    sync_url: Option<String>,
     visibility: Option<String>,
 ) -> Result<(), String> {
     let path = find_card_dataset_dir(&settings, &uuid)?;
-    let info_path = path.join("info.json");
-
-    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-    let mut info: CardDatasetInfo = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+    let mut info = read_info(&path)?;
 
     if let Some(n) = name {
         info.name = n;
@@ -849,20 +786,15 @@ pub async fn card_dataset_update(
     if let Some(d) = description {
         info.description = d;
     }
-    if let Some(s) = sync_url {
-        info.sync_url = s;
-    }
     if let Some(v) = visibility {
         if !["private", "shared", "public"].contains(&v.as_str()) {
             return Err("Invalid visibility value. Must be: private, shared, or public".into());
         }
-        info.visibility = v;
+        info.sharing.visibility = v;
     }
-    info.updated = Utc::now().to_rfc3339();
+    info.updated_at = now_stamp();
 
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(&info_path, data).map_err(|e| e.to_string())?;
-    Ok(())
+    write_info(&path, &info)
 }
 
 /// Add a subscriber to a card dataset.
@@ -873,18 +805,14 @@ pub async fn card_dataset_add_subscriber(
     email: String,
 ) -> Result<(), String> {
     let path = find_card_dataset_dir(&settings, &uuid)?;
-    let info_path = path.join("info.json");
+    let mut info = read_info(&path)?;
 
-    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-    let mut info: CardDatasetInfo = serde_json::from_str(&data).map_err(|e| e.to_string())?;
-
-    if !info.subscribers.contains(&email) {
-        info.subscribers.push(email.clone());
+    if !info.sharing.subscribers.contains(&email) {
+        info.sharing.subscribers.push(email.clone());
     }
-    info.updated = Utc::now().to_rfc3339();
+    info.updated_at = now_stamp();
 
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(&info_path, data).map_err(|e| e.to_string())?;
+    write_info(&path, &info)?;
     log::info!("[Cards] Added subscriber '{}' to dataset '{}'", email, uuid);
     Ok(())
 }
@@ -897,16 +825,12 @@ pub async fn card_dataset_remove_subscriber(
     email: String,
 ) -> Result<(), String> {
     let path = find_card_dataset_dir(&settings, &uuid)?;
-    let info_path = path.join("info.json");
+    let mut info = read_info(&path)?;
 
-    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-    let mut info: CardDatasetInfo = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+    info.sharing.subscribers.retain(|s| s != &email);
+    info.updated_at = now_stamp();
 
-    info.subscribers.retain(|s| s != &email);
-    info.updated = Utc::now().to_rfc3339();
-
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(&info_path, data).map_err(|e| e.to_string())?;
+    write_info(&path, &info)?;
     log::info!("[Cards] Removed subscriber '{}' from dataset '{}'", email, uuid);
     Ok(())
 }
@@ -960,8 +884,7 @@ pub async fn card_dataset_move(
     }
 
     // Read info.json to verify it's a valid dataset
-    let info_path = source_path.join("info.json");
-    if !info_path.exists() {
+    if !source_path.join(INFO_FILE).exists() {
         return Err("Not a valid dataset directory (missing info.json)".into());
     }
 
@@ -1176,7 +1099,7 @@ pub async fn card_save(
     update_dataset_timestamp(&path)?;
 
     // Update FTS index
-    if let Ok(info) = read_card_dataset_info(&path) {
+    if let Ok(info) = read_info(&path) {
         // Find the location (root) for this dataset
         for root in dataset_roots(&settings, crate::datasets::DatasetType::Card) {
             if path.starts_with(&root) {
@@ -1862,10 +1785,5 @@ pub async fn card_sync_get_changes(
 
 /// Update the dataset's info.json timestamp.
 fn update_dataset_timestamp(dataset_dir: &Path) -> Result<(), String> {
-    let info_path = dataset_dir.join("info.json");
-    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-    let mut info: CardDatasetInfo = serde_json::from_str(&data).map_err(|e| e.to_string())?;
-    info.updated = Utc::now().to_rfc3339();
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(&info_path, data).map_err(|e| e.to_string())
+    touch_info(dataset_dir)
 }

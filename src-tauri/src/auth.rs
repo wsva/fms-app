@@ -5,7 +5,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::settings::SettingsState;
 use crate::workspace::WorkspaceState;
 
-const BASE_URL: &str = "https://lusworkshop.site";
+/// The single origin this build talks to: OAuth login is verified against it, and
+/// so is card sync. `pub(crate)` so `datasets::cards::sync` cannot be pointed
+/// anywhere else by dataset content — those requests carry the bearer token.
+pub(crate) const BASE_URL: &str = "https://lusworkshop.site";
 
 /// Deep link scheme used for login callback.
 const DEEP_LINK_SCHEME: &str = "fms-app";

@@ -5,14 +5,16 @@
 //! [`dataset_roots`] to `<datasets_dir>/{dictation,card,book,read_aloud,wiki}/` plus
 //! the linked directories listed in that folder's `meta.json`.
 //!
-//! TODO: the shared core ([`DatasetType`], [`dataset_roots`], the `meta.json`
+//! The unified `info.json` descriptor every type shares lives in [`info`]; the
+//! remaining shared core ([`DatasetType`], [`dataset_roots`], the `meta.json`
 //! read/write helpers, `find_dataset_dir*` and the `dataset_*_dir` commands)
-//! still lives in this file next to the dictation pipeline, so every sibling
-//! depends on a ~2k-line parent. Split it out as a follow-up.
+//! still lives in this file next to the dictation pipeline — split it out as a
+//! follow-up now that the descriptor has left.
 
 pub(crate) mod book;
 pub(crate) mod cards;
 pub(crate) mod dictation;
+pub(crate) mod info;
 pub(crate) mod read_aloud;
 pub(crate) mod textsim;
 pub(crate) mod wiki;
@@ -21,6 +23,7 @@ pub(crate) mod tools;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use chrono::Utc;
 use rusqlite::Connection;
@@ -32,24 +35,21 @@ use crate::settings::SettingsState;
 #[cfg(feature = "desktop")]
 use crate::models::ModelState;
 
+// The shared descriptor and its helpers are addressed through this module root by
+// every dataset type and by the sync layer.
+pub(crate) use info::{
+    assert_uuid_free, now_stamp, read_info, read_info_opt, touch_info, write_info, DatasetInfo,
+    FAVORITES_DATASET_UUID, FORMAT_BOOK, FORMAT_CARD, FORMAT_DICTATION, FORMAT_READ_ALOUD,
+    FORMAT_WIKI, INFO_FILE,
+};
+// The cross-type enumerator's only caller is the desktop MCP listing; an ungated
+// re-export would warn in the mobile build.
+#[cfg(feature = "desktop")]
+pub(crate) use info::scan_datasets;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct DatasetInfo {
-    pub name: String,
-    pub uuid: String,
-    pub description: String,
-    pub parent_uuid: String,
-    pub version: u32,
-    pub structure: String,
-    pub updated: String,
-    /// Marks the special "Favorites" dataset that cue audio clips are cut into.
-    /// Serde default keeps existing info.json files valid.
-    #[serde(default)]
-    pub is_favorites: bool,
-}
 
 #[derive(Clone, Serialize)]
 pub struct MediaFile {
@@ -181,6 +181,17 @@ pub(crate) enum DatasetType {
 }
 
 impl DatasetType {
+    /// Every type the app can host, in scan order. `find_dataset_dir_typed` and the
+    /// cross-type listings iterate this, so a new type is added in exactly one place
+    /// — anything left out is silently unsyncable and unlistable.
+    pub(crate) const ALL: [DatasetType; 5] = [
+        DatasetType::Dictation,
+        DatasetType::Card,
+        DatasetType::Book,
+        DatasetType::Read,
+        DatasetType::Wiki,
+    ];
+
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             DatasetType::Card => "card",
@@ -189,6 +200,42 @@ impl DatasetType {
             DatasetType::Read => "read_aloud",
             DatasetType::Wiki => "wiki",
         }
+    }
+}
+
+impl FromStr for DatasetType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "card" => Ok(DatasetType::Card),
+            "dictation" => Ok(DatasetType::Dictation),
+            "book" => Ok(DatasetType::Book),
+            "read_aloud" => Ok(DatasetType::Read),
+            "wiki" => Ok(DatasetType::Wiki),
+            other => Err(format!(
+                "Invalid dataset type: {} (expected one of card, dictation, book, read_aloud, wiki)",
+                other
+            )),
+        }
+    }
+}
+
+/// Wire `DatasetType` to its slug without duplicating the mapping: `as_str()` is
+/// the single source of truth for both the directory name and the `type` field in
+/// `info.json`. Deliberately not `#[derive(Serialize, Deserialize)]` with
+/// `rename_all` — that would make `DatasetType::Read` serialize as `read` while
+/// its directory is `read_aloud`, silently splitting the two spellings.
+impl Serialize for DatasetType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DatasetType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        DatasetType::from_str(&raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -222,14 +269,7 @@ pub async fn dataset_list_dirs(
     settings: State<'_, SettingsState>,
     dataset_type: String,
 ) -> Result<Vec<DatasetDirEntry>, String> {
-    let ds_type = match dataset_type.as_str() {
-        "card" => DatasetType::Card,
-        "dictation" => DatasetType::Dictation,
-        "book" => DatasetType::Book,
-        "read_aloud" => DatasetType::Read,
-        "wiki" => DatasetType::Wiki,
-        _ => return Err(format!("Invalid dataset type: {}", dataset_type)),
-    };
+    let ds_type = DatasetType::from_str(&dataset_type)?;
     
     let base_dir = datasets_dir(&settings);
     let type_dir = base_dir.join(ds_type.as_str());
@@ -433,11 +473,10 @@ fn scan_dataset_dir(path: &Path, location: &str) -> Option<DatasetSummary> {
     }
 
     let path_str = path.to_string_lossy().into_owned();
-    let info_path = path.join("info.json");
+    let info_path = path.join(INFO_FILE);
 
     if info_path.exists() {
-        let data = fs::read_to_string(&info_path).ok()?;
-        let info: DatasetInfo = serde_json::from_str(&data).ok()?;
+        let info = read_info_opt(path)?;
         let media_dir = path.join("media");
         let media_count = list_media_files(&media_dir).len();
         let status = if path.join("data.sqlite3").exists() { "ready" } else { "not_ready" };
@@ -456,16 +495,16 @@ fn scan_dataset_dir(path: &Path, location: &str) -> Option<DatasetSummary> {
     if media_files.is_empty() {
         return None;
     }
-    let info = DatasetInfo {
-        name: path.file_name()?.to_string_lossy().into_owned(),
-        uuid: String::new(),
-        description: String::new(),
-        parent_uuid: String::new(),
-        version: 0,
-        structure: "dictation-v1".into(),
-        updated: String::new(),
-        is_favorites: false,
-    };
+    // A raw folder is not yet a dataset: the empty uuid is what tells the UI and
+    // the sync catalog to skip it (see `useDictationData` and `sync::rest`).
+    let mut info = DatasetInfo::new(
+        String::new(),
+        DatasetType::Dictation,
+        FORMAT_DICTATION,
+        path.file_name()?.to_string_lossy().into_owned(),
+    );
+    info.created_at = String::new();
+    info.updated_at = String::new();
     Some(DatasetSummary {
         info,
         media_count: media_files.len(),
@@ -544,7 +583,6 @@ pub async fn dataset_import(
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create datasets dir: {}", e))?;
 
     let uuid = Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
 
     // Use the source directory name as the dataset folder name
     let dir_name = src
@@ -564,21 +602,31 @@ pub async fn dataset_import(
     let name = dir_name.clone();
     let media_count = media_files.len();
 
-    let info = DatasetInfo {
-        name,
-        uuid: uuid.clone(),
-        description: String::new(),
-        parent_uuid: String::new(),
-        version: 1,
-        structure: "dictation-v1".into(),
-        updated: now,
-        is_favorites: false,
+    // An imported folder may already carry an `info.json` (a dataset exported by
+    // another copy of the app). Keep its identity when it is ours to keep, and
+    // reject it when another dataset already claims that id.
+    let imported_info_path = dst.join(INFO_FILE);
+    let info = match read_info_opt(&dst) {
+        Some(mut existing) => {
+            if existing.uuid == FAVORITES_DATASET_UUID || find_dataset_dir_typed(&settings, &existing.uuid).is_ok() {
+                let _ = fs::remove_dir_all(&dst);
+                return Err(format!(
+                    "Imported dataset id {} is already used by a dataset on this machine; re-export it with a new id",
+                    existing.uuid
+                ));
+            }
+            existing.updated_at = now_stamp();
+            existing
+        }
+        None => {
+            if imported_info_path.exists() {
+                log::warn!("Imported '{}' has an info.json we cannot read; replacing it", dir_name);
+            }
+            DatasetInfo::new(uuid, DatasetType::Dictation, FORMAT_DICTATION, name)
+        }
     };
 
-    // Write info.json
-    let info_path = dst.join("info.json");
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(&info_path, data).map_err(|e| e.to_string())?;
+    write_info(&dst, &info)?;
 
     log::info!("Imported dataset '{}' with {} media file(s)", dir_name, media_count);
     Ok(DatasetSummary { info, media_count, path: dst.to_string_lossy().into_owned(), location: dir.to_string_lossy().into_owned(), status: "not_ready".into() })
@@ -591,10 +639,7 @@ pub async fn dataset_get(
     uuid: String,
 ) -> Result<DatasetDetail, String> {
     let path = find_dataset_dir(&settings, &uuid)?;
-
-    let info_path = path.join("info.json");
-    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-    let info: DatasetInfo = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+    let info = read_info(&path)?;
 
     let media_dir = path.join("media");
     let media = list_media_files(&media_dir);
@@ -614,19 +659,20 @@ pub async fn dataset_get(
     Ok(DatasetDetail { info, media, has_subtitles, has_waveforms, has_database, has_book, status: status.into() })
 }
 
-/// Update mutable fields of a dataset's info.json (name, description).
+/// Update the mutable descriptive fields of a dataset's `info.json`.
+///
+/// Identity (`uuid`), layout (`type`/`format`) and history (`created_at`) are not
+/// settable here: changing any of them is a different dataset, not an edit.
 #[tauri::command]
 pub async fn dataset_update(
     settings: State<'_, SettingsState>,
     uuid: String,
     name: Option<String>,
     description: Option<String>,
+    language: Option<String>,
 ) -> Result<(), String> {
     let path = find_dataset_dir(&settings, &uuid)?;
-    let info_path = path.join("info.json");
-
-    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-    let mut info: DatasetInfo = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+    let mut info = read_info(&path)?;
 
     if let Some(n) = name {
         info.name = n;
@@ -634,11 +680,12 @@ pub async fn dataset_update(
     if let Some(d) = description {
         info.description = d;
     }
-    info.updated = Utc::now().to_rfc3339();
+    if let Some(l) = language {
+        info.language = l;
+    }
+    info.updated_at = now_stamp();
 
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(&info_path, data).map_err(|e| e.to_string())?;
-    Ok(())
+    write_info(&path, &info)
 }
 
 /// Delete a dataset by removing its entire directory.
@@ -716,7 +763,7 @@ pub async fn dataset_create(
     fs::create_dir_all(&root).map_err(|e| format!("Failed to create datasets dir: {}", e))?;
 
     let uuid = Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
+    assert_uuid_free(&settings, &uuid)?;
     let dir_name = sanitize_dir_name(trimmed).unwrap_or_else(|| uuid.clone());
     let dst = root.join(&dir_name);
     if dst.exists() {
@@ -727,18 +774,14 @@ pub async fn dataset_create(
         fs::create_dir_all(dst.join(sub)).map_err(|e| e.to_string())?;
     }
 
-    let info = DatasetInfo {
-        name: trimmed.to_string(),
-        uuid: uuid.clone(),
-        description: description.unwrap_or_default(),
-        parent_uuid: String::new(),
-        version: 1,
-        structure: "dictation-v1".into(),
-        updated: now,
-        is_favorites: false,
-    };
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(dst.join("info.json"), data).map_err(|e| e.to_string())?;
+    let mut info = DatasetInfo::new(
+        uuid.clone(),
+        DatasetType::Dictation,
+        FORMAT_DICTATION,
+        trimmed.to_string(),
+    );
+    info.description = description.unwrap_or_default();
+    write_info(&dst, &info)?;
 
     log::info!("Created dataset '{}' at '{}'", trimmed, dst.display());
     Ok(DatasetSummary {
@@ -750,44 +793,29 @@ pub async fn dataset_create(
     })
 }
 
-/// Locate the special "Favorites" dataset directory (the one whose `info.json`
-/// has `is_favorites == true`) WITHOUT creating it. Returns `None` when it does
-/// not exist yet. Used for read-only lookups such as de-duplicating favorites.
+/// Locate the built-in "Favorites" dataset WITHOUT creating it.
+///
+/// It is an ordinary dataset addressed by the reserved id [`FAVORITES_DATASET_UUID`]
+/// rather than by a flag, so this is a plain uuid lookup instead of a scan of every
+/// `info.json`. Returns `None` when it has not been created yet — read-only callers
+/// (de-duplication, listing) must not cause a dataset to appear.
 pub(crate) fn find_favorites_dataset(settings: &SettingsState) -> Option<(PathBuf, String)> {
-    for root in &dataset_roots(settings, DatasetType::Dictation) {
-        if !root.exists() {
-            continue;
-        }
-        let entries = match fs::read_dir(root) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let dir = entry.path();
-            let info_path = dir.join("info.json");
-            if !info_path.is_file() {
-                continue;
-            }
-            let data = match fs::read_to_string(&info_path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            if let Ok(info) = serde_json::from_str::<DatasetInfo>(&data) {
-                if info.is_favorites {
-                    return Some((dir, info.uuid));
-                }
-            }
-        }
-    }
-    None
+    find_dataset_dir(settings, FAVORITES_DATASET_UUID)
+        .ok()
+        .map(|dir| (dir, FAVORITES_DATASET_UUID.to_string()))
 }
 
-/// Resolve the special "Favorites" dataset, creating it on first use.
+/// Resolve the built-in "Favorites" dataset, creating it on first use.
 ///
-/// Scans all configured dataset roots for a directory whose `info.json` has
-/// `is_favorites == true`. If none exists, creates the standard skeleton
-/// (media/subtitle/waveform/transcript + info.json) named "Favorites" under the
-/// first root. Returns `(dataset_dir, dataset_uuid)`.
+/// The id is reserved and constant, so a Favorites dataset on the PC and one on the
+/// phone are the *same* dataset: their clips merge under sync instead of forking per
+/// device. `assert_uuid_free` is deliberately not called here — it would reject the
+/// very id this function exists to mint, and any dataset it finds is by definition
+/// the one it was looking for.
+///
+/// A pre-existing Favorites dataset carrying a random uuid (the shape before the
+/// reserved id) is not adopted: it stays an ordinary dictation dataset until it is
+/// migrated by hand.
 pub(crate) fn ensure_favorites_dataset(settings: &SettingsState) -> Result<(PathBuf, String), String> {
     if let Some(found) = find_favorites_dataset(settings) {
         log::debug!("Found Favorites dataset at '{}'", found.0.display());
@@ -801,9 +829,7 @@ pub(crate) fn ensure_favorites_dataset(settings: &SettingsState) -> Result<(Path
         .unwrap_or_else(|| datasets_dir(settings));
     fs::create_dir_all(&root).map_err(|e| format!("Failed to create datasets dir: {}", e))?;
 
-    let uuid = Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
-    let dir_name = sanitize_dir_name("Favorites").unwrap_or_else(|| uuid.clone());
+    let dir_name = sanitize_dir_name("Favorites").unwrap_or_else(|| FAVORITES_DATASET_UUID.to_string());
     // Avoid clobbering an existing unrelated "Favorites" directory.
     let mut dst = root.join(&dir_name);
     let mut n = 2;
@@ -816,21 +842,17 @@ pub(crate) fn ensure_favorites_dataset(settings: &SettingsState) -> Result<(Path
         fs::create_dir_all(dst.join(sub)).map_err(|e| e.to_string())?;
     }
 
-    let info = DatasetInfo {
-        name: "Favorites".to_string(),
-        uuid: uuid.clone(),
-        description: "Clips cut from favorited cues".to_string(),
-        parent_uuid: String::new(),
-        version: 1,
-        structure: "dictation-v1".into(),
-        updated: now,
-        is_favorites: true,
-    };
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(dst.join("info.json"), data).map_err(|e| e.to_string())?;
+    let mut info = DatasetInfo::new(
+        FAVORITES_DATASET_UUID.to_string(),
+        DatasetType::Dictation,
+        FORMAT_DICTATION,
+        "Favorites".to_string(),
+    );
+    info.description = "Clips cut from favorited cues".to_string();
+    write_info(&dst, &info)?;
 
-    log::info!("Created Favorites dataset '{}' at '{}'", uuid, dst.display());
-    Ok((dst, uuid))
+    log::info!("Created Favorites dataset '{}' at '{}'", FAVORITES_DATASET_UUID, dst.display());
+    Ok((dst, FAVORITES_DATASET_UUID.to_string()))
 }
 
 /// Copy (or symlink) audio/video files from a source directory into a dataset's
@@ -993,17 +1015,13 @@ pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<P
             if !path.is_dir() {
                 continue;
             }
-            let info_path = path.join("info.json");
+            let info_path = path.join(INFO_FILE);
             if !info_path.exists() {
                 continue;
             }
-            let data = match fs::read_to_string(&info_path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            let info: DatasetInfo = match serde_json::from_str(&data) {
-                Ok(i) => i,
-                Err(_) => continue,
+            let info = match read_info_opt(&path) {
+                Some(i) => i,
+                None => continue,
             };
             if info.uuid == uuid {
                 return Ok(path);
@@ -1018,9 +1036,10 @@ pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<P
 /// callers — the REST manifest/snapshot endpoints and the sync client — know
 /// both where the dataset lives and which local root it belongs to.
 ///
-/// `info.json` shapes differ per type (books have no `name`/`description`), so
-/// only the `uuid` field is read via a lenient JSON parse.
-#[allow(dead_code)] // only the desktop REST endpoints call this
+/// Every type now shares one `info.json` shape, so this is a typed parse. The
+/// directory remains the routing authority: a dataset that declares a different
+/// `type` than the tree it sits in is reported and skipped, since honouring it
+/// would let a file edit move a dataset between types behind the UI's back.
 pub(crate) fn find_dataset_dir_typed(
     settings: &SettingsState,
     uuid: &str,
@@ -1028,13 +1047,7 @@ pub(crate) fn find_dataset_dir_typed(
     // Every type the sync transport can serve. A type missing here cannot be
     // resolved by `/manifest`, `/snapshot`, `/changes` or `/file`, so it is
     // effectively unsyncable even when the catalog advertises it.
-    for ty in [
-        DatasetType::Dictation,
-        DatasetType::Card,
-        DatasetType::Book,
-        DatasetType::Read,
-        DatasetType::Wiki,
-    ] {
+    for ty in DatasetType::ALL {
         for root in dataset_roots(settings, ty) {
             if !root.exists() {
                 continue;
@@ -1045,24 +1058,26 @@ pub(crate) fn find_dataset_dir_typed(
             };
             for entry in entries.flatten() {
                 let path = entry.path();
-                if !path.is_dir() {
+                if !path.is_dir() || !path.join(INFO_FILE).exists() {
                     continue;
                 }
-                let info_path = path.join("info.json");
-                if !info_path.exists() {
+                let info = match read_info_opt(&path) {
+                    Some(i) => i,
+                    None => continue,
+                };
+                if info.uuid != uuid {
                     continue;
                 }
-                let data = match fs::read_to_string(&info_path) {
-                    Ok(d) => d,
-                    Err(_) => continue,
-                };
-                let value: serde_json::Value = match serde_json::from_str(&data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if value.get("uuid").and_then(|u| u.as_str()) == Some(uuid) {
-                    return Ok((path, ty));
+                if info.dataset_type != ty {
+                    log::warn!(
+                        "[Dataset] '{}' declares type '{}' but lives under '{}'; ignoring it",
+                        uuid,
+                        info.dataset_type.as_str(),
+                        ty.as_str()
+                    );
+                    continue;
                 }
+                return Ok((path, ty));
             }
         }
     }
@@ -1132,12 +1147,7 @@ pub async fn dataset_generate_subtitles(
 
     // Update timestamp only when something was actually generated.
     if total > 0 {
-        let info_path = dataset_dir.join("info.json");
-        let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-        let mut info: DatasetInfo = serde_json::from_str(&data).map_err(|e| e.to_string())?;
-        info.updated = Utc::now().to_rfc3339();
-        let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-        fs::write(&info_path, data).map_err(|e| e.to_string())?;
+        touch_info(&dataset_dir)?;
     }
 
     Ok(format!(
@@ -1241,12 +1251,7 @@ pub async fn dataset_delete_subtitles(
     }
 
     // Update timestamp
-    let info_path = dataset_dir.join("info.json");
-    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-    let mut info: DatasetInfo = serde_json::from_str(&data).map_err(|e| e.to_string())?;
-    info.updated = Utc::now().to_rfc3339();
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(&info_path, data).map_err(|e| e.to_string())?;
+    touch_info(&dataset_dir)?;
 
     Ok(())
 }
@@ -1700,12 +1705,7 @@ pub async fn dataset_delete_database(
     }
 
     // Update timestamp
-    let info_path = dataset_dir.join("info.json");
-    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-    let mut info: DatasetInfo = serde_json::from_str(&data).map_err(|e| e.to_string())?;
-    info.updated = Utc::now().to_rfc3339();
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(&info_path, data).map_err(|e| e.to_string())?;
+    touch_info(&dataset_dir)?;
 
     Ok(())
 }
@@ -1814,12 +1814,7 @@ pub async fn dataset_generate_database(
     drop(conn);
 
     // Update timestamp
-    let info_path = dataset_dir.join("info.json");
-    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-    let mut info: DatasetInfo = serde_json::from_str(&data).map_err(|e| e.to_string())?;
-    info.updated = now;
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(&info_path, data).map_err(|e| e.to_string())?;
+    touch_info(&dataset_dir)?;
 
     log::info!("Database generated for dataset '{}': {} media, {} total", uuid, total, total);
     Ok(())
@@ -1957,12 +1952,7 @@ pub async fn dataset_write_subtitles_to_db(
     drop(conn);
 
     // Update timestamp
-    let info_path = dataset_dir.join("info.json");
-    let data = fs::read_to_string(&info_path).map_err(|e| e.to_string())?;
-    let mut info: DatasetInfo = serde_json::from_str(&data).map_err(|e| e.to_string())?;
-    info.updated = now;
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(&info_path, data).map_err(|e| e.to_string())?;
+    touch_info(&dataset_dir)?;
 
     log_lines.push(String::new());
     log_lines.push(format!("Wrote {} subtitle(s) to database.", written));

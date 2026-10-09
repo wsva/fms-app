@@ -2,19 +2,14 @@
 // Types
 // ---------------------------------------------------------------------------
 
-export type DatasetStatus = "ready" | "not_ready";
+import type { DatasetInfo } from "@/lib/types";
 
-export interface DatasetInfo {
-  name: string;
-  uuid: string;
-  description: string;
-  parent_uuid: string;
-  version: number;
-  structure: string;
-  updated: string;
-  /** Marks the special "Favorites" dataset that cue clips are cut into. */
-  is_favorites?: boolean;
-}
+// One descriptor for every dataset type — defined once in `@/lib/types` (which
+// mirrors the Rust `datasets::info::DatasetInfo`) and re-exported here so the
+// dictation UI keeps importing it from the dataset module.
+export type { DatasetInfo };
+
+export type DatasetStatus = "ready" | "not_ready";
 
 export interface DatasetSummary {
   info: DatasetInfo;

@@ -3,16 +3,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RefreshCw, Plus, X, Star, Globe, Play } from "lucide-react";
+import type { CardDatasetSummary } from "@/lib/types";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
-interface CardDatasetSummary {
-  info: { uuid: string; name: string; description: string };
-  card_count: number;
-  path: string;
-  location: string;
 }
 
 interface LanguageConfig {

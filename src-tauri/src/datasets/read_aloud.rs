@@ -21,12 +21,13 @@ use tauri::{Emitter, State};
 use uuid::Uuid;
 
 use crate::auth::workspace_identity;
-use crate::datasets::{dataset_roots, DatasetType};
+use crate::datasets::{
+    assert_uuid_free, dataset_roots, now_stamp, read_info, read_info_opt, touch_info, write_info,
+    DatasetInfo, DatasetType, FORMAT_READ_ALOUD, INFO_FILE,
+};
 use crate::settings::SettingsState;
 use crate::datasets::textsim::similarity_score;
 use crate::xp::{xp_award_internal, XpAwardResult};
-
-const READ_ALOUD_STRUCTURE: &str = "read-aloud-v1";
 
 /// Score thresholds for the scaled XP reward.
 const XP_PASS_SCORE: f64 = 60.0;
@@ -47,18 +48,6 @@ pub struct ReadAloudMeta {
     pub path: String,
     pub created_at: String,
     pub updated_at: String,
-}
-
-/// Contents of a dataset directory's `info.json`.
-#[derive(Clone, Serialize, Deserialize)]
-struct ReadAloudInfoFile {
-    uuid: String,
-    name: String,
-    #[serde(default)]
-    description: String,
-    structure: String,
-    created_at: String,
-    updated_at: String,
 }
 
 /// A single text to read aloud.
@@ -135,10 +124,10 @@ fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, Str
         let entries = fs::read_dir(&root).map_err(|e| e.to_string())?;
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() || !path.join("info.json").exists() {
+            if !path.is_dir() || !path.join(INFO_FILE).exists() {
                 continue;
             }
-            if let Ok(info) = read_info(&path) {
+            if let Some(info) = read_info_opt(&path) {
                 if info.uuid == uuid {
                     return Ok(path);
                 }
@@ -146,11 +135,6 @@ fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, Str
         }
     }
     Err(format!("Read-aloud dataset with UUID {} not found", uuid))
-}
-
-fn read_info(dir: &Path) -> Result<ReadAloudInfoFile, String> {
-    let data = fs::read_to_string(dir.join("info.json")).map_err(|e| e.to_string())?;
-    serde_json::from_str(&data).map_err(|e| e.to_string())
 }
 
 /// Open (and initialize) a dataset's SQLite database.
@@ -218,15 +202,6 @@ fn sanitize_name(title: &str) -> String {
     }
 }
 
-fn touch_info(dir: &Path) {
-    if let Ok(mut info) = read_info(dir) {
-        info.updated_at = Utc::now().to_rfc3339();
-        if let Ok(data) = serde_json::to_string_pretty(&info) {
-            let _ = fs::write(dir.join("info.json"), data);
-        }
-    }
-}
-
 // ============================================================
 // Dataset commands
 // ============================================================
@@ -252,11 +227,11 @@ pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<ReadAloudMeta> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() || !path.join("info.json").exists() {
+            if !path.is_dir() || !path.join(INFO_FILE).exists() {
                 continue;
             }
-            if let Ok(info) = read_info(&path) {
-                if info.structure != READ_ALOUD_STRUCTURE {
+            if let Some(info) = read_info_opt(&path) {
+                if info.dataset_type != DatasetType::Read {
                     continue;
                 }
                 out.push(ReadAloudMeta {
@@ -295,7 +270,7 @@ pub(crate) fn create_dataset(
     let root = primary_root(settings)?;
 
     let uuid = Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
+    assert_uuid_free(settings, &uuid)?;
     let base_name = sanitize_name(&name);
 
     let mut dst = root.join(&base_name);
@@ -304,16 +279,14 @@ pub(crate) fn create_dataset(
     }
     fs::create_dir_all(dst.join("media")).map_err(|e| e.to_string())?;
 
-    let info = ReadAloudInfoFile {
-        uuid: uuid.clone(),
-        name: name.clone(),
-        description: description.clone(),
-        structure: READ_ALOUD_STRUCTURE.into(),
-        created_at: now.clone(),
-        updated_at: now.clone(),
-    };
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(dst.join("info.json"), data).map_err(|e| e.to_string())?;
+    let mut info = DatasetInfo::new(
+        uuid.clone(),
+        DatasetType::Read,
+        FORMAT_READ_ALOUD,
+        name.clone(),
+    );
+    info.description = description.clone();
+    write_info(&dst, &info)?;
     open_db(&dst)?;
 
     Ok(ReadAloudMeta {
@@ -321,8 +294,8 @@ pub(crate) fn create_dataset(
         name,
         description,
         path: dst.to_string_lossy().into_owned(),
-        created_at: now.clone(),
-        updated_at: now,
+        created_at: info.created_at.clone(),
+        updated_at: info.updated_at,
     })
 }
 
@@ -343,10 +316,8 @@ pub async fn read_aloud_update(
     if let Some(d) = description {
         info.description = d;
     }
-    info.updated_at = Utc::now().to_rfc3339();
-    let data = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
-    fs::write(dir.join("info.json"), data).map_err(|e| e.to_string())?;
-    Ok(())
+    info.updated_at = now_stamp();
+    write_info(&dir, &info)
 }
 
 /// Delete a dataset and its entire directory.
@@ -448,7 +419,7 @@ pub(crate) fn save_text_row(
         ],
     )
     .map_err(|e| e.to_string())?;
-    touch_info(&dir);
+    let _ = touch_info(&dir);
     {
         let _ = crate::sync::change_log::commit_change(
             settings,
@@ -484,7 +455,7 @@ pub async fn read_aloud_delete_text(
         .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM read_text WHERE uuid = ?1", [&uuid])
         .map_err(|e| e.to_string())?;
-    touch_info(&dir);
+    let _ = touch_info(&dir);
     // The attempt rows go with it by cascade, so one change entry suffices — the
     // apply path deletes the same way.
     {
@@ -607,7 +578,7 @@ pub(crate) fn save_attempt_row(
         rusqlite::params![attempt.score, attempt.text_uuid],
     )
     .map_err(|e| e.to_string())?;
-    touch_info(&dir);
+    let _ = touch_info(&dir);
 
     {
         let _ = crate::sync::change_log::commit_change(

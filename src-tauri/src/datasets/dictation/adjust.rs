@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use tauri::{Emitter, State};
 use uuid::Uuid;
 
-use crate::datasets::{find_dataset_dir, parse_vtt, DatasetProgress};
+use crate::datasets::{find_dataset_dir, parse_vtt, touch_info, DatasetProgress};
 use crate::models::ModelState;
 use crate::settings::SettingsState;
 use crate::datasets::dictation::align::similarity_score;
@@ -961,15 +961,7 @@ fn dataset_adjust_cue_time_sync(
         summary.push_str(&format!("\nRemoved {} leftover tmp working subtitle(s)", tmp_deleted));
     }
     // Touch info.json timestamp (best-effort).
-    let info_path = dataset_dir.join("info.json");
-    if let Ok(data) = fs::read_to_string(&info_path) {
-        if let Ok(mut info) = serde_json::from_str::<crate::datasets::DatasetInfo>(&data) {
-            info.updated = Utc::now().to_rfc3339();
-            if let Ok(out) = serde_json::to_string_pretty(&info) {
-                let _ = fs::write(&info_path, out);
-            }
-        }
-    }
+    let _ = touch_info(&dataset_dir);
     Ok(summary)
 }
 
@@ -1589,15 +1581,7 @@ pub async fn dataset_sync_cue_times_word_level(
     ));
 
     // Touch info.json timestamp.
-    let info_path = dataset_dir.join("info.json");
-    if let Ok(data) = fs::read_to_string(&info_path) {
-        if let Ok(mut info) = serde_json::from_str::<crate::datasets::DatasetInfo>(&data) {
-            info.updated = Utc::now().to_rfc3339();
-            if let Ok(out) = serde_json::to_string_pretty(&info) {
-                let _ = fs::write(&info_path, out);
-            }
-        }
-    }
+    let _ = touch_info(&dataset_dir);
 
     Ok(summary)
 }
@@ -1816,15 +1800,7 @@ pub async fn dataset_sync_cue_times(
     ));
 
     // Touch info.json timestamp.
-    let info_path = dataset_dir.join("info.json");
-    if let Ok(data) = fs::read_to_string(&info_path) {
-        if let Ok(mut info) = serde_json::from_str::<crate::datasets::DatasetInfo>(&data) {
-            info.updated = Utc::now().to_rfc3339();
-            if let Ok(out) = serde_json::to_string_pretty(&info) {
-                let _ = fs::write(&info_path, out);
-            }
-        }
-    }
+    let _ = touch_info(&dataset_dir);
 
     Ok(summary)
 }

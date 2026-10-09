@@ -38,24 +38,49 @@ export type ListenDictation = {
   completed: string;
 };
 
-// ── Card types ──────────────────────────────────────────────────────────────
+// ── Dataset descriptor (info.json) ─────────────────────────────────────────
+// Mirrors `datasets::info::DatasetInfo` in the Rust core: ONE shape for every
+// dataset type, so no component needs a per-type variant. Unknown keys written
+// by a newer build round-trip through the backend's `extra` map and simply show
+// up here as extra properties.
 
-export type CardDatasetInfo = {
-  uuid: string;
-  name: string;
-  description: string;
-  parent_uuid: string;
-  version: number;
-  structure: 'cards-v1';
-  updated: string;
-  sync_url: string;
+/** Dataset types, spelled as their directory slug (`type` in info.json). */
+export type DatasetType = 'dictation' | 'card' | 'book' | 'read_aloud' | 'wiki';
+
+/** Publication state, shared by every dataset type. */
+export type Sharing = {
   visibility: 'private' | 'shared' | 'public';
+  /** Owner's user id (email); gates pushes to the hub. */
   owner_id: string;
+  /** Website-authoritative mirror — local code reads it, never appends. */
   subscribers: string[];
 };
 
+export type DatasetInfo = {
+  /** info.json schema version. */
+  spec: number;
+  /** Opaque, globally unique id — never format-validated. */
+  uuid: string;
+  type: DatasetType;
+  /** Per-type internal layout tag, e.g. `card-v1`. */
+  format: string;
+  name: string;
+  description: string;
+  /** BCP 47 primary subtag (`de`, `en`, …); "" when unknown. */
+  language: string;
+  /** Set once at creation; a rebuild never moves it. */
+  created_at: string;
+  updated_at: string;
+  sharing: Sharing;
+};
+
+/** The app-owned Favorites dataset, identified by this reserved id (not a flag). */
+export const FAVORITES_DATASET_UUID = 'dictation-favorites';
+
+// ── Card types ──────────────────────────────────────────────────────────────
+
 export type CardDatasetSummary = {
-  info: CardDatasetInfo;
+  info: DatasetInfo;
   card_count: number;
   path: string;
   location: string;

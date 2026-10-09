@@ -9,13 +9,14 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { useImmer } from "use-immer";
 import { isAudio } from "@/lib/listen/utils";
 import { isTauri } from "@/lib/tauri";
-import type { Cue, ListenMedia, ListenSubtitle, ListenDictation } from "@/lib/types";
+import type { Cue, DatasetInfo, ListenMedia, ListenSubtitle, ListenDictation } from "@/lib/types";
 import type { WaveformData } from "@/components/listen_speak/dictation/components/WaveformCanvas";
 
 const getUUID = () => crypto.randomUUID().replaceAll("-", "");
 
 interface DatasetSummary {
-    info: { uuid: string; name: string; is_favorites?: boolean };
+    /** The unified info.json descriptor — see `DatasetInfo` in `@/lib/types`. */
+    info: DatasetInfo;
     path: string;
     /** Root location directory this dataset was found under. */
     location: string;

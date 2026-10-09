@@ -48,15 +48,25 @@ pub(crate) mod discover;
 ///   exists so a follower can tell whether the route is there. (The matching local
 ///   change — `lifetime_xp` is now recomputed from the ledger instead of accumulated
 ///   — touches no wire format at all.)
+/// * `5`: the unified `info.json` schema (see docs/design/dataset-info.md). One
+///   typed descriptor for every dataset type replaces the five divergent shapes,
+///   so `updated` becomes `updated_at`, a book's `title` becomes `name`, `type` /
+///   `format` split out of `structure`, and per-dataset `sync_url` is gone. There
+///   is **no** compatibility reader: an old follower pointed at a migrated dataset
+///   loses `name`/`type`, and a v5 follower reading a pre-migration file loses the
+///   same fields under the typed parser — both mis-parse silently, so the bump
+///   exists to make a mixed-version cluster refuse each other instead.
 ///
-/// Mixed versions degrade safely in both directions: a v3 follower only pulls
+/// Versions 1-4 degrade safely in both directions: a v3 follower only pulls
 /// `/app/changes` when the hub's `/status` reports `protocol_version >= 3`, and a
 /// v4 follower only asks for `/app/state` at `>= 4`, so an older hub is never
 /// probed with a route it lacks. A v2 follower's app-data pushes still land in the
 /// v3+ hub's journal — under `@app` rather than the dataset scope, so they are no
-/// longer echoed through that device's per-dataset pull. Everyone converges once
-/// the whole cluster is on the same version.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// longer echoed through that device's per-dataset pull. v5 is the exception: the
+/// on-disk descriptor format, not a route, is what changed, so no `>=` guard can
+/// express it — migrate every dataset before running a v5 binary. Everyone
+/// converges once the whole cluster is on the same version.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Hostname of this machine, as advertised in the discovery beacon and
 /// `/api/v1/status` so a scanned list can say *which* PC it found rather than
