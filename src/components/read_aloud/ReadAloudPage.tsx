@@ -105,7 +105,7 @@ export default function ReadAloudPage() {
   const deleteDataset = (meta: ReadAloudMeta) => {
     setConfirm({
       title: "Delete dataset",
-      message: `Delete the read-aloud dataset "${meta.name}" and everything inside it?`,
+      message: `Delete the read-aloud dataset "${meta.name}" and everything inside it?\n\nThe folder is moved to trash, not permanently deleted.`,
       confirmLabel: "Delete",
       onConfirm: async () => {
         try {

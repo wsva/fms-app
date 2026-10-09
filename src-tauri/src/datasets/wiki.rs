@@ -17,7 +17,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -26,8 +25,8 @@ use uuid::Uuid;
 use crate::settings::SettingsState;
 
 use super::{
-    assert_uuid_free, dataset_roots, is_derived_index, read_info_opt, touch_info, write_info,
-    DatasetInfo, DatasetType, FORMAT_WIKI, INFO_FILE,
+    assert_uuid_free, dataset_roots, is_derived_index, move_to_trash, read_info_opt, touch_info,
+    write_info, DatasetInfo, DatasetType, FORMAT_WIKI, INFO_FILE,
 };
 
 /// The derived FTS index inside a wiki dataset dir. Never synced, never listed.
@@ -196,21 +195,6 @@ pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<P
     Err(format!(
         "Wiki dataset not downloaded on this device (uuid {uuid}) — download it first"
     ))
-}
-
-/// Move a file or directory into the shared trash instead of destroying it
-/// (the "backup before destroy" rule), returning the trash path.
-fn move_to_trash(path: &Path) -> Result<PathBuf, String> {
-    let trash_dir = crate::app_paths::data_subdir("trash");
-    fs::create_dir_all(&trash_dir).map_err(|e| format!("Failed to create trash directory: {}", e))?;
-    let file_name = path
-        .file_name()
-        .ok_or("Invalid file name")?
-        .to_string_lossy();
-    let trash_name = format!("{}_{}", Utc::now().format("%Y%m%d_%H%M%S"), file_name);
-    let trash_path = trash_dir.join(trash_name);
-    fs::rename(path, &trash_path).map_err(|e| format!("Failed to move to trash: {}", e))?;
-    Ok(trash_path)
 }
 
 /// Folder name for a new dataset: filesystem-safe form of the display name.

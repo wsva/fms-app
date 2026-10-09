@@ -843,12 +843,13 @@ pub async fn card_dataset_remove_subscriber(
     Ok(())
 }
 
-/// Delete a card dataset by removing its entire directory.
+/// Delete a card dataset: its directory moves into the shared trash instead of
+/// being destroyed, so the operation stays undoable. Returns the trash path.
 #[tauri::command]
 pub async fn card_dataset_delete(
     settings: State<'_, SettingsState>,
     uuid: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let path = find_card_dataset_dir(&settings, &uuid)?;
     log::info!("[Cards] Deleting dataset at '{}'", path.display());
     
@@ -862,8 +863,9 @@ pub async fn card_dataset_delete(
         }
     }
     
-    fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
-    Ok(())
+    let trashed = crate::datasets::move_to_trash(&path)?;
+    log::info!("[Cards] Dataset {} moved to trash '{}'", uuid, trashed.display());
+    Ok(trashed.to_string_lossy().into_owned())
 }
 
 /// Move a card dataset to a different location (directory root).

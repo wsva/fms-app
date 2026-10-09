@@ -22,8 +22,8 @@ use uuid::Uuid;
 
 use crate::auth::workspace_identity;
 use crate::datasets::{
-    assert_uuid_free, dataset_roots, now_stamp, read_info, read_info_opt, touch_info, write_info,
-    DatasetInfo, DatasetType, FORMAT_READ_ALOUD, INFO_FILE,
+    assert_uuid_free, dataset_roots, move_to_trash, now_stamp, read_info, read_info_opt, touch_info,
+    write_info, DatasetInfo, DatasetType, FORMAT_READ_ALOUD, INFO_FILE,
 };
 use crate::settings::SettingsState;
 use crate::datasets::textsim::similarity_score;
@@ -320,12 +320,23 @@ pub async fn read_aloud_update(
     write_info(&dir, &info)
 }
 
-/// Delete a dataset and its entire directory.
+/// Delete a dataset: its directory moves into the shared trash instead of being
+/// destroyed, so the operation stays undoable (see [`move_to_trash`]). Returns the
+/// trash path.
 #[tauri::command]
-pub async fn read_aloud_delete(settings: State<'_, SettingsState>, uuid: String) -> Result<(), String> {
+pub async fn read_aloud_delete(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+) -> Result<String, String> {
     let dir = find_dataset_dir(&settings, &uuid)?;
-    fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(())
+    log::info!("[ReadAloud] Deleting dataset at '{}'", dir.display());
+    let trashed = move_to_trash(&dir)?;
+    log::info!(
+        "[ReadAloud] Dataset {} moved to trash '{}'",
+        uuid,
+        trashed.display()
+    );
+    Ok(trashed.to_string_lossy().into_owned())
 }
 
 // ============================================================

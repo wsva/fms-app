@@ -183,7 +183,7 @@ export default function BookManager({ books, onBooksChanged }: Props) {
 
   const handleDeleteBook = (uuid: string) => {
     setConfirmReq({
-      message: "Delete this book and all its chapters?",
+      message: "Delete this book and all its chapters?\n\nThe folder is moved to trash, not permanently deleted.",
       confirmLabel: "Delete",
       onConfirm: () => doDeleteBook(uuid),
     });

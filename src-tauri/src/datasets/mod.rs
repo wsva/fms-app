@@ -450,7 +450,8 @@ fn rel_source_string(media_dir: &Path, media_path: &Path) -> String {
         .replace('\\', "/")
 }
 
-#[allow(dead_code)]
+/// Copy a directory tree. Only reachable through [`move_to_trash`], whose
+/// cross-volume fallback needs it; the fast path is a rename.
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| e.to_string())?;
     for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
@@ -464,6 +465,89 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Move a file or directory into the shared trash instead of destroying it — the
+/// "backup before destroy" rule in `docs/agent_friendly_design.md`, which is what
+/// lets a delete be issued without a confirmation prompt and still be undone.
+/// Returns the trash path: a delete that reports only success leaves nobody the
+/// wiser about where the data went, so callers surface it.
+///
+/// A rename is the fast path, but a linked dataset dir can live on another volume
+/// than the app-data dir, and Windows refuses to rename across that boundary — so
+/// a failed rename copies instead. The copy lands under a `.partial` name and is
+/// published only once the whole tree has been written, and only then is the
+/// original removed: a half-copied backup can never be mistaken for a real one,
+/// and a failed copy leaves the dataset exactly where it was.
+///
+/// The timestamp has second precision, so two deletions of same-named folders
+/// inside one second would otherwise land on the same path and the second rename
+/// would fail on Windows (or silently replace on Unix). The counter keeps each
+/// deletion recoverable.
+pub(crate) fn move_to_trash(path: &Path) -> Result<PathBuf, String> {
+    let trash_dir = crate::app_paths::data_subdir("trash");
+    fs::create_dir_all(&trash_dir).map_err(|e| format!("Failed to create trash directory: {}", e))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("Cannot trash {}: it has no file name", path.display()))?
+        .to_string_lossy()
+        .into_owned();
+    let stem = format!("{}_{}", Utc::now().format("%Y%m%d_%H%M%S"), file_name);
+    let mut trash_path = trash_dir.join(&stem);
+    let mut n = 1;
+    while trash_path.exists() {
+        trash_path = trash_dir.join(format!("{}_{}", stem, n));
+        n += 1;
+    }
+
+    if fs::rename(path, &trash_path).is_ok() {
+        return Ok(trash_path);
+    }
+    log::warn!(
+        "[Trash] rename {} -> {} failed, copying instead (probably another volume)",
+        path.display(),
+        trash_path.display()
+    );
+
+    let partial = trash_dir.join(format!("{}.partial", stem));
+    let copied: Result<(), String> = if path.is_dir() {
+        copy_dir_recursive(path, &partial)
+    } else {
+        fs::copy(path, &partial).map(|_| ()).map_err(|e| e.to_string())
+    };
+    if let Err(e) = copied {
+        // Nothing was published and nothing was removed: the original is intact.
+        if partial.is_dir() {
+            let _ = fs::remove_dir_all(&partial);
+        } else {
+            let _ = fs::remove_file(&partial);
+        }
+        return Err(format!("Failed to copy {} into trash: {}", path.display(), e));
+    }
+    fs::rename(&partial, &trash_path).map_err(|e| {
+        format!(
+            "Copied {} into trash as {} but could not publish it: {}",
+            path.display(),
+            partial.display(),
+            e
+        )
+    })?;
+    let removed = if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    if let Err(e) = removed {
+        // Recoverable, but say so: the trash copy exists *and* the original is
+        // still in place, which is the safe direction to have failed in.
+        return Err(format!(
+            "Backed up {} to {} but could not remove the original: {}",
+            path.display(),
+            trash_path.display(),
+            e
+        ));
+    }
+    Ok(trash_path)
 }
 
 // ---------------------------------------------------------------------------
@@ -693,16 +777,19 @@ pub async fn dataset_update(
     write_info(&path, &info)
 }
 
-/// Delete a dataset by removing its entire directory.
+/// Delete a dataset: its whole directory moves into the shared trash rather than
+/// being destroyed, so the operation stays undoable (see [`move_to_trash`]).
+/// Returns the trash path.
 #[tauri::command]
 pub async fn dataset_delete(
     settings: State<'_, SettingsState>,
     uuid: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let path = find_dataset_dir(&settings, &uuid)?;
     log::info!("Deleting dataset at '{}'", path.display());
-    fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
-    Ok(())
+    let trashed = move_to_trash(&path)?;
+    log::info!("Dataset {} moved to trash '{}'", uuid, trashed.display());
+    Ok(trashed.to_string_lossy().into_owned())
 }
 
 // ---------------------------------------------------------------------------

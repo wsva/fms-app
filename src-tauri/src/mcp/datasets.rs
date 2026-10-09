@@ -582,13 +582,18 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?)
     }
 
-    #[tool(name = "dataset_delete", description = "Delete a dataset and all its files. This is irreversible — the dataset directory is removed from disk.")]
+    #[tool(name = "dataset_delete", description = "Delete a dataset by moving its whole directory into the app trash folder — not permanently removed, so this is recoverable. Returns `trashed_to`, the path the directory landed at. Use `dataset_list` first to get the UUID.")]
     async fn dataset_delete(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::warn!("[MCP] dataset_delete: uuid={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
-        datasets::dataset_delete(settings, param.uuid).await?;
+        let trashed_to = datasets::dataset_delete(settings, param.uuid).await?;
         let _ = self.app.emit("dataset-list-changed", ());
-        Ok(serde_json::json!({"status": "ok", "message": "Dataset deleted"}).to_string())
+        Ok(serde_json::json!({
+            "status": "ok",
+            "message": "Dataset moved to trash",
+            "trashed_to": trashed_to
+        })
+        .to_string())
     }
 
     #[tool(name = "dataset_import_media", description = "Import media files from a directory into a dataset. Set link=true to create symlinks instead of copying files. Returns the number of files imported.")]

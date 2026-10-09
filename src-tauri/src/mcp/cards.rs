@@ -130,12 +130,17 @@ impl DatasetMcpServer {
         }}).to_string())
     }
 
-    #[tool(name = "card_dataset_delete", description = "Delete a card dataset and all its files (database, info.json). This is irreversible.")]
+    #[tool(name = "card_dataset_delete", description = "Delete a card dataset by moving its whole directory (database, info.json) into the app trash folder — not permanently removed, so this is recoverable. Returns `trashed_to`. Its cards leave the location's search index.")]
     async fn card_dataset_delete(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::warn!("[MCP] card_dataset_delete: uuid={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
-        datasets::cards::card_dataset_delete(settings, param.uuid).await?;
-        Ok(serde_json::json!({"status": "ok", "message": "Dataset deleted"}).to_string())
+        let trashed_to = datasets::cards::card_dataset_delete(settings, param.uuid).await?;
+        Ok(serde_json::json!({
+            "status": "ok",
+            "message": "Dataset moved to trash",
+            "trashed_to": trashed_to
+        })
+        .to_string())
     }
 
     #[tool(name = "card_dataset_add_subscriber", description = "Add a subscriber (by email) to a card dataset. Only the dataset owner can do this.")]

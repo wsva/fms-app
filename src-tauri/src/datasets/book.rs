@@ -8,8 +8,8 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::datasets::{
-    assert_uuid_free, dataset_roots, now_stamp, read_info, read_info_opt, write_info, DatasetInfo,
-    DatasetType, FORMAT_BOOK, INFO_FILE,
+    assert_uuid_free, dataset_roots, move_to_trash, now_stamp, read_info, read_info_opt, write_info,
+    DatasetInfo, DatasetType, FORMAT_BOOK, INFO_FILE,
 };
 use crate::settings::SettingsState;
 
@@ -288,12 +288,19 @@ pub async fn book_rename(
     write_info(&dir, &info)
 }
 
-/// Delete a book and its entire directory.
+/// Delete a book: its directory moves into the shared trash instead of being
+/// destroyed, so the operation stays undoable (see [`move_to_trash`]). Returns the
+/// trash path.
 #[tauri::command]
-pub async fn book_delete(settings: State<'_, SettingsState>, uuid: String) -> Result<(), String> {
+pub async fn book_delete(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+) -> Result<String, String> {
     let dir = find_book_dir(&settings, &uuid)?;
-    fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(())
+    log::info!("[Book] Deleting book at '{}'", dir.display());
+    let trashed = move_to_trash(&dir)?;
+    log::info!("[Book] Book {} moved to trash '{}'", uuid, trashed.display());
+    Ok(trashed.to_string_lossy().into_owned())
 }
 
 // ============================================================

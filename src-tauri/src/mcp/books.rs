@@ -167,12 +167,12 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Book renamed"}).to_string())
     }
 
-    #[tool(name = "book_delete", description = "Delete a book and all its contents (chapters, sentences, words, audio).")]
+    #[tool(name = "book_delete", description = "Delete a book by moving its whole directory (chapters, sentences, words, audio) into the app trash folder — not permanently removed, so this is recoverable. Returns `trashed_to`.")]
     async fn book_delete(&self, Parameters(param): Parameters<BookUuidParam>) -> Result<String, String> {
         log::warn!("[MCP] book_delete: uuid={}", param.book_uuid);
         let settings = self.app.state::<SettingsState>();
-        datasets::book::book_delete(settings, param.book_uuid).await?;
-        Ok(serde_json::json!({"status": "ok", "message": "Book deleted"}).to_string())
+        let trashed_to = datasets::book::book_delete(settings, param.book_uuid).await?;
+        Ok(serde_json::json!({"status": "ok", "message": "Book moved to trash", "trashed_to": trashed_to}).to_string())
     }
 
     #[tool(name = "book_list_chapters", description = "List all chapters of a book, ordered.")]
@@ -267,12 +267,12 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Dataset updated"}).to_string())
     }
 
-    #[tool(name = "read_aloud_delete", description = "Delete a read-aloud dataset and all its texts, attempts, and recordings.")]
+    #[tool(name = "read_aloud_delete", description = "Delete a read-aloud dataset by moving its whole directory (texts, attempts, recordings) into the app trash folder — not permanently removed, so this is recoverable. Returns `trashed_to`.")]
     async fn read_aloud_delete(&self, Parameters(param): Parameters<ReadAloudUuidParam>) -> Result<String, String> {
         log::warn!("[MCP] read_aloud_delete: uuid={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
-        datasets::read_aloud::read_aloud_delete(settings, param.uuid).await?;
-        Ok(serde_json::json!({"status": "ok", "message": "Dataset deleted"}).to_string())
+        let trashed_to = datasets::read_aloud::read_aloud_delete(settings, param.uuid).await?;
+        Ok(serde_json::json!({"status": "ok", "message": "Dataset moved to trash", "trashed_to": trashed_to}).to_string())
     }
 
     #[tool(name = "read_aloud_list_texts", description = "List all texts in a read-aloud dataset, ordered, with best score and attempt count.")]

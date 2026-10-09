@@ -1078,7 +1078,7 @@ function AdvancedTab({
                 dataset={ds}
                 isSelected={ds.info.uuid === selectedDatasetUuid}
                 onDelete={async () => {
-                  const confirmed = await ask(`Delete dataset "${ds.info.name}"? This is irreversible.`, { title: "Delete Dataset" });
+                  const confirmed = await ask(`Delete dataset "${ds.info.name}"?\n\nThe folder is moved to trash, not permanently deleted.`, { title: "Delete Dataset" });
                   if (!confirmed) return;
                   await onDeleteDataset(ds.info.uuid);
                 }}
