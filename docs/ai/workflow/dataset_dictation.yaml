@@ -1,14 +1,14 @@
 # Dictation dataset processing workflow — a workflow.yaml definition (see workflow.md).
 #
 # One illustrative *instance* of the generic framework: it takes raw audio, produces
-# subtitles / waveforms / the cue database, aligns and adjusts cue times, and validates
-# the result into a practice-ready dictation dataset.
+# subtitles / waveforms / the cue database, then aligns and adjusts cue times into a
+# practice-ready dictation dataset.
 #
 # Every `action` names an existing MCP tool (mcp/datasets.rs, mcp/dictation.rs,
 # mcp/models.rs) or the matching Tauri command; the run is driven agent-in-the-loop:
 # `workflow_next` hands the agent the step, the agent calls the tool, then reports back
 # with `workflow_record`. Skipped steps satisfy their dependents by default, so the
-# optional align branches may both skip without stalling `validate`.
+# optional align branches may both skip cleanly.
 
 name: process_dictation_dataset
 version: 1
@@ -135,32 +135,3 @@ steps:
     params:
       mode: "new"
       strategy: "noise_floor"          # or: dual_bound | peak_relative | otsu
-
-  # ── Stage 5: join & validate ────────────────────────────────────────────────
-  - id: validate
-    description: >-
-      Summarize the dataset (media / subtitle / cue counts) and spot-check cues of one
-      media with dataset_list_cues: every media has a subtitle, cue texts non-empty,
-      start_ms < end_ms and monotonically ordered per subtitle.
-    action: dataset_get_summary
-    depends_on:
-      - generate_waveforms
-      - align_cues
-      - align_cues_transcript
-      - adjust_cue_times
-    inputs:
-      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
-    on_failure: stop
-
-  # ── Stage 6: done ───────────────────────────────────────────────────────────
-  - id: mark_ready
-    description: >-
-      Record the final counts and, optionally, adjust the description to note the
-      dataset is processed and practice-ready in the Dictation page.
-    action: dataset_info_update
-    depends_on:
-      - validate
-    inputs:
-      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
-    params:
-      description: "Processed: subtitles + waveforms + cue DB generated and validated."
