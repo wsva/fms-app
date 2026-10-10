@@ -113,6 +113,38 @@ function parseInline(text: string): ReactNode[] {
 // Block parser
 // ============================================================
 
+// Does this line start a new block construct? Used to decide where a paragraph
+// or list item stops, and whether an unindented line is a *lazy continuation*
+// (part of the current item) versus the start of the next block.
+function isBlockBoundary(lines: string[], idx: number): boolean {
+    const l = lines[idx];
+    const t = l.trim();
+    if (t === "") return true;
+    if (/^> ?/.test(l)) return true;
+    if (/^`{3,}/.test(t)) return true;
+    if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(t)) return true;
+    if (/^[-*+] /.test(t) || /^\d+\. /.test(t)) return true;
+    // GFM table start: this line has a pipe and the next is a separator row.
+    if (l.includes("|") && idx + 1 < lines.length && /^[\|:\-\s]+$/.test(lines[idx + 1].trim())) return true;
+    return false;
+}
+
+// Join physical lines into inline text using GFM line-break rules: a bare
+// newline is a soft break (→ space, so hard-wrapped prose flows); two trailing
+// spaces or a trailing backslash force a hard break (→ "\n", which parseInline
+// renders as <br>).
+function joinLines(lines: string[]): string {
+    let out = "";
+    for (let p = 0; p < lines.length; p++) {
+        const cur = lines[p];
+        if (p === lines.length - 1) { out += cur; break; }
+        if (/\\$/.test(cur)) out += cur.replace(/\\$/, "") + "\n";      // backslash hard break
+        else if (/ {2,}$/.test(cur)) out += cur.replace(/ +$/, "") + "\n"; // trailing-space hard break
+        else out += cur + " ";                                          // soft break → space
+    }
+    return out;
+}
+
 function parseBlocks(text: string, keyStart = 0): ReactNode[] {
     const lines = text.split("\n");
     const result: ReactNode[] = [];
@@ -167,14 +199,16 @@ function parseBlocks(text: string, keyStart = 0): ReactNode[] {
 
         // Unordered list
         if (/^[-*+] /.test(trimmed)) {
-            const items: string[] = [];
+            const items: string[][] = [];
             while (i < lines.length) {
                 const l = lines[i];
                 if (/^[-*+] /.test(l)) {
-                    items.push(l.replace(/^[-*+] /, ""));
+                    items.push([l.replace(/^[-*+] /, "").trim()]);
                     i++;
-                } else if (/^  /.test(l) && items.length > 0 && l.trim() !== "") {
-                    items[items.length - 1] += "\n" + l.replace(/^  /, "");
+                } else if (items.length > 0 && l.trim() !== "" &&
+                           ((/^( {2}|\t)/.test(l)) || !isBlockBoundary(lines, i))) {
+                    // indented continuation, or a lazy (unindented) continuation
+                    items[items.length - 1].push(l.trim());
                     i++;
                 } else {
                     break;
@@ -182,8 +216,8 @@ function parseBlocks(text: string, keyStart = 0): ReactNode[] {
             }
             result.push(
                 createElement("ul", { key: key++ },
-                    ...items.map((item, idx) =>
-                        createElement("li", { key: idx }, ...parseInline(item))
+                    ...items.map((itemLines, idx) =>
+                        createElement("li", { key: idx }, ...parseInline(joinLines(itemLines)))
                     )
                 )
             );
@@ -193,14 +227,16 @@ function parseBlocks(text: string, keyStart = 0): ReactNode[] {
         // Ordered list
         if (/^\d+\. /.test(trimmed)) {
             const startNum = parseInt(trimmed.match(/^(\d+)/)![1]);
-            const items: string[] = [];
+            const items: string[][] = [];
             while (i < lines.length) {
                 const l = lines[i];
                 if (/^\d+\. /.test(l)) {
-                    items.push(l.replace(/^\d+\. /, ""));
+                    items.push([l.replace(/^\d+\. /, "").trim()]);
                     i++;
-                } else if (/^   /.test(l) && items.length > 0 && l.trim() !== "") {
-                    items[items.length - 1] += "\n" + l.replace(/^   /, "");
+                } else if (items.length > 0 && l.trim() !== "" &&
+                           ((/^( {3}|\t)/.test(l)) || !isBlockBoundary(lines, i))) {
+                    // indented continuation, or a lazy (unindented) continuation
+                    items[items.length - 1].push(l.trim());
                     i++;
                 } else {
                     break;
@@ -215,8 +251,8 @@ function parseBlocks(text: string, keyStart = 0): ReactNode[] {
             if (startNum !== 1) olProps.style = { counterReset: `md-ol ${startNum - 1}` };
             result.push(
                 createElement("ol", olProps,
-                    ...items.map((item, idx) =>
-                        createElement("li", { key: idx }, ...parseInline(item))
+                    ...items.map((itemLines, idx) =>
+                        createElement("li", { key: idx }, ...parseInline(joinLines(itemLines)))
                     )
                 )
             );
@@ -269,36 +305,12 @@ function parseBlocks(text: string, keyStart = 0): ReactNode[] {
 
         // Paragraph: collect consecutive non-block lines
         const paraLines: string[] = [];
-        while (i < lines.length) {
-            const l = lines[i];
-            if (l.trim() === "") break;
-            if (/^> ?/.test(l) || /^[-*+] /.test(l) || /^\d+\. /.test(l)) break;
-            if (l.trim().match(/^`{3,}/)) break;
-            if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(l.trim())) break;
-            if (l.includes("|") && i + 1 < lines.length && /^[\|:\-\s]+$/.test(lines[i + 1]?.trim() ?? "")) break;
-            paraLines.push(l);
+        while (i < lines.length && !isBlockBoundary(lines, i)) {
+            paraLines.push(lines[i]);
             i++;
         }
         if (paraLines.length > 0) {
-            // GFM line-break rules so authors can hard-wrap prose freely:
-            // a single newline inside a paragraph is a *soft* break (renders as
-            // a space), while a line ending with two+ spaces or a trailing
-            // backslash is a *hard* break (<br>). We collapse soft breaks into
-            // spaces here and keep hard breaks as "\n", which parseInline turns
-            // into <br>.
-            let paraText = "";
-            for (let p = 0; p < paraLines.length; p++) {
-                const cur = paraLines[p];
-                if (p === paraLines.length - 1) { paraText += cur; break; }
-                if (/\\$/.test(cur)) {
-                    paraText += cur.replace(/\\$/, "") + "\n"; // hard break via backslash
-                } else if (/ {2,}$/.test(cur)) {
-                    paraText += cur.replace(/ +$/, "") + "\n";  // hard break via trailing spaces
-                } else {
-                    paraText += cur + " ";                       // soft break → space
-                }
-            }
-            result.push(createElement("p", { key: key++ }, ...parseInline(paraText)));
+            result.push(createElement("p", { key: key++ }, ...parseInline(joinLines(paraLines))));
         }
     }
 
