@@ -3,11 +3,14 @@
 //!
 //! The desktop-only cue tooling lives alongside: [`align`] (multi-pass anchor DP
 //! against a reference text) and [`adjust`] (energy-envelope cue-time snapping).
+//! [`audit`] reads what all three leave behind.
 
 #[cfg(feature = "desktop")]
 pub(crate) mod adjust;
 #[cfg(feature = "desktop")]
 pub(crate) mod align;
+#[cfg(feature = "desktop")]
+pub(crate) mod audit;
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};

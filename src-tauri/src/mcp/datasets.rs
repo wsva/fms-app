@@ -572,7 +572,14 @@ impl DatasetMcpServer {
         .to_string())
     }
 
-    #[tool(name = "dataset_info_save", description = "Overwrite a dataset's info.json with a full JSON document (any type). The text must parse as a dataset descriptor; identity fields uuid/type/format/created_at are always taken from disk and updated_at is refreshed. Returns the authoritative saved descriptor.")]
+    #[tool(name = "dataset_audit", description = "Read-only health check of a dictation dataset: walk media/, subtitle/, waveform/, transcript/ and data.sqlite3 against each other and report every disagreement as a named check. Covers media registered vs present (new / deleted files), VTT files that exist but were never imported, cue-count and mtime drift between a VTT file and its database rows, missing or stale waveform JSON, whether cues still carry raw STT timings (no 'adjusted using waveform' note), cue-level sanity (empty, zero-length, overlapping, non-increasing or past-the-end cues), ambiguous subtitle versions and reference material (book.txt / transcript/). Each check returns an exact count, up to 100 offending files with a reason, and the fix_step name of the template step that repairs it. Never writes anything - run it before deciding which pipeline step is next. Also returns the six when-guard facts the graph evaluates.")]
+    async fn dataset_audit(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_audit: uuid={}", param.uuid);
+        let settings = self.app.state::<SettingsState>();
+        let report = datasets::dictation::audit::audit(&settings, &param.uuid)?;
+        Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
+    }
+
     async fn dataset_info_save(&self, Parameters(param): Parameters<DatasetInfoSaveParam>) -> Result<String, String> {
         log::info!("[MCP] dataset_info_save: uuid={}", param.uuid);
         let settings = self.app.state::<SettingsState>();

@@ -369,7 +369,7 @@ pub async fn dataset_remove_dir(
     Ok(())
 }
 
-fn list_media_files(media_dir: &PathBuf) -> Vec<MediaFile> {
+pub(crate) fn list_media_files(media_dir: &PathBuf) -> Vec<MediaFile> {
     if !media_dir.exists() {
         return Vec::new();
     }
@@ -436,15 +436,14 @@ fn media_rel_path(media_dir: &Path, media_path: &Path) -> PathBuf {
 /// Sibling artefact for a media file under `base_dir` with extension `ext`,
 /// mirroring the media sub-directory (see `media_rel_path`). Shared by subtitle,
 /// waveform and transcript resolution so all stages agree on nested media.
-#[allow(dead_code)]
-fn sibling_path(media_dir: &Path, base_dir: &Path, media_path: &Path, ext: &str) -> PathBuf {
+pub(crate) fn sibling_path(media_dir: &Path, base_dir: &Path, media_path: &Path, ext: &str) -> PathBuf {
     base_dir.join(media_rel_path(media_dir, media_path).with_extension(ext))
 }
 
 /// The relative media path as a portable forward-slash string, stored in the
 /// database `source` column so sibling files and playback URLs resolve for
 /// nested media (e.g. `a/b.mp3`).
-fn rel_source_string(media_dir: &Path, media_path: &Path) -> String {
+pub(crate) fn rel_source_string(media_dir: &Path, media_path: &Path) -> String {
     media_rel_path(media_dir, media_path)
         .to_string_lossy()
         .replace('\\', "/")

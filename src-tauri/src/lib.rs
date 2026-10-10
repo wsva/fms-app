@@ -191,6 +191,7 @@ pub fn run() {
             datasets::dataset_write_subtitles_to_db,
             datasets::tools::dataset_write_transcripts,
             datasets::tools::dataset_parse_book,
+            datasets::dictation::audit::dataset_audit,
             datasets::dictation::align::dataset_align_cues,
             datasets::dictation::align::dataset_align_cues_transcript,
             datasets::dictation::adjust::dataset_adjust_cue_time,
