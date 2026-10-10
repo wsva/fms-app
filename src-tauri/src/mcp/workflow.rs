@@ -107,6 +107,16 @@ impl DatasetMcpServer {
         ok(&v)
     }
 
+    #[tool(name = "workflow_get_definition", description = "Return the raw workflow.yaml text of a run, so you can read or edit the exact definition it was created from (preserves UI-only fields). Errors if the run does not exist.")]
+    async fn workflow_get_definition(
+        &self,
+        Parameters(param): Parameters<WorkflowRunParam>,
+    ) -> Result<String, String> {
+        log::info!("[MCP] workflow_get_definition: run_id={}", param.run_id);
+        let state = self.app.state::<SettingsState>();
+        crate::workflow::definition_text(state.inner(), &param.run_id)
+    }
+
     #[tool(name = "workflow_advance", description = "Claim a ready step (single-flight via a lease) and hand its resolved action + inputs back to you to perform. This does NOT execute anything: after doing the work, report the outcome with workflow_record. Errors if the step is not ready or is already claimed by a live lease.")]
     async fn workflow_advance(
         &self,

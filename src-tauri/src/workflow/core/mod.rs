@@ -258,6 +258,13 @@ pub(crate) fn status(settings: &SettingsState, run_id: &str) -> Result<Value, St
     Ok(build_status(run_id, &def, &state))
 }
 
+/// Return the raw `workflow.yaml` text of a run, for loading back into the
+/// page's editor (preserves UI-only fields like `title`).
+pub(crate) fn definition_text(settings: &SettingsState, run_id: &str) -> Result<String, String> {
+    let dir = persist::run_dir(settings, run_id)?;
+    persist::read_definition_text(&dir)
+}
+
 /// The runnable (`ready`, unclaimed) steps with resolved action + inputs.
 pub(crate) fn next_steps(settings: &SettingsState, run_id: &str) -> Result<Value, String> {
     let (_dir, def, mut state) = load_bundle(settings, run_id)?;

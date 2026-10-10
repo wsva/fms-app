@@ -77,6 +77,15 @@ pub(super) fn write_definition_text(dir: &Path, yaml_text: &str) -> Result<(), S
         .map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
+/// Read the raw `workflow.yaml` text of a run (for round-tripping into the
+/// page's editor, preserving UI-only fields like `title` that a re-serialize
+/// from the parsed [`Definition`] would drop).
+pub(super) fn read_definition_text(dir: &Path) -> Result<String, String> {
+    let path = dir.join(DEFINITION_FILE);
+    fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))
+}
+
 /// Parse `workflow.yaml` into a [`Definition`].
 pub(super) fn load_definition(dir: &Path) -> Result<Definition, String> {
     let path = dir.join(DEFINITION_FILE);
