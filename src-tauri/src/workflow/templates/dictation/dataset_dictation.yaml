@@ -57,14 +57,10 @@ steps:
   - id: sync_media
     title: Sync media
     description: >-
-      Reconcile listen_media with the files under media/ in place: INSERT a row
-      for every media file not yet in the table and DELETE rows whose media file
-      has been removed from disk (dropping their subtitle/cue/transcript rows).
-      Idempotent — a no-op when the DB already matches the folder. Since
-      init_dataset now leaves data.sqlite3 empty, this is what first populates it;
-      it is also the cheap alternative to a full dataset_generate_database rebuild,
-      so existing media uuids (and their cues / practice history) survive later
-      file changes.
+      Update the database to match the files under media/: add a row for each new
+      media file, and delete the rows for files that are gone — together with all
+      data related to them (subtitles, cues, transcripts). Safe to re-run: if no
+      media files were renamed or deleted, it changes nothing.
     action: dataset_sync_media
     depends_on:
       - init_dataset

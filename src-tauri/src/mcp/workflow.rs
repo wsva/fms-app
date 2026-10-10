@@ -218,7 +218,7 @@ impl DatasetMcpServer {
         ok(&v)
     }
 
-    #[tool(name = "workflow_builtin_templates", description = "List the workflow templates shipped built-in with the app (currently the Dataset Dictation pipeline), each with a stable `id`, its parsed `name`/`version`/`step_count`, and the full raw `workflow.yaml` text. Use this instead of inventing a definition from scratch: pass the returned `yaml` straight to workflow_create (with a dataset_uuid to scope the run inside that dataset). This is the single source of truth shared with the in-app Workflow page — an agent and the UI always start from the identical definition.")]
+    #[tool(name = "workflow_builtin_templates", description = "List the workflow templates shipped built-in with the app, grouped by dataset `category` (dictation, book, card) — a category may carry several. Each entry has its category, a stable `id`, the parsed `name`/`version`/`step_count`, and the full raw `workflow.yaml` text. Use this instead of inventing a definition from scratch: pass the returned `yaml` straight to workflow_create (with a dataset_uuid to scope the run inside that dataset). Only the dictation pipeline is wired for in-app execution; book/card are view/agent-facing (their actions still name real MCP tools). This is the single source of truth shared with the in-app Workflow page — an agent and the UI always start from the identical definition.")]
     async fn workflow_builtin_templates(&self) -> String {
         log::info!("[MCP] workflow_builtin_templates");
         match crate::workflow::builtin_templates() {

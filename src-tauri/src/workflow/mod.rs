@@ -148,10 +148,11 @@ pub(crate) fn intervene(
 /// an agent get the exact same definition, no second source of truth).
 pub(crate) fn builtin_templates() -> Result<Value, String> {
     let mut out = Vec::new();
-    for (id, yaml) in templates::all() {
+    for (category, id, yaml) in templates::all() {
         let def: core::Definition = serde_yaml::from_str(yaml)
             .map_err(|e| format!("built-in template '{id}' failed to parse: {e}"))?;
         out.push(json!({
+            "category": category,
             "id": id,
             "name": def.name,
             "version": def.version,

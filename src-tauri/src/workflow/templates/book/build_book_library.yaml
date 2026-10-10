@@ -1,0 +1,74 @@
+# Book (reading library) workflow — a workflow.yaml definition (see workflow.md).
+#
+# App BUILT-IN template, baked into the binary via `include_str!` (see
+# `src-tauri/src/workflow/templates.rs`) under the `book` category and served to
+# the Workflow page and the `workflow_builtin_templates` MCP tool. It sketches
+# turning a plain book into a browsable reading library: create the book, lay out
+# chapters and sentences, attach audio, and build the per-sentence vocabulary.
+#
+# NOTE: the in-app Workflow page currently drives only the Dictation pipeline.
+# This Book pipeline is *view / agent-facing*: every `action` names a real
+# command — an MCP tool (mcp/books.rs) or its matching Tauri command
+# (datasets/book.rs) — so an agent can run it via workflow_create + the
+# workflow_* loop, and the graph renders identically — there is just no per-node
+# Run button yet for the `book_*` twins. (Some steps, e.g. author_sentences /
+# generate_audio, are Tauri-command-only today, with no MCP twin.)
+
+name: build_book_library
+version: 1
+
+steps:
+  # ── Stage 1: create the book shell ──────────────────────────────────────────
+  - id: create_book
+    title: Create book
+    description: >-
+      Create a new book in the reading library (mints its uuid). Everything below
+      hangs off this book_uuid.
+    action: book_create
+    params:
+      title: "My Book"                 # EDIT: the book's display title
+    outputs:
+      - book_uuid
+
+  # ── Stage 2: chapter structure ──────────────────────────────────────────────
+  - id: author_chapters
+    title: Author chapters
+    description: >-
+      Save the chapter tree (uuid empty for new, order_num for sequence, status
+      tracks progress). Repeat per chapter.
+    action: book_save_chapter
+    depends_on:
+      - create_book
+    inputs:
+      book_uuid: "${steps.create_book.outputs.book_uuid}"
+
+  # ── Stage 3: sentence content ───────────────────────────────────────────────
+  - id: author_sentences
+    title: Author sentences
+    description: >-
+      Batch-save the sentences for each chapter (content, sentence_type, order_num).
+      Vocabulary and audio both key off the sentence uuids written here.
+    action: book_save_sentences
+    depends_on:
+      - author_chapters
+
+  # ── Stage 4: audio (two interchangeable branches) ───────────────────────────
+  - id: generate_audio
+    title: Generate audio
+    description: >-
+      Synthesize / write sentence audio (Edge TTS under the hood). The sibling
+      `book_import_audio` imports pre-recorded audio from a folder instead — pick
+      whichever source you have.
+    action: book_write_audio
+    depends_on:
+      - author_sentences
+
+  # ── Stage 5: vocabulary ─────────────────────────────────────────────────────
+  - id: build_vocabulary
+    title: Build vocabulary
+    description: >-
+      Save vocabulary words against each sentence (word, word_type, note) so the
+      reader can tap through new terms.
+    action: book_save_word
+    depends_on:
+      - author_sentences

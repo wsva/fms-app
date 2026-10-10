@@ -1,0 +1,79 @@
+# Card (flashcard deck) workflow — a workflow.yaml definition (see workflow.md).
+#
+# App BUILT-IN template, baked into the binary via `include_str!` (see
+# `src-tauri/src/workflow/templates.rs`) under the `card` category and served to
+# the Workflow page and the `workflow_builtin_templates` MCP tool. It sketches
+# standing up a card deck from scratch: create the dataset, author cards and
+# tags, (re)build the full-text index, then push to the online card service.
+#
+# NOTE: the in-app Workflow page currently drives only the Dictation pipeline.
+# This Card pipeline is *view / agent-facing*: every `action` names a real MCP
+# tool (mcp/cards.rs) so an agent can run it via workflow_create + the workflow_*
+# loop, and the graph renders identically — there is just no per-node Run button
+# yet for the `card_*` command twins.
+
+name: setup_card_deck
+version: 1
+
+steps:
+  # ── Stage 1: create the deck ────────────────────────────────────────────────
+  - id: create_deck
+    title: Create deck
+    description: >-
+      Create a new card dataset (mints its uuid). Cards, tags and the search index
+      all key off this dataset_uuid.
+    action: card_dataset_create
+    params:
+      name: "My Deck"                  # EDIT: the deck's display name
+      description: ""                  # optional
+    outputs:
+      - dataset_uuid
+
+  # ── Stage 2: author cards ───────────────────────────────────────────────────
+  - id: author_cards
+    title: Author cards
+    description: >-
+      Save cards into the deck (question, suggestion, answer, note; uuid empty for
+      new). Repeat per card. `card_fork` copies a card across decks with lineage.
+    action: card_save
+    depends_on:
+      - create_deck
+    inputs:
+      dataset_uuid: "${steps.create_deck.outputs.dataset_uuid}"
+
+  # ── Stage 3: organize with tags ─────────────────────────────────────────────
+  - id: add_tags
+    title: Add tags
+    description: >-
+      Create / update tags (name, optional color) so cards can be filtered by topic
+      or difficulty. Independent of the cards themselves.
+    action: card_tag_save
+    depends_on:
+      - create_deck
+    inputs:
+      dataset_uuid: "${steps.create_deck.outputs.dataset_uuid}"
+
+  # ── Stage 4: make it searchable ─────────────────────────────────────────────
+  - id: index_search
+    title: Build search index
+    description: >-
+      Rebuild the FTS5 full-text index over the deck's cards so card_search can
+      find them. Run after the cards land.
+    action: card_fts_rebuild
+    depends_on:
+      - author_cards
+
+  # ── Stage 5: publish ────────────────────────────────────────────────────────
+  # Only meaningful for a deck owned by the signed-in user; the agent should skip
+  # it for a purely local deck.
+  - id: sync_online
+    title: Sync online
+    description: >-
+      Bidirectional sync with the online card service (push local changes, pull
+      remote). Owner-only — skip for a purely local deck. `card_sync_all` syncs
+      every owned deck in one shot.
+    action: card_sync
+    depends_on:
+      - index_search
+    inputs:
+      dataset_uuid: "${steps.create_deck.outputs.dataset_uuid}"

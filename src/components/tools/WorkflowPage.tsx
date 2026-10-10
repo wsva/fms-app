@@ -70,12 +70,22 @@ function summarizeResult(r: unknown): string {
 
 /** One entry from `workflow_builtin_templates`. */
 interface BuiltinTemplate {
+  /** Dataset type this workflow belongs to — the page tabs on this. */
+  category: string;
   id: string;
   name: string;
   version: number;
   step_count: number;
   yaml: string;
 }
+
+/** The dataset categories the Workflow page shows as tabs (in order). */
+type WorkflowCategory = "dictation" | "book" | "card";
+const CATEGORY_TABS: { key: WorkflowCategory; label: string }[] = [
+  { key: "dictation", label: "Dictation" },
+  { key: "book", label: "Book" },
+  { key: "card", label: "Card" },
+];
 
 /** Placeholder document shown until the built-in template finishes loading. */
 const EMPTY_DEFINITION: WorkflowDefinition = { name: "workflow", version: 1, steps: [] };
@@ -95,13 +105,19 @@ export default function WorkflowPage() {
 
   // Workflow document is YAML-driven; `definition` = last-good parse, `parseError` = live.
   const [mode, setMode] = useState<"view" | "edit">("view");
-  // The built-in "Dataset Dictation" pipeline, fetched once from the Rust binary
-  // (see `workflow/templates.rs`) instead of duplicated as a local seed string.
+  // Built-in templates fetched once from the Rust binary (see `workflow/templates.rs`),
+  // grouped by category. The active tab is a category; a category may hold several
+  // workflows, so `activeTemplateId` picks which one is loaded.
+  const [templates, setTemplates] = useState<BuiltinTemplate[]>([]);
+  const [activeCategory, setActiveCategory] = useState<WorkflowCategory>("dictation");
+  const [activeTemplateId, setActiveTemplateId] = useState("");
   const [builtinYaml, setBuiltinYaml] = useState("");
   const [yamlText, setYamlText] = useState("");
   const [definition, setDefinition] = useState<WorkflowDefinition>(EMPTY_DEFINITION);
   const [parseError, setParseError] = useState<string | null>(null);
   const steps = definition.steps;
+  // Only Dictation is wired for in-app per-step Run; Book / Card are view/agent-facing.
+  const isDictation = activeCategory === "dictation";
 
   const [scanning, setScanning] = useState(false);
   const [initing, setIniting] = useState(false);
@@ -132,6 +148,10 @@ export default function WorkflowPage() {
 
   const positioned = useMemo(() => layoutSteps(steps), [steps]);
   const edges = useMemo(() => buildEdges(steps), [steps]);
+  const categoryTemplates = useMemo(
+    () => templates.filter((t) => t.category === activeCategory),
+    [templates, activeCategory],
+  );
   const view: StatusMap = useMemo(
     () => engineView ?? (facts ? recompute(committed, facts, steps) : committed),
     [engineView, committed, facts, steps],
@@ -159,27 +179,79 @@ export default function WorkflowPage() {
     setOutputLines((prev) => [...prev.slice(-400), text]);
   }, []);
 
-  // ---- Load the built-in "Dataset Dictation" template once ----
+  // ---- Built-in template loading / switching ----
+  // Apply a template's YAML as the working document (resets the graph to a
+  // clean all-pending projection). Used by tab / workflow switching.
+  const applyTemplate = (tpl: BuiltinTemplate) => {
+    setActiveTemplateId(tpl.id);
+    setBuiltinYaml(tpl.yaml);
+    setYamlText(tpl.yaml);
+    try {
+      const def = parseDefinition(tpl.yaml);
+      setDefinition(def);
+      setCommitted(initialStatuses(def.steps));
+      setParseError(null);
+    } catch (e) {
+      setParseError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Drop the dataset-scoped run projection (facts / engine view / prompt / output)
+  // without touching `committed` — the caller sets that via applyTemplate.
+  const resetRunView = () => {
+    setFacts(null);
+    setEngineView(null);
+    setRunMeta(null);
+    setSelectedId(null);
+    setPrompt("");
+    setInfoText("");
+    setInfoOpen(false);
+    setOutputLines([]);
+  };
+
+  const selectCategory = (cat: WorkflowCategory) => {
+    if (cat === activeCategory) return;
+    setActiveCategory(cat);
+    setMode("view");
+    resetRunView();
+    if (cat !== "dictation") setSelectedKey("");
+    const first = templates.find((t) => t.category === cat);
+    if (first) applyTemplate(first);
+  };
+
+  const selectTemplate = (id: string) => {
+    const tpl = templates.find((t) => t.id === id);
+    if (!tpl) return;
+    resetRunView();
+    applyTemplate(tpl);
+  };
+
+  const copyYaml = async () => {
+    try {
+      await navigator.clipboard.writeText(yamlText);
+      setNotice("workflow.yaml copied to clipboard.");
+    } catch {
+      setNotice("Copy failed.");
+    }
+  };
+
+  // ---- Load every built-in template once, seed the Dictation tab ----
   useEffect(() => {
     if (!isTauri()) return;
     let cancelled = false;
     invoke<{ templates: BuiltinTemplate[] }>("workflow_builtin_templates")
       .then((res) => {
         if (cancelled) return;
-        const tpl = res.templates.find((t) => t.id === "dictation") ?? res.templates[0];
-        if (!tpl) return;
-        setBuiltinYaml(tpl.yaml);
-        try {
-          const def = parseDefinition(tpl.yaml);
-          setYamlText(tpl.yaml);
-          setDefinition(def);
-          setCommitted(initialStatuses(def.steps));
-        } catch (e) {
-          setParseError(e instanceof Error ? e.message : String(e));
-        }
+        setTemplates(res.templates);
+        const initial =
+          res.templates.find((t) => t.category === "dictation") ?? res.templates[0];
+        if (!initial) return;
+        setActiveCategory(initial.category as WorkflowCategory);
+        applyTemplate(initial);
       })
       .catch((e) => appendLog(`workflow_builtin_templates failed: ${String(e)}`, "ERROR"));
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appendLog]);
 
   // ---- Load dictation datasets ----
@@ -638,15 +710,37 @@ export default function WorkflowPage() {
         <p className="text-text-secondary">Workflow is only available in the desktop app.</p>
       ) : (
         <div className="flex-1 min-h-0 flex flex-col gap-3">
+          {/* Category tabs — one per dataset type; a tab may hold several workflows. */}
+          <div className="flex items-center gap-1 shrink-0 border-b border-border-light">
+            {CATEGORY_TABS.map((tab) => (
+              <button
+                key={tab.key}
+                onClick={() => selectCategory(tab.key)}
+                className={`px-3 py-1.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                  activeCategory === tab.key
+                    ? "border-accent text-accent"
+                    : "border-transparent text-text-secondary hover:text-text-primary"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+            {categoryTemplates.length > 1 && (
+              <select
+                className="ml-auto px-2 py-1 text-sm rounded-md bg-bg-body border border-border-light text-text-primary focus:border-accent outline-none"
+                value={activeTemplateId}
+                onChange={(e) => selectTemplate(e.target.value)}
+                title="Pick a workflow in this category"
+              >
+                {categoryTemplates.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name} v{t.version}</option>
+                ))}
+              </select>
+            )}
+          </div>
+
           {/* Toolbar */}
           <div className="flex items-center gap-3 flex-wrap shrink-0 rounded-lg border border-border-light bg-bg-card px-3 py-2">
-            <span
-              className="text-sm font-semibold text-text-primary px-2 py-1 rounded-md bg-bg-muted"
-              title={`${definition.name} v${definition.version}`}
-            >
-              {definition.name}
-              <span className="ml-1 text-[10px] font-normal text-text-tertiary">v{definition.version}</span>
-            </span>
             <div className="inline-flex rounded-md border border-border-light overflow-hidden">
               <button
                 className={`${mode === "view" ? btnSmPrimary : btnSmSecondary} inline-flex items-center gap-1 rounded-none border-0`}
@@ -661,6 +755,7 @@ export default function WorkflowPage() {
                 <Pencil size={14} /> Edit
               </button>
             </div>
+            {isDictation && (
             <div className="ml-auto flex items-center gap-2">
               <button
                 className={`${btnSmSecondary} inline-flex items-center gap-1`}
@@ -696,7 +791,8 @@ export default function WorkflowPage() {
                   {facts ? "Re-scan" : "Scan status"}
                 </button>
               )}
-            </div>
+              </div>
+            )}
           </div>
 
           {notice && (
@@ -781,7 +877,7 @@ export default function WorkflowPage() {
                 </div>
               </div>
             </div>
-          ) : !facts ? (
+          ) : isDictation && !facts ? (
             <div className="flex-1 min-h-0 flex items-center justify-center text-sm text-text-tertiary px-6 text-center">
               {isRaw
                 ? "This folder has media but no info.json yet — click “Initialize as dataset” to create it."
@@ -816,6 +912,7 @@ export default function WorkflowPage() {
                   running={running}
                   runningStep={runningStep}
                   hasRun={hasRun}
+                  readOnly={!isDictation}
                   onChangeField={setField}
                   onRun={handleRun}
                   onClear={handleClear}
@@ -828,6 +925,8 @@ export default function WorkflowPage() {
                   }}
                 />
 
+                {isDictation && (
+                  <>
                 {/* Run output */}
                 <section className="rounded-lg border border-border-light bg-bg-card p-3 flex flex-col gap-2">
                   <div className="flex items-center justify-between">
@@ -897,6 +996,20 @@ export default function WorkflowPage() {
                     </p>
                   )}
                 </section>
+                  </>
+                )}
+
+                {!isDictation && (
+                  <section className="rounded-lg border border-border-light bg-bg-card p-3 flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Agent handoff</h2>
+                      <button className={`${btnSmSecondary} inline-flex items-center gap-1`} onClick={copyYaml}><Copy size={14} /> Copy workflow.yaml</button>
+                    </div>
+                    <p className="text-xs text-text-tertiary leading-relaxed">
+                      <span className="font-semibold text-text-secondary">{definition.name}</span> is a view / agent-facing workflow: every step’s action names a real command (an MCP tool or its Tauri-command twin), so an agent runs it via <span className="font-mono">workflow_builtin_templates</span> → <span className="font-mono">workflow_create</span> → the workflow loop. Per-step in-app Run is wired for the Dictation tab only.
+                    </p>
+                  </section>
+                )}
               </div>
             </div>
           )}
@@ -931,6 +1044,8 @@ interface InspectorProps {
   running: boolean;
   runningStep: string;
   hasRun: boolean;
+  /** View / agent-facing (Book, Card): hide the parameter form, Run and manual controls. */
+  readOnly?: boolean;
   onChangeField: (id: string, name: string, value: string | boolean) => void;
   onRun: (step: StepDef, op: StepOp) => void;
   onClear: (step: StepDef, op: StepOp) => void;
@@ -940,7 +1055,7 @@ interface InspectorProps {
   pickDir: (title: string) => Promise<string | null>;
 }
 
-function StepInspector({ step, op, status, values, hint, command, runnable, running, runningStep, onChangeField, onRun, onClear, onIntervene, onForce, onOpenModels, pickDir }: InspectorProps) {
+function StepInspector({ step, op, status, values, hint, command, runnable, running, runningStep, readOnly, onChangeField, onRun, onClear, onIntervene, onForce, onOpenModels, pickDir }: InspectorProps) {
   if (!step) {
     return (
       <section className="rounded-lg border border-border-light bg-bg-card p-3 flex flex-col gap-2">
@@ -962,8 +1077,12 @@ function StepInspector({ step, op, status, values, hint, command, runnable, runn
       <div className="font-mono text-[11px] text-text-tertiary">{command ?? step.action}</div>
       <p className="text-xs text-text-secondary leading-relaxed">{step.description}</p>
 
+      {readOnly && (
+        <p className="text-xs text-text-tertiary mt-1">View / agent-facing step — no in-app Run wired for this workflow yet.</p>
+      )}
+
       {/* Parameter form */}
-      {op?.formFields?.length ? (
+      {!readOnly && op?.formFields?.length ? (
         <div className="flex flex-col gap-2 mt-1">
           {op.formFields.map((f) => (
             <FieldRow
@@ -979,12 +1098,14 @@ function StepInspector({ step, op, status, values, hint, command, runnable, runn
       ) : null}
 
       {/* ensure_model shortcut */}
-      {step.id === "ensure_model" && (
+      {!readOnly && step.id === "ensure_model" && (
         <button className={`${btnSmSecondary} inline-flex items-center gap-1 self-start`} onClick={onOpenModels}>
           <Play size={13} /> Open Models page
         </button>
       )}
 
+      {!readOnly && (
+      <>
       {/* Primary actions */}
       {runnable ? (
         <div className="flex flex-wrap items-center gap-2 mt-1">
@@ -1022,6 +1143,8 @@ function StepInspector({ step, op, status, values, hint, command, runnable, runn
           <X size={13} /> Mark failed
         </button>
       </div>
+      </>
+      )}
     </section>
   );
 }

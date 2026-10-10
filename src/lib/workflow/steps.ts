@@ -11,11 +11,12 @@
 //
 // The DAG itself is NOT hardcoded here: it is parsed from `workflow.yaml`-shaped
 // text (`parseDefinition`), so the Workflow page's editor can drive any pipeline.
-// Every layout/engine helper takes the parsed `steps` as a parameter. The one
-// built-in pipeline ("Dataset Dictation") is no longer duplicated in this repo's
-// frontend either — it ships in the Rust binary (`src-tauri/src/workflow/
-// templates/dataset_dictation.yaml`, served via `workflow_builtin_templates`),
-// so the page fetches it at runtime instead of importing a seed string.
+// Every layout/engine helper takes the parsed `steps` as a parameter. The
+// built-in pipelines are no longer duplicated in this repo's frontend either —
+// they ship in the Rust binary grouped by dataset category (`src-tauri/src/
+// workflow/templates/{dictation,book,card}/*.yaml`, served via
+// `workflow_builtin_templates`), so the page fetches them at runtime and shows
+// one tab per category instead of importing a seed string.
 // ---------------------------------------------------------------------------
 
 import { load as loadYaml } from "js-yaml";
