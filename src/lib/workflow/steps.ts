@@ -2,12 +2,12 @@
 // Workflow step definitions + a small client-side mirror of the Rust engine.
 //
 // The authoritative engine lives in `src-tauri/src/workflow/core` and persists
-// runs as `state.json`. That backend surface is MCP-only today, so the Workflow
-// page drives a *local* projection of the DAG: it seeds step status from the
-// dataset's on-disk facts (`dataset_get`), then recomputes readiness the same way
-// `engine::recompute` does (when-guards → skipped, satisfied deps → ready). When
-// the `workflow_*` Tauri command twins land, they replace `seedFromDataset` +
-// the local `recompute` with the real run state — the graph and prompt code stay.
+// runs as `state.json`. Before a run exists, the Workflow page shows an honest
+// all-`pending` graph and only derives what `engine::recompute` can from the DAG
+// itself — `when`-guard skipping and dependency readiness — never faking step
+// completion from the dataset's on-disk facts. Once a `workflow_*` Tauri command
+// twin returns real run state, that replaces this local projection entirely; the
+// graph and prompt code stay the same.
 //
 // The DAG itself is NOT hardcoded here: it is parsed from `workflow.yaml`-shaped
 // text (`parseDefinition`), so the Workflow page's editor can drive any pipeline.
@@ -271,26 +271,9 @@ export function recompute(committed: StatusMap, facts: DatasetFacts, steps: Step
   return out;
 }
 
-/**
- * Seed committed statuses from a freshly probed dataset — the "no state.json, so
- * determine current progress" path. Steps the dataset can't prove (align / adjust /
- * validate / mark_ready) stay `pending`; `recompute` then marks the guard-skippable
- * and dependency-ready ones. The user fine-tunes the rest from the graph.
- *
- * Dictation-flavoured: it seeds by well-known step id, so a custom workflow whose
- * ids differ simply seeds nothing and starts from all-`pending`.
- */
-export function seedFromDataset(facts: DatasetFacts): StatusMap {
-  const seed: StatusMap = {};
-  seed.create_dataset = "completed";
-  seed.ensure_model = "completed"; // a model is configured; agent re-checks if not
-  if (facts.hasMedia) seed.import_media = "completed";
-  if (facts.hasSubtitles) seed.generate_subtitles = "completed";
-  if (facts.hasDatabase) seed.generate_database = "completed";
-  if (facts.hasWaveforms) seed.generate_waveforms = "completed";
-  seed.detect_reference = "completed"; // we just probed the files
-  return seed;
-}
+// (Removed `seedFromDataset`: the pre-run graph no longer fakes completed steps
+// from on-disk facts. It starts all-`pending` via `initialStatuses`; real progress
+// comes from the engine's run state once the `workflow_*` command twins return it.)
 
 /** Empty status map — nothing run yet. */
 export function initialStatuses(steps: StepDef[]): StatusMap {

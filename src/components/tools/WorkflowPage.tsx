@@ -25,9 +25,7 @@ import {
   type StepDef,
   type StepStatus,
   recompute,
-  seedFromDataset,
   initialStatuses,
-  topoOrder,
   layoutSteps,
   buildEdges,
   stepById,
@@ -223,8 +221,8 @@ export default function WorkflowPage() {
     setScanning(true);
     setNotice("");
     try {
-      const probed = await probeDataset(selectedUuid);
-      setCommitted(seedFromDataset(probed));
+      await probeDataset(selectedUuid);
+      setCommitted(initialStatuses(steps));
       const live = await refreshEngine(runId);
       setNotice(live ? "Re-scanned. Graph reflects the workflow run state." : "Scanned dataset. Run any step to start its workflow run.");
     } catch (e) {
@@ -233,7 +231,7 @@ export default function WorkflowPage() {
     } finally {
       setScanning(false);
     }
-  }, [selectedUuid, runId, probeDataset, refreshEngine, appendLog]);
+  }, [selectedUuid, runId, probeDataset, refreshEngine, appendLog, steps]);
 
   // ---- Initialize a raw folder in place, then load it ----
   const handleInit = async () => {
@@ -249,8 +247,8 @@ export default function WorkflowPage() {
       await fetchDatasets();
       await emit("dataset-list-changed", {});
       setSelectedKey(summary.info.uuid);
-      const probed = await probeDataset(summary.info.uuid);
-      setCommitted(seedFromDataset(probed));
+      await probeDataset(summary.info.uuid);
+      setCommitted(initialStatuses(steps));
       await refreshEngine(runIdFor(summary.info.uuid));
       setInfoOpen(false);
       setNotice(`Initialized dataset “${summary.info.name}” (uuid ${summary.info.uuid}).`);
@@ -299,8 +297,8 @@ export default function WorkflowPage() {
         return;
       }
       setSelectedKey(renamed.info.uuid);
-      const probed = await probeDataset(renamed.info.uuid);
-      setCommitted(seedFromDataset(probed));
+      await probeDataset(renamed.info.uuid);
+      setCommitted(initialStatuses(steps));
       await refreshEngine(runId);
       setNotice(`Dataset uuid changed on disk: “${renamed.info.name}” is now ${renamed.info.uuid}.`);
     } finally {
@@ -341,33 +339,11 @@ export default function WorkflowPage() {
     setFormState((prev) => ({ ...prev, [stepId]: { ...(prev[stepId] ?? {}), [name]: value } }));
   };
 
-  // Mark steps the disk already proves as completed so a fresh run isn't blank.
-  // Best-effort: advance/record failures (not-ready / already done) are ignored.
-  const seedAfterCreate = useCallback(async () => {
-    if (!facts) return;
-    const provable: Record<string, boolean> = {
-      create_dataset: true,
-      ensure_model: true,
-      detect_reference: true,
-      import_media: facts.hasMedia,
-      generate_subtitles: facts.hasSubtitles,
-      generate_database: facts.hasDatabase,
-      generate_waveforms: facts.hasWaveforms && facts.hasDatabase,
-      write_subtitles_to_db: facts.hasDatabase,
-      sync_cue_times: facts.hasDatabase,
-    };
-    for (const id of topoOrder(steps)) {
-      if (!provable[id]) continue;
-      try {
-        await invoke("workflow_advance", { runId, step: id, agentId: "ui" });
-        await invoke("workflow_record", { runId, step: id, event: "completed", detail: { outputs: {} } });
-      } catch {
-        /* not ready / already done — ignore, best-effort */
-      }
-    }
-  }, [facts, steps, runId]);
-
-  // ---- Ensure a run exists, seeding disk-proven steps as a starting point ----
+  // ---- Ensure a run exists ----
+  // A fresh run starts fully `pending`: the engine derives every readiness/skip
+  // from steps actually run + their recorded outputs, never from on-disk facts.
+  // (The former `seedAfterCreate` pre-marked disk-proven steps as complete, which
+  // let the graph claim progress it had not earned — removed for an honest run.)
   const ensureRun = useCallback(async (): Promise<string> => {
     if (!selectedUuid) throw new Error("Select a dataset first.");
     if (hasRun) return runId;
@@ -378,10 +354,9 @@ export default function WorkflowPage() {
       // surfaces when the caller tries to advance.
       appendLog(`workflow_create_run('${runId}'): ${String(e)}`, "WARN");
     }
-    await seedAfterCreate();
     await refreshEngine(runId);
     return runId;
-  }, [selectedUuid, hasRun, runId, yamlText, seedAfterCreate, refreshEngine, appendLog]);
+  }, [selectedUuid, hasRun, runId, yamlText, refreshEngine, appendLog]);
 
   // ---- Run a step through the engine + command twin ----
   const handleRun = async (step: StepDef, op: StepOp) => {

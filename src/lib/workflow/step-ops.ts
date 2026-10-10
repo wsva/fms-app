@@ -282,6 +282,30 @@ export const STEP_OPS: Record<string, StepOp> = {
     reloadAfter: true,
   },
 
+  // Reads the dataset to surface which optional references exist. Its recorded
+  // outputs are what the engine resolves `when` guards against downstream
+  // (`${steps.detect_reference.outputs.has_book}` / `…has_transcript`), so this
+  // mapper is the linchpin of an engine-honest graph: without it the guarded
+  // steps (split_book / align_cues / align_cues_transcript) would go *blocked*
+  // on an unresolvable reference instead of *skipped* on a false guard.
+  detect_reference: {
+    runLabel: "Detect",
+    formFields: [],
+    gate: needDataset,
+    run: (ctx) => ({ command: "dataset_get", args: { uuid: ctx.uuid } }),
+    outputs: (r) => {
+      const d = r as {
+        has_book?: boolean;
+        has_transcript?: boolean;
+        media?: { has_transcript?: boolean }[];
+      };
+      return {
+        has_book: !!d?.has_book,
+        has_transcript: !!d?.has_transcript || (d?.media?.some((m) => m.has_transcript) ?? false),
+      };
+    },
+  },
+
   validate: {
     runLabel: "Validate",
     formFields: [],
