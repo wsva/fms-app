@@ -128,23 +128,6 @@ CREATE INDEX IF NOT EXISTS idx_version_subtitle ON listen_subtitle_version(subti
 CREATE UNIQUE INDEX IF NOT EXISTS idx_version_unique ON listen_subtitle_version(subtitle_uuid, version);
 ```
 
-### listen_waveform
-
-Cached waveform data for visualization (optional, can be regenerated).
-
-```sql
-CREATE TABLE IF NOT EXISTS listen_waveform (
-    uuid          TEXT PRIMARY KEY,
-    media_uuid    TEXT NOT NULL,
-    peaks_data    TEXT,                        -- JSON array of peak values
-    sample_rate   INTEGER,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (media_uuid) REFERENCES listen_media(uuid)
-);
-
-CREATE INDEX IF NOT EXISTS idx_waveform_media ON listen_waveform(media_uuid);
-```
-
 ### listen_dictation (App-level DB)
 
 Dictation progress — stored in app-level database, not dataset database.

@@ -1502,42 +1502,12 @@ struct WaveformJson<'a> {
     data: &'a [i8],
 }
 
-/// Write waveform peaks data into the `listen_waveform` table of the dataset DB.
-/// Looks up the media_uuid by matching the relative source path.
-pub(crate) fn write_waveform_to_db(
-    conn: &Connection,
-    media_dir: &Path,
-    media_path: &Path,
-    peaks_json: &str,
-    sample_rate: u32,
-) -> Result<(), String> {
-    let rel_source = rel_source_string(media_dir, media_path);
-    let media_uuid: String = conn
-        .query_row(
-            "SELECT uuid FROM listen_media WHERE source = ?1",
-            rusqlite::params![rel_source],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("Media not found in DB for '{}': {}", rel_source, e))?;
-
-    let wf_uuid = Uuid::new_v4().to_string();
-    conn.execute(
-        "INSERT OR REPLACE INTO listen_waveform (uuid, media_uuid, peaks_data, sample_rate) \
-         VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![wf_uuid, media_uuid, peaks_json, sample_rate as i64],
-    )
-    .map_err(|e| format!("Failed to write waveform to DB: {}", e))?;
-    Ok(())
-}
-
 /// Generate waveform JSON files for all media files in a dataset.
 ///
 /// Peaks are computed in pure Rust via symphonia (see `audio::generate_waveform`),
 /// so no external `audiowaveform` binary is required and video containers are
-/// supported (their audio track is decoded).
-///
-/// If the dataset database exists, waveform data is also written to the
-/// `listen_waveform` table alongside the JSON files.
+/// supported (their audio track is decoded). The peaks are written to `waveform/*.json`,
+/// which is the sole waveform read path (`listen_get_waveform`).
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn dataset_generate_waveform(
@@ -1549,14 +1519,6 @@ pub async fn dataset_generate_waveform(
     let media_dir = dataset_dir.join("media");
     let waveform_dir = dataset_dir.join("waveform");
     fs::create_dir_all(&waveform_dir).map_err(|e| e.to_string())?;
-
-    // Open DB if it exists (for writing waveform data alongside JSON files).
-    let db_path = dataset_dir.join("data.sqlite3");
-    let db_conn = if db_path.exists() {
-        Connection::open(&db_path).ok()
-    } else {
-        None
-    };
 
     let media_files = list_media_files(&media_dir);
     let total = media_files.len();
@@ -1595,14 +1557,6 @@ pub async fn dataset_generate_waveform(
         let file = fs::File::create(&output_path)
             .map_err(|e| format!("Failed to create {}: {}", output_path.display(), e))?;
         serde_json::to_writer(file, &wf).map_err(|e| e.to_string())?;
-
-        // Also write waveform data to database if available.
-        if let Some(ref conn) = db_conn {
-            let peaks_json = serde_json::to_string(&wf).map_err(|e| e.to_string())?;
-            if let Err(e) = write_waveform_to_db(conn, &media_dir, Path::new(&mf.path), &peaks_json, peaks.sample_rate) {
-                log::warn!("[waveform] DB write skipped for {}: {}", mf.name, e);
-            }
-        }
     }
 
     log::info!("[waveform] Complete: {} files processed", total);
@@ -1666,10 +1620,6 @@ pub async fn dataset_generate_waveform_single(
     let file = fs::File::create(&output_path)
         .map_err(|e| format!("Failed to create {}: {}", output_path.display(), e))?;
     serde_json::to_writer(file, &wf).map_err(|e| e.to_string())?;
-
-    // Also write waveform data to database.
-    let peaks_json = serde_json::to_string(&wf).map_err(|e| e.to_string())?;
-    write_waveform_to_db(&conn, &media_dir, &media_path, &peaks_json, peaks.sample_rate)?;
 
     log::info!("[waveform] Done: {}", source);
     Ok(source)
@@ -1861,16 +1811,6 @@ pub(crate) fn create_db_schema(conn: &rusqlite::Connection) -> Result<(), String
         );
         CREATE INDEX IF NOT EXISTS idx_version_subtitle ON listen_subtitle_version(subtitle_uuid);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_version_unique ON listen_subtitle_version(subtitle_uuid, version);
-
-        -- Waveform data (cached)
-        CREATE TABLE IF NOT EXISTS listen_waveform (
-            uuid          TEXT PRIMARY KEY,
-            media_uuid    TEXT NOT NULL,
-            peaks_data    TEXT,
-            sample_rate   INTEGER,
-            created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_waveform_media ON listen_waveform(media_uuid);
 
         -- Transcript (per-media)
         CREATE TABLE IF NOT EXISTS listen_transcript (

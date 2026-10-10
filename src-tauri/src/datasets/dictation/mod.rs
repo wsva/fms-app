@@ -1226,15 +1226,6 @@ pub async fn dictation_add_cue_to_favorites(
             if let Err(e) = std::fs::write(&wf_path, &peaks_json) {
                 log::warn!("[favorites] waveform file write failed: {}", e);
             }
-            if let Err(e) = crate::datasets::write_waveform_to_db(
-                &fav_conn,
-                &fav_media_dir,
-                &wav_path,
-                &peaks_json,
-                peaks.sample_rate,
-            ) {
-                log::warn!("[favorites] waveform DB write failed: {}", e);
-            }
         }
         Err(e) => log::warn!("[favorites] waveform generation failed: {}", e),
     }

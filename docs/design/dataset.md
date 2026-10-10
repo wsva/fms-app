@@ -106,7 +106,7 @@ Wiki paths additionally pass `sanitize_rel`, which rejects absolute paths, any `
 
 ## The dictation database
 
-`data.sqlite3` holds seven tables plus the sync tombstones:
+`data.sqlite3` holds six tables plus the sync tombstones:
 
 | Table | Role |
 |-------|------|
@@ -114,7 +114,6 @@ Wiki paths additionally pass `sanitize_rel`, which rejects absolute paths, any `
 | `listen_subtitle` | a subtitle *track*: `name`, `track_type` (`stt` / `manual` / `aligned` / `adjusted`), `model_uuid`, `version`, `is_active` |
 | `listen_subtitle_cue` | the cues, versioned in place |
 | `listen_subtitle_version` | one row per version: `change_type`, description, added/modified/deleted counts, `created_by` |
-| `listen_waveform` | written but never read — see rough edges |
 | `listen_transcript` | per-media transcript text imported from `transcript/` |
 | `listen_note` | created by the schema, used by nothing — see rough edges |
 | `tombstones` | appended by `ensure_tombstones`; travels with the snapshot |
@@ -214,7 +213,7 @@ These are real, verified against the code, and each is a candidate for cleanup r
 - **`format` carries a version number no code reads.** The tag is `<type-slug>-v<N>`, and dictation is the only type whose number is not `v1` — but nothing branches on it. Its only two readers, `cards::find_card_dataset_dir` and the card listing, compare `format == card-v1` purely as a *type* tag, a job `type` now does properly. So the two discovery paths validate different fields for the same purpose: `find_dataset_dir_typed` checks `type` and skips a mismatch, the card scanner checks `format` and never looks at `type`. The two version numbers in the file are unrelated scales that happen to agree — `spec` versions the descriptor, `format` versions the dataset's internal layout, and both read `2` for dictation.
 - **Only whole-dataset deletes are reversible.** `move_to_trash` guards the five dataset directories, but the deletes *inside* a dataset (`book_delete_chapter`, `book_delete_sentence`, `book_delete_audio`, `read_aloud_delete_text`, `read_aloud_delete_attempt`, `listen_delete_media`, `dataset_delete_subtitles`, `dataset_delete_database`) call `fs::remove_file`/`remove_dir_all` outright, while `docs/agent_friendly_design.md` §3 names "clear database" and "overwrite subtitles" among the operations that should be backed up first. The same spec section promises a `restore_from_trash` tool that does not exist yet, so recovering anything from the trash is still a manual filesystem operation.
 - **Rebuilding the database orphans progress.** `dataset_generate_database` mints fresh media uuids, while `listen_dictation` keys on `media_uuid`. Practice history recorded before a rebuild no longer matches anything afterwards, and the XP ledger still cites the dataset by uuid, so history and progress diverge.
-- **Two write-only tables.** `listen_waveform` is populated alongside the waveform JSON but the read path (`listen_get_waveform`) only ever reads the file, and `listen_note` is created by the schema and touched by nothing.
+- **One write-only table.** `listen_note` is created by the schema and touched by nothing. (Waveform data lives solely in the `waveform/*.json` files that `listen_get_waveform` reads; the former `listen_waveform` table was populated alongside them but never read, so it has been dropped from the schema.)
 - **`status` means different things.** For dictation it is computed (`ready` iff `data.sqlite3` exists); in the sync catalog the other four types report `ready` unconditionally, so a broken card dataset advertises itself as fine.
 - **Two `sync_state` concepts with similar names.** `sync_state` inside a card dataset's database tracks the online card-service link; `dataset_sync_state` in `app.sqlite3` tracks the device hub link. Nothing relates them, and the naming invites confusion.
 
