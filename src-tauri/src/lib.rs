@@ -397,6 +397,7 @@ pub fn run() {
             workflow::commands::workflow_record,
             workflow::commands::workflow_intervene,
             workflow::commands::workflow_verify,
+            workflow::commands::workflow_adopt,
             workflow::commands::workflow_builtin_templates,
         ])
         .manage(workspace::WorkspaceState::new())

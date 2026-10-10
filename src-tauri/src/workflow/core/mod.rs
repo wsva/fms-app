@@ -144,6 +144,15 @@ pub struct Step {
     /// Evidence this step claims to produce. Opaque ids, evaluated by the caller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<StepVerify>,
+    /// Check ids that must come back **measured and clean** for this step to be
+    /// recorded as completed without running it (see [`adopt`]).
+    ///
+    /// Opt-in per step and deliberately rare: a clean result has to *prove* the
+    /// artifact exists, which an id counting offenders over an empty subject does
+    /// not. "No media, so no media is missing subtitles" is vacuously clean, and
+    /// adopting on that would put a green tick on work nobody did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopt: Option<Vec<String>>,
 }
 
 impl Step {
@@ -152,6 +161,11 @@ impl Step {
     }
     fn max_attempts(&self) -> u32 {
         self.retry.as_ref().map(|r| r.attempts.max(1)).unwrap_or(1)
+    }
+    /// Check ids this step adopts existing evidence for (never empty in practice:
+    /// [`adopt`] skips a step whose list is absent or empty).
+    fn adopt_ids(&self) -> &[String] {
+        self.adopt.as_deref().unwrap_or(&[])
     }
 }
 
@@ -287,6 +301,12 @@ pub(crate) fn create_run(
     commit(&dir, &events, &state)?;
 
     Ok(build_status(&id, &def, &state))
+}
+
+/// Whether a run of this name already exists under `base`. Handed to the binding
+/// layer, which needs to tell "create it, then write into it" from "load it".
+pub(crate) fn run_exists(base: &Path, run_id: &str) -> bool {
+    persist::run_exists(base, run_id)
 }
 
 /// Definition + current state + what's ready/blocked/failed and why.
@@ -739,6 +759,116 @@ pub(crate) fn verify(
 }
 
 // ---------------------------------------------------------------------------
+// Adoption
+// ---------------------------------------------------------------------------
+
+/// Record a step as completed because its outcome is already on disk.
+///
+/// This is the mirror image of [`verify`]'s demotion, and the only act in the
+/// engine that moves a step *up* without running it — which is why it is opt-in
+/// per step (`adopt:`) rather than a rule over `verify:` bindings. The condition
+/// is strict: every listed id must have been **measured** (present in
+/// `evidence`) and come back with no offenders. An unmeasured id withholds, in
+/// the same spirit as a verdict that refuses to certify what was never probed.
+///
+/// A step that is `completed`, `failed`, `skipped` or mid-run is left alone: a
+/// human's intervention outranks the filesystem. And like every other transition
+/// this costs an event — `adopted`, carrying which checks justified it — so a
+/// green node is never indistinguishable from a tick that was earned by work.
+/// Calling it again with the same evidence writes nothing.
+pub(crate) fn adopt(
+    base: &Path,
+    run_id: &str,
+    evidence: &HashMap<String, usize>,
+) -> Result<Value, String> {
+    let (dir, def, mut state) = load_bundle(base, run_id)?;
+    let now = persist::now_ts();
+    engine::recompute(&def, &mut state, now);
+
+    let mut adopted: Vec<String> = Vec::new();
+    let mut withheld: Vec<Value> = Vec::new();
+    let mut events: Vec<Event> = Vec::new();
+
+    for step in &def.steps {
+        let wanted = step.adopt_ids();
+        if wanted.is_empty() {
+            continue;
+        }
+        let status = state.steps.get(&step.id).map(|ss| ss.status).unwrap_or_default();
+        if !matches!(status, Status::Pending | Status::Ready) {
+            continue;
+        }
+
+        let (unmeasured, findings) = (
+            wanted.iter().map(String::as_str).filter(|id| !evidence.contains_key(*id)).collect::<Vec<_>>(),
+            wanted.iter()
+                .filter_map(|id| evidence.get(id.as_str()).filter(|n| **n > 0).map(|n| json!({ "check": id, "count": n })))
+                .collect::<Vec<Value>>(),
+        );
+        if !unmeasured.is_empty() {
+            withheld.push(json!({ "step": step.id, "why": "not measured", "checks": unmeasured }));
+            continue;
+        }
+        if !findings.is_empty() {
+            withheld.push(json!({ "step": step.id, "why": "the evidence disagrees", "checks": findings }));
+            continue;
+        }
+
+        let entry = state.steps.entry(step.id.clone()).or_default();
+        entry.status = Status::Completed;
+        entry.finished_at = Some(persist::now_string());
+        entry.lease = None;
+        entry.heartbeat = None;
+        events.push(event(
+            Some(step.id.as_str()),
+            "adopted",
+            Some(json!({
+                "from": status.as_str(),
+                "to": "completed",
+                "checks": wanted,
+                "by": "workflow_adopt",
+            })),
+        ));
+        adopted.push(step.id.clone());
+    }
+
+    let changed = !events.is_empty();
+    if changed {
+        // What the adopted claim satisfies has to be re-derived, exactly as a
+        // reported completion would.
+        engine::recompute(&def, &mut state, now);
+        commit(&dir, &events, &state)?;
+    }
+
+    let hint = if changed {
+        format!(
+            "{} step(s) adopted as completed from evidence already on disk: {}; they need not be run, \
+             and re-scan after any later change to their adopt: checks",
+            adopted.len(),
+            adopted.join(", "),
+        )
+    } else if withheld.is_empty() {
+        "nothing adopted: no step of this definition declares an adopt: list that is waiting for \
+         evidence".into()
+    } else {
+        format!(
+            "nothing adopted; {} step(s) withheld by the evidence (see 'withheld')",
+            withheld.len()
+        )
+    };
+
+    let mut resp = build_status(run_id, &def, &state);
+    if let Some(obj) = resp.as_object_mut() {
+        obj.insert(
+            "adoption".into(),
+            json!({ "changed": changed, "adopted": adopted, "withheld": withheld }),
+        );
+        obj.insert("adopt_hint".into(), json!(hint));
+    }
+    Ok(resp)
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -932,6 +1062,19 @@ steps:
     action: dataset_get
 "#;
 
+    /// The mirror case: a step that opts into inheriting progress from evidence,
+    /// plus the dependent that only opens up once it does.
+    const ADOPT_YAML: &str = r#"name: probe
+version: 1
+steps:
+  - id: preparer
+    action: dataset_init_dir
+    adopt: [present]
+  - id: consumer
+    action: dataset_get
+    depends_on: [preparer]
+"#;
+
     fn temp_base(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("fms-core-verify-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1026,6 +1169,69 @@ steps:
         assert!(gated["verification"]["gated"].as_array().unwrap().iter().any(|v| v == "follower"));
         // A gate is advice, not an action: nothing was applied, nothing was written.
         assert_eq!(gated["verification"]["changed"], json!(false));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn adoption_completes_a_step_only_when_its_evidence_is_measured_and_clean() {
+        let base = temp_base("adopt");
+        create_run(&base, Some("probe".into()), ADOPT_YAML, &["present", "needing"]).unwrap();
+        assert_eq!(status(&base, "probe").unwrap()["steps"]["preparer"]["status"], json!("ready"));
+
+        // Nothing has run, but the artifact `preparer` would produce is there and the
+        // step asked to be allowed to inherit it: record it, open the dependent, and
+        // say in the log who moved the step.
+        let done = adopt(&base, "probe", &evidence(&[("present", 0)])).unwrap();
+        assert_eq!(done["adoption"]["changed"], json!(true));
+        assert_eq!(done["steps"]["preparer"]["status"], json!("completed"));
+        assert_eq!(done["steps"]["consumer"]["status"], json!("ready"));
+        let events = events_text(&base);
+        assert_eq!(events.matches("\"adopted\"").count(), 1);
+        assert!(events.contains("workflow_adopt"), "the event must name its author");
+
+        // The same evidence again writes nothing.
+        let again = adopt(&base, "probe", &evidence(&[("present", 0)])).unwrap();
+        assert_eq!(again["adoption"]["changed"], json!(false));
+        assert_eq!(events_text(&base).matches("\"adopted\"").count(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn adoption_withholds_when_the_check_disagrees_or_was_never_measured() {
+        let base = temp_base("withhold");
+        create_run(&base, Some("probe".into()), ADOPT_YAML, &["present", "needing"]).unwrap();
+
+        // Findings: the artifact is not there after all.
+        let dirty = adopt(&base, "probe", &evidence(&[("present", 1)])).unwrap();
+        assert_eq!(dirty["adoption"]["changed"], json!(false));
+        assert_eq!(dirty["steps"]["preparer"]["status"], json!("ready"));
+        assert_eq!(dirty["adoption"]["withheld"][0]["step"], json!("preparer"));
+        assert_eq!(dirty["adoption"]["withheld"][0]["why"], json!("the evidence disagrees"));
+
+        // An absent id is not a clean one: nothing was probed, so nothing is proved.
+        let blind = adopt(&base, "probe", &evidence(&[])).unwrap();
+        assert_eq!(blind["adoption"]["changed"], json!(false));
+        assert_eq!(blind["adoption"]["withheld"][0]["why"], json!("not measured"));
+
+        // Both attempts wrote nothing at all — only `workflow_started` is on disk.
+        assert_eq!(events_text(&base).lines().count(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn adoption_never_overrides_a_step_a_human_already_judged() {
+        let base = temp_base("adopt-skip");
+        create_run(&base, Some("probe".into()), ADOPT_YAML, &["present", "needing"]).unwrap();
+        intervene(&base, "probe", "preparer", "skip").unwrap();
+
+        // Clean evidence, and still no move: `skipped` is a decision, and re-deriving
+        // it from the filesystem every scan would erase the human's.
+        let res = adopt(&base, "probe", &evidence(&[("present", 0)])).unwrap();
+        assert_eq!(res["adoption"]["changed"], json!(false));
+        assert_eq!(res["steps"]["preparer"]["status"], json!("skipped"));
 
         let _ = std::fs::remove_dir_all(&base);
     }

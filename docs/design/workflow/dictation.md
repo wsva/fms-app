@@ -23,10 +23,11 @@ engine does not honour.
 
 | Concern | Location |
 |---|---|
-| The template (DAG + `verify:` binding, single source of truth) | `src-tauri/src/workflow/templates/dictation/dataset_dictation.yaml`, baked in via `include_str!` and served by `workflow_builtin_templates` |
+| The template (DAG + `verify:`/`adopt:` binding, single source of truth) | `src-tauri/src/workflow/templates/dictation/dataset_dictation.yaml`, baked in via `include_str!` and served by `workflow_builtin_templates` |
 | The scan (read-only checks, each under a stable id) | `src-tauri/src/datasets/dictation/audit.rs` → `dataset_audit` command + MCP tool |
 | The check provider + vocabulary that binds the scan to a run | `src-tauri/src/workflow/verify.rs` (the only module naming both checks and steps) |
 | The join itself (verdicts, invalidation) | `src-tauri/src/workflow/core/mod.rs::verify` → `workflow_verify` command + MCP tool |
+| Adoption (clean evidence ⇒ `completed`, the one upward move) | `src-tauri/src/workflow/core/mod.rs::adopt` → `workflow_adopt` command + MCP tool |
 | Rendering the verdicts | `src/lib/workflow/verify.ts` (labels and sentences only — no ids) |
 | In-app Run buttons per step | `src/lib/workflow/step-ops.ts` (`STEP_OPS`, keyed by step id) |
 | Client mirror of the engine's readiness rules | `src/lib/workflow/steps.ts` (parses the YAML, evaluates `when` against probed facts) |
@@ -114,13 +115,15 @@ loop used to skip.
 ### The checks
 
 Fourteen named ids, though `database_missing` short-circuits the rest: with no `data.sqlite3`
-there is nothing to compare, so a report either names that one problem or walks all thirteen.
-Severity is the sort key, so the report leads with what blocks the pipeline. A check collapses
-to `clean` when it finds nothing, and the panel folds those behind a toggle.
+there is nothing to compare, so a report either names that one problem or walks all fourteen —
+`database_missing` among them, collapsed to `clean`, because reaching the walk *is* the
+measurement that the file exists. Severity is the sort key, so the report leads with what blocks
+the pipeline. A check collapses to `clean` when it finds nothing, and the panel folds those behind
+a toggle.
 
 | id | level | what it means |
 |---|---|---|
-| `database_missing` | problem | no `data.sqlite3` (the only check reported) |
+| `database_missing` | problem | no `data.sqlite3` (then the only check reported; otherwise it walks as `clean`) |
 | `media_new` | problem | file under `media/` with no `listen_media` row |
 | `media_gone` | warn | row whose audio is gone |
 | `subtitles_missing` | problem | neither a VTT nor cue rows anywhere |
@@ -138,6 +141,12 @@ to `clean` when it finds nothing, and the panel folds those behind a toggle.
 Which step each id answers to is *not* in this table — that is the binding further down, and it
 lives in the template where the engine can enforce it.
 
+One distinction in this list decides adoption later on: `database_missing` is the only id that
+answers a question about a file's **existence**. Every other id counts offenders over an
+inventory, so on a dataset with no media it comes back clean *vacuously* — "no media, therefore
+no media is missing subtitles". That is fine for a report and nowhere near enough to certify
+that a step's work was done.
+
 Cost and noise are both bounded on purpose: three bulk queries plus one VTT parse per media,
 **exact** counts kept while the item list caps at 100 with a `truncated` flag ("fix these and
 re-scan for the rest").
@@ -150,7 +159,9 @@ mutating the original. Everything downstream trusts that marker and nothing else
 
 - **No Fix buttons.** A finding carries the advice sentence and nothing else; the panel offers no
   action, because a scan is not consent to change data.
-- **No status changes from the scan.** `dataset_audit` touches no `state.json`. Invalidation is a
+- **No repair is ever triggered by a scan.** `dataset_audit` touches no dataset file. The one
+  thing a scan may write is a *status* — adoption (rung E), which a step opts into in the
+  template and which cannot rewrite a decision a human already made. Invalidation stays a
   separate, explicit act through `workflow_verify(apply=true)` — an agent or command surface, not
   a button in a report.
 - **No practice coverage.** Dictation progress lives in the app-level DB, a different subject.
@@ -204,19 +215,25 @@ dictation instantiation of them.
 |---|---|
 | `verify.blocks` | check ids whose findings mean "not yet" |
 | `verify.proves` | check ids whose findings mean "this step's output is missing, partial or drifted" |
+| `adopt` | check ids that must come back measured *and* clean for the step to be adopted as `completed` without running it |
 
 The dictation binding, in full:
 
-| Step | `blocks` | `proves` |
-|---|---|---|
-| `ensure_model` | — | — (no subject-side evidence; legitimately `unknown`) |
-| `init_dataset` | — | `database_missing` |
-| `sync_media` | `database_missing` | `media_new`, `media_gone` |
-| `generate_subtitles` | `database_missing`, `media_new` | `subtitles_missing`, `subtitles_unreadable`, `subtitles_not_imported`, `subtitles_out_of_sync` |
-| `generate_waveforms` | `media_new` | `waveforms_missing`, `waveforms_stale` |
-| `detect_reference` | — | — (records facts; nothing to prove) |
-| `align_cues` / `align_cues_transcript` | `subtitles_not_imported` | — (see *Not everything is verifiable*) |
-| `adjust_cue_times` | `waveforms_missing`, `subtitles_not_imported` | `cues_unadjusted` |
+| Step | `blocks` | `proves` | `adopt` |
+|---|---|---|---|
+| `ensure_model` | — | — (no subject-side evidence; legitimately `unknown`) | — |
+| `init_dataset` | — | `database_missing` | `database_missing` |
+| `sync_media` | `database_missing` | `media_new`, `media_gone` | — |
+| `generate_subtitles` | `database_missing`, `media_new` | `subtitles_missing`, `subtitles_unreadable`, `subtitles_not_imported`, `subtitles_out_of_sync` | — |
+| `generate_waveforms` | `media_new` | `waveforms_missing`, `waveforms_stale` | — |
+| `detect_reference` | — | — (records facts; nothing to prove) | — |
+| `align_cues` / `align_cues_transcript` | `subtitles_not_imported` | — (see *Not everything is verifiable*) | — |
+| `adjust_cue_times` | `waveforms_missing`, `subtitles_not_imported` | `cues_unadjusted` | — |
+
+`init_dataset` is the only step that adopts, and only on the one id that can prove it: the file
+either exists or it does not. The per-file ids stay out for the vacuity reason above — adopting
+`generate_subtitles` because a media-less dataset has no missing subtitles would put a green tick
+over work nobody did, the exact false confidence the rest of this design exists to prevent.
 
 How it is wired, as built:
 
@@ -227,8 +244,9 @@ How it is wired, as built:
 - **The report is subject-only.** `AuditCheck` lost `fix_step`/`fix_label`; grouping findings
   under steps is a join of the definition and the report, done in `workflow::core::verify`. Same
   report, any pipeline.
-- **Validation rejects a dangling id.** A typo in `verify:` would silently disable a gate, so it
-  fails the pre-run check like a bad `depends_on` does. Checks named by no step are report-only
+- **Validation rejects a dangling id.** A typo in `verify:` would silently disable a gate and a
+  typo in `adopt:` would silently disable a promotion (the step never turns green, whatever is on
+  disk), so both fail the pre-run check like a bad `depends_on` does. Checks named by no step are report-only
   (`cue_sanity`, `subtitle_versions`, `reference_material`, `adjust_blocked_no_waveform`), which is
   an answer, not an oversight.
 - **`workflow_verify(dataset_uuid, run_id, apply?)`** is the surface: a command twin for the page
@@ -236,13 +254,29 @@ How it is wired, as built:
   and reports; with it, it may demote. Its payload is the run's `status` response plus
   `verdicts`, a `verification` summary (`drifted`/`gated`/`unbound`/`undecidable`/`applied`) and a
   `verify_hint` sentence aimed at the agent.
-- **Verdicts need a run.** Before the first step runs there is no `state.json` to score, so the
-  page shows the flat audit only — no badges, no per-step grouping. The advice prose in the report
-  still names the repairing step in words, which is enough for a human and honest for a machine.
+- **`workflow_adopt(dataset_uuid, run_id, yaml_text?)`** is its mirror and the engine's only
+  upward act: same evidence map, opposite direction. It completes every step whose `adopt:` ids
+  all come back present *and* zero, and withholds the rest with a reason (`not measured`,
+  `the evidence disagrees`). It creates the run from the template text when none exists — a scan
+  needs a `state.json` to score anyway, so there is one source of truth instead of an optimistic
+  TypeScript preview the engine later contradicts — and it never moves a step already
+  `completed`, `failed`, `skipped` or `running`. Command twin, MCP tool, `adopted` event.
+- **The subject is environment, not output.** No step declares `inputs: { dataset_uuid: … }`: the
+  uuid is handed to every command and tool by its caller, and the run directory lives inside the
+  dataset it describes. While it was modeled as an output of `init_dataset`, an already-initialized
+  dataset was unrunnable *and* unadoptable — a completion recorded with no outputs left every
+  dependent `blocked` on a value that could never arrive.
+- **Verdicts need a run** — and a scan now always opens one. `workflow_adopt` creates the run when
+  no `state.json` exists yet, so badges, grouping and adoption all score against the same
+  engine-derived state the page renders. Before that, a dataset that had never been run through the
+  page had no verdicts at all.
 - **The rules are tested, not just written down.** `workflow::core::tests` runs the seam against
   real run directories: a demotion costs exactly one `invalidated` event and re-applying costs no
   second one, a clean probe over a `ready` step says `verified` and changes nothing, a step whose
-  bound id was never measured cannot certify, and `state.json` never contains a verdict.
+  bound id was never measured cannot certify, and `state.json` never contains a verdict. Adoption
+  is held to the same standard in the other direction: it completes a step only over
+  measured-and-clean evidence, opens its dependent, withholds with a named reason otherwise while
+  writing no second event, is idempotent, and cannot overrule a step a human already skipped.
   `workflow::verify::tests` checks that every built-in template binds only registered ids — the
   one guard against the binding and the vocabulary drifting apart silently.
 - **Other kinds follow for free.** `book/build_book_library.yaml` and `card/setup_card_deck.yaml`
@@ -266,6 +300,12 @@ Verdicts are dropped the moment the engine state changes (`refreshEngine`) or th
 (`resetRunView`): they were scored against a state that no longer holds, and a stale badge is a
 lie with a nice colour.
 
+Adoption rides the same scan (`probeAndSync`): after the audit lands, the page calls
+`workflow_adopt`, then refreshes from the engine, so a step whose artifact is already on disk
+renders as `completed` — the user sees "nothing to do here" instead of a button for work that is
+done. The notice names the steps it adopted; a withheld step stays exactly as it was and writes
+nothing.
+
 ## What a scan may do to a status
 
 The ladder runs from harmless to consequential, and each rung is a separate decision:
@@ -276,19 +316,26 @@ The ladder runs from harmless to consequential, and each rung is a separate deci
 | **B. Gate** | `blocks` findings rendered as "why this is not ready" | nothing | none needed | **built** |
 | **C. Feed guards** | a step records probed facts as *outputs*, so `when:` may `skip` | `record` events | automatic — it is the existing `detect_reference` precedent | not built |
 | **D. Invalidate** | a `completed` step whose `proves` evidence contradicts it goes back to `ready` | `invalidated` event | opt-in per *call* (`apply=true`), not per run | **built** |
-| **E. Adopt** | pre-existing evidence accepted as `completed` | `adopted` event | always explicit, one click per step | not built |
+| **E. Adopt** | pre-existing evidence accepted as `completed` | `adopted` event | opt-in per *step* (`adopt:`), written by the template author | **built** |
 
-Rung D is reachable by an agent or the command twin, never by a button: the page scans, reports
-and never writes. Two hard rules keep it honest — both are framework, spelled out in
+Rung D is reachable by an agent or the command twin, never by a button. Rung E *is* reached by the
+page's scan, and what makes that acceptable is that the consent moved somewhere sturdier than a
+click: a step adopts only over ids the definition listed, ones that fail when the artifact is
+absent, so the judgement is written down once, reviewable and validated, rather than improvised
+per user. Three hard rules keep it honest — all framework, spelled out in
 [`core.md`](./core.md#verification--scoring-progress-against-evidence):
 
-- **Verification only ever moves a step down.** A clean probe proves an artifact *exists*, not
+- **A probe only ever moves a step down.** A clean probe proves an artifact *exists*, not
   that this run made it. `ensure_model` can be perfect while no transcription ran here; a
   shipped dataset is indistinguishable from a processed one. Invalidation keeps the step's
   recorded `outputs`, so `when:` guards do not change underneath the demotion.
-- **Every status change costs an event.** The scan gets no privileged path into `state.json`,
-  so the log stays the audit trail of progress decisions. A probe that changes nothing writes
-  nothing — no re-`recompute`, no atomic rewrite, no timestamp churn.
+- **A step moves up only where the definition opted in, and never over a human.** No `adopt:` list
+  means no promotion, whatever is on disk; a step already `completed`, `failed`, `skipped` or
+  `running` is left alone, because someone decided about that one.
+- **Every status change costs an event.** Neither rung gets a privileged path into `state.json`,
+  so the log stays the audit trail of progress decisions and still tells progress this run earned
+  apart from progress it inherited. A probe that changes nothing writes nothing — no
+  re-`recompute`, no atomic rewrite, no timestamp churn.
 
 ### Not everything is verifiable, and that is the correct answer
 
@@ -316,7 +363,10 @@ contradicting each other.
 4. ✅ Rung D: `invalidated` on explicit `apply=true` — built out of order, ahead of C, because the join
    and the demotion path are one piece of code. Not built: a run-level opt-in flag, and any UI affordance for it.
 5. ○ Rung C: let `detect_reference` (and optionally a `verify_dataset` step) record audit facts as outputs.
-6. ○ Rung E: the explicit *Adopt the existing state* action, plus a second kind's check provider to prove the mechanism was never dictation-specific.
+6. ✅ Rung E: `adopt:` on `Step`, `workflow_adopt`, and adoption folded into the page's scan. Built as
+   an act authorized by the *definition* rather than a per-step button — the ask was a graph that
+   shows `completed`, not another thing to click. Not built: a second kind's check provider to prove
+   the mechanism was never dictation-specific.
 
 ## Open questions
 

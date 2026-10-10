@@ -121,6 +121,11 @@ interface EngineStatus {
   steps: Record<string, { status: string }>;
 }
 
+/** The `adoption` block `workflow_adopt` appends to that same status. */
+interface AdoptReport {
+  adoption?: { adopted?: string[] };
+}
+
 /** Render an invoke result as a single concise output line. */
 function summarizeResult(r: unknown): string {
   if (typeof r === "string") return r;
@@ -415,7 +420,7 @@ export default function WorkflowPage() {
     const def = loadTemplateDoc(tpl);
     navigate({ ...nav, templateId: tpl.id });
     const ds = (kindDatasets[tpl.category as WorkflowCategory] ?? []).find((d) => d.key === nav.datasetKey);
-    if (tpl.category === "dictation" && ds?.uuid && def) void probeAndSync(ds.uuid, def.steps);
+    if (tpl.category === "dictation" && ds?.uuid && def) void probeAndSync(ds.uuid, def.steps, tpl.yaml);
   };
 
   // Breadcrumb crumbs: jump back one level at a time, always clearing the run
@@ -536,6 +541,28 @@ export default function WorkflowPage() {
     }
   }, [appendLog]);
 
+  // ---- Inherit progress the evidence already proves ----
+  // A dataset initialized before this page ever saw it has no run, so its graph
+  // would say "not done" about work that is plainly done. `workflow_adopt` scores
+  // the same audit evidence against the steps that *opt in* to adopting (`adopt:`
+  // in the definition — today only `init_dataset`, whose database either exists or
+  // does not) and records those as completed, opening the run first when the
+  // dataset has none. It writes an `adopted` event, not a completion, so a green
+  // node is still traceable to "inherited from the disk" rather than to work the
+  // run performed. Returns the step ids it moved.
+  const adoptRun = useCallback(async (id: string, datasetUuid: string, yaml: string): Promise<string[]> => {
+    if (!isTauri() || !id || !datasetUuid || !yaml) return [];
+    try {
+      const res = await invoke<AdoptReport>("workflow_adopt", { datasetUuid, runId: id, yamlText: yaml });
+      return res.adoption?.adopted ?? [];
+    } catch (e) {
+      // Not a scan failure: no check provider for this kind, or a definition that
+      // will not validate. The audit's own findings below stand without it.
+      appendLog(`workflow_adopt('${id}'): ${String(e)}`);
+      return [];
+    }
+  }, [appendLog]);
+
   // ---- Probe on-disk facts + read info.json (does not touch the engine) ----
   // One command does the whole reconciliation: `dataset_audit` walks media/,
   // subtitle/, waveform/ and transcript/ against the rows in data.sqlite3 and
@@ -561,13 +588,16 @@ export default function WorkflowPage() {
   // run state from the engine. Explicit args because this also runs while
   // navigating into the workflow level, before the new `definition`/`nav` state
   // is visible to a closure.
-  const probeAndSync = useCallback(async (uuid: string, defs: StepDef[]) => {
+  const probeAndSync = useCallback(async (uuid: string, defs: StepDef[], yaml: string) => {
     if (!isTauri() || !uuid) return;
     setScanning(true);
     setNotice("");
     try {
       const report = await probeDataset(uuid);
       setCommitted(initialStatuses(defs));
+      // Adopt before reading the state back, so the graph opens on the state the
+      // dataset is in rather than on the absence of a record of it.
+      const adopted = await adoptRun(runIdFor(uuid), uuid, yaml);
       const live = await refreshEngine(runIdFor(uuid), uuid);
       // Verdicts only exist for a run that is on disk; a preview has no claims to check.
       const verdicts = live ? await verifyRun(runIdFor(uuid), uuid) : null;
@@ -583,12 +613,17 @@ export default function WorkflowPage() {
           : live
             ? "Audit is clean. The graph reflects the workflow run state."
             : "Audit is clean. Run any step to start its workflow run.";
+      // Steps whose outcome was already on disk get named, because a tick the run
+      // did not earn has to say where it came from.
+      const inherited = adopted.length
+        ? ` Adopted ${adopted.join(", ")} from evidence already on disk — they need not be run.`
+        : "";
       // A run that could not be scored has to say so: a missing badge is otherwise
       // indistinguishable from a clean bill of health.
       setNotice(
         live && !verdicts
-          ? `${message} The run could not be scored against its verify: bindings (see the log).`
-          : message,
+          ? `${message}${inherited} The run could not be scored against its verify: bindings (see the log).`
+          : `${message}${inherited}`,
       );
     } catch (e) {
       appendLog(`scan failed: ${String(e)}`, "ERROR");
@@ -596,11 +631,11 @@ export default function WorkflowPage() {
     } finally {
       setScanning(false);
     }
-  }, [probeDataset, refreshEngine, verifyRun, appendLog]);
+  }, [probeDataset, adoptRun, refreshEngine, verifyRun, appendLog]);
 
   const scan = useCallback(() => {
-    void probeAndSync(selectedUuid, steps);
-  }, [probeAndSync, selectedUuid, steps]);
+    void probeAndSync(selectedUuid, steps, yamlText);
+  }, [probeAndSync, selectedUuid, steps, yamlText]);
 
   // ---- Initialize a raw folder in place, then keep browsing it as a dataset ----
   // Drops back to the dataset's workflow list: the folder now has a uuid, so the

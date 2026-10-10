@@ -20,8 +20,8 @@
 //! dataset-less editor "jobs" live in the workspace `<workspace>/workflows`.
 //! Binding concrete actions (download, transcribe, …) to the generic engine is
 //! still future work; beyond the storage-location seam this root owns
-//! [`verify`], the check vocabulary the engine's `verify:` bindings are scored
-//! against.
+//! [`verify`], the check vocabulary that a definition's `verify:` bindings are
+//! scored against and that its `adopt:` list is allowed to inherit progress from.
 //!
 //! Desktop-only: the engine is reached through the desktop-gated MCP server
 //! (`mcp/workflow.rs`) and, for the Workflow page, its `workflow_*` Tauri
@@ -164,6 +164,18 @@ pub(crate) fn verify(
     apply: bool,
 ) -> Result<Value, String> {
     verify::verify(settings, dataset_uuid, run_id, apply)
+}
+
+/// Adopt on-disk evidence into a dataset-scoped run, opening the run first when
+/// the dataset has none. Same reason as [`verify`]: it needs the dataset as the
+/// subject to probe, so it is not a thin wrapper over a [`core`] fn.
+pub(crate) fn adopt(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    run_id: &str,
+    definition_yaml: Option<&str>,
+) -> Result<Value, String> {
+    verify::adopt(settings, dataset_uuid, run_id, definition_yaml)
 }
 
 // ---------------------------------------------------------------------------

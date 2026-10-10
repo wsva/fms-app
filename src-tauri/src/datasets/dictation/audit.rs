@@ -898,6 +898,11 @@ fn build_checks(media: &[MediaState], conn: &Connection, has_book: bool) -> Vec<
     }
 
     vec![
+        // Reported even when it passes: reaching here *is* the measurement, so the
+        // id is present with zero offenders rather than absent. `init_dataset`'s
+        // `proves`/`adopt` binding depends on that distinction — an absent id means
+        // "not evaluated", which can neither certify a step nor adopt one.
+        check("database_missing", Vec::new()),
         check("media_new", new_media),
         check("media_gone", gone),
         check("subtitles_missing", no_subtitle),
@@ -912,4 +917,33 @@ fn build_checks(media: &[MediaState], conn: &Connection, has_book: bool) -> Vec<
         reference,
         check("adjust_blocked_no_waveform", no_waveform_for_adjust),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    //! `workflow::verify` reads this report as `id → offender count`, where an
+    //! absent key means *not evaluated* — which makes a bound step undecidable
+    //! and blocks both certification and adoption. So the vocabulary a definition
+    //! may name and the ids a walk actually reports must never drift apart, and
+    //! nothing but this test notices when they do (`database_missing` used to be
+    //! reported only when it failed, so `init_dataset` could never be adopted).
+    use super::{build_checks, check_ids};
+
+    #[test]
+    fn a_walk_reports_every_registered_check_id() {
+        // An empty dataset with a usable (empty) database: the walk runs, finds
+        // nothing, and must still say so id by id.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut reported: Vec<&str> = build_checks(&[], &conn, false)
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        let mut registered: Vec<&str> = check_ids().collect();
+        reported.sort();
+        registered.sort();
+        assert_eq!(
+            reported, registered,
+            "every registered id must be present in a completed walk, measured and clean"
+        );
+    }
 }

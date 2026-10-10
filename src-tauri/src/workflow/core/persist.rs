@@ -51,6 +51,16 @@ pub(super) fn run_dir(base: &Path, run_id: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Whether a run already exists under `base` (a directory holding a
+/// `workflow.yaml`). Lets a caller decide to create one instead of guessing from
+/// the error text of a load.
+pub(super) fn run_exists(base: &Path, run_id: &str) -> bool {
+    match sanitize_run_id(run_id) {
+        Ok(id) => base.join(id).join(DEFINITION_FILE).is_file(),
+        Err(_) => false,
+    }
+}
+
 /// Create a fresh, empty run directory under `base`. Fails if it already exists.
 pub(super) fn create_run_dir(base: &Path, run_id: &str) -> Result<PathBuf, String> {
     let id = sanitize_run_id(run_id)?;

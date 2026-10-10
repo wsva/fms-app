@@ -73,6 +73,37 @@ pub(crate) fn verify(
     core::verify(&base, run_id, &evidence, apply)
 }
 
+/// Adopt the evidence into a dataset-scoped run: a step whose `adopt:` checks were
+/// all measured and came back clean becomes `completed` without being run.
+///
+/// The run is opened from `definition_yaml` when this dataset has none yet. That
+/// is on purpose: the whole point of adoption is that a dataset prepared
+/// elsewhere should show its real state the first time anyone looks at it, and
+/// "there is no run" is not a state of the pipeline, it is the absence of a
+/// record of one. Nothing is torn down here — the mirror operation,
+/// [`verify`] with `apply`, is the one that needs to be asked — and every
+/// adoption is journalled as `adopted` rather than as work performed, so
+/// `events.jsonl` still distinguishes a tick earned from a tick inherited.
+pub(crate) fn adopt(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    run_id: &str,
+    definition_yaml: Option<&str>,
+) -> Result<Value, String> {
+    let base = super::run_base(settings, Some(dataset_uuid))?;
+    let evidence = evidence(settings, dataset_uuid)?;
+    if !core::run_exists(&base, run_id) {
+        let yaml = definition_yaml.ok_or_else(|| {
+            format!(
+                "no run '{run_id}' for dataset '{dataset_uuid}'; pass its workflow.yaml text as \
+                 yaml_text to open one, or call workflow_create_run first"
+            )
+        })?;
+        core::create_run(&base, Some(run_id.to_string()), yaml, &check_ids())?;
+    }
+    core::adopt(&base, run_id, &evidence)
+}
+
 #[cfg(test)]
 mod tests {
     //! The binding is only trustworthy while both sides agree on the vocabulary, and
@@ -105,6 +136,20 @@ mod tests {
         let err = crate::workflow::core::create_run(&base, Some("dangling".into()), yaml, &check_ids())
             .expect_err("an unregistered check id must not create a run");
         assert!(err.contains("no_such_check"), "unexpected error text: {err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A dangling `adopt:` id is worse than a dangling `verify:` one: instead of
+    /// silently disabling a gate it silently disables a promotion, so the step
+    /// never turns green no matter what is on disk.
+    #[test]
+    fn a_dangling_adopt_id_is_rejected() {
+        let base = temp_base("dangling-adopt");
+        let yaml = "name: probe\nversion: 1\nsteps:\n  - id: a\n    action: dataset_init_dir\n    adopt: [no_such_check]\n";
+        let err = crate::workflow::core::create_run(&base, Some("dangling-adopt".into()), yaml, &check_ids())
+            .expect_err("an unregistered adopt check id must not create a run");
+        assert!(err.contains("no_such_check"), "unexpected error text: {err}");
+        assert!(err.contains("adopt"), "the error should name the field: {err}");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

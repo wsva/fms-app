@@ -58,6 +58,7 @@ A definition is a named, versioned set of **steps** forming a directed acyclic g
 | `inputs` | no | Named references to other steps' outputs (see *Data flow*) |
 | `outputs` | no | Named values this step produces, stored in state |
 | `verify` | no | `{ blocks, proves }` — which external checks this step answers to (see *Verification*) |
+| `adopt` | no | Check ids that must come back measured-and-clean for this step to be adopted as `completed` without running it (see *Verification*) |
 | `params` | no | Static arguments passed to the executor |
 | `retry` | no | `{ attempts, backoff }` — how many times to re-run on failure |
 | `timeout` | no | Max run duration; exceeding it ⇒ `failed` (or retry) |
@@ -122,9 +123,9 @@ Note the shape: `transcribe → normalize_text` and `generate_waveform` are two 
 
 - Step `id`s are unique.
 - Every `depends_on` / `inputs` reference points at an existing step id.
-- Every `verify` id is one the domain's check provider actually registers — a typo would
-  silently disable a gate, so it fails like a bad `depends_on` does. The vocabulary is passed
-  in from the binding layer; the engine only sees opaque strings.
+- Every `verify` / `adopt` id is one the domain's check provider actually registers — a typo
+  would silently disable a gate or a promotion, so it fails like a bad `depends_on` does. The
+  vocabulary is passed in from the binding layer; the engine only sees opaque strings.
 - The graph is **acyclic**.
 - Every `action` resolves to a registered executor (fail fast, not mid-run).
 - `name` and `version` are present.
@@ -169,6 +170,8 @@ Every step is in exactly one state:
 - `failed → ready` — automatic retry while `attempts` remain.
 - `blocked → ready` — the blocking condition clears (input arrives, dependency is retried and succeeds, manual unblock).
 - `completed → ready` — **invalidated** by evidence (see *Verification*), never by a clean probe.
+- `pending | ready → completed` — **adopted**: the step's `adopt` evidence is already clean on
+  disk (see *Verification*). The only upward move, and only for a step that asked for it.
 - `any → skipped` — `when` false, or propagation from an upstream skip/ignore.
 
 `completed`, `failed` (retries exhausted) and `skipped` are terminal for the run unless an agent intervenes (retry / unblock / reset).
@@ -209,15 +212,26 @@ about a step, and the framework deliberately keeps it thin:
 - **A probe that could not measure cannot certify.** If any id a step binds was absent from the
   evidence map (another domain's vocabulary, a short-circuited report), a would-be `verified`
   downgrades to `unknown`. A clean bill of health over ids nobody measured is a lie.
-- **Verification only ever moves a step down.** With `apply` set, a `completed` step whose
+- **A probe only ever moves a step down.** With `apply` set, a `completed` step whose
   `proves` evidence reports offenders goes back to `ready` (outputs kept, so `when:` guards
   still resolve). A clean probe proves an artifact *exists*, never that this run made it — so
-  there is no upward path, no promotion, ever.
-- **Every status change costs an event.** Invalidation appends `invalidated` like any other
-  transition; verification gets no privileged path into `state.json`. A probe that changes
-  nothing writes nothing.
+  verification has no upward path, no promotion, ever.
+- **Adoption is the one upward move, and a step has to ask for it.** `adopt: [check ids]`
+  says: "if every one of these ids comes back measured *and* with zero offenders, record me
+  `completed` — the artifact is already on disk, and making the user run me again would claim
+  credit for work nobody did." Opt-in per step and deliberately rare, because **vacuity** is
+  the trap: a check that counts offenders over an empty subject (no media ⇒ no media is
+  missing subtitles) is vacuously clean, so an id measured per file must never sit in an
+  `adopt` list; only an id that *fails when the artifact is absent* can certify existence.
+  Adoption never touches a step already `completed`, `failed`, `skipped` or `running` — a
+  human's judgement outranks the filesystem — and it withholds, with a reason, when an id was
+  not measured or reports offenders.
+- **Every status change costs an event.** Invalidation appends `invalidated` and adoption
+  appends `adopted`, like any other transition; neither gets a privileged path into
+  `state.json`. A probe or adoption that changes nothing writes nothing.
 
-The two honesty rules — down-only, and no uncertified claims — are what make it safe to let a
+The honesty rules — probes down-only, promotion only where a step opted in over non-vacuous
+evidence, and never over an id nobody measured — are what make it safe to let a
 read-only probe influence a run at all. The dictation instantiation (which check answers to
 which step, and what a probe cannot see at all) is in
 [`dictation.md`](./dictation.md#binding-checks-to-the-template).
@@ -300,6 +314,7 @@ An agent never needs to understand the domain — only a small generic command s
 | `advance(run, step)` | Execute the bound action, record the result, re-evaluate |
 | `record(run, step, event, detail)` | Report an outcome (esp. when the agent itself did the work) |
 | `verify(run, apply?)` | Score the run against measured evidence; with `apply` it may only demote (see *Verification*) |
+| `adopt(run, evidence)` | Complete the steps whose `adopt` ids this probe returns measured-and-clean (see *Verification*) |
 | `intervene(run, step, op)` | `retry` / `unblock` / `skip` / `reset` for manual recovery |
 
 Hints are actionable, e.g. *"step `validate` is blocked because dependency `normalize_text` failed; retry `normalize_text` or skip `validate`."*
@@ -325,7 +340,7 @@ JSONL has no surrounding `[]` and no commas between records. Each record is one 
 {"time":"2026-10-01 10:21:00","step":"transcribe","event":"started"}
 `````
 
-Event vocabulary (extensible): `claimed`, `started`, `completed`, `failed`, `retried`, `blocked`, `unblocked`, `skipped`, `resumed`, `invalidated`, plus run-level `workflow_started` / `workflow_completed` / `workflow_failed` / `workflow_blocked`. A record may carry an optional `detail` object (error message, attempt number, output refs, actor/device id) — an `invalidated` event names the checks that contradicted the step and the actor that applied it, so a demotion is always attributable.
+Event vocabulary (extensible): `claimed`, `started`, `completed`, `failed`, `retried`, `blocked`, `unblocked`, `skipped`, `resumed`, `invalidated`, `adopted`, plus run-level `workflow_started` / `workflow_completed` / `workflow_failed` / `workflow_blocked`. A record may carry an optional `detail` object (error message, attempt number, output refs, actor/device id) — an `invalidated` event names the checks that contradicted the step and the actor that applied it, and an `adopted` event names the checks that authorized the promotion, so a move in either direction is always attributable.
 
 ---
 

@@ -11,6 +11,8 @@
 //! The `verify:` id rule is enforced, but the vocabulary is *passed in*: this
 //! module only knows the ids must name a check the caller can evaluate. A typo
 //! there would silently disable a gate, so it fails like a bad `depends_on` does.
+//! The same rule covers `adopt:`, where a typo would silently disable an
+//! adoption — a quieter bug, but still a graph that lies about what was checked.
 
 use std::collections::{HashMap, HashSet};
 
@@ -86,17 +88,20 @@ pub(super) fn validate(def: &Definition, check_ids: &[&str]) -> Result<(), Strin
     // Acyclic via iterative DFS colouring.
     detect_cycle(def)?;
 
-    // Every check id named under `verify:` must be one the caller can evaluate.
+    // Every check id named under `verify:` or `adopt:` must be one the caller can
+    // evaluate.
     if !checks.is_empty() {
         for step in &def.steps {
-            let Some(v) = step.verify.as_ref() else {
-                continue;
-            };
-            for (field, ids) in [("blocks", &v.blocks), ("proves", &v.proves)] {
+            let bound: [(&str, &[String]); 3] = [
+                ("verify.blocks", step.verify.as_ref().map(|v| v.blocks.as_slice()).unwrap_or(&[])),
+                ("verify.proves", step.verify.as_ref().map(|v| v.proves.as_slice()).unwrap_or(&[])),
+                ("adopt", step.adopt.as_deref().unwrap_or(&[])),
+            ];
+            for (field, ids) in bound {
                 for id in ids {
                     if !checks.contains(id.as_str()) {
                         return Err(format!(
-                            "step '{}' verify.{field} names unknown check '{id}'; this dataset kind evaluates: {}",
+                            "step '{}' {field} names unknown check '{id}'; this dataset kind evaluates: {}",
                             step.id,
                             {
                                 let mut v: Vec<&str> = checks.iter().copied().collect();

@@ -91,6 +91,17 @@ struct WorkflowVerifyParam {
     apply: Option<bool>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct WorkflowAdoptParam {
+    /// Required: adoption inherits progress from the *dataset* on disk.
+    dataset_uuid: String,
+    run_id: String,
+    /// The `workflow.yaml` text to open the run from, when this dataset does not
+    /// have one yet. Omit it and an absent run is reported rather than invented.
+    #[serde(default)]
+    definition_yaml: Option<String>,
+}
+
 fn ok(v: &Value) -> Result<String, String> {
     Ok(serde_json::to_string_pretty(v).unwrap_or_default())
 }
@@ -247,6 +258,27 @@ impl DatasetMcpServer {
             &param.dataset_uuid,
             &param.run_id,
             param.apply.unwrap_or(false),
+        )?;
+        ok(&v)
+    }
+
+    #[tool(name = "workflow_adopt", description = "Record a step as completed because the evidence shows its outcome is already on disk, without running it. The mirror of workflow_verify's apply: verify may only move a step DOWN, this is the only act that moves one UP unrun, and it applies solely to steps that opt in via the definition's `adopt:` list (today: init_dataset, whose database file either exists or does not). A step whose listed checks were not all measured, or that report any offender, is withheld and named in `withheld` with the reason. Steps already completed, failed, skipped or running are left untouched - a human's intervention outranks the filesystem. Each adoption appends an `adopted` event, so events.jsonl still distinguishes progress the run performed from progress it inherited. Opens the run from definition_yaml if the dataset has none yet, then returns its full status; calling it twice with unchanged evidence writes nothing. Use this when a dataset was prepared outside the app (or by an earlier run) and the graph should show the state it is actually in.")]
+    async fn workflow_adopt(
+        &self,
+        Parameters(param): Parameters<WorkflowAdoptParam>,
+    ) -> Result<String, String> {
+        log::info!(
+            "[MCP] workflow_adopt: dataset_uuid={}, run_id={}, defines={}",
+            param.dataset_uuid,
+            param.run_id,
+            param.definition_yaml.is_some()
+        );
+        let state = self.app.state::<SettingsState>();
+        let v = crate::workflow::adopt(
+            state.inner(),
+            &param.dataset_uuid,
+            &param.run_id,
+            param.definition_yaml.as_deref(),
         )?;
         ok(&v)
     }

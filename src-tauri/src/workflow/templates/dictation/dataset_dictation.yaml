@@ -32,6 +32,23 @@
 # and `adjust_blocked_no_waveform` are context — and two steps declare nothing at
 # all (`ensure_model`, `detect_reference`) because there is no subject-side
 # evidence for them. That is `unknown`, the honest answer, not an oversight.
+#
+# `adopt:` is the opposite act and the engine's only upward move: the ids listed
+# there must come back measured *and* clean, and `workflow_adopt` then records the
+# step as completed without running it, because the artifact it would have
+# produced is already on disk. Exactly one step asks for it. `database_missing`
+# answers a question about one file's existence, which nothing can make vacuously
+# true; every per-file check instead reads "zero offenders" on a dataset with no
+# media at all, and adopting on that would print a green tick over work nobody did
+# — so they stay out. An adoption costs an `adopted` event, so the audit trail
+# still distinguishes progress a run earned from progress it inherited.
+#
+# No step declares `inputs: { dataset_uuid: … }` any more. That value is the
+# *subject* the run is bound to — the run directory lives inside the dataset, and
+# every command and MCP tool is handed the uuid by its caller — not something
+# `init_dataset` produces. Making it a step output meant a dataset initialized
+# anywhere else could never be adopted: the completion would carry no outputs and
+# every dependent would go `blocked` waiting for one that could not arrive.
 
 name: process_dictation_dataset
 # Deliberately NOT bumped when `verify:` was added: the field changes no step
@@ -69,6 +86,9 @@ steps:
       path: "C:/path/to/dataset_folder"   # EDIT: a folder already holding media/
     verify:
       proves: [database_missing]
+    # The database file *is* this step's whole output, so its presence is enough
+    # to adopt: see the header note on `adopt:` for why no other step may say so.
+    adopt: [database_missing]
     outputs:
       - dataset_uuid
       - media_count
@@ -87,8 +107,6 @@ steps:
     verify:
       blocks: [database_missing]
       proves: [media_new, media_gone]
-    inputs:
-      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     outputs:
       - added_count
       - removed_count
@@ -109,8 +127,6 @@ steps:
     verify:
       blocks: [database_missing, media_new]
       proves: [subtitles_missing, subtitles_unreadable, subtitles_not_imported, subtitles_out_of_sync]
-    inputs:
-      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     retry: { attempts: 2, backoff: "1m" }
 
   - id: generate_waveforms
@@ -122,8 +138,6 @@ steps:
     verify:
       blocks: [media_new]
       proves: [waveforms_missing, waveforms_stale]
-    inputs:
-      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
 
   # ── Stage 2b: the cue DB is filled inline by generate_subtitles ───────────────────────────────────────────────────
   # generate_subtitles already wrote the active listen_subtitle + cues into
@@ -138,8 +152,6 @@ steps:
     action: dataset_list_files
     depends_on:
       - generate_subtitles
-    inputs:
-      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     outputs:
       - has_book
       - has_transcript
@@ -153,8 +165,6 @@ steps:
     verify:
       blocks: [subtitles_not_imported]
     when: "${steps.detect_reference.outputs.has_book}"
-    inputs:
-      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
 
   - id: align_cues_transcript
     title: Align cues (transcript)
@@ -165,8 +175,6 @@ steps:
     verify:
       blocks: [subtitles_not_imported]
     when: "${steps.detect_reference.outputs.has_transcript}"
-    inputs:
-      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
 
   # ── Stage 4: cue-time refinement (independent of text alignment) ────────────
   - id: adjust_cue_times
@@ -183,8 +191,6 @@ steps:
       # The note marker is the only durable trace of an adjustment, so this can
       # only ever mean "some adjustment exists" — never which mode or strategy.
       proves: [cues_unadjusted]
-    inputs:
-      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     params:
       mode: "new"
       strategy: "noise_floor"          # or: dual_bound | peak_relative | otsu
