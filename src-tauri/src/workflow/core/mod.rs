@@ -2,15 +2,16 @@
 //! engine (readiness + transitions, in [`engine`]), file IO ([`persist`]),
 //! validation ([`validate`]), and the run-scoped public API the MCP tools call.
 //!
-//! Domain-free: nothing here knows what a step's `action` actually does.
+//! Domain-free: nothing here knows what a step's `action` actually does, nor
+//! where a run lives on disk. Every public fn takes an explicit *run base
+//! directory* (the directory holding that group's run sub-directories); the
+//! caller resolves it (workspace jobs dir vs. a dataset's own `workflows/`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-
-use crate::settings::SettingsState;
 
 pub(super) mod engine;
 mod persist;
@@ -179,12 +180,12 @@ pub struct Event {
 // Public API (called by mcp/workflow.rs)
 // ---------------------------------------------------------------------------
 
-/// List every run under `<workspace>/workflows` with a status summary.
-pub(crate) fn list_runs(settings: &SettingsState) -> Result<Value, String> {
+/// List every run in `base` (a run root directory) with a status summary.
+pub(crate) fn list_runs(base: &Path) -> Result<Value, String> {
     let now = persist::now_ts();
     let mut runs: Vec<Value> = Vec::new();
-    for id in persist::list_run_ids(settings) {
-        let Ok(dir) = persist::run_dir(settings, &id) else {
+    for id in persist::list_run_ids(base) {
+        let Ok(dir) = persist::run_dir(base, &id) else {
             continue;
         };
         let def = match persist::load_definition(&dir) {
@@ -216,7 +217,7 @@ pub(crate) fn list_runs(settings: &SettingsState) -> Result<Value, String> {
 /// Instantiate a new run from a YAML definition: validate, write the three
 /// files, and return the initial status.
 pub(crate) fn create_run(
-    settings: &SettingsState,
+    base: &Path,
     run_id: Option<String>,
     definition_yaml: &str,
 ) -> Result<Value, String> {
@@ -229,7 +230,7 @@ pub(crate) fn create_run(
         _ => generated_run_id(&def.name),
     };
 
-    let dir = persist::create_run_dir(settings, &id)?;
+    let dir = persist::create_run_dir(base, &id)?;
     persist::write_definition_text(&dir, definition_yaml)?;
 
     let now = persist::now_ts();
@@ -249,8 +250,8 @@ pub(crate) fn create_run(
 }
 
 /// Definition + current state + what's ready/blocked/failed and why.
-pub(crate) fn status(settings: &SettingsState, run_id: &str) -> Result<Value, String> {
-    let (dir, def, mut state) = load_bundle(settings, run_id)?;
+pub(crate) fn status(base: &Path, run_id: &str) -> Result<Value, String> {
+    let (dir, def, mut state) = load_bundle(base, run_id)?;
     engine::recompute(&def, &mut state, persist::now_ts());
     // Persist any recompute-derived changes (e.g. a reaped lease) so the on-disk
     // snapshot matches what we return.
@@ -260,14 +261,14 @@ pub(crate) fn status(settings: &SettingsState, run_id: &str) -> Result<Value, St
 
 /// Return the raw `workflow.yaml` text of a run, for loading back into the
 /// page's editor (preserves UI-only fields like `title`).
-pub(crate) fn definition_text(settings: &SettingsState, run_id: &str) -> Result<String, String> {
-    let dir = persist::run_dir(settings, run_id)?;
+pub(crate) fn definition_text(base: &Path, run_id: &str) -> Result<String, String> {
+    let dir = persist::run_dir(base, run_id)?;
     persist::read_definition_text(&dir)
 }
 
 /// The runnable (`ready`, unclaimed) steps with resolved action + inputs.
-pub(crate) fn next_steps(settings: &SettingsState, run_id: &str) -> Result<Value, String> {
-    let (_dir, def, mut state) = load_bundle(settings, run_id)?;
+pub(crate) fn next_steps(base: &Path, run_id: &str) -> Result<Value, String> {
+    let (_dir, def, mut state) = load_bundle(base, run_id)?;
     let now = persist::now_ts();
     engine::recompute(&def, &mut state, now);
 
@@ -304,12 +305,12 @@ pub(crate) fn next_steps(settings: &SettingsState, run_id: &str) -> Result<Value
 /// Claim a `ready` step (single-flight via lease) and hand its resolved action
 /// back to the agent. There is no bound executor in this agent-in-the-loop build.
 pub(crate) fn advance(
-    settings: &SettingsState,
+    base: &Path,
     run_id: &str,
     step_id: &str,
     agent_id: Option<String>,
 ) -> Result<Value, String> {
-    let (dir, def, mut state) = load_bundle(settings, run_id)?;
+    let (dir, def, mut state) = load_bundle(base, run_id)?;
     let now = persist::now_ts();
     engine::recompute(&def, &mut state, now);
 
@@ -371,13 +372,13 @@ pub(crate) fn advance(
 
 /// Record an executor/agent outcome for a claimed step and re-evaluate.
 pub(crate) fn record(
-    settings: &SettingsState,
+    base: &Path,
     run_id: &str,
     step_id: &str,
     event_kind: &str,
     detail: Option<Value>,
 ) -> Result<Value, String> {
-    let (dir, def, mut state) = load_bundle(settings, run_id)?;
+    let (dir, def, mut state) = load_bundle(base, run_id)?;
     let now = persist::now_ts();
     engine::recompute(&def, &mut state, now);
 
@@ -467,12 +468,12 @@ pub(crate) fn record(
 
 /// Manual recovery: `retry` / `unblock` / `skip` / `reset` a step.
 pub(crate) fn intervene(
-    settings: &SettingsState,
+    base: &Path,
     run_id: &str,
     step_id: &str,
     op: &str,
 ) -> Result<Value, String> {
-    let (dir, def, mut state) = load_bundle(settings, run_id)?;
+    let (dir, def, mut state) = load_bundle(base, run_id)?;
     let now = persist::now_ts();
     engine::recompute(&def, &mut state, now);
     find_step(&def, step_id)?;
@@ -530,10 +531,10 @@ pub(crate) fn intervene(
 
 /// Load definition + state for a run, enforcing version binding.
 fn load_bundle(
-    settings: &SettingsState,
+    base: &Path,
     run_id: &str,
 ) -> Result<(PathBuf, Definition, RunState), String> {
-    let dir = persist::run_dir(settings, run_id)?;
+    let dir = persist::run_dir(base, run_id)?;
     let def = persist::load_definition(&dir)?;
     let state = persist::load_state(&dir)?;
     if state.workflow.name != def.name || state.workflow.version != def.version {

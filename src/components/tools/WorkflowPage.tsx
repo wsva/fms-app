@@ -166,14 +166,17 @@ export default function WorkflowPage() {
   }, [fetchDatasets]);
 
   // ---- Engine status pull (authoritative once a run exists) ----
-  const refreshEngine = useCallback(async (id: string): Promise<boolean> => {
+  // Dataset-scoped: a run lives inside its dataset's `workflows/` dir, so the
+  // dataset uuid selects the store. (Workspace-level editor "jobs" are handled
+  // separately by loadRuns/saveJob/loadJob and pass no uuid.)
+  const refreshEngine = useCallback(async (id: string, datasetUuid: string): Promise<boolean> => {
     if (!isTauri() || !id) {
       setEngineView(null);
       setRunMeta(null);
       return false;
     }
     try {
-      const st = await invoke<EngineStatus>("workflow_status", { runId: id });
+      const st = await invoke<EngineStatus>("workflow_status", { datasetUuid, runId: id });
       const map: StatusMap = {};
       for (const [k, v] of Object.entries(st.steps ?? {})) map[k] = v.status as StepStatus;
       setEngineView(map);
@@ -223,7 +226,7 @@ export default function WorkflowPage() {
     try {
       await probeDataset(selectedUuid);
       setCommitted(initialStatuses(steps));
-      const live = await refreshEngine(runId);
+      const live = await refreshEngine(runId, selectedUuid);
       setNotice(live ? "Re-scanned. Graph reflects the workflow run state." : "Scanned dataset. Run any step to start its workflow run.");
     } catch (e) {
       appendLog(`scan failed: ${String(e)}`, "ERROR");
@@ -249,7 +252,7 @@ export default function WorkflowPage() {
       setSelectedKey(summary.info.uuid);
       await probeDataset(summary.info.uuid);
       setCommitted(initialStatuses(steps));
-      await refreshEngine(runIdFor(summary.info.uuid));
+      await refreshEngine(runIdFor(summary.info.uuid), summary.info.uuid);
       setInfoOpen(false);
       setNotice(`Initialized dataset “${summary.info.name}” (uuid ${summary.info.uuid}).`);
     } catch (e) {
@@ -299,7 +302,7 @@ export default function WorkflowPage() {
       setSelectedKey(renamed.info.uuid);
       await probeDataset(renamed.info.uuid);
       setCommitted(initialStatuses(steps));
-      await refreshEngine(runId);
+      await refreshEngine(runId, renamed.info.uuid);
       setNotice(`Dataset uuid changed on disk: “${renamed.info.name}” is now ${renamed.info.uuid}.`);
     } finally {
       setReloading(false);
@@ -348,13 +351,13 @@ export default function WorkflowPage() {
     if (!selectedUuid) throw new Error("Select a dataset first.");
     if (hasRun) return runId;
     try {
-      await invoke("workflow_create_run", { runId, yamlText });
+      await invoke("workflow_create_run", { datasetUuid: selectedUuid, runId, yamlText });
     } catch (e) {
       // Likely already exists — refreshEngine below confirms; a genuine failure
       // surfaces when the caller tries to advance.
       appendLog(`workflow_create_run('${runId}'): ${String(e)}`, "WARN");
     }
-    await refreshEngine(runId);
+    await refreshEngine(runId, selectedUuid);
     return runId;
   }, [selectedUuid, hasRun, runId, yamlText, refreshEngine, appendLog]);
 
@@ -377,12 +380,12 @@ export default function WorkflowPage() {
       return;
     }
     try {
-      await invoke("workflow_advance", { runId: id, step: step.id, agentId: "ui" });
+      await invoke("workflow_advance", { datasetUuid: selectedUuid, runId: id, step: step.id, agentId: "ui" });
     } catch (e) {
       setNotice(String(e));
       setRunning(false);
       setRunningStep("");
-      await refreshEngine(id);
+      await refreshEngine(id, selectedUuid);
       return;
     }
     try {
@@ -390,6 +393,7 @@ export default function WorkflowPage() {
       const result = await invoke(command, args);
       pushOutput(summarizeResult(result));
       await invoke("workflow_record", {
+        datasetUuid: selectedUuid,
         runId: id,
         step: step.id,
         event: "completed",
@@ -398,14 +402,14 @@ export default function WorkflowPage() {
       setNotice(`“${step.title}” completed.`);
       if (op.emitListChanged) await emit("dataset-list-changed", {});
       if (op.reloadAfter && selectedUuid) await probeDataset(selectedUuid);
-      await refreshEngine(id);
+      await refreshEngine(id, selectedUuid);
     } catch (e) {
       pushOutput(`Error: ${String(e)}`);
       try {
-        await invoke("workflow_record", { runId: id, step: step.id, event: "failed", detail: { reason: String(e) } });
+        await invoke("workflow_record", { datasetUuid: selectedUuid, runId: id, step: step.id, event: "failed", detail: { reason: String(e) } });
       } catch { /* ignore */ }
       setNotice(`“${step.title}” failed: ${String(e)}`);
-      await refreshEngine(id);
+      await refreshEngine(id, selectedUuid);
     } finally {
       setRunning(false);
       setRunningStep("");
@@ -421,12 +425,12 @@ export default function WorkflowPage() {
       pushOutput(`$ clear ${step.title}`);
       await invoke(command, args);
       if (hasRun) {
-        try { await invoke("workflow_intervene", { runId, step: step.id, op: "reset" }); } catch { /* ignore */ }
+        try { await invoke("workflow_intervene", { datasetUuid: selectedUuid, runId, step: step.id, op: "reset" }); } catch { /* ignore */ }
       } else {
         setStep(step.id, "pending");
       }
       await probeDataset(selectedUuid);
-      await refreshEngine(runId);
+      await refreshEngine(runId, selectedUuid);
       setNotice(`Cleared “${step.title}” outputs.`);
     } catch (e) {
       setNotice(`Clear failed: ${String(e)}`);
@@ -445,8 +449,8 @@ export default function WorkflowPage() {
   const intervene = async (step: StepDef, op: "reset" | "skip") => {
     if (hasRun) {
       try {
-        await invoke("workflow_intervene", { runId, step: step.id, op });
-        await refreshEngine(runId);
+        await invoke("workflow_intervene", { datasetUuid: selectedUuid, runId, step: step.id, op });
+        await refreshEngine(runId, selectedUuid);
       } catch (e) {
         setNotice(String(e));
       }
@@ -463,13 +467,14 @@ export default function WorkflowPage() {
       setNotice(String(e));
       return;
     }
-    try { await invoke("workflow_advance", { runId: id, step: step.id, agentId: "ui" }); } catch { /* not ready */ }
+    try { await invoke("workflow_advance", { datasetUuid: selectedUuid, runId: id, step: step.id, agentId: "ui" }); } catch { /* not ready */ }
     try {
       await invoke("workflow_record", {
+        datasetUuid: selectedUuid,
         runId: id, step: step.id, event,
         detail: event === "failed" ? { reason: "marked failed in UI" } : { outputs: {} },
       });
-      await refreshEngine(id);
+      await refreshEngine(id, selectedUuid);
     } catch (e) {
       // No run / step not claimable: fall back to the local projection.
       setStep(step.id, event === "failed" ? "failed" : "completed");

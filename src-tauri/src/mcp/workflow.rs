@@ -15,6 +15,11 @@ use super::{DatasetMcpServer, JsonValue};
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct WorkflowCreateParam {
+    /// Optional dataset uuid: scope the run inside that dataset's own
+    /// `<dataset>/workflows` dir (self-contained, travels with sync/export).
+    /// Omit to create a workspace-level job instead.
+    #[serde(default)]
+    dataset_uuid: Option<String>,
     /// Optional run id (single directory name). Generated from the definition
     /// name when omitted.
     #[serde(default)]
@@ -24,12 +29,26 @@ struct WorkflowCreateParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct WorkflowListParam {
+    /// Optional dataset uuid: list that dataset's runs under `<dataset>/workflows`.
+    /// Omit to list the workspace jobs directory (dataset-less jobs) instead.
+    #[serde(default)]
+    dataset_uuid: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct WorkflowRunParam {
+    /// Optional dataset uuid the run lives under (see workflow_create). Omit for
+    /// workspace-level jobs.
+    #[serde(default)]
+    dataset_uuid: Option<String>,
     run_id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct WorkflowAdvanceParam {
+    #[serde(default)]
+    dataset_uuid: Option<String>,
     run_id: String,
     step: String,
     /// Optional lease owner id; distinguishes concurrent agents.
@@ -39,6 +58,8 @@ struct WorkflowAdvanceParam {
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct WorkflowRecordParam {
+    #[serde(default)]
+    dataset_uuid: Option<String>,
     run_id: String,
     step: String,
     /// One of: `completed`, `failed`, `blocked`.
@@ -50,6 +71,8 @@ struct WorkflowRecordParam {
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct WorkflowInterveneParam {
+    #[serde(default)]
+    dataset_uuid: Option<String>,
     run_id: String,
     step: String,
     /// One of: `retry`, `unblock`, `skip`, `reset`.
@@ -62,37 +85,45 @@ fn ok(v: &Value) -> Result<String, String> {
 
 #[tool_router(router = workflow_router, vis = "pub(crate)")]
 impl DatasetMcpServer {
-    #[tool(name = "workflow_list", description = "List every workflow run under the workspace's workflows directory. Returns each run's id, definition name/version, overall run_status (in_progress|completed|failed|blocked) and per-status counts. Use this to discover runs before loading one.")]
-    async fn workflow_list(&self) -> Result<String, String> {
-        log::info!("[MCP] workflow_list");
+    #[tool(name = "workflow_list", description = "List workflow runs and their status summaries (id, definition name/version, overall run_status, per-status counts). Pass dataset_uuid to list a dataset's own runs under <dataset>/workflows; omit it to list the workspace jobs directory (dataset-less pipeline templates). Use this to discover runs before loading one.")]
+    async fn workflow_list(
+        &self,
+        Parameters(param): Parameters<WorkflowListParam>,
+    ) -> Result<String, String> {
+        log::info!("[MCP] workflow_list: dataset_uuid={:?}", param.dataset_uuid);
         let state = self.app.state::<SettingsState>();
-        let v = crate::workflow::list_runs(state.inner())?;
+        let v = crate::workflow::list_runs(state.inner(), param.dataset_uuid.as_deref())?;
         ok(&v)
     }
 
-    #[tool(name = "workflow_create", description = "Create a new workflow run from a YAML definition. Validates the DAG (unique ids, existing references, acyclic), writes workflow.yaml/state.json/events.jsonl, and returns the initial status with the first ready steps. Pass run_id to choose the directory name, or omit it to auto-generate one.")]
+    #[tool(name = "workflow_create", description = "Create a new workflow run from a YAML definition. Validates the DAG (unique ids, existing references, acyclic), writes workflow.yaml/state.json/events.jsonl, and returns the initial status with the first ready steps. Pass dataset_uuid to store the run inside that dataset's own workflows dir (so it travels with the dataset); omit for a workspace-level job. Pass run_id to choose the directory name, or omit it to auto-generate one.")]
     async fn workflow_create(
         &self,
         Parameters(param): Parameters<WorkflowCreateParam>,
     ) -> Result<String, String> {
-        log::info!("[MCP] workflow_create: run_id={:?}", param.run_id);
+        log::info!(
+            "[MCP] workflow_create: dataset_uuid={:?}, run_id={:?}",
+            param.dataset_uuid,
+            param.run_id
+        );
         let state = self.app.state::<SettingsState>();
         let v = crate::workflow::create_run(
             state.inner(),
+            param.dataset_uuid.as_deref(),
             param.run_id,
             &param.definition_yaml,
         )?;
         ok(&v)
     }
 
-    #[tool(name = "workflow_status", description = "Load a run and return its definition metadata, per-step statuses, and what is ready/blocked/failed with actionable reasons and hints. Recomputes derived statuses and reaps expired leases, so it is always safe to call after a restart to resume.")]
+    #[tool(name = "workflow_status", description = "Load a run and return its definition metadata, per-step statuses, and what is ready/blocked/failed with actionable reasons and hints. Recomputes derived statuses and reaps expired leases, so it is always safe to call after a restart to resume. Pass dataset_uuid when the run is stored inside a dataset; omit for a workspace job.")]
     async fn workflow_status(
         &self,
         Parameters(param): Parameters<WorkflowRunParam>,
     ) -> Result<String, String> {
         log::info!("[MCP] workflow_status: run_id={}", param.run_id);
         let state = self.app.state::<SettingsState>();
-        let v = crate::workflow::status(state.inner(), &param.run_id)?;
+        let v = crate::workflow::status(state.inner(), param.dataset_uuid.as_deref(), &param.run_id)?;
         ok(&v)
     }
 
@@ -103,7 +134,7 @@ impl DatasetMcpServer {
     ) -> Result<String, String> {
         log::info!("[MCP] workflow_next: run_id={}", param.run_id);
         let state = self.app.state::<SettingsState>();
-        let v = crate::workflow::next_steps(state.inner(), &param.run_id)?;
+        let v = crate::workflow::next_steps(state.inner(), param.dataset_uuid.as_deref(), &param.run_id)?;
         ok(&v)
     }
 
@@ -114,7 +145,7 @@ impl DatasetMcpServer {
     ) -> Result<String, String> {
         log::info!("[MCP] workflow_get_definition: run_id={}", param.run_id);
         let state = self.app.state::<SettingsState>();
-        crate::workflow::definition_text(state.inner(), &param.run_id)
+        crate::workflow::definition_text(state.inner(), param.dataset_uuid.as_deref(), &param.run_id)
     }
 
     #[tool(name = "workflow_advance", description = "Claim a ready step (single-flight via a lease) and hand its resolved action + inputs back to you to perform. This does NOT execute anything: after doing the work, report the outcome with workflow_record. Errors if the step is not ready or is already claimed by a live lease.")]
@@ -130,6 +161,7 @@ impl DatasetMcpServer {
         let state = self.app.state::<SettingsState>();
         let v = crate::workflow::advance(
             state.inner(),
+            param.dataset_uuid.as_deref(),
             &param.run_id,
             &param.step,
             param.agent_id,
@@ -155,6 +187,7 @@ impl DatasetMcpServer {
         };
         let v = crate::workflow::record(
             state.inner(),
+            param.dataset_uuid.as_deref(),
             &param.run_id,
             &param.step,
             &param.event,
@@ -177,6 +210,7 @@ impl DatasetMcpServer {
         let state = self.app.state::<SettingsState>();
         let v = crate::workflow::intervene(
             state.inner(),
+            param.dataset_uuid.as_deref(),
             &param.run_id,
             &param.step,
             &param.op,

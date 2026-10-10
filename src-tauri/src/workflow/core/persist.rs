@@ -4,6 +4,12 @@
 //! One directory per run holds three plain-text files (see the design doc):
 //! `workflow.yaml` (definition), `state.json` (snapshot), `events.jsonl`
 //! (audit log). Everything is diffable, agent-readable and sync-friendly.
+//!
+//! Domain-free: this module is handed an explicit *run base directory* (the
+//! directory that holds a group's run sub-directories) and never resolves it
+//! from settings or dataset identity. Choosing where runs live — the workspace
+//! jobs dir vs. a dataset's own `workflows/` — is the glue layer's concern
+//! (see `workflow/mod.rs::run_base`).
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -11,21 +17,11 @@ use std::path::{Path, PathBuf};
 
 use chrono::{Local, Utc};
 
-use crate::settings::SettingsState;
-
 use super::{Definition, Event, RunState};
 
-/// Name of the workspace sub-directory that holds every run.
-const RUNS_SUBDIR: &str = "workflows";
 const DEFINITION_FILE: &str = "workflow.yaml";
 const STATE_FILE: &str = "state.json";
 const EVENTS_FILE: &str = "events.jsonl";
-
-/// Root directory holding every workflow run: `<workspace>/workflows`.
-/// Falls back to `<data_root>/workflows` when no workspace is selected.
-pub(super) fn runs_root(settings: &SettingsState) -> PathBuf {
-    settings.workspace_subdir(RUNS_SUBDIR, "")
-}
 
 /// Validate and normalize a run id so it is safe to use as a single directory
 /// name. Rejects empty ids, path separators and `..` traversal.
@@ -42,10 +38,10 @@ pub(super) fn sanitize_run_id(run_id: &str) -> Result<String, String> {
     Ok(id.to_string())
 }
 
-/// Resolve a run's directory, ensuring it exists as a directory.
-pub(super) fn run_dir(settings: &SettingsState, run_id: &str) -> Result<PathBuf, String> {
+/// Resolve a run's directory under `base`, ensuring it exists as a directory.
+pub(super) fn run_dir(base: &Path, run_id: &str) -> Result<PathBuf, String> {
     let id = sanitize_run_id(run_id)?;
-    let dir = runs_root(settings).join(&id);
+    let dir = base.join(&id);
     if !dir.is_dir() {
         return Err(format!(
             "workflow run '{id}' not found at {}. Create it with workflow_create, or list runs with workflow_list.",
@@ -55,10 +51,10 @@ pub(super) fn run_dir(settings: &SettingsState, run_id: &str) -> Result<PathBuf,
     Ok(dir)
 }
 
-/// Create a fresh, empty run directory. Fails if it already exists.
-pub(super) fn create_run_dir(settings: &SettingsState, run_id: &str) -> Result<PathBuf, String> {
+/// Create a fresh, empty run directory under `base`. Fails if it already exists.
+pub(super) fn create_run_dir(base: &Path, run_id: &str) -> Result<PathBuf, String> {
     let id = sanitize_run_id(run_id)?;
-    let dir = runs_root(settings).join(&id);
+    let dir = base.join(&id);
     if dir.exists() {
         return Err(format!(
             "workflow run '{id}' already exists at {}. Pick a different run_id or load it with workflow_status.",
@@ -154,9 +150,8 @@ pub(super) fn now_ts() -> i64 {
 }
 
 /// List existing run directory names (directories containing a `workflow.yaml`).
-pub(super) fn list_run_ids(settings: &SettingsState) -> Vec<String> {
-    let root = runs_root(settings);
-    let Ok(entries) = fs::read_dir(&root) else {
+pub(super) fn list_run_ids(base: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(base) else {
         return Vec::new();
     };
     let mut ids: Vec<String> = entries
