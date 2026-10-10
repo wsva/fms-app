@@ -1,18 +1,21 @@
 # Process a Dictation Dataset (engine-driven)
 
-> **How to run this.** The other files in this folder are `.yaml` goose *recipes*
-> (`goose run --recipe …`). This one is markdown, so it is a goose *instruction file*:
+> **How to run this.** `dataset_dictation.yaml` beside this file is the goose *recipe*
+> form of the same instructions, and is the one to run:
 >
 > ```
-> goose run -i docs/ai/goose_recipe/dataset_dictation.md --with-streamable-http-extension http://127.0.0.1:35711/mcp
+> goose run --recipe docs/ai/goose_recipe/dataset_dictation.yaml --with-streamable-http-extension http://127.0.0.1:35711/mcp
 > ```
 >
-> Flags checked against goose 1.53.0, where `-i` is `--instructions` and `-r` on
+> This markdown version is kept for reading and diffing; run it with
+> `goose run -i docs/ai/goose_recipe/dataset_dictation.md …` if you prefer prose over
+> YAML. Flags checked against goose 1.53.0, where `-i` is `--instructions` and `-r` on
 > `goose session` means *resume*, not recipe. Interactive instead: `goose session
-> --with-streamable-http-extension http://127.0.0.1:35711/mcp`, then point it at this file.
-> To turn it into a `-r` recipe, wrap the body below in `instructions: |-` under
-> `version` / `title` / `description`, add `activities: []` and `parameters: []`, and check it
-> with `goose recipe validate`.
+> --with-streamable-http-extension http://127.0.0.1:35711/mcp`, then point it at either
+> file. Check the recipe with `goose recipe validate <file>`.
+>
+> **The two files must stay in sync** — that is the whole cost of shipping both, and it is
+> paid by whoever edits one of them.
 >
 > It differs from the other recipes in one way that matters: it drives the
 > **workflow engine** rather than calling pipeline tools in a fixed order, so the
