@@ -1,6 +1,7 @@
 "use client";
 
 import { memo } from "react";
+import { AlertTriangle, Check } from "lucide-react";
 import {
   ReactFlow,
   Background,
@@ -20,6 +21,7 @@ import {
   type Edge as WfEdge,
   statusLabel,
 } from "@/lib/workflow/steps";
+import { type StepVerdict } from "@/lib/workflow/verify";
 
 // Status → theme-aware palette (CSS vars from globals.css @theme block).
 function statusColors(status: StepStatus): {
@@ -46,15 +48,41 @@ function statusColors(status: StepStatus): {
   }
 }
 
+/** A step's evidence reading, resolved by the page from `workflow_verify`. */
+export interface StepVerdictInfo {
+  verdict: StepVerdict;
+  /** Hover text: the binding, the findings, what the probe could not judge. */
+  title: string;
+}
+
 interface StepNodeData {
   step: StepDef;
   status: StepStatus;
   selected: boolean;
+  /** Absent until a verification has run — the badge is earned, not default. */
+  verdict?: StepVerdictInfo;
   [key: string]: unknown;
 }
 
+/**
+ * The evidence marker beside a node's status pill: a second, independent judgement
+ * of what the *dataset* looks like, never a restatement of the run's progress. An
+ * unbound step shows nothing, because "the definition says nothing about this
+ * step" is not a finding worth a glyph.
+ */
+function VerdictBadge({ info }: { info: StepVerdictInfo }) {
+  if (info.verdict === "unknown") return null;
+  const drifted = info.verdict === "drifted";
+  const Icon = drifted ? AlertTriangle : Check;
+  return (
+    <span className="inline-flex shrink-0" title={info.title}>
+      <Icon size={11} className={drifted ? "text-warning-text" : "text-success-text"} />
+    </span>
+  );
+}
+
 const StepNode = memo(({ data }: { data: StepNodeData }) => {
-  const { step, status, selected } = data;
+  const { step, status, selected, verdict } = data;
   const c = statusColors(status);
   return (
     <div
@@ -70,8 +98,11 @@ const StepNode = memo(({ data }: { data: StepNodeData }) => {
       {/* Top→down flow: edges enter the top edge of a node and leave its bottom. */}
       <Handle type="target" position={Position.Top} className="!bg-[var(--border-default)]" />
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-semibold truncate" title={step.title}>
-          {step.title}
+        <span className="flex items-center gap-1 min-w-0">
+          {verdict && <VerdictBadge info={verdict} />}
+          <span className="text-xs font-semibold truncate" title={step.title}>
+            {step.title}
+          </span>
         </span>
         <span
           className="text-[10px] px-1.5 py-[1px] rounded-full font-medium shrink-0"
@@ -95,12 +126,14 @@ export default function WorkflowGraph({
   positioned,
   edges,
   view,
+  verdicts,
   selectedId,
   onSelect,
 }: {
   positioned: PositionedStep[];
   edges: WfEdge[];
   view: Record<string, StepStatus>;
+  verdicts?: Record<string, StepVerdictInfo>;
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
@@ -108,7 +141,12 @@ export default function WorkflowGraph({
     id: p.step.id,
     type: "step",
     position: { x: p.x, y: p.y },
-    data: { step: p.step, status: view[p.step.id] ?? "pending", selected: p.step.id === selectedId },
+    data: {
+      step: p.step,
+      status: view[p.step.id] ?? "pending",
+      selected: p.step.id === selectedId,
+      verdict: verdicts?.[p.step.id],
+    },
   }));
 
   const rfEdges: RfEdge[] = edges.map((e) => ({

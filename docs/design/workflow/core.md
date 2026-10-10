@@ -57,6 +57,7 @@ A definition is a named, versioned set of **steps** forming a directed acyclic g
 | `when` | no | Condition/guard; if false the step is `skipped` (not failed) |
 | `inputs` | no | Named references to other steps' outputs (see *Data flow*) |
 | `outputs` | no | Named values this step produces, stored in state |
+| `verify` | no | `{ blocks, proves }` — which external checks this step answers to (see *Verification*) |
 | `params` | no | Static arguments passed to the executor |
 | `retry` | no | `{ attempts, backoff }` — how many times to re-run on failure |
 | `timeout` | no | Max run duration; exceeding it ⇒ `failed` (or retry) |
@@ -121,6 +122,9 @@ Note the shape: `transcribe → normalize_text` and `generate_waveform` are two 
 
 - Step `id`s are unique.
 - Every `depends_on` / `inputs` reference points at an existing step id.
+- Every `verify` id is one the domain's check provider actually registers — a typo would
+  silently disable a gate, so it fails like a bad `depends_on` does. The vocabulary is passed
+  in from the binding layer; the engine only sees opaque strings.
 - The graph is **acyclic**.
 - Every `action` resolves to a registered executor (fail fast, not mid-run).
 - `name` and `version` are present.
@@ -164,6 +168,7 @@ Every step is in exactly one state:
 - `running → completed | failed | blocked` — executor outcome.
 - `failed → ready` — automatic retry while `attempts` remain.
 - `blocked → ready` — the blocking condition clears (input arrives, dependency is retried and succeeds, manual unblock).
+- `completed → ready` — **invalidated** by evidence (see *Verification*), never by a clean probe.
 - `any → skipped` — `when` false, or propagation from an upstream skip/ignore.
 
 `completed`, `failed` (retries exhausted) and `skipped` are terminal for the run unless an agent intervenes (retry / unblock / reset).
@@ -178,6 +183,44 @@ Statuses are **derived**, not guessed. On every evaluation the engine recomputes
 - Otherwise ⇒ `pending`.
 
 This is a pure function of the definition + current statuses, so it is stable and reproducible across restarts.
+
+---
+
+## Verification — scoring progress against evidence
+
+Readiness is derived from the graph; it says nothing about whether the *artifacts a step
+produced* still exist. Verification is the one seam where the outside world is allowed to speak
+about a step, and the framework deliberately keeps it thin:
+
+- **The definition declares the relationship**, per step:
+  `verify: { blocks: [check ids], proves: [check ids] }`. `blocks` means "findings here say
+  *not yet*"; `proves` means "findings here contradict the claim that this step's output
+  holds". A step with no `verify:` is legitimately `unknown` — the absence of a binding is a
+  statement, not a gap.
+- **Checks are not engine concepts.** A check needs the domain's data access, so it lives in a
+  domain module that registers it under a stable id and hands the engine a `id → offender
+  count` map. The core never names a check, a file kind or a repair sentence; it only compares
+  opaque ids against the binding. Adding a new pipeline means a new provider, not an engine
+  change.
+- **Verdicts are a projection.** `verified` / `drifted` / `unknown` are recomputed on every
+  call and never written to `state.json`, so `state.json` stays exactly a replay of
+  `events.jsonl` and a verdict means "as of this probe". Render it beside a node's status, never
+  instead of it.
+- **A probe that could not measure cannot certify.** If any id a step binds was absent from the
+  evidence map (another domain's vocabulary, a short-circuited report), a would-be `verified`
+  downgrades to `unknown`. A clean bill of health over ids nobody measured is a lie.
+- **Verification only ever moves a step down.** With `apply` set, a `completed` step whose
+  `proves` evidence reports offenders goes back to `ready` (outputs kept, so `when:` guards
+  still resolve). A clean probe proves an artifact *exists*, never that this run made it — so
+  there is no upward path, no promotion, ever.
+- **Every status change costs an event.** Invalidation appends `invalidated` like any other
+  transition; verification gets no privileged path into `state.json`. A probe that changes
+  nothing writes nothing.
+
+The two honesty rules — down-only, and no uncertified claims — are what make it safe to let a
+read-only probe influence a run at all. The dictation instantiation (which check answers to
+which step, and what a probe cannot see at all) is in
+[`dictation.md`](./dictation.md#binding-checks-to-the-template).
 
 ---
 
@@ -256,6 +299,7 @@ An agent never needs to understand the domain — only a small generic command s
 | `next(run)` | The runnable step(s) with resolved action + inputs |
 | `advance(run, step)` | Execute the bound action, record the result, re-evaluate |
 | `record(run, step, event, detail)` | Report an outcome (esp. when the agent itself did the work) |
+| `verify(run, apply?)` | Score the run against measured evidence; with `apply` it may only demote (see *Verification*) |
 | `intervene(run, step, op)` | `retry` / `unblock` / `skip` / `reset` for manual recovery |
 
 Hints are actionable, e.g. *"step `validate` is blocked because dependency `normalize_text` failed; retry `normalize_text` or skip `validate`."*
@@ -281,7 +325,7 @@ JSONL has no surrounding `[]` and no commas between records. Each record is one 
 {"time":"2026-10-01 10:21:00","step":"transcribe","event":"started"}
 `````
 
-Event vocabulary (extensible): `claimed`, `started`, `completed`, `failed`, `retried`, `blocked`, `unblocked`, `skipped`, `resumed`, plus run-level `workflow_started` / `workflow_completed` / `workflow_failed` / `workflow_blocked`. A record may carry an optional `detail` object (error message, attempt number, output refs, actor/device id).
+Event vocabulary (extensible): `claimed`, `started`, `completed`, `failed`, `retried`, `blocked`, `unblocked`, `skipped`, `resumed`, `invalidated`, plus run-level `workflow_started` / `workflow_completed` / `workflow_failed` / `workflow_blocked`. A record may carry an optional `detail` object (error message, attempt number, output refs, actor/device id) — an `invalidated` event names the checks that contradicted the step and the actor that applied it, so a demotion is always attributable.
 
 ---
 
@@ -318,6 +362,7 @@ Kept deliberately light — the engine is small and domain-free.
 - **Engine core:** topological readiness recompute, an async run loop (tokio), and an executor registry `action_name → Executor`. Single-flight claims + leases give crash-safe concurrency.
 - **Pluggable executors** — the only place "what work means" lives. An executor can be: (a) a call to an existing MCP tool / Tauri command, (b) a sidecar script (the `resources/tools` pattern), or (c) *deferred to the agent* — the engine returns the step and the agent reports the result via `record`. The core is identical for all three, so the same framework serves deterministic pipelines and agent-in-the-loop reasoning.
 - **Agent surface:** expose the commands above as MCP tools (`workflow_*`) so any agent can drive a run — structured JSON responses and actionable errors, matching the project's agent-friendly conventions.
+- **Two layers, one seam.** The engine (`workflow/core/`) stays domain-free: it takes opaque check ids and a `id → count` evidence map. The binding layer (`workflow/`) owns run locations, the check vocabulary and the providers, so verification for a new pipeline is a provider there and no change here.
 - **Optional later:** a small UI (list runs, per-step status, retry/unblock/skip buttons). Not required for the framework to work.
 
 ### Explicitly out of scope

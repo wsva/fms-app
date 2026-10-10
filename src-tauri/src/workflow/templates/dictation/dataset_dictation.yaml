@@ -20,8 +20,24 @@
 #
 # `title` is a UI-only short label for the Workflow page's graph nodes; the engine
 # ignores unknown fields, so it is safe (and expected) to keep it here.
+#
+# `verify:` is NOT UI-only: it binds read-only check ids from `dataset_audit` to the
+# step they concern, and `workflow_verify` scores this run against them. `blocks`
+# means "findings here say: not yet"; `proves` means "findings here say: what this
+# step claimed is missing, partial or drifted", which is what entitles a
+# `completed` step to be sent back to `ready`. Ids are validated against the
+# evaluator's vocabulary when a run is created, so a typo fails the definition
+# instead of silently disabling a gate. Four checks stay deliberately unbound —
+# `cue_sanity` and `subtitle_versions` have no repairing step, `reference_material`
+# and `adjust_blocked_no_waveform` are context — and two steps declare nothing at
+# all (`ensure_model`, `detect_reference`) because there is no subject-side
+# evidence for them. That is `unknown`, the honest answer, not an oversight.
 
 name: process_dictation_dataset
+# Deliberately NOT bumped when `verify:` was added: the field changes no step
+# semantics, exactly like `title:`, and version binding in `load_bundle` would
+# otherwise stale every existing `dictation-<uuid>` run over a purely additive
+# annotation.
 version: 2
 
 steps:
@@ -51,6 +67,8 @@ steps:
     action: dataset_init_dir
     params:
       path: "C:/path/to/dataset_folder"   # EDIT: a folder already holding media/
+    verify:
+      proves: [database_missing]
     outputs:
       - dataset_uuid
       - media_count
@@ -66,6 +84,9 @@ steps:
     action: dataset_sync_media
     depends_on:
       - init_dataset
+    verify:
+      blocks: [database_missing]
+      proves: [media_new, media_gone]
     inputs:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     outputs:
@@ -85,6 +106,9 @@ steps:
     depends_on:
       - ensure_model
       - sync_media
+    verify:
+      blocks: [database_missing, media_new]
+      proves: [subtitles_missing, subtitles_unreadable, subtitles_not_imported, subtitles_out_of_sync]
     inputs:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     retry: { attempts: 2, backoff: "1m" }
@@ -95,6 +119,9 @@ steps:
     action: dataset_generate_waveforms
     depends_on:
       - sync_media
+    verify:
+      blocks: [media_new]
+      proves: [waveforms_missing, waveforms_stale]
     inputs:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
 
@@ -123,6 +150,8 @@ steps:
     action: dataset_align_cues
     depends_on:
       - detect_reference
+    verify:
+      blocks: [subtitles_not_imported]
     when: "${steps.detect_reference.outputs.has_book}"
     inputs:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
@@ -133,6 +162,8 @@ steps:
     action: dataset_align_cues_transcript
     depends_on:
       - detect_reference
+    verify:
+      blocks: [subtitles_not_imported]
     when: "${steps.detect_reference.outputs.has_transcript}"
     inputs:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
@@ -147,6 +178,11 @@ steps:
     depends_on:
       - generate_subtitles
       - generate_waveforms
+    verify:
+      blocks: [waveforms_missing, subtitles_not_imported]
+      # The note marker is the only durable trace of an adjustment, so this can
+      # only ever mean "some adjustment exists" — never which mode or strategy.
+      proves: [cues_unadjusted]
     inputs:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     params:

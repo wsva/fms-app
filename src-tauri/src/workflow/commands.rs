@@ -123,6 +123,20 @@ pub async fn workflow_intervene(
     crate::workflow::intervene(settings.inner(), dataset_uuid.as_deref(), &run_id, &step, &op)
 }
 
+/// Score a dataset-scoped run against the current state of its dataset: per-step
+/// `verified` / `drifted` / `unknown` verdicts plus the findings behind them.
+/// `apply` allows a `completed` step whose evidence contradicted it to fall back
+/// to `ready` (never the other way); omitting it leaves `state.json` untouched.
+#[tauri::command]
+pub async fn workflow_verify(
+    settings: State<'_, SettingsState>,
+    dataset_uuid: String,
+    run_id: String,
+    apply: Option<bool>,
+) -> Result<Value, String> {
+    crate::workflow::verify(settings.inner(), &dataset_uuid, &run_id, apply.unwrap_or(false))
+}
+
 /// List the built-in workflow templates shipped with the app (e.g. the Dataset
 /// Dictation pipeline), each with its parsed `id`/`name`/`version` metadata and
 /// raw `workflow.yaml` text. Static data baked into the binary at compile time

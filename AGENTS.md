@@ -66,6 +66,8 @@ src-tauri/src/
 │   │   ├── mod.rs          # Dictation commands: media/subtitle/cue queries, progress (app-level DB)
 │   │   ├── align.rs        # Cue alignment (multi-pass anchor DP): `dataset_align_cues` (shared
 │   │   │                   #   `book.txt`/`book_sentences.txt`) + `dataset_align_cues_transcript` — desktop
+│   │   ├── audit.rs        # Read-only dataset audit: 14 id-keyed checks over media/, subtitle/, waveform/, cues
+│   │   │                   #   (`dataset_audit`; its check ids are the vocabulary `verify:` binds against) — desktop
 │   │   └── adjust.rs       # Cue-time adjustment: energy envelope, silence snapping — desktop
 │   ├── cards/
 │   │   ├── mod.rs          # Card CRUD, tags, SM-2 review, FTS5 search, multi-location discovery
@@ -103,6 +105,7 @@ src-tauri/src/
 │   ├── mod.rs              # `DatasetMcpServer`, params shared by 2+ domains, `tool_router()`
 │   │                       #   merging the domain routers, `ServerHandler` impl, `create_mcp_service()`
 │   ├── datasets.rs         # dataset discovery/CRUD + subtitle & waveform pipeline (24 tools)
+│   │                       #   `dataset_audit` is subject-only — per-step reading is `workflow_verify`
 │   ├── dictation.rs        # cue adjust/align, dictation progress, favourites, subtitle versions (15)
 │   ├── cards.rs            # card CRUD, tags, FTS5 search, SM-2 review, online sync (24)
 │   ├── books.rs            # book chapters/sentences/words + read-aloud texts & scoring (24)
@@ -111,13 +114,16 @@ src-tauri/src/
 │   ├── wiki.rs             # wiki dirs, read/write/delete, search, index (9)
 │   ├── sync.rs             # web service, pairing registry, PC scan/connect/pull, incremental sync (15)
 │   ├── system.rs           # settings, auth, logs, OCR, screenshot, app UI control (15)
-│   └── workflow.rs         # persistent workflow state machine: list/create/status/next/advance/record/intervene (7)
+│   └── workflow.rs         # persistent workflow state machine: list/create/status/next/advance/record/intervene/verify (9)
 │
 ├── workflow/              # Persistent workflow state machine (file-based, resumable DAG) — desktop
-│   ├── mod.rs             # group root: `pub(crate) mod core;` + re-export the run-scoped API
+│   ├── mod.rs             # group root: the `run_base()` storage seam + re-export the run-scoped API
+│   ├── commands.rs        # the `workflow_*` Tauri command twins (the page drives the same core fns MCP does)
+│   ├── templates.rs       # built-in definitions baked in via `include_str!` (`templates/<kind>/*.yaml`)
+│   ├── verify.rs          # the binding layer: check vocabulary + evidence providers joining an audit to a run
 │   └── core/              # domain-free framework (steps/deps/statuses, not what a step does)
-│       ├── mod.rs         # schema (Definition/RunState/Event) + public API (list/create/status/next/advance/record/intervene)
-│       ├── validate.rs    # pre-run structural validation: unique ids, refs exist, acyclic
+│       ├── mod.rs         # schema (Definition/RunState/Event) + public API (list/create/status/next/advance/record/intervene/verify)
+│       ├── validate.rs    # pre-run structural validation: unique ids, refs exist, acyclic, `verify:` ids registered
 │       ├── engine.rs      # readiness recompute, transitions, retry/propagation, lease recovery, data flow
 │       └── persist.rs     # run-dir resolution, YAML/JSON parse, atomic state write, append-only events
 │

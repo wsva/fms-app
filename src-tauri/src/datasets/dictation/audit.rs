@@ -6,8 +6,10 @@
 //! finished one. This module walks the media inventory from three sides at once:
 //! the files under `media/`, their siblings under `subtitle/` + `waveform/` +
 //! `transcript/`, and the rows in `data.sqlite3`. Every disagreement is reported
-//! as a named check carrying the offending files and the workflow step that
-//! repairs it.
+//! as a named check carrying the offending files. Which *step* repairs a check is
+//! not this module's business: a workflow definition binds check ids to its own
+//! steps in a `verify:` block (see [`crate::workflow::verify`]), so the report
+//! stays subject-only and any pipeline can read it.
 //!
 //! It never writes. Fixing is the pipeline's job (`sync_media`,
 //! `generate_subtitles`, `generate_waveforms`, `adjust_cue_times`), which keeps a
@@ -49,9 +51,10 @@ pub struct AuditFinding {
 }
 
 /// One check and its verdict. `level` is what the UI colours by, `count` what it
-/// prints, `advice` + `fix_step` what an agent does next.
+/// prints, `advice` what an agent does next.
 #[derive(Serialize)]
 pub struct AuditCheck {
+    /// Stable id, named by a definition's `verify:` binding. Never renamed.
     pub id: &'static str,
     pub label: &'static str,
     /// `problem` blocks the pipeline, `warn` is drift worth a look, `info` is
@@ -61,9 +64,132 @@ pub struct AuditCheck {
     pub items: Vec<AuditFinding>,
     pub truncated: bool,
     pub advice: &'static str,
-    /// Step id in the built-in dictation template that repairs this, if any.
-    pub fix_step: Option<&'static str>,
-    pub fix_label: Option<&'static str>,
+}
+
+/// Static metadata of one check.
+struct CheckMeta {
+    id: &'static str,
+    label: &'static str,
+    level: &'static str,
+    advice: &'static str,
+}
+
+/// Every check this domain answers, in one table: the id a definition binds to,
+/// the label the report prints, the severity it sorts by and the advice an agent
+/// follows. `check()` looks each id up here, so the vocabulary a workflow can
+/// reference is exactly the set this module can actually evaluate — and
+/// [`check_ids`] hands that same set to definition validation.
+const CHECKS: &[CheckMeta] = &[
+    CheckMeta {
+        id: "database_missing",
+        label: "Cue database",
+        level: "problem",
+        advice: "Initialize this folder as a dataset, then Sync media to register \
+                  its files — every later step writes into this database.",
+    },
+    CheckMeta {
+        id: "media_new",
+        label: "New media not in the database",
+        level: "problem",
+        advice: "Files under media/ with no listen_media row. Sync media registers \
+                  them, and every later step keys off that table.",
+    },
+    CheckMeta {
+        id: "media_gone",
+        label: "Database rows without a media file",
+        level: "warn",
+        advice: "Registered media whose audio is gone. Sync media deletes the rows \
+                  and cascades to their subtitles, cues, versions and transcripts.",
+    },
+    CheckMeta {
+        id: "subtitles_missing",
+        label: "Media with no subtitles anywhere",
+        level: "problem",
+        advice: "Neither a subtitle/<name>.vtt nor cue rows exist, so nothing is \
+                  heard-and-typed yet. A missing VTT whose cues are already in the \
+                  database is normal and is not reported here.",
+    },
+    CheckMeta {
+        id: "subtitles_unreadable",
+        label: "VTT file that cannot be parsed",
+        level: "problem",
+        advice: "The file exists but is not valid WebVTT, so its cues can never be \
+                  re-imported. Delete the subtitle and regenerate.",
+    },
+    CheckMeta {
+        id: "subtitles_not_imported",
+        label: "Subtitles not in the database",
+        level: "problem",
+        advice: "A VTT file exists but its cues never reached data.sqlite3, so the \
+                  practice UI has nothing to show.",
+    },
+    CheckMeta {
+        id: "subtitles_out_of_sync",
+        label: "VTT file and database disagree",
+        level: "warn",
+        advice: "Cue counts differ, or a file was touched after the import that wrote \
+                  its rows. Re-import with Write subtitles to database after deleting \
+                  the stale subtitle — Generate subtitles leaves media that already \
+                  have an active subtitle alone.",
+    },
+    CheckMeta {
+        id: "waveforms_missing",
+        label: "Media without a waveform",
+        level: "problem",
+        advice: "No waveform/<name>.json. Adjust cue times reads it for its energy \
+                  envelope and the player draws it.",
+    },
+    CheckMeta {
+        id: "waveforms_stale",
+        label: "Waveform older than its audio",
+        level: "warn",
+        advice: "The audio was replaced after the peaks were computed, so the waveform \
+                  no longer describes the file being played.",
+    },
+    CheckMeta {
+        id: "cues_unadjusted",
+        label: "Cues not time-adjusted",
+        level: "problem",
+        advice: "Cues are still on raw STT timings while a waveform is available, so \
+                  Adjust cue times can snap them to silence.",
+    },
+    CheckMeta {
+        id: "cue_sanity",
+        label: "Suspicious cues",
+        level: "warn",
+        advice: "Empty, zero-length, overlapping, out-of-order or past-the-end cues. \
+                  Fix these in the Dictation page’s cue editor — no workflow \
+                  step rewrites them on its own.",
+    },
+    CheckMeta {
+        id: "subtitle_versions",
+        label: "Ambiguous subtitle versions",
+        level: "warn",
+        advice: "More than one active version without an adjustment note, or inactive \
+                  versions still holding cues. Play the intended one (or delete the \
+                  leftovers) so the choice is not arbitrary.",
+    },
+    CheckMeta {
+        id: "reference_material",
+        label: "Reference text for alignment",
+        level: "info",
+        advice: "Neither book.txt nor transcript/ files exist, so both alignment steps \
+                  are skipped and the cues keep their raw STT text.",
+    },
+    CheckMeta {
+        id: "adjust_blocked_no_waveform",
+        label: "Adjustment waiting on waveforms",
+        level: "info",
+        advice: "These media have cues but no waveform yet, so Adjust cue times will \
+                  skip them until Generate waveforms has run.",
+    },
+];
+
+/// The binding vocabulary: every check id a workflow definition may name in a
+/// `verify:` block. Validation against this list is what turns a typo into a
+/// rejected definition rather than a gate that silently never fires.
+pub(crate) fn check_ids() -> impl Iterator<Item = &'static str> {
+    CHECKS.iter().map(|c| c.id)
 }
 
 /// The six booleans the template's `when:` guards evaluate, derived from the same
@@ -278,8 +404,6 @@ pub(crate) fn audit(settings: &SettingsState, uuid: &str) -> Result<DatasetAudit
         // No rows to compare against: report the single thing standing in the way.
         let mut checks = vec![check(
             "database_missing",
-            "Cue database",
-            "problem",
             vec![AuditFinding {
                 source: "data.sqlite3".into(),
                 detail: format!(
@@ -287,10 +411,6 @@ pub(crate) fn audit(settings: &SettingsState, uuid: &str) -> Result<DatasetAudit
                     media.len()
                 ),
             }],
-            "Initialize this folder as a dataset, then Sync media to register its \
-             files — every later step writes into this database.",
-            Some("init_dataset"),
-            Some("Initialize dataset"),
         )];
         sort_checks(&mut checks);
         return Ok(DatasetAudit {
@@ -480,27 +600,40 @@ fn db_inventory(conn: &Connection) -> Vec<DbMediaRow> {
 // Checks
 // ---------------------------------------------------------------------------
 
-/// Assemble one check: the exact total is taken before the item list is capped.
-fn check(
+/// Assemble one check by id: label, severity and advice come from [`CHECKS`], and
+/// the exact total is taken before the item list is capped. A check that found
+/// nothing is `clean` whatever its severity would be.
+fn check(id: &'static str, items: Vec<AuditFinding>) -> AuditCheck {
+    check_with(id, items, None)
+}
+
+/// `advice_override` serves the one check whose guidance depends on what *is*
+/// there rather than on what is wrong (the reference-material check names which
+/// reference text exists). It never changes the id's label or severity.
+fn check_with(
     id: &'static str,
-    label: &'static str,
-    level: &'static str,
     items: Vec<AuditFinding>,
-    advice: &'static str,
-    fix_step: Option<&'static str>,
-    fix_label: Option<&'static str>,
+    advice_override: Option<&'static str>,
 ) -> AuditCheck {
+    let meta = CHECKS.iter().find(|c| c.id == id);
+    debug_assert!(meta.is_some(), "audit: check '{id}' is not declared in CHECKS");
     let count = items.len();
     AuditCheck {
         id,
-        label,
-        level: if count == 0 { "clean" } else { level },
+        // An id missing from the table surfaces labelled by itself rather than
+        // panicking inside a probe that is supposed to be safe to run any time.
+        label: meta.map(|c| c.label).unwrap_or(id),
+        level: match meta {
+            Some(_) if count == 0 => "clean",
+            Some(c) => c.level,
+            None => "warn",
+        },
         count,
         truncated: count > ITEM_CAP,
         items: items.into_iter().take(ITEM_CAP).collect(),
-        advice,
-        fix_step,
-        fix_label,
+        advice: advice_override
+            .or_else(|| meta.map(|c| c.advice))
+            .unwrap_or("Undeclared check id — re-scan after updating the app."),
     }
 }
 
@@ -745,20 +878,18 @@ fn build_checks(media: &[MediaState], conn: &Connection, has_book: bool) -> Vec<
             .map(|m| m.finding("no transcript/.txt either".into()))
             .collect()
     };
-    let mut reference = check(
+    // The only check whose guidance depends on what *is* there rather than on what
+    // is wrong, so its advice is passed in instead of read from the table.
+    let mut reference = check_with(
         "reference_material",
-        "Reference text for alignment",
-        "info",
         reference_items,
-        if has_book {
+        Some(if has_book {
             "book.txt is present, so Align cues (book) can match the cue text against it."
         } else if has_transcript {
             "Per-media transcripts exist, so Align cues (transcript) can run."
         } else {
             "Neither book.txt nor transcript/ files exist, so both alignment steps are skipped and the cues keep their raw STT text."
-        },
-        Some("detect_reference"),
-        Some("Detect reference"),
+        }),
     );
     // Always informational: a dataset is legitimately practisable without any
     // reference, so an empty list here is not a failure.
@@ -767,114 +898,18 @@ fn build_checks(media: &[MediaState], conn: &Connection, has_book: bool) -> Vec<
     }
 
     vec![
-        check(
-            "media_new",
-            "New media not in the database",
-            "problem",
-            new_media,
-            "Files under media/ with no listen_media row. Sync media registers them, and every later step keys off that table.",
-            Some("sync_media"),
-            Some("Sync media"),
-        ),
-        check(
-            "media_gone",
-            "Database rows without a media file",
-            "warn",
-            gone,
-            "Registered media whose audio is gone. Sync media deletes the rows and cascades to their subtitles, cues, versions and transcripts.",
-            Some("sync_media"),
-            Some("Sync media"),
-        ),
-        check(
-            "subtitles_missing",
-            "Media with no subtitles anywhere",
-            "problem",
-            no_subtitle,
-            "Neither a subtitle/<name>.vtt nor cue rows exist, so nothing is heard-and-typed yet. A missing VTT whose cues are already in the database is normal and is not reported here.",
-            Some("generate_subtitles"),
-            Some("Generate subtitles"),
-        ),
-        check(
-            "subtitles_unreadable",
-            "VTT file that cannot be parsed",
-            "problem",
-            unreadable_vtt,
-            "The file exists but is not valid WebVTT, so its cues can never be re-imported. Delete the subtitle and regenerate.",
-            Some("generate_subtitles"),
-            Some("Generate subtitles"),
-        ),
-        check(
-            "subtitles_not_imported",
-            "Subtitles not in the database",
-            "problem",
-            not_imported,
-            "A VTT file exists but its cues never reached data.sqlite3, so the practice UI has nothing to show.",
-            Some("generate_subtitles"),
-            Some("Generate subtitles"),
-        ),
-        check(
-            "subtitles_out_of_sync",
-            "VTT file and database disagree",
-            "warn",
-            out_of_sync,
-            "Cue counts differ, or a file was touched after the import that wrote its rows. Re-import with Write subtitles to database after deleting the stale subtitle — Generate subtitles leaves media that already have an active subtitle alone.",
-            Some("generate_subtitles"),
-            Some("Generate subtitles"),
-        ),
-        check(
-            "waveforms_missing",
-            "Media without a waveform",
-            "problem",
-            no_waveform,
-            "No waveform/<name>.json. Adjust cue times reads it for its energy envelope and the player draws it.",
-            Some("generate_waveforms"),
-            Some("Generate waveforms"),
-        ),
-        check(
-            "waveforms_stale",
-            "Waveform older than its audio",
-            "warn",
-            stale_waveforms,
-            "The audio was replaced after the peaks were computed, so the waveform no longer describes the file being played.",
-            Some("generate_waveforms"),
-            Some("Generate waveforms"),
-        ),
-        check(
-            "cues_unadjusted",
-            "Cues not time-adjusted",
-            "problem",
-            unadjusted,
-            "Cues are still on raw STT timings while a waveform is available, so Adjust cue times can snap them to silence.",
-            Some("adjust_cue_times"),
-            Some("Adjust cue times"),
-        ),
-        check(
-            "cue_sanity",
-            "Suspicious cues",
-            "warn",
-            sanity,
-            "Empty, zero-length, overlapping, out-of-order or past-the-end cues. Fix these in the Dictation page’s cue editor — no workflow step rewrites them on its own.",
-            None,
-            None,
-        ),
-        check(
-            "subtitle_versions",
-            "Ambiguous subtitle versions",
-            "warn",
-            versions,
-            "More than one active version without an adjustment note, or inactive versions still holding cues. Play the intended one (or delete the leftovers) so the choice is not arbitrary.",
-            None,
-            None,
-        ),
+        check("media_new", new_media),
+        check("media_gone", gone),
+        check("subtitles_missing", no_subtitle),
+        check("subtitles_unreadable", unreadable_vtt),
+        check("subtitles_not_imported", not_imported),
+        check("subtitles_out_of_sync", out_of_sync),
+        check("waveforms_missing", no_waveform),
+        check("waveforms_stale", stale_waveforms),
+        check("cues_unadjusted", unadjusted),
+        check("cue_sanity", sanity),
+        check("subtitle_versions", versions),
         reference,
-        check(
-            "adjust_blocked_no_waveform",
-            "Adjustment waiting on waveforms",
-            "info",
-            no_waveform_for_adjust,
-            "These media have cues but no waveform yet, so Adjust cue times will skip them until Generate waveforms has run.",
-            Some("generate_waveforms"),
-            Some("Generate waveforms"),
-        ),
+        check("adjust_blocked_no_waveform", no_waveform_for_adjust),
     ]
 }

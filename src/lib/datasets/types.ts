@@ -47,8 +47,13 @@ export interface AuditFinding {
 /**
  * One read-only consistency check from `dataset_audit`. `count` is the exact
  * number of offenders; `items` is capped at 100, hence `truncated`.
+ *
+ * The report is subject-only: `id` is the stable name a workflow definition binds
+ * to in its `verify:` block, so *which* step repairs a finding is a property of
+ * the pipeline, not of this row.
  */
 export interface AuditCheck {
+  /** Stable check id — the vocabulary a `verify:` binding references. */
   id: string;
   label: string;
   /** `problem` blocks the pipeline, `warn` is drift, `info` is context. */
@@ -57,9 +62,6 @@ export interface AuditCheck {
   items: AuditFinding[];
   truncated: boolean;
   advice: string;
-  /** Template step id that repairs it, when one does. */
-  fix_step?: string | null;
-  fix_label?: string | null;
 }
 
 /** The six booleans the template's `when:` guards evaluate. */

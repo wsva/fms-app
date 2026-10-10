@@ -2,10 +2,18 @@
 //! engine (readiness + transitions, in [`engine`]), file IO ([`persist`]),
 //! validation ([`validate`]), and the run-scoped public API the MCP tools call.
 //!
-//! Domain-free: nothing here knows what a step's `action` actually does, nor
-//! where a run lives on disk. Every public fn takes an explicit *run base
-//! directory* (the directory holding that group's run sub-directories); the
-//! caller resolves it (workspace jobs dir vs. a dataset's own `workflows/`).
+//! Domain-free: nothing here knows what a step's `action` actually does, where a
+//! run lives on disk, or what any check id *means*. Every public fn takes an
+//! explicit *run base directory* (the directory holding that group's run
+//! sub-directories); the caller resolves it (workspace jobs dir vs. a dataset's
+//! own `workflows/`).
+//!
+//! [`verify`] is the one exception to "the caller decides everything": a
+//! definition may bind check ids to a step under `verify:`, but the framework
+//! treats them as opaque strings — the *binding layer* (`workflow::verify`) owns
+//! the vocabulary, evaluates the checks and hands the outcome over as counts.
+//! What lives here is the semantics that belongs to no domain: what a binding
+//! implies, and the one-way demotion it can trigger.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -83,6 +91,30 @@ fn default_attempts() -> u32 {
     1
 }
 
+/// What a step's completion is *evidence* about, in the domain's check ids.
+///
+/// The framework never evaluates these: it only knows that a non-empty finding
+/// count for a bound id is bad news, and which of the two kinds of bad news it
+/// is. Ids are validated against the caller-supplied vocabulary
+/// ([`create_run`]'s `check_ids`) so a typo fails the definition instead of
+/// silently disabling a gate.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct StepVerify {
+    /// Findings here mean "not yet": the step should not be attempted.
+    #[serde(default)]
+    pub blocks: Vec<String>,
+    /// Findings here mean the step's output is missing, partial or drifted — a
+    /// `completed` claim these contradict can be invalidated.
+    #[serde(default)]
+    pub proves: Vec<String>,
+}
+
+impl StepVerify {
+    fn ids(&self) -> impl Iterator<Item = &str> {
+        self.blocks.iter().map(String::as_str).chain(self.proves.iter().map(String::as_str))
+    }
+}
+
 /// One node of the workflow DAG. Only `id` and `action` are mandatory.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Step {
@@ -109,6 +141,9 @@ pub struct Step {
     pub timeout: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_failure: Option<OnFailure>,
+    /// Evidence this step claims to produce. Opaque ids, evaluated by the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<StepVerify>,
 }
 
 impl Step {
@@ -216,14 +251,19 @@ pub(crate) fn list_runs(base: &Path) -> Result<Value, String> {
 
 /// Instantiate a new run from a YAML definition: validate, write the three
 /// files, and return the initial status.
+///
+/// `check_ids` is the caller's vocabulary — every id a `verify:` block may name.
+/// Pass an empty slice when the caller evaluates no checks, which turns the
+/// id-existence rule off rather than rejecting every binding.
 pub(crate) fn create_run(
     base: &Path,
     run_id: Option<String>,
     definition_yaml: &str,
+    check_ids: &[&str],
 ) -> Result<Value, String> {
     let def: Definition = serde_yaml::from_str(definition_yaml)
         .map_err(|e| format!("invalid workflow YAML: {e}"))?;
-    validate::validate(&def)?;
+    validate::validate(&def, check_ids)?;
 
     let id = match run_id {
         Some(rid) if !rid.trim().is_empty() => persist::sanitize_run_id(&rid)?,
@@ -526,6 +566,179 @@ pub(crate) fn intervene(
 }
 
 // ---------------------------------------------------------------------------
+// Verification
+// ---------------------------------------------------------------------------
+
+/// Score a run's steps against measured evidence, and optionally act on it.
+///
+/// `evidence` maps a check id to its offender count; an id the probe could not
+/// evaluate is simply absent (which makes the affected step `undecidable`, not
+/// clean). Verdicts are a **projection**: they are recomputed on every call and
+/// never stored in `state.json`, so a verdict means "as of this probe" instead of
+/// being a fact with no provenance.
+///
+/// The one way a probe may touch progress is `apply`: a `completed` step whose
+/// `proves` evidence contradicts it goes back to `ready`. Verification only ever
+/// moves a step *down* — a clean probe proves an artifact exists, never that this
+/// run made it — and every demotion costs an `invalidated` event, so
+/// `events.jsonl` stays the audit trail of progress decisions. A probe that
+/// changes nothing writes nothing.
+pub(crate) fn verify(
+    base: &Path,
+    run_id: &str,
+    evidence: &HashMap<String, usize>,
+    apply: bool,
+) -> Result<Value, String> {
+    let (dir, def, mut state) = load_bundle(base, run_id)?;
+    let now = persist::now_ts();
+    engine::recompute(&def, &mut state, now);
+
+    let mut verdicts: Map<String, Value> = Map::new();
+    let mut drifted: Vec<String> = Vec::new();
+    let mut gated: Vec<String> = Vec::new();
+    let mut unbound: Vec<String> = Vec::new();
+    let mut undecidable: Vec<String> = Vec::new();
+    let mut events: Vec<Event> = Vec::new();
+    let mut applied: Vec<Value> = Vec::new();
+
+    for step in &def.steps {
+        let status = state.steps.get(&step.id).map(|ss| ss.status).unwrap_or_default();
+        let Some(binding) = step.verify.as_ref() else {
+            unbound.push(step.id.clone());
+            verdicts.insert(step.id.clone(), json!({
+                "status": status.as_str(),
+                "verdict": "unknown",
+                "reason": "this step declares no verify: binding",
+            }));
+            continue;
+        };
+
+        // Findings per bound side, and the ids this probe could not answer for.
+        let hits = |ids: &[String]| -> Vec<Value> {
+            ids.iter()
+                .filter_map(|id| evidence.get(id.as_str()).filter(|n| **n > 0).map(|n| json!({ "check": id, "count": n })))
+                .collect()
+        };
+        let missing: Vec<&str> =
+            binding.ids().filter(|id| !evidence.contains_key(*id)).collect();
+        let (blocks, proves) = (hits(&binding.blocks), hits(&binding.proves));
+
+        let verdict = if binding.proves.is_empty() {
+            // Nothing is claimed about the output, so nothing can contradict it.
+            "unknown"
+        } else if !proves.is_empty() {
+            "drifted"
+        } else if binding.proves.iter().all(|id| !evidence.contains_key(id.as_str())) {
+            "unknown"
+        } else {
+            "verified"
+        };
+        if verdict == "unknown" && !missing.is_empty() {
+            undecidable.push(step.id.clone());
+        }
+        if !missing.is_empty() && verdict == "verified" {
+            // A clean bill of health over ids we never measured would be a lie.
+            verdicts.insert(step.id.clone(), json!({
+                "status": status.as_str(), "verdict": "unknown",
+                "blocks": blocks, "proves": proves, "undecidable": missing,
+            }));
+            continue;
+        }
+
+        verdicts.insert(step.id.clone(), json!({
+            "status": status.as_str(),
+            "verdict": verdict,
+            "blocks": blocks,
+            "proves": proves,
+            "bound": { "blocks": binding.blocks, "proves": binding.proves },
+            "undecidable": missing,
+        }));
+
+        if verdict == "drifted" {
+            if status == Status::Completed {
+                drifted.push(step.id.clone());
+                if apply {
+                    let entry = state.steps.entry(step.id.clone()).or_default();
+                    entry.status = Status::Ready;
+                    entry.finished_at = None;
+                    entry.lease = None;
+                    entry.heartbeat = None;
+                    entry.reason = None;
+                    events.push(event(
+                        Some(step.id.as_str()),
+                        "invalidated",
+                        Some(json!({
+                            "from": "completed",
+                            "to": "ready",
+                            "checks": proves,
+                            "by": "workflow_verify",
+                        })),
+                    ));
+                    applied.push(json!({ "step": step.id, "from": "completed", "to": "ready" }));
+                }
+            }
+        } else if !blocks.is_empty() && matches!(status, Status::Pending | Status::Ready) {
+            gated.push(step.id.clone());
+        }
+    }
+
+    let changed = !events.is_empty();
+    if changed {
+        // Re-derive what the demotion un-satisfied, then append-then-write.
+        engine::recompute(&def, &mut state, now);
+        commit(&dir, &events, &state)?;
+        for (id, v) in verdicts.iter_mut() {
+            if let Some(ss) = state.steps.get(id) {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("status".into(), json!(ss.status.as_str()));
+                }
+            }
+        }
+    }
+
+    let hint = if !applied.is_empty() {
+        format!(
+            "{} completed step(s) invalidated by the evidence and returned to ready: {}; perform their actions again and report with workflow_record",
+            applied.len(),
+            applied.iter().filter_map(|a| a.get("step").and_then(|s| s.as_str())).collect::<Vec<_>>().join(", "),
+        )
+    } else if !drifted.is_empty() {
+        format!(
+            "{} completed step(s) are contradicted by the evidence: {}; re-verify with apply=true to send them back to ready",
+            drifted.len(),
+            drifted.join(", "),
+        )
+    } else if unbound.len() == def.steps.len() {
+        "no step of this definition declares a verify: binding, so nothing could be checked".into()
+    } else {
+        format!(
+            "no completed step is contradicted; {} step(s) gated, {} step(s) bind no checks",
+            gated.len(),
+            unbound.len(),
+        )
+    };
+
+    let mut resp = build_status(run_id, &def, &state);
+    if let Some(obj) = resp.as_object_mut() {
+        obj.insert("verdicts".into(), Value::Object(verdicts));
+        obj.insert(
+            "verification".into(),
+            json!({
+                "apply": apply,
+                "changed": changed,
+                "drifted": drifted,
+                "gated": gated,
+                "unbound": unbound,
+                "undecidable": undecidable,
+                "applied": applied,
+            }),
+        );
+        obj.insert("verify_hint".into(), json!(hint));
+    }
+    Ok(resp)
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -691,4 +904,129 @@ fn build_status(run_id: &str, def: &Definition, state: &RunState) -> Value {
         "steps": steps_view,
         "hints": hints,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! The verification honesty rules are the entire point of the seam, and they are
+    //! behaviour, not prose: a verdict is a projection that never lands in
+    //! `state.json`, evidence may only ever move a step *down*, and a probe that
+    //! could not measure an id cannot certify over it. Tested against a real run
+    //! directory, because `verify` writes through `persist` and that is half the risk.
+    use super::*;
+
+    const YAML: &str = r#"name: probe
+version: 1
+steps:
+  - id: maker
+    action: dataset_get
+    verify:
+      proves: [made]
+      blocks: [needing]
+  - id: follower
+    action: dataset_get
+    depends_on: [maker]
+    verify:
+      blocks: [needing]
+  - id: unbound
+    action: dataset_get
+"#;
+
+    fn temp_base(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fms-core-verify-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn evidence(pairs: &[(&str, usize)]) -> HashMap<String, usize> {
+        pairs.iter().map(|(id, n)| (id.to_string(), *n)).collect()
+    }
+
+    fn state_text(base: &Path) -> String {
+        std::fs::read_to_string(persist::run_dir(base, "probe").unwrap().join("state.json")).unwrap()
+    }
+
+    fn events_text(base: &Path) -> String {
+        std::fs::read_to_string(persist::run_dir(base, "probe").unwrap().join("events.jsonl")).unwrap()
+    }
+
+    /// Complete `maker` the way an agent would: claim it, then report the outcome.
+    fn complete_maker(base: &Path) {
+        advance(base, "probe", "maker", None).unwrap();
+        record(base, "probe", "maker", "completed", Some(json!({ "outputs": { "n": 1 } }))).unwrap();
+    }
+
+    #[test]
+    fn contradicted_evidence_demotes_a_completed_step_and_writes_an_event() {
+        let base = temp_base("demote");
+        create_run(&base, Some("probe".into()), YAML, &["made", "needing"]).unwrap();
+        complete_maker(&base);
+
+        let dirty = evidence(&[("made", 3), ("needing", 0)]);
+
+        // Reporting the drift changes nothing: `changed` is false and state.json is
+        // untouched, so a probe cannot quietly rewrite progress.
+        let report = verify(&base, "probe", &dirty, false).unwrap();
+        assert_eq!(report["verdicts"]["maker"]["verdict"], json!("drifted"));
+        assert_eq!(report["verdicts"]["maker"]["status"], json!("completed"));
+        assert_eq!(report["verification"]["changed"], json!(false));
+        assert_eq!(report["verification"]["applied"].as_array().unwrap().len(), 0);
+        assert!(!state_text(&base).contains("verdict"), "verdicts must never be persisted");
+
+        // Applied, it is a demotion — down to `ready`, one `invalidated` event, and the
+        // step's recorded outputs kept so `when:` guards still resolve.
+        let applied = verify(&base, "probe", &dirty, true).unwrap();
+        assert_eq!(applied["verdicts"]["maker"]["status"], json!("ready"));
+        assert_eq!(applied["steps"]["maker"]["outputs"]["n"], json!(1));
+        assert_eq!(events_text(&base).matches("\"invalidated\"").count(), 1);
+        assert!(events_text(&base).contains("workflow_verify"));
+
+        // Re-applying an already-demoted step adds no second event: the probe is
+        // idempotent while nothing changes.
+        verify(&base, "probe", &dirty, true).unwrap();
+        assert_eq!(events_text(&base).matches("\"invalidated\"").count(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_clean_probe_never_promotes_and_never_certifies_an_unmeasured_id() {
+        let base = temp_base("unknown");
+        create_run(&base, Some("probe".into()), YAML, &["made", "needing"]).unwrap();
+
+        // Nothing has run, so `maker` sits at `ready` (no dependencies). A clean probe
+        // over the artifacts it *would* produce says `verified` — and changes nothing:
+        // there is no upward path from evidence to `completed`.
+        let clean = verify(&base, "probe", &evidence(&[("made", 0), ("needing", 0)]), true).unwrap();
+        assert_eq!(clean["steps"]["maker"]["status"], json!("ready"));
+        assert_eq!(clean["verdicts"]["maker"]["verdict"], json!("verified"));
+        assert_eq!(clean["verification"]["changed"], json!(false));
+        // …and an unbound step is honestly `unknown`, listed as such.
+        assert_eq!(clean["verdicts"]["unbound"]["verdict"], json!("unknown"));
+        assert!(clean["verification"]["unbound"].as_array().unwrap().iter().any(|v| v == "unbound"));
+
+        // `made` absent from the map means the provider never evaluated it, so the
+        // clean bill of health above would have been a lie.
+        let partial = verify(&base, "probe", &evidence(&[("needing", 0)]), false).unwrap();
+        assert_eq!(partial["verdicts"]["maker"]["verdict"], json!("unknown"));
+        assert!(partial["verdicts"]["maker"]["undecidable"].as_array().unwrap().iter().any(|v| v == "made"));
+        assert!(partial["verification"]["undecidable"].as_array().unwrap().iter().any(|v| v == "maker"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn outstanding_blocks_evidence_gates_a_step_without_touching_it() {
+        let base = temp_base("gate");
+        create_run(&base, Some("probe".into()), YAML, &["made", "needing"]).unwrap();
+
+        let gated = verify(&base, "probe", &evidence(&[("made", 0), ("needing", 2)]), true).unwrap();
+        assert_eq!(gated["verdicts"]["follower"]["status"], json!("pending"));
+        assert_eq!(gated["verdicts"]["follower"]["blocks"][0]["check"], json!("needing"));
+        assert!(gated["verification"]["gated"].as_array().unwrap().iter().any(|v| v == "follower"));
+        // A gate is advice, not an action: nothing was applied, nothing was written.
+        assert_eq!(gated["verification"]["changed"], json!(false));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

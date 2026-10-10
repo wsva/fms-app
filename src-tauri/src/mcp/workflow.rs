@@ -79,6 +79,18 @@ struct WorkflowInterveneParam {
     op: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct WorkflowVerifyParam {
+    /// Required: verification probes the *dataset*, so a workspace-level job
+    /// (no dataset) has no subject and cannot be verified.
+    dataset_uuid: String,
+    run_id: String,
+    /// Allow the one-way demotion of `completed` steps the evidence contradicts.
+    /// Omit (or false) for a pure read that writes nothing.
+    #[serde(default)]
+    apply: Option<bool>,
+}
+
 fn ok(v: &Value) -> Result<String, String> {
     Ok(serde_json::to_string_pretty(v).unwrap_or_default())
 }
@@ -214,6 +226,27 @@ impl DatasetMcpServer {
             &param.run_id,
             &param.step,
             &param.op,
+        )?;
+        ok(&v)
+    }
+
+    #[tool(name = "workflow_verify", description = "Score a dataset-scoped run against the dataset as it is right now: re-run the domain's read-only checks and join them to each step's `verify:` binding, returning a per-step verdict (verified / drifted / unknown), the offending checks with counts, and which steps are gated. Verdicts are a projection of the current probe, never stored in state.json, so calling this changes nothing unless apply=true. apply=true performs the one permitted status change: a `completed` step whose `proves` checks report findings goes back to `ready` and an `invalidated` event is appended - a probe can never promote a step, only retract a claim it no longer supports. Errors for a dataset kind with no check provider yet (only dictation today) or a run whose definition declares no `verify:` blocks. dataset_audit gives the raw subject-side report; this gives what it means for *this* pipeline.")]
+    async fn workflow_verify(
+        &self,
+        Parameters(param): Parameters<WorkflowVerifyParam>,
+    ) -> Result<String, String> {
+        log::info!(
+            "[MCP] workflow_verify: dataset_uuid={}, run_id={}, apply={:?}",
+            param.dataset_uuid,
+            param.run_id,
+            param.apply
+        );
+        let state = self.app.state::<SettingsState>();
+        let v = crate::workflow::verify(
+            state.inner(),
+            &param.dataset_uuid,
+            &param.run_id,
+            param.apply.unwrap_or(false),
         )?;
         ok(&v)
     }

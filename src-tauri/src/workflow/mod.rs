@@ -19,7 +19,9 @@
 //! `<dataset>/workflows/<run_id>` (self-contained, travels with sync/export);
 //! dataset-less editor "jobs" live in the workspace `<workspace>/workflows`.
 //! Binding concrete actions (download, transcribe, …) to the generic engine is
-//! still future work; today this root only owns the storage-location seam.
+//! still future work; beyond the storage-location seam this root owns
+//! [`verify`], the check vocabulary the engine's `verify:` bindings are scored
+//! against.
 //!
 //! Desktop-only: the engine is reached through the desktop-gated MCP server
 //! (`mcp/workflow.rs`) and, for the Workflow page, its `workflow_*` Tauri
@@ -36,6 +38,9 @@ pub(crate) mod commands;
 /// Workflow page and the `workflow_builtin_templates` MCP tool seed a new run
 /// with, replacing the former duplicate `docs/ai/workflow/` + `seed.ts` copies.
 pub(crate) mod templates;
+/// The check vocabulary behind a definition's `verify:` block: which ids exist,
+/// who evaluates them and what they imply for a step's status.
+pub(crate) mod verify;
 
 use std::path::PathBuf;
 
@@ -83,7 +88,14 @@ pub(crate) fn create_run(
     run_id: Option<String>,
     definition_yaml: &str,
 ) -> Result<Value, String> {
-    core::create_run(&run_base(settings, dataset_uuid)?, run_id, definition_yaml)
+    // The check vocabulary comes from the binding layer, so `verify:` ids are
+    // validated against what the app can actually evaluate.
+    core::create_run(
+        &run_base(settings, dataset_uuid)?,
+        run_id,
+        definition_yaml,
+        &verify::check_ids(),
+    )
 }
 
 pub(crate) fn status(
@@ -139,6 +151,19 @@ pub(crate) fn intervene(
     op: &str,
 ) -> Result<Value, String> {
     core::intervene(&run_base(settings, dataset_uuid)?, run_id, step_id, op)
+}
+
+/// Score a dataset-scoped run against freshly measured evidence. Not a thin
+/// wrapper on purpose: unlike the other run fns it needs the *dataset* (that is
+/// the subject being probed), and it lives in [`verify`] where the check
+/// vocabulary sits.
+pub(crate) fn verify(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    run_id: &str,
+    apply: bool,
+) -> Result<Value, String> {
+    verify::verify(settings, dataset_uuid, run_id, apply)
 }
 
 // ---------------------------------------------------------------------------

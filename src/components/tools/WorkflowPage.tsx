@@ -32,6 +32,17 @@ import {
   statusLabel,
 } from "@/lib/workflow/steps";
 import { getStepOp, KNOWN_COMMANDS, type FormField, type RunCtx, type StepOp } from "@/lib/workflow/step-ops";
+import {
+  type VerifyReport,
+  checksById,
+  driftReason,
+  findingAdvice,
+  findingLabel,
+  gateReason,
+  stepsWithEvidence,
+  verdictTitle,
+} from "@/lib/workflow/verify";
+import type { StepVerdictInfo } from "./WorkflowGraph";
 import type { BookMeta } from "@/lib/read/types";
 import type { CardDatasetSummary } from "@/lib/types";
 import {
@@ -227,6 +238,10 @@ export default function WorkflowPage() {
   const [facts, setFacts] = useState<DatasetFacts | null>(null);
   // The full audit the scan produced: per-check findings for the Scan result panel.
   const [audit, setAudit] = useState<DatasetAudit | null>(null);
+  // The same probe read through the run's `verify:` bindings (`workflow_verify`):
+  // which step each finding speaks for. A projection over the audit + the run's
+  // statuses — never stored, and stale the moment either changes.
+  const [verifyReport, setVerifyReport] = useState<VerifyReport | null>(null);
   // Local projection placeholder used only until a run exists on disk.
   const [committed, setCommitted] = useState<StatusMap>(() => initialStatuses([]));
   // Authoritative engine statuses once a run exists (drives the graph + inspector).
@@ -294,6 +309,25 @@ export default function WorkflowPage() {
     [engineView, committed, facts, steps],
   );
 
+  // Check id → its audit row, so every label and advice sentence below stays the
+  // report's own words instead of a second copy in the page.
+  const auditById = useMemo(() => checksById(audit), [audit]);
+  // Node badges: one per step the probe actually judged. `unknown` earns no glyph,
+  // so it is left out here rather than passed and hidden in the node.
+  const nodeVerdicts = useMemo(() => {
+    const out: Record<string, StepVerdictInfo> = {};
+    if (!verifyReport) return out;
+    for (const [id, entry] of Object.entries(verifyReport.verdicts ?? {})) {
+      if (entry.verdict === "unknown") continue;
+      out[id] = { verdict: entry.verdict, title: verdictTitle(id, verifyReport, auditById) };
+    }
+    return out;
+  }, [verifyReport, auditById]);
+  // The edit-mode graph shows the in-editor document, while the verdicts were scored
+  // against the definition saved with the run. Overlay them only while the two are
+  // the same text — otherwise a badge would vouch for an unverified edit.
+  const previewVerdicts = yamlText === builtinYaml ? nodeVerdicts : undefined;
+
   const datasets = nav.cat ? kindDatasets[nav.cat] ?? [] : [];
   const selectedDataset = useMemo(
     () => datasets.find((d) => d.key === nav.datasetKey),
@@ -347,6 +381,7 @@ export default function WorkflowPage() {
   const resetRunView = () => {
     setFacts(null);
     setAudit(null);
+    setVerifyReport(null);
     setEngineView(null);
     setRunMeta(null);
     setSelectedId(null);
@@ -457,6 +492,9 @@ export default function WorkflowPage() {
   // dataset uuid selects the store. (Workspace-level editor "jobs" are handled
   // separately by loadRuns/saveJob/loadJob and pass no uuid.)
   const refreshEngine = useCallback(async (id: string, datasetUuid: string): Promise<boolean> => {
+    // Any status movement invalidates the last verdicts: they were scored against
+    // the state this call is about to replace. They come back with the next scan.
+    setVerifyReport(null);
     if (!isTauri() || !id) {
       setEngineView(null);
       setRunMeta(null);
@@ -478,10 +516,32 @@ export default function WorkflowPage() {
     }
   }, [appendLog]);
 
+  // ---- Score the run against the evidence (the binding made visible) ----
+  // One join, in Rust: this run's `workflow.yaml` `verify:` blocks × the audit's
+  // per-check counts × the step statuses. The page only renders the verdicts, so
+  // which check speaks for which step is never restated here. No run, no verdicts
+  // — a binding needs a claim about progress to be read against.
+  const verifyRun = useCallback(async (id: string, datasetUuid: string): Promise<VerifyReport | null> => {
+    setVerifyReport(null);
+    if (!isTauri() || !id || !datasetUuid) return null;
+    try {
+      const report = await invoke<VerifyReport>("workflow_verify", { datasetUuid, runId: id });
+      setVerifyReport(report);
+      return report;
+    } catch (e) {
+      // Not a scan failure: the run does not exist yet, or its stored definition
+      // predates the binding. Say nothing rather than something vacuous.
+      appendLog(`workflow_verify('${id}'): ${String(e)}`);
+      return null;
+    }
+  }, [appendLog]);
+
   // ---- Probe on-disk facts + read info.json (does not touch the engine) ----
   // One command does the whole reconciliation: `dataset_audit` walks media/,
   // subtitle/, waveform/ and transcript/ against the rows in data.sqlite3 and
-  // returns the guards' facts, info.json and every finding with its repair step.
+  // returns the guards' facts, info.json and every finding it made. Attributing a
+  // finding to a step is a property of the workflow definition, not of this probe,
+  // so that reading comes from `verifyRun` on top of it.
   const probeDataset = useCallback(async (uuid: string): Promise<DatasetAudit> => {
     const report = await invoke<DatasetAudit>("dataset_audit", { uuid });
     setFacts({
@@ -509,15 +569,26 @@ export default function WorkflowPage() {
       const report = await probeDataset(uuid);
       setCommitted(initialStatuses(defs));
       const live = await refreshEngine(runIdFor(uuid), uuid);
+      // Verdicts only exist for a run that is on disk; a preview has no claims to check.
+      const verdicts = live ? await verifyRun(runIdFor(uuid), uuid) : null;
       // Lead with what needs doing: a scan that only says "done" is not actionable.
       const blocking = report.checks.filter((c) => c.level === "problem").length;
       const drift = report.checks.filter((c) => c.level === "warn").length;
-      setNotice(
+      const contradicted = verdicts?.verification?.drifted?.length ?? 0;
+      const message =
         blocking || drift
-          ? `Audit found ${blocking} blocking and ${drift} warning-level issue(s) — the Scan result panel names the files and the step that fixes each one.`
+          ? contradicted
+            ? `Audit found ${blocking} blocking and ${drift} warning-level issue(s), and ${contradicted} completed step(s) are contradicted by the evidence their own verify: bindings name. Re-scan after fixing, or let an agent invalidate them.`
+            : `Audit found ${blocking} blocking and ${drift} warning-level issue(s) — the Scan result panel names the files and groups them under the step its verify: bindings hold responsible.`
           : live
             ? "Audit is clean. The graph reflects the workflow run state."
-            : "Audit is clean. Run any step to start its workflow run.",
+            : "Audit is clean. Run any step to start its workflow run.";
+      // A run that could not be scored has to say so: a missing badge is otherwise
+      // indistinguishable from a clean bill of health.
+      setNotice(
+        live && !verdicts
+          ? `${message} The run could not be scored against its verify: bindings (see the log).`
+          : message,
       );
     } catch (e) {
       appendLog(`scan failed: ${String(e)}`, "ERROR");
@@ -525,7 +596,7 @@ export default function WorkflowPage() {
     } finally {
       setScanning(false);
     }
-  }, [probeDataset, refreshEngine, appendLog]);
+  }, [probeDataset, refreshEngine, verifyRun, appendLog]);
 
   const scan = useCallback(() => {
     void probeAndSync(selectedUuid, steps);
@@ -871,7 +942,14 @@ export default function WorkflowPage() {
   const selCtx: RunCtx | undefined = sel
     ? { ...buildCtx(sel.id), form: formValues(sel.id, selOp) }
     : undefined;
-  const selHint = selCtx ? selOp?.gate?.(selCtx) : undefined;
+  // The inspector's advisory line. Evidence outranks convention: a reason joined
+  // from *this* dataset's findings is more specific than the sentence step-ops
+  // writes for every dataset. Drift first — a step the run thinks is done but the
+  // probe contradicts is more urgent than one whose inputs are still missing.
+  const selFactGate = selCtx ? selOp?.gate?.(selCtx) : undefined;
+  const selHint = sel
+    ? driftReason(sel.id, verifyReport, auditById) ?? gateReason(sel.id, verifyReport, auditById) ?? selFactGate
+    : selFactGate;
   const selCommand = selCtx ? resolveCommand(selOp, selCtx) : undefined;
   const readyCount = Object.values(view).filter((s) => s === "ready").length;
   const doneCount = Object.values(view).filter((s) => s === "completed").length;
@@ -1154,7 +1232,7 @@ export default function WorkflowPage() {
                   <div className="absolute left-2 top-2 z-10 text-[11px] px-2 py-1 rounded bg-bg-card/80 border border-border-light text-text-secondary">
                     Preview · {definition.name} v{definition.version}
                   </div>
-                  <WorkflowGraph positioned={positioned} edges={edges} view={view} selectedId={selectedId} onSelect={(id) => setSelectedId(id || null)} />
+                  <WorkflowGraph positioned={positioned} edges={edges} view={view} verdicts={previewVerdicts} selectedId={selectedId} onSelect={(id) => setSelectedId(id || null)} />
                 </div>
               </div>
             </div>
@@ -1175,7 +1253,7 @@ export default function WorkflowPage() {
                   )}
                   {!hasRun && <span className="text-text-tertiary">· preview (no run yet)</span>}
                 </div>
-                <WorkflowGraph positioned={positioned} edges={edges} view={view} selectedId={selectedId} onSelect={(id) => setSelectedId(id || null)} />
+                <WorkflowGraph positioned={positioned} edges={edges} view={view} verdicts={nodeVerdicts} selectedId={selectedId} onSelect={(id) => setSelectedId(id || null)} />
               </div>
 
               {/* Inspector */}
@@ -1209,6 +1287,11 @@ export default function WorkflowPage() {
                             );
                           })}
                         </div>
+                        {/* The pipeline-side reading of the same probe: which step each
+                            finding belongs to, as this run's `verify:` bindings decide. */}
+                        {verifyReport && (
+                          <StepEvidence report={verifyReport} byId={auditById} steps={steps} onSelect={setSelectedId} />
+                        )}
                         {audit && <AuditChecks key={audit.dataset_uuid} audit={audit} />}
                       </div>
                     ) : (
@@ -1542,6 +1625,83 @@ function FieldRow({ field, value, disabled, onChange, pickDir }: FieldRowProps) 
 }
 
 // ---------------------------------------------------------------------------
+// Scan result — the audit read through the run's `verify:` bindings
+// ---------------------------------------------------------------------------
+
+interface StepEvidenceProps {
+  report: VerifyReport;
+  /** check id → its audit row, so every label and advice stays the report's words. */
+  byId: Map<string, AuditCheck>;
+  steps: StepDef[];
+  onSelect: (id: string) => void;
+}
+
+/**
+ * The pipeline-side view of one probe: which step the evidence holds responsible,
+ * as the definition's `verify:` blocks decide and Rust joins. Rows are only the
+ * steps with something to say — a drifted step first, then the steps whose `blocks`
+ * evidence is still outstanding.
+ *
+ * Nothing here can change a status. Invalidation is an explicit, evented act
+ * (`workflow_verify` with `apply=true`, which only ever moves a step *down*), and a
+ * scan is not consent to change data.
+ */
+function StepEvidence({ report, byId, steps, onSelect }: StepEvidenceProps) {
+  const rows = stepsWithEvidence(report);
+  const ordered = [
+    ...rows.filter((r) => r.entry.verdict === "drifted"),
+    ...rows.filter((r) => r.entry.verdict !== "drifted"),
+  ];
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="text-[11px] font-medium text-text-secondary">
+        {ordered.length
+          ? `${ordered.length} step(s) accountable for these findings`
+          : "No step binding disagrees with the audit"}
+      </div>
+
+      {ordered.map((row) => {
+        const step = stepById(row.stepId, steps);
+        const contradicted = row.entry.verdict === "drifted";
+        const Icon = contradicted ? AlertTriangle : Info;
+        const cls = contradicted ? "text-warning-text" : "text-info-text";
+        return (
+          <div key={row.stepId} className="rounded-md border border-border-light bg-bg-body/60 px-2 py-1">
+            <button
+              className="flex items-center gap-1.5 w-full text-left cursor-pointer"
+              onClick={() => onSelect(row.stepId)}
+              title={verdictTitle(row.stepId, report, byId)}
+            >
+              <Icon size={12} className={`shrink-0 ${cls}`} />
+              <span className="text-[11px] text-text-primary truncate">{step?.title || row.stepId}</span>
+              <span className={`ml-auto shrink-0 text-[10px] ${cls}`}>
+                {contradicted ? "contradicted" : "not yet"}
+              </span>
+            </button>
+            <div className="mt-0.5 flex flex-col gap-0.5 pl-[18px]">
+              {row.findings.map((f) => {
+                const advice = findingAdvice(f, byId);
+                return (
+                  <p key={f.check} className="text-[10px] leading-snug text-text-tertiary" title={`verify: ${f.check}`}>
+                    <span className="text-text-secondary">{findingLabel(f, byId)}</span>
+                    {advice && <> — {advice}</>}
+                  </p>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+
+      {report.verify_hint && (
+        <p className="text-[10px] leading-snug text-text-tertiary">{report.verify_hint}</p>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Scan result — the audit report
 // ---------------------------------------------------------------------------
 
@@ -1552,9 +1712,10 @@ interface AuditChecksProps {
 /**
  * The `dataset_audit` report: one row per check, severity-ordered, with the
  * exact offender count in the header and the offending files behind an expander.
- * Purely informational — a finding neither completes its step nor links to it;
- * the advice text names the workflow step in words, and the graph above keeps
- * reflecting the run state instead of wishes about what is on disk.
+ * Purely informational — a finding neither completes its step nor links to it.
+ * Which step a finding belongs to is the binding above, judged from the run's own
+ * definition; the graph keeps reflecting the run state instead of wishes about
+ * what is on disk.
  */
 function AuditChecks({ audit }: AuditChecksProps) {
   const [showPassed, setShowPassed] = useState(false);

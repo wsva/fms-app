@@ -41,6 +41,18 @@ export interface DatasetFacts {
   hasTranscript: boolean;
 }
 
+/**
+ * A step's evidence binding (`workflow::core::StepVerify`): the `dataset_audit`
+ * check ids that speak for this step. The engine scores them on every
+ * `workflow_verify`; the client only reads the verdicts, never re-derives them.
+ */
+export interface StepVerify {
+  /** Findings here mean "not yet" — the step should not be attempted. */
+  blocks: string[];
+  /** Findings here mean what this step claimed is missing, partial or drifted. */
+  proves: string[];
+}
+
 /** One node of the workflow DAG — a subset of the YAML `Step` schema. */
 export interface StepDef {
   id: string;
@@ -54,6 +66,8 @@ export interface StepDef {
   when?: keyof DatasetFacts;
   /** Static params surfaced into the generated prompt. */
   params?: Record<string, unknown>;
+  /** Evidence binding, when the definition declares one. */
+  verify?: StepVerify;
 }
 
 /** A parsed `workflow.yaml`: identity + the ordered step list. */
@@ -77,6 +91,7 @@ interface RawStep {
   dependsOn?: unknown;
   when?: unknown;
   params?: unknown;
+  verify?: unknown;
 }
 
 /** `align_cues_transcript` → `Align cues transcript` (fallback node label). */
@@ -129,6 +144,20 @@ function asStringArray(v: unknown): string[] {
 }
 
 /**
+ * Read a step's `verify:` block. An absent, non-mapping or wholly empty block
+ * means "this step declares nothing", which the backend reports as `unknown` —
+ * so returning `undefined` here is the honest counterpart, not a parse failure.
+ */
+function parseVerify(v: unknown): StepVerify | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const raw = v as { blocks?: unknown; proves?: unknown };
+  const blocks = asStringArray(raw.blocks);
+  const proves = asStringArray(raw.proves);
+  if (!blocks.length && !proves.length) return undefined;
+  return { blocks, proves };
+}
+
+/**
  * Parse a `workflow.yaml`-shaped document into a [`WorkflowDefinition`].
  * Throws an actionable `Error` on malformed YAML, a missing step `id`/`action`,
  * duplicate ids, or a `depends_on` referencing an unknown step — the editor
@@ -168,6 +197,8 @@ export function parseDefinition(yamlText: string): WorkflowDefinition {
     if (raw.params && typeof raw.params === "object" && !Array.isArray(raw.params)) {
       step.params = raw.params as Record<string, unknown>;
     }
+    const verify = parseVerify(raw.verify);
+    if (verify) step.verify = verify;
     return step;
   });
 

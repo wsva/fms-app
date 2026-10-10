@@ -7,6 +7,10 @@
 //! executor" check is intentionally skipped. This build is agent-in-the-loop —
 //! there is no executor registry — so actions are symbolic names the agent
 //! resolves at run time. Only `action` non-emptiness is enforced here.
+//!
+//! The `verify:` id rule is enforced, but the vocabulary is *passed in*: this
+//! module only knows the ids must name a check the caller can evaluate. A typo
+//! there would silently disable a gate, so it fails like a bad `depends_on` does.
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,7 +18,12 @@ use super::Definition;
 
 /// Validate a definition. Returns an actionable error message on the first
 /// problem found.
-pub(super) fn validate(def: &Definition) -> Result<(), String> {
+///
+/// `check_ids` is the caller's evaluation vocabulary. An empty slice means the
+/// caller evaluates no checks at all, which leaves `verify:` blocks unchecked
+/// rather than rejecting ids the caller simply does not know.
+pub(super) fn validate(def: &Definition, check_ids: &[&str]) -> Result<(), String> {
+    let checks: HashSet<&str> = check_ids.iter().copied().collect();
     if def.name.trim().is_empty() {
         return Err("definition is missing a non-empty 'name'".into());
     }
@@ -76,6 +85,30 @@ pub(super) fn validate(def: &Definition) -> Result<(), String> {
 
     // Acyclic via iterative DFS colouring.
     detect_cycle(def)?;
+
+    // Every check id named under `verify:` must be one the caller can evaluate.
+    if !checks.is_empty() {
+        for step in &def.steps {
+            let Some(v) = step.verify.as_ref() else {
+                continue;
+            };
+            for (field, ids) in [("blocks", &v.blocks), ("proves", &v.proves)] {
+                for id in ids {
+                    if !checks.contains(id.as_str()) {
+                        return Err(format!(
+                            "step '{}' verify.{field} names unknown check '{id}'; this dataset kind evaluates: {}",
+                            step.id,
+                            {
+                                let mut v: Vec<&str> = checks.iter().copied().collect();
+                                v.sort();
+                                v.join(", ")
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+    }
 
     Ok(())
 }
