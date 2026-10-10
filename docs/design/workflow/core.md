@@ -36,7 +36,7 @@ events.jsonl     ← everything that happened (append-only audit log)
 
 | File | Role | Written by | Mutable? |
 |---|---|---|---|
-| `workflow.yaml` | The DAG of steps + how to run them | author / generator | No (edit → bump `version`) |
+| `workflow.yaml` | The DAG of steps + how to run them | author / generator — the engine rewrites it only when rebinding an *inherited-only* run (see *Refreshing a run's definition*) | No (edit → bump `version`) |
 | `state.json` | Per-step status + run metadata | engine (atomic rewrite) | Yes (fully overwritten each step) |
 | `events.jsonl` | Ordered log of every transition | engine (append-only) | Append only, never rewritten |
 
@@ -221,8 +221,11 @@ about a step, and the framework deliberately keeps it thin:
   `completed` — the artifact is already on disk, and making the user run me again would claim
   credit for work nobody did." Opt-in per step and deliberately rare, because **vacuity** is
   the trap: a check that counts offenders over an empty subject (no media ⇒ no media is
-  missing subtitles) is vacuously clean, so an id measured per file must never sit in an
-  `adopt` list; only an id that *fails when the artifact is absent* can certify existence.
+  missing subtitles) is vacuously clean. So an `adopt` list may name per-file ids only
+  alongside an id that *fails when the subject itself is absent* — one that reports an
+  offender exactly when there is nothing to walk, which turns a bundle of vacuous zeros into
+  a claim — and a step whose whole output is a single file may name only that file's
+  existence id.
   Adoption never touches a step already `completed`, `failed`, `skipped` or `running` — a
   human's judgement outranks the filesystem — and it withholds, with a reason, when an id was
   not measured or reports offenders.
@@ -235,6 +238,31 @@ evidence, and never over an id nobody measured — are what make it safe to let 
 read-only probe influence a run at all. The dictation instantiation (which check answers to
 which step, and what a probe cannot see at all) is in
 [`dictation.md`](./dictation.md#binding-checks-to-the-template).
+
+### Refreshing a run's definition
+
+A run stores the definition text it was created from, and `load_bundle` enforces that
+`state.json` and `workflow.yaml` still agree — deliberately, so progress is never judged
+against intent that changed underneath it. That also makes a template edit a one-way door:
+every run opened before the edit would keep its older binding forever, and a check added to
+the vocabulary later would silently stop applying to datasets scanned earlier.
+
+The engine allows exactly one narrow exception, decided by the run's own history rather than
+by a parameter:
+
+- `history_is_inherited_only(run)` is true when `events.jsonl` holds nothing but the run
+  opening, adoptions, invalidations and refreshes — no step was ever advanced, recorded,
+  skipped, retried or reset. Such a run is a *projection* of a template, not a piece of work.
+- Only for such a run may the binding layer call `rebind_definition(run, yaml)`: validate the
+  new text first, carry the status of every step that still exists under the same id, let the
+  added ones arrive through the ordinary recompute, drop the records of the ones that
+  vanished, and append `definition_refreshed` naming what was dropped.
+- A run holding earned progress keeps its definition, full stop. Nothing rewrites intent
+  because a newer file happened to exist.
+
+Whether two texts really differ is the caller's judgement, but it should be semantic: a
+comment-only edit to a template must not rewrite a run's file and journal a refresh that
+changed no behaviour.
 
 ---
 
@@ -315,6 +343,7 @@ An agent never needs to understand the domain — only a small generic command s
 | `record(run, step, event, detail)` | Report an outcome (esp. when the agent itself did the work) |
 | `verify(run, apply?)` | Score the run against measured evidence; with `apply` it may only demote (see *Verification*) |
 | `adopt(run, evidence)` | Complete the steps whose `adopt` ids this probe returns measured-and-clean (see *Verification*) |
+| `history_is_inherited_only(run)` / `rebind_definition(run, yaml)` | The guard and the act behind *Refreshing a run's definition* — only a run whose whole history was inherited may be pointed at newer intent |
 | `intervene(run, step, op)` | `retry` / `unblock` / `skip` / `reset` for manual recovery |
 
 Hints are actionable, e.g. *"step `validate` is blocked because dependency `normalize_text` failed; retry `normalize_text` or skip `validate`."*
@@ -340,7 +369,7 @@ JSONL has no surrounding `[]` and no commas between records. Each record is one 
 {"time":"2026-10-01 10:21:00","step":"transcribe","event":"started"}
 `````
 
-Event vocabulary (extensible): `claimed`, `started`, `completed`, `failed`, `retried`, `blocked`, `unblocked`, `skipped`, `resumed`, `invalidated`, `adopted`, plus run-level `workflow_started` / `workflow_completed` / `workflow_failed` / `workflow_blocked`. A record may carry an optional `detail` object (error message, attempt number, output refs, actor/device id) — an `invalidated` event names the checks that contradicted the step and the actor that applied it, and an `adopted` event names the checks that authorized the promotion, so a move in either direction is always attributable.
+Event vocabulary (extensible): `claimed`, `started`, `completed`, `failed`, `retried`, `blocked`, `unblocked`, `skipped`, `resumed`, `invalidated`, `adopted`, `definition_refreshed`, plus run-level `workflow_started` / `workflow_completed` / `workflow_failed` / `workflow_blocked`. A record may carry an optional `detail` object (error message, attempt number, output refs, actor/device id) — an `invalidated` event names the checks that contradicted the step and the actor that applied it, an `adopted` event names the checks that authorized the promotion, and a `definition_refreshed` event names the new step count and the steps that vanished, so a move in either direction — or a change of the intent itself — is always attributable.
 
 ---
 

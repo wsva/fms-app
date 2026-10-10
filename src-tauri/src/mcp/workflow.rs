@@ -97,7 +97,9 @@ struct WorkflowAdoptParam {
     dataset_uuid: String,
     run_id: String,
     /// The `workflow.yaml` text to open the run from, when this dataset does not
-    /// have one yet. Omit it and an absent run is reported rather than invented.
+    /// have one yet — and to rebind an existing run whose history is nothing but
+    /// inherited progress, so a template edit reaches datasets scanned earlier.
+    /// Omit it and an absent run is reported rather than invented.
     #[serde(default)]
     definition_yaml: Option<String>,
 }
@@ -262,7 +264,7 @@ impl DatasetMcpServer {
         ok(&v)
     }
 
-    #[tool(name = "workflow_adopt", description = "Record a step as completed because the evidence shows its outcome is already on disk, without running it. The mirror of workflow_verify's apply: verify may only move a step DOWN, this is the only act that moves one UP unrun, and it applies solely to steps that opt in via the definition's `adopt:` list (today: init_dataset, whose database file either exists or does not). A step whose listed checks were not all measured, or that report any offender, is withheld and named in `withheld` with the reason. Steps already completed, failed, skipped or running are left untouched - a human's intervention outranks the filesystem. Each adoption appends an `adopted` event, so events.jsonl still distinguishes progress the run performed from progress it inherited. Opens the run from definition_yaml if the dataset has none yet, then returns its full status; calling it twice with unchanged evidence writes nothing. Use this when a dataset was prepared outside the app (or by an earlier run) and the graph should show the state it is actually in.")]
+    #[tool(name = "workflow_adopt", description = "Record a step as completed because the evidence shows its outcome is already on disk, without running it. The mirror of workflow_verify's apply: verify may only move a step DOWN, this is the only act that moves one UP unrun, and it applies solely to steps that opt in via the definition's `adopt:` list (in the dictation pipeline: init_dataset and sync_media, which claim an agreement between the database and the media folder, plus generate_subtitles / generate_waveforms / adjust_cue_times, which additionally list media_none because a per-file check reads 'zero offenders' vacuously when a dataset has no audio at all). A step whose listed checks were not all measured, or that report any offender, is withheld and named in `withheld` with the reason. Steps already completed, failed, skipped or running are left untouched - a human's intervention outranks the filesystem. Each adoption appends an `adopted` event, so events.jsonl still distinguishes progress the run performed from progress it inherited. Opens the run from definition_yaml if the dataset has none yet; if the run exists, holds nothing but inherited progress, and the passed definition differs semantically from the stored one, the run is rebound to it (statuses of surviving steps carried over, `definition_refreshed` event) so a template edit does not strand older datasets - a run with earned progress keeps the definition it was created from. Returns the full status, with `adoption.refreshed` and `adoption.refresh_error` telling which case happened. Calling it twice with unchanged evidence writes nothing. Use this when a dataset was prepared outside the app (or by an earlier run) and the graph should show the state it is actually in.")]
     async fn workflow_adopt(
         &self,
         Parameters(param): Parameters<WorkflowAdoptParam>,

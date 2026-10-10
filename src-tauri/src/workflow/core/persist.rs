@@ -148,6 +148,18 @@ pub(super) fn append_events(dir: &Path, events: &[Event]) -> Result<(), String> 
     Ok(())
 }
 
+/// Read `events.jsonl` back. Malformed or half-written lines are skipped rather
+/// than failing the read: this is used to judge what a run's history *contains*,
+/// where a torn last line must not be mistaken for a reason to refuse.
+pub(super) fn read_events(dir: &Path) -> Vec<Event> {
+    let Ok(text) = fs::read_to_string(dir.join(EVENTS_FILE)) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Event>(line).ok())
+        .collect()
+}
+
 /// Human-readable local timestamp, e.g. `2026-10-01 10:00:00`.
 pub(super) fn now_string() -> String {
     Local::now().format("%Y-%m-%d %H:%M:%S").to_string()

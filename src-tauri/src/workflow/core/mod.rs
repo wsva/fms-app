@@ -869,6 +869,74 @@ pub(crate) fn adopt(
 }
 
 // ---------------------------------------------------------------------------
+// Definition refresh
+// ---------------------------------------------------------------------------
+
+/// Whether every status in this run was inherited rather than earned.
+///
+/// True when `events.jsonl` holds nothing but the run opening, adoptions,
+/// invalidations and definition refreshes — no step was ever advanced, recorded,
+/// skipped, retried or reset by an agent or a human. The binding layer uses it to
+/// decide whether a run a page opened for itself may follow the app's current
+/// template. A run holding real progress keeps the definition it was created
+/// from, which is the whole reason the text is stored beside the state.
+pub(crate) fn history_is_inherited_only(base: &Path, run_id: &str) -> Result<bool, String> {
+    let dir = persist::run_dir(base, run_id)?;
+    Ok(persist::read_events(&dir).iter().all(|e| {
+        matches!(
+            e.event.as_str(),
+            "workflow_started" | "adopted" | "invalidated" | "definition_refreshed"
+        )
+    }))
+}
+
+/// Point a run at a new definition text, keeping the status of every step that
+/// still exists under the same id.
+///
+/// Not a general operation — see [`history_is_inherited_only`] for who may call it.
+/// Steps that vanished from the definition lose their record; steps the new text
+/// adds arrive through the ordinary recompute (`pending`, or `ready`/`skipped` as
+/// their dependencies and `when:` guards say). The refresh is journalled, so the
+/// log still explains why a run's history stops matching its earlier graph.
+pub(crate) fn rebind_definition(
+    base: &Path,
+    run_id: &str,
+    definition_yaml: &str,
+    known_checks: &[&str],
+) -> Result<(), String> {
+    let dir = persist::run_dir(base, run_id)?;
+    let def: Definition = serde_yaml::from_str(definition_yaml)
+        .map_err(|e| format!("invalid workflow YAML: {e}"))?;
+    validate::validate(&def, known_checks)?;
+    let mut state = persist::load_state(&dir)?;
+
+    let carried: HashMap<String, StepState> = def
+        .steps
+        .iter()
+        .filter_map(|s| state.steps.remove(s.id.as_str()).map(|ss| (s.id.clone(), ss)))
+        .collect();
+    let dropped: Vec<String> = state.steps.keys().cloned().collect();
+    state.steps = carried;
+    state.workflow = WorkflowRef {
+        name: def.name.clone(),
+        version: def.version,
+    };
+
+    persist::write_definition_text(&dir, definition_yaml)?;
+    let events = vec![event(
+        None,
+        "definition_refreshed",
+        Some(json!({
+            "steps": def.steps.len(),
+            "dropped": dropped,
+            "by": "workflow_adopt",
+        })),
+    )];
+    engine::recompute(&def, &mut state, persist::now_ts());
+    commit(&dir, &events, &state)
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1221,6 +1289,20 @@ steps:
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// `ADOPT_YAML` grown the way a template grows between releases: one step
+    /// renamed away, one added, `preparer` untouched. Used to prove a refresh
+    /// carries inherited status instead of restarting the run.
+    const ADOPT_YAML_V2: &str = r#"name: probe
+version: 2
+steps:
+  - id: preparer
+    action: dataset_init_dir
+    adopt: [present]
+  - id: newcomer
+    action: dataset_get
+    depends_on: [preparer]
+"#;
+
     #[test]
     fn adoption_never_overrides_a_step_a_human_already_judged() {
         let base = temp_base("adopt-skip");
@@ -1232,6 +1314,65 @@ steps:
         let res = adopt(&base, "probe", &evidence(&[("present", 0)])).unwrap();
         assert_eq!(res["adoption"]["changed"], json!(false));
         assert_eq!(res["steps"]["preparer"]["status"], json!("skipped"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_run_that_only_inherited_progress_may_follow_a_newer_definition() {
+        let base = temp_base("refresh");
+        create_run(&base, Some("probe".into()), ADOPT_YAML, &["present", "needing"]).unwrap();
+        adopt(&base, "probe", &evidence(&[("present", 0)])).unwrap();
+        assert!(
+            history_is_inherited_only(&base, "probe").unwrap(),
+            "an adoption is inherited progress, not a reason to freeze the definition"
+        );
+
+        rebind_definition(&base, "probe", ADOPT_YAML_V2, &["present", "needing"]).unwrap();
+        let after = status(&base, "probe").unwrap();
+        assert_eq!(after["workflow"]["version"], json!(2));
+        assert_eq!(
+            after["steps"]["preparer"]["status"],
+            json!("completed"),
+            "a step that still exists keeps the status the evidence gave it"
+        );
+        assert_eq!(after["steps"]["newcomer"]["status"], json!("ready"), "added steps arrive through the ordinary recompute");
+        assert!(after["steps"].get("consumer").is_none(), "a vanished step loses its record");
+        assert!(events_text(&base).contains("\"definition_refreshed\""));
+        assert!(definition_text(&base, "probe").unwrap().contains("newcomer"), "state.json and workflow.yaml must not drift apart");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn earned_progress_freezes_a_run_against_the_current_template() {
+        let base = temp_base("refresh-earned");
+        create_run(&base, Some("probe".into()), ADOPT_YAML, &["present", "needing"]).unwrap();
+
+        // Nothing adopted, just a claimed step: somebody is working on this run.
+        assert!(history_is_inherited_only(&base, "probe").unwrap(), "a bare run opening is not progress");
+        advance(&base, "probe", "preparer", None).unwrap();
+        assert!(
+            !history_is_inherited_only(&base, "probe").unwrap(),
+            "a run an agent touched keeps the definition it was created from"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_refresh_validates_before_it_rewrites_anything() {
+        let base = temp_base("refresh-bad");
+        create_run(&base, Some("probe".into()), ADOPT_YAML, &["present", "needing"]).unwrap();
+        adopt(&base, "probe", &evidence(&[("present", 0)])).unwrap();
+        let before = state_text(&base);
+
+        // The id does not exist in the evaluator's vocabulary, so the refresh is
+        // refused outright — the run must still be readable and unchanged.
+        let bad = ADOPT_YAML.replace("adopt: [present]", "adopt: [no_such_check]");
+        assert!(rebind_definition(&base, "probe", &bad, &["present", "needing"]).is_err());
+        assert_eq!(state_text(&base), before);
+        assert_eq!(status(&base, "probe").unwrap()["steps"]["preparer"]["status"], json!("completed"));
 
         let _ = std::fs::remove_dir_all(&base);
     }

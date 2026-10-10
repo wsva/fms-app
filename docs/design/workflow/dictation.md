@@ -28,6 +28,7 @@ engine does not honour.
 | The check provider + vocabulary that binds the scan to a run | `src-tauri/src/workflow/verify.rs` (the only module naming both checks and steps) |
 | The join itself (verdicts, invalidation) | `src-tauri/src/workflow/core/mod.rs::verify` → `workflow_verify` command + MCP tool |
 | Adoption (clean evidence ⇒ `completed`, the one upward move) | `src-tauri/src/workflow/core/mod.rs::adopt` → `workflow_adopt` command + MCP tool |
+| Refreshing a run's definition, while and only while its whole history was inherited | `src-tauri/src/workflow/core/mod.rs::{history_is_inherited_only, rebind_definition}`, called from `verify.rs::adopt` |
 | Rendering the verdicts | `src/lib/workflow/verify.ts` (labels and sentences only — no ids) |
 | In-app Run buttons per step | `src/lib/workflow/step-ops.ts` (`STEP_OPS`, keyed by step id) |
 | Client mirror of the engine's readiness rules | `src/lib/workflow/steps.ts` (parses the YAML, evaluates `when` against probed facts) |
@@ -114,8 +115,8 @@ loop used to skip.
 
 ### The checks
 
-Fourteen named ids, though `database_missing` short-circuits the rest: with no `data.sqlite3`
-there is nothing to compare, so a report either names that one problem or walks all fourteen —
+Fifteen named ids, though `database_missing` short-circuits the rest: with no `data.sqlite3`
+there is nothing to compare, so a report either names that one problem or walks all fifteen —
 `database_missing` among them, collapsed to `clean`, because reaching the walk *is* the
 measurement that the file exists. Severity is the sort key, so the report leads with what blocks
 the pipeline. A check collapses to `clean` when it finds nothing, and the panel folds those behind
@@ -124,6 +125,7 @@ a toggle.
 | id | level | what it means |
 |---|---|---|
 | `database_missing` | problem | no `data.sqlite3` (then the only check reported; otherwise it walks as `clean`) |
+| `media_none` | info | nothing under `media/` *and* no `listen_media` row — there is no subject to walk |
 | `media_new` | problem | file under `media/` with no `listen_media` row |
 | `media_gone` | warn | row whose audio is gone |
 | `subtitles_missing` | problem | neither a VTT nor cue rows anywhere |
@@ -141,11 +143,14 @@ a toggle.
 Which step each id answers to is *not* in this table — that is the binding further down, and it
 lives in the template where the engine can enforce it.
 
-One distinction in this list decides adoption later on: `database_missing` is the only id that
-answers a question about a file's **existence**. Every other id counts offenders over an
-inventory, so on a dataset with no media it comes back clean *vacuously* — "no media, therefore
-no media is missing subtitles". That is fine for a report and nowhere near enough to certify
-that a step's work was done.
+One distinction in this list decides adoption later on: `database_missing` and `media_none` are
+the two ids that answer a question about **existence** — of the database file, and of a subject
+to walk at all. `media_none` is judged from both sides (no file *and* no row), so a folder whose
+media were deleted along with their rows is not quietly treated as an empty-but-measured dataset.
+Every other id counts offenders over an inventory, so on a dataset with no media it comes back
+clean *vacuously* — "no media, therefore no media is missing subtitles". That is fine for a
+report and nowhere near enough to certify that a step's work was done, which is why the per-file
+ids may only be adopted *together with* `media_none`.
 
 Cost and noise are both bounded on purpose: three bulk queries plus one VTT parse per media,
 **exact** counts kept while the item list caps at 100 with a `truncated` flag ("fix these and
@@ -223,17 +228,23 @@ The dictation binding, in full:
 |---|---|---|---|
 | `ensure_model` | — | — (no subject-side evidence; legitimately `unknown`) | — |
 | `init_dataset` | — | `database_missing` | `database_missing` |
-| `sync_media` | `database_missing` | `media_new`, `media_gone` | — |
-| `generate_subtitles` | `database_missing`, `media_new` | `subtitles_missing`, `subtitles_unreadable`, `subtitles_not_imported`, `subtitles_out_of_sync` | — |
-| `generate_waveforms` | `media_new` | `waveforms_missing`, `waveforms_stale` | — |
+| `sync_media` | `database_missing` | `media_new`, `media_gone` | `database_missing`, `media_new`, `media_gone` |
+| `generate_subtitles` | `database_missing`, `media_new` | `subtitles_missing`, `subtitles_unreadable`, `subtitles_not_imported`, `subtitles_out_of_sync` | `media_none` + all four `proves` ids |
+| `generate_waveforms` | `media_new` | `waveforms_missing`, `waveforms_stale` | `media_none`, `waveforms_missing`, `waveforms_stale` |
 | `detect_reference` | — | — (records facts; nothing to prove) | — |
 | `align_cues` / `align_cues_transcript` | `subtitles_not_imported` | — (see *Not everything is verifiable*) | — |
-| `adjust_cue_times` | `waveforms_missing`, `subtitles_not_imported` | `cues_unadjusted` | — |
+| `adjust_cue_times` | `waveforms_missing`, `subtitles_not_imported` | `cues_unadjusted` | `media_none`, `cues_unadjusted`, `adjust_blocked_no_waveform` |
 
-`init_dataset` is the only step that adopts, and only on the one id that can prove it: the file
-either exists or it does not. The per-file ids stay out for the vacuity reason above — adopting
-`generate_subtitles` because a media-less dataset has no missing subtitles would put a green tick
-over work nobody did, the exact false confidence the rest of this design exists to prevent.
+Five steps adopt, in two shapes. `init_dataset` and `sync_media` claim an **agreement**, and an
+agreement holds when there is nothing to disagree about: `database_missing` is one file's
+existence, and `media_new` + `media_gone` clean means the folder and the table match in *both*
+directions — so an empty dataset genuinely has nothing to sync, and needs no guard. The three
+artifact steps claim an **outcome**, which cannot be inherited from an inventory of zero: each
+lists `media_none` beside its per-file ids, and `adjust_cue_times` also lists
+`adjust_blocked_no_waveform`, because a media skipped for lack of a waveform was not adjusted and
+must veto the claim instead of hiding inside a zero count. Adopting `generate_subtitles` because a
+media-less dataset has no missing subtitles would put a green tick over work nobody did — the
+exact false confidence the rest of this design exists to prevent.
 
 How it is wired, as built:
 
@@ -247,8 +258,10 @@ How it is wired, as built:
 - **Validation rejects a dangling id.** A typo in `verify:` would silently disable a gate and a
   typo in `adopt:` would silently disable a promotion (the step never turns green, whatever is on
   disk), so both fail the pre-run check like a bad `depends_on` does. Checks named by no step are report-only
-  (`cue_sanity`, `subtitle_versions`, `reference_material`, `adjust_blocked_no_waveform`), which is
-  an answer, not an oversight.
+  (`cue_sanity`, `subtitle_versions`, `reference_material`), which is an answer, not an oversight.
+  The `audit.rs` test that a completed walk reports every registered id is the other half: an id
+  the vocabulary has but the walk omits reads "not measured" and blocks certification *and*
+  adoption in silence.
 - **`workflow_verify(dataset_uuid, run_id, apply?)`** is the surface: a command twin for the page
   and an MCP tool for agents, both in process of the same core function. Without `apply` it joins
   and reports; with it, it may demote. Its payload is the run's `status` response plus
@@ -261,6 +274,16 @@ How it is wired, as built:
   needs a `state.json` to score anyway, so there is one source of truth instead of an optimistic
   TypeScript preview the engine later contradicts — and it never moves a step already
   `completed`, `failed`, `skipped` or `running`. Command twin, MCP tool, `adopted` event.
+- **A run that never earned its progress follows the template.** `state.json` and
+  `workflow.yaml` are version-bound on purpose, so a template edit would otherwise strand every
+  dataset scanned before it — including on the bindings that decide adoption. `workflow_adopt`
+  therefore rebinds an existing run to the text it is passed when, and only when, the two differ
+  *semantically* (a comment tweak is not a change) and `events.jsonl` holds nothing but inherited
+  moves: run opening, adoptions, invalidations, refreshes. Surviving steps keep their statuses,
+  added ones arrive through the ordinary recompute, vanished ones lose their record, and the act
+  costs a `definition_refreshed` event; `adoption.refreshed` tells the caller it happened. A run
+  an agent or a human advanced keeps its own definition — the copy beside its state is the reason
+  that is still possible.
 - **The subject is environment, not output.** No step declares `inputs: { dataset_uuid: … }`: the
   uuid is handed to every command and tool by its caller, and the run directory lives inside the
   dataset it describes. While it was modeled as an output of `init_dataset`, an already-initialized
@@ -277,8 +300,14 @@ How it is wired, as built:
   is held to the same standard in the other direction: it completes a step only over
   measured-and-clean evidence, opens its dependent, withholds with a named reason otherwise while
   writing no second event, is idempotent, and cannot overrule a step a human already skipped.
+  The refresh is tested the same way: a run that only adopted may be rebound to a newer
+  definition and carries its `completed` over, a run whose step was `advance`d may not, and a
+  definition that fails validation leaves the run byte-for-byte unchanged.
   `workflow::verify::tests` checks that every built-in template binds only registered ids — the
-  one guard against the binding and the vocabulary drifting apart silently.
+  one guard against the binding and the vocabulary drifting apart silently — that a dangling
+  `adopt:` id is rejected naming the field, and that only a semantic edit counts as a new
+  definition. `audit.rs` itself tests that a completed walk reports every registered id and that
+  an empty inventory is a finding rather than a clean bill.
 - **Other kinds follow for free.** `book/build_book_library.yaml` and `card/setup_card_deck.yaml`
   need only a provider in `workflow/verify.rs`; the engine, the command and the MCP tool do not
   change. The page's `isDictation` gate becomes a dispatch on kind.
@@ -303,8 +332,10 @@ lie with a nice colour.
 Adoption rides the same scan (`probeAndSync`): after the audit lands, the page calls
 `workflow_adopt`, then refreshes from the engine, so a step whose artifact is already on disk
 renders as `completed` — the user sees "nothing to do here" instead of a button for work that is
-done. The notice names the steps it adopted; a withheld step stays exactly as it was and writes
-nothing.
+done. The notice names the steps it adopted and says so when the run was rebound to the current
+template, because that rewrote the run's own `workflow.yaml`; a withheld step stays exactly as it
+was and writes nothing, and a passed definition that will not validate is logged rather than
+applied.
 
 ## What a scan may do to a status
 

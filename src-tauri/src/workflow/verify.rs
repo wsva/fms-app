@@ -84,6 +84,14 @@ pub(crate) fn verify(
 /// [`verify`] with `apply`, is the one that needs to be asked — and every
 /// adoption is journalled as `adopted` rather than as work performed, so
 /// `events.jsonl` still distinguishes a tick earned from a tick inherited.
+///
+/// When the run already exists and the passed definition differs semantically from
+/// the stored one, the run is rebound to it *only* if its whole history is
+/// inherited — see [`core::history_is_inherited_only`] — because a template edit
+/// that adds a binding must not silently stop applying to every dataset scanned
+/// since. `adoption.refreshed` reports whether that happened; a definition that
+/// fails validation is reported in `adoption.refresh_error` and the scan proceeds
+/// against the run's own, older text.
 pub(crate) fn adopt(
     settings: &SettingsState,
     dataset_uuid: &str,
@@ -92,6 +100,8 @@ pub(crate) fn adopt(
 ) -> Result<Value, String> {
     let base = super::run_base(settings, Some(dataset_uuid))?;
     let evidence = evidence(settings, dataset_uuid)?;
+    let mut refreshed = false;
+    let mut refresh_error: Option<String> = None;
     if !core::run_exists(&base, run_id) {
         let yaml = definition_yaml.ok_or_else(|| {
             format!(
@@ -100,8 +110,50 @@ pub(crate) fn adopt(
             )
         })?;
         core::create_run(&base, Some(run_id.to_string()), yaml, &check_ids())?;
+    } else if let Some(yaml) = definition_yaml {
+        // A run this page opened for itself is a projection of the app's current
+        // template, so when the template moves and the run holds nothing but
+        // adoptions, the projection moves with it — otherwise a definition edit
+        // would silently strand every existing dataset on the checks it predates.
+        // A run an agent or a human put progress into keeps the definition it was
+        // created from; that is why the text is stored beside the state at all.
+        let stored = core::definition_text(&base, run_id)?;
+        if documents_differ(&stored, yaml) && core::history_is_inherited_only(&base, run_id)? {
+            if let Err(e) = core::rebind_definition(&base, run_id, yaml, &check_ids()) {
+                // An editor buffer that will not validate must not sink the scan:
+                // the run keeps its own definition and adoption proceeds on it.
+                refresh_error = Some(e);
+            } else {
+                refreshed = true;
+            }
+        }
     }
-    core::adopt(&base, run_id, &evidence)
+    let mut resp = core::adopt(&base, run_id, &evidence)?;
+    if let Some(adoption) = resp
+        .as_object_mut()
+        .and_then(|obj| obj.get_mut("adoption"))
+        .and_then(|a| a.as_object_mut())
+    {
+        adoption.insert("refreshed".into(), Value::Bool(refreshed));
+        if let Some(e) = refresh_error {
+            adoption.insert("refresh_error".into(), Value::String(e));
+        }
+    }
+    Ok(resp)
+}
+
+/// Whether two YAML texts mean *different* definitions. Comment-only and
+/// formatting-only edits must not count, or a prose tweak to a template would
+/// rewrite a run's file and journal a refresh that changed no behaviour.
+fn documents_differ(stored: &str, current: &str) -> bool {
+    match (
+        serde_yaml::from_str::<serde_yaml::Value>(stored),
+        serde_yaml::from_str::<serde_yaml::Value>(current),
+    ) {
+        (Ok(a), Ok(b)) => a != b,
+        // Unreadable on either side: call it different and let validation decide.
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -109,7 +161,7 @@ mod tests {
     //! The binding is only trustworthy while both sides agree on the vocabulary, and
     //! nothing but these tests stops a template from naming a check no provider
     //! registers — a typo there silently disables a gate in front of a user.
-    use super::check_ids;
+    use super::{check_ids, documents_differ};
 
     fn temp_base(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("fms-verify-{tag}-{}", std::process::id()));
@@ -151,5 +203,26 @@ mod tests {
         assert!(err.contains("no_such_check"), "unexpected error text: {err}");
         assert!(err.contains("adopt"), "the error should name the field: {err}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The refresh decision hinges on this comparison: prose-only edits must not
+    /// rewrite a run's definition and journal a change that altered no behaviour,
+    /// while a real binding edit must not be mistaken for formatting.
+    #[test]
+    fn only_a_semantic_edit_counts_as_a_new_definition() {
+        let yaml = "name: probe\nversion: 1\nsteps:\n  - id: a\n    action: dataset_get\n";
+        assert!(!documents_differ(yaml, yaml), "identical text is not a change");
+        assert!(
+            !documents_differ(yaml, &format!("{yaml}# a note for the next reader\n")),
+            "a comment must not count as a definition change"
+        );
+        assert!(
+            documents_differ(yaml, &yaml.replace("action: dataset_get", "action: dataset_get\n    adopt: [database_missing]")),
+            "a new binding must count"
+        );
+        assert!(
+            documents_differ(yaml, "name: [unclosed"),
+            "unreadable text is left to validation rather than silently passed"
+        );
     }
 }

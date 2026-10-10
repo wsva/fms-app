@@ -150,7 +150,8 @@ pub async fn workflow_builtin_templates() -> Result<Value, String> {
 /// all measured and came back clean is recorded `completed` without being run, so
 /// a dataset prepared earlier shows the progress it already has instead of nagging
 /// for work that is done. Opens the run from `yaml_text` when the dataset has none
-/// yet; every adoption is journalled as an `adopted` event, never as work.
+/// yet, and rebinds one that only ever inherited its progress to a `yaml_text` that
+/// moved on; every adoption is journalled as an `adopted` event, never as work.
 #[tauri::command]
 pub async fn workflow_adopt(
     settings: State<'_, SettingsState>,

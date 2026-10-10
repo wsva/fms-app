@@ -87,6 +87,17 @@ const CHECKS: &[CheckMeta] = &[
         advice: "Initialize this folder as a dataset, then Sync media to register \
                   its files — every later step writes into this database.",
     },
+    // The second check about existence rather than correctness, and the reason an
+    // empty inventory cannot certify a step: every per-file id below reads "zero
+    // offenders" when there is nothing to walk, so a step adopting on those must
+    // list this id too.
+    CheckMeta {
+        id: "media_none",
+        label: "Media inventory",
+        level: "info",
+        advice: "Nothing under media/ and no listen_media row, so this dataset has no audio \
+                  yet and every per-file finding below proves nothing. Add media files first.",
+    },
     CheckMeta {
         id: "media_new",
         label: "New media not in the database",
@@ -854,8 +865,11 @@ fn build_checks(media: &[MediaState], conn: &Connection, has_book: bool) -> Vec<
     }
 
     // Rows whose file no longer exists. Their `source` is the only name left.
+    let db_rows = db_inventory(conn);
+    // Captured before `gone` consumes the rows: emptiness is the subject check.
+    let db_empty = db_rows.is_empty();
     let on_disk: HashSet<&str> = media.iter().map(|m| m.source.as_str()).collect();
-    let gone: Vec<AuditFinding> = db_inventory(conn)
+    let gone: Vec<AuditFinding> = db_rows
         .into_iter()
         .filter(|row| !on_disk.contains(row.source.as_str()))
         .map(|row| AuditFinding {
@@ -903,6 +917,19 @@ fn build_checks(media: &[MediaState], conn: &Connection, has_book: bool) -> Vec<
         // `proves`/`adopt` binding depends on that distinction — an absent id means
         // "not evaluated", which can neither certify a step nor adopt one.
         check("database_missing", Vec::new()),
+        // Emptiness judged from both sides, so a folder whose media are all gone
+        // *and* whose rows were all deleted is not silently treated as a subject.
+        check(
+            "media_none",
+            if media.is_empty() && db_empty {
+                vec![AuditFinding {
+                    source: "media/".into(),
+                    detail: "no audio file on disk and no listen_media row".into(),
+                }]
+            } else {
+                Vec::new()
+            },
+        ),
         check("media_new", new_media),
         check("media_gone", gone),
         check("subtitles_missing", no_subtitle),
@@ -927,7 +954,25 @@ mod tests {
     //! may name and the ids a walk actually reports must never drift apart, and
     //! nothing but this test notices when they do (`database_missing` used to be
     //! reported only when it failed, so `init_dataset` could never be adopted).
-    use super::{build_checks, check_ids};
+    use super::{build_checks, check_ids, MediaState, Vtt};
+
+    /// The smallest media that counts as *registered with a readable subtitle* —
+    /// enough to make an inventory non-empty, which is all the subject check reads.
+    fn one_media() -> MediaState {
+        MediaState {
+            source: "a.mp3".into(),
+            db_uuid: Some("u-a".into()),
+            duration_ms: Some(1000),
+            waveform: std::path::PathBuf::from("a.json"),
+            vtt_state: Vtt::Cues(1),
+            media_mtime: None,
+            vtt_mtime: None,
+            waveform_mtime: None,
+            has_transcript: false,
+            subs: Vec::new(),
+            cues: Vec::new(),
+        }
+    }
 
     #[test]
     fn a_walk_reports_every_registered_check_id() {
@@ -945,5 +990,27 @@ mod tests {
             reported, registered,
             "every registered id must be present in a completed walk, measured and clean"
         );
+    }
+
+    #[test]
+    fn an_empty_inventory_is_a_finding_and_not_a_clean_bill() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let none_count = |media: &[MediaState]| {
+            build_checks(media, &conn, false)
+                .into_iter()
+                .find(|c| c.id == "media_none")
+                .unwrap()
+                .count
+        };
+
+        // No file, no row: the subject itself is absent, so this id must report an
+        // offender. Every per-file check reads "zero offenders" here purely because
+        // there is nothing to walk, and a step adopting on those zeros would claim
+        // work nobody did — which is why the artifact steps list `media_none`.
+        assert_eq!(none_count(&[]), 1);
+
+        // One registered media is enough for the walk to have actually measured
+        // something, and then emptiness is no longer a finding.
+        assert_eq!(none_count(std::slice::from_ref(&one_media())), 0);
     }
 }

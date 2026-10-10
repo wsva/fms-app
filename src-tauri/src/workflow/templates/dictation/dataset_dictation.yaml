@@ -27,21 +27,35 @@
 # step claimed is missing, partial or drifted", which is what entitles a
 # `completed` step to be sent back to `ready`. Ids are validated against the
 # evaluator's vocabulary when a run is created, so a typo fails the definition
-# instead of silently disabling a gate. Four checks stay deliberately unbound —
+# instead of silently disabling a gate. Three checks stay deliberately unbound —
 # `cue_sanity` and `subtitle_versions` have no repairing step, `reference_material`
-# and `adjust_blocked_no_waveform` are context — and two steps declare nothing at
-# all (`ensure_model`, `detect_reference`) because there is no subject-side
-# evidence for them. That is `unknown`, the honest answer, not an oversight.
+# is context — and two steps declare nothing at all (`ensure_model`,
+# `detect_reference`) because there is no subject-side evidence for them. That is
+# `unknown`, the honest answer, not an oversight.
 #
 # `adopt:` is the opposite act and the engine's only upward move: the ids listed
 # there must come back measured *and* clean, and `workflow_adopt` then records the
-# step as completed without running it, because the artifact it would have
-# produced is already on disk. Exactly one step asks for it. `database_missing`
-# answers a question about one file's existence, which nothing can make vacuously
-# true; every per-file check instead reads "zero offenders" on a dataset with no
-# media at all, and adopting on that would print a green tick over work nobody did
-# — so they stay out. An adoption costs an `adopted` event, so the audit trail
-# still distinguishes progress a run earned from progress it inherited.
+# step as completed without running it, because the outcome it would have produced
+# is already on disk. Five steps ask for it, each for a different reason. The
+# agreement steps (`init_dataset`, `sync_media`) state everything they need on
+# their own: `database_missing` is about one file's existence, and `media_new` +
+# `media_gone` together mean the inventory and the table match in *both*
+# directions. The artifact steps (`generate_subtitles`, `generate_waveforms`,
+# `adjust_cue_times`) additionally list `media_none`, because a per-file check
+# counts offenders over whatever it finds and therefore reads "zero offenders"
+# vacuously on a dataset with no audio at all — without that guard, adopting them
+# would print a green tick over work nobody did. `adjust_cue_times` also lists
+# `adjust_blocked_no_waveform`: media skipped for lack of a waveform are not
+# adjusted, so they veto the claim rather than hiding inside a zero count.
+# An adoption costs an `adopted` event, so the audit trail still distinguishes
+# progress a run earned from progress it inherited.
+#
+# Editing this file therefore reaches datasets that were scanned before the edit,
+# but only through the narrow door in `docs/design/workflow/core.md`: a run whose
+# whole history is inherited (nothing but adoptions) is rebound to the current text
+# by `workflow_adopt`, while a run an agent or a human advanced keeps the definition
+# it was created from — which is why the version below still has to change when the
+# meaning of the definition does.
 #
 # No step declares `inputs: { dataset_uuid: … }` any more. That value is the
 # *subject* the run is bound to — the run directory lives inside the dataset, and
@@ -51,11 +65,12 @@
 # every dependent would go `blocked` waiting for one that could not arrive.
 
 name: process_dictation_dataset
-# Deliberately NOT bumped when `verify:` was added: the field changes no step
-# semantics, exactly like `title:`, and version binding in `load_bundle` would
-# otherwise stale every existing `dictation-<uuid>` run over a purely additive
-# annotation.
-version: 2
+# Bumped for the `adopt:` lists, because they change what a scan is entitled to
+# conclude about a step. The earlier `verify:` addition stayed on version 2 — it
+# only annotated gates that could demote, never what could claim completion — and
+# an existing `dictation-<uuid>` run keeps whichever version it opened with until a
+# scan rebinds it, so an additive change is no longer a reason to freeze a run.
+version: 3
 
 steps:
   # ── Stage 0: STT model readiness ────────────────────────────────────────────
@@ -87,7 +102,8 @@ steps:
     verify:
       proves: [database_missing]
     # The database file *is* this step's whole output, so its presence is enough
-    # to adopt: see the header note on `adopt:` for why no other step may say so.
+    # to adopt — the only id that needs no `media_none` guard beside it, because
+    # nothing can make a missing file read as clean. See the header note on `adopt:`.
     adopt: [database_missing]
     outputs:
       - dataset_uuid
@@ -107,6 +123,10 @@ steps:
     verify:
       blocks: [database_missing]
       proves: [media_new, media_gone]
+    # Files without rows and rows without files are the two halves of the one
+    # postcondition this step has: an agreement, not an artifact — so it needs no
+    # `media_none` guard, and an empty dataset genuinely has nothing to sync.
+    adopt: [database_missing, media_new, media_gone]
     outputs:
       - added_count
       - removed_count
@@ -127,6 +147,9 @@ steps:
     verify:
       blocks: [database_missing, media_new]
       proves: [subtitles_missing, subtitles_unreadable, subtitles_not_imported, subtitles_out_of_sync]
+    # Cues present, parseable, imported and in sync for *every* media is this step's
+    # outcome — `media_none` is what turns those four zeros into a claim.
+    adopt: [media_none, subtitles_missing, subtitles_unreadable, subtitles_not_imported, subtitles_out_of_sync]
     retry: { attempts: 2, backoff: "1m" }
 
   - id: generate_waveforms
@@ -138,6 +161,7 @@ steps:
     verify:
       blocks: [media_new]
       proves: [waveforms_missing, waveforms_stale]
+    adopt: [media_none, waveforms_missing, waveforms_stale]
 
   # ── Stage 2b: the cue DB is filled inline by generate_subtitles ───────────────────────────────────────────────────
   # generate_subtitles already wrote the active listen_subtitle + cues into
@@ -191,6 +215,11 @@ steps:
       # The note marker is the only durable trace of an adjustment, so this can
       # only ever mean "some adjustment exists" — never which mode or strategy.
       proves: [cues_unadjusted]
+    # `adjust_blocked_no_waveform` belongs here too: a media skipped because it has
+    # no waveform is not adjusted, so it must veto the claim instead of passing as a
+    # zero. This is the only step whose evidence can say "some adjustment exists"
+    # but never which mode or strategy made it — see docs/design/workflow/dictation.md.
+    adopt: [media_none, cues_unadjusted, adjust_blocked_no_waveform]
     params:
       mode: "new"
       strategy: "noise_floor"          # or: dual_bound | peak_relative | otsu

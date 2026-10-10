@@ -66,7 +66,7 @@ src-tauri/src/
 │   │   ├── mod.rs          # Dictation commands: media/subtitle/cue queries, progress (app-level DB)
 │   │   ├── align.rs        # Cue alignment (multi-pass anchor DP): `dataset_align_cues` (shared
 │   │   │                   #   `book.txt`/`book_sentences.txt`) + `dataset_align_cues_transcript` — desktop
-│   │   ├── audit.rs        # Read-only dataset audit: 14 id-keyed checks over media/, subtitle/, waveform/, cues
+│   │   ├── audit.rs        # Read-only dataset audit: 15 id-keyed checks over media/, subtitle/, waveform/, cues
 │   │   │                   #   (`dataset_audit`; its check ids are the vocabulary `verify:` binds against) — desktop
 │   │   └── adjust.rs       # Cue-time adjustment: energy envelope, silence snapping — desktop
 │   ├── cards/
@@ -123,10 +123,11 @@ src-tauri/src/
 │   ├── templates.rs       # built-in definitions baked in via `include_str!` (`templates/<kind>/*.yaml`)
 │   ├── verify.rs          # the binding layer: check vocabulary + evidence providers; owns the verify and adopt joins
 │   └── core/              # domain-free framework (steps/deps/statuses, not what a step does)
-│       ├── mod.rs         # schema (Definition/RunState/Event) + public API (list/create/status/next/advance/record/intervene/verify/adopt)
+│       ├── mod.rs         # schema (Definition/RunState/Event) + public API (list/create/status/next/advance/
+│       │                  #   record/intervene/verify/adopt + rebinding a run whose progress was only inherited)
 │       ├── validate.rs    # pre-run structural validation: unique ids, refs exist, acyclic, `verify:`/`adopt:` ids registered
 │       ├── engine.rs      # readiness recompute, transitions, retry/propagation, lease recovery, data flow
-│       └── persist.rs     # run-dir resolution, YAML/JSON parse, atomic state write, append-only events
+│       └── persist.rs     # run-dir resolution, YAML/JSON parse, atomic state write, append-only events (+ read back)
 │
 ├── app_paths.rs            # Platform-correct base dirs (desktop `dirs`, mobile app-private)
 ├── settings.rs             # Two-tier settings: global JSON + per-workspace JSON overlay
