@@ -1,4 +1,6 @@
-# Dictation dataset processing workflow — a workflow.yaml definition (see workflow.md).
+# Dictation dataset processing workflow — a workflow.yaml definition.
+# Format: docs/design/workflow/core.md; this pipeline and its scan:
+# docs/design/workflow/dictation.md.
 #
 # This is the app's BUILT-IN template, shipped in the binary via `include_str!`
 # (see `src-tauri/src/workflow/templates.rs`) and served to the Workflow page and

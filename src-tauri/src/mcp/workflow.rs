@@ -1,5 +1,5 @@
 //! Workflow state-machine tools: drive a persistent, resumable, file-based DAG
-//! run (see `docs/design/workflow.md`). Agent-in-the-loop — the framework does
+//! run (see `docs/design/workflow/core.md`). Agent-in-the-loop — the framework does
 //! bookkeeping + scheduling; the agent performs each step's action and reports
 //! the outcome. Every tool returns structured JSON with actionable hints.
 

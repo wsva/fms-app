@@ -1,4 +1,4 @@
-# Card (flashcard deck) workflow — a workflow.yaml definition (see workflow.md).
+# Card (flashcard deck) workflow — a workflow.yaml definition (see docs/design/workflow/core.md).
 #
 # App BUILT-IN template, baked into the binary via `include_str!` (see
 # `src-tauri/src/workflow/templates.rs`) under the `card` category and served to

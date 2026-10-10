@@ -4,6 +4,8 @@ A generic, file-based framework for describing and running multi-step processes 
 
 Nothing here is domain-specific. The framework knows about *steps*, *dependencies* and *statuses*; it does not know what a step actually does. Actions are symbolic names bound to pluggable executors (an MCP tool, a Tauri command, a sidecar script, or "hand the step back to the agent"). The examples below use a dataset-processing pipeline purely to illustrate the file formats.
 
+> **This directory splits by layer, not by feature.** `core.md` (this file) is the engine spec and must never name a domain concept; sibling documents describe one pipeline each — [`dictation.md`](./dictation.md) for the built-in dictation pipeline, its read-only audit and the Workflow page. Mechanism invented while solving a pipeline's problem is written up in that pipeline's doc and promoted here once the engine actually honours it.
+
 ## Design principles
 
 - **Definition vs. state vs. events are separate concerns.** What *should* happen is immutable intent; what *has* happened is derived truth; the event log is the audit trail.

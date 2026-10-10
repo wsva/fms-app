@@ -2,7 +2,9 @@
 //! describing and running multi-step processes that an AI agent can drive and
 //! resume after any interruption without relying on conversation history.
 //!
-//! See `docs/design/workflow.md` for the full specification.
+//! See `docs/design/workflow/core.md` for the full specification; a pipeline's
+//! own document (e.g. `docs/design/workflow/dictation.md`) describes the steps,
+//! their artifacts and how the world around them is verified.
 //!
 //! # Layout
 //!

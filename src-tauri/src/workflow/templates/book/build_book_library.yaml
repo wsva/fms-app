@@ -1,4 +1,4 @@
-# Book (reading library) workflow — a workflow.yaml definition (see workflow.md).
+# Book (reading library) workflow — a workflow.yaml definition (see docs/design/workflow/core.md).
 #
 # App BUILT-IN template, baked into the binary via `include_str!` (see
 # `src-tauri/src/workflow/templates.rs`) under the `book` category and served to
