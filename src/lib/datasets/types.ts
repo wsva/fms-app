@@ -37,6 +37,53 @@ export interface DatasetDetail {
   status: DatasetStatus;
 }
 
+/** One file a check flagged, with the reason shown next to it. */
+export interface AuditFinding {
+  /** Media-relative source, e.g. `a/b.mp3` — the name every layer agrees on. */
+  source: string;
+  detail: string;
+}
+
+/**
+ * One read-only consistency check from `dataset_audit`. `count` is the exact
+ * number of offenders; `items` is capped at 100, hence `truncated`.
+ */
+export interface AuditCheck {
+  id: string;
+  label: string;
+  /** `problem` blocks the pipeline, `warn` is drift, `info` is context. */
+  level: "problem" | "warn" | "info" | "clean";
+  count: number;
+  items: AuditFinding[];
+  truncated: boolean;
+  advice: string;
+  /** Template step id that repairs it, when one does. */
+  fix_step?: string | null;
+  fix_label?: string | null;
+}
+
+/** The six booleans the template's `when:` guards evaluate. */
+export interface AuditFacts {
+  has_media: boolean;
+  has_subtitles: boolean;
+  has_waveforms: boolean;
+  has_database: boolean;
+  has_book: boolean;
+  has_transcript: boolean;
+}
+
+export interface DatasetAudit {
+  dataset_uuid: string;
+  path: string;
+  info: DatasetInfo;
+  facts: AuditFacts;
+  media_on_disk: number;
+  media_in_db: number;
+  subtitles_in_db: number;
+  cues_in_db: number;
+  checks: AuditCheck[];
+}
+
 export interface DatasetProgressEvt {
   uuid: string;
   current_file: string;

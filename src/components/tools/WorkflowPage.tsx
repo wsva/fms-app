@@ -8,9 +8,10 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import { isTauri } from "@/lib/tauri";
 import {
   type DatasetSummary,
-  type DatasetDetail,
+  type DatasetAudit,
   type DatasetInfo,
   type DatasetProgressEvt,
+  type AuditCheck,
   btnSmPrimary,
   btnSmSecondary,
   btnSmDanger,
@@ -36,7 +37,8 @@ import type { CardDatasetSummary } from "@/lib/types";
 import {
   RefreshCw, Workflow as WorkflowIcon, Play, RotateCcw, SkipForward, Check, Copy, Send, Plus,
   FileJson, Save, Eye, Pencil, FolderOpen, Trash2, X, ListChecks,
-  Headphones, BookOpen, Layers, type LucideIcon,
+  Headphones, BookOpen, Layers, AlertTriangle, ChevronDown, ChevronRight, Info,
+  type LucideIcon,
 } from "lucide-react";
 
 // react-flow touches browser layout APIs on mount; keep it out of the SSG pass.
@@ -191,6 +193,14 @@ const FACT_LABELS: Array<[keyof DatasetFacts, string]> = [
   ["hasTranscript", "Transcript"],
 ];
 
+/** Severity → glyph and colour, so the report can be read at a glance. */
+const AUDIT_LEVEL_STYLE: Record<AuditCheck["level"], { icon: LucideIcon; cls: string }> = {
+  problem: { icon: AlertTriangle, cls: "text-error-text" },
+  warn: { icon: AlertTriangle, cls: "text-warning-text" },
+  info: { icon: Info, cls: "text-info-text" },
+  clean: { icon: Check, cls: "text-success-text" },
+};
+
 // Wiki-style bar chrome: full-width stacked bars, ghost buttons that only
 // change background on hover (see WikiPage / DictationPage for the same pattern).
 const toolBtn =
@@ -215,6 +225,8 @@ export default function WorkflowPage() {
   const [loadingDatasets, setLoadingDatasets] = useState(false);
 
   const [facts, setFacts] = useState<DatasetFacts | null>(null);
+  // The full audit the scan produced: per-check findings for the Scan result panel.
+  const [audit, setAudit] = useState<DatasetAudit | null>(null);
   // Local projection placeholder used only until a run exists on disk.
   const [committed, setCommitted] = useState<StatusMap>(() => initialStatuses([]));
   // Authoritative engine statuses once a run exists (drives the graph + inspector).
@@ -334,6 +346,7 @@ export default function WorkflowPage() {
   // without touching `committed` — the caller sets that via loadTemplateDoc.
   const resetRunView = () => {
     setFacts(null);
+    setAudit(null);
     setEngineView(null);
     setRunMeta(null);
     setSelectedId(null);
@@ -466,19 +479,22 @@ export default function WorkflowPage() {
   }, [appendLog]);
 
   // ---- Probe on-disk facts + read info.json (does not touch the engine) ----
-  const probeDataset = useCallback(async (uuid: string) => {
-    const detail = await invoke<DatasetDetail>("dataset_get", { uuid });
-    const probed: DatasetFacts = {
-      hasMedia: (detail.media?.length ?? 0) > 0,
-      hasSubtitles: !!detail.has_subtitles,
-      hasDatabase: !!detail.has_database,
-      hasWaveforms: !!detail.has_waveforms,
-      hasBook: !!detail.has_book,
-      hasTranscript: !!detail.media?.some((m) => m.has_transcript),
-    };
-    setFacts(probed);
-    setInfoText(JSON.stringify(detail.info, null, 2));
-    return probed;
+  // One command does the whole reconciliation: `dataset_audit` walks media/,
+  // subtitle/, waveform/ and transcript/ against the rows in data.sqlite3 and
+  // returns the guards' facts, info.json and every finding with its repair step.
+  const probeDataset = useCallback(async (uuid: string): Promise<DatasetAudit> => {
+    const report = await invoke<DatasetAudit>("dataset_audit", { uuid });
+    setFacts({
+      hasMedia: report.facts.has_media,
+      hasSubtitles: report.facts.has_subtitles,
+      hasDatabase: report.facts.has_database,
+      hasWaveforms: report.facts.has_waveforms,
+      hasBook: report.facts.has_book,
+      hasTranscript: report.facts.has_transcript,
+    });
+    setAudit(report);
+    setInfoText(JSON.stringify(report.info, null, 2));
+    return report;
   }, []);
 
   // Probe the dataset's on-disk facts, reset the local projection, then pull the
@@ -490,12 +506,19 @@ export default function WorkflowPage() {
     setScanning(true);
     setNotice("");
     try {
-      await probeDataset(uuid);
+      const report = await probeDataset(uuid);
       setCommitted(initialStatuses(defs));
       const live = await refreshEngine(runIdFor(uuid), uuid);
-      setNotice(live
-        ? "Scanned. The graph reflects the workflow run state."
-        : "Scanned the dataset. Run any step to start its workflow run.");
+      // Lead with what needs doing: a scan that only says "done" is not actionable.
+      const blocking = report.checks.filter((c) => c.level === "problem").length;
+      const drift = report.checks.filter((c) => c.level === "warn").length;
+      setNotice(
+        blocking || drift
+          ? `Audit found ${blocking} blocking and ${drift} warning-level issue(s) — the Scan result panel names the files and the step that fixes each one.`
+          : live
+            ? "Audit is clean. The graph reflects the workflow run state."
+            : "Audit is clean. Run any step to start its workflow run.",
+      );
     } catch (e) {
       appendLog(`scan failed: ${String(e)}`, "ERROR");
       setNotice(`Scan failed: ${String(e)}`);
@@ -1168,26 +1191,29 @@ export default function WorkflowPage() {
                       </span>
                     </div>
                     {facts ? (
-                      <div className="flex flex-wrap gap-1.5">
-                        {FACT_LABELS.map(([key, label]) => {
-                          const present = facts[key];
-                          return (
-                            <span
-                              key={key}
-                              className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full ${
-                                present ? "bg-success-bg text-success-text" : "bg-bg-muted text-text-tertiary"
-                              }`}
-                              title={present ? "present on disk" : "missing on disk — steps guarded by it are skipped"}
-                            >
-                              {present ? <Check size={11} /> : <X size={11} />}
-                              {label}
-                            </span>
-                          );
-                        })}
+                      <div className="flex flex-col gap-2">
+                        <div className="flex flex-wrap gap-1.5">
+                          {FACT_LABELS.map(([key, label]) => {
+                            const present = facts[key];
+                            return (
+                              <span
+                                key={key}
+                                className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full ${
+                                  present ? "bg-success-bg text-success-text" : "bg-bg-muted text-text-tertiary"
+                                }`}
+                                title={present ? "present on disk" : "missing on disk — steps guarded by it are skipped"}
+                              >
+                                {present ? <Check size={11} /> : <X size={11} />}
+                                {label}
+                              </span>
+                            );
+                          })}
+                        </div>
+                        {audit && <AuditChecks key={audit.dataset_uuid} audit={audit} />}
                       </div>
                     ) : (
                       <p className="text-xs text-text-tertiary leading-relaxed">
-                        Press “Scan status” to probe this dataset’s media, subtitles, waveforms, cue DB, book text and transcripts.
+                        Press “Scan status” to reconcile media/, subtitle/, waveform/ and transcript/ against the rows in data.sqlite3.
                       </p>
                     )}
                   </section>
@@ -1512,5 +1538,114 @@ function FieldRow({ field, value, disabled, onChange, pickDir }: FieldRowProps) 
       <span>{field.label}</span>
       <input className={cls} placeholder={field.placeholder} value={String(value)} disabled={disabled} onChange={(e) => onChange(e.target.value)} />
     </label>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Scan result — the audit report
+// ---------------------------------------------------------------------------
+
+interface AuditChecksProps {
+  audit: DatasetAudit;
+}
+
+/**
+ * The `dataset_audit` report: one row per check, severity-ordered, with the
+ * exact offender count in the header and the offending files behind an expander.
+ * Purely informational — a finding neither completes its step nor links to it;
+ * the advice text names the workflow step in words, and the graph above keeps
+ * reflecting the run state instead of wishes about what is on disk.
+ */
+function AuditChecks({ audit }: AuditChecksProps) {
+  const [showPassed, setShowPassed] = useState(false);
+  const flagged = audit.checks.filter((c) => c.level !== "clean");
+  const passed = audit.checks.filter((c) => c.level === "clean");
+  const blocking = flagged.filter((c) => c.level === "problem").length;
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="text-[10px] text-text-tertiary leading-snug">
+        {audit.media_on_disk} media file(s) on disk · {audit.media_in_db} registered · {audit.subtitles_in_db} subtitle(s) · {audit.cues_in_db} current cue(s)
+      </div>
+
+      <div className="text-[11px] font-medium text-text-secondary">
+        {flagged.length
+          ? `${flagged.length} of ${audit.checks.length} checks flagged${blocking ? ` · ${blocking} blocking` : ""}`
+          : `All ${audit.checks.length} checks passed`}
+      </div>
+
+      {flagged.map((c) => (
+        <AuditCheckRow key={c.id} check={c} />
+      ))}
+
+      {passed.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <button
+            className="flex items-center gap-1.5 text-[11px] text-text-tertiary hover:text-text-secondary cursor-pointer"
+            onClick={() => setShowPassed((s) => !s)}
+          >
+            {showPassed ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+            <Check size={11} className="text-success-text" />
+            {passed.length} check(s) passed
+          </button>
+          {showPassed && (
+            <div className="flex flex-wrap gap-1 pl-4">
+              {passed.map((c) => (
+                <span key={c.id} className="text-[10px] px-1.5 py-0.5 rounded bg-bg-muted text-text-tertiary" title={c.advice}>
+                  {c.label}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AuditCheckRow({ check }: { check: AuditCheck }) {
+  const [open, setOpen] = useState(false);
+  const { icon: Icon, cls } = AUDIT_LEVEL_STYLE[check.level];
+
+  return (
+    <div className="rounded-md border border-border-light bg-bg-body/60">
+      <div className="flex items-center gap-1.5 px-2 py-1">
+        <Icon size={12} className={`shrink-0 ${cls}`} />
+        <button
+          className="flex items-center gap-1.5 min-w-0 flex-1 text-left cursor-pointer"
+          onClick={() => setOpen((o) => !o)}
+          title={open ? "Collapse this check" : "Show the advice and the affected files"}
+        >
+          <ChevronRight size={11} className={`shrink-0 text-text-tertiary transition-transform ${open ? "rotate-90" : ""}`} />
+          <span className="text-[11px] text-text-primary truncate">{check.label}</span>
+          <span className={`ml-auto shrink-0 text-[11px] font-semibold ${cls}`}>{check.count > 0 ? check.count : "ok"}</span>
+        </button>
+      </div>
+
+      {/* Collapsed rows carry just the first finding as a teaser, so the panel
+          stays scannable while still naming a concrete file. */}
+      {!open && check.items.length > 0 && (
+        <p className="px-2 pb-1.5 text-[10px] text-text-tertiary truncate" title={check.items[0].detail}>
+          <span className="font-mono">{check.items[0].source}</span> — {check.items[0].detail}
+        </p>
+      )}
+
+      {open && (
+        <div className="px-2 pb-1.5 pt-0.5 flex flex-col gap-1 border-t border-border-light">
+          <p className="text-[11px] text-text-secondary leading-relaxed">{check.advice}</p>
+          {check.items.map((it, i) => (
+            <div key={`${check.id}-${i}`} className="text-[10px] leading-snug">
+              <span className="font-mono text-text-primary break-all">{it.source}</span>
+              <span className="text-text-tertiary"> — {it.detail}</span>
+            </div>
+          ))}
+          {check.truncated && (
+            <p className="text-[10px] text-text-tertiary">
+              {check.count} in total — the report lists the first {check.items.length}. Fix those and re-scan for the rest.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
