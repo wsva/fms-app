@@ -824,6 +824,32 @@ fn symlink_file(src: &Path, dst: &Path) -> Result<(), String> {
     std::os::unix::fs::symlink(src, dst).map_err(|e| format!("Failed to symlink: {}", e))
 }
 
+/// Bootstrap a dictation dataset's `data.sqlite3` so it exists from creation:
+/// open the file, run the schema, and register any media already on disk as
+/// `listen_media` rows. **No-op when the DB already exists**, so it never
+/// clobbers a fully generated database and is safe on the idempotent init path.
+/// Subtitle/cue import still happens later via `dataset_generate_database`.
+fn ensure_dataset_db(dataset_dir: &Path) -> Result<(), String> {
+    let db_path = dataset_dir.join("data.sqlite3");
+    if db_path.exists() {
+        return Ok(());
+    }
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    create_db_schema(&conn)?;
+    let media_dir = dataset_dir.join("media");
+    let now = Utc::now().to_rfc3339();
+    for mf in list_media_files(&media_dir) {
+        let file_path = Path::new(&mf.path);
+        conn.execute(
+            "INSERT INTO listen_media (uuid, source, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![Uuid::new_v4().to_string(), rel_source_string(&media_dir, file_path), now, now],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    log::info!("Bootstrapped database at '{}'", db_path.display());
+    Ok(())
+}
+
 /// Create a new empty dataset directory skeleton (media/, subtitle/, waveform/,
 /// transcript/) plus an info.json under a configured dataset location.
 #[tauri::command]
@@ -874,6 +900,7 @@ pub async fn dataset_create(
     );
     info.description = description.unwrap_or_default();
     write_info(&dst, &info)?;
+    ensure_dataset_db(&dst)?;
 
     log::info!("Created dataset '{}' at '{}'", trimmed, dst.display());
     Ok(DatasetSummary {
@@ -934,6 +961,10 @@ pub async fn dataset_init_dir(
         );
         fresh
     };
+
+    // Ensure the dataset has its SQLite database from the start (no-op if one is
+    // already present), registering any media already in the folder.
+    ensure_dataset_db(&dir)?;
 
     Ok(DatasetSummary {
         info,

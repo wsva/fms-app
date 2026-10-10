@@ -26,32 +26,23 @@ steps:
       - model_version
     retry: { attempts: 2, backoff: "30s" }
 
-  # ── Stage 1: dataset skeleton ───────────────────────────────────────────────
-  - id: create_dataset
+  # ── Stage 1: initialize the dataset (create + media in one step) ────────────
+  - id: init_dataset
     description: >-
-      Create the empty dictation dataset (dataset_import instead, if the directory
-      already exists with an info.json).
-    action: dataset_create
+      Initialize an existing raw media folder IN PLACE as a dictation dataset:
+      mint a uuid, write info.json, and bootstrap data.sqlite3 (registering the
+      media already on disk). Replaces the former create_dataset + import_media
+      pair — the folder's own media IS the import, so no separate import step.
+      (dataset_create remains the primitive for an empty dataset from a typed
+      name; use it here only when the folder has no media yet.)
+    action: dataset_init_dir
     params:
-      name: "my_dictation"
-      description: "Dictation dataset processed by workflow"
+      path: "C:/path/to/dataset_folder"   # EDIT: a folder already holding media/
     outputs:
       - dataset_uuid
-
-  - id: import_media
-    description: Import audio/video files from a source directory into the dataset.
-    action: dataset_import_media
-    depends_on:
-      - create_dataset
-    inputs:
-      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
-    params:
-      source_dir: "C:/path/to/audio"   # EDIT: your media folder
-      link: false                      # true = symlink instead of copy
-    outputs:
       - media_count
 
-  # ── Stage 2: two independent artifact branches off import_media ─────────────
+  # ── Stage 2: two independent artifact branches off init_dataset ─────────────
   - id: generate_subtitles
     description: >-
       STT-transcribe every media file into VTT subtitles (long-running; progress via
@@ -59,29 +50,29 @@ steps:
     action: dataset_generate_subtitles
     depends_on:
       - ensure_model
-      - import_media
+      - init_dataset
     inputs:
-      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     retry: { attempts: 2, backoff: "1m" }
 
   - id: generate_waveforms
     description: Generate waveform JSON for all media via Symphonia peak detection.
     action: dataset_generate_waveforms
     depends_on:
-      - import_media
+      - init_dataset
     inputs:
-      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
 
   # ── Stage 3: cue database ───────────────────────────────────────────────────
   - id: generate_database
     description: >-
-      Parse the VTT subtitles and write listen_media / listen_subtitle /
-      listen_subtitle_cue into data.sqlite3.
+      Rebuild data.sqlite3 (bootstrapped at init_dataset) from scratch: parse the
+      VTT subtitles and write listen_media / listen_subtitle / listen_subtitle_cue.
     action: dataset_generate_database
     depends_on:
       - generate_subtitles
     inputs:
-      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
 
   # ── Stage 4: optional text alignment (guarded by reference material) ────────
   - id: detect_reference
@@ -92,7 +83,7 @@ steps:
     depends_on:
       - generate_database
     inputs:
-      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     outputs:
       - has_book
       - has_transcript
@@ -104,7 +95,7 @@ steps:
       - detect_reference
     when: "${steps.detect_reference.outputs.has_book}"
     inputs:
-      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
 
   - id: align_cues_transcript
     description: Align cue text against per-subtitle files in transcript/ instead.
@@ -113,7 +104,7 @@ steps:
       - detect_reference
     when: "${steps.detect_reference.outputs.has_transcript}"
     inputs:
-      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
 
   # ── Stage 5: cue-time refinement (independent of text alignment) ────────────
   - id: adjust_cue_times
@@ -124,7 +115,7 @@ steps:
     depends_on:
       - generate_database
     inputs:
-      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     params:
       mode: "new"
       strategy: "noise_floor"          # or: dual_bound | peak_relative | otsu
@@ -142,7 +133,7 @@ steps:
       - align_cues_transcript
       - adjust_cue_times
     inputs:
-      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     on_failure: stop
 
   # ── Stage 7: done ───────────────────────────────────────────────────────────
@@ -154,6 +145,6 @@ steps:
     depends_on:
       - validate
     inputs:
-      dataset_uuid: "${steps.create_dataset.outputs.dataset_uuid}"
+      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     params:
       description: "Processed: subtitles + waveforms + cue DB generated and validated."
