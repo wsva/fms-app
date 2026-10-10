@@ -74,6 +74,9 @@ src-tauri/src/
 │   │   └── sync.rs         # Bidirectional card dataset sync (last-write-wins, per-dataset sync_state)
 │   ├── book.rs             # Book chapters/sentences/words and their audio
 │   ├── read_aloud.rs       # Read-aloud datasets: recorded takes, STT scoring, XP awards
+│   ├── report.rs           # The whole read-only picture of one dataset in one call: identity,
+│   │                       #   audit, every workflow run scored against it, STT model state,
+│   │                       #   actionable hint (`dataset_full_report`) — desktop
 │   ├── tools.rs            # Book splitting (`dataset_parse_book`, Rust or bundled `split_book.py`
 │   │                       #   via NLTK), Python script execution (`write_transcripts.py`) — desktop
 │   └── textsim.rs          # Ratcliff-Obershelp similarity, shared by align + read_aloud
@@ -104,8 +107,9 @@ src-tauri/src/
 ├── mcp/                    # Built-in MCP server (rmcp), nested at `/mcp` — desktop
 │   ├── mod.rs              # `DatasetMcpServer`, params shared by 2+ domains, `tool_router()`
 │   │                       #   merging the domain routers, `ServerHandler` impl, `create_mcp_service()`
-│   ├── datasets.rs         # dataset discovery/CRUD + subtitle & waveform pipeline (24 tools)
-│   │                       #   `dataset_audit` is subject-only — per-step reading is `workflow_verify`/`workflow_adopt`
+│   ├── datasets.rs         # dataset discovery/CRUD + subtitle & waveform pipeline (25 tools)
+│   │                       #   `dataset_audit` is subject-only — per-step reading is `workflow_verify`/`workflow_adopt`;
+│   │                       #   `dataset_full_report` composes audit + runs + model state for one call
 │   ├── dictation.rs        # cue adjust/align, dictation progress, favourites, subtitle versions (15)
 │   ├── cards.rs            # card CRUD, tags, FTS5 search, SM-2 review, online sync (24)
 │   ├── books.rs            # book chapters/sentences/words + read-aloud texts & scoring (24)

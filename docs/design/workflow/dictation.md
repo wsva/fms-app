@@ -29,6 +29,8 @@ engine does not honour.
 | The join itself (verdicts, invalidation) | `src-tauri/src/workflow/core/mod.rs::verify` → `workflow_verify` command + MCP tool |
 | Adoption (clean evidence ⇒ `completed`, the one upward move) | `src-tauri/src/workflow/core/mod.rs::adopt` → `workflow_adopt` command + MCP tool |
 | Refreshing a run's definition, while and only while its whole history was inherited | `src-tauri/src/workflow/core/mod.rs::{history_is_inherited_only, rebind_definition}`, called from `verify.rs::adopt` |
+| The one call an agent starts from: identity + audit + every run scored against it + model state + a hint | `src-tauri/src/datasets/report.rs` → `dataset_full_report` MCP tool (read-only: scores with `apply: false`, so it describes drift and adopts nothing) |
+| The recipe that drives this pipeline from goose | `docs/ai/goose_recipe/dataset_dictation.md` |
 | Rendering the verdicts | `src/lib/workflow/verify.ts` (labels and sentences only — no ids) |
 | In-app Run buttons per step | `src/lib/workflow/step-ops.ts` (`STEP_OPS`, keyed by step id) |
 | Client mirror of the engine's readiness rules | `src/lib/workflow/steps.ts` (parses the YAML, evaluates `when` against probed facts) |
@@ -403,5 +405,5 @@ contradicting each other.
 
 - Should the unbound checks (`cue_sanity`, `subtitle_versions`, …) be asserted as a workflow-level `report_only:` list, instead of being an accident of the code — the one place where "no step owns this" becomes documentation?
 - ~~Stale runs~~ answered by construction: an old run's stored YAML has no bindings, so it reports every step `unknown` and nothing is invented for it.
-- Cost: one scan walks the dataset **twice** — `dataset_audit` for the report, then `workflow_verify`, whose provider runs the same audit to build its evidence map. Fine interactively at today's sizes, but the right fix is to pass the counts in (or memoize per probe), not to make the audit cheaper. Would a `verify:` gate inside `next()` be worth that restructure?
+- Cost: one scan walks the dataset **twice** — `dataset_audit` for the report, then `workflow_verify`, whose provider runs the same audit to build its evidence map. `dataset_full_report` inherits the shape (one audit for its own section, one more per run it scores), so a dataset with one run still costs two walks. Fine interactively at today's sizes, but the right fix is to pass the counts in (or memoize per probe), not to make the audit cheaper. Would a `verify:` gate inside `next()` be worth that restructure?
 - Invalidation is shallow by design: `recompute` never demotes a `completed` dependent, so sending `sync_media` back to `ready` leaves its downstream steps `completed`. Correct (their own outputs may still exist), or should a demotion mark dependents `blocked`?

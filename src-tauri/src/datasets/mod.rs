@@ -19,6 +19,8 @@ pub(crate) mod read_aloud;
 pub(crate) mod textsim;
 pub(crate) mod wiki;
 #[cfg(feature = "desktop")]
+pub(crate) mod report;
+#[cfg(feature = "desktop")]
 pub(crate) mod tools;
 
 use std::fs;

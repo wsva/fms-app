@@ -580,6 +580,16 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
     }
 
+    #[tool(name = "dataset_full_report", description = "START HERE for any dataset work: one read-only call returning the whole picture. (1) `dataset` - identity, kind, path and the full info.json. (2) `audit` - the six when-guard facts, inventory counts (media on disk vs in the DB, subtitles, cues) and every named check with its offender count, offending files and advice; `available: false` with the reason for kinds that have no provider yet. (3) `workflow` - every run recorded inside the dataset, each scored against that audit: per-step status, verdict (verified / drifted / unknown), ready / blocked / failed lists, the engine's hints, and `next` = the runnable steps with their action and params already resolved. (4) `stt_model` - loaded / selected / default version and its hint, the prerequisite subtitle generation needs. (5) `hint` - one actionable sentence naming the next call. Writes NOTHING: runs are scored with apply=false, so drift is described but not repaired and no step is adopted - use workflow_verify(apply=true) and workflow_adopt for those, since they own the event. Prefer this over calling dataset_get + dataset_audit + workflow_list + workflow_verify + model_status separately.")]
+    async fn dataset_full_report(
+        &self,
+        Parameters(param): Parameters<UuidParam>,
+    ) -> Result<String, String> {
+        log::info!("[MCP] dataset_full_report: uuid={}", param.uuid);
+        let report = datasets::report::full_report(&self.app, &param.uuid).await?;
+        Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
+    }
+
     async fn dataset_info_save(&self, Parameters(param): Parameters<DatasetInfoSaveParam>) -> Result<String, String> {
         log::info!("[MCP] dataset_info_save: uuid={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
