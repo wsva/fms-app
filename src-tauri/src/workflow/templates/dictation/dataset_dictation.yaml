@@ -144,6 +144,7 @@ steps:
     action: dataset_adjust_cue_time
     depends_on:
       - generate_subtitles
+      - generate_waveforms
     inputs:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     params:
