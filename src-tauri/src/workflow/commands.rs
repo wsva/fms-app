@@ -122,3 +122,12 @@ pub async fn workflow_intervene(
 ) -> Result<Value, String> {
     crate::workflow::intervene(settings.inner(), dataset_uuid.as_deref(), &run_id, &step, &op)
 }
+
+/// List the built-in workflow templates shipped with the app (e.g. the Dataset
+/// Dictation pipeline), each with its parsed `id`/`name`/`version` metadata and
+/// raw `workflow.yaml` text. Static data baked into the binary at compile time
+/// (see `workflow/templates.rs`), so this needs no settings or run scoping.
+#[tauri::command]
+pub async fn workflow_builtin_templates() -> Result<Value, String> {
+    crate::workflow::builtin_templates()
+}

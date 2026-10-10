@@ -1,5 +1,11 @@
 # Dictation dataset processing workflow — a workflow.yaml definition (see workflow.md).
 #
+# This is the app's BUILT-IN template, shipped in the binary via `include_str!`
+# (see `src-tauri/src/workflow/templates.rs`) and served to the Workflow page and
+# the `workflow_builtin_templates` MCP tool as the single source of truth for the
+# Dictation pipeline — it replaces the former duplicate copies that lived in
+# `docs/ai/workflow/` and the frontend's `seed.ts`.
+#
 # One illustrative *instance* of the generic framework: it takes raw audio, produces
 # subtitles / waveforms / the cue database, then aligns and adjusts cue times into a
 # practice-ready dictation dataset.
@@ -9,13 +15,17 @@
 # `workflow_next` hands the agent the step, the agent calls the tool, then reports back
 # with `workflow_record`. Skipped steps satisfy their dependents by default, so the
 # optional align branches may both skip cleanly.
+#
+# `title` is a UI-only short label for the Workflow page's graph nodes; the engine
+# ignores unknown fields, so it is safe (and expected) to keep it here.
 
 name: process_dictation_dataset
-version: 1
+version: 2
 
 steps:
   # ── Stage 0: STT model readiness ────────────────────────────────────────────
   - id: ensure_model
+    title: Ensure STT model
     description: >-
       Check model_status; if the preferred model is not downloaded, model_download it,
       then model_load it. transcribe steps below fail without a loaded model.
@@ -28,6 +38,7 @@ steps:
 
   # ── Stage 1: initialize the dataset in place (uuid + info.json + empty DB) ──
   - id: init_dataset
+    title: Initialize dataset
     description: >-
       Initialize an existing raw media folder IN PLACE as a dictation dataset:
       mint a uuid, write info.json, and create an EMPTY data.sqlite3 (schema only).
@@ -44,6 +55,7 @@ steps:
 
   # ── Stage 1b: reconcile the DB's media inventory with the files on disk ────
   - id: sync_media
+    title: Sync media
     description: >-
       Reconcile listen_media with the files under media/ in place: INSERT a row
       for every media file not yet in the table and DELETE rows whose media file
@@ -64,6 +76,7 @@ steps:
 
   # ── Stage 2: two independent artifact branches off sync_media ──────────────
   - id: generate_subtitles
+    title: Generate subtitles
     description: >-
       STT-transcribe every media file into VTT subtitles (long-running; progress via
       dataset progress events) AND import them into data.sqlite3: an active
@@ -79,6 +92,7 @@ steps:
     retry: { attempts: 2, backoff: "1m" }
 
   - id: generate_waveforms
+    title: Generate waveforms
     description: Generate waveform JSON for all media via Symphonia peak detection.
     action: dataset_generate_waveforms
     depends_on:
@@ -92,6 +106,7 @@ steps:
 
   # ── Stage 3: optional text alignment (guarded by reference material) ────────
   - id: detect_reference
+    title: Detect reference
     description: >-
       List dataset files to see whether book.txt and/or transcript/ exist; record
       "true"/"false" in the outputs so the guards below can skip cleanly.
@@ -105,6 +120,7 @@ steps:
       - has_transcript
 
   - id: align_cues
+    title: Align cues (book)
     description: Align cue text against book.txt with multi-pass anchor DP matching.
     action: dataset_align_cues
     depends_on:
@@ -114,6 +130,7 @@ steps:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
 
   - id: align_cues_transcript
+    title: Align cues (transcript)
     description: Align cue text against per-subtitle files in transcript/ instead.
     action: dataset_align_cues_transcript
     depends_on:
@@ -124,6 +141,7 @@ steps:
 
   # ── Stage 4: cue-time refinement (independent of text alignment) ────────────
   - id: adjust_cue_times
+    title: Adjust cue times
     description: >-
       Snap cue boundaries to silence detected in the audio. mode=new writes adjusted
       cues alongside the originals; re-run with force=true only deliberately.

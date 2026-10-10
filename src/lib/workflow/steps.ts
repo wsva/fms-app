@@ -11,12 +11,14 @@
 //
 // The DAG itself is NOT hardcoded here: it is parsed from `workflow.yaml`-shaped
 // text (`parseDefinition`), so the Workflow page's editor can drive any pipeline.
-// Every layout/engine helper takes the parsed `steps` as a parameter.
+// Every layout/engine helper takes the parsed `steps` as a parameter. The one
+// built-in pipeline ("Dataset Dictation") is no longer duplicated in this repo's
+// frontend either — it ships in the Rust binary (`src-tauri/src/workflow/
+// templates/dataset_dictation.yaml`, served via `workflow_builtin_templates`),
+// so the page fetches it at runtime instead of importing a seed string.
 // ---------------------------------------------------------------------------
 
 import { load as loadYaml } from "js-yaml";
-
-import { DICTATION_YAML } from "./seed";
 
 /** The seven step states, mirroring `workflow::core::Status`. */
 export type StepStatus =
@@ -187,21 +189,6 @@ export function parseDefinition(yamlText: string): WorkflowDefinition {
     steps,
   };
 }
-
-/** The bundled Dataset Dictation definition, parsed from its seed YAML. */
-export const DICTATION_PARSED: WorkflowDefinition = parseDefinition(DICTATION_YAML);
-
-/** Re-exported so the editor has a single import surface for the seed text. */
-export { DICTATION_YAML };
-
-/** Steps of the bundled dictation workflow — the editor's default document. */
-export const DICTATION_STEPS: StepDef[] = DICTATION_PARSED.steps;
-
-export const DICTATION_DEFINITION = {
-  name: DICTATION_PARSED.name,
-  version: DICTATION_PARSED.version,
-  yamlPath: "docs/ai/workflow/dataset_dictation.yaml",
-};
 
 /** Look a step up by id within a step list. */
 export function stepById(id: string, steps: StepDef[]): StepDef | undefined {

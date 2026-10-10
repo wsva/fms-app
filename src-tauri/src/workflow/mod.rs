@@ -29,10 +29,15 @@ pub(crate) mod core;
 /// drive the same engine in-app. Desktop-only (registered only in the desktop
 /// handler list), matching the engine + MCP surface.
 pub(crate) mod commands;
+/// Built-in workflow templates (e.g. the Dataset Dictation pipeline) baked into
+/// the binary via `include_str!` — the single source of truth for what the
+/// Workflow page and the `workflow_builtin_templates` MCP tool seed a new run
+/// with, replacing the former duplicate `docs/ai/workflow/` + `seed.ts` copies.
+pub(crate) mod templates;
 
 use std::path::PathBuf;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::settings::SettingsState;
 
@@ -132,4 +137,27 @@ pub(crate) fn intervene(
     op: &str,
 ) -> Result<Value, String> {
     core::intervene(&run_base(settings, dataset_uuid)?, run_id, step_id, op)
+}
+
+// ---------------------------------------------------------------------------
+// Built-in templates
+// ---------------------------------------------------------------------------
+
+/// List every built-in template shipped in the binary, each parsed once for its
+/// `name`/`version` metadata alongside its raw YAML text (so the frontend and
+/// an agent get the exact same definition, no second source of truth).
+pub(crate) fn builtin_templates() -> Result<Value, String> {
+    let mut out = Vec::new();
+    for (id, yaml) in templates::all() {
+        let def: core::Definition = serde_yaml::from_str(yaml)
+            .map_err(|e| format!("built-in template '{id}' failed to parse: {e}"))?;
+        out.push(json!({
+            "id": id,
+            "name": def.name,
+            "version": def.version,
+            "step_count": def.steps.len(),
+            "yaml": yaml,
+        }));
+    }
+    Ok(json!({ "templates": out, "count": out.len() }))
 }

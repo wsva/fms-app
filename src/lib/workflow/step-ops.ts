@@ -30,6 +30,9 @@ export interface FormField {
 /** Everything a step's `run`/`gate` needs, supplied by the page. */
 export interface RunCtx {
   uuid: string;
+  /** Selected dataset's own folder path (raw folder before init, or the
+   *  initialized dataset's dir). Powers the `init_dataset` step. */
+  path: string;
   /** Selected dataset's info.json name / description (for prefill + update). */
   name: string;
   description: string;
@@ -69,6 +72,45 @@ const needDataset = (ctx: RunCtx) => (ctx.uuid ? undefined : "Select or initiali
 const has = (ctx: RunCtx, key: keyof DatasetFacts) => !!ctx.facts?.[key];
 
 export const STEP_OPS: Record<string, StepOp> = {
+  // Initialize a raw media folder IN PLACE as a dictation dataset (mint a uuid,
+  // write info.json, create an empty data.sqlite3) — the head of the built-in
+  // pipeline. Unlike every other step this one has no dataset to act on yet: it
+  // consumes the *selected folder's path* (raw, no uuid) instead, which is why
+  // the gate keys off `path` rather than `needDataset`. Idempotent on the
+  // backend, so re-running after init just returns the existing summary.
+  init_dataset: {
+    runLabel: "Initialize",
+    formFields: [
+      { name: "path", label: "Folder path", type: "text", placeholder: "C:/path/to/dataset_folder" },
+    ],
+    defaults: (ctx) => ({ path: ctx.path }),
+    gate: (ctx) => (ctx.path ? undefined : "Select a raw media folder (no info.json yet) first."),
+    run: (ctx) => ({
+      command: "dataset_init_dir",
+      args: { path: String(ctx.form.path ?? ctx.path) },
+    }),
+    outputs: (r) => {
+      const d = r as { info?: { uuid?: string }; media_count?: number };
+      return { dataset_uuid: d?.info?.uuid, media_count: d?.media_count };
+    },
+    emitListChanged: true,
+    reloadAfter: true,
+  },
+
+  // Reconcile listen_media with the files under media/ in place — the cheap,
+  // non-destructive alternative to a full dataset_generate_database rebuild.
+  sync_media: {
+    runLabel: "Sync",
+    formFields: [],
+    gate: needDataset,
+    run: (ctx) => ({ command: "dataset_sync_media", args: { uuid: ctx.uuid } }),
+    outputs: (r) => {
+      const d = r as { added_count?: number; removed_count?: number };
+      return { added_count: d?.added_count ?? 0, removed_count: d?.removed_count ?? 0 };
+    },
+    reloadAfter: true,
+  },
+
   // Metadata of the selected dataset (Studio's "Edit Dataset"). Brand-new empty
   // datasets are still created from Studio (kept until removed) or the raw-folder
   // "Initialize" flow in this page's header.
@@ -337,7 +379,7 @@ export const STEP_OPS: Record<string, StepOp> = {
 };
 
 /** A safe, dataset-less context used only to enumerate command names statically. */
-const ENUM_CTX: RunCtx = { uuid: "", name: "", description: "", facts: null, form: {} };
+const ENUM_CTX: RunCtx = { uuid: "", path: "", name: "", description: "", facts: null, form: {} };
 
 /** Every Tauri command the registry can dispatch — powers the Add-step list. */
 export const KNOWN_COMMANDS: string[] = Array.from(

@@ -16,8 +16,6 @@ import {
   btnSmDanger,
 } from "@/lib/datasets/types";
 import {
-  DICTATION_YAML,
-  DICTATION_PARSED,
   parseDefinition,
   type WorkflowDefinition,
   type DatasetFacts,
@@ -70,6 +68,18 @@ function summarizeResult(r: unknown): string {
   }
 }
 
+/** One entry from `workflow_builtin_templates`. */
+interface BuiltinTemplate {
+  id: string;
+  name: string;
+  version: number;
+  step_count: number;
+  yaml: string;
+}
+
+/** Placeholder document shown until the built-in template finishes loading. */
+const EMPTY_DEFINITION: WorkflowDefinition = { name: "workflow", version: 1, steps: [] };
+
 export default function WorkflowPage() {
   const [mounted, setMounted] = useState(false);
   const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
@@ -77,7 +87,7 @@ export default function WorkflowPage() {
   const [selectedKey, setSelectedKey] = useState("");
   const [facts, setFacts] = useState<DatasetFacts | null>(null);
   // Local projection placeholder used only until a run exists on disk.
-  const [committed, setCommitted] = useState<StatusMap>(() => initialStatuses(DICTATION_PARSED.steps));
+  const [committed, setCommitted] = useState<StatusMap>(() => initialStatuses([]));
   // Authoritative engine statuses once a run exists (drives the graph + inspector).
   const [engineView, setEngineView] = useState<StatusMap | null>(null);
   const [runMeta, setRunMeta] = useState<{ name: string; version: number; run_status: string } | null>(null);
@@ -85,8 +95,11 @@ export default function WorkflowPage() {
 
   // Workflow document is YAML-driven; `definition` = last-good parse, `parseError` = live.
   const [mode, setMode] = useState<"view" | "edit">("view");
-  const [yamlText, setYamlText] = useState(DICTATION_YAML);
-  const [definition, setDefinition] = useState<WorkflowDefinition>(DICTATION_PARSED);
+  // The built-in "Dataset Dictation" pipeline, fetched once from the Rust binary
+  // (see `workflow/templates.rs`) instead of duplicated as a local seed string.
+  const [builtinYaml, setBuiltinYaml] = useState("");
+  const [yamlText, setYamlText] = useState("");
+  const [definition, setDefinition] = useState<WorkflowDefinition>(EMPTY_DEFINITION);
   const [parseError, setParseError] = useState<string | null>(null);
   const steps = definition.steps;
 
@@ -145,6 +158,29 @@ export default function WorkflowPage() {
   const pushOutput = useCallback((text: string) => {
     setOutputLines((prev) => [...prev.slice(-400), text]);
   }, []);
+
+  // ---- Load the built-in "Dataset Dictation" template once ----
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    invoke<{ templates: BuiltinTemplate[] }>("workflow_builtin_templates")
+      .then((res) => {
+        if (cancelled) return;
+        const tpl = res.templates.find((t) => t.id === "dictation") ?? res.templates[0];
+        if (!tpl) return;
+        setBuiltinYaml(tpl.yaml);
+        try {
+          const def = parseDefinition(tpl.yaml);
+          setYamlText(tpl.yaml);
+          setDefinition(def);
+          setCommitted(initialStatuses(def.steps));
+        } catch (e) {
+          setParseError(e instanceof Error ? e.message : String(e));
+        }
+      })
+      .catch((e) => appendLog(`workflow_builtin_templates failed: ${String(e)}`, "ERROR"));
+    return () => { cancelled = true; };
+  }, [appendLog]);
 
   // ---- Load dictation datasets ----
   const fetchDatasets = useCallback(async (): Promise<DatasetSummary[] | null> => {
@@ -326,11 +362,12 @@ export default function WorkflowPage() {
   // ---- Step context builder for the registry ----
   const buildCtx = useCallback((stepId: string): RunCtx => ({
     uuid: selectedUuid,
+    path: selectedPath,
     name: selectedDataset?.info.name ?? "",
     description: selectedDataset?.info.description ?? "",
     facts,
     form: formState[stepId] ?? {},
-  }), [selectedUuid, selectedDataset, facts, formState]);
+  }), [selectedUuid, selectedPath, selectedDataset, facts, formState]);
 
   // Effective form values = registry defaults overlaid with the user's edits.
   const formValues = useCallback((stepId: string, op?: StepOp): Record<string, string | boolean> => {
@@ -493,7 +530,7 @@ export default function WorkflowPage() {
     }
   };
 
-  const resetYaml = () => applyYaml(DICTATION_YAML);
+  const resetYaml = () => applyYaml(builtinYaml);
 
   const addStep = () => {
     const action = addStepAction || "dataset_get";
