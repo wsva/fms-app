@@ -225,7 +225,13 @@ function parseBlocks(text: string, keyStart = 0): ReactNode[] {
         // GFM table: first line has |, second line is a separator (|---|:---:|)
         if (line.includes("|") && i + 1 < lines.length && /^[\|:\-\s]+$/.test(lines[i + 1].trim())) {
             const parseRow = (l: string): string[] =>
-                l.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+                l.trim()
+                    // Protect GFM-escaped pipes (\|) so they don't act as cell
+                    // delimiters, then restore them as literal '|' in the cell.
+                    .replace(/\\\|/g, "\0")
+                    .replace(/^\||\|$/g, "")
+                    .split("|")
+                    .map(c => c.trim().replace(/\0/g, "|"));
 
             const headerCells = parseRow(line);
             i += 2; // skip header + separator
