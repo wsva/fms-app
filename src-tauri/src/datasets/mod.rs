@@ -824,11 +824,12 @@ fn symlink_file(src: &Path, dst: &Path) -> Result<(), String> {
     std::os::unix::fs::symlink(src, dst).map_err(|e| format!("Failed to symlink: {}", e))
 }
 
-/// Bootstrap a dictation dataset's `data.sqlite3` so it exists from creation:
-/// open the file, run the schema, and register any media already on disk as
-/// `listen_media` rows. **No-op when the DB already exists**, so it never
-/// clobbers a fully generated database and is safe on the idempotent init path.
-/// Subtitle/cue import still happens later via `dataset_generate_database`.
+/// Bootstrap a dictation dataset's `data.sqlite3` so it exists (empty) from
+/// creation: open the file and run the schema. **No-op when the DB already
+/// exists**, so it never clobbers a fully generated database and is safe on the
+/// idempotent init path. Media registration is deliberately NOT done here —
+/// [`dataset_sync_media`] owns reconciling `listen_media` with the files on disk,
+/// and `dataset_generate_database` rebuilds everything from the VTT subtitles.
 fn ensure_dataset_db(dataset_dir: &Path) -> Result<(), String> {
     let db_path = dataset_dir.join("data.sqlite3");
     if db_path.exists() {
@@ -836,17 +837,7 @@ fn ensure_dataset_db(dataset_dir: &Path) -> Result<(), String> {
     }
     let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
     create_db_schema(&conn)?;
-    let media_dir = dataset_dir.join("media");
-    let now = Utc::now().to_rfc3339();
-    for mf in list_media_files(&media_dir) {
-        let file_path = Path::new(&mf.path);
-        conn.execute(
-            "INSERT INTO listen_media (uuid, source, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![Uuid::new_v4().to_string(), rel_source_string(&media_dir, file_path), now, now],
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    log::info!("Bootstrapped database at '{}'", db_path.display());
+    log::info!("Created empty database at '{}'", db_path.display());
     Ok(())
 }
 
@@ -962,8 +953,8 @@ pub async fn dataset_init_dir(
         fresh
     };
 
-    // Ensure the dataset has its SQLite database from the start (no-op if one is
-    // already present), registering any media already in the folder.
+    // Ensure the dataset has its (empty) SQLite database from the start; media
+    // registration is left to `dataset_sync_media` / `dataset_generate_database`.
     ensure_dataset_db(&dir)?;
 
     Ok(DatasetSummary {
@@ -972,6 +963,121 @@ pub async fn dataset_init_dir(
         path: dir.to_string_lossy().into_owned(),
         location: location.to_string_lossy().into_owned(),
         status: "not_ready".into(),
+    })
+}
+
+/// Result of [`dataset_sync_media`]: how many `listen_media` rows were added /
+/// removed to bring the DB in line with the `media/` folder.
+#[derive(Serialize)]
+pub struct MediaSyncResult {
+    pub added_count: usize,
+    pub removed_count: usize,
+}
+
+/// Reconcile a dataset's `listen_media` table with the files actually under
+/// `media/` **in place**: INSERT a row for every media file not yet registered
+/// and DELETE rows whose file has disappeared from disk, dropping each removed
+/// media's subtitle / cue / version / transcript dependents so no orphan rows
+/// survive. Idempotent — a no-op when the DB already matches the folder — and,
+/// unlike [`dataset_generate_database`], it never rebuilds the DB or re-keys the
+/// media that stay, so cues and (app-level) practice history for surviving files
+/// are left untouched. Requires an existing `data.sqlite3` (created empty at
+/// `dataset_create` / `dataset_init_dir`).
+#[tauri::command]
+pub async fn dataset_sync_media(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+) -> Result<MediaSyncResult, String> {
+    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let db_path = dataset_dir.join("data.sqlite3");
+    if !db_path.exists() {
+        return Err("Database file not found. Create or initialize the dataset first.".into());
+    }
+    let media_dir = dataset_dir.join("media");
+
+    let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    create_db_schema(&conn)?;
+
+    // On-disk inventory, keyed by the DB's `source` form (media-relative, forward slash).
+    let on_disk: std::collections::HashSet<String> = list_media_files(&media_dir)
+        .iter()
+        .map(|mf| rel_source_string(&media_dir, Path::new(&mf.path)))
+        .collect();
+
+    // Current DB inventory as (uuid, source) rows.
+    let mut stmt = conn
+        .prepare("SELECT uuid, source FROM listen_media")
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |row| {
+            let media_uuid: String = row.get(0)?;
+            let source: String = row.get(1)?;
+            Ok((media_uuid, source))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    let in_db: std::collections::HashSet<String> =
+        rows.iter().map(|(_, s)| s.clone()).collect();
+
+    let now = Utc::now().to_rfc3339();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    // Register media present on disk but missing from the DB.
+    let mut added_count = 0usize;
+    for src in &on_disk {
+        if in_db.contains(src) {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO listen_media (uuid, source, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![Uuid::new_v4().to_string(), src, now, now],
+        )
+        .map_err(|e| e.to_string())?;
+        added_count += 1;
+    }
+
+    // Remove DB rows whose file is gone, cascading to their dependents via
+    // subqueries so no orphan subtitle / cue / version / transcript rows survive.
+    let mut removed_count = 0usize;
+    for (media_uuid, src) in &rows {
+        if on_disk.contains(src) {
+            continue;
+        }
+        tx.execute(
+            "DELETE FROM listen_subtitle_cue WHERE subtitle_uuid IN (SELECT uuid FROM listen_subtitle WHERE media_uuid = ?1)",
+            [media_uuid],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM listen_subtitle_version WHERE subtitle_uuid IN (SELECT uuid FROM listen_subtitle WHERE media_uuid = ?1)",
+            [media_uuid],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM listen_subtitle WHERE media_uuid = ?1", [media_uuid])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM listen_transcript WHERE media_uuid = ?1", [media_uuid])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM listen_media WHERE uuid = ?1", [media_uuid])
+            .map_err(|e| e.to_string())?;
+        removed_count += 1;
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+
+    if added_count > 0 || removed_count > 0 {
+        touch_info(&dataset_dir)?;
+    }
+    log::info!(
+        "Synced media for dataset '{}': +{} registered, -{} removed",
+        uuid,
+        added_count,
+        removed_count
+    );
+    Ok(MediaSyncResult {
+        added_count,
+        removed_count,
     })
 }
 
@@ -1301,7 +1407,13 @@ pub(crate) fn find_dataset_dir_typed(
 /// Incremental: media that already have a subtitle (mirrored under `subtitle/`,
 /// e.g. `media/a/b.mp3` -> `subtitle/a/b.vtt`) are skipped, so re-running only
 /// transcribes newly added media. Use `dataset_delete_subtitles` to force a full
-/// regeneration. Returns a short summary for the UI log.
+/// regeneration. After transcription, every media that has a VTT is also imported
+/// into `data.sqlite3` — an active `listen_subtitle` plus cues (version 1), matched
+/// to its `listen_media` row by source and written idempotently (an existing active
+/// subtitle is left untouched; a missing media row is registered on the fly). This
+/// makes generating subtitles alone enough to produce a practice-ready DB, so no
+/// separate build-database pass is required; `dataset_sync_media` stays the
+/// dedicated reconciler for media removals. Returns a short summary for the UI log.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn dataset_generate_subtitles(
@@ -1357,14 +1469,103 @@ pub async fn dataset_generate_subtitles(
         fs::write(vtt_path, vtt_content).map_err(|e| e.to_string())?;
     }
 
-    // Update timestamp only when something was actually generated.
-    if total > 0 {
+    // Persist subtitles into the dataset DB so the pipeline needs no separate
+    // "build database" pass: every media that now has a VTT gets an active
+    // listen_subtitle + cues (version 1) keyed by source, idempotently. A missing
+    // listen_media row is registered on the fly, so the standalone "Generate
+    // Subtitles" action still yields a practice-ready DB; dataset_sync_media stays
+    // the dedicated reconciler for removals.
+    let db_path = dataset_dir.join("data.sqlite3");
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    create_db_schema(&conn)?;
+
+    // source (media-relative) -> media_uuid, from the current inventory.
+    let mut stmt = conn
+        .prepare("SELECT uuid, source FROM listen_media")
+        .map_err(|e| e.to_string())?;
+    let mut media_map: std::collections::HashMap<String, String> = stmt
+        .query_map([], |row| {
+            let u: String = row.get(0)?;
+            let s: String = row.get(1)?;
+            Ok((s, u))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    let now = Utc::now().to_rfc3339();
+    let mut cues_written = 0usize;
+    for mf in media_files.iter() {
+        let file_path = Path::new(&mf.path);
+        let vtt_path = sibling_path(&media_dir, &subtitle_dir, file_path, "vtt");
+        if !vtt_path.exists() {
+            continue;
+        }
+        let source = rel_source_string(&media_dir, file_path);
+        let media_uuid = match media_map.get(&source) {
+            Some(u) => u.clone(),
+            None => {
+                let u = Uuid::new_v4().to_string();
+                conn.execute(
+                    "INSERT INTO listen_media (uuid, source, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![u, source, now, now],
+                )
+                .map_err(|e| e.to_string())?;
+                media_map.insert(source.clone(), u.clone());
+                u
+            }
+        };
+
+        // Idempotent: leave an existing active subtitle untouched.
+        let existing: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM listen_subtitle WHERE media_uuid = ?1 AND is_active = 1",
+                [media_uuid.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if existing > 0 {
+            continue;
+        }
+
+        let cues = parse_vtt(&vtt_path)?;
+        let name = file_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let subtitle_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO listen_subtitle (uuid, media_uuid, name, track_type, version, is_active, created_at, updated_at) VALUES (?1, ?2, ?3, 'stt', 1, 1, ?4, ?5)",
+            rusqlite::params![subtitle_uuid, media_uuid, name, now, now],
+        )
+        .map_err(|e| e.to_string())?;
+        let version_uuid = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO listen_subtitle_version (uuid, subtitle_uuid, version, change_type, description, cues_added, created_by) VALUES (?1, ?2, 1, 'initial', 'Initial STT transcription', ?3, 'system')",
+            rusqlite::params![version_uuid, subtitle_uuid, cues.len() as i64],
+        )
+        .map_err(|e| e.to_string())?;
+        for (order, cue) in cues.iter().enumerate() {
+            let cue_uuid = Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO listen_subtitle_cue (uuid, subtitle_uuid, order_num, start_ms, end_ms, content, version_created) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+                rusqlite::params![cue_uuid, subtitle_uuid, order as i64, cue.start_ms, cue.end_ms, cue.content],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        cues_written += 1;
+    }
+    drop(conn);
+
+    // Update timestamp when either VTT files or DB subtitle rows changed.
+    if total > 0 || cues_written > 0 {
         touch_info(&dataset_dir)?;
     }
 
     Ok(format!(
-        "Generated {} subtitle(s), skipped {} already present.",
-        total, skipped
+        "Generated {} subtitle(s), skipped {} already present; wrote {} subtitle row(s) to the database.",
+        total, skipped, cues_written
     ))
 }
 

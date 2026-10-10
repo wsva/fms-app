@@ -176,6 +176,7 @@ pub fn run() {
             datasets::dataset_delete,
             datasets::dataset_create,
             datasets::dataset_init_dir,
+            datasets::dataset_sync_media,
             datasets::dataset_info_save,
             datasets::dataset_import_media,
             datasets::dataset_generate_subtitles,

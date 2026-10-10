@@ -26,15 +26,15 @@ steps:
       - model_version
     retry: { attempts: 2, backoff: "30s" }
 
-  # ── Stage 1: initialize the dataset (create + media in one step) ────────────
+  # ── Stage 1: initialize the dataset in place (uuid + info.json + empty DB) ──
   - id: init_dataset
     description: >-
       Initialize an existing raw media folder IN PLACE as a dictation dataset:
-      mint a uuid, write info.json, and bootstrap data.sqlite3 (registering the
-      media already on disk). Replaces the former create_dataset + import_media
-      pair — the folder's own media IS the import, so no separate import step.
-      (dataset_create remains the primitive for an empty dataset from a typed
-      name; use it here only when the folder has no media yet.)
+      mint a uuid, write info.json, and create an EMPTY data.sqlite3 (schema only).
+      Media are NOT registered here — the sync_media step below owns the
+      listen_media inventory, keeping "set up the folder" and "reconcile media
+      into the DB" cleanly separate. (dataset_create is the sibling primitive for
+      a brand-new empty dataset from a typed name.)
     action: dataset_init_dir
     params:
       path: "C:/path/to/dataset_folder"   # EDIT: a folder already holding media/
@@ -42,15 +42,38 @@ steps:
       - dataset_uuid
       - media_count
 
-  # ── Stage 2: two independent artifact branches off init_dataset ─────────────
+  # ── Stage 1b: reconcile the DB's media inventory with the files on disk ────
+  - id: sync_media
+    description: >-
+      Reconcile listen_media with the files under media/ in place: INSERT a row
+      for every media file not yet in the table and DELETE rows whose media file
+      has been removed from disk (dropping their subtitle/cue/transcript rows).
+      Idempotent — a no-op when the DB already matches the folder. Since
+      init_dataset now leaves data.sqlite3 empty, this is what first populates it;
+      it is also the cheap alternative to a full dataset_generate_database rebuild,
+      so existing media uuids (and their cues / practice history) survive later
+      file changes.
+    action: dataset_sync_media
+    depends_on:
+      - init_dataset
+    inputs:
+      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
+    outputs:
+      - added_count
+      - removed_count
+
+  # ── Stage 2: two independent artifact branches off sync_media ──────────────
   - id: generate_subtitles
     description: >-
       STT-transcribe every media file into VTT subtitles (long-running; progress via
-      dataset progress events).
+      dataset progress events) AND import them into data.sqlite3: an active
+      listen_subtitle + cues (version 1) per media, matched to its listen_media row by
+      source and written idempotently. Because generation persists straight to the DB,
+      there is no separate "build database" step downstream.
     action: dataset_generate_subtitles
     depends_on:
       - ensure_model
-      - init_dataset
+      - sync_media
     inputs:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     retry: { attempts: 2, backoff: "1m" }
@@ -59,29 +82,22 @@ steps:
     description: Generate waveform JSON for all media via Symphonia peak detection.
     action: dataset_generate_waveforms
     depends_on:
-      - init_dataset
+      - sync_media
     inputs:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
 
-  # ── Stage 3: cue database ───────────────────────────────────────────────────
-  - id: generate_database
-    description: >-
-      Rebuild data.sqlite3 (bootstrapped at init_dataset) from scratch: parse the
-      VTT subtitles and write listen_media / listen_subtitle / listen_subtitle_cue.
-    action: dataset_generate_database
-    depends_on:
-      - generate_subtitles
-    inputs:
-      dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
+  # ── Stage 2b: the cue DB is filled inline by generate_subtitles ───────────────────────────────────────────────────
+  # generate_subtitles already wrote the active listen_subtitle + cues into
+  # data.sqlite3, so no separate "build database" step is needed here.
 
-  # ── Stage 4: optional text alignment (guarded by reference material) ────────
+  # ── Stage 3: optional text alignment (guarded by reference material) ────────
   - id: detect_reference
     description: >-
       List dataset files to see whether book.txt and/or transcript/ exist; record
       "true"/"false" in the outputs so the guards below can skip cleanly.
     action: dataset_list_files
     depends_on:
-      - generate_database
+      - generate_subtitles
     inputs:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     outputs:
@@ -106,21 +122,21 @@ steps:
     inputs:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
 
-  # ── Stage 5: cue-time refinement (independent of text alignment) ────────────
+  # ── Stage 4: cue-time refinement (independent of text alignment) ────────────
   - id: adjust_cue_times
     description: >-
       Snap cue boundaries to silence detected in the audio. mode=new writes adjusted
       cues alongside the originals; re-run with force=true only deliberately.
     action: dataset_adjust_cue_time
     depends_on:
-      - generate_database
+      - generate_subtitles
     inputs:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     params:
       mode: "new"
       strategy: "noise_floor"          # or: dual_bound | peak_relative | otsu
 
-  # ── Stage 6: join & validate ────────────────────────────────────────────────
+  # ── Stage 5: join & validate ────────────────────────────────────────────────
   - id: validate
     description: >-
       Summarize the dataset (media / subtitle / cue counts) and spot-check cues of one
@@ -136,7 +152,7 @@ steps:
       dataset_uuid: "${steps.init_dataset.outputs.dataset_uuid}"
     on_failure: stop
 
-  # ── Stage 7: done ───────────────────────────────────────────────────────────
+  # ── Stage 6: done ───────────────────────────────────────────────────────────
   - id: mark_ready
     description: >-
       Record the final counts and, optionally, adjust the description to note the

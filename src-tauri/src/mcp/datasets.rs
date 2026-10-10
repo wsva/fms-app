@@ -444,7 +444,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "result": result}).to_string())
     }
 
-    #[tool(name = "dataset_generate_subtitles", description = "Generate subtitles for all media files using STT model. Requires a model to be downloaded first.")]
+    #[tool(name = "dataset_generate_subtitles", description = "Generate subtitles for all media files using the STT model (requires a model downloaded first). Writes VTT files under subtitle/ AND imports each subtitle into data.sqlite3 as an active listen_subtitle + cues (version 1), keyed by media source and idempotently (existing active subtitles are left untouched) - so no separate build-database step is needed. Returns a summary of subtitles generated and DB rows written.")]
     async fn dataset_generate_subtitles(
         &self,
         Parameters(param): Parameters<UuidParam>,
@@ -557,6 +557,19 @@ impl DatasetMcpServer {
         let summary = datasets::dataset_init_dir(settings, param.path).await?;
         let _ = self.app.emit("dataset-list-changed", ());
         Ok(serde_json::to_string_pretty(&summary).unwrap_or_default())
+    }
+
+    #[tool(name = "dataset_sync_media", description = "Reconcile a dictation dataset's listen_media table with the files under media/ IN PLACE: register a row for every media file not yet in the DB and delete rows whose file is gone (dropping their subtitles/cues/versions/transcripts too). Idempotent and, unlike dataset_generate_database, it never rebuilds the DB or re-keys surviving media, so existing cues and practice history stay intact. Requires an existing data.sqlite3 (created empty at dataset_create/dataset_init_dir). Returns added_count and removed_count.")]
+    async fn dataset_sync_media(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_sync_media: uuid={}", param.uuid);
+        let settings = self.app.state::<SettingsState>();
+        let result = datasets::dataset_sync_media(settings, param.uuid).await?;
+        Ok(serde_json::json!({
+            "status": "ok",
+            "added_count": result.added_count,
+            "removed_count": result.removed_count
+        })
+        .to_string())
     }
 
     #[tool(name = "dataset_info_save", description = "Overwrite a dataset's info.json with a full JSON document (any type). The text must parse as a dataset descriptor; identity fields uuid/type/format/created_at are always taken from disk and updated_at is refreshed. Returns the authoritative saved descriptor.")]
