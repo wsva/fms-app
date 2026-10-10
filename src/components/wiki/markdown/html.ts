@@ -92,8 +92,7 @@ function parseInline(text: string): ReactNode[] {
             continue;
         }
 
-        // Hard break → <br> (paragraph soft-wraps are already collapsed to
-        // spaces upstream, so a "\n" reaching here is an intentional break)
+        // Newline → <br> (mirrors marked's breaks:true behaviour)
         if (text[pos] === "\n") {
             flush();
             result.push(createElement("br", { key: key++ }));
@@ -280,25 +279,7 @@ function parseBlocks(text: string, keyStart = 0): ReactNode[] {
             i++;
         }
         if (paraLines.length > 0) {
-            // GFM line-break rules so authors can hard-wrap prose freely:
-            // a single newline inside a paragraph is a *soft* break (renders as
-            // a space), while a line ending with two+ spaces or a trailing
-            // backslash is a *hard* break (<br>). We collapse soft breaks into
-            // spaces here and keep hard breaks as "\n", which parseInline turns
-            // into <br>.
-            let paraText = "";
-            for (let p = 0; p < paraLines.length; p++) {
-                const cur = paraLines[p];
-                if (p === paraLines.length - 1) { paraText += cur; break; }
-                if (/\\$/.test(cur)) {
-                    paraText += cur.replace(/\\$/, "") + "\n"; // hard break via backslash
-                } else if (/ {2,}$/.test(cur)) {
-                    paraText += cur.replace(/ +$/, "") + "\n";  // hard break via trailing spaces
-                } else {
-                    paraText += cur + " ";                       // soft break → space
-                }
-            }
-            result.push(createElement("p", { key: key++ }, ...parseInline(paraText)));
+            result.push(createElement("p", { key: key++ }, ...parseInline(paraLines.join("\n"))));
         }
     }
 
