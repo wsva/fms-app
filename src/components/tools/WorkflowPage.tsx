@@ -31,13 +31,64 @@ import {
   statusLabel,
 } from "@/lib/workflow/steps";
 import { getStepOp, KNOWN_COMMANDS, type FormField, type RunCtx, type StepOp } from "@/lib/workflow/step-ops";
-import { RefreshCw, Workflow as WorkflowIcon, Play, RotateCcw, SkipForward, Check, Copy, Send, Plus, FileJson, Save, FolderSync, Eye, Pencil, FolderOpen, Trash2, X } from "lucide-react";
+import type { BookMeta } from "@/lib/read/types";
+import type { CardDatasetSummary } from "@/lib/types";
+import {
+  RefreshCw, Workflow as WorkflowIcon, Play, RotateCcw, SkipForward, Check, Copy, Send, Plus,
+  FileJson, Save, Eye, Pencil, FolderOpen, Trash2, X, ListChecks,
+  Headphones, BookOpen, Layers, type LucideIcon,
+} from "lucide-react";
 
 // react-flow touches browser layout APIs on mount; keep it out of the SSG pass.
 const WorkflowGraph = dynamic(() => import("./WorkflowGraph"), { ssr: false });
 
 function runIdFor(uuid: string): string {
   return `dictation-${uuid}`;
+}
+
+/**
+ * List the datasets of one kind through its own command twin, flattened into the
+ * shared row shape. Each kind is discovered by a different backend command
+ * (`dataset_list` scans dictation roots, `book_list` the book roots, …) because
+ * the on-disk layouts differ; only dictation may yield folders without info.json.
+ */
+async function listDatasetsOfKind(cat: WorkflowCategory): Promise<KindDataset[]> {
+  if (cat === "dictation") {
+    const res = await invoke<DatasetSummary[]>("dataset_list");
+    return res
+      .filter((d) => d.info.uuid !== "dictation-favorites")
+      .map((d) => ({
+        key: d.info.uuid || d.path,
+        uuid: d.info.uuid,
+        name: d.info.name,
+        description: d.info.description,
+        path: d.path,
+        note: d.info.uuid ? `${d.media_count} media` : "folder · not imported",
+        ready: d.status === "ready",
+      }));
+  }
+  if (cat === "book") {
+    const res = await invoke<BookMeta[]>("book_list");
+    return res.map((b) => ({
+      key: b.uuid,
+      uuid: b.uuid,
+      name: b.name,
+      description: "",
+      path: b.path,
+      note: "",
+      ready: true,
+    }));
+  }
+  const res = await invoke<CardDatasetSummary[]>("card_dataset_list");
+  return res.map((d) => ({
+    key: d.info.uuid,
+    uuid: d.info.uuid,
+    name: d.info.name,
+    description: d.info.description,
+    path: d.path,
+    note: `${d.card_count} cards`,
+    ready: true,
+  }));
 }
 
 /** A saved run entry from `workflow_list_runs`. */
@@ -79,22 +130,90 @@ interface BuiltinTemplate {
   yaml: string;
 }
 
-/** The dataset categories the Workflow page shows as tabs (in order). */
+/** Dataset kinds the Workflow page offers — one breadcrumb level 1 entry each. */
 type WorkflowCategory = "dictation" | "book" | "card";
-const CATEGORY_TABS: { key: WorkflowCategory; label: string }[] = [
-  { key: "dictation", label: "Dictation" },
-  { key: "book", label: "Book" },
-  { key: "card", label: "Card" },
+
+const KIND_ORDER: WorkflowCategory[] = ["dictation", "book", "card"];
+
+const KIND_META: Record<WorkflowCategory, { label: string; blurb: string; icon: LucideIcon }> = {
+  dictation: {
+    label: "Dictation",
+    blurb: "Import a raw folder, generate subtitles / waveforms / the cue DB, then align and adjust cue times.",
+    icon: Headphones,
+  },
+  book: {
+    label: "Book",
+    blurb: "Create a book, author chapters / sentences, attach audio, build the vocabulary. Agent-facing.",
+    icon: BookOpen,
+  },
+  card: {
+    label: "Card",
+    blurb: "Create a deck, author cards / tags, rebuild the full-text index, sync online. Agent-facing.",
+    icon: Layers,
+  },
+};
+
+/**
+ * Breadcrumb trail position. Each field set adds one level: nothing picked =
+ * the kind list, `cat` = that kind's datasets, `datasetKey` = the dataset's
+ * templates, `templateId` = the workflow itself (graph + run panels).
+ */
+interface Nav {
+  cat: WorkflowCategory | "";
+  datasetKey: string;
+  templateId: string;
+}
+
+const ROOT_NAV: Nav = { cat: "", datasetKey: "", templateId: "" };
+
+/** Any dataset, flattened into one row shape so every kind shares the list UI. */
+interface KindDataset {
+  /** Selection key: the uuid, or the folder path for an un-imported dictation dir. */
+  key: string;
+  /** "" when the folder has no info.json yet (raw dictation dir). */
+  uuid: string;
+  name: string;
+  /** info.json description ("" for kinds that do not carry one). */
+  description: string;
+  path: string;
+  /** Right-hand summary (media / card counts) or a status note. */
+  note: string;
+  ready: boolean;
+}
+
+/** The disk-probed facts, in display order, for the Scan result badges. */
+const FACT_LABELS: Array<[keyof DatasetFacts, string]> = [
+  ["hasMedia", "Media"],
+  ["hasSubtitles", "Subtitles"],
+  ["hasWaveforms", "Waveforms"],
+  ["hasDatabase", "Cue DB"],
+  ["hasBook", "Book text"],
+  ["hasTranscript", "Transcript"],
 ];
+
+// Wiki-style bar chrome: full-width stacked bars, ghost buttons that only
+// change background on hover (see WikiPage / DictationPage for the same pattern).
+const toolBtn =
+  "flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors shrink-0 text-text-secondary hover:text-text-primary hover:bg-bg-hover disabled:opacity-50 disabled:cursor-not-allowed";
+const toolBtnActive =
+  "flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors shrink-0 bg-accent text-white hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed";
+const iconBtn =
+  "p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors disabled:opacity-30 disabled:cursor-default";
 
 /** Placeholder document shown until the built-in template finishes loading. */
 const EMPTY_DEFINITION: WorkflowDefinition = { name: "workflow", version: 1, steps: [] };
 
 export default function WorkflowPage() {
   const [mounted, setMounted] = useState(false);
-  const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
-  // Selection key = the dataset uuid when it has one, otherwise the folder path.
-  const [selectedKey, setSelectedKey] = useState("");
+  // Breadcrumb drill-down position. The crumbs themselves are the navigation
+  // controls (wiki model): jumping to any ancestor level replaces going back.
+  const [nav, setNav] = useState<Nav>(ROOT_NAV);
+
+  // Datasets of the kind being browsed, cached per kind so switching back is
+  // instant. `datasets` below is the active slice.
+  const [kindDatasets, setKindDatasets] = useState<Partial<Record<WorkflowCategory, KindDataset[]>>>({});
+  const [loadingDatasets, setLoadingDatasets] = useState(false);
+
   const [facts, setFacts] = useState<DatasetFacts | null>(null);
   // Local projection placeholder used only until a run exists on disk.
   const [committed, setCommitted] = useState<StatusMap>(() => initialStatuses([]));
@@ -106,22 +225,19 @@ export default function WorkflowPage() {
   // Workflow document is YAML-driven; `definition` = last-good parse, `parseError` = live.
   const [mode, setMode] = useState<"view" | "edit">("view");
   // Built-in templates fetched once from the Rust binary (see `workflow/templates.rs`),
-  // grouped by category. The active tab is a category; a category may hold several
-  // workflows, so `activeTemplateId` picks which one is loaded.
+  // grouped by category. The breadcrumb's kind level selects the category, and the
+  // dataset page lists every template of that category to pick from.
   const [templates, setTemplates] = useState<BuiltinTemplate[]>([]);
-  const [activeCategory, setActiveCategory] = useState<WorkflowCategory>("dictation");
-  const [activeTemplateId, setActiveTemplateId] = useState("");
   const [builtinYaml, setBuiltinYaml] = useState("");
   const [yamlText, setYamlText] = useState("");
   const [definition, setDefinition] = useState<WorkflowDefinition>(EMPTY_DEFINITION);
   const [parseError, setParseError] = useState<string | null>(null);
   const steps = definition.steps;
   // Only Dictation is wired for in-app per-step Run; Book / Card are view/agent-facing.
-  const isDictation = activeCategory === "dictation";
+  const isDictation = nav.cat === "dictation";
 
   const [scanning, setScanning] = useState(false);
   const [initing, setIniting] = useState(false);
-  const [reloading, setReloading] = useState(false);
   const [notice, setNotice] = useState<string>("");
 
   // Inspector run state.
@@ -146,25 +262,35 @@ export default function WorkflowPage() {
     setMounted(true);
   }, []);
 
+  // Which breadcrumb level the content area renders. Derived from how many of the
+  // three nav fields are filled, so the trail and the view can never disagree.
+  const viewLevel: "kinds" | "datasets" | "templates" | "workflow" =
+    !nav.cat ? "kinds" : !nav.datasetKey ? "datasets" : !nav.templateId ? "templates" : "workflow";
+
   const positioned = useMemo(() => layoutSteps(steps), [steps]);
   const edges = useMemo(() => buildEdges(steps), [steps]);
-  const categoryTemplates = useMemo(
-    () => templates.filter((t) => t.category === activeCategory),
-    [templates, activeCategory],
+  const kindTemplates = useMemo(
+    () => templates.filter((t) => t.category === nav.cat),
+    [templates, nav.cat],
+  );
+  const activeTemplate = useMemo(
+    () => templates.find((t) => t.id === nav.templateId),
+    [templates, nav.templateId],
   );
   const view: StatusMap = useMemo(
     () => engineView ?? (facts ? recompute(committed, facts, steps) : committed),
     [engineView, committed, facts, steps],
   );
 
+  const datasets = nav.cat ? kindDatasets[nav.cat] ?? [] : [];
   const selectedDataset = useMemo(
-    () => datasets.find((d) => (d.info.uuid || d.path) === selectedKey),
-    [datasets, selectedKey],
+    () => datasets.find((d) => d.key === nav.datasetKey),
+    [datasets, nav.datasetKey],
   );
-  const selectedUuid = selectedDataset?.info.uuid ?? "";
+  const selectedUuid = selectedDataset?.uuid ?? "";
   const selectedPath = selectedDataset?.path ?? "";
-  const isRaw = !!selectedDataset && !selectedDataset.info.uuid;
-  const selectedName = selectedDataset?.info.name ?? selectedKey;
+  const isRaw = !!selectedDataset && !selectedDataset.uuid;
+  const selectedName = selectedDataset?.name ?? "";
   const runId = runIdFor(selectedUuid);
   const hasRun = engineView !== null;
 
@@ -179,11 +305,17 @@ export default function WorkflowPage() {
     setOutputLines((prev) => [...prev.slice(-400), text]);
   }, []);
 
+  // ---- Breadcrumb navigation ----
+  // Every user-initiated level change goes through `navigate`, so the trail and
+  // the content are always driven by the same `nav` state.
+  const navigate = useCallback((next: Nav) => setNav(next), []);
+
   // ---- Built-in template loading / switching ----
   // Apply a template's YAML as the working document (resets the graph to a
-  // clean all-pending projection). Used by tab / workflow switching.
-  const applyTemplate = (tpl: BuiltinTemplate) => {
-    setActiveTemplateId(tpl.id);
+  // clean all-pending projection) and return the parsed definition, so callers
+  // that navigate into the workflow level can probe with the right step list
+  // before `definition` state has committed.
+  const loadTemplateDoc = (tpl: BuiltinTemplate): WorkflowDefinition | null => {
     setBuiltinYaml(tpl.yaml);
     setYamlText(tpl.yaml);
     try {
@@ -191,13 +323,15 @@ export default function WorkflowPage() {
       setDefinition(def);
       setCommitted(initialStatuses(def.steps));
       setParseError(null);
+      return def;
     } catch (e) {
       setParseError(e instanceof Error ? e.message : String(e));
+      return null;
     }
   };
 
   // Drop the dataset-scoped run projection (facts / engine view / prompt / output)
-  // without touching `committed` — the caller sets that via applyTemplate.
+  // without touching `committed` — the caller sets that via loadTemplateDoc.
   const resetRunView = () => {
     setFacts(null);
     setEngineView(null);
@@ -209,22 +343,38 @@ export default function WorkflowPage() {
     setOutputLines([]);
   };
 
-  const selectCategory = (cat: WorkflowCategory) => {
-    if (cat === activeCategory) return;
-    setActiveCategory(cat);
-    setMode("view");
+  // Level 1 → 2: pick a dataset kind. Always re-reads disk, so datasets imported
+  // through another page (or by an agent) show up when you drill back in.
+  const openKind = (cat: WorkflowCategory) => {
     resetRunView();
-    if (cat !== "dictation") setSelectedKey("");
-    const first = templates.find((t) => t.category === cat);
-    if (first) applyTemplate(first);
+    setMode("view");
+    navigate({ cat, datasetKey: "", templateId: "" });
+    void loadKindDatasets(cat, true);
   };
 
-  const selectTemplate = (id: string) => {
-    const tpl = templates.find((t) => t.id === id);
-    if (!tpl) return;
+  // Level 2 → 3: pick a dataset, which lists the workflows of its kind.
+  const openDataset = (key: string) => {
     resetRunView();
-    applyTemplate(tpl);
+    setMode("view");
+    navigate({ ...nav, datasetKey: key, templateId: "" });
   };
+
+  // Level 3 → 4: pick a workflow. The dictation pipeline is probed right away so
+  // the graph opens on real disk facts; Book / Card stay a read-only preview.
+  const openTemplate = (tpl: BuiltinTemplate) => {
+    resetRunView();
+    setMode("view");
+    const def = loadTemplateDoc(tpl);
+    navigate({ ...nav, templateId: tpl.id });
+    const ds = (kindDatasets[tpl.category as WorkflowCategory] ?? []).find((d) => d.key === nav.datasetKey);
+    if (tpl.category === "dictation" && ds?.uuid && def) void probeAndSync(ds.uuid, def.steps);
+  };
+
+  // Breadcrumb crumbs: jump back one level at a time, always clearing the run
+  // projection because a different scope means a different run on disk.
+  const goToKinds = () => { resetRunView(); setMode("view"); navigate(ROOT_NAV); };
+  const goToDatasets = () => { resetRunView(); setMode("view"); navigate({ ...nav, datasetKey: "", templateId: "" }); };
+  const goToTemplates = () => { resetRunView(); setMode("view"); navigate({ ...nav, templateId: "" }); };
 
   const copyYaml = async () => {
     try {
@@ -235,7 +385,7 @@ export default function WorkflowPage() {
     }
   };
 
-  // ---- Load every built-in template once, seed the Dictation tab ----
+  // ---- Load every built-in template once (a dataset page lists its kind's workflows) ----
   useEffect(() => {
     if (!isTauri()) return;
     let cancelled = false;
@@ -243,35 +393,51 @@ export default function WorkflowPage() {
       .then((res) => {
         if (cancelled) return;
         setTemplates(res.templates);
+        // Seed the YAML editor with the default pipeline. The breadcrumb still
+        // starts at the kind list, so nothing is opened on the user's behalf.
         const initial =
           res.templates.find((t) => t.category === "dictation") ?? res.templates[0];
-        if (!initial) return;
-        setActiveCategory(initial.category as WorkflowCategory);
-        applyTemplate(initial);
+        if (initial) loadTemplateDoc(initial);
       })
       .catch((e) => appendLog(`workflow_builtin_templates failed: ${String(e)}`, "ERROR"));
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appendLog]);
 
-  // ---- Load dictation datasets ----
-  const fetchDatasets = useCallback(async (): Promise<DatasetSummary[] | null> => {
+  // ---- Dataset list for the kind being browsed ----
+  const loadKindDatasets = useCallback(async (
+    cat: WorkflowCategory,
+    force = false,
+  ): Promise<KindDataset[] | null> => {
     if (!isTauri()) return null;
+    // Cached unless an explicit refresh is asked for, so revisiting a level does
+    // not re-scan the disk each time.
+    if (!force && kindDatasets[cat]) return kindDatasets[cat] ?? null;
+    setLoadingDatasets(true);
     try {
-      const res = await invoke<DatasetSummary[]>("dataset_list");
-      const kept = res.filter((d) => d.info.uuid !== "dictation-favorites");
-      setDatasets(kept);
-      return kept;
+      const list = await listDatasetsOfKind(cat);
+      setKindDatasets((prev) => ({ ...prev, [cat]: list }));
+      return list;
     } catch (e) {
-      appendLog(`dataset_list failed: ${String(e)}`, "ERROR");
-      setNotice(`Failed to list datasets: ${String(e)}`);
+      appendLog(`dataset list (${cat}) failed: ${String(e)}`, "ERROR");
+      setNotice(`Failed to list ${KIND_META[cat].label} datasets: ${String(e)}`);
       return null;
+    } finally {
+      setLoadingDatasets(false);
     }
-  }, [appendLog]);
+  }, [kindDatasets, appendLog]);
 
+  // MCP / sync operations import datasets without going through this page, so
+  // track the `dataset-list-changed` event rather than relying on a manual button.
   useEffect(() => {
-    fetchDatasets();
-  }, [fetchDatasets]);
+    if (!isTauri() || !nav.cat) return;
+    const cat = nav.cat;
+    let unlisten: (() => void) | undefined;
+    listen("dataset-list-changed", () => { void loadKindDatasets(cat, true); })
+      .then((fn) => { unlisten = fn; })
+      .catch(() => {});
+    return () => { if (unlisten) unlisten(); };
+  }, [nav.cat, loadKindDatasets]);
 
   // ---- Engine status pull (authoritative once a run exists) ----
   // Dataset-scoped: a run lives inside its dataset's `workflows/` dir, so the
@@ -315,36 +481,36 @@ export default function WorkflowPage() {
     return probed;
   }, []);
 
-  const clearView = useCallback(() => {
-    setFacts(null);
-    setCommitted(initialStatuses(steps));
-    setEngineView(null);
-    setRunMeta(null);
-    setSelectedId(null);
-    setPrompt("");
-    setInfoText("");
-    setInfoOpen(false);
-    setOutputLines([]);
-  }, [steps]);
-
-  const scan = useCallback(async () => {
-    if (!isTauri() || !selectedUuid) return;
+  // Probe the dataset's on-disk facts, reset the local projection, then pull the
+  // run state from the engine. Explicit args because this also runs while
+  // navigating into the workflow level, before the new `definition`/`nav` state
+  // is visible to a closure.
+  const probeAndSync = useCallback(async (uuid: string, defs: StepDef[]) => {
+    if (!isTauri() || !uuid) return;
     setScanning(true);
     setNotice("");
     try {
-      await probeDataset(selectedUuid);
-      setCommitted(initialStatuses(steps));
-      const live = await refreshEngine(runId, selectedUuid);
-      setNotice(live ? "Re-scanned. Graph reflects the workflow run state." : "Scanned dataset. Run any step to start its workflow run.");
+      await probeDataset(uuid);
+      setCommitted(initialStatuses(defs));
+      const live = await refreshEngine(runIdFor(uuid), uuid);
+      setNotice(live
+        ? "Scanned. The graph reflects the workflow run state."
+        : "Scanned the dataset. Run any step to start its workflow run.");
     } catch (e) {
       appendLog(`scan failed: ${String(e)}`, "ERROR");
       setNotice(`Scan failed: ${String(e)}`);
     } finally {
       setScanning(false);
     }
-  }, [selectedUuid, runId, probeDataset, refreshEngine, appendLog, steps]);
+  }, [probeDataset, refreshEngine, appendLog]);
 
-  // ---- Initialize a raw folder in place, then load it ----
+  const scan = useCallback(() => {
+    void probeAndSync(selectedUuid, steps);
+  }, [probeAndSync, selectedUuid, steps]);
+
+  // ---- Initialize a raw folder in place, then keep browsing it as a dataset ----
+  // Drops back to the dataset's workflow list: the folder now has a uuid, so the
+  // next template pick probes it like any other dictation dataset.
   const handleInit = async () => {
     if (!isTauri() || !isRaw) return;
     const ok = await ask(
@@ -355,14 +521,11 @@ export default function WorkflowPage() {
     setIniting(true);
     try {
       const summary = await invoke<DatasetSummary>("dataset_init_dir", { path: selectedPath });
-      await fetchDatasets();
+      await loadKindDatasets("dictation", true);
       await emit("dataset-list-changed", {});
-      setSelectedKey(summary.info.uuid);
-      await probeDataset(summary.info.uuid);
-      setCommitted(initialStatuses(steps));
-      await refreshEngine(runIdFor(summary.info.uuid), summary.info.uuid);
-      setInfoOpen(false);
-      setNotice(`Initialized dataset “${summary.info.name}” (uuid ${summary.info.uuid}).`);
+      resetRunView();
+      navigate({ cat: "dictation", datasetKey: summary.info.uuid, templateId: "" });
+      setNotice(`Initialized dataset “${summary.info.name}” (uuid ${summary.info.uuid}). Pick a workflow to continue.`);
     } catch (e) {
       appendLog(`init failed: ${String(e)}`, "ERROR");
       setNotice(`Initialize failed: ${String(e)}`);
@@ -387,35 +550,30 @@ export default function WorkflowPage() {
     }
   };
 
-  const handleReload = async () => {
-    if (!isTauri()) return;
+  // Re-read the current kind's dataset list from disk. A dictation folder without
+  // info.json is keyed by its path, so a folder imported elsewhere only turns up
+  // after such a scan; if the selected one gained a uuid in the meantime, follow
+  // it so the breadcrumb keeps pointing at the same dataset.
+  const refreshKindDatasets = useCallback(async () => {
+    if (!isTauri() || !nav.cat) return;
+    const cat = nav.cat;
     const prev = selectedDataset;
-    const prevKey = selectedKey;
-    setReloading(true);
-    try {
-      const kept = await fetchDatasets();
-      if (!kept) return;
-      await emit("dataset-list-changed", {});
-      if (!prev || kept.some((d) => (d.info.uuid || d.path) === prevKey)) {
-        setNotice(`Reloaded ${kept.length} dataset(s) from disk.`);
-        return;
-      }
-      const renamed = kept.find((d) => d.path === prev.path && d.info.uuid);
-      clearView();
-      if (!renamed) {
-        setSelectedKey("");
-        setNotice("The selected dataset is no longer on disk — pick another one.");
-        return;
-      }
-      setSelectedKey(renamed.info.uuid);
-      await probeDataset(renamed.info.uuid);
-      setCommitted(initialStatuses(steps));
-      await refreshEngine(runId, renamed.info.uuid);
-      setNotice(`Dataset uuid changed on disk: “${renamed.info.name}” is now ${renamed.info.uuid}.`);
-    } finally {
-      setReloading(false);
+    const list = await loadKindDatasets(cat, true);
+    if (!list) return;
+    if (!prev || list.some((d) => d.key === prev.key)) {
+      setNotice(`Reloaded ${list.length} ${KIND_META[cat].label} dataset(s) from disk.`);
+      return;
     }
-  };
+    resetRunView();
+    const renamed = list.find((d) => d.path === prev.path && d.uuid);
+    if (!renamed) {
+      navigate({ cat, datasetKey: "", templateId: "" });
+      setNotice("The selected dataset is no longer on disk — pick another one.");
+      return;
+    }
+    navigate({ cat, datasetKey: renamed.key, templateId: "" });
+    setNotice(`“${renamed.name}” was imported since you opened it — its uuid is now ${renamed.uuid}.`);
+  }, [nav, selectedDataset, loadKindDatasets, navigate]);
 
   // ---- Live progress from running commands ----
   useEffect(() => {
@@ -435,8 +593,8 @@ export default function WorkflowPage() {
   const buildCtx = useCallback((stepId: string): RunCtx => ({
     uuid: selectedUuid,
     path: selectedPath,
-    name: selectedDataset?.info.name ?? "",
-    description: selectedDataset?.info.description ?? "",
+    name: selectedDataset?.name ?? "",
+    description: selectedDataset?.description ?? "",
     facts,
     form: formState[stepId] ?? {},
   }), [selectedUuid, selectedPath, selectedDataset, facts, formState]);
@@ -695,105 +853,121 @@ export default function WorkflowPage() {
   const readyCount = Object.values(view).filter((s) => s === "ready").length;
   const doneCount = Object.values(view).filter((s) => s === "completed").length;
 
+  // Step titles per template, for the one-line pipeline summary on the dataset page.
+  const templateStepTitles = useMemo(() => {
+    const map: Record<string, string[]> = {};
+    for (const t of templates) {
+      try {
+        map[t.id] = parseDefinition(t.yaml).steps.map((s) => s.title || s.id);
+      } catch {
+        map[t.id] = [];
+      }
+    }
+    return map;
+  }, [templates]);
+
+  const kindLabel = nav.cat ? KIND_META[nav.cat].label : "";
+  const toolbarLabel =
+    viewLevel === "kinds" ? `${templates.length} built-in workflow(s) · pick a dataset kind`
+      : viewLevel === "datasets" ? (loadingDatasets ? "Loading datasets…" : `${datasets.length} ${kindLabel.toLowerCase()} dataset(s)`)
+        : viewLevel === "templates" ? `${kindTemplates.length} workflow template(s) for “${selectedName}”`
+          : `${definition.name} v${definition.version} · ${steps.length} step(s)`;
+
   return (
-    <div className="flex flex-col w-full h-full min-h-0 p-4 gap-3">
-      {/* Header */}
-      <div className="flex items-center gap-3 shrink-0">
-        <WorkflowIcon size={20} className="text-accent shrink-0" />
-        <h1 className="text-[1.3em] font-bold">Workflow</h1>
-        <span className="text-xs text-text-tertiary">
-          Click a step to run it in-app (the same command an agent calls over MCP), or arrange a multi-step job.
-        </span>
-      </div>
-
+    <div className="flex flex-col w-full h-full min-h-0 bg-bg-body min-w-0">
       {!mounted ? null : !isTauri() ? (
-        <p className="text-text-secondary">Workflow is only available in the desktop app.</p>
+        <p className="p-4 text-text-secondary">Workflow is only available in the desktop app.</p>
       ) : (
-        <div className="flex-1 min-h-0 flex flex-col gap-3">
-          {/* Category tabs — one per dataset type; a tab may hold several workflows. */}
-          <div className="flex items-center gap-1 shrink-0 border-b border-border-light">
-            {CATEGORY_TABS.map((tab) => (
+        <>
+        {/* Breadcrumb navigation — the top bar of this page: the "Workflow" crumb
+            is the title. Trail: Workflow › kind › dataset › workflow. */}
+        <nav className="shrink-0 flex items-center justify-start gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
+          <button
+            className={`shrink-0 cursor-pointer hover:underline text-left ${viewLevel === "kinds" ? "text-text-primary font-medium" : "text-accent"}`}
+            onClick={goToKinds}
+          >
+            Workflow
+          </button>
+          {nav.cat && (
+            <>
+              <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
               <button
-                key={tab.key}
-                onClick={() => selectCategory(tab.key)}
-                className={`px-3 py-1.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
-                  activeCategory === tab.key
-                    ? "border-accent text-accent"
-                    : "border-transparent text-text-secondary hover:text-text-primary"
-                }`}
+                className={`shrink-0 max-w-[240px] cursor-pointer hover:underline truncate text-left ${viewLevel === "datasets" ? "text-text-primary font-medium" : "text-accent"}`}
+                onClick={goToDatasets}
+                title={kindLabel}
               >
-                {tab.label}
+                {kindLabel}
               </button>
-            ))}
-            {categoryTemplates.length > 1 && (
-              <select
-                className="ml-auto px-2 py-1 text-sm rounded-md bg-bg-body border border-border-light text-text-primary focus:border-accent outline-none"
-                value={activeTemplateId}
-                onChange={(e) => selectTemplate(e.target.value)}
-                title="Pick a workflow in this category"
-              >
-                {categoryTemplates.map((t) => (
-                  <option key={t.id} value={t.id}>{t.name} v{t.version}</option>
-                ))}
-              </select>
-            )}
-          </div>
-
-          {/* Toolbar */}
-          <div className="flex items-center gap-3 flex-wrap shrink-0 rounded-lg border border-border-light bg-bg-card px-3 py-2">
-            <div className="inline-flex rounded-md border border-border-light overflow-hidden">
+            </>
+          )}
+          {selectedDataset && (
+            <>
+              <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
               <button
-                className={`${mode === "view" ? btnSmPrimary : btnSmSecondary} inline-flex items-center gap-1 rounded-none border-0`}
-                onClick={() => setMode("view")}
+                className={`cursor-pointer hover:underline truncate min-w-0 text-left ${viewLevel === "templates" ? "flex-1 text-text-primary font-medium" : "shrink-0 max-w-[240px] text-accent"}`}
+                onClick={goToTemplates}
+                title={selectedDataset.path}
               >
+                {selectedDataset.name}
+              </button>
+            </>
+          )}
+          {viewLevel === "workflow" && (
+            <>
+              <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+              <span className="text-text-primary font-medium truncate min-w-0 flex-1" title={activeTemplate?.name ?? definition.name}>
+                {activeTemplate?.name ?? definition.name}
+              </span>
+            </>
+          )}
+        </nav>
+
+        {/* Sub-toolbar — the contextual actions of the current level. Going back is
+            the breadcrumb's job, so there is no Back / Forward pair here. The old
+            Reload button lives on as a disk re-scan on the two dataset-listing
+            levels; the workflow level scans one dataset instead. */}
+        <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card">
+          {(viewLevel === "datasets" || viewLevel === "templates") && (
+            <button
+              onClick={() => void refreshKindDatasets()}
+              disabled={loadingDatasets}
+              className={iconBtn}
+              title="Re-read the dataset list from disk"
+            >
+              <RefreshCw size={16} className={loadingDatasets ? "animate-spin" : undefined} />
+            </button>
+          )}
+
+          <div className="text-xs text-text-tertiary truncate flex-1 min-w-0">{toolbarLabel}</div>
+
+          {isDictation && selectedDataset && (
+            isRaw ? (
+              <button className={toolBtnActive} onClick={handleInit} disabled={initing} title="Write an info.json with a new uuid into this folder">
+                <Plus size={14} className={initing ? "animate-spin" : undefined} />
+                {initing ? "Initializing…" : "Initialize as dataset"}
+              </button>
+            ) : viewLevel === "workflow" ? (
+              <button className={toolBtnActive} onClick={scan} disabled={!selectedUuid || scanning} title="Probe the dataset on disk and re-read the run state">
+                <RefreshCw size={14} className={scanning ? "animate-spin" : undefined} />
+                {facts ? "Re-scan" : "Scan status"}
+              </button>
+            ) : null
+          )}
+
+          {viewLevel === "workflow" && (
+            <div className="flex items-center gap-1 shrink-0">
+              <button className={mode === "view" ? toolBtnActive : toolBtn} onClick={() => setMode("view")} title="Graph and run panels">
                 <Eye size={14} /> View
               </button>
-              <button
-                className={`${mode === "edit" ? btnSmPrimary : btnSmSecondary} inline-flex items-center gap-1 rounded-none border-0`}
-                onClick={() => setMode("edit")}
-              >
+              <button className={mode === "edit" ? toolBtnActive : toolBtn} onClick={() => setMode("edit")} title="Edit the workflow YAML / author a job">
                 <Pencil size={14} /> Edit
               </button>
             </div>
-            {isDictation && (
-            <div className="ml-auto flex items-center gap-2">
-              <button
-                className={`${btnSmSecondary} inline-flex items-center gap-1`}
-                onClick={handleReload}
-                disabled={reloading}
-                title="Re-read the dataset list from disk"
-              >
-                <FolderSync size={14} className={reloading ? "animate-spin" : undefined} />
-                Reload
-              </button>
-              <select
-                className="px-2 py-1 text-sm rounded-md bg-bg-body border border-border-light text-text-primary focus:border-accent outline-none min-w-[220px]"
-                value={selectedKey}
-                onChange={(e) => { setSelectedKey(e.target.value); clearView(); setNotice(""); }}
-                disabled={scanning || initing}
-              >
-                <option value="">Select a dictation dataset…</option>
-                {datasets.map((ds) => (
-                  <option key={ds.path} value={ds.info.uuid || ds.path}>
-                    {ds.info.name}
-                    {ds.info.uuid ? (ds.status === "ready" ? "" : " · not ready") : " · not imported"}
-                  </option>
-                ))}
-              </select>
-              {isRaw ? (
-                <button className={`${btnSmPrimary} inline-flex items-center gap-1`} onClick={handleInit} disabled={initing}>
-                  <Plus size={14} className={initing ? "animate-spin" : undefined} />
-                  {initing ? "Initializing…" : "Initialize as dataset"}
-                </button>
-              ) : (
-                <button className={`${btnSmPrimary} inline-flex items-center gap-1`} onClick={scan} disabled={!selectedUuid || scanning}>
-                  <RefreshCw size={14} className={scanning ? "animate-spin" : undefined} />
-                  {facts ? "Re-scan" : "Scan status"}
-                </button>
-              )}
-              </div>
-            )}
-          </div>
+          )}
+        </div>
+
+        {/* Level content */}
+        <div className="flex-1 min-h-0 flex flex-col gap-3 p-4 overflow-hidden">
 
           {notice && (
             <div className="shrink-0 text-xs px-3 py-2 rounded-md bg-info-bg text-info-text border border-border-light flex items-center justify-between gap-2">
@@ -804,7 +978,91 @@ export default function WorkflowPage() {
             </div>
           )}
 
-          {mode === "edit" ? (
+          {viewLevel === "kinds" ? (
+            <div className="flex-1 min-h-0 overflow-y-auto grid gap-2 content-start sm:grid-cols-2 lg:grid-cols-3">
+              {KIND_ORDER.map((cat) => {
+                const meta = KIND_META[cat];
+                const Icon = meta.icon;
+                const count = templates.filter((t) => t.category === cat).length;
+                return (
+                  <button
+                    key={cat}
+                    className="text-left p-4 border border-border-default rounded-lg transition-colors hover:bg-bg-hover cursor-pointer"
+                    onClick={() => openKind(cat)}
+                    title={`Browse ${meta.label} datasets`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Icon size={16} className="shrink-0 text-accent" />
+                      <span className="font-medium text-text-primary truncate">{meta.label}</span>
+                      <span className="ml-auto text-xs text-text-tertiary shrink-0">{count} workflow{count === 1 ? "" : "s"}</span>
+                    </div>
+                    <div className="text-xs text-text-tertiary leading-relaxed mt-1">{meta.blurb}</div>
+                  </button>
+                );
+              })}
+            </div>
+          ) : viewLevel === "datasets" ? (
+            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
+              {loadingDatasets && datasets.length === 0 ? (
+                <p className="text-text-tertiary">Loading…</p>
+              ) : datasets.length === 0 ? (
+                <p className="text-text-secondary">
+                  No {kindLabel.toLowerCase()} dataset was found in the configured locations. Import one first, then refresh this list.
+                </p>
+              ) : (
+                datasets.map((ds) => (
+                  <button
+                    key={ds.key}
+                    className="text-left p-4 border border-border-default rounded-lg transition-colors hover:bg-bg-hover cursor-pointer"
+                    onClick={() => openDataset(ds.key)}
+                    title={ds.path}
+                  >
+                    <div className="flex items-center gap-2">
+                      <FolderOpen size={16} className={`shrink-0 ${ds.ready ? "text-accent" : "text-text-tertiary"}`} />
+                      <span className="font-medium text-text-primary truncate">{ds.name}</span>
+                      {!ds.ready && (
+                        <span className="text-xs px-2 py-[0.2em] rounded-full bg-bg-muted text-text-secondary shrink-0">
+                          {ds.uuid ? "not ready" : "not imported"}
+                        </span>
+                      )}
+                      <span className="ml-auto text-xs text-text-tertiary shrink-0">{ds.note}</span>
+                    </div>
+                    <div className="text-xs text-text-tertiary truncate mt-1" title={ds.path}>{ds.path}</div>
+                  </button>
+                ))
+              )}
+            </div>
+          ) : viewLevel === "templates" ? (
+            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
+              {isDictation && isRaw && (
+                <div className="shrink-0 text-xs px-3 py-2 rounded-md bg-info-bg text-info-text border border-border-light">
+                  This folder has media but no info.json yet — use “Initialize as dataset” in the toolbar, then pick a workflow.
+                </div>
+              )}
+              {kindTemplates.length === 0 ? (
+                <p className="text-text-secondary">No built-in workflow ships for the {kindLabel} kind yet.</p>
+              ) : (
+                kindTemplates.map((t) => (
+                  <button
+                    key={t.id}
+                    className="text-left p-4 border border-border-default rounded-lg transition-colors hover:bg-bg-hover cursor-pointer"
+                    onClick={() => openTemplate(t)}
+                    title={`${t.name} — open the pipeline for ${selectedName}`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <ListChecks size={16} className="shrink-0 text-accent" />
+                      <span className="font-medium text-text-primary truncate">{t.name}</span>
+                      <span className="text-xs text-text-tertiary shrink-0">v{t.version}</span>
+                      <span className="ml-auto text-xs text-text-tertiary shrink-0">{t.step_count} step{t.step_count === 1 ? "" : "s"}</span>
+                    </div>
+                    <div className="text-xs text-text-tertiary mt-1 line-clamp-2">
+                      {(templateStepTitles[t.id] ?? []).join(" › ")}
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          ) : mode === "edit" ? (
             <div className="flex-1 min-h-0 flex flex-col gap-3">
               <div className="flex items-center gap-2 flex-wrap shrink-0 rounded-lg border border-border-light bg-bg-card px-3 py-2">
                 <span className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Jobs</span>
@@ -880,10 +1138,8 @@ export default function WorkflowPage() {
           ) : isDictation && !facts ? (
             <div className="flex-1 min-h-0 flex items-center justify-center text-sm text-text-tertiary px-6 text-center">
               {isRaw
-                ? "This folder has media but no info.json yet — click “Initialize as dataset” to create it."
-                : selectedUuid
-                  ? "Click “Scan status” to read the dataset and lay out the pipeline."
-                  : "Select a dictation dataset above to view its workflow graph."}
+                ? "This folder still needs an info.json — use “Initialize as dataset” in the toolbar above."
+                : "Press “Scan status” in the toolbar to probe the dataset and refresh the run state."}
             </div>
           ) : (
             <div className="flex-1 min-h-0 flex gap-3">
@@ -901,6 +1157,42 @@ export default function WorkflowPage() {
 
               {/* Inspector */}
               <div className="w-[440px] max-w-[55%] shrink-0 min-h-0 overflow-y-auto flex flex-col gap-3">
+                {/* Scan result — what the last probe found on disk, i.e. exactly the
+                    values this pipeline's `when:` guards are evaluated against. */}
+                {isDictation && (
+                  <section className="rounded-lg border border-border-light bg-bg-card p-3 flex flex-col gap-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <h2 className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Scan result</h2>
+                      <span className="text-[10px] text-text-tertiary truncate min-w-0">
+                        {scanning ? "Scanning…" : facts ? selectedName : "not scanned yet"}
+                      </span>
+                    </div>
+                    {facts ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        {FACT_LABELS.map(([key, label]) => {
+                          const present = facts[key];
+                          return (
+                            <span
+                              key={key}
+                              className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full ${
+                                present ? "bg-success-bg text-success-text" : "bg-bg-muted text-text-tertiary"
+                              }`}
+                              title={present ? "present on disk" : "missing on disk — steps guarded by it are skipped"}
+                            >
+                              {present ? <Check size={11} /> : <X size={11} />}
+                              {label}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-text-tertiary leading-relaxed">
+                        Press “Scan status” to probe this dataset’s media, subtitles, waveforms, cue DB, book text and transcripts.
+                      </p>
+                    )}
+                  </section>
+                )}
+
                 <StepInspector
                   step={sel}
                   op={selOp}
@@ -1006,7 +1298,7 @@ export default function WorkflowPage() {
                       <button className={`${btnSmSecondary} inline-flex items-center gap-1`} onClick={copyYaml}><Copy size={14} /> Copy workflow.yaml</button>
                     </div>
                     <p className="text-xs text-text-tertiary leading-relaxed">
-                      <span className="font-semibold text-text-secondary">{definition.name}</span> is a view / agent-facing workflow: every step’s action names a real command (an MCP tool or its Tauri-command twin), so an agent runs it via <span className="font-mono">workflow_builtin_templates</span> → <span className="font-mono">workflow_create</span> → the workflow loop. Per-step in-app Run is wired for the Dictation tab only.
+                      <span className="font-semibold text-text-secondary">{definition.name}</span> is a view / agent-facing workflow: every step’s action names a real command (an MCP tool or its Tauri-command twin), so an agent runs it via <span className="font-mono">workflow_builtin_templates</span> → <span className="font-mono">workflow_create</span> → the workflow loop. Per-step in-app Run is wired for the Dictation kind only.
                     </p>
                   </section>
                 )}
@@ -1014,6 +1306,7 @@ export default function WorkflowPage() {
             </div>
           )}
         </div>
+        </>
       )}
     </div>
   );
