@@ -1,0 +1,79 @@
+﻿version: 1.0.0
+title: build-dataset-from-media
+description: Build a complete dataset from media files only - generate subtitles, database, waveforms, adjust timestamps, and align to book/transcript references.
+instructions: |-
+  # Build Complete Dataset from Media Files
+
+  ## Goal
+  Starting from a dataset that only has a media/ directory, run the full pipeline to produce subtitles, database, waveforms, refined timestamps, and align cues to optional book.txt and transcript references.
+
+  ## Prerequisites
+  - An STT model must be loaded (check with model_status, load with model_load)
+  - Parakeet model preferred for word-level alignment (most accurate)
+  - The dataset must already be imported with media files present
+
+  ## Workflow
+
+  ### Step 1: Identify the Dataset
+  - Call dataset_list to show available datasets
+  - Call dataset_get with the dataset UUID to check current status
+  - Confirm media exists. Note which optional artifacts exist: book.txt, transcript/, subtitle/, database
+  - Call dataset_get_summary to see media count and confirm no subtitles/cues yet
+
+  ### Step 2: Check Model Status
+  - Call model_status to see what model is loaded
+  - If the hint says "Call model_load", call model_load to load a Parakeet model
+  - If no Parakeet model is downloaded, either download one (model_download) or use a different available model
+
+  ### Step 3: Generate Subtitles
+  - Call dataset_generate_subtitles with the dataset UUID
+  - This transcribes ALL media files using the loaded STT model and produces VTT subtitle files
+  - Report the number of subtitle files generated
+
+  ### Step 4: Generate Database
+  - Call dataset_write_subtitles_to_db with the dataset UUID
+  - This parses all VTT files and writes media, subtitle, and cue records into data.sqlite3
+  - Call dataset_get_summary to verify: subtitle_count and cue_count should be > 0
+
+  ### Step 5: Generate Waveforms
+  - Call dataset_generate_waveforms with the dataset UUID
+  - This generates waveform JSON files for all media using Symphonia peak detection
+  - Waveforms are needed for silence-snapping in Step 6
+  - Report the number of files generated
+
+  ### Step 6: Adjust Cue Timestamps (Silence-Snap)
+  - Call dataset_adjust_cue_time with the dataset UUID and mode=in_place
+  - This uses waveform silence detection to snap cue boundaries to quiet regions in the audio
+  - Can be run multiple times to refine results
+  - Report the number of cues shifted
+
+  ### Step 7: Align Cues to Book Reference (if book.txt exists)
+  - Check if book.txt exists (from dataset_get artifacts, or call dataset_read_file with path="book.txt")
+  - If book.txt exists: call dataset_align_cues with the dataset UUID
+  - This matches cue text to sentences in book.txt using multi-pass similarity, setting the reference field
+  - Report alignment results
+
+  ### Step 8: Align Cues to Transcript References (if transcript/ exists)
+  - Check if transcript/ directory exists (from dataset_get artifacts, or call dataset_list_files)
+  - If transcript/ exists: call dataset_align_cues_transcript with the dataset UUID
+  - This matches cue text to per-subtitle transcript files for reference alignment
+  - Report alignment results
+
+  ### Step 9: Verify Results
+  - Call dataset_get_summary to see final counts (media, subtitles, cues)
+  - Call dataset_list_subtitles to see all subtitles with cue counts
+  - Call dataset_list_cues with a subtitle UUID to inspect a sample of cues
+  - Show the user the results: how many media processed, cues created, alignment stats
+
+  ## Pipeline Order
+  The steps MUST run in this order because each depends on the previous:
+  1. Subtitles (STT) -> 2. Database (parse VTTs) -> 3. Waveforms (audio peaks) -> 4. Adjust (silence-snap) -> 5. Align (book/transcript)
+
+  ## Important Notes
+  - If any step fails, stop and report the error before continuing
+  - Steps 7 and 8 are optional - only run if book.txt or transcript/ exist
+  - dataset_adjust_cue_time with mode=in_place modifies existing cues directly
+  - Book alignment sets the reference field on cues (does NOT change cue text)
+  - The whole pipeline may take a while depending on media count and duration
+activities: []
+parameters: []

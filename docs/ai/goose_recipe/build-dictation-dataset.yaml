@@ -2,17 +2,16 @@
 #   goose run --recipe docs/ai/goose_recipe/dataset_dictation.yaml --with-streamable-http-extension http://127.0.0.1:35711/mcp
 # Check with:
 #   goose recipe validate docs/ai/goose_recipe/dataset_dictation.yaml
-# A markdown twin of these instructions lives beside this file (dataset_dictation.md).
 version: 1.0.0
-title: dataset_dictation
+title: build-dictation-dataset
 description: Drive one dictation dataset to a prepared state through the workflow engine - subtitles, waveforms, cue alignment, silence-snapping - with every step measured against the disk and recorded in a resumable run.
 instructions: |-
-  # Process a Dictation Dataset (engine-driven)
+  # Build a Dictation Dataset (engine-driven)
 
   ## Goal
   Take one dictation dataset from whatever state it is in to a fully prepared one - media registered, subtitles generated *and* imported, waveforms, cues aligned to `book.txt` / `transcript/` when they exist, cue times snapped to silence - while recording every transition in a workflow run stored inside the dataset.
 
-  Unlike the other recipes in this folder, this one drives the **workflow engine** rather than calling pipeline tools in a fixed order, so:
+  This recipe drives the **workflow engine** rather than calling pipeline tools in a fixed order, so:
   - the run is resumable across sessions and crashes;
   - the app's Workflow page shows the same state you see;
   - steps the dataset already satisfies are adopted as completed instead of being re-run.

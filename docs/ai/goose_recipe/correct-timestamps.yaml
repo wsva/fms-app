@@ -1,0 +1,72 @@
+version: 1.0.0
+title: correct-timestamps
+description: Fix cue timestamps for ALL media in a dataset using word-level STT alignment (preferred) or VTT text matching, then silence-snapping.
+instructions: |-
+  # Correct Cue Timestamps for All Media (Batch)
+
+  ## Goal
+  Fix inaccurate cue timestamps for ALL media files in a language learning dataset. The cue TEXT is correct — only timestamps need adjustment.
+
+  ## Prerequisites
+  - For the preferred word-level approach: a **Parakeet model must be loaded** (check with model_status, load with model_load)
+  - For the VTT fallback approach: any STT model works
+
+  ## Workflow
+
+  ### Step 1: Identify the Dataset
+  - Call dataset_list to show available datasets
+  - Call dataset_get with the dataset UUID to check current status
+  - Confirm database exists, subtitles exist, media exists
+
+  ### Step 2: Check Model Status
+  - Call model_status to see what model is loaded
+  - If the hint says "Call model_load", call model_load to load a Parakeet model
+  - If no Parakeet model is downloaded, either download one (model_download) or plan to use the VTT fallback approach
+
+  ### Step 3: Sync Cue Times
+
+  **If Parakeet is loaded (PREFERRED — word-level alignment):**
+  - Call dataset_sync_cue_times_word_level with the dataset UUID
+  - This transcribes all media with word-level timestamps, then DP-aligns cue words against STT words
+  - Much more accurate than text similarity matching
+  - Cues with <50% word match ratio are flagged as unmatched
+  - Review the output for per-cue before/after timestamps and match ratios
+
+  **If Parakeet is NOT available (FALLBACK — VTT text matching):**
+  - Call dataset_generate_subtitles with the dataset UUID to generate fresh VTTs for all media files
+  - Call dataset_sync_cue_times with the dataset UUID
+  - This matches fresh VTT cues to existing DB cues by text similarity (Ratcliff-Obershelp)
+  - Default similarity threshold is 70. If too many unmatched, retry with threshold=50
+
+  ### Step 4: Generate Waveforms for All Media
+  - Call dataset_generate_waveforms with the dataset UUID
+  - This generates waveform JSON files for all media that don't have one yet
+  - Report the number of files generated
+
+  ### Step 5: Silence-Snap (Refine with Waveform)
+  - Call dataset_adjust_cue_time with mode=in_place, force=true
+  - force=true ensures already-adjusted subtitles are re-processed (important for iterative refinement)
+  - This uses waveform silence detection to snap cue boundaries to quiet regions
+  - **Strategy parameter** (optional): controls how silence is detected
+    - `noise_floor` (default): threshold = noise_floor × 2.0. Good for audio with consistent background noise
+    - `dual_bound`: threshold = max(noise_floor × 4.0, peak × 0.001). Prevents over-detection on very clean audio
+    - `peak_relative`: threshold = peak × 0.005. Simple and predictable; good when noise floor estimation is unreliable
+    - `otsu`: automatic optimal threshold via histogram analysis. No magic constants; good for unknown audio characteristics
+  - If default strategy doesn't work well, try another: `strategy=dual_bound` or `strategy=otsu`
+  - **Resumable**: If interrupted, safely re-run — per-subtitle transactions ensure progress is saved
+  - **Protected**: Concurrent operations on the same dataset are prevented (returns error if already running)
+  - Can be run multiple times to refine results
+
+  ### Step 6: Verify Results
+  - Call dataset_list_subtitles to see subtitles and cue counts
+  - Call dataset_list_cues with a subtitle UUID to inspect updated cue timestamps
+  - Show the user a sample of the updated timestamps
+
+  ## Important Notes
+  - Word-level alignment does NOT need separate VTT generation — it transcribes internally
+  - VTT fallback requires fresh VTT files but works with any model
+  - Step 5 (silence-snap) fine-tunes using actual audio energy data
+  - Cue text is NEVER changed — only timestamps are updated
+  - Different audio files may need different silence strategies; check debug logs for threshold values
+activities: []
+parameters: []
