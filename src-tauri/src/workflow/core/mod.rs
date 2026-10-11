@@ -223,6 +223,13 @@ pub struct Step {
     /// dependent run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_skipped_dependency: Option<SkipPolicy>,
+    /// How many times a claim on this step may be reaped as interrupted before it
+    /// is given up on as `failed`. Separate from `retry.attempts` on purpose: a
+    /// reaped lease is a *crash*, not an error the executor reported, and a user
+    /// may want a different tolerance for each. Defaults to
+    /// [`Step::DEFAULT_MAX_INTERRUPTS`] when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_interrupts: Option<u32>,
 }
 
 impl Step {
@@ -235,6 +242,13 @@ impl Step {
     fn max_attempts(&self) -> u32 {
         self.retry.as_ref().map(|r| r.attempts.max(1)).unwrap_or(1)
     }
+    /// Reaps this many before the step is abandoned as `failed`. Kept small on
+    /// purpose: an executor that crashes every time must not loop forever (a reap
+    /// consumes no `retry.attempts`, so without this budget nothing stops it).
+    fn max_interrupts(&self) -> u32 {
+        self.max_interrupts.unwrap_or(Self::DEFAULT_MAX_INTERRUPTS)
+    }
+    const DEFAULT_MAX_INTERRUPTS: u32 = 3;
     /// Check ids this step adopts existing evidence for (never empty in practice:
     /// [`adopt`] skips a step whose list is absent or empty).
     fn adopt_ids(&self) -> &[String] {
@@ -297,6 +311,17 @@ pub struct StepState {
     /// re-derive it — see [`SkipReason`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<SkipReason>,
+    /// The token identifying the current `running` claim ([`advance`] mints it,
+    /// [`record`] demands it once the step has been reaped at least once). A late
+    /// report from an executor whose claim was already reaped and re-granted
+    /// carries a stale id, so it is rejected instead of clobbering the live claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    /// How many times this step's lease has been reaped as interrupted, counted
+    /// against [`Step::max_interrupts`]. Reset on a clean completion or an
+    /// explicit human `retry`/`reset`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupts: Option<u32>,
 }
 
 /// The materialized snapshot (`state.json`).
@@ -404,13 +429,36 @@ pub(crate) fn run_exists(base: &Path, run_id: &str) -> bool {
 }
 
 /// Definition + current state + what's ready/blocked/failed and why.
+///
+/// Read-only. It recomputes derived statuses in memory — so the view it returns is
+/// accurate after a restart — but never writes: a status probe must not quietly
+/// persist a reaped lease (which would move `state.json` ahead of `events.jsonl`
+/// with no event behind it). An expired lease is *reported* in `expired_claims` and
+/// the `lease_hint`; the reap is persisted only by a mutating call or [`reap`].
 pub(crate) fn status(base: &Path, run_id: &str) -> Result<Value, String> {
+    let (_dir, def, mut state) = load_bundle(base, run_id)?;
+    let reaps = engine::recompute(&def, &mut state, persist::now_ts());
+    let mut out = build_status(run_id, &def, &state);
+    attach_expired_claims(&mut out, &reaps);
+    Ok(out)
+}
+
+/// Explicitly persist the reaping of any expired lease, journalling one
+/// `interrupted` (or, past the budget, `failed`) event per reaped claim. This is
+/// the mutating home for a reap that [`status`] only reports: an agent that wants
+/// to clear stalled claims without advancing or recording anything else calls it.
+/// A second identical call finds nothing expired and writes nothing.
+pub(crate) fn reap(base: &Path, run_id: &str) -> Result<Value, String> {
     let (dir, def, mut state) = load_bundle(base, run_id)?;
-    engine::recompute(&def, &mut state, persist::now_ts());
-    // Persist any recompute-derived changes (e.g. a reaped lease) so the on-disk
-    // snapshot matches what we return.
-    persist::write_state_atomic(&dir, &state)?;
-    Ok(build_status(run_id, &def, &state))
+    let reaps = engine::recompute(&def, &mut state, persist::now_ts());
+    if reaps.is_empty() {
+        return Ok(build_status(run_id, &def, &state));
+    }
+    let events = reap_events(&reaps);
+    commit(&dir, &events, &state)?;
+    let mut out = build_status(run_id, &def, &state);
+    attach_expired_claims(&mut out, &reaps);
+    Ok(out)
 }
 
 /// Return the raw `workflow.yaml` text of a run, for loading back into the
@@ -421,10 +469,13 @@ pub(crate) fn definition_text(base: &Path, run_id: &str) -> Result<String, Strin
 }
 
 /// The runnable (`ready`, unclaimed) steps with resolved action + inputs.
+///
+/// Read-only like [`status`]: it recomputes in memory and reports any expired lease
+/// in `expired_claims`/`lease_hint`, but persists nothing.
 pub(crate) fn next_steps(base: &Path, run_id: &str) -> Result<Value, String> {
     let (_dir, def, mut state) = load_bundle(base, run_id)?;
     let now = persist::now_ts();
-    engine::recompute(&def, &mut state, now);
+    let reaps = engine::recompute(&def, &mut state, now);
 
     let ready = engine::ready_step_ids(&def, &state);
     let mut steps: Vec<Value> = Vec::new();
@@ -460,6 +511,8 @@ pub(crate) fn next_steps(base: &Path, run_id: &str) -> Result<Value, String> {
                     "lease": ss.lease,
                     "started_at": ss.started_at,
                     "attempt": ss.attempt,
+                    "claim_id": ss.claim_id,
+                    "interrupts": ss.interrupts,
                     "lease_secs": s.lease_secs(),
                 })
             })
@@ -486,7 +539,9 @@ pub(crate) fn next_steps(base: &Path, run_id: &str) -> Result<Value, String> {
     } else {
         format!("no runnable steps (run_status={run_status}); call workflow_status for blocked/failed reasons")
     };
-    Ok(json!({ "run_id": run_id, "run_status": run_status, "steps": steps, "claimed": claimed, "hint": hint }))
+    let mut out = json!({ "run_id": run_id, "run_status": run_status, "steps": steps, "claimed": claimed, "hint": hint });
+    attach_expired_claims(&mut out, &reaps);
+    Ok(out)
 }
 
 /// Claim a `ready` step (single-flight via lease) and hand its resolved action
@@ -499,7 +554,9 @@ pub(crate) fn advance(
 ) -> Result<Value, String> {
     let (dir, def, mut state) = load_bundle(base, run_id)?;
     let now = persist::now_ts();
-    engine::recompute(&def, &mut state, now);
+    // A mutating call is one of the homes for a reap: any expired claim this
+    // advance touches is journalled (`interrupted`/`failed`) in the same write.
+    let reaps = engine::recompute(&def, &mut state, now);
 
     let step = find_step(&def, step_id)?;
     let ss = state.steps.get(step_id).cloned().unwrap_or_default();
@@ -558,6 +615,9 @@ pub(crate) fn advance(
     let lease = agent_id.filter(|a| !a.trim().is_empty()).unwrap_or_else(|| "agent".into());
     let attempt = ss.attempt.unwrap_or(0) + 1;
     let started = persist::now_string();
+    // A fresh, unique token per claim: the only thing that lets `record` tell a
+    // live holder from a reaped executor reporting late (see [`record`]'s token gate).
+    let claim_id = new_claim_id(attempt);
 
     let entry = state.steps.entry(step_id.to_string()).or_default();
     entry.status = Status::Running;
@@ -565,13 +625,21 @@ pub(crate) fn advance(
     entry.heartbeat = Some(now);
     entry.started_at = Some(started);
     entry.attempt = Some(attempt);
+    entry.claim_id = Some(claim_id.clone());
     entry.reason = None;
 
     let inputs = engine::resolve_inputs(step, &state).unwrap_or_default();
-    let events = vec![
-        event(Some(step_id), "claimed", Some(json!({ "lease": lease, "attempt": attempt }))),
-        event(Some(step_id), "started", None),
-    ];
+    let mut events = reap_events(&reaps);
+    events.push(event(
+        Some(step_id),
+        "claimed",
+        Some(json!({ "lease": lease, "attempt": attempt, "claim_id": claim_id })),
+    ));
+    events.push(event(
+        Some(step_id),
+        "started",
+        Some(json!({ "claim_id": claim_id })),
+    ));
     commit(&dir, &events, &state)?;
 
     Ok(json!({
@@ -580,27 +648,36 @@ pub(crate) fn advance(
         "status": "running",
         "lease": lease,
         "attempt": attempt,
+        "claim_id": claim_id,
         "action": step.action,
         "description": step.description,
         "params": step.params,
         "inputs": inputs,
         "declared_outputs": step.outputs,
         "lease_secs": step.lease_secs(),
-        "hint": "perform the action, then report the outcome with workflow_record(run_id, step, event=completed|failed|blocked, detail) before this step's lease expires",
+        "hint": "perform the action, then report the outcome with workflow_record(run_id, step, event=completed|failed|blocked, detail) before this step's lease expires; pass claim_id back on the report if this step was ever reaped",
     }))
 }
 
 /// Record an executor/agent outcome for a claimed step and re-evaluate.
+///
+/// `claim_id` is the token [`advance`] minted for this claim. It is only *demanded*
+/// for a step that has already been reaped once (see the gate below): a first-time
+/// executor may report without it, so existing agents keep working, but a step that
+/// has lost a claim to a crash must not be completed by a late report carrying a
+/// stale token that would clobber the live claim.
 pub(crate) fn record(
     base: &Path,
     run_id: &str,
     step_id: &str,
     event_kind: &str,
     detail: Option<Value>,
+    claim_id: Option<&str>,
 ) -> Result<Value, String> {
     let (dir, def, mut state) = load_bundle(base, run_id)?;
     let now = persist::now_ts();
-    engine::recompute(&def, &mut state, now);
+    // Mutating call: any expired lease reaped here is journalled in this same write.
+    let reaps = engine::recompute(&def, &mut state, now);
 
     let step = find_step(&def, step_id)?;
     let cur = state.steps.get(step_id).map(|s| s.status).unwrap_or_default();
@@ -609,6 +686,36 @@ pub(crate) fn record(
             "step '{step_id}' is '{cur_status}', so an outcome cannot be recorded. Advance it first, or use workflow_intervene.",
             cur_status = cur.as_str()
         ));
+    }
+
+    // Claim-token gate (3.2). Only a *live* claim can be clobbered, so this bites
+    // only while the step is `Running`; a reaped-then-ready step (no live claim)
+    // still accepts the late original executor's report, which is the documented
+    // recovery path. Strict once the step has been reaped at least once, lenient
+    // otherwise (a first claim reports with no token at all).
+    if cur == Status::Running {
+        let live = state.steps.get(step_id).and_then(|s| s.claim_id.clone());
+        let interrupts = state.steps.get(step_id).and_then(|s| s.interrupts).unwrap_or(0);
+        match (claim_id, &live) {
+            (Some(tok), Some(live)) if tok != live => {
+                return Err(format!(
+                    "step '{step_id}' is now claimed under token '{live}', not '{tok}': this report \
+                     is from an executor whose claim was reaped and re-granted, so accepting it would \
+                     clobber the live claim. Nothing was written. The current holder reports with \
+                     claim_id='{live}'."
+                ));
+            }
+            (None, _) if interrupts > 0 => {
+                return Err(format!(
+                    "step '{step_id}' has been reaped {interrupts} time(s) and is claimed under token \
+                     '{}'; a report must present that claim_id (returned by workflow_advance), because \
+                     a step that already lost a claim to a crash must not be completed by a token we \
+                     cannot match to the live holder. Nothing was written.",
+                    live.clone().unwrap_or_else(|| "(none recorded)".into())
+                ));
+            }
+            _ => {}
+        }
     }
 
     let mut outputs = detail
@@ -666,7 +773,10 @@ pub(crate) fn record(
     let attempt = state.steps.get(step_id).and_then(|s| s.attempt).unwrap_or(1).max(1);
     let now_str = persist::now_string();
 
-    let mut events: Vec<Event> = Vec::new();
+    let mut events: Vec<Event> = reap_events(&reaps);
+    // The token this operation closes, captured before the entry clears it:
+    // every outcome event names the claim it reports on (spec 3.2).
+    let closing_claim = state.steps.get(step_id).and_then(|s| s.claim_id.clone());
     let entry = state.steps.entry(step_id.to_string()).or_default();
     match event_kind {
         "completed" => {
@@ -677,7 +787,14 @@ pub(crate) fn record(
             entry.lease = None;
             entry.blocked_by = None;
             entry.skip_reason = None;
-            events.push(event(Some(step_id), "completed", detail.clone()));
+            // A clean completion ends the crash history and the live claim.
+            entry.claim_id = None;
+            entry.interrupts = None;
+            events.push(event(
+                Some(step_id),
+                "completed",
+                detail_with_claim(detail.clone(), closing_claim.as_deref()),
+            ));
         }
         "blocked" => {
             entry.status = Status::Blocked;
@@ -687,7 +804,12 @@ pub(crate) fn record(
             // explicit `unblock` — the graph may not silently reopen it (F5).
             entry.blocked_by = Some(BlockedBy::External);
             entry.skip_reason = None;
-            events.push(event(Some(step_id), "blocked", detail.clone()));
+            entry.claim_id = None;
+            events.push(event(
+                Some(step_id),
+                "blocked",
+                detail_with_claim(detail.clone(), closing_claim.as_deref()),
+            ));
         }
         "failed" => {
             if attempt < max_attempts {
@@ -696,10 +818,16 @@ pub(crate) fn record(
                 entry.lease = None;
                 entry.blocked_by = None;
                 entry.skip_reason = None;
+                entry.claim_id = None;
                 events.push(event(
                     Some(step_id),
                     "retried",
-                    Some(json!({ "attempt": attempt, "max_attempts": max_attempts, "error": reason })),
+                    Some(json!({
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "error": reason,
+                        "claim_id": closing_claim,
+                    })),
                 ));
             } else {
                 entry.status = Status::Failed;
@@ -708,7 +836,12 @@ pub(crate) fn record(
                 entry.lease = None;
                 entry.blocked_by = None;
                 entry.skip_reason = None;
-                events.push(event(Some(step_id), "failed", detail.clone()));
+                entry.claim_id = None;
+                events.push(event(
+                    Some(step_id),
+                    "failed",
+                    detail_with_claim(detail.clone(), closing_claim.as_deref()),
+                ));
             }
         }
         other => {
@@ -720,12 +853,24 @@ pub(crate) fn record(
 
     // A step that fell back to `ready`/`failed`/`blocked` may leave a
     // already-`completed` dependent stranded on a now-unsatisfied upstream: reopen
-    // it (F3) before re-deriving readiness, so the invariant never breaks.
-    events.extend(cascade_completed(&def, &mut state));
+    // it (F3) before re-deriving readiness, so the invariant never breaks. The
+    // `invalidated` event records where the dependent actually *landed* after
+    // recompute (normally `pending`), not the transient `ready` reopen set (N1/3.5).
+    let reopened = engine::reopen_stale_completed(&def, &mut state);
     engine::recompute(&def, &mut state, now);
+    events.extend(invalidated_events(&reopened, &state));
     // A run-level event marks a terminal run.
     match engine::classify_run(&def, &state) {
         "completed" => events.push(event(None, "workflow_completed", None)),
+        "completed_with_failures" => {
+            let failed: Vec<&str> = def
+                .steps
+                .iter()
+                .filter(|s| state.steps.get(&s.id).map(|ss| ss.status == Status::Failed).unwrap_or(false))
+                .map(|s| s.id.as_str())
+                .collect();
+            events.push(event(None, "workflow_completed_with_failures", Some(json!({ "failed": failed }))));
+        }
         "failed" => events.push(event(None, "workflow_failed", None)),
         "blocked" => events.push(event(None, "workflow_blocked", None)),
         _ => {}
@@ -748,7 +893,9 @@ pub(crate) fn intervene(
 ) -> Result<Value, String> {
     let (dir, def, mut state) = load_bundle(base, run_id)?;
     let now = persist::now_ts();
-    engine::recompute(&def, &mut state, now);
+    // A mutating call is a home for a reap: an expired claim this intervene
+    // touches is journalled (`interrupted`/`failed`) in the same write.
+    let reaps = engine::recompute(&def, &mut state, now);
     find_step(&def, step_id)?;
 
     let now_str = persist::now_string();
@@ -763,6 +910,9 @@ pub(crate) fn intervene(
             entry.finished_at = None;
             entry.blocked_by = None;
             entry.skip_reason = None;
+            // A human retry restarts the crash history and the live claim.
+            entry.claim_id = None;
+            entry.interrupts = None;
             "retried"
         }
         "unblock" => {
@@ -771,6 +921,7 @@ pub(crate) fn intervene(
             entry.lease = None;
             // The caller's parked block is lifted — the graph re-derives from here.
             entry.blocked_by = None;
+            entry.claim_id = None;
             "unblocked"
         }
         "skip" => {
@@ -782,6 +933,7 @@ pub(crate) fn intervene(
             // never re-derives it from a `when:` guard (F5c).
             entry.skip_reason = Some(SkipReason::Manual);
             entry.blocked_by = None;
+            entry.claim_id = None;
             "skipped"
         }
         "reset" => {
@@ -795,13 +947,18 @@ pub(crate) fn intervene(
         }
     };
 
-    let mut events = vec![event(Some(step_id), ev_name, Some(json!({ "op": op })))];
+    let mut events = reap_events(&reaps);
+    events.push(event(Some(step_id), ev_name, Some(json!({ "op": op }))));
     // Resetting or retrying a step that had `completed` dependents strands them on
     // a now-unsatisfied upstream: reopen them (F3) before re-deriving readiness.
-    if matches!(op, "reset" | "retry") {
-        events.extend(cascade_completed(&def, &mut state));
-    }
+    // The `invalidated` event records where each dependent actually landed.
+    let reopened = if matches!(op, "reset" | "retry") {
+        engine::reopen_stale_completed(&def, &mut state)
+    } else {
+        Vec::new()
+    };
     engine::recompute(&def, &mut state, now);
+    events.extend(invalidated_events(&reopened, &state));
     commit(&dir, &events, &state)?;
 
     let mut resp = build_status(run_id, &def, &state);
@@ -837,7 +994,7 @@ pub(crate) fn verify(
 ) -> Result<Value, String> {
     let (dir, def, mut state) = load_bundle(base, run_id)?;
     let now = persist::now_ts();
-    engine::recompute(&def, &mut state, now);
+    let reaps = engine::recompute(&def, &mut state, now);
 
     let mut verdicts: Map<String, Value> = Map::new();
     let mut drifted: Vec<String> = Vec::new();
@@ -929,13 +1086,19 @@ pub(crate) fn verify(
     }
 
     let changed = !events.is_empty();
-    if changed {
+    // A reap this verify observed is a status change and must cost an event, so it
+    // is journalled whenever this call writes at all (its own demotions, or a reap).
+    if changed || !reaps.is_empty() {
+        let mut all_events = reap_events(&reaps);
+        all_events.append(&mut events);
         // A demotion may strand an already-`completed` dependent on a now-
-        // unsatisfied upstream: reopen it too (F3) before re-deriving readiness.
-        events.extend(cascade_completed(&def, &mut state));
+        // unsatisfied upstream: reopen it too (F3) before re-deriving readiness,
+        // recording where each reopened dependent actually landed.
+        let reopened = engine::reopen_stale_completed(&def, &mut state);
         // Re-derive what the demotion un-satisfied, then append-then-write.
         engine::recompute(&def, &mut state, now);
-        commit(&dir, &events, &state)?;
+        all_events.extend(invalidated_events(&reopened, &state));
+        commit(&dir, &all_events, &state)?;
         for (id, v) in verdicts.iter_mut() {
             if let Some(ss) = state.steps.get(id) {
                 if let Some(obj) = v.as_object_mut() {
@@ -1013,7 +1176,7 @@ pub(crate) fn adopt(
 ) -> Result<Value, String> {
     let (dir, def, mut state) = load_bundle(base, run_id)?;
     let now = persist::now_ts();
-    engine::recompute(&def, &mut state, now);
+    let reaps = engine::recompute(&def, &mut state, now);
 
     // Which outputs of each step a dependent reads back (through `inputs:` or a
     // `when:` guard). Adopting a step whose consumed output the call did not supply
@@ -1132,11 +1295,15 @@ pub(crate) fn adopt(
     }
 
     let changed = !events.is_empty();
-    if changed {
+    // A reap adoption observed is a status change and must cost an event, so it is
+    // journalled whenever this call writes at all (its own adoptions, or a reap).
+    if changed || !reaps.is_empty() {
+        let mut all_events = reap_events(&reaps);
+        all_events.append(&mut events);
         // What the adopted claim satisfies has to be re-derived, exactly as a
         // reported completion would.
         engine::recompute(&def, &mut state, now);
-        commit(&dir, &events, &state)?;
+        commit(&dir, &all_events, &state)?;
     }
 
     let hint = if changed {
@@ -1222,7 +1389,9 @@ pub(crate) fn rebind_definition(
     };
 
     persist::write_definition_text(&dir, definition_yaml)?;
-    let events = vec![event(
+    let reaps = engine::recompute(&def, &mut state, persist::now_ts());
+    let mut events = reap_events(&reaps);
+    events.push(event(
         None,
         "definition_refreshed",
         Some(json!({
@@ -1230,8 +1399,7 @@ pub(crate) fn rebind_definition(
             "dropped": dropped,
             "by": "workflow_adopt",
         })),
-    )];
-    engine::recompute(&def, &mut state, persist::now_ts());
+    ));
     commit(&dir, &events, &state)
 }
 
@@ -1283,24 +1451,113 @@ fn commit(dir: &Path, events: &[Event], state: &RunState) -> Result<(), String> 
     persist::write_state_atomic(dir, state)
 }
 
-/// Run the F3 cascade and return one `invalidated` event per reopened dependent.
-///
-/// Called wherever a step is moved *down* (a demotion, a terminal failure, a
-/// reset/retry): it reopens every `completed` step whose dependency has stopped
-/// being satisfied, so a green node never sits on top of a stale upstream. The
-/// caller then runs `recompute` to settle the reopened steps' readiness and
-/// `commit`s the whole cascade in one atomic write. Every move is attributable
-/// through `detail.cascaded_from` naming the dependency that forced it.
-fn cascade_completed(def: &Definition, state: &mut RunState) -> Vec<Event> {
-    engine::reopen_stale_completed(def, state)
-        .into_iter()
+/// A fresh, unique token per claim (spec 3.2): the attempt number plus a random
+/// suffix, so a late report from an executor whose claim was already reaped and
+/// re-granted carries a stale id [`record`] can reject instead of honouring.
+fn new_claim_id(attempt: u32) -> String {
+    let uuid = uuid::Uuid::new_v4().simple().to_string();
+    format!("{attempt}-{}", &uuid[..8])
+}
+
+/// Attach the claim a closing event refers to (spec 3.2): `claimed` always names
+/// its token, and so do the events that end a claim (`started`, `completed`,
+/// `failed`, `retried`, `blocked`), so a group-3 replay can rebuild the token
+/// without guessing. A caller-supplied `claim_id` in `detail` wins; a non-object
+/// detail is left exactly as written.
+fn detail_with_claim(detail: Option<Value>, claim_id: Option<&str>) -> Option<Value> {
+    let Some(claim) = claim_id else { return detail };
+    let mut obj = match detail {
+        Some(Value::Object(o)) => o,
+        Some(other) => return Some(other),
+        None => serde_json::Map::new(),
+    };
+    obj.entry("claim_id").or_insert(json!(claim));
+    Some(Value::Object(obj))
+}
+
+/// One event per claim this operation reaped (spec 3.1): always an `interrupted`
+/// event, plus a terminal `failed` event when the step exhausted its interrupt
+/// budget ([`Step::max_interrupts`]). `detail` carries the whole claim — attempt,
+/// claim id, holder, when it expired, the timeout — so a later replay can rebuild
+/// the interruption without guessing. These belong to the reap, not to whatever
+/// else the calling operation does, so they are prepended before its own events.
+fn reap_events(reaps: &[engine::ReapedClaim]) -> Vec<Event> {
+    let mut events = Vec::new();
+    for r in reaps {
+        events.push(event(
+            Some(&r.id),
+            "interrupted",
+            Some(json!({
+                "attempt": r.attempt,
+                "claim_id": r.claim_id,
+                "holder": r.holder,
+                "expired_at": r.expired_at,
+                "timeout_secs": r.timeout_secs,
+                "gave_up": r.gave_up,
+            })),
+        ));
+        if r.gave_up {
+            events.push(event(
+                Some(&r.id),
+                "failed",
+                Some(json!({
+                    "reason": "interrupt budget exhausted (max_interrupts reached)",
+                    "claim_id": r.claim_id,
+                    "holder": r.holder,
+                    "by": "reap",
+                })),
+            ));
+        }
+    }
+    events
+}
+
+/// Report — never persist — the claims this read-only call found expired (spec
+/// 3.1), so a probe of a stalled run says so out loud. [`status`] and
+/// [`next_steps`] carry it; the reap itself is left to a mutating call or
+/// [`reap`], which is the only way it costs an event.
+fn attach_expired_claims(out: &mut Value, reaps: &[engine::ReapedClaim]) {
+    if reaps.is_empty() {
+        return;
+    }
+    let Some(obj) = out.as_object_mut() else { return };
+    let claims: Vec<Value> = reaps
+        .iter()
+        .map(|r| json!({
+            "step": r.id,
+            "holder": r.holder,
+            "claim_id": r.claim_id,
+            "expired_at": r.expired_at,
+            "timeout_secs": r.timeout_secs,
+            "gave_up": r.gave_up,
+        }))
+        .collect();
+    obj.insert("expired_claims".into(), Value::Array(claims));
+    obj.insert(
+        "lease_hint".into(),
+        json!("these claims have expired, but this is a read-only call so nothing \
+              was persisted; the reap lands on the next advance/record/intervene, \
+              or call workflow_reap to clear them now"),
+    );
+}
+
+/// One `invalidated` event per step the F3 cascade reopened, recording the status
+/// it *actually* landed on after the following recompute (normally `pending`, not
+/// the transient `ready` the reopen sets) — spec 3.5/N1. The caller runs
+/// [`engine::reopen_stale_completed`] then [`engine::recompute`] and hands the
+/// reopened pairs plus the settled state here, so the event never lies about where
+/// a demoted dependent ended up.
+fn invalidated_events(reopened: &[(String, String)], state: &RunState) -> Vec<Event> {
+    reopened
+        .iter()
         .map(|(id, dep)| {
+            let to = state.steps.get(id).map(|ss| ss.status.as_str()).unwrap_or("pending");
             event(
-                Some(&id),
+                Some(id.as_str()),
                 "invalidated",
                 Some(json!({
                     "from": "completed",
-                    "to": "ready",
+                    "to": to,
                     "cascaded_from": dep,
                     "by": "cascade",
                 })),
@@ -1391,6 +1648,11 @@ fn build_status(run_id: &str, def: &Definition, state: &RunState) -> Value {
         ),
         "blocked" => hints.push(
             "workflow blocked: nothing is runnable; resolve the blocked/failed steps listed below".into(),
+        ),
+        "completed_with_failures" => hints.push(
+            "workflow finished with failures: no step is runnable or waiting, but at least one failed \
+             under on_failure=continue; the run reached its end with a red node — retry or skip the \
+             failed steps below with workflow_intervene if they matter".into(),
         ),
         _ => {}
     }
@@ -1483,6 +1745,19 @@ steps:
     /// `super::adopt` directly with a real map).
     fn adopt(base: &Path, run_id: &str, evidence: &HashMap<String, usize>) -> Result<Value, String> {
         super::adopt(base, run_id, evidence, &HashMap::new())
+    }
+
+    /// 5-arg `record` for the tests that never exercise the claim-token gate
+    /// (shadows the 6-arg core fn inside this module; the token tests call
+    /// `super::record` directly with a real or stale `claim_id`).
+    fn record(
+        base: &Path,
+        run_id: &str,
+        step_id: &str,
+        event_kind: &str,
+        detail: Option<Value>,
+    ) -> Result<Value, String> {
+        super::record(base, run_id, step_id, event_kind, detail, None)
     }
 
     fn state_text(base: &Path) -> String {
@@ -1984,5 +2259,299 @@ steps:
         assert_eq!(done["steps"]["a"]["outputs"]["v"], json!(7));
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------------------------------------------------------------------
+    // Group 2 (review round 3): read-only status/next + a real home for the
+    // reap, the claim token, the interrupt budget, the `completed_with_failures`
+    // outcome, and the cascaded `invalidated` recording where a dependent landed.
+    // ---------------------------------------------------------------------
+
+    /// Age a step's lease so the next recompute treats it as expired without
+    /// waiting out the real `LEASE_TIMEOUT_SECS`: rewrite its `heartbeat` in
+    /// `state.json` to the far past. The engine reads the persisted heartbeat on
+    /// the next load, so this drives every reap test deterministically.
+    fn expire_lease(base: &Path, step: &str) {
+        let path = persist::run_dir(base, "probe").unwrap().join("state.json");
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        v["steps"][step]["heartbeat"] = json!(persist::now_ts() - 10_000_000);
+        std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn status_and_next_are_read_only_while_reap_persists_the_interrupted_event() {
+        let base = temp_base("readonly");
+        create_run(&base, Some("probe".into()), YAML, &[("made", CheckKind::PerSubject), ("needing", CheckKind::PerSubject)]).unwrap();
+        advance(&base, "probe", "maker", None).unwrap();
+        expire_lease(&base, "maker");
+
+        let before_state = state_text(&base);
+        let before_events = events_text(&base);
+
+        // A read-only probe reports the expired claim but writes nothing at all.
+        let st = status(&base, "probe").unwrap();
+        assert_eq!(st["expired_claims"][0]["step"], json!("maker"));
+        assert!(st["lease_hint"].is_string(), "status must hint the reap is pending");
+        assert_eq!(state_text(&base), before_state, "status must not rewrite state.json");
+        assert_eq!(events_text(&base), before_events, "status must not append events");
+
+        // …and the same is true of `next`.
+        let nx = next_steps(&base, "probe").unwrap();
+        assert_eq!(nx["expired_claims"][0]["step"], json!("maker"));
+        assert_eq!(state_text(&base), before_state, "next must not rewrite state.json");
+        assert_eq!(events_text(&base), before_events, "next must not append events");
+
+        // The explicit reap is the mutating home: exactly one `interrupted` event.
+        let reaped = reap(&base, "probe").unwrap();
+        assert_eq!(reaped["steps"]["maker"]["status"], json!("ready"), "reaped, then re-derived to ready");
+        assert_eq!(events_text(&base).matches("\"interrupted\"").count(), 1);
+        assert!(events_text(&base).contains("\"claim_id\""), "the interrupted event carries the claim");
+        assert_ne!(state_text(&base), before_state, "a reap that acts must rewrite state");
+
+        // A second reap finds nothing expired and writes nothing further.
+        let after_state = state_text(&base);
+        let after_events = events_text(&base);
+        let again = reap(&base, "probe").unwrap();
+        assert!(again.get("expired_claims").is_none(), "nothing left to report");
+        assert_eq!(state_text(&base), after_state);
+        assert_eq!(events_text(&base), after_events);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_stale_claim_token_is_rejected_and_a_live_one_is_honoured() {
+        let base = temp_base("token");
+        create_run(&base, Some("probe".into()), YAML, &[("made", CheckKind::PerSubject), ("needing", CheckKind::PerSubject)]).unwrap();
+
+        let first = advance(&base, "probe", "maker", None).unwrap();
+        let cid1 = first["claim_id"].as_str().unwrap().to_string();
+        // The lease dies and the step is re-claimed by a fresh executor.
+        expire_lease(&base, "maker");
+        let second = advance(&base, "probe", "maker", None).unwrap();
+        let cid2 = second["claim_id"].as_str().unwrap().to_string();
+        assert_ne!(cid1, cid2, "each claim mints a fresh token");
+        assert_eq!(second["status"], json!("running"));
+
+        // The dead executor finally reports — with its now-stale token. Rejected,
+        // and the state is byte-identical afterwards, so the live claim survives.
+        let before_state = state_text(&base);
+        let before_events = events_text(&base);
+        let err = super::record(&base, "probe", "maker", "completed", None, Some(&cid1))
+            .expect_err("a stale claim token must be refused");
+        assert!(err.contains(&cid2), "the error must name the live claim: {err}");
+        assert_eq!(state_text(&base), before_state, "a refused report writes nothing");
+        assert_eq!(events_text(&base), before_events);
+
+        // The current holder reports with its own token and succeeds.
+        let done = super::record(&base, "probe", "maker", "completed", None, Some(&cid2)).unwrap();
+        assert_eq!(done["steps"]["maker"]["status"], json!("completed"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn repeated_interruption_exhausts_the_budget_and_fails_the_step() {
+        let base = temp_base("budget");
+        create_run(&base, Some("probe".into()), YAML, &[("made", CheckKind::PerSubject), ("needing", CheckKind::PerSubject)]).unwrap();
+        // Default `max_interrupts` is 3, so the 4th reap gives up on the step.
+        for i in 1..=4 {
+            advance(&base, "probe", "maker", None).unwrap();
+            expire_lease(&base, "maker");
+            let s = reap(&base, "probe").unwrap();
+            let st = s["steps"]["maker"]["status"].as_str().unwrap();
+            if i < 4 {
+                assert_eq!(s["expired_claims"][0]["gave_up"], json!(false), "reap #{i} is inside the budget");
+                assert_ne!(st, "failed", "a step within its interrupt budget stays runnable");
+            } else {
+                assert_eq!(s["expired_claims"][0]["gave_up"], json!(true), "the {i}th reap exhausts the budget");
+                assert_eq!(st, "failed", "an exhausted step is abandoned as failed");
+            }
+        }
+        let ev = events_text(&base);
+        assert_eq!(ev.matches("\"interrupted\"").count(), 4, "one interrupted event per reap");
+        assert!(ev.contains("max_interrupts"), "the giving-up reap must journal a failed reason");
+        assert!(advance(&base, "probe", "maker", None).is_err(), "a failed step is not advanceable");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_run_finished_around_a_continue_failure_is_completed_with_failures() {
+        let base = temp_base("terminal");
+        let yaml = r#"name: probe
+version: 1
+steps:
+  - id: soft
+    action: dataset_get
+    on_failure: continue
+  - id: hard
+    action: dataset_get
+    on_failure: stop
+"#;
+        create_run(&base, Some("probe".into()), yaml, &[]).unwrap();
+        // Write the step states straight into `state.json`, then read the honest
+        // (recomputed) `run_status` a read-only probe returns. Each entry is a full
+        // `StepState` object (`status` plus any provenance tags), not a bare string.
+        let run_status_of = |states: &[(&str, Value)]| -> String {
+            let path = persist::run_dir(&base, "probe").unwrap().join("state.json");
+            let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            for (id, st) in states {
+                v["steps"][*id] = st.clone();
+            }
+            std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+            status(&base, "probe").unwrap()["run_status"].as_str().unwrap().to_string()
+        };
+
+        assert_eq!(run_status_of(&[("soft", json!({ "status": "completed" })), ("hard", json!({ "status": "completed" }))]), "completed");
+        // A continue-failure with everything else done: never the old `blocked`
+        // fallthrough, never `completed` — it finished with a red node.
+        assert_eq!(run_status_of(&[("soft", json!({ "status": "failed" })), ("hard", json!({ "status": "completed" }))]), "completed_with_failures");
+        // A stop-failure halts the whole run, whatever else is done.
+        assert_eq!(run_status_of(&[("soft", json!({ "status": "completed" })), ("hard", json!({ "status": "failed" }))]), "failed");
+        // Nothing runnable but an external block still waiting: genuinely blocked.
+        assert_eq!(
+            run_status_of(&[("soft", json!({ "status": "blocked", "blocked_by": "external" })), ("hard", json!({ "status": "completed" }))]),
+            "blocked",
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_cascaded_invalidation_records_where_the_dependent_landed() {
+        let base = temp_base("cascade-to");
+        // `follower` depends on `maker`; both are completed, then a contradicting
+        // probe demotes `maker`. `follower` must reopen too, and its `invalidated`
+        // event must record where it actually landed (recompute moves it to
+        // `pending` behind a `ready` parent), not the transient `ready` the reopen
+        // set — the exact N1/3.5 fix.
+        let yaml = r#"name: probe
+version: 1
+steps:
+  - id: maker
+    action: dataset_get
+    verify:
+      proves: [made]
+  - id: follower
+    action: dataset_get
+    depends_on: [maker]
+"#;
+        create_run(&base, Some("probe".into()), yaml, &[("made", CheckKind::PerSubject)]).unwrap();
+        complete_maker(&base);
+        advance(&base, "probe", "follower", None).unwrap();
+        super::record(&base, "probe", "follower", "completed", None, None).unwrap();
+        assert_eq!(status(&base, "probe").unwrap()["steps"]["follower"]["status"], json!("completed"));
+
+        let dirty = evidence(&[("made", 3)]);
+        let resp = verify(&base, "probe", &dirty, true).unwrap();
+        let landed = resp["steps"]["follower"]["status"].clone();
+        assert_eq!(landed, json!("pending"), "the reopened dependent re-derives to pending behind a ready parent");
+
+        let ev = events_text(&base);
+        let line = ev
+            .lines()
+            .find(|l| {
+                serde_json::from_str::<Value>(l)
+                    .map(|v| {
+                        v["step"] == json!("follower")
+                            && v["event"] == json!("invalidated")
+                            && v["detail"]["cascaded_from"] == json!("maker")
+                    })
+                    .unwrap_or(false)
+            })
+            .expect("a cascaded invalidated event for follower must exist");
+        let parsed: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(parsed["detail"]["to"], landed, "the invalidated `to` must equal the resulting status");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A deterministic LCG, so the random-DAG property test is reproducible
+    /// without pulling in a `rand` dependency.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() as usize) % n
+        }
+    }
+
+    /// Assert the engine invariant over the honest (recomputed) view: no step is
+    /// `ready`, `running` or `completed` while a non-skipped dependency is
+    /// unsatisfied (neither `completed` nor `skipped`).
+    fn invariant_ok(base: &Path, steps: &[String], deps: &[Vec<String>]) -> Result<(), String> {
+        let st = status(base, "probe")?;
+        for (i, id) in steps.iter().enumerate() {
+            let s = st["steps"][id].as_str().unwrap_or("pending");
+            if matches!(s, "ready" | "running" | "completed") {
+                for dep in &deps[i] {
+                    let ds = st["steps"][dep].as_str().unwrap_or("pending");
+                    if ds != "completed" && ds != "skipped" {
+                        return Err(format!("step '{id}' is '{s}' while dependency '{dep}' is '{ds}'"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn no_step_is_active_over_an_unsatisfied_dependency_across_random_operations() {
+        // Several seeds build several acyclic-by-construction DAGs; each is driven
+        // through a random sequence of advance/record/intervene and the invariant is
+        // re-checked after every single operation.
+        for seed in 1..=8u64 {
+            let mut rng = Lcg(seed * 2654435761);
+            let n = 3 + rng.below(5); // 3..=7 steps
+            let steps: Vec<String> = (0..n).map(|i| format!("s{i}")).collect();
+            let mut lines = String::from("name: probe\nversion: 1\nsteps:\n");
+            let mut deps: Vec<Vec<String>> = Vec::new();
+            for i in 0..n {
+                let mut d: Vec<String> = Vec::new();
+                for j in 0..i {
+                    if rng.below(3) == 0 {
+                        d.push(format!("s{j}"));
+                    }
+                }
+                deps.push(d.clone());
+                lines.push_str(&format!("  - id: s{i}\n    action: dataset_get\n"));
+                if !d.is_empty() {
+                    lines.push_str(&format!("    depends_on: [{}]\n", d.join(", ")));
+                }
+            }
+
+            let base = temp_base(&format!("prop-{seed}"));
+            create_run(&base, Some("probe".into()), &lines, &[]).unwrap();
+            invariant_ok(&base, &steps, &deps).expect("a fresh run already violates the invariant");
+
+            for step_no in 0..40 {
+                let pick = rng.below(n);
+                match rng.below(4) {
+                    0 => {
+                        if advance(&base, "probe", &steps[pick], None).is_ok() {
+                            super::record(&base, "probe", &steps[pick], "completed", None, None).ok();
+                        }
+                    }
+                    1 => {
+                        intervene(&base, "probe", &steps[pick], "reset").ok();
+                    }
+                    2 => {
+                        intervene(&base, "probe", &steps[pick], "retry").ok();
+                    }
+                    _ => {
+                        next_steps(&base, "probe").ok();
+                    }
+                }
+                if let Err(e) = invariant_ok(&base, &steps, &deps) {
+                    let _ = std::fs::remove_dir_all(&base);
+                    panic!("seed {seed}, op {step_no} on '{}': {e}", steps[pick]);
+                }
+            }
+            let _ = std::fs::remove_dir_all(&base);
+        }
     }
 }

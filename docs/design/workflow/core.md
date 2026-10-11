@@ -2,17 +2,17 @@
 
 A generic, file-based framework for describing and running multi-step processes that an AI agent can drive — and **resume after any interruption without relying on conversation history**.
 
-Nothing here is domain-specific. The framework knows about *steps*, *dependencies* and *statuses*; it does not know what a step actually does. Actions are symbolic names bound to pluggable executors (an MCP tool, a Tauri command, a sidecar script, or "hand the step back to the agent"). The examples below use a dataset-processing pipeline purely to illustrate the file formats.
+Nothing here is domain-specific. The framework knows about *steps*, *dependencies* and *statuses*; it does not know what a step actually does. Actions are symbolic names bound to pluggable executors (an MCP tool, a native application command, a sidecar script, or "hand the step back to the agent"). The examples below use a dataset-processing pipeline purely to illustrate the file formats.
 
 > **This directory splits by layer, not by feature.** `core.md` (this file) is the engine spec and must never name a domain concept; sibling documents describe one pipeline each — [`dictation.md`](./dictation.md) for the built-in dictation pipeline, its read-only audit and the Workflow page. Mechanism invented while solving a pipeline's problem is written up in that pipeline's doc and promoted here once the engine actually honours it.
 
 ## Design principles
 
-- **Definition vs. state vs. events are separate concerns.** What *should* happen is immutable intent; what *has* happened is derived truth; the event log is the audit trail.
-- **File-based and diffable.** Plain-text YAML/JSON/JSONL — human-readable, agent-readable, version-controllable, sync-friendly. No hidden in-memory or database-only state.
+- **Definition vs. state vs. events are separate concerns.** What *should* happen is immutable intent; what *has* happened is recorded truth; the event log is the audit trail. Today `state.json` is the authoritative record and every status change costs an event; rebuilding state from the log is a planned capability (F1), not yet a guarantee — see *Goal*.
+- **File-based and diffable.** Plain-text YAML/JSON/JSONL — human-readable, agent-readable, version-controllable, sync-friendly **for a single writer**: one run has exactly one writing device at a time (see *Concurrency*). No hidden in-memory or database-only state.
 - **Resumable and idempotent.** Re-reading the files and re-running the evaluation loop always yields the same "what to do next", so a crashed or restarted agent continues exactly where it left off.
 - **Action-agnostic.** The engine schedules and records; executors do the work. Adding a new kind of work never changes the engine.
-- **Agent-drivable.** A small generic command surface (load / status / next / advance / intervene) is all an agent needs; every response is structured JSON with actionable hints.
+- **Agent-drivable.** A small generic command surface (status / next / advance / record / reap / verify / adopt / intervene) is all an agent needs; every response is structured JSON with actionable hints.
 
 ---
 
@@ -20,7 +20,7 @@ Nothing here is domain-specific. The framework knows about *steps*, *dependencie
 
 A persistent workflow state machine: the **workflow definition** describes what should happen and the dependencies, while the **state** records what has actually happened. This is a very good pattern for an AI agent because the agent can resume after interruption without relying on conversation history.
 
-The event log is the ultimate source of truth; `state.json` is a materialized snapshot that can always be rebuilt by replaying the events. Keeping state derived from events means a partial write or a crash never leaves the run in an unrecoverable place.
+**Today `state.json` is the authoritative snapshot and the event log is the audit trail.** Every status change costs an event, but the log is not yet a complete replay source: events carry no sequence number and not every field needed to rebuild the state (outputs, lease, claim tokens) is on every event. Rebuild-by-replay is the intended end state and a planned capability (review finding **F1**); until it lands, nothing may depend on it — recovery means "trust `state.json`, recompute", never "replay the log". This downgrade of an earlier stronger claim is **temporary** and tracked under F1, so it does not quietly become the design.
 
 ---
 
@@ -59,9 +59,10 @@ A definition is a named, versioned set of **steps** forming a directed acyclic g
 | `outputs` | no | Named values this step produces, stored in state |
 | `verify` | no | `{ blocks, proves }` — which external checks this step answers to. The two are not equally powerful: `proves` is the only list that can retract a `completed`, `blocks` only annotates a verdict and reports a gate (see *Verification*) |
 | `adopt` | no | Check ids that must come back measured-and-clean for this step to be adopted as `completed` without running it (see *Verification*) |
-| `params` | no | Static arguments passed to the executor, verbatim by the engine; the binding layer substitutes `${run.dataset_uuid}` (see *Agent interface*) |
+| `params` | no | Static arguments passed to the executor, verbatim by the engine; the binding layer resolves `${run.*}` placeholders that name the run's own subject (see *Agent interface*) |
 | `retry` | no | `{ attempts, backoff }` — how many times to re-run on failure |
 | `timeout` | no | Lease seconds — how long a claim on this step is honoured before `recompute` treats it as interrupted (default 300, see *Resumability*). Not a work budget: nothing here stops a running action. |
+| `max_interrupts` | no | How many times a claim on this step may be reaped as interrupted before the step is given up on as `failed` (default 3, see *Resumability*). Deliberately separate from `retry.attempts`: a reaped lease is a crash, not an error the executor reported. |
 | `on_failure` | no | `stop` \| `continue` \| `skip_dependents` (default `stop`) |
 | `on_skipped_dependency` | no | `satisfy` \| `block` \| `skip` (default `satisfy`) — how a dependency that ended `skipped` counts here: clears it, leaves this step waiting, or skips this step too (see *Readiness derivation*) |
 
@@ -126,7 +127,7 @@ Note the shape: `transcribe → normalize_text` and `generate_waveform` are two 
 - Every `depends_on` / `inputs` reference points at an existing step id.
 - An `inputs:` or `when:` `${steps.X.outputs.Y}` reference may only name `X` if `X` is a **transitive ancestor** of the reading step (upstream via `depends_on`). A reference to a sibling or a descendant races on a value that may never be produced — it would strand a `when:` guard `blocked` forever — so it is refused here, not left to the run.
 - Every `verify` / `adopt` id is one the domain's check provider actually registers — a typo would silently disable a gate or a promotion, so it fails like a bad `depends_on` does. The vocabulary is passed in from the binding layer as `(id, kind)` pairs; the engine only sees opaque strings plus a structural vacuity *class* (`per_subject` / `subject_present` / `file_exists`, see *Verification*).
-- An `adopt:` list is **non-vacuous**: if it names any `per_subject` check (one that counts offenders over a collection and reads clean on an empty one), it must also name a check that can report an offender on an empty subject (`subject_present` or `file_exists`). Otherwise adopting on it would certify work nobody did.
+- An `adopt:` list is **non-vacuous**: if it names any `per_subject` check (one that counts offenders over a collection and reads clean on an empty one), it must also name a check that can report an offender on an empty subject (`subject_present` or `file_exists`). Otherwise adopting on it would certify work nobody did. The rule is **structural, not semantic**: it checks that a guard of the right *class* sits on the list, not that the guard examines the same subject as the `per_subject` checks it — a `per_subject` count and an unrelated single-file `file_exists` pass validation while still certifying nothing about each other. Subject-keyed tightening is deferred (N4); until then a template review carries that judgement, and the binding layer additionally lints its own built-in templates so the convention cannot rot silently.
 - The graph is **acyclic**.
 - `timeout`, when present, is positive (`timeout: 0` would reap a claim the instant it is taken). `retry.backoff`, when present, reads as a lenient duration (`30s` / `5m` / `1h`) or is empty — a typo like `30x` would otherwise read as "no delay".
 - Every `action` resolves to a registered executor (fail fast, not mid-run). *(Skipped in this build: it is agent-in-the-loop, so actions are symbolic names the agent resolves at run time.)*
@@ -171,7 +172,7 @@ Every step is in exactly one state:
 - `running → completed | failed | blocked` — executor outcome.
 - `failed → ready` — automatic retry while `attempts` remain.
 - `blocked → ready` — the blocking condition clears. A `dependency` block clears by itself on the next recompute once the upstream is fixed; an `external` block clears only on an explicit `intervene unblock`.
-- `completed → ready` — **invalidated** by evidence (see *Verification*), or by **cascade**: demoting a step reopens every already-`completed` transitive dependent whose upstream is no longer satisfied, so a green node never sits on top of a stale one. Never by a clean probe.
+- `completed → ready` or `pending` — **invalidated** by evidence (see *Verification*), or by **cascade**: demoting a step reopens every already-`completed` transitive dependent whose upstream is no longer satisfied, so a green node never sits on top of a stale one. A cascaded dependent is reopened and then immediately re-derived by the same pass, so it normally lands `pending` (its demoted parent no longer satisfies it) rather than `ready`; the `invalidated` event's `to` records where it actually landed. Never by a clean probe.
 - `pending | ready → completed` — **adopted**: the step's `adopt` evidence is already clean on disk (see *Verification*). The only upward move, and only for a step that asked for it.
 - `any → skipped` — `when` false, or propagation from an upstream skip/ignore.
 
@@ -187,9 +188,9 @@ Statuses are **derived**, not guessed. On every evaluation the engine walks the 
 - A dependency is **satisfied** when it is `completed`, or `skipped` under the dependent's `on_skipped_dependency` policy: `satisfy` clears it (default), `block` leaves the dependent waiting, `skip` skips the dependent too.
 - A step with all dependencies satisfied and `when` true ⇒ `ready`; a `when` that resolves false ⇒ `skipped` (`when_false`); a dependency `failed`/`blocked`, or `skipped` under a `block` policy ⇒ `blocked`; otherwise ⇒ `pending`.
 
-**The invariant** *("completed ⇒ its dependencies are satisfied")* is enforced as a **cascade**: whenever a step moves *down* (a `verify` demotion, a terminal `failed`, or an `intervene reset`/`retry`), every already-`completed` transitive dependent whose upstream is no longer satisfied is reopened to `ready` in the same atomic pass, each journalled with an `invalidated` event naming `cascaded_from`. Without it, demoting `transcribe` would leave `validate`/`export` green on top of a stale result — the exact false-`completed` the verification seam exists to catch.
+**The invariant** *("completed ⇒ its dependencies are satisfied")* is enforced as a **cascade**: whenever a step moves *down* (a `verify` demotion, a terminal `failed`, or an `intervene reset`/`retry`), every already-`completed` transitive dependent whose upstream is no longer satisfied is reopened and re-derived in the same atomic pass — landing on `pending` unless its remaining dependencies are still satisfied — each journalled with an `invalidated` event naming `cascaded_from` and the status the dependent actually landed on. Without it, demoting `transcribe` would leave `validate`/`export` green on top of a stale result — the exact false-`completed` the verification seam exists to catch.
 
-The recompute is a pure function of the definition + current statuses, so it is stable and reproducible across restarts.
+The recompute is pure *given `now`* — definition + current statuses + an explicit clock input; it never reads the wall clock itself — so it is stable and reproducible across restarts.
 
 ---
 
@@ -198,21 +199,21 @@ The recompute is a pure function of the definition + current statuses, so it is 
 Readiness is derived from the graph; it says nothing about whether the *artifacts a step produced* still exist. Verification is the one seam where the outside world is allowed to speak about a step, and the framework deliberately keeps it thin:
 
 - **The definition declares the relationship**, per step: `verify: { blocks: [check ids], proves: [check ids] }`. The two lists are not symmetric, and the asymmetry is the design: `proves` is about the output *this step claims*, so it is the only list that can judge a `completed` step and the only one that can ever change a status. `blocks` is about the *preconditions*, so it can only say "not yet" about a step that has claimed nothing. A step with no `verify:` is legitimately `unknown` — the absence of a binding is a statement, not a gap.
-- **`blocks` is advice, and only advice.** Offenders on a bound `blocks` id come back in the verdict beside the offending counts, and the step is listed in `verification.gated` — but only while it is `pending` or `ready`, because a gate on a step that already claims completion is a statement about someone else's files. Nothing is written, no status moves, and `next()` still hands the step back as ready: readiness is derived from the graph alone, so **holding off on a gated step is the caller's job**, and a step bound by `blocks` alone can only ever read `unknown` — nothing is claimed about its output, so nothing can agree or disagree with it, whatever the gate says. Withholding a gated step inside `next()` is the tempting alternative; it is refused because a decision that depends on a filesystem reading no one persisted would make the loop non-reproducible, which is the one property *Readiness derivation* exists to guarantee. Do not confuse the `blocks:` list with the `blocked` *state* — that one is derived from the graph (a failed or blocking-policy dependency) and is written to `state.json`; this one never is.
+- **`blocks` is advice, and only advice.** Offenders on a bound `blocks` id come back in the verdict beside the offending counts, and the step is listed in `verification.gated` — but only while it is `pending` or `ready`, because a gate on a step that already claims completion is a statement about someone else's files. Nothing is written, no status moves, and `next()` still hands the step back as ready: readiness is derived from the graph alone, so **holding off on a gated step is the caller's job**, and a step bound by `blocks` alone can only ever read `unknown` — nothing is claimed about its output, so nothing can agree or disagree with it, whatever the gate says. Withholding a gated step inside `next()` is the tempting alternative; it is refused because a decision that depends on a filesystem reading no one persisted would make the loop non-reproducible, which is the one property *Readiness derivation* exists to guarantee. Do not confuse the `blocks:` list with the `blocked` *state* — that one is derived from the graph (a failed or blocking-policy dependency) and is written to `state.json`; this one never is. The expected caller loop for a gated step is: `verify` → read `verification.gated` → hold those steps back → take what remains from `next`. An agent that never calls `verify` never sees a gate — seeing it is the caller's responsibility, by design.
 - **Checks are not engine concepts.** A check needs the domain's data access, so it lives in a domain module that registers it under a stable id and hands the engine a `id → offender count` map. The core never names a check, a file kind or a repair sentence; it only compares opaque ids against the binding. Adding a new pipeline means a new provider, not an engine change.
-- **Verdicts are a projection.** `verified` / `drifted` / `unknown` are recomputed on every call and never written to `state.json`, so `state.json` stays exactly a replay of `events.jsonl` and a verdict means "as of this probe". Render it beside a node's status, never instead of it.
+- **Verdicts are a projection.** `verified` / `drifted` / `unknown` are recomputed on every call and never written to `state.json` — a probe may *report*, never *record* — so a verdict means "as of this probe". Render it beside a node's status, never instead of it.
 - **A probe that could not measure cannot certify.** If any id a step binds was absent from the evidence map (another domain's vocabulary, a short-circuited report), a would-be `verified` downgrades to `unknown`. A clean bill of health over ids nobody measured is a lie.
 - **A probe only ever moves a step down.** With `apply` set, a `completed` step whose `proves` evidence reports offenders goes back to `ready` (outputs kept, so `when:` guards still resolve). A clean probe proves an artifact *exists*, never that this run made it — so verification has no upward path, no promotion, ever.
-- **Adoption is the one upward move, and a step has to ask for it.** `adopt: [check ids]` says: "if every one of these ids comes back measured *and* with zero offenders, record me `completed` — the artifact is already on disk, and making the user run me again would claim credit for work nobody did." Opt-in per step and deliberately rare, because **vacuity** is the trap: a check that counts offenders over an empty subject (no media ⇒ no media is missing subtitles) is vacuously clean. So each check id carries a structural **class** the binding layer assigns (`per_subject`, `subject_present`, `file_exists`) and validation refuses an `adopt` list of only `per_subject` ids unless it also names a guard that reports an offender on an empty subject — a `subject_present` id (fails when the whole subject is absent) *or* a `file_exists` id (a single file's existence, which can never be vacuously true; this is how a `sync_media`-style list guarded by `database_missing` stays honest).
+- **Adoption is the one upward move, and a step has to ask for it.** `adopt: [check ids]` says: "if every one of these ids comes back measured *and* with zero offenders, record me `completed` — the artifact is already on disk, and making the user run me again would claim credit for work nobody did." Opt-in per step and deliberately rare, because **vacuity** is the trap: a check that counts offenders over an empty subject (no items ⇒ no item is missing its artifact) is vacuously clean. So each check id carries a structural **class** the binding layer assigns (`per_subject`, `subject_present`, `file_exists`) and validation refuses an `adopt` list of only `per_subject` ids unless it also names a guard that reports an offender on an empty subject — a `subject_present` id (fails when the whole subject is absent) *or* a `file_exists` id (a single file's existence, which can never be vacuously true; this is how an illustrative `adopt: [index_file_exists, waveform_missing]` list stays honest).
 - **Adoption runs in topological order and only over satisfied dependencies.** A step is adopted only once every dependency is already `completed`/`skipped`-under-policy/adopted-earlier-this-pass; otherwise it is withheld with reason `dependency not satisfied`, so a green tick never lands on top of an unstarted parent. And a step whose declared `outputs` are read back by a dependent is withheld with reason `outputs not derivable` unless the adopt call supplies those values — inheriting the step but not its data would strand the dependent in a silent block.
 - Adoption never touches a step already `completed`, `failed`, `skipped` or `running` — a human's judgement outranks the filesystem — and it withholds *with a reason* (`not measured`, `the evidence disagrees`, `dependency not satisfied`, `outputs not derivable`) rather than silently doing nothing.
 - **Every status change costs an event.** Invalidation appends `invalidated` and adoption appends `adopted`, like any other transition; neither gets a privileged path into `state.json`. A probe or adoption that changes nothing writes nothing.
 
-The honesty rules — probes down-only, promotion only where a step opted in over non-vacuous evidence, and never over an id nobody measured — are what make it safe to let a read-only probe influence a run at all. The dictation instantiation (which check answers to which step, and what a probe cannot see at all) is in [`dictation.md`](./dictation.md#binding-checks-to-the-template).
+The honesty rules — probes down-only, promotion only where a step opted in over non-vacuous evidence, and never over an id nobody measured — are what make it safe to let a read-only probe influence a run at all. Which check a concrete pipeline binds to which step — and what a probe there cannot see at all — is that pipeline's own document's concern (see the layer note at the top).
 
 ### The same rules in plain terms
 
-The rules above are dense; this is the same content said plainly. The check ids are the illustrative ones from *Verification by example* below — no pipeline named here is a real one.
+The rules above are dense; this is the same content said plainly, **explanatory and non-normative** — where the two disagree, the dense rules are authoritative. The check ids are the illustrative ones from *Verification by example* below — no pipeline named here is a real one.
 
 A run is a checklist, each item ticked when it finishes — and a tick only ever says *"this finished at that moment."* Nothing re-opens it. So if `transcribe` went green on Monday and someone deletes its transcripts on Tuesday, the checklist still reads green, `next()` finds nothing to do, and an agent obediently does nothing. **Verification is the spot check that catches that.**
 
@@ -288,7 +289,7 @@ A probe hands the engine a single evidence map — `id → offender count` — s
 
 Row 2 is the whole reason `subject_absent` sits on the list. `waveform_missing` counts offenders over the audio files, so with *zero* audio files it comes back `0` **vacuously** — "no audio, therefore no audio is missing waveforms". Adopting on that alone would paint a green tick over work nobody did. `subject_absent` is the id that *fails when the subject itself is missing*: it reports an offender exactly when there is nothing to walk, which turns a bundle of vacuous zeros into a real claim.
 
-Adoption also never touches a step already `completed`, `failed`, `skipped` or `running` — a human's judgement outranks the filesystem — and it withholds *with a reason* (`not measured`, `the evidence disagrees`) rather than silently doing nothing.
+Adoption also never touches a step already `completed`, `failed`, `skipped` or `running` — a human's judgement outranks the filesystem — and it withholds *with a reason* (`not measured`, `the evidence disagrees`, `dependency not satisfied`, `outputs not derivable`) rather than silently doing nothing.
 
 **7. A `blocks` finding gates, and gating writes nothing.** Suppose the map also reports `audio_missing: 1`. `transcribe` binds it under `blocks`, so the verdict payload names the offender and `transcribe` appears in `verification.gated` — and that is the entire effect. Its status is untouched, no event is appended, and if it was `ready` then `next()` still offers it, because a probe is not the scheduler. Read the gate as what the evidence says about *starting* the step; the caller decides.
 
@@ -317,14 +318,15 @@ Deterministic and idempotent:
 5. **Append** the event(s) to `events.jsonl`, then **atomically rewrite** `state.json`.
 6. Repeat until there are no `ready` and no `running` steps.
 
-The run is **terminal** when nothing is runnable, decided in this strict precedence (a `stop` failure outranks apparent completion, so a halted run never reads as *done*):
+The run status is decided in this strict precedence (a `stop` failure outranks apparent completion, so a halted run never reads as *done*):
 
-1. any step `failed` under `on_failure: stop` ⇒ workflow **failed**;
+1. any step `failed` under `on_failure: stop` ⇒ workflow **failed** (run event `workflow_failed`);
 2. otherwise any step `running` or `ready` ⇒ **in_progress** (not terminal — work remains or is in flight);
-3. otherwise every step `completed`/`skipped` ⇒ workflow **completed**;
-4. otherwise (only `blocked` steps and non-`stop` failures remain) ⇒ workflow **blocked** (waiting, resumable).
+3. otherwise every step `completed`/`skipped` ⇒ workflow **completed** (run event `workflow_completed`);
+4. otherwise any step `failed` with nothing `pending` or `blocked` left ⇒ workflow **completed_with_failures** — the run reached its end with a red node: the failures were `continue`/`skip_dependents` and their dependents resolved, so the run is *finished*, not waiting for intervention. The hint lists the failed steps; the run event is `workflow_completed_with_failures`. (Reporting this run `blocked` instead — the old fallthrough — tells a waiting agent "someone must intervene", when the graph is done and merely has a failed node).
+5. otherwise (only `blocked`/`pending` steps and non-`stop` failures remain) ⇒ workflow **blocked** (waiting, resumable; run event `workflow_blocked`).
 
-Because step 2 is a pure recompute, re-entering the loop from any persisted state produces the same next actions — the property that makes resume safe.
+Because step 2 is pure *given `now`* (time is an input, never read from the clock), re-entering the loop from any persisted state produces the same next actions — the property that makes resume safe.
 
 ---
 
@@ -334,9 +336,11 @@ This is the reason the framework exists.
 
 - **State is the resume point; events are the audit.** A restarted agent reads `state.json`, ignores any prior conversation, recomputes, and continues.
 - **Atomic writes.** `state.json` is written to a temp file then renamed, so a crash mid-write never leaves a half-written snapshot. Events are appended and flushed.
-- **Interrupted steps.** A step left `running` whose lease has expired on resume is treated as *interrupted*: `recompute` returns it to `pending` (and so to `ready`) with a reason naming the timeout it ran out of. Policy: re-run it (executors should be **idempotent**) or mark it `failed`. The lease/heartbeat distinguishes "still running elsewhere" from "died mid-flight".
-- **A lease is a crash detector, not a work budget.** The default is short on purpose — 300 s without a report and the claim is presumed dead, so a crashed agent does not hold a pipeline hostage. That default is wrong for anything that legitimately runs for minutes, and being wrong is expensive in the other direction: the engine reaps work that is still happening, the step goes back to `ready`, and the same files are processed twice while the first executor is still running. A long step therefore declares its own `timeout:` (the dictation template gives transcription four hours). There is no heartbeat *renewal* call: the claim is stamped at `advance` and the only way to extend it is to report.
-- **A claimed-and-unreported step is a stall, and is named as one.** `next` returns `claimed[]` alongside an empty `steps[]`, `advance` refuses a live claim quoting how long it has been held, and the dataset report's hint says "stalled" with the call that clears it. Left unnamed this reads to a waiting agent as "the app is busy", which is how a session ends its turn and leaves the run claimed forever.
+- **Interrupted steps.** A step left `running` whose lease has expired is treated as *interrupted*: `recompute` returns it to `pending` (and so, if its dependencies still hold, back to `ready`) with a reason naming the timeout it ran out of; once a step has been reaped more than `max_interrupts` times it is abandoned as `failed`, naming the last holder. Policy: re-run it (executors should be **idempotent**) or mark it `failed`. The lease/heartbeat distinguishes "still running elsewhere" from "died mid-flight". A clean completion or an explicit human `retry`/`reset` clears the interrupt count.
+- **A reap costs an event, and only a mutating call performs one.** Every expired lease a mutating call touches (`advance`, `record`, `intervene`, `verify`, `adopt`, `rebind_definition`) is reaped and journalled with one `interrupted` event (plus a budget-exhausting `failed`) in that call's own write, and `reap(run)` is the explicit home for an agent that wants stalled claims cleared and journalled without doing other work. `status` and `next` are read-only: they *report* an expired lease (`expired_claims` + a `lease_hint` naming `reap`) but never persist it — a probe must not move state ahead of the event log with no event behind it.
+- **Claims carry a token.** `advance` mints a fresh `claim_id` per claim (attempt number plus a random suffix), returns it to the executor and journals it on the `claimed` and `started` events. `record` refuses a report whose token mismatches the live claim, so an executor whose claim was already reaped and re-granted cannot clobber the new holder's. Enforcement is strict against a mismatched token while the step is `running`, and also against a *missing* token once the step has been reaped at least once; a first-time report without the token stays accepted (lenient, so existing agent prompts keep working). The token an outcome closes is journalled on the `completed`/`failed`/`retried`/`blocked` event, so a future replay can rebuild claims without guessing.
+- **A lease is a crash detector, not a work budget.** The default is short on purpose — 300 s without a report and the claim is presumed dead, so a crashed agent does not hold a pipeline hostage. That default is wrong for anything that legitimately runs for minutes, and being wrong is expensive in the other direction: the engine reaps work that is still happening, the step goes back to `ready`, and the same files are processed twice while the first executor is still running. A long-running step therefore declares its own `timeout:` (a step that legitimately transcribes for four hours sets 14400). There is no heartbeat *renewal* call: the claim is stamped at `advance` and the only way to extend it is to report (renewal is planned, group 3).
+- **A claimed-and-unreported step is a stall, and is named as one.** `next` returns `claimed[]` alongside an empty `steps[]`, `advance` refuses a live claim quoting how long it has been held, and the run report's hint says "stalled" with the call that clears it. Left unnamed this reads to a waiting agent as "the app is busy", which is how a session ends its turn and leaves the run claimed forever.
 - **Idempotent executors.** Because a step may be re-run after an interruption, actions should be safe to repeat (or record enough checkpoint data to resume). The framework does not assume atomicity of the work itself.
 - **Version binding.** `state.json` records the definition `name` + `version` (and optionally a content hash). If the loaded definition differs, the state is **stale**: require an explicit migration or reset rather than silently applying old state to a new graph.
 
@@ -357,10 +361,11 @@ If a workflow prefers, steps can instead communicate through an external store (
 
 ## Failure, retry & propagation
 
-- **Retry** — `retry: { attempts, backoff }`: `failed → ready` until attempts are exhausted, then terminal `failed`.
-- **Timeout** — a step's `timeout:` is its lease: an unreported `running` claim older than it is reaped back towards `ready` (see *Resumability & crash safety*). It never makes a step `failed` by itself, because nothing in this build measures how long an action took.
+- **Retry** — `retry: { attempts, backoff }`: `failed → ready` until attempts are exhausted, then terminal `failed`. A retry counts errors the executor *reported*; it is not the crash budget.
+- **Interrupt budget** — `max_interrupts:` (default 3): how many times a claim may be reaped as interrupted before the step is abandoned as `failed` with a reason naming the last holder. Separate from `retry.attempts` on purpose — a reaped lease is a crash, not an error — and without it an executor that crashes every time would loop forever.
+- **Timeout** — a step's `timeout:` is its lease: an unreported `running` claim older than it is reaped back towards `ready`, journalling an `interrupted` event (see *Resumability & crash safety*). It never makes a step `failed` by itself, because nothing in this build measures how long an action took.
 - **`on_failure`** — per step (or a workflow default):
-- `stop` — halt the run; dependents stay `pending`/`blocked`.
+- `stop` — halt the run; the recompute marks every other non-terminal step `blocked`, its reason naming the halting failure (see *Readiness derivation*) — dependents never stay quietly `pending`.
 - `continue` — independent branches keep running; only the failed step's dependents are affected.
 - `skip_dependents` — mark the transitive dependents `skipped` and move on.
 - **Blocked propagation** — a step whose dependency is `blocked`/`failed` becomes `blocked` (recoverable) rather than `failed`, so clearing the upstream issue resumes the downstream automatically.
@@ -371,6 +376,7 @@ If a workflow prefers, steps can instead communicate through an external store (
 
 - Independent steps (no dependency path between them) may run in parallel; the loop selects *all* `ready` steps each pass. In the example, `transcribe` and `generate_waveform` both depend only on `extract_audio`, so they can run together; `validate` joins them.
 - **Single-flight per step** is enforced by the claim/lease: two agents (or two loop iterations) never run the same step twice.
+- **Single writer per run.** The atomic rewrite and the lease make a run crash-safe, not multi-writer-safe: two processes writing the same run directory concurrently can clobber each other's updates (open finding F2, pending a product decision on multi-device use). "Sync-friendly" therefore means *portable*: copying or moving a run folder between devices is a **hand-off** — the old holder must stop touching it before the new one starts — not concurrent use.
 - The engine is otherwise stateless between passes, so concurrency is bounded only by the executor registry's own limits.
 
 ---
@@ -382,10 +388,11 @@ An agent never needs to understand the domain — only a small generic command s
 | Command | Purpose |
 |---|---|
 | `list` / `load` | Discover runs; load a definition + its state |
-| `status(run)` | Definition + current state + what's `ready`, `blocked`, `failed`, and *why* |
-| `next(run)` | The runnable step(s) with resolved action + inputs, each with its `lease_secs`, plus `claimed[]` — the steps held by an unreported claim, which is often why nothing is runnable |
-| `advance(run, step)` | Execute the bound action, record the result, re-evaluate |
-| `record(run, step, event, detail)` | Report an outcome (esp. when the agent itself did the work) |
+| `status(run)` | **Read-only.** Definition + current state + what's `ready`, `blocked`, `failed`, and *why*; an expired lease is *reported* (`expired_claims` + hint), never persisted here |
+| `next(run)` | **Read-only.** The runnable step(s) with resolved action + inputs, each with its `lease_secs`, plus `claimed[]` — the steps held by an unreported claim (each with its `claim_id`), which is often why nothing is runnable |
+| `advance(run, step)` | Claim the step (single-flight lease), minting a fresh `claim_id` returned beside the action, re-evaluate |
+| `record(run, step, event, detail, claim_id?)` | Report an outcome (esp. when the agent itself did the work); once the step has been reaped the report must present the live `claim_id` (see *Resumability*) |
+| `reap(run)` | Explicitly persist the reaping of any expired lease — one `interrupted` (or past-budget `failed`) event per reaped claim; a second call finds nothing expired and writes nothing |
 | `verify(run, apply?)` | Score the run against measured evidence; with `apply` it may only demote (see *Verification*) |
 | `adopt(run, evidence)` | Complete the steps whose `adopt` ids this probe returns measured-and-clean (see *Verification*) |
 | `history_is_inherited_only(run)` / `rebind_definition(run, yaml)` | The guard and the act behind *Refreshing a run's definition* — only a run whose whole history was inherited may be pointed at newer intent |
@@ -393,7 +400,7 @@ An agent never needs to understand the domain — only a small generic command s
 
 Hints are actionable, e.g. *"step `validate` is blocked because dependency `normalize_text` failed; retry `normalize_text` or skip `validate`."* An `advance` on a step that is not `ready` names what it waits on rather than sending the caller off to `status`, and an `advance` or `next` on a live claim quotes the step's lease (`lease_secs`) and how long it has been held.
 
-**`next` and `advance` hand back an executable call, not a riddle.** `params` are copied verbatim by the engine, which knows steps and dependencies but never what a step does — so the *binding* layer resolves the `${run.*}` placeholders that name the run's own subject and folds the resolved value back into the response root, so an agent is never handed an action with no argument to run it on. What `${run.dataset_uuid}` concretely means for the dictation pipeline — read back out of that dataset's `info.json`, and the workspace-job case where there is no subject so the placeholder stays as written rather than resolving to something invented — is documented in [`dictation.md`](./dictation.md). A dataset-less job has no subject, so nothing is resolved.
+**`next` and `advance` hand back an executable call, not a riddle.** `params` are copied verbatim by the engine, which knows steps and dependencies but never what a step does — so the *binding* layer resolves the `${run.*}` placeholders that name the run's own subject and folds the resolved value back into the response root, so an agent is never handed an action with no argument to run it on. What the placeholder concretely means for a given pipeline — how the subject is read back off disk, and the job type where there is no subject so the placeholder stays as written rather than resolving to something invented — belongs to that pipeline's own document. A subject-less job has nothing to resolve.
 
 Two execution styles share the same three files:
 
@@ -406,17 +413,17 @@ Two execution styles share the same three files:
 
 An append-only event log.
 
-JSONL has no surrounding `[]` and no commas between records. Each record is one transition; the ordered log can rebuild `state.json` from scratch.
+JSONL has no surrounding `[]` and no commas between records. Each record is one transition. *(Temporary — **F1**: today the log is an audit trail, not yet a replay source; `state.json` is authoritative. See *Goal*.)* Timestamps are UTC ISO-8601 with a `Z` suffix. A legacy timestamp *without* `Z` is local-naive: read it as-is, never reinterpret it or compare it arithmetically against a UTC value — so a log spanning the changeover may not be strictly time-ordered around it.
 
 `````jsonl
-{"time":"2026-10-01 10:00:00","step":"download","event":"started"}
-{"time":"2026-10-01 10:03:21","step":"download","event":"completed"}
-{"time":"2026-10-01 10:03:25","step":"extract_audio","event":"started"}
-{"time":"2026-10-01 10:20:10","step":"extract_audio","event":"completed"}
-{"time":"2026-10-01 10:21:00","step":"transcribe","event":"started"}
+{"time":"2026-10-01T08:00:00Z","step":"download","event":"started"}
+{"time":"2026-10-01T08:03:21Z","step":"download","event":"completed"}
+{"time":"2026-10-01T08:03:25Z","step":"extract_audio","event":"started"}
+{"time":"2026-10-01T08:20:10Z","step":"extract_audio","event":"completed"}
+{"time":"2026-10-01T08:21:00Z","step":"transcribe","event":"started"}
 `````
 
-Event vocabulary (extensible): `claimed`, `started`, `completed`, `failed`, `retried`, `blocked`, `unblocked`, `skipped`, `resumed`, `invalidated`, `adopted`, `definition_refreshed`, plus run-level `workflow_started` / `workflow_completed` / `workflow_failed` / `workflow_blocked`. A record may carry an optional `detail` object (error message, attempt number, output refs, actor/device id) — an `invalidated` event names the checks that contradicted the step and the actor that applied it, or (for a cascade reopening) the dependency in `cascaded_from`; a `blocked`/`unblocked` pair distinguishes an `external` block from a derived one; an `adopted` event names the checks that authorized the promotion; and a `definition_refreshed` event names the new step count and the steps that vanished, so a move in either direction — or a change of the intent itself — is always attributable.
+Event vocabulary (extensible): `claimed`, `started`, `completed`, `failed`, `retried`, `interrupted`, `blocked`, `unblocked`, `skipped`, `resumed`, `invalidated`, `adopted`, `definition_refreshed`, plus run-level `workflow_started` / `workflow_completed` / `workflow_completed_with_failures` / `workflow_failed` / `workflow_blocked`. A record may carry an optional `detail` object (error message, attempt number, output refs, actor/device id) — the claim-bearing events name the `claim_id` they refer to (`claimed` and `started` always; `completed`/`failed`/`retried`/`blocked` when a claim closes, `interrupted` and its budget-exhausting `failed` always), so a later replay can rebuild claims without guessing; an `interrupted` event names the dead claim (`attempt`, `claim_id`, `holder`, `expired_at`, `timeout_secs`, `gave_up`); an `invalidated` event names the checks that contradicted the step and the actor that applied it, or (for a cascade reopening) the dependency in `cascaded_from` and the status the dependent actually landed on; a `blocked`/`unblocked` pair distinguishes an `external` block from a derived one; an `adopted` event names the checks that authorized the promotion; and a `definition_refreshed` event names the new step count and the steps that vanished, so a move in either direction — or a change of the intent itself — is always attributable.
 
 ---
 
@@ -428,9 +435,9 @@ The current snapshot. Keys are **step ids from the definition**; values carry th
 {
   "workflow": { "name": "process_dataset", "version": 1 },
   "steps": {
-    "download":          { "status": "completed", "finished_at": "2026-10-01 10:03:21" },
-    "extract_audio":     { "status": "completed", "finished_at": "2026-10-01 10:20:10" },
-    "transcribe":        { "status": "running",   "started_at": "2026-10-01 10:21:00", "lease": "agent-1" },
+    "download":          { "status": "completed", "finished_at": "2026-10-01T08:03:21Z" },
+    "extract_audio":     { "status": "completed", "finished_at": "2026-10-01T08:20:10Z" },
+    "transcribe":        { "status": "running", "started_at": "2026-10-01T08:21:00Z", "lease": "agent-1", "heartbeat": 1759307260, "attempt": 1, "claim_id": "1-9f2c3a7b" },
     "normalize_text":    { "status": "pending" },
     "generate_waveform": { "status": "completed", "outputs": { "path": "waveform/" } },
     "validate":          { "status": "pending" },
@@ -439,7 +446,7 @@ The current snapshot. Keys are **step ids from the definition**; values carry th
 }
 `````
 
-Per-step fields are all optional except `status`: `started_at`, `finished_at`, `attempt`, `lease`/`heartbeat`, `outputs`, a short `reason` (for `blocked`/`failed`) that surfaces directly in `status()` hints, and — for the two derived states — `blocked_by` (`dependency` | `external`, deciding whether a recompute may lift the block) and `skip_reason` (`when_false` | `manual` | `propagated`, deciding whether a recompute may reopen the skip).
+Per-step fields are all optional except `status`: `started_at`/`finished_at` (UTC ISO-8601 with `Z`; a legacy value without `Z` is local-naive and read as-is), `attempt`, `lease`/`heartbeat` (`heartbeat` is epoch seconds — lease arithmetic never mixes the two time forms), `claim_id` (the token of the current or last claim, see *Resumability*), `interrupts` (reaped claims, counted against `max_interrupts`), `outputs`, a short `reason` (for `blocked`/`failed`) that surfaces directly in `status()` hints, and — for the two derived states — `blocked_by` (`dependency` | `external`, deciding whether a recompute may lift the block) and `skip_reason` (`when_false` | `manual` | `propagated`, deciding whether a recompute may reopen the skip).
 
 ---
 
@@ -447,11 +454,11 @@ Per-step fields are all optional except `status`: `started_at`, `finished_at`, `
 
 Kept deliberately light — the engine is small and domain-free.
 
-- **A self-contained module** (e.g. `src-tauri/src/workflow.rs`): parse → build DAG → evaluate readiness → run loop → persist. It contains **no** domain knowledge; executors are injected.
-- **Storage:** one directory per run holding the three plain-text files, under a configurable location (e.g. the workspace dir). Plain text keeps them diffable, agent-readable and sync-friendly.
+- **A self-contained module** (the engine lives one directory deep in the app's backend, split from the binding layer below): parse → build DAG → evaluate readiness → run loop → persist. It contains **no** domain knowledge; executors are injected.
+- **Storage:** one directory per run holding the three plain-text files, under a configurable location (e.g. the workspace dir). Plain text keeps them diffable, agent-readable and sync-friendly *for a single writer* (see *Concurrency*).
 - **Parsing:** `serde_yaml` → a typed `Definition`; `serde_json` for state; line-append + flush for events. Atomic state writes via temp-file + rename.
 - **Engine core:** topological readiness recompute, an async run loop (tokio), and an executor registry `action_name → Executor`. Single-flight claims + leases give crash-safe concurrency.
-- **Pluggable executors** — the only place "what work means" lives. An executor can be: (a) a call to an existing MCP tool / Tauri command, (b) a sidecar script (the `resources/tools` pattern), or (c) *deferred to the agent* — the engine returns the step and the agent reports the result via `record`. The core is identical for all three, so the same framework serves deterministic pipelines and agent-in-the-loop reasoning.
+- **Pluggable executors** — the only place "what work means" lives. An executor can be: (a) a call into the host application's native command surface, (b) a sidecar script, or (c) *deferred to the agent* — the engine returns the step and the agent reports the result via `record`. The core is identical for all three, so the same framework serves deterministic pipelines and agent-in-the-loop reasoning.
 - **Agent surface:** expose the commands above as MCP tools (`workflow_*`) so any agent can drive a run — structured JSON responses and actionable errors, matching the project's agent-friendly conventions.
 - **Two layers, one seam.** The engine (`workflow/core/`) stays domain-free: it takes opaque check ids and a `id → count` evidence map. The binding layer (`workflow/`) owns run locations, the check vocabulary and the providers, so verification for a new pipeline is a provider there and no change here.
 - **Optional later:** a small UI (list runs, per-step status, retry/unblock/skip buttons). Not required for the framework to work.

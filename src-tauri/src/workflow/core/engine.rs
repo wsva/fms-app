@@ -217,11 +217,82 @@ pub(super) fn lease_live(step: &Step, heartbeat: Option<i64>, now: i64) -> bool 
         .unwrap_or(false)
 }
 
+/// What happened to a running step whose lease expired: enough to journal one
+/// `interrupted` (or, past the budget, `failed`) event in the operation that
+/// persists the reap. The caller owns the write; this only says *which* steps
+/// died, under whose claim, and whether the interrupt budget ran out.
+#[derive(Debug)]
+pub(super) struct ReapedClaim {
+    pub id: String,
+    pub attempt: Option<u32>,
+    pub claim_id: Option<String>,
+    pub holder: Option<String>,
+    /// Epoch seconds of the last heartbeat that kept the claim alive.
+    pub expired_at: Option<i64>,
+    pub timeout_secs: i64,
+    /// The interrupt budget ran out, so the step went to `failed`, not `pending`.
+    pub gave_up: bool,
+}
+
+/// Reap every `running` step whose lease has expired: one executor died
+/// mid-flight (or simply never reported), so its claim is given up. Each reap
+/// counts against [`Step::max_interrupts`] — a crash consumes no `retry.attempts`,
+/// so without this budget an executor that fails every time would loop forever.
+///
+/// Under budget the step returns to `pending` with a reason quoting the timeout
+/// (so a reader can tell "this claim was too old" from "this step was never
+/// finished"); past it the step is abandoned as `failed`, naming the last holder.
+/// The claim id is kept (a re-claim overwrites it, a late report carrying the dead
+/// token is then recognisable as stale); the lease and heartbeat are cleared.
+pub(super) fn reap_expired(def: &Definition, state: &mut RunState, now: i64) -> Vec<ReapedClaim> {
+    let mut reaped = Vec::new();
+    for step in &def.steps {
+        let Some(ss) = state.steps.get_mut(&step.id) else { continue };
+        if ss.status != Status::Running || lease_live(step, ss.heartbeat, now) {
+            continue;
+        }
+        let interrupts = ss.interrupts.unwrap_or(0) + 1;
+        ss.interrupts = Some(interrupts);
+        let timeout_secs = step.lease_secs();
+        let gave_up = interrupts > step.max_interrupts();
+        reaped.push(ReapedClaim {
+            id: step.id.clone(),
+            attempt: ss.attempt,
+            claim_id: ss.claim_id.clone(),
+            holder: ss.lease.clone(),
+            expired_at: ss.heartbeat,
+            timeout_secs,
+            gave_up,
+        });
+        if gave_up {
+            ss.status = Status::Failed;
+            ss.reason = Some(format!(
+                "interrupted: {} consecutive claims reaped without a report (max_interrupts={}); \
+                 the last holder was '{}'. Raise this step's `timeout:` if the work legitimately \
+                 takes longer, or workflow_intervene(op=retry) to try again",
+                interrupts,
+                step.max_interrupts(),
+                ss.lease.as_deref().unwrap_or("unknown"),
+            ));
+        } else {
+            ss.status = Status::Pending;
+            ss.reason = Some(format!(
+                "interrupted: lease expired after {}s without a heartbeat (raise this step's \
+                 `timeout:` if the work legitimately takes longer)",
+                timeout_secs,
+            ));
+        }
+        ss.lease = None;
+        ss.heartbeat = None;
+    }
+    reaped
+}
+
 /// Recompute all derived statuses in place. Recorded decisions and live claims
 /// are preserved; everything else is re-derived from the dependency graph:
 /// - `completed` and `failed` are always preserved (a terminal judgement);
 /// - a `running` claim with a live lease is preserved (and an expired one reaped
-///   back to `pending`, above);
+///   by [`reap_expired`] first, above);
 /// - an **external** `blocked` (`blocked_by = External`) is preserved — the graph
 ///   must never reopen a step a caller deliberately parked;
 /// - a `skipped` step is preserved only when it was a recorded decision
@@ -229,30 +300,19 @@ pub(super) fn lease_live(step: &Step, heartbeat: Option<i64>, now: i64) -> bool 
 ///   re-derived, so an upstream change can bring it back.
 ///
 /// A graph-derived block sets `blocked_by = Dependency`; when such a step becomes
-/// ready the flag is cleared. Also reaps expired leases.
-pub(super) fn recompute(def: &Definition, state: &mut RunState, now: i64) {
+/// ready the flag is cleared. Reaps expired leases and returns what it reaped so
+/// the *mutating* caller can journal one `interrupted`/`failed` event each; a
+/// read-only caller (status/next) reports them without persisting. Pure given
+/// `now` — time is an input, never read from the clock here.
+pub(super) fn recompute(def: &Definition, state: &mut RunState, now: i64) -> Vec<ReapedClaim> {
     // Ensure every defined step has a state entry.
     for step in &def.steps {
         state.steps.entry(step.id.clone()).or_default();
     }
 
-    // Reap interrupted steps: running with an expired lease → pending. The reason
-    // quotes the timeout, so a reader can tell "this claim was too old" from
-    // "this step was never finished" — and a step reaped far too early can be
-    // given a longer `timeout:` instead of being worked around by hand.
-    for step in &def.steps {
-        if let Some(ss) = state.steps.get_mut(&step.id) {
-            if ss.status == Status::Running && !lease_live(step, ss.heartbeat, now) {
-                ss.status = Status::Pending;
-                ss.lease = None;
-                ss.reason = Some(format!(
-                    "interrupted: lease expired after {}s without a heartbeat (raise this step's \
-                     `timeout:` if the work legitimately takes longer)",
-                    step.lease_secs()
-                ));
-            }
-        }
-    }
+    // Reap interrupted claims before re-deriving, so a dead claim neither blocks
+    // its dependents as `running` nor is counted live.
+    let reaped = reap_expired(def, state, now);
 
     let by_id: HashMap<&str, &Step> = def.steps.iter().map(|s| (s.id.as_str(), s)).collect();
 
@@ -289,6 +349,8 @@ pub(super) fn recompute(def: &Definition, state: &mut RunState, now: i64) {
             ss.skip_reason = d.skip_reason;
         }
     }
+
+    reaped
 }
 
 /// What [`derive_status`] concluded about one step, including the two
@@ -453,12 +515,23 @@ pub(super) fn ready_step_ids(def: &Definition, state: &RunState) -> Vec<String> 
         .collect()
 }
 
-/// Classify the overall run: `in_progress`, `completed`, `failed` or `blocked`.
+/// Classify the overall run: `in_progress`, `completed`, `completed_with_failures`,
+/// `failed` or `blocked`.
+///
+/// The distinction that matters (N3) is a run that finished with a `continue`-policy
+/// step failed: it has no work left it can still do, yet is not `completed` either —
+/// reporting it `blocked` (the old fallthrough) reads to a waiting agent like "somebody
+/// must intervene to unstick it", when in fact the graph is done and just has a red
+/// node. Precedence: a `stop` failure halts everything (`failed`); live work anywhere
+/// (`in_progress`); genuinely all-done (`completed`); finished but with a non-stop
+/// failure and nothing still waiting (`completed_with_failures`); otherwise stuck
+/// behind a failed/blocked/pending step (`blocked`).
 pub(super) fn classify_run(def: &Definition, state: &RunState) -> &'static str {
     let mut any_running = false;
     let mut any_ready = false;
     let mut any_blocked = false;
     let mut any_failed = false;
+    let mut any_pending = false;
     let mut all_done = true;
 
     for step in &def.steps {
@@ -472,7 +545,10 @@ pub(super) fn classify_run(def: &Definition, state: &RunState) -> &'static str {
                 any_ready = true;
                 all_done = false;
             }
-            Status::Pending => all_done = false,
+            Status::Pending => {
+                any_pending = true;
+                all_done = false;
+            }
             Status::Blocked => {
                 any_blocked = true;
                 all_done = false;
@@ -496,9 +572,11 @@ pub(super) fn classify_run(def: &Definition, state: &RunState) -> &'static str {
         "in_progress"
     } else if all_done {
         "completed"
-    } else if any_failed || any_blocked {
-        "blocked"
+    } else if any_failed && !any_pending && !any_blocked {
+        // Every non-failed step is done; the failures were `continue`-policy, so
+        // the run reached its end with a red node rather than stalling.
+        "completed_with_failures"
     } else {
-        "completed"
+        "blocked"
     }
 }

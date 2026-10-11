@@ -77,6 +77,12 @@ struct WorkflowRecordParam {
     /// `reason`/`error` key names why a step did not complete.
     #[serde(default)]
     detail: JsonValue,
+    /// The `claim_id` [`workflow_advance`] returned for this claim. Optional at
+    /// first, but required once a step has been reaped at least once: a report for
+    /// a `running` step whose lease was reaped and re-granted must present the live
+    /// token, or a stale executor's late completion would clobber the current claim.
+    #[serde(default)]
+    claim_id: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -153,7 +159,7 @@ impl DatasetMcpServer {
         ok(&v)
     }
 
-    #[tool(name = "workflow_status", description = "Load a run and return its definition metadata, per-step statuses, and what is ready/blocked/failed with actionable reasons and hints. Recomputes derived statuses and reaps expired leases, so it is always safe to call after a restart to resume. Pass dataset_uuid when you mean a particular dataset; omit it and the run is found by its run_id alone.")]
+    #[tool(name = "workflow_status", description = "Load a run and return its definition metadata, per-step statuses, and what is ready/blocked/failed with actionable reasons and hints. READ-ONLY: it recomputes derived statuses in memory so the view is accurate after a restart, but it never writes. An expired lease is reported in `expired_claims`/`lease_hint`, not reaped here — the reap lands on the next workflow_advance/workflow_record/workflow_intervene, or call workflow_reap to persist it now. Pass dataset_uuid when you mean a particular dataset; omit it and the run is found by its run_id alone.")]
     async fn workflow_status(
         &self,
         Parameters(param): Parameters<WorkflowRunParam>,
@@ -161,6 +167,17 @@ impl DatasetMcpServer {
         log::info!("[MCP] workflow_status: run_id={}", param.run_id);
         let state = self.app.state::<SettingsState>();
         let v = crate::workflow::status(state.inner(), param.dataset_uuid.as_deref(), &param.run_id)?;
+        ok(&v)
+    }
+
+    #[tool(name = "workflow_reap", description = "Explicitly persist the reaping of any expired leases in a run, journalling one `interrupted` event per reaped claim (and a `failed` event when a step exhausted its `max_interrupts` budget). This is the mutating home for a reap that workflow_status only reports: call it to clear stalled claims an agent left `running` without advancing or recording anything else. A run with no expired lease is returned unchanged and nothing is written. Pass dataset_uuid to name a particular dataset; omit it and the run is found by its run_id alone.")]
+    async fn workflow_reap(
+        &self,
+        Parameters(param): Parameters<WorkflowRunParam>,
+    ) -> Result<String, String> {
+        log::info!("[MCP] workflow_reap: run_id={}", param.run_id);
+        let state = self.app.state::<SettingsState>();
+        let v = crate::workflow::reap(state.inner(), param.dataset_uuid.as_deref(), &param.run_id)?;
         ok(&v)
     }
 
@@ -185,7 +202,7 @@ impl DatasetMcpServer {
         crate::workflow::definition_text(state.inner(), param.dataset_uuid.as_deref(), &param.run_id)
     }
 
-    #[tool(name = "workflow_advance", description = "Claim a ready step (single-flight via a lease) and hand its resolved action + inputs back to you to perform. This does NOT execute anything: the response is the call to make — `action` plus `params`, whose `uuid` is the dataset this run is filed under — and you must report the outcome with workflow_record before your turn ends. `lease_secs` in the response is how long you have: after that the engine reaps the claim back to ready, so work still in flight gets performed twice and the step you are on can be re-claimed by anyone. A step you claimed and never reported sits `running` under your lease while nothing is running. Errors if the step is not ready — naming what it waits on — or is already claimed by a live lease.")]
+    #[tool(name = "workflow_advance", description = "Claim a ready step (single-flight via a lease) and hand its resolved action + inputs back to you to perform. This does NOT execute anything: the response is the call to make — `action` plus `params`, whose `uuid` is the dataset this run is filed under — and you must report the outcome with workflow_record before your turn ends. The response carries a `claim_id` token for this claim: pass it back to workflow_record if this step has ever been reaped, so a late report from an executor whose claim died cannot clobber yours. `lease_secs` in the response is how long you have: after that the engine reaps the claim (an `interrupted` event) and it can be re-claimed by anyone — a step reaped past its `max_interrupts` becomes `failed`. A step you claimed and never reported sits `running` under your lease while nothing is running. Errors if the step is not ready — naming what it waits on — or is already claimed by a live lease.")]
     async fn workflow_advance(
         &self,
         Parameters(param): Parameters<WorkflowAdvanceParam>,
@@ -206,7 +223,7 @@ impl DatasetMcpServer {
         ok(&v)
     }
 
-    #[tool(name = "workflow_record", description = "Report the outcome of a claimed step: event=completed (with the step's declared values under detail.outputs, or directly on detail), failed (with detail.reason/error; auto-retries while attempts remain), or blocked (waiting on something external). A completion that omits a declared output is refused and writes nothing — the step stays running so the corrected call lands on it — because a dependent reading that name through a `when:` guard would otherwise sit blocked forever with no event naming the cause. Re-evaluates the DAG, appends events, and atomically rewrites state. Returns the updated status. Omit dataset_uuid and the run is still found by its run_id.")]
+    #[tool(name = "workflow_record", description = "Report the outcome of a claimed step: event=completed (with the step's declared values under detail.outputs, or directly on detail), failed (with detail.reason/error; auto-retries while attempts remain), or blocked (waiting on something external). A completion that omits a declared output is refused and writes nothing — the step stays running so the corrected call lands on it — because a dependent reading that name through a `when:` guard would otherwise sit blocked forever with no event naming the cause. Pass the `claim_id` from workflow_advance when this step has been reaped before: a report for a `running` step carrying a missing or stale token is rejected and writes nothing, so a dead executor cannot clobber the live claim. Also reaps any expired lease this call touches (journalling an `interrupted` event) and re-evaluates the DAG, appending events and atomically rewriting state. Returns the updated status. Omit dataset_uuid and the run is still found by its run_id.")]
     async fn workflow_record(
         &self,
         Parameters(param): Parameters<WorkflowRecordParam>,
@@ -229,6 +246,7 @@ impl DatasetMcpServer {
             &param.step,
             &param.event,
             detail,
+            param.claim_id.as_deref(),
         )?;
         ok(&v)
     }

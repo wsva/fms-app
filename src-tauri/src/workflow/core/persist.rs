@@ -15,7 +15,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use chrono::{Local, Utc};
+use chrono::Utc;
 
 use super::{Definition, Event, RunState};
 
@@ -163,9 +163,18 @@ pub(super) fn read_events(dir: &Path) -> Vec<Event> {
         .collect()
 }
 
-/// Human-readable local timestamp, e.g. `2026-10-01 10:00:00`.
+/// UTC ISO-8601 with a `Z` suffix, e.g. `2026-10-11T09:00:00Z`.
+///
+/// Deliberately UTC, not local: a local *naive* timestamp repeats an hour when
+/// clocks fall back (Europe: late October), which made `events.jsonl` time order
+/// non-monotonic. Every new event and state stamp carries the `Z` marker so a
+/// reader can tell UTC from the legacy local strings already in old logs. Those
+/// legacy values (no `Z`) are never reinterpreted or compared arithmetically —
+/// they are display-only; lease expiry uses [`now_ts`] (epoch seconds), never
+/// these strings. (A `schema_version` that makes the split explicit lands with
+/// F13.)
 pub(super) fn now_string() -> String {
-    Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+    Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 /// Unix epoch seconds (UTC) — used for lease heartbeats so expiry is a cheap

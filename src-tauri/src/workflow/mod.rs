@@ -294,6 +294,18 @@ pub(crate) fn status(
     core::status(&run_base_for(settings, dataset_uuid, run_id)?, run_id)
 }
 
+/// Persist the reaping of any expired lease, journalling one `interrupted` (or,
+/// past the budget, `failed`) event per reaped claim. This is the explicit home
+/// for a reap that [`status`] only reports, for an agent that wants to clear
+/// stalled claims without advancing or recording anything else.
+pub(crate) fn reap(
+    settings: &SettingsState,
+    dataset_uuid: Option<&str>,
+    run_id: &str,
+) -> Result<Value, String> {
+    core::reap(&run_base_for(settings, dataset_uuid, run_id)?, run_id)
+}
+
 pub(crate) fn definition_text(
     settings: &SettingsState,
     dataset_uuid: Option<&str>,
@@ -331,6 +343,7 @@ pub(crate) fn record(
     step_id: &str,
     event_kind: &str,
     detail: Option<Value>,
+    claim_id: Option<&str>,
 ) -> Result<Value, String> {
     core::record(
         &run_base_for(settings, dataset_uuid, run_id)?,
@@ -338,6 +351,7 @@ pub(crate) fn record(
         step_id,
         event_kind,
         detail,
+        claim_id,
     )
 }
 

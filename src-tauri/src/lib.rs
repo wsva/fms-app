@@ -391,6 +391,7 @@ pub fn run() {
             workflow::commands::workflow_list_runs,
             workflow::commands::workflow_create_run,
             workflow::commands::workflow_status,
+            workflow::commands::workflow_reap,
             workflow::commands::workflow_next,
             workflow::commands::workflow_get_definition,
             workflow::commands::workflow_advance,

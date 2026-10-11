@@ -199,6 +199,63 @@ mod tests {
         dir
     }
 
+    /// N4: turn the vacuity convention into a checked rule. An `adopt:` list that
+    /// counts offenders over a collection (`per_subject`) reads clean when the
+    /// collection is empty, so it must be paired with a `subject_present` guard that
+    /// reports an offender on an empty subject — otherwise a green tick certifies
+    /// work nobody did. This is *stricter* than the F10 rule `validate` enforces (a
+    /// `file_exists` id also satisfies F10): here we insist on a real `subject_present`
+    /// id, and `sync_media` is the one deliberate, named exception. That step's
+    /// postcondition is a two-way agreement between the DB inventory and the files on
+    /// disk, so the offender that makes `media_new`/`media_gone` meaningful is the
+    /// missing database (`database_missing`, a `file_exists` check) — the emptiness it
+    /// guards against is the file's, not the media's, and a `subject_present` id would
+    /// be the wrong guard. `init_dataset` needs no guard at all: its list is a single
+    /// `file_exists` id with no `per_subject` member, which this test never reaches.
+    #[test]
+    fn outcome_steps_pair_per_subject_adopts_with_a_subject_present_guard() {
+        use crate::workflow::core::CheckKind;
+        const NAMED_EXCEPTIONS: &[&str] = &["sync_media"];
+        let vocab = check_vocab();
+        let kind_of = |id: &str| -> CheckKind {
+            vocab
+                .iter()
+                .find(|(k, _)| *k == id)
+                .map(|(_, kk)| *kk)
+                .unwrap_or_else(|| panic!("template check '{id}' is not in the vocabulary"))
+        };
+        let mut saw_subject_present = 0;
+        let mut saw_exception = 0;
+        for (category, _, yaml) in crate::workflow::templates::all() {
+            let def: crate::workflow::core::Definition = serde_yaml::from_str(yaml)
+                .unwrap_or_else(|e| panic!("'{category}' template failed to parse: {e}"));
+            for step in &def.steps {
+                let adopt = match &step.adopt {
+                    Some(a) if !a.is_empty() => a,
+                    _ => continue,
+                };
+                let any_per_subject = adopt.iter().any(|id| kind_of(id) == CheckKind::PerSubject);
+                let any_subject_present = adopt.iter().any(|id| kind_of(id) == CheckKind::SubjectPresent);
+                if any_subject_present {
+                    saw_subject_present += 1;
+                }
+                if any_per_subject && !any_subject_present {
+                    assert!(
+                        NAMED_EXCEPTIONS.contains(&step.id.as_str()),
+                        "step '{}' in the '{category}' template adopts on per_subject checks with no \
+                         subject_present guard; add a subject_present id (e.g. media_none) or list it \
+                         as a deliberate exception with its reason",
+                        step.id
+                    );
+                    saw_exception += 1;
+                }
+            }
+        }
+        // The rule must actually bite somewhere, or it is guarding an empty set.
+        assert!(saw_subject_present > 0, "no outcome step used a subject_present guard");
+        assert_eq!(saw_exception, 1, "exactly the one named exception (sync_media) should be present");
+    }
+
     #[test]
     fn built_in_templates_bind_only_registered_checks() {
         let vocab = check_vocab();

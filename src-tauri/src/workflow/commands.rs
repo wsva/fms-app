@@ -38,8 +38,8 @@ pub async fn workflow_create_run(
 }
 
 /// Load a run and return its definition metadata + per-step statuses and what
-/// is ready/blocked/failed. Recomputes derived statuses and reaps expired
-/// leases, so it is safe to call after a restart to resume.
+/// is ready/blocked/failed. READ-ONLY: recomputes derived statuses in memory but
+/// writes nothing; an expired lease is reported, not reaped (see `workflow_reap`).
 #[tauri::command]
 pub async fn workflow_status(
     settings: State<'_, SettingsState>,
@@ -47,6 +47,18 @@ pub async fn workflow_status(
     run_id: String,
 ) -> Result<Value, String> {
     crate::workflow::status(settings.inner(), dataset_uuid.as_deref(), &run_id)
+}
+
+/// Persist the reaping of any expired lease, journalling an `interrupted` (or
+/// `failed`) event per reaped claim — the mutating home for a reap `workflow_status`
+/// only reports. Writes nothing if no lease has expired.
+#[tauri::command]
+pub async fn workflow_reap(
+    settings: State<'_, SettingsState>,
+    dataset_uuid: Option<String>,
+    run_id: String,
+) -> Result<Value, String> {
+    crate::workflow::reap(settings.inner(), dataset_uuid.as_deref(), &run_id)
 }
 
 /// The runnable (ready, unclaimed) steps with their resolved action, params and
@@ -91,7 +103,9 @@ pub async fn workflow_advance(
 }
 
 /// Report the outcome of a claimed step: `event` is one of `completed`,
-/// `failed`, `blocked`; `detail` optionally carries `{ outputs, reason }`.
+/// `failed`, `blocked`; `detail` optionally carries `{ outputs, reason }`;
+/// `claim_id` is the token `workflow_advance` returned (required once the step has
+/// been reaped, so a stale executor's late report cannot clobber the live claim).
 #[tauri::command]
 pub async fn workflow_record(
     settings: State<'_, SettingsState>,
@@ -100,6 +114,7 @@ pub async fn workflow_record(
     step: String,
     event: String,
     detail: Option<Value>,
+    claim_id: Option<String>,
 ) -> Result<Value, String> {
     crate::workflow::record(
         settings.inner(),
@@ -108,6 +123,7 @@ pub async fn workflow_record(
         &step,
         &event,
         detail,
+        claim_id.as_deref(),
     )
 }
 

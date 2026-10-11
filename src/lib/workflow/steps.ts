@@ -479,9 +479,9 @@ export function buildPrompt(opts: {
   lines.push("Steps intentionally skipped: " + (skipped.length ? skipped.join(", ") : "none") + ".");
   lines.push("");
   lines.push("Loop until the run is completed or blocked (pass dataset_uuid on every call — this run lives inside the dataset):");
-  lines.push("1. workflow_status(dataset_uuid, run_id) to sync derived statuses (safe to call after a restart; it also reaps a step left running by an expired lease).");
+  lines.push("1. workflow_status(dataset_uuid, run_id) to sync derived statuses (READ-ONLY: safe after a restart, it reports an expired lease in expired_claims but persists nothing — the reap lands on the next advance/record/intervene, or call workflow_reap to clear stalled claims now).");
   lines.push("2. workflow_next(dataset_uuid, run_id) for the ready steps.");
-  lines.push("3. For each ready step: workflow_advance(dataset_uuid, run_id, step), call the MCP tool with the same name as its action using the resolved inputs/params, then workflow_record(dataset_uuid, run_id, step, event=completed|failed, detail) — a completion must carry every name in declared_outputs under detail.outputs, or it is refused.");
+  lines.push("3. For each ready step: workflow_advance(dataset_uuid, run_id, step) (it returns a claim_id token), call the MCP tool with the same name as its action using the resolved inputs/params, then workflow_record(dataset_uuid, run_id, step, event=completed|failed, detail, claim_id) — a completion must carry every name in declared_outputs under detail.outputs, or it is refused; pass the claim_id back whenever this step was ever reaped.");
   lines.push("4. Use workflow_intervene (retry/skip/reset) to recover, and report progress as you go.");
   lines.push("");
   if (ready.length > 0) {
