@@ -63,6 +63,16 @@
 # `init_dataset` produces. Making it a step output meant a dataset initialized
 # anywhere else could never be adopted: the completion would carry no outputs and
 # every dependent would go `blocked` waiting for one that could not arrive.
+#
+# "Handed by its caller" was the flaw: an agent that omits `dataset_uuid` on a
+# run-scoped call has the step handed back with `params: {}` — an action name and
+# no subject, so nothing it can actually call. The subject is therefore written
+# into `params` as `${run.dataset_uuid}`, a run-level reference the *binding*
+# layer resolves (`workflow/mod.rs::bind_subject`) from the dataset the run is
+# filed under. `core` never sees it: it copies `params` verbatim and has no notion
+# of a dataset, which is why it stays a placeholder there and a uuid in the agent's
+# hands. The one step that must not carry it is `init_dataset`, whose action takes
+# a `path` and mints the uuid — the subject does not exist until it has run.
 
 name: process_dictation_dataset
 # Bumped for the `adopt:` lists, because they change what a scan is entitled to
@@ -70,7 +80,10 @@ name: process_dictation_dataset
 # only annotated gates that could demote, never what could claim completion — and
 # an existing `dictation-<uuid>` run keeps whichever version it opened with until a
 # scan rebinds it, so an additive change is no longer a reason to freeze a run.
-version: 3
+# Version 4 hands every dataset-scoped step its subject in `params`, which changes
+# what a step *means as a call* — an agent following version 3 literally could not
+# perform it.
+version: 4
 
 steps:
   # ── Stage 0: STT model readiness ────────────────────────────────────────────
@@ -118,6 +131,8 @@ steps:
       data related to them (subtitles, cues, transcripts). Safe to re-run: if no
       media files were renamed or deleted, it changes nothing.
     action: dataset_sync_media
+    params:
+      uuid: "${run.dataset_uuid}"
     depends_on:
       - init_dataset
     verify:
@@ -140,7 +155,14 @@ steps:
       listen_subtitle + cues (version 1) per media, matched to its listen_media row by
       source and written idempotently. Because generation persists straight to the DB,
       there is no separate "build database" step downstream.
+      It transcribes inline, so one call over dozens of files can run for many minutes.
+      It is also incremental per file — media that already have a VTT are skipped — so
+      a client whose call timed out lost the response, not the work: call it again, or
+      poll `dataset_audit` until `subtitles_missing` reads 0, and only then record this
+      step completed. Never leave a claimed step sitting at `running` unreported.
     action: dataset_generate_subtitles
+    params:
+      uuid: "${run.dataset_uuid}"
     depends_on:
       - ensure_model
       - sync_media
@@ -156,6 +178,8 @@ steps:
     title: Generate waveforms
     description: Generate waveform JSON for all media via Symphonia peak detection.
     action: dataset_generate_waveforms
+    params:
+      uuid: "${run.dataset_uuid}"
     depends_on:
       - sync_media
     verify:
@@ -174,6 +198,8 @@ steps:
       List dataset files to see whether book.txt and/or transcript/ exist; record
       "true"/"false" in the outputs so the guards below can skip cleanly.
     action: dataset_list_files
+    params:
+      uuid: "${run.dataset_uuid}"
     depends_on:
       - generate_subtitles
     outputs:
@@ -184,6 +210,8 @@ steps:
     title: Align cues (book)
     description: Align cue text against book.txt with multi-pass anchor DP matching.
     action: dataset_align_cues
+    params:
+      uuid: "${run.dataset_uuid}"
     depends_on:
       - detect_reference
     verify:
@@ -194,6 +222,8 @@ steps:
     title: Align cues (transcript)
     description: Align cue text against per-subtitle files in transcript/ instead.
     action: dataset_align_cues_transcript
+    params:
+      uuid: "${run.dataset_uuid}"
     depends_on:
       - detect_reference
     verify:
@@ -221,5 +251,6 @@ steps:
     # but never which mode or strategy made it — see docs/design/workflow/dictation.md.
     adopt: [media_none, cues_unadjusted, adjust_blocked_no_waveform]
     params:
+      uuid: "${run.dataset_uuid}"
       mode: "new"
       strategy: "noise_floor"          # or: dual_bound | peak_relative | otsu

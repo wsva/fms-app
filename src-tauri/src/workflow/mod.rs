@@ -54,6 +54,11 @@ use crate::settings::SettingsState;
 const RUNS_SUBDIR: &str = "workflows";
 /// What makes a directory a run rather than a stray folder of the same name.
 const DEFINITION_FILE: &str = "workflow.yaml";
+/// The placeholder a template writes in a step's `params` to mean *"the dataset
+/// this run is filed under"*. [`core`] copies `params` into the agent surface
+/// verbatim — it knows steps, dependencies and statuses, never datasets — so
+/// [`bind_subject`] in this layer is what resolves it.
+const SUBJECT_REF: &str = "${run.dataset_uuid}";
 
 /// Resolve the run *base directory* for a call that only needs a **scope** —
 /// creating a run or listing runs, where no existing run is being named.
@@ -157,6 +162,71 @@ fn run_base_for(
     }
 }
 
+/// Where an existing run lives, and what it is about.
+struct RunScope {
+    base: PathBuf,
+    /// The dataset a dataset-scoped run is filed under; `None` for a workspace
+    /// job, which has no subject.
+    dataset_uuid: Option<String>,
+}
+
+/// Locate an existing run and recover the dataset it belongs to.
+///
+/// The uuid is not decoration. A step whose action is `dataset_generate_subtitles`
+/// and whose `params` are `{}` is an instruction the agent cannot carry out: the
+/// subject of the work appears nowhere in the call, and only in the path the run
+/// happens to be filed under. So the binding layer reads it back out of that
+/// dataset's `info.json` and hands it to the agent surface ([`bind_subject`]).
+///
+/// An explicit `dataset_uuid` is believed as given — resolving it to a directory
+/// already proved the dataset exists, and re-reading its `info.json` could only
+/// disagree with the caller.
+fn run_scope(
+    settings: &SettingsState,
+    dataset_uuid: Option<&str>,
+    run_id: &str,
+) -> Result<RunScope, String> {
+    let explicit = dataset_uuid.map(str::trim).filter(|s| !s.is_empty());
+    let base = run_base_for(settings, explicit, run_id)?;
+    // The dataset directory is the parent of its `workflows/`; a workspace jobs
+    // dir has the workspace there instead, and a workspace holds no `info.json`.
+    let dataset_uuid = match explicit {
+        Some(uuid) => Some(uuid.to_string()),
+        None => base
+            .parent()
+            .and_then(crate::datasets::info::read_info_opt)
+            .map(|info| info.uuid),
+    };
+    Ok(RunScope { base, dataset_uuid })
+}
+
+/// Resolve [`SUBJECT_REF`] inside a response, and name the subject at its root
+/// as well — a run opened from a template that never wrote the placeholder still
+/// gets told what its actions operate on.
+fn bind_subject(mut value: Value, dataset_uuid: Option<&str>) -> Value {
+    let Some(uuid) = dataset_uuid else {
+        return value;
+    };
+    substitute_subject(&mut value, &uuid);
+    if let Value::Object(map) = &mut value {
+        if !map.contains_key("dataset_uuid") {
+            map.insert("dataset_uuid".into(), json!(uuid));
+        }
+    }
+    value
+}
+
+/// Depth-first, exact-match only: a placeholder that is part of a longer string
+/// is the template author's own text, not ours to rewrite.
+fn substitute_subject(node: &mut Value, uuid: &str) {
+    match node {
+        Value::String(text) if text == SUBJECT_REF => *text = uuid.to_string(),
+        Value::Array(items) => items.iter_mut().for_each(|item| substitute_subject(item, uuid)),
+        Value::Object(map) => map.values_mut().for_each(|item| substitute_subject(item, uuid)),
+        _ => {}
+    }
+}
+
 // Run-scoped public API. These thin wrappers resolve the run base directory from
 // `(settings, dataset_uuid, run_id)` — an existing run is found by its id even
 // when the caller omitted the scope (see [`run_base_for`]) — and hand the
@@ -224,7 +294,9 @@ pub(crate) fn next_steps(
     dataset_uuid: Option<&str>,
     run_id: &str,
 ) -> Result<Value, String> {
-    core::next_steps(&run_base_for(settings, dataset_uuid, run_id)?, run_id)
+    let scope = run_scope(settings, dataset_uuid, run_id)?;
+    core::next_steps(&scope.base, run_id)
+        .map(|value| bind_subject(value, scope.dataset_uuid.as_deref()))
 }
 
 pub(crate) fn advance(
@@ -234,12 +306,9 @@ pub(crate) fn advance(
     step_id: &str,
     agent_id: Option<String>,
 ) -> Result<Value, String> {
-    core::advance(
-        &run_base_for(settings, dataset_uuid, run_id)?,
-        run_id,
-        step_id,
-        agent_id,
-    )
+    let scope = run_scope(settings, dataset_uuid, run_id)?;
+    core::advance(&scope.base, run_id, step_id, agent_id)
+        .map(|value| bind_subject(value, scope.dataset_uuid.as_deref()))
 }
 
 pub(crate) fn record(
@@ -316,4 +385,29 @@ pub(crate) fn builtin_templates() -> Result<Value, String> {
         }));
     }
     Ok(json!({ "templates": out, "count": out.len() }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dataset_scoped_response_hands_back_an_executable_call() {
+        let response = json!({
+            "run_id": "dictation-abc",
+            "steps": [{ "id": "sync_media", "action": "dataset_sync_media", "params": { "uuid": SUBJECT_REF } }],
+        });
+        let bound = bind_subject(response, Some("abc"));
+        assert_eq!(bound["dataset_uuid"], json!("abc"));
+        assert_eq!(bound["steps"][0]["params"]["uuid"], json!("abc"));
+    }
+
+    #[test]
+    fn a_job_with_no_subject_keeps_the_placeholder_instead_of_inventing_one() {
+        let response = json!({ "params": { "uuid": SUBJECT_REF, "mode": "new" } });
+        let bound = bind_subject(response, None);
+        assert_eq!(bound["params"]["uuid"], json!(SUBJECT_REF));
+        assert_eq!(bound["params"]["mode"], json!("new"));
+        assert!(bound.get("dataset_uuid").is_none());
+    }
 }

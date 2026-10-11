@@ -451,9 +451,9 @@ impl DatasetMcpServer {
     ) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         let model_state = self.app.state::<ModelState>();
-        datasets::dataset_generate_subtitles(self.app.clone(), settings, model_state, param.uuid)
+        let summary = datasets::dataset_generate_subtitles(self.app.clone(), settings, model_state, param.uuid)
             .await?;
-        Ok(serde_json::json!({"status": "ok", "message": "Subtitles generated for all media files"}).to_string())
+        Ok(serde_json::json!({"status": "ok", "summary": summary, "message": "Subtitles generated for all media files"}).to_string())
     }
 
     #[tool(name = "dataset_generate_subtitle_single", description = "Generate subtitle for a single media file using STT model. Use dataset_list_media first to get media UUIDs. Returns the source path on success.")]

@@ -430,6 +430,25 @@ export function statusLabel(s: StepStatus): string {
 }
 
 /**
+ * The subject placeholder a template writes in `params` (see the dictation
+ * template's header). The engine resolves it in the `workflow_next` /
+ * `workflow_advance` responses; the prompt resolves it here too, so an agent's
+ * very first turn already holds calls it can issue.
+ */
+const SUBJECT_REF = "${run.dataset_uuid}";
+
+function bindSubject(value: unknown, datasetUuid: string): unknown {
+  if (typeof value === "string") return value === SUBJECT_REF ? datasetUuid : value;
+  if (Array.isArray(value)) return value.map((item) => bindSubject(item, datasetUuid));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, bindSubject(item, datasetUuid)]),
+    );
+  }
+  return value;
+}
+
+/**
  * Build the driver prompt handed to the Agent Dock. It names the run, tells the
  * agent to load/execute the DAG loop, and lists the currently-ready steps with
  * their actions + params so the first turn has everything it needs.
@@ -467,7 +486,7 @@ export function buildPrompt(opts: {
     lines.push("Start with these ready steps now:");
     for (const id of ready) {
       const s = stepById(id, steps)!;
-      const params = s.params ? ` — params: ${JSON.stringify(s.params)}` : "";
+      const params = s.params ? ` — params: ${JSON.stringify(bindSubject(s.params, datasetUuid))}` : "";
       lines.push(`  - ${id}: ${s.action} (${s.description})${params}`);
     }
   } else {

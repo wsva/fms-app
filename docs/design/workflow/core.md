@@ -59,7 +59,7 @@ A definition is a named, versioned set of **steps** forming a directed acyclic g
 | `outputs` | no | Named values this step produces, stored in state |
 | `verify` | no | `{ blocks, proves }` — which external checks this step answers to (see *Verification*) |
 | `adopt` | no | Check ids that must come back measured-and-clean for this step to be adopted as `completed` without running it (see *Verification*) |
-| `params` | no | Static arguments passed to the executor |
+| `params` | no | Static arguments passed to the executor, verbatim by the engine; the binding layer substitutes `${run.dataset_uuid}` (see *Agent interface*) |
 | `retry` | no | `{ attempts, backoff }` — how many times to re-run on failure |
 | `timeout` | no | Max run duration; exceeding it ⇒ `failed` (or retry) |
 | `on_failure` | no | `stop` \| `continue` \| `skip_dependents` (default `stop`) |
@@ -361,6 +361,8 @@ An agent never needs to understand the domain — only a small generic command s
 | `intervene(run, step, op)` | `retry` / `unblock` / `skip` / `reset` for manual recovery |
 
 Hints are actionable, e.g. *"step `validate` is blocked because dependency `normalize_text` failed; retry `normalize_text` or skip `validate`."*
+
+**`next` and `advance` hand back an executable call, not a riddle.** `params` are copied verbatim by the engine, which knows steps and dependencies but never what a step does — so the *binding* layer resolves the argument a dataset-scoped action always needs: `${run.dataset_uuid}` becomes the uuid of the dataset the run is filed under, read back out of that dataset's `info.json`, and the response names `dataset_uuid` at its root besides. Before that seam an agent was handed `action: dataset_generate_subtitles` with `params: {}` — a command with no subject, which it could only guess at or abandon. A workspace job has no subject, so the placeholder stays as written instead of resolving to something invented.
 
 Two execution styles share the same three files:
 
