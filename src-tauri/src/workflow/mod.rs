@@ -282,7 +282,7 @@ pub(crate) fn create_run(
         &run_base(settings, dataset_uuid)?,
         run_id,
         definition_yaml,
-        &verify::check_ids(),
+        &verify::check_vocab(),
     )
 }
 

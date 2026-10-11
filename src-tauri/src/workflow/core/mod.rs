@@ -15,7 +15,7 @@
 //! What lives here is the semantics that belongs to no domain: what a binding
 //! implies, and the one-way demotion it can trigger.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -75,6 +75,67 @@ impl Default for OnFailure {
     fn default() -> Self {
         OnFailure::Stop
     }
+}
+
+/// What put a step in `blocked` — decides whether a `recompute` may clear it.
+///
+/// A `Dependency` block is derived from the graph (an upstream failed or is
+/// itself blocked), so the pure recompute owns it and lifts it the moment the
+/// upstream is fixed. An `External` block was set by a caller (`record blocked`,
+/// a human parked the step awaiting approval or an outside resource) and is a
+/// judgement, not a derivation — the recompute must never touch it, or a spot
+/// check would silently reopen what someone deliberately stopped.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockedBy {
+    Dependency,
+    External,
+}
+
+/// How a dependent treats a dependency that ended `skipped`. The spec says a
+/// skip satisfies "if the dependent's policy allows"; this is that policy.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SkipPolicy {
+    /// A skip clears the dependency (the default — e.g. an optional branch).
+    #[default]
+    Satisfy,
+    /// A skip leaves the dependent waiting, as an unmet dependency would.
+    Block,
+    /// A skip propagates: the dependent is skipped too.
+    Skip,
+}
+
+/// Why a step is `skipped` — decides whether a `recompute` may re-open it.
+///
+/// A `WhenFalse` skip is a live reading of a guard, so when an upstream reset or
+/// cascade changes the inputs that guard reads, the step is re-derived (it may
+/// become ready). A `Manual` or `Propagated` skip is a recorded decision and
+/// stays terminal until a human changes it — nothing in the filesystem re-opens
+/// a step someone deliberately skipped.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    WhenFalse,
+    Manual,
+    Propagated,
+}
+
+/// The vacuity class of a check id, tagged by the binding layer and treated here
+/// as an opaque structural fact. The engine reasons only about the *composition*
+/// of an `adopt:` list, never about what any check measures — so the words
+/// describe collection shape, not any domain.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckKind {
+    /// Counts offenders over a collection; reads clean when the collection is
+    /// empty, which proves nothing ("no media, so no media is missing subtitles").
+    PerSubject,
+    /// Reports an offender exactly when the subject itself is absent — the guard
+    /// that turns a bundle of vacuous `PerSubject` zeros into a real claim.
+    SubjectPresent,
+    /// A single file's existence; cannot be vacuously true.
+    FileExists,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -157,11 +218,19 @@ pub struct Step {
     /// adopting on that would put a green tick on work nobody did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopt: Option<Vec<String>>,
+    /// How this step reacts when one of its dependencies ends `skipped`. Defaults
+    /// to [`SkipPolicy::Satisfy`] — an optional branch that skipped still lets the
+    /// dependent run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_skipped_dependency: Option<SkipPolicy>,
 }
 
 impl Step {
     fn on_failure(&self) -> OnFailure {
         self.on_failure.unwrap_or_default()
+    }
+    fn skip_policy(&self) -> SkipPolicy {
+        self.on_skipped_dependency.unwrap_or_default()
     }
     fn max_attempts(&self) -> u32 {
         self.retry.as_ref().map(|r| r.attempts.max(1)).unwrap_or(1)
@@ -219,6 +288,15 @@ pub struct StepState {
     pub outputs: Map<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// For a `blocked` step: whether the graph owns the block (`Dependency`, so
+    /// a recompute lifts it when the upstream is fixed) or a caller does
+    /// (`External`, preserved across every recompute — see [`BlockedBy`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<BlockedBy>,
+    /// For a `skipped` step: why it was skipped, deciding whether a recompute may
+    /// re-derive it — see [`SkipReason`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<SkipReason>,
 }
 
 /// The materialized snapshot (`state.json`).
@@ -281,18 +359,19 @@ pub(crate) fn list_runs(base: &Path) -> Result<Value, String> {
 /// Instantiate a new run from a YAML definition: validate, write the three
 /// files, and return the initial status.
 ///
-/// `check_ids` is the caller's vocabulary — every id a `verify:` block may name.
-/// Pass an empty slice when the caller evaluates no checks, which turns the
-/// id-existence rule off rather than rejecting every binding.
+/// `check_vocab` is the caller's vocabulary — every id a `verify:`/`adopt:` block
+/// may name, each tagged with its vacuity [`CheckKind`]. Pass an empty slice when
+/// the caller evaluates no checks, which turns the id-existence and vacuity rules
+/// off rather than rejecting every binding.
 pub(crate) fn create_run(
     base: &Path,
     run_id: Option<String>,
     definition_yaml: &str,
-    check_ids: &[&str],
+    check_vocab: &[(&str, CheckKind)],
 ) -> Result<Value, String> {
     let def: Definition = serde_yaml::from_str(definition_yaml)
         .map_err(|e| format!("invalid workflow YAML: {e}"))?;
-    validate::validate(&def, check_ids)?;
+    validate::validate(&def, check_vocab)?;
 
     let id = match run_id {
         Some(rid) if !rid.trim().is_empty() => persist::sanitize_run_id(&rid)?,
@@ -573,9 +652,9 @@ pub(crate) fn record(
             return Err(format!(
                 "step '{step_id}' declares outputs [{}] but this completion is missing [{}]. \
                  Re-call workflow_record carrying those names under detail.outputs (or directly \
-                 on detail), using the string \"false\" or \"unknown\" when a value genuinely \
-                 does not exist so a dependent's 'when:' guard can resolve. Nothing was \
-                 written; '{step_id}' is still '{cur_status}'.",
+                 on detail), using JSON `null` when a value genuinely does not exist so a \
+                 dependent's 'when:' guard resolves false instead of the step sitting blocked. \
+                 Nothing was written; '{step_id}' is still '{cur_status}'.",
                 step.outputs.join(", "),
                 missing.join(", "),
                 cur_status = cur.as_str(),
@@ -596,12 +675,18 @@ pub(crate) fn record(
             entry.outputs = outputs;
             entry.reason = None;
             entry.lease = None;
+            entry.blocked_by = None;
+            entry.skip_reason = None;
             events.push(event(Some(step_id), "completed", detail.clone()));
         }
         "blocked" => {
             entry.status = Status::Blocked;
             entry.reason = reason.clone().or_else(|| Some("marked blocked by agent".into()));
             entry.lease = None;
+            // A caller-blocked step survives every later recompute until an
+            // explicit `unblock` — the graph may not silently reopen it (F5).
+            entry.blocked_by = Some(BlockedBy::External);
+            entry.skip_reason = None;
             events.push(event(Some(step_id), "blocked", detail.clone()));
         }
         "failed" => {
@@ -609,6 +694,8 @@ pub(crate) fn record(
                 entry.status = Status::Ready;
                 entry.reason = None;
                 entry.lease = None;
+                entry.blocked_by = None;
+                entry.skip_reason = None;
                 events.push(event(
                     Some(step_id),
                     "retried",
@@ -619,6 +706,8 @@ pub(crate) fn record(
                 entry.finished_at = Some(now_str);
                 entry.reason = reason.clone().or_else(|| Some("step failed".into()));
                 entry.lease = None;
+                entry.blocked_by = None;
+                entry.skip_reason = None;
                 events.push(event(Some(step_id), "failed", detail.clone()));
             }
         }
@@ -629,6 +718,10 @@ pub(crate) fn record(
         }
     }
 
+    // A step that fell back to `ready`/`failed`/`blocked` may leave a
+    // already-`completed` dependent stranded on a now-unsatisfied upstream: reopen
+    // it (F3) before re-deriving readiness, so the invariant never breaks.
+    events.extend(cascade_completed(&def, &mut state));
     engine::recompute(&def, &mut state, now);
     // A run-level event marks a terminal run.
     match engine::classify_run(&def, &state) {
@@ -668,12 +761,16 @@ pub(crate) fn intervene(
             entry.lease = None;
             entry.heartbeat = None;
             entry.finished_at = None;
+            entry.blocked_by = None;
+            entry.skip_reason = None;
             "retried"
         }
         "unblock" => {
             entry.status = Status::Pending;
             entry.reason = None;
             entry.lease = None;
+            // The caller's parked block is lifted — the graph re-derives from here.
+            entry.blocked_by = None;
             "unblocked"
         }
         "skip" => {
@@ -681,6 +778,10 @@ pub(crate) fn intervene(
             entry.finished_at = Some(now_str);
             entry.reason = Some("manually skipped".into());
             entry.lease = None;
+            // A manual skip is a recorded decision: `recompute` preserves it and
+            // never re-derives it from a `when:` guard (F5c).
+            entry.skip_reason = Some(SkipReason::Manual);
+            entry.blocked_by = None;
             "skipped"
         }
         "reset" => {
@@ -694,7 +795,12 @@ pub(crate) fn intervene(
         }
     };
 
-    let events = vec![event(Some(step_id), ev_name, Some(json!({ "op": op })))];
+    let mut events = vec![event(Some(step_id), ev_name, Some(json!({ "op": op })))];
+    // Resetting or retrying a step that had `completed` dependents strands them on
+    // a now-unsatisfied upstream: reopen them (F3) before re-deriving readiness.
+    if matches!(op, "reset" | "retry") {
+        events.extend(cascade_completed(&def, &mut state));
+    }
     engine::recompute(&def, &mut state, now);
     commit(&dir, &events, &state)?;
 
@@ -824,6 +930,9 @@ pub(crate) fn verify(
 
     let changed = !events.is_empty();
     if changed {
+        // A demotion may strand an already-`completed` dependent on a now-
+        // unsatisfied upstream: reopen it too (F3) before re-deriving readiness.
+        events.extend(cascade_completed(&def, &mut state));
         // Re-derive what the demotion un-satisfied, then append-then-write.
         engine::recompute(&def, &mut state, now);
         commit(&dir, &events, &state)?;
@@ -900,22 +1009,67 @@ pub(crate) fn adopt(
     base: &Path,
     run_id: &str,
     evidence: &HashMap<String, usize>,
+    outputs: &HashMap<String, Map<String, Value>>,
 ) -> Result<Value, String> {
     let (dir, def, mut state) = load_bundle(base, run_id)?;
     let now = persist::now_ts();
     engine::recompute(&def, &mut state, now);
 
+    // Which outputs of each step a dependent reads back (through `inputs:` or a
+    // `when:` guard). Adopting a step whose consumed output the call did not supply
+    // would strand that dependent — the silent block F4 closes — so such a step is
+    // withheld unless the adopt call hands the value over.
+    let mut consumed: HashMap<String, HashSet<String>> = HashMap::new();
+    for s in &def.steps {
+        let mut exprs: Vec<&String> = s.inputs.values().collect();
+        if let Some(w) = &s.when {
+            exprs.push(w);
+        }
+        for e in exprs {
+            for (src_id, out_key) in engine::scan_output_refs(e) {
+                consumed.entry(src_id).or_default().insert(out_key);
+            }
+        }
+    }
+
     let mut adopted: Vec<String> = Vec::new();
     let mut withheld: Vec<Value> = Vec::new();
     let mut events: Vec<Event> = Vec::new();
 
-    for step in &def.steps {
+    // Adopt in topological order (F4), so a dependent is only ever considered once
+    // its upstreams have had their chance to be adopted first — inheriting progress
+    // out of definition order would mark a step green on top of an unadopted parent.
+    for step_id in engine::topo_order(&def) {
+        let Some(step) = def.steps.iter().find(|s| s.id == step_id) else {
+            continue;
+        };
         let wanted = step.adopt_ids();
         if wanted.is_empty() {
             continue;
         }
-        let status = state.steps.get(&step.id).map(|ss| ss.status).unwrap_or_default();
+        let status = state.steps.get(&step_id).map(|ss| ss.status).unwrap_or_default();
         if !matches!(status, Status::Pending | Status::Ready) {
+            continue;
+        }
+
+        // Dependency gating: every dependency must already be satisfied — completed,
+        // skipped under this step's policy, or adopted earlier in this pass (its
+        // status was just set to `completed` below). Otherwise the green tick would
+        // sit on an upstream that has not earned it.
+        let unmet = step.depends_on.iter().find(|dep| {
+            let ds = state.steps.get(dep.as_str()).map(|ss| ss.status).unwrap_or(Status::Pending);
+            match ds {
+                Status::Completed => false,
+                Status::Skipped => step.skip_policy() != SkipPolicy::Satisfy,
+                _ => true,
+            }
+        });
+        if let Some(dep) = unmet {
+            withheld.push(json!({
+                "step": step_id,
+                "why": "dependency not satisfied",
+                "checks": [dep.as_str()],
+            }));
             continue;
         }
 
@@ -926,21 +1080,46 @@ pub(crate) fn adopt(
                 .collect::<Vec<Value>>(),
         );
         if !unmeasured.is_empty() {
-            withheld.push(json!({ "step": step.id, "why": "not measured", "checks": unmeasured }));
+            withheld.push(json!({ "step": step_id, "why": "not measured", "checks": unmeasured }));
             continue;
         }
         if !findings.is_empty() {
-            withheld.push(json!({ "step": step.id, "why": "the evidence disagrees", "checks": findings }));
+            withheld.push(json!({ "step": step_id, "why": "the evidence disagrees", "checks": findings }));
             continue;
         }
 
-        let entry = state.steps.entry(step.id.clone()).or_default();
+        // Outputs gating: a declared output some dependent reads must be supplied by
+        // the adopt call, or the dependent would resolve to nothing and sit blocked.
+        let provided = outputs.get(&step_id);
+        let missing: Vec<&String> = step
+            .outputs
+            .iter()
+            .filter(|o| consumed.get(&step_id).map(|c| c.contains(o.as_str())).unwrap_or(false))
+            .filter(|o| !provided.map(|p| p.contains_key(o.as_str())).unwrap_or(false))
+            .collect();
+        if !missing.is_empty() {
+            withheld.push(json!({
+                "step": step_id,
+                "why": "outputs not derivable",
+                "outputs": missing,
+            }));
+            continue;
+        }
+
+        let entry = state.steps.entry(step_id.clone()).or_default();
         entry.status = Status::Completed;
         entry.finished_at = Some(persist::now_string());
         entry.lease = None;
         entry.heartbeat = None;
+        entry.blocked_by = None;
+        entry.skip_reason = None;
+        if let Some(provided) = provided {
+            for (k, v) in provided {
+                entry.outputs.insert(k.clone(), v.clone());
+            }
+        }
         events.push(event(
-            Some(step.id.as_str()),
+            Some(step_id.as_str()),
             "adopted",
             Some(json!({
                 "from": status.as_str(),
@@ -949,7 +1128,7 @@ pub(crate) fn adopt(
                 "by": "workflow_adopt",
             })),
         ));
-        adopted.push(step.id.clone());
+        adopted.push(step_id.clone());
     }
 
     let changed = !events.is_empty();
@@ -1022,7 +1201,7 @@ pub(crate) fn rebind_definition(
     base: &Path,
     run_id: &str,
     definition_yaml: &str,
-    known_checks: &[&str],
+    known_checks: &[(&str, CheckKind)],
 ) -> Result<(), String> {
     let dir = persist::run_dir(base, run_id)?;
     let def: Definition = serde_yaml::from_str(definition_yaml)
@@ -1102,6 +1281,32 @@ fn commit(dir: &Path, events: &[Event], state: &RunState) -> Result<(), String> 
     // Events are the source of truth: append them first, then rewrite state.
     persist::append_events(dir, events)?;
     persist::write_state_atomic(dir, state)
+}
+
+/// Run the F3 cascade and return one `invalidated` event per reopened dependent.
+///
+/// Called wherever a step is moved *down* (a demotion, a terminal failure, a
+/// reset/retry): it reopens every `completed` step whose dependency has stopped
+/// being satisfied, so a green node never sits on top of a stale upstream. The
+/// caller then runs `recompute` to settle the reopened steps' readiness and
+/// `commit`s the whole cascade in one atomic write. Every move is attributable
+/// through `detail.cascaded_from` naming the dependency that forced it.
+fn cascade_completed(def: &Definition, state: &mut RunState) -> Vec<Event> {
+    engine::reopen_stale_completed(def, state)
+        .into_iter()
+        .map(|(id, dep)| {
+            event(
+                Some(&id),
+                "invalidated",
+                Some(json!({
+                    "from": "completed",
+                    "to": "ready",
+                    "cascaded_from": dep,
+                    "by": "cascade",
+                })),
+            )
+        })
+        .collect()
 }
 
 fn generated_run_id(name: &str) -> String {
@@ -1273,6 +1478,13 @@ steps:
         pairs.iter().map(|(id, n)| (id.to_string(), *n)).collect()
     }
 
+    /// 3-arg `adopt` for the tests that supply no outputs (shadows the 4-arg core
+    /// fn inside this module; tests that exercise the outputs gate call
+    /// `super::adopt` directly with a real map).
+    fn adopt(base: &Path, run_id: &str, evidence: &HashMap<String, usize>) -> Result<Value, String> {
+        super::adopt(base, run_id, evidence, &HashMap::new())
+    }
+
     fn state_text(base: &Path) -> String {
         std::fs::read_to_string(persist::run_dir(base, "probe").unwrap().join("state.json")).unwrap()
     }
@@ -1290,7 +1502,7 @@ steps:
     #[test]
     fn contradicted_evidence_demotes_a_completed_step_and_writes_an_event() {
         let base = temp_base("demote");
-        create_run(&base, Some("probe".into()), YAML, &["made", "needing"]).unwrap();
+        create_run(&base, Some("probe".into()), YAML, &[("made", CheckKind::PerSubject), ("needing", CheckKind::PerSubject)]).unwrap();
         complete_maker(&base);
 
         let dirty = evidence(&[("made", 3), ("needing", 0)]);
@@ -1323,7 +1535,7 @@ steps:
     #[test]
     fn a_clean_probe_never_promotes_and_never_certifies_an_unmeasured_id() {
         let base = temp_base("unknown");
-        create_run(&base, Some("probe".into()), YAML, &["made", "needing"]).unwrap();
+        create_run(&base, Some("probe".into()), YAML, &[("made", CheckKind::PerSubject), ("needing", CheckKind::PerSubject)]).unwrap();
 
         // Nothing has run, so `maker` sits at `ready` (no dependencies). A clean probe
         // over the artifacts it *would* produce says `verified` — and changes nothing:
@@ -1349,7 +1561,7 @@ steps:
     #[test]
     fn outstanding_blocks_evidence_gates_a_step_without_touching_it() {
         let base = temp_base("gate");
-        create_run(&base, Some("probe".into()), YAML, &["made", "needing"]).unwrap();
+        create_run(&base, Some("probe".into()), YAML, &[("made", CheckKind::PerSubject), ("needing", CheckKind::PerSubject)]).unwrap();
 
         let gated = verify(&base, "probe", &evidence(&[("made", 0), ("needing", 2)]), true).unwrap();
         assert_eq!(gated["verdicts"]["follower"]["status"], json!("pending"));
@@ -1405,7 +1617,7 @@ steps:
     #[test]
     fn adoption_completes_a_step_only_when_its_evidence_is_measured_and_clean() {
         let base = temp_base("adopt");
-        create_run(&base, Some("probe".into()), ADOPT_YAML, &["present", "needing"]).unwrap();
+        create_run(&base, Some("probe".into()), ADOPT_YAML, &[("present", CheckKind::FileExists), ("needing", CheckKind::PerSubject)]).unwrap();
         assert_eq!(status(&base, "probe").unwrap()["steps"]["preparer"]["status"], json!("ready"));
 
         // Nothing has run, but the artifact `preparer` would produce is there and the
@@ -1430,7 +1642,7 @@ steps:
     #[test]
     fn adoption_withholds_when_the_check_disagrees_or_was_never_measured() {
         let base = temp_base("withhold");
-        create_run(&base, Some("probe".into()), ADOPT_YAML, &["present", "needing"]).unwrap();
+        create_run(&base, Some("probe".into()), ADOPT_YAML, &[("present", CheckKind::FileExists), ("needing", CheckKind::PerSubject)]).unwrap();
 
         // Findings: the artifact is not there after all.
         let dirty = adopt(&base, "probe", &evidence(&[("present", 1)])).unwrap();
@@ -1467,7 +1679,7 @@ steps:
     #[test]
     fn adoption_never_overrides_a_step_a_human_already_judged() {
         let base = temp_base("adopt-skip");
-        create_run(&base, Some("probe".into()), ADOPT_YAML, &["present", "needing"]).unwrap();
+        create_run(&base, Some("probe".into()), ADOPT_YAML, &[("present", CheckKind::FileExists), ("needing", CheckKind::PerSubject)]).unwrap();
         intervene(&base, "probe", "preparer", "skip").unwrap();
 
         // Clean evidence, and still no move: `skipped` is a decision, and re-deriving
@@ -1482,14 +1694,14 @@ steps:
     #[test]
     fn a_run_that_only_inherited_progress_may_follow_a_newer_definition() {
         let base = temp_base("refresh");
-        create_run(&base, Some("probe".into()), ADOPT_YAML, &["present", "needing"]).unwrap();
+        create_run(&base, Some("probe".into()), ADOPT_YAML, &[("present", CheckKind::FileExists), ("needing", CheckKind::PerSubject)]).unwrap();
         adopt(&base, "probe", &evidence(&[("present", 0)])).unwrap();
         assert!(
             history_is_inherited_only(&base, "probe").unwrap(),
             "an adoption is inherited progress, not a reason to freeze the definition"
         );
 
-        rebind_definition(&base, "probe", ADOPT_YAML_V2, &["present", "needing"]).unwrap();
+        rebind_definition(&base, "probe", ADOPT_YAML_V2, &[("present", CheckKind::FileExists), ("needing", CheckKind::PerSubject)]).unwrap();
         let after = status(&base, "probe").unwrap();
         assert_eq!(after["workflow"]["version"], json!(2));
         assert_eq!(
@@ -1508,7 +1720,7 @@ steps:
     #[test]
     fn earned_progress_freezes_a_run_against_the_current_template() {
         let base = temp_base("refresh-earned");
-        create_run(&base, Some("probe".into()), ADOPT_YAML, &["present", "needing"]).unwrap();
+        create_run(&base, Some("probe".into()), ADOPT_YAML, &[("present", CheckKind::FileExists), ("needing", CheckKind::PerSubject)]).unwrap();
 
         // Nothing adopted, just a claimed step: somebody is working on this run.
         assert!(history_is_inherited_only(&base, "probe").unwrap(), "a bare run opening is not progress");
@@ -1524,16 +1736,252 @@ steps:
     #[test]
     fn a_refresh_validates_before_it_rewrites_anything() {
         let base = temp_base("refresh-bad");
-        create_run(&base, Some("probe".into()), ADOPT_YAML, &["present", "needing"]).unwrap();
+        create_run(&base, Some("probe".into()), ADOPT_YAML, &[("present", CheckKind::FileExists), ("needing", CheckKind::PerSubject)]).unwrap();
         adopt(&base, "probe", &evidence(&[("present", 0)])).unwrap();
         let before = state_text(&base);
 
         // The id does not exist in the evaluator's vocabulary, so the refresh is
         // refused outright — the run must still be readable and unchanged.
         let bad = ADOPT_YAML.replace("adopt: [present]", "adopt: [no_such_check]");
-        assert!(rebind_definition(&base, "probe", &bad, &["present", "needing"]).is_err());
+        assert!(rebind_definition(&base, "probe", &bad, &[("present", CheckKind::FileExists), ("needing", CheckKind::PerSubject)]).is_err());
         assert_eq!(state_text(&base), before);
         assert_eq!(status(&base, "probe").unwrap()["steps"]["preparer"]["status"], json!("completed"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- F3 / F5 / F7 / F9 / F10 / F4 invariant coverage -----------------
+
+    /// `a → b → c` plus an independent `x`, for the F3 cascade and the F5
+    /// external-block preservation.
+    const CHAIN_YAML: &str = r#"name: probe
+version: 1
+steps:
+  - id: a
+    action: dataset_get
+  - id: b
+    action: dataset_get
+    depends_on: [a]
+  - id: c
+    action: dataset_get
+    depends_on: [b]
+  - id: x
+    action: dataset_get
+"#;
+
+    /// Claim and report a step as an agent would (these steps declare no outputs).
+    fn complete_step(base: &Path, id: &str) {
+        advance(base, "probe", id, None).unwrap();
+        record(base, "probe", id, "completed", Some(json!({ "note": "ok" }))).unwrap();
+    }
+
+    #[test]
+    fn demoting_a_step_reopens_its_completed_dependents() {
+        let base = temp_base("cascade");
+        create_run(&base, Some("probe".into()), CHAIN_YAML, &[]).unwrap();
+        for id in ["a", "b", "c", "x"] {
+            complete_step(&base, id);
+        }
+        assert_eq!(status(&base, "probe").unwrap()["steps"]["c"]["status"], json!("completed"));
+
+        // Knock `a` out from under the chain: the invariant "completed ⇒ deps
+        // satisfied" forces `b` and `c` open again, while the independent `x` stands.
+        intervene(&base, "probe", "a", "reset").unwrap();
+        let after = status(&base, "probe").unwrap();
+        assert_ne!(after["steps"]["b"]["status"], json!("completed"), "b must reopen");
+        assert_ne!(after["steps"]["c"]["status"], json!("completed"), "c must reopen");
+        assert_eq!(after["steps"]["x"]["status"], json!("completed"), "an independent branch is untouched");
+        let ev = events_text(&base);
+        assert!(ev.contains("cascaded_from"), "the cascade must be journalled with its cause");
+        assert_eq!(ev.matches("\"invalidated\"").count(), 2, "b and c reopen, one event each");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_external_block_survives_every_recompute_until_unblocked() {
+        let base = temp_base("ext-block");
+        create_run(&base, Some("probe".into()), CHAIN_YAML, &[]).unwrap();
+        // A source step sits `ready`; a caller parks it.
+        record(&base, "probe", "a", "blocked", Some(json!({ "reason": "awaiting approval" }))).unwrap();
+        // `status` recomputes every time: a graph pass must not reopen a caller's park.
+        assert_eq!(status(&base, "probe").unwrap()["steps"]["a"]["status"], json!("blocked"));
+        assert_eq!(status(&base, "probe").unwrap()["steps"]["a"]["status"], json!("blocked"));
+
+        intervene(&base, "probe", "a", "unblock").unwrap();
+        assert_eq!(status(&base, "probe").unwrap()["steps"]["a"]["status"], json!("ready"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_when_false_skip_reopens_when_its_guard_input_changes() {
+        let base = temp_base("whenfalse");
+        create_run(&base, Some("probe".into()), OUTPUT_YAML, &[]).unwrap();
+        advance(&base, "probe", "decider", None).unwrap();
+        record(&base, "probe", "decider", "completed", Some(json!({ "flag": "false" }))).unwrap();
+        assert_eq!(status(&base, "probe").unwrap()["steps"]["follower"]["status"], json!("skipped"));
+
+        // The skip was a live reading of the guard, not a decision: reset the input
+        // and the step is re-derived.
+        intervene(&base, "probe", "decider", "reset").unwrap();
+        assert_eq!(status(&base, "probe").unwrap()["steps"]["follower"]["status"], json!("pending"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_manual_skip_survives_an_upstream_reset() {
+        let base = temp_base("manualskip");
+        create_run(&base, Some("probe".into()), OUTPUT_YAML, &[]).unwrap();
+        advance(&base, "probe", "decider", None).unwrap();
+        record(&base, "probe", "decider", "completed", Some(json!({ "flag": "false" }))).unwrap();
+        // A human overwrites the derived skip with their own judgement.
+        intervene(&base, "probe", "follower", "skip").unwrap();
+
+        // Resetting the guard's input must NOT reopen a recorded manual skip.
+        intervene(&base, "probe", "decider", "reset").unwrap();
+        assert_eq!(status(&base, "probe").unwrap()["steps"]["follower"]["status"], json!("skipped"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_typed_null_output_satisfies_the_contract_and_reads_false() {
+        let base = temp_base("null-out");
+        create_run(&base, Some("probe".into()), OUTPUT_YAML, &[]).unwrap();
+        advance(&base, "probe", "decider", None).unwrap();
+        // `flag` present but null: the name is carried (completion accepted) and a
+        // dependent's `when:` guard reads it as false, not the literal "null".
+        let done = record(&base, "probe", "decider", "completed", Some(json!({ "flag": null }))).unwrap();
+        assert_eq!(done["steps"]["decider"]["outputs"]["flag"], json!(null));
+        assert_eq!(done["steps"]["follower"]["status"], json!("skipped"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_output_reference_to_a_non_ancestor_is_rejected() {
+        let base = temp_base("bad-ref");
+        // `b` reads a sibling `s` that is not upstream of it.
+        let yaml = r#"name: probe
+version: 1
+steps:
+  - id: s
+    action: dataset_get
+    outputs: [v]
+  - id: b
+    action: dataset_get
+    inputs:
+      w: "${steps.s.outputs.v}"
+"#;
+        let err = create_run(&base, Some("r1".into()), yaml, &[]).expect_err("a non-ancestor read must fail");
+        assert!(err.contains("transitive ancestor"), "unexpected error: {err}");
+
+        // A `when:` guard racing a value that may never exist is caught too.
+        let when_yaml = r#"name: probe
+version: 1
+steps:
+  - id: s
+    action: dataset_get
+    outputs: [v]
+  - id: b
+    action: dataset_get
+    when: "${steps.s.outputs.v}"
+"#;
+        assert!(create_run(&base, Some("r2".into()), when_yaml, &[]).is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_zero_timeout_or_malformed_backoff_is_rejected() {
+        let base = temp_base("bad-grammar");
+        let zero = "name: probe\nversion: 1\nsteps:\n  - id: a\n    action: dataset_get\n    timeout: 0\n";
+        assert!(create_run(&base, Some("r1".into()), zero, &[]).is_err(), "timeout: 0 must be rejected");
+        let bad = "name: probe\nversion: 1\nsteps:\n  - id: a\n    action: dataset_get\n    retry:\n      attempts: 2\n      backoff: 30x\n";
+        let err = create_run(&base, Some("r2".into()), bad, &[]).expect_err("a bad backoff must be rejected");
+        assert!(err.contains("backoff"), "unexpected error: {err}");
+        // The accepted grammar.
+        let good = "name: probe\nversion: 1\nsteps:\n  - id: a\n    action: dataset_get\n    timeout: 600\n    retry:\n      attempts: 2\n      backoff: 30s\n";
+        assert!(create_run(&base, Some("r3".into()), good, &[]).is_ok());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_adopt_list_of_only_per_subject_checks_is_rejected() {
+        let base = temp_base("vacuous");
+        let yaml = "name: probe\nversion: 1\nsteps:\n  - id: a\n    action: dataset_init_dir\n    adopt: [per_only]\n";
+        let vocab = [("per_only", CheckKind::PerSubject), ("file_check", CheckKind::FileExists)];
+        let err = create_run(&base, Some("r1".into()), yaml, &vocab).expect_err("a vacuous adopt list must be rejected");
+        assert!(err.contains("empty"), "unexpected error: {err}");
+
+        // Pairing it with a subject-present/file-exists guard makes the clean result
+        // non-vacuous — the shape a literal "per_subject needs subject_absent" rule
+        // would have wrongly rejected (a `sync_media`-style list guarded by a file).
+        let paired = yaml.replace("adopt: [per_only]", "adopt: [per_only, file_check]");
+        assert!(create_run(&base, Some("r2".into()), &paired, &vocab).is_ok());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn adoption_waits_for_an_unsatisfied_dependency_even_with_clean_evidence() {
+        let base = temp_base("adopt-dep");
+        let yaml = r#"name: probe
+version: 1
+steps:
+  - id: a
+    action: dataset_get
+  - id: b
+    action: dataset_init_dir
+    depends_on: [a]
+    adopt: [present]
+"#;
+        create_run(&base, Some("probe".into()), yaml, &[("present", CheckKind::FileExists)]).unwrap();
+        // `b`'s evidence is clean, but its dependency `a` has not run: adopt withholds
+        // rather than mark a green node on top of an unstarted parent.
+        let res = adopt(&base, "probe", &evidence(&[("present", 0)])).unwrap();
+        assert_eq!(res["steps"]["b"]["status"], json!("pending"));
+        assert_eq!(res["adoption"]["withheld"][0]["step"], json!("b"));
+        assert_eq!(res["adoption"]["withheld"][0]["why"], json!("dependency not satisfied"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn adoption_withholds_a_step_that_reads_an_unsupplied_output() {
+        let base = temp_base("adopt-outputs");
+        let yaml = r#"name: probe
+version: 1
+steps:
+  - id: a
+    action: dataset_init_dir
+    adopt: [present]
+    outputs: [v]
+  - id: b
+    action: dataset_get
+    depends_on: [a]
+    inputs:
+      w: "${steps.a.outputs.v}"
+"#;
+        create_run(&base, Some("probe".into()), yaml, &[("present", CheckKind::FileExists)]).unwrap();
+        // Clean evidence, but a's `v` is read by b and the call supplies nothing:
+        // adopting a would strand b in a silent block, so it is withheld.
+        let withheld = super::adopt(&base, "probe", &evidence(&[("present", 0)]), &HashMap::new()).unwrap();
+        assert_eq!(withheld["steps"]["a"]["status"], json!("ready"));
+        assert_eq!(withheld["adoption"]["withheld"][0]["why"], json!("outputs not derivable"));
+
+        // Supplying the value lets the adoption proceed and opens the dependent.
+        let mut provided = HashMap::new();
+        let mut vals = Map::new();
+        vals.insert("v".into(), json!(7));
+        provided.insert("a".to_string(), vals);
+        let done = super::adopt(&base, "probe", &evidence(&[("present", 0)]), &provided).unwrap();
+        assert_eq!(done["steps"]["a"]["status"], json!("completed"));
+        assert_eq!(done["steps"]["b"]["status"], json!("ready"));
+        assert_eq!(done["steps"]["a"]["outputs"]["v"], json!(7));
 
         let _ = std::fs::remove_dir_all(&base);
     }

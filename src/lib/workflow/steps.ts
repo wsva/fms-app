@@ -153,7 +153,9 @@ function asStringArray(v: unknown): string[] {
  * engine refuses a `completed` that omits one — and rightly so, since a
  * dependent reading that name through a `when:` guard would sit `blocked`
  * forever with nothing in the log naming the cause. A value nobody measured is
- * therefore recorded as the honest placeholder `"unknown"`, never dropped.
+ * therefore recorded as the typed no-value marker `null` (not a string), which
+ * the engine resolves as false in a `when:` guard and treats as satisfying a
+ * declared-output presence check — never silently dropped.
  */
 export function withDeclaredOutputs(
   step: StepDef,
@@ -164,7 +166,7 @@ export function withDeclaredOutputs(
     // `undefined` is checked rather than `in`, because a mapper that reads a
     // field the command did not return produces exactly that — and JSON drops
     // undefined values on the way over, so the engine would see a missing name.
-    if (filled[key] === undefined || filled[key] === null) filled[key] = "unknown";
+    if (filled[key] === undefined) filled[key] = null;
   }
   return filled;
 }

@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 
-use super::{Definition, OnFailure, RunState, Status, Step};
+use super::{BlockedBy, Definition, OnFailure, RunState, SkipPolicy, SkipReason, Status, Step};
 
 /// A `running` step whose heartbeat is older than its own [`Step::lease_secs`]
 /// (this being the default) is treated as interrupted (its executor died
@@ -38,6 +38,30 @@ pub(super) fn parse_output_ref(expr: &str) -> Option<(String, String)> {
         return None;
     }
     Some((id, key))
+}
+
+/// Extract every `${steps.<id>.outputs.<key>}` reference embedded in `expr`,
+/// whether it is the whole value or interpolated inside a larger string. Shared
+/// by validation (which reads `inputs:`/`when:`) and adoption (which needs to
+/// know which declared outputs a dependent will read back).
+pub(super) fn scan_output_refs(expr: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if expr[i..].starts_with("${") {
+            if let Some(end) = expr[i..].find('}') {
+                let candidate = &expr[i..i + end + 1];
+                if let Some((id, key)) = parse_output_ref(candidate) {
+                    out.push((id, key));
+                }
+                i += end + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Replace every embedded `${steps.id.outputs.key}` in `expr` with the string
@@ -85,6 +109,10 @@ fn utf8_char_len(b: u8) -> usize {
 fn value_to_string(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
+        // A deliberate "no value" (see F7): rendered as the empty string so an
+        // embedded `when:` reference resolves to false, never to the literal
+        // "null" (which a case-insensitive truthiness read would accept).
+        Value::Null => String::new(),
         other => other.to_string(),
     }
 }
@@ -118,14 +146,17 @@ pub(super) fn resolve_inputs(step: &Step, state: &RunState) -> Result<Map<String
 }
 
 /// Evaluate a step's `when` guard. Absent ⇒ true. A guard resolves its
-/// references then is false when empty/`false`/`0`/`no` (case-insensitive).
+/// references then is false when it reads empty/`false`/`0`/`no`/`unknown`
+/// (case-insensitive). `null` resolves to the empty string (see
+/// [`value_to_string`]); the legacy `"unknown"`/`"no"` strings are still read as
+/// no-value so runs written before the typed marker are not stranded.
 fn eval_when(step: &Step, state: &RunState) -> Result<bool, String> {
     let Some(expr) = &step.when else {
         return Ok(true);
     };
     let resolved = interpolate_refs(expr, state)?;
     let t = resolved.trim().to_lowercase();
-    Ok(!(t.is_empty() || t == "false" || t == "0" || t == "no"))
+    Ok(!(t.is_empty() || t == "false" || t == "0" || t == "no" || t == "unknown"))
 }
 
 /// Topological order of step ids (dependencies before dependents) via Kahn's
@@ -186,9 +217,19 @@ pub(super) fn lease_live(step: &Step, heartbeat: Option<i64>, now: i64) -> bool 
         .unwrap_or(false)
 }
 
-/// Recompute all derived statuses in place. Recorded statuses (`completed`,
-/// `failed`, `skipped`) and live `running` leases are preserved; everything else
-/// is re-derived from the dependency graph. Also reaps expired leases.
+/// Recompute all derived statuses in place. Recorded decisions and live claims
+/// are preserved; everything else is re-derived from the dependency graph:
+/// - `completed` and `failed` are always preserved (a terminal judgement);
+/// - a `running` claim with a live lease is preserved (and an expired one reaped
+///   back to `pending`, above);
+/// - an **external** `blocked` (`blocked_by = External`) is preserved — the graph
+///   must never reopen a step a caller deliberately parked;
+/// - a `skipped` step is preserved only when it was a recorded decision
+///   (`skip_reason` absent or `Manual`); a `when_false`/`propagated` skip is
+///   re-derived, so an upstream change can bring it back.
+///
+/// A graph-derived block sets `blocked_by = Dependency`; when such a step becomes
+/// ready the flag is cleared. Also reaps expired leases.
 pub(super) fn recompute(def: &Definition, state: &mut RunState, now: i64) {
     // Ensure every defined step has a state entry.
     for step in &def.steps {
@@ -225,18 +266,58 @@ pub(super) fn recompute(def: &Definition, state: &mut RunState, now: i64) {
         let Some(step) = by_id.get(id.as_str()) else {
             continue;
         };
-        let cur = state.steps.get(&id).map(|ss| ss.status).unwrap_or_default();
+        let cur = state.steps.get(&id).cloned().unwrap_or_default();
         // Preserve terminal statuses and live running leases.
-        if matches!(cur, Status::Completed | Status::Failed | Status::Skipped) {
+        if matches!(cur.status, Status::Completed | Status::Failed | Status::Running) {
             continue;
         }
-        if cur == Status::Running {
+        // A caller-blocked step is a judgement, not a derivation — leave it.
+        if cur.status == Status::Blocked && cur.blocked_by == Some(BlockedBy::External) {
             continue;
         }
-        let (status, reason) = derive_status(step, state, &by_id, halted_by.as_deref());
+        // A recorded skip (manual, or a legacy one with no reason) is terminal.
+        if cur.status == Status::Skipped
+            && !matches!(cur.skip_reason, Some(SkipReason::WhenFalse) | Some(SkipReason::Propagated))
+        {
+            continue;
+        }
+        let d = derive_status(step, state, &by_id, halted_by.as_deref());
         if let Some(ss) = state.steps.get_mut(&id) {
-            ss.status = status;
-            ss.reason = reason;
+            ss.status = d.status;
+            ss.reason = d.reason;
+            ss.blocked_by = d.blocked_by;
+            ss.skip_reason = d.skip_reason;
+        }
+    }
+}
+
+/// What [`derive_status`] concluded about one step, including the two
+/// provenance tags the graph owns (`blocked_by`, `skip_reason`).
+pub(super) struct Derived {
+    pub status: Status,
+    pub reason: Option<String>,
+    pub blocked_by: Option<BlockedBy>,
+    pub skip_reason: Option<SkipReason>,
+}
+
+impl Derived {
+    fn plain(status: Status, reason: Option<String>) -> Self {
+        Self { status, reason, blocked_by: None, skip_reason: None }
+    }
+    fn blocked(reason: String) -> Self {
+        Self {
+            status: Status::Blocked,
+            reason: Some(reason),
+            blocked_by: Some(BlockedBy::Dependency),
+            skip_reason: None,
+        }
+    }
+    fn skipped(reason: &str, kind: SkipReason) -> Self {
+        Self {
+            status: Status::Skipped,
+            reason: Some(reason.to_string()),
+            blocked_by: None,
+            skip_reason: Some(kind),
         }
     }
 }
@@ -247,33 +328,39 @@ fn derive_status(
     state: &RunState,
     by_id: &HashMap<&str, &Step>,
     halted_by: Option<&str>,
-) -> (Status, Option<String>) {
+) -> Derived {
     if let Some(h) = halted_by {
-        return (
-            Status::Blocked,
-            Some(format!(
-                "run halted: step '{h}' failed with on_failure=stop; retry or reset '{h}' to resume"
-            )),
-        );
+        return Derived::blocked(format!(
+            "run halted: step '{h}' failed with on_failure=stop; retry or reset '{h}' to resume"
+        ));
     }
 
     let mut block_reason: Option<String> = None;
-    let mut skip = false;
+    let mut propagate_skip = false;
     let mut unsat = false;
+    let skip_policy = step.skip_policy();
 
     for dep in &step.depends_on {
         let dep_status = state.steps.get(dep).map(|ss| ss.status).unwrap_or(Status::Pending);
         match dep_status {
-            // A skip satisfies a dependency by default (design: "skipped and the
-            // dependent's policy allows a skip to satisfy it").
-            Status::Completed | Status::Skipped => {}
+            Status::Completed => {}
+            // A skip satisfies, blocks, or propagates per the dependent's policy.
+            Status::Skipped => match skip_policy {
+                SkipPolicy::Satisfy => {}
+                SkipPolicy::Block => {
+                    if block_reason.is_none() {
+                        block_reason = Some(format!("dependency '{dep}' was skipped"));
+                    }
+                }
+                SkipPolicy::Skip => propagate_skip = true,
+            },
             Status::Failed => {
                 let dep_policy = by_id
                     .get(dep.as_str())
                     .map(|s| s.on_failure())
                     .unwrap_or(OnFailure::Stop);
                 if dep_policy == OnFailure::SkipDependents {
-                    skip = true;
+                    propagate_skip = true;
                 } else if block_reason.is_none() {
                     block_reason = Some(format!("dependency '{dep}' failed"));
                 }
@@ -287,29 +374,75 @@ fn derive_status(
         }
     }
 
-    if skip {
-        return (
-            Status::Skipped,
-            Some("an upstream failure used on_failure=skip_dependents".into()),
-        );
+    if propagate_skip {
+        return Derived::skipped("an upstream skip propagated", SkipReason::Propagated);
     }
     if let Some(reason) = block_reason {
-        return (Status::Blocked, Some(reason));
+        return Derived::blocked(reason);
     }
     if unsat {
-        return (Status::Pending, None);
+        return Derived::plain(Status::Pending, None);
     }
 
     // All dependencies satisfied — evaluate the guard and resolve inputs.
     match eval_when(step, state) {
-        Err(e) => return (Status::Blocked, Some(format!("cannot evaluate 'when': {e}"))),
-        Ok(false) => return (Status::Skipped, Some("'when' condition is false".into())),
+        Err(e) => return Derived::blocked(format!("cannot evaluate 'when': {e}")),
+        Ok(false) => {
+            return Derived::skipped("'when' condition is false", SkipReason::WhenFalse)
+        }
         Ok(true) => {}
     }
     if let Err(e) = resolve_inputs(step, state) {
-        return (Status::Blocked, Some(e));
+        return Derived::blocked(e);
     }
-    (Status::Ready, None)
+    Derived::plain(Status::Ready, None)
+}
+
+/// Enforce the invariant "a `completed` step's dependencies are satisfied": any
+/// `completed` step whose dependency is no longer satisfied is reopened to
+/// `ready` (keeping its `outputs`, so a `when:` guard still resolves), and the
+/// cascade continues to its transitive dependents in one topological pass.
+///
+/// This is F3: demotion (`verify apply`, a failed `record`, or `intervene
+/// reset/retry`) may not leave a green node sitting on top of a stale upstream —
+/// that reproduces exactly the false-`completed` the verification seam exists to
+/// catch. Returns the reopened `(step id, unsatisfied dependency id)` pairs so
+/// the caller can journal one `invalidated` event each with `cascaded_from`.
+pub(super) fn reopen_stale_completed(def: &Definition, state: &mut RunState) -> Vec<(String, String)> {
+    let by_id: HashMap<&str, &Step> = def.steps.iter().map(|s| (s.id.as_str(), s)).collect();
+    let mut reopened: Vec<(String, String)> = Vec::new();
+    for id in topo_order(def) {
+        let Some(step) = by_id.get(id.as_str()) else { continue };
+        let cur = state.steps.get(&id).map(|ss| ss.status).unwrap_or_default();
+        if cur != Status::Completed {
+            continue;
+        }
+        // Find the first dependency that is no longer satisfied under this step's
+        // skip policy. Because we walk in topo order, an unsatisfied dep has
+        // already been reopened this pass (or was never completed), so its new
+        // status is what we read.
+        let unsatisfied = step.depends_on.iter().find(|dep| {
+            let ds = state.steps.get(dep.as_str()).map(|ss| ss.status).unwrap_or(Status::Pending);
+            match ds {
+                Status::Completed => false,
+                Status::Skipped => step.skip_policy() != SkipPolicy::Satisfy,
+                _ => true,
+            }
+        });
+        if let Some(dep) = unsatisfied {
+            if let Some(ss) = state.steps.get_mut(&id) {
+                ss.status = Status::Ready;
+                ss.finished_at = None;
+                ss.lease = None;
+                ss.heartbeat = None;
+                ss.blocked_by = None;
+                ss.skip_reason = None;
+                ss.reason = Some(format!("reopened: dependency '{dep}' is no longer satisfied"));
+            }
+            reopened.push((id.clone(), dep.clone()));
+        }
+    }
+    reopened
 }
 
 /// Ids of steps that are `ready` and unclaimed, in topological order.

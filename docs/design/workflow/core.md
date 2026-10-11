@@ -63,6 +63,7 @@ A definition is a named, versioned set of **steps** forming a directed acyclic g
 | `retry` | no | `{ attempts, backoff }` — how many times to re-run on failure |
 | `timeout` | no | Lease seconds — how long a claim on this step is honoured before `recompute` treats it as interrupted (default 300, see *Resumability*). Not a work budget: nothing here stops a running action. |
 | `on_failure` | no | `stop` \| `continue` \| `skip_dependents` (default `stop`) |
+| `on_skipped_dependency` | no | `satisfy` \| `block` \| `skip` (default `satisfy`) — how a dependency that ended `skipped` counts here: clears it, leaves this step waiting, or skips this step too (see *Readiness derivation*) |
 
 Only `id` and `action` are mandatory; everything else has a sensible default so a minimal definition stays small.
 
@@ -123,9 +124,12 @@ Note the shape: `transcribe → normalize_text` and `generate_waveform` are two 
 
 - Step `id`s are unique.
 - Every `depends_on` / `inputs` reference points at an existing step id.
-- Every `verify` / `adopt` id is one the domain's check provider actually registers — a typo would silently disable a gate or a promotion, so it fails like a bad `depends_on` does. The vocabulary is passed in from the binding layer; the engine only sees opaque strings.
+- An `inputs:` or `when:` `${steps.X.outputs.Y}` reference may only name `X` if `X` is a **transitive ancestor** of the reading step (upstream via `depends_on`). A reference to a sibling or a descendant races on a value that may never be produced — it would strand a `when:` guard `blocked` forever — so it is refused here, not left to the run.
+- Every `verify` / `adopt` id is one the domain's check provider actually registers — a typo would silently disable a gate or a promotion, so it fails like a bad `depends_on` does. The vocabulary is passed in from the binding layer as `(id, kind)` pairs; the engine only sees opaque strings plus a structural vacuity *class* (`per_subject` / `subject_present` / `file_exists`, see *Verification*).
+- An `adopt:` list is **non-vacuous**: if it names any `per_subject` check (one that counts offenders over a collection and reads clean on an empty one), it must also name a check that can report an offender on an empty subject (`subject_present` or `file_exists`). Otherwise adopting on it would certify work nobody did.
 - The graph is **acyclic**.
-- Every `action` resolves to a registered executor (fail fast, not mid-run).
+- `timeout`, when present, is positive (`timeout: 0` would reap a claim the instant it is taken). `retry.backoff`, when present, reads as a lenient duration (`30s` / `5m` / `1h`) or is empty — a typo like `30x` would otherwise read as "no delay".
+- Every `action` resolves to a registered executor (fail fast, not mid-run). *(Skipped in this build: it is agent-in-the-loop, so actions are symbolic names the agent resolves at run time.)*
 - `name` and `version` are present.
 
 A definition that fails validation is rejected outright; the run never starts.
@@ -143,8 +147,8 @@ Every step is in exactly one state:
 | `running` | An executor has claimed it; work in progress (or interrupted) | no |
 | `completed` | Executor returned success; outputs recorded | yes |
 | `failed` | Executor errored and retries are exhausted | yes (retry ⇒ `ready`) |
-| `blocked` | Cannot proceed for a *non-error* reason: waiting on input/approval/an external resource, or a dependency failed under a blocking policy | no |
-| `skipped` | Deliberately not run: `when` false, or an upstream skip propagated | yes |
+| `blocked` | Cannot proceed for a *non-error* reason. Two kinds, tagged in state: a **`dependency`** block is derived from the graph (an upstream failed, is blocked, or is skipped under a `block` policy) and the recompute lifts it the moment the upstream is fixed; an **`external`** block was set by a caller (`record blocked`) awaiting input/approval/an outside resource and is a judgement the graph must never overwrite | no |
+| `skipped` | Deliberately not run. Tagged with its cause: `when_false` (a live guard reading — re-derived whenever its inputs change), `manual` (a `record`/`intervene` decision — terminal until a human changes it), or `propagated` (an upstream skip/`skip_dependents` reached it — re-derived with the upstream) | yes (a `manual` skip; the others are re-derived) |
 
 `blocked` vs `failed` matters: **failed** means work was attempted and errored; **blocked** means the step is waiting on something outside its own execution and may become `ready` again with no code change.
 
@@ -166,23 +170,26 @@ Every step is in exactly one state:
 - `ready → running` — an executor claims the step (single-flight; see *Concurrency*).
 - `running → completed | failed | blocked` — executor outcome.
 - `failed → ready` — automatic retry while `attempts` remain.
-- `blocked → ready` — the blocking condition clears (input arrives, dependency is retried and succeeds, manual unblock).
-- `completed → ready` — **invalidated** by evidence (see *Verification*), never by a clean probe.
+- `blocked → ready` — the blocking condition clears. A `dependency` block clears by itself on the next recompute once the upstream is fixed; an `external` block clears only on an explicit `intervene unblock`.
+- `completed → ready` — **invalidated** by evidence (see *Verification*), or by **cascade**: demoting a step reopens every already-`completed` transitive dependent whose upstream is no longer satisfied, so a green node never sits on top of a stale one. Never by a clean probe.
 - `pending | ready → completed` — **adopted**: the step's `adopt` evidence is already clean on disk (see *Verification*). The only upward move, and only for a step that asked for it.
 - `any → skipped` — `when` false, or propagation from an upstream skip/ignore.
 
-`completed`, `failed` (retries exhausted) and `skipped` are terminal for the run unless an agent intervenes (retry / unblock / reset).
+`completed`, `failed` (retries exhausted) and a **`manual`** `skipped` are terminal for the run unless an agent intervenes (retry / unblock / reset). A `when_false` or `propagated` skip is *not* — it is a live derivation, re-evaluated every pass, so resetting an upstream that changes the guard reopens it.
 
 ### Readiness derivation
 
-Statuses are **derived**, not guessed. On every evaluation the engine recomputes:
+Statuses are **derived**, not guessed. On every evaluation the engine walks the graph in topological order and recomputes, preserving anything that is a recorded decision rather than a derivation:
 
-- A dependency is **satisfied** when it is `completed`, or `skipped` *and* the dependent's policy allows a skip to satisfy it.
-- A step with all dependencies satisfied and `when` true ⇒ `ready`.
-- A step with a dependency that is `failed` or `blocked` ⇒ `blocked` (or `skipped` under `on_failure: skip_dependents`).
-- Otherwise ⇒ `pending`.
+- `completed`, `failed` and a live-`running` claim are preserved (a terminal judgement, or work in flight).
+- A `blocked` step is preserved **only** when the block is `external` — a caller parked it, and the graph may not silently reopen it. A `dependency` block is re-derived (and lifted when the upstream heals).
+- A `skipped` step is preserved only when it is `manual` (or a legacy skip with no recorded reason). A `when_false` or `propagated` skip is re-derived every pass.
+- A dependency is **satisfied** when it is `completed`, or `skipped` under the dependent's `on_skipped_dependency` policy: `satisfy` clears it (default), `block` leaves the dependent waiting, `skip` skips the dependent too.
+- A step with all dependencies satisfied and `when` true ⇒ `ready`; a `when` that resolves false ⇒ `skipped` (`when_false`); a dependency `failed`/`blocked`, or `skipped` under a `block` policy ⇒ `blocked`; otherwise ⇒ `pending`.
 
-This is a pure function of the definition + current statuses, so it is stable and reproducible across restarts.
+**The invariant** *("completed ⇒ its dependencies are satisfied")* is enforced as a **cascade**: whenever a step moves *down* (a `verify` demotion, a terminal `failed`, or an `intervene reset`/`retry`), every already-`completed` transitive dependent whose upstream is no longer satisfied is reopened to `ready` in the same atomic pass, each journalled with an `invalidated` event naming `cascaded_from`. Without it, demoting `transcribe` would leave `validate`/`export` green on top of a stale result — the exact false-`completed` the verification seam exists to catch.
+
+The recompute is a pure function of the definition + current statuses, so it is stable and reproducible across restarts.
 
 ---
 
@@ -196,7 +203,9 @@ Readiness is derived from the graph; it says nothing about whether the *artifact
 - **Verdicts are a projection.** `verified` / `drifted` / `unknown` are recomputed on every call and never written to `state.json`, so `state.json` stays exactly a replay of `events.jsonl` and a verdict means "as of this probe". Render it beside a node's status, never instead of it.
 - **A probe that could not measure cannot certify.** If any id a step binds was absent from the evidence map (another domain's vocabulary, a short-circuited report), a would-be `verified` downgrades to `unknown`. A clean bill of health over ids nobody measured is a lie.
 - **A probe only ever moves a step down.** With `apply` set, a `completed` step whose `proves` evidence reports offenders goes back to `ready` (outputs kept, so `when:` guards still resolve). A clean probe proves an artifact *exists*, never that this run made it — so verification has no upward path, no promotion, ever.
-- **Adoption is the one upward move, and a step has to ask for it.** `adopt: [check ids]` says: "if every one of these ids comes back measured *and* with zero offenders, record me `completed` — the artifact is already on disk, and making the user run me again would claim credit for work nobody did." Opt-in per step and deliberately rare, because **vacuity** is the trap: a check that counts offenders over an empty subject (no media ⇒ no media is missing subtitles) is vacuously clean. So an `adopt` list may name per-file ids only alongside an id that *fails when the subject itself is absent* — one that reports an offender exactly when there is nothing to walk, which turns a bundle of vacuous zeros into a claim — and a step whose whole output is a single file may name only that file's existence id. Adoption never touches a step already `completed`, `failed`, `skipped` or `running` — a human's judgement outranks the filesystem — and it withholds, with a reason, when an id was not measured or reports offenders.
+- **Adoption is the one upward move, and a step has to ask for it.** `adopt: [check ids]` says: "if every one of these ids comes back measured *and* with zero offenders, record me `completed` — the artifact is already on disk, and making the user run me again would claim credit for work nobody did." Opt-in per step and deliberately rare, because **vacuity** is the trap: a check that counts offenders over an empty subject (no media ⇒ no media is missing subtitles) is vacuously clean. So each check id carries a structural **class** the binding layer assigns (`per_subject`, `subject_present`, `file_exists`) and validation refuses an `adopt` list of only `per_subject` ids unless it also names a guard that reports an offender on an empty subject — a `subject_present` id (fails when the whole subject is absent) *or* a `file_exists` id (a single file's existence, which can never be vacuously true; this is how a `sync_media`-style list guarded by `database_missing` stays honest).
+- **Adoption runs in topological order and only over satisfied dependencies.** A step is adopted only once every dependency is already `completed`/`skipped`-under-policy/adopted-earlier-this-pass; otherwise it is withheld with reason `dependency not satisfied`, so a green tick never lands on top of an unstarted parent. And a step whose declared `outputs` are read back by a dependent is withheld with reason `outputs not derivable` unless the adopt call supplies those values — inheriting the step but not its data would strand the dependent in a silent block.
+- Adoption never touches a step already `completed`, `failed`, `skipped` or `running` — a human's judgement outranks the filesystem — and it withholds *with a reason* (`not measured`, `the evidence disagrees`, `dependency not satisfied`, `outputs not derivable`) rather than silently doing nothing.
 - **Every status change costs an event.** Invalidation appends `invalidated` and adoption appends `adopted`, like any other transition; neither gets a privileged path into `state.json`. A probe or adoption that changes nothing writes nothing.
 
 The honesty rules — probes down-only, promotion only where a step opted in over non-vacuous evidence, and never over an id nobody measured — are what make it safe to let a read-only probe influence a run at all. The dictation instantiation (which check answers to which step, and what a probe cannot see at all) is in [`dictation.md`](./dictation.md#binding-checks-to-the-template).
@@ -212,7 +221,7 @@ A run is a checklist, each item ticked when it finishes — and a tick only ever
 - **The three labels.** *verified* — the check ran and found nothing. *drifted* — it ran, found offenders, and so contradicts the green tick. *unknown* — there is no binding, or the check never ran: an honest "I can't tell", never a pass. They are shown beside the status and are not saved anywhere.
 - **A spot check may only move a step backwards.** A `completed` step found drifted goes back to `ready` so it can be redone. Files that look fine do **not** turn a step green: their existence never proves *this run* made them — they may be someone else's work from before, or shipped with the subject. The reasoning is the asymmetry: wrongly saying "done" stops all work, while wrongly saying "not done" costs only some extra work.
 - **The one exception is adoption.** A step may opt in with `adopt: [subject_absent, waveform_missing]`, meaning "if every one of these comes back measured *and* clean, mark me done without running me — the result is already on disk". That is what keeps a subject prepared by hand, or by another device, from being reprocessed.
-- **The trap is a vacuous pass.** "No audio file is missing waveforms" is satisfied by a folder holding no audio at all — no files, so no offenders. Adopt on that and a green tick lands over nothing. So an `adopt` list must name, beside its per-file checks, one that *fails when the subject itself is absent* (`subject_absent`), and adoption is refused outright if any listed check did not run.
+- **The trap is a vacuous pass.** "No audio file is missing waveforms" is satisfied by a folder holding no audio at all — no files, so no offenders. Adopt on that and a green tick lands over nothing. So every check is tagged `per_subject` / `subject_present` / `file_exists`, and an `adopt` list must name, beside its `per_subject` checks, a guard that reports an offender on an empty subject (`subject_present`, or a single-file `file_exists` check) — validation rejects the list outright otherwise. Adoption is also refused if any listed check did not run, if a dependency has not been satisfied, or if the step feeds a dependent an output the call did not supply.
 
 > In one line: verification lets the real files **veto** a green tick, and lets them **grant** one only for the steps that asked for it, only when the evidence is solid.
 
@@ -308,10 +317,12 @@ Deterministic and idempotent:
 5. **Append** the event(s) to `events.jsonl`, then **atomically rewrite** `state.json`.
 6. Repeat until there are no `ready` and no `running` steps.
 
-The run is **terminal** when nothing is runnable:
-- all steps `completed`/`skipped` ⇒ workflow **completed**;
-- any step `failed` with `on_failure: stop` ⇒ workflow **failed**;
-- only `blocked` steps remain ⇒ workflow **blocked** (waiting, resumable).
+The run is **terminal** when nothing is runnable, decided in this strict precedence (a `stop` failure outranks apparent completion, so a halted run never reads as *done*):
+
+1. any step `failed` under `on_failure: stop` ⇒ workflow **failed**;
+2. otherwise any step `running` or `ready` ⇒ **in_progress** (not terminal — work remains or is in flight);
+3. otherwise every step `completed`/`skipped` ⇒ workflow **completed**;
+4. otherwise (only `blocked` steps and non-`stop` failures remain) ⇒ workflow **blocked** (waiting, resumable).
 
 Because step 2 is a pure recompute, re-entering the loop from any persisted state produces the same next actions — the property that makes resume safe.
 
@@ -338,7 +349,7 @@ Steps can pass values forward without the engine knowing what they mean:
 - A step declares `outputs`; the engine stores the produced references in `state.json` under that step.
 - A later step declares `inputs` referencing them, e.g. `${steps.transcribe.outputs.text}` or `${steps.download.outputs.path}`.
 - The executor reads its resolved inputs and writes its outputs; the framework only records the references.
-- **A `completed` must carry every name the step declares.** A missing output is not a partially-recorded step, it is a dependent that can never be scheduled: its `when:` guard or `inputs:` reference resolves against a name that never arrived and sits `blocked`, with nothing in `events.jsonl` explaining why. So `record` refuses such a completion and writes nothing — the step stays `running`, and the corrected call lands on it with its attempt intact. Values may arrive under `detail.outputs` or straight on `detail`; a value that genuinely does not exist is recorded as `"false"`/`"unknown"`, which is a judgement, while an absent key is only silence.
+- **A `completed` must carry every name the step declares.** A missing output is not a partially-recorded step, it is a dependent that can never be scheduled: its `when:` guard or `inputs:` reference resolves against a name that never arrived and sits `blocked`, with nothing in `events.jsonl` explaining why. So `record` refuses such a completion and writes nothing — the step stays `running`, and the corrected call lands on it with its attempt intact. Values may arrive under `detail.outputs` or straight on `detail`; a value that genuinely does not exist is recorded as JSON `null` — the typed *no-value* marker, distinct from an absent key and from the string `"null"`. A `null` satisfies the presence contract (the name is carried) and resolves a dependent's `when:` guard to **false**; runs written before this marker that used the strings `"unknown"`/`"false"`/`"no"` are still read as no-value, so existing state is not stranded.
 
 If a workflow prefers, steps can instead communicate through an external store (filesystem, DB) and let the framework track **status only** — data flow is an opt-in convenience, never a requirement.
 
@@ -382,7 +393,7 @@ An agent never needs to understand the domain — only a small generic command s
 
 Hints are actionable, e.g. *"step `validate` is blocked because dependency `normalize_text` failed; retry `normalize_text` or skip `validate`."* An `advance` on a step that is not `ready` names what it waits on rather than sending the caller off to `status`, and an `advance` or `next` on a live claim quotes the step's lease (`lease_secs`) and how long it has been held.
 
-**`next` and `advance` hand back an executable call, not a riddle.** `params` are copied verbatim by the engine, which knows steps and dependencies but never what a step does — so the *binding* layer resolves the argument a dataset-scoped action always needs: `${run.dataset_uuid}` becomes the uuid of the dataset the run is filed under, read back out of that dataset's `info.json`, and the response names `dataset_uuid` at its root besides. Before that seam an agent was handed `action: dataset_generate_subtitles` with `params: {}` — a command with no subject, which it could only guess at or abandon. A workspace job has no subject, so the placeholder stays as written instead of resolving to something invented.
+**`next` and `advance` hand back an executable call, not a riddle.** `params` are copied verbatim by the engine, which knows steps and dependencies but never what a step does — so the *binding* layer resolves the `${run.*}` placeholders that name the run's own subject and folds the resolved value back into the response root, so an agent is never handed an action with no argument to run it on. What `${run.dataset_uuid}` concretely means for the dictation pipeline — read back out of that dataset's `info.json`, and the workspace-job case where there is no subject so the placeholder stays as written rather than resolving to something invented — is documented in [`dictation.md`](./dictation.md). A dataset-less job has no subject, so nothing is resolved.
 
 Two execution styles share the same three files:
 
@@ -405,7 +416,7 @@ JSONL has no surrounding `[]` and no commas between records. Each record is one 
 {"time":"2026-10-01 10:21:00","step":"transcribe","event":"started"}
 `````
 
-Event vocabulary (extensible): `claimed`, `started`, `completed`, `failed`, `retried`, `blocked`, `unblocked`, `skipped`, `resumed`, `invalidated`, `adopted`, `definition_refreshed`, plus run-level `workflow_started` / `workflow_completed` / `workflow_failed` / `workflow_blocked`. A record may carry an optional `detail` object (error message, attempt number, output refs, actor/device id) — an `invalidated` event names the checks that contradicted the step and the actor that applied it, an `adopted` event names the checks that authorized the promotion, and a `definition_refreshed` event names the new step count and the steps that vanished, so a move in either direction — or a change of the intent itself — is always attributable.
+Event vocabulary (extensible): `claimed`, `started`, `completed`, `failed`, `retried`, `blocked`, `unblocked`, `skipped`, `resumed`, `invalidated`, `adopted`, `definition_refreshed`, plus run-level `workflow_started` / `workflow_completed` / `workflow_failed` / `workflow_blocked`. A record may carry an optional `detail` object (error message, attempt number, output refs, actor/device id) — an `invalidated` event names the checks that contradicted the step and the actor that applied it, or (for a cascade reopening) the dependency in `cascaded_from`; a `blocked`/`unblocked` pair distinguishes an `external` block from a derived one; an `adopted` event names the checks that authorized the promotion; and a `definition_refreshed` event names the new step count and the steps that vanished, so a move in either direction — or a change of the intent itself — is always attributable.
 
 ---
 
@@ -428,7 +439,7 @@ The current snapshot. Keys are **step ids from the definition**; values carry th
 }
 `````
 
-Per-step fields are all optional except `status`: `started_at`, `finished_at`, `attempt`, `lease`/`heartbeat`, `outputs`, and a short `reason` (for `blocked`/`failed`) that surfaces directly in `status()` hints.
+Per-step fields are all optional except `status`: `started_at`, `finished_at`, `attempt`, `lease`/`heartbeat`, `outputs`, a short `reason` (for `blocked`/`failed`) that surfaces directly in `status()` hints, and — for the two derived states — `blocked_by` (`dependency` | `external`, deciding whether a recompute may lift the block) and `skip_reason` (`when_false` | `manual` | `propagated`, deciding whether a recompute may reopen the skip).
 
 ---
 

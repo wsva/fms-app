@@ -9,7 +9,7 @@
 //!
 //! Today exactly one provider answers, the dictation audit
 //! ([`crate::datasets::dictation::audit`]). Another dataset kind taking part
-//! means adding a branch to [`check_ids`] and [`evidence`] — nothing changes in
+//! means adding a branch to [`check_vocab`] and [`evidence`] — nothing changes in
 //! [`core`], the command twin or the MCP tool, which is the proof that the
 //! mechanism was never dictation-specific.
 
@@ -22,12 +22,32 @@ use crate::settings::SettingsState;
 
 use super::core;
 
-/// Every check id a `verify:` block may name, across all providers. Handed to
-/// [`core::create_run`] for validation, so the vocabulary a definition can
-/// reference and the vocabulary the app can evaluate are one list rather than two
-/// that drift apart.
-pub(crate) fn check_ids() -> Vec<&'static str> {
-    crate::datasets::dictation::audit::check_ids().collect()
+/// The vacuity class of one check id. `core` reasons only about the *composition*
+/// of an `adopt:` list, never about what a check measures, so the class is the
+/// binding layer's call — decided by reading each evaluator:
+/// - `database_missing` looks for one file, so it can report an offender on an
+///   otherwise-empty dataset (`file_exists`);
+/// - `media_none` reports exactly when the subject collection is empty
+///   (`subject_present`) — the guard that turns a bundle of vacuous zeros into a
+///   real claim;
+/// - every other id counts offenders over the media inventory, so a clean result
+///   on an empty collection proves nothing (`per_subject`).
+///
+/// Lives here rather than beside `CheckMeta` because `workflow` is desktop-gated
+/// while `datasets` is not: the audit table must not name a core type.
+fn check_kind(id: &str) -> core::CheckKind {
+    match id {
+        "database_missing" => core::CheckKind::FileExists,
+        "media_none" => core::CheckKind::SubjectPresent,
+        _ => core::CheckKind::PerSubject,
+    }
+}
+
+/// The validation vocabulary with vacuity classes: every id a `verify:`/`adopt:`
+/// block may name, each tagged how [`core::create_run`] and
+/// [`core::rebind_definition`] need it to enforce the F10 non-vacuity rule.
+pub(crate) fn check_vocab() -> Vec<(&'static str, core::CheckKind)> {
+    crate::datasets::dictation::audit::check_ids().map(|id| (id, check_kind(id))).collect()
 }
 
 /// Measure one dataset as `check id → number of offenders`, where `0` means
@@ -115,7 +135,7 @@ pub(crate) fn adopt(
                  run, or call workflow_create first"
             )
         })?;
-        core::create_run(&base, Some(run_id.to_string()), yaml, &check_ids())?;
+        core::create_run(&base, Some(run_id.to_string()), yaml, &check_vocab())?;
     } else if let Some(yaml) = definition_yaml {
         // A run this page opened for itself is a projection of the app's current
         // template, so when the template moves and the run holds nothing but
@@ -125,7 +145,7 @@ pub(crate) fn adopt(
         // created from; that is why the text is stored beside the state at all.
         let stored = core::definition_text(&base, run_id)?;
         if documents_differ(&stored, yaml) && core::history_is_inherited_only(&base, run_id)? {
-            if let Err(e) = core::rebind_definition(&base, run_id, yaml, &check_ids()) {
+            if let Err(e) = core::rebind_definition(&base, run_id, yaml, &check_vocab()) {
                 // An editor buffer that will not validate must not sink the scan:
                 // the run keeps its own definition and adoption proceeds on it.
                 refresh_error = Some(e);
@@ -134,7 +154,11 @@ pub(crate) fn adopt(
             }
         }
     }
-    let mut resp = core::adopt(&base, run_id, &evidence)?;
+    // The binding has no producer for adopted-output values (the audit reports
+    // offender counts, not the values a dependent reads), so it forwards an empty
+    // map: a step whose declared outputs a dependent reads is withheld by the
+    // engine rather than adopted blind.
+    let mut resp = core::adopt(&base, run_id, &evidence, &HashMap::new())?;
     if let Some(adoption) = resp
         .as_object_mut()
         .and_then(|obj| obj.get_mut("adoption"))
@@ -167,7 +191,7 @@ mod tests {
     //! The binding is only trustworthy while both sides agree on the vocabulary, and
     //! nothing but these tests stops a template from naming a check no provider
     //! registers — a typo there silently disables a gate in front of a user.
-    use super::{check_ids, documents_differ};
+    use super::{check_vocab, documents_differ};
 
     fn temp_base(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("fms-verify-{tag}-{}", std::process::id()));
@@ -177,11 +201,11 @@ mod tests {
 
     #[test]
     fn built_in_templates_bind_only_registered_checks() {
-        let ids = check_ids();
-        assert!(!ids.is_empty(), "the check vocabulary must not be empty");
+        let vocab = check_vocab();
+        assert!(!vocab.is_empty(), "the check vocabulary must not be empty");
         let base = temp_base("templates");
         for (category, _, yaml) in crate::workflow::templates::all() {
-            let result = crate::workflow::core::create_run(&base, Some(format!("probe-{category}")), yaml, &ids);
+            let result = crate::workflow::core::create_run(&base, Some(format!("probe-{category}")), yaml, &vocab);
             assert!(result.is_ok(), "'{category}' template rejected: {}", result.unwrap_err());
         }
         let _ = std::fs::remove_dir_all(&base);
@@ -191,7 +215,7 @@ mod tests {
     fn a_dangling_verify_id_is_rejected() {
         let base = temp_base("dangling");
         let yaml = "name: probe\nversion: 1\nsteps:\n  - id: a\n    action: dataset_get\n    verify:\n      proves: [no_such_check]\n";
-        let err = crate::workflow::core::create_run(&base, Some("dangling".into()), yaml, &check_ids())
+        let err = crate::workflow::core::create_run(&base, Some("dangling".into()), yaml, &check_vocab())
             .expect_err("an unregistered check id must not create a run");
         assert!(err.contains("no_such_check"), "unexpected error text: {err}");
         let _ = std::fs::remove_dir_all(&base);
@@ -204,7 +228,7 @@ mod tests {
     fn a_dangling_adopt_id_is_rejected() {
         let base = temp_base("dangling-adopt");
         let yaml = "name: probe\nversion: 1\nsteps:\n  - id: a\n    action: dataset_init_dir\n    adopt: [no_such_check]\n";
-        let err = crate::workflow::core::create_run(&base, Some("dangling-adopt".into()), yaml, &check_ids())
+        let err = crate::workflow::core::create_run(&base, Some("dangling-adopt".into()), yaml, &check_vocab())
             .expect_err("an unregistered adopt check id must not create a run");
         assert!(err.contains("no_such_check"), "unexpected error text: {err}");
         assert!(err.contains("adopt"), "the error should name the field: {err}");
