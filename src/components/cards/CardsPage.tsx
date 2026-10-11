@@ -894,7 +894,7 @@ function AdvancedTab({
   onError: (msg: string) => void;
 }) {
   // Locations state
-  const [dirs, setDirs] = useState<{ name: string; path: string; is_linked: boolean }[]>([]);
+  const [dirs, setDirs] = useState<{ name: string; path: string; is_linked: boolean; is_read_only?: boolean }[]>([]);
   const [showAddDir, setShowAddDir] = useState(false);
   const [newDirName, setNewDirName] = useState("");
   const [newDirPath, setNewDirPath] = useState("");
@@ -910,7 +910,7 @@ function AdvancedTab({
   // Load dataset directories (locations)
   const loadDirs = useCallback(async () => {
     try {
-      const result = await invoke<{ name: string; path: string; is_linked: boolean }[]>("dataset_list_dirs", { datasetType: "card" });
+      const result = await invoke<{ name: string; path: string; is_linked: boolean; is_read_only?: boolean }[]>("dataset_list_dirs", { datasetType: "card" });
       setDirs(result);
     } catch {
       // Ignore
@@ -946,9 +946,14 @@ function AdvancedTab({
                   <div className="flex items-center gap-2">
                     <MapPin size={14} className="text-text-tertiary" />
                     <span className="text-sm font-medium">{dir.name}</span>
-                    {!dir.is_linked && (
+                    {!dir.is_linked && !dir.is_read_only && (
                       <span className="text-xs px-1.5 py-0.5 rounded bg-accent-blue/10 text-accent-blue">
                         default
+                      </span>
+                    )}
+                    {dir.is_read_only && (
+                      <span className="text-xs px-1.5 py-0.5 rounded border border-border-light bg-bg-body text-text-secondary">
+                        app-managed · read-only
                       </span>
                     )}
                     <span className="text-xs text-text-tertiary">

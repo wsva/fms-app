@@ -207,6 +207,14 @@ impl DatasetMcpServer {
         .map_err(|e| e.to_string())?)
     }
 
+    #[tool(name = "dataset_layer_status", description = "Report a dataset's layer / read-only status before acting on it: role ('overlay'|'flat'), is_read_only (true when it resolves under the reserved download root, so every mutation is refused), downloaded, base_uuid, base_version, and the resolved path. Call this to decide whether a write will be refused.")]
+    async fn dataset_layer_status(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_layer_status: uuid={}", param.uuid);
+        let settings = self.app.state::<SettingsState>();
+        let status = datasets::layer_status(&settings, &param.uuid)?;
+        serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
+    }
+
     #[tool(name = "dataset_read_file", description = "Read a file from a dataset directory (e.g. info.json, a VTT subtitle, book.txt)")]
     async fn dataset_read_file(
         &self,
@@ -395,7 +403,7 @@ impl DatasetMcpServer {
     async fn dataset_delete_subtitles(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::warn!("[MCP] dataset_delete_subtitles: uuid={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
-        let dir = datasets::find_dataset_dir(&settings, &param.uuid).map_err(|e| e)?;
+        let dir = datasets::find_dataset_dir_write(&settings, &param.uuid).map_err(|e| e)?;
         let subtitle_dir = dir.join("subtitle");
         if subtitle_dir.exists() {
             std::fs::remove_dir_all(&subtitle_dir).map_err(|e| e.to_string())?;
@@ -413,7 +421,7 @@ impl DatasetMcpServer {
     #[tool(name = "dataset_delete_waveforms", description = "Delete all waveform JSON files for a dataset")]
     async fn dataset_delete_waveforms(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
-        let dir = datasets::find_dataset_dir(&settings, &param.uuid).map_err(|e| e)?;
+        let dir = datasets::find_dataset_dir_write(&settings, &param.uuid).map_err(|e| e)?;
         let wf_dir = dir.join("waveform");
         if wf_dir.exists() {
             std::fs::remove_dir_all(&wf_dir).map_err(|e| e.to_string())?;
@@ -425,7 +433,7 @@ impl DatasetMcpServer {
     async fn dataset_delete_database(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::warn!("[MCP] dataset_delete_database: uuid={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
-        let dir = datasets::find_dataset_dir(&settings, &param.uuid).map_err(|e| e)?;
+        let dir = datasets::find_dataset_dir_write(&settings, &param.uuid).map_err(|e| e)?;
         let db_path = dir.join("data.sqlite3");
         if db_path.exists() {
             std::fs::remove_file(&db_path).map_err(|e| e.to_string())?;
@@ -606,6 +614,12 @@ impl DatasetMcpServer {
         log::info!("[MCP] dataset_info_update: uuid={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
         let (dir, ty) = datasets::find_dataset_dir_typed(&settings, &param.uuid)?;
+        if datasets::is_under_download_root(&settings, &dir) {
+            return Err(format!(
+                "cannot write: '{}' is a read-only base under the download root; editing downloaded datasets arrives in a later update",
+                param.uuid
+            ));
+        }
         let mut info = datasets::read_info(&dir)?;
         if !param.name.is_empty() {
             info.name = param.name.clone();

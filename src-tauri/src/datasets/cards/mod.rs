@@ -17,8 +17,9 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::datasets::{
-    assert_uuid_free, canonical_stamp, dataset_roots, now_row_stamp, now_stamp, read_info,
-    read_info_opt, row_stamp_at, touch_info, write_info, DatasetInfo, FORMAT_CARD, INFO_FILE,
+    assert_uuid_free, canonical_stamp, dataset_roots, is_under_download_root, now_row_stamp,
+    now_stamp, read_info, read_info_opt, row_stamp_at, touch_info, write_info, DatasetInfo,
+    FORMAT_CARD, INFO_FILE,
 };
 use crate::settings::SettingsState;
 
@@ -163,6 +164,20 @@ pub(crate) fn find_card_dataset_dir(settings: &SettingsState, uuid: &str) -> Res
         }
     }
     Err(format!("Card dataset with UUID {} not found", uuid))
+}
+
+/// Write-resolution: refuses a read-only base under the download root
+/// (dataset-layers.md §6). Read commands keep using [`find_card_dataset_dir`].
+pub(crate) fn find_card_dataset_dir_write(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
+    let dir = find_card_dataset_dir(settings, uuid)?;
+    if is_under_download_root(settings, &dir) {
+        let name = read_info_opt(&dir).map(|i| i.name).unwrap_or_else(|| uuid.to_string());
+        return Err(format!(
+            "cannot write: '{}' is a read-only base under the download root; editing downloaded datasets arrives in a later update",
+            name
+        ));
+    }
+    Ok(dir)
 }
 
 /// Open the card dataset SQLite database, ensuring the schema exists.
@@ -637,6 +652,7 @@ pub(crate) fn list_card_datasets(settings: &SettingsState) -> Vec<CardDatasetSum
         }
     }
 
+    datasets = crate::datasets::dedup_by_uuid_first(datasets, |s| s.info.uuid.as_str());
     datasets.sort_by(|a, b| a.info.name.cmp(&b.info.name));
     datasets
 }
@@ -785,7 +801,7 @@ pub async fn card_dataset_update(
     description: Option<String>,
     visibility: Option<String>,
 ) -> Result<(), String> {
-    let path = find_card_dataset_dir(&settings, &uuid)?;
+    let path = find_card_dataset_dir_write(&settings, &uuid)?;
     let mut info = read_info(&path)?;
 
     if let Some(n) = name {
@@ -812,7 +828,7 @@ pub async fn card_dataset_add_subscriber(
     uuid: String,
     email: String,
 ) -> Result<(), String> {
-    let path = find_card_dataset_dir(&settings, &uuid)?;
+    let path = find_card_dataset_dir_write(&settings, &uuid)?;
     let mut info = read_info(&path)?;
 
     if !info.sharing.subscribers.contains(&email) {
@@ -832,7 +848,7 @@ pub async fn card_dataset_remove_subscriber(
     uuid: String,
     email: String,
 ) -> Result<(), String> {
-    let path = find_card_dataset_dir(&settings, &uuid)?;
+    let path = find_card_dataset_dir_write(&settings, &uuid)?;
     let mut info = read_info(&path)?;
 
     info.sharing.subscribers.retain(|s| s != &email);
@@ -850,7 +866,7 @@ pub async fn card_dataset_delete(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<String, String> {
-    let path = find_card_dataset_dir(&settings, &uuid)?;
+    let path = find_card_dataset_dir_write(&settings, &uuid)?;
     log::info!("[Cards] Deleting dataset at '{}'", path.display());
     
     // Remove all cards in this dataset from the FTS index
@@ -876,7 +892,7 @@ pub async fn card_dataset_move(
     uuid: String,
     target_location: String,
 ) -> Result<String, String> {
-    let source_path = find_card_dataset_dir(&settings, &uuid)?;
+    let source_path = find_card_dataset_dir_write(&settings, &uuid)?;
     let target_root = std::path::PathBuf::from(&target_location);
 
     if !target_root.exists() {
@@ -1065,7 +1081,7 @@ pub async fn card_save(
     dataset_uuid: String,
     card: Card,
 ) -> Result<Card, String> {
-    let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
+    let path = find_card_dataset_dir_write(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
     let now = now_row_stamp();
 
@@ -1167,7 +1183,7 @@ pub async fn card_delete(
     dataset_uuid: String,
     card_uuid: String,
 ) -> Result<(), String> {
-    let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
+    let path = find_card_dataset_dir_write(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
     let now = now_row_stamp();
 
@@ -1305,7 +1321,7 @@ pub async fn card_tag_save(
     dataset_uuid: String,
     tag: Tag,
 ) -> Result<Tag, String> {
-    let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
+    let path = find_card_dataset_dir_write(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
     let now = now_row_stamp();
 
@@ -1349,7 +1365,7 @@ pub async fn card_tag_delete(
     dataset_uuid: String,
     tag_uuid: String,
 ) -> Result<(), String> {
-    let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
+    let path = find_card_dataset_dir_write(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
     let now = now_row_stamp();
 
@@ -1379,7 +1395,7 @@ pub async fn card_set_tags(
     card_uuid: String,
     tag_uuids: Vec<String>,
 ) -> Result<(), String> {
-    let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
+    let path = find_card_dataset_dir_write(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
     let now = now_row_stamp();
 
@@ -1634,7 +1650,7 @@ pub async fn card_test_submit(
     card_uuid: String,
     quality: i32,
 ) -> Result<CardReview, String> {
-    let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
+    let path = find_card_dataset_dir_write(&settings, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
     let now = now_row_stamp();
 

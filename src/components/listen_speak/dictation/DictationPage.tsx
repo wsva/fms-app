@@ -151,6 +151,9 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 <div className="flex items-center gap-2">
                     <span className="font-medium text-text-primary">{ds.info.name}</span>
                     <span className={datasetStatusBadgeClasses(status)}>{datasetStatusLabel(status)}</span>
+                    {ds.is_read_only && (
+                        <span className="px-2 py-0.5 text-[11px] rounded-md border border-border-light bg-bg-body text-text-secondary">Downloaded · read-only</span>
+                    )}
                 </div>
                 <div className="text-xs text-text-tertiary truncate" title={ds.path}>{ds.path}</div>
             </button>
@@ -469,6 +472,9 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                                                 <Folder size={14} className="text-text-tertiary shrink-0" />
                                             )}
                                             <span className="text-sm font-semibold text-text-primary shrink-0">{loc.name}</span>
+                                            {loc.is_read_only && (
+                                                <span className="shrink-0 text-[11px] px-1.5 py-0.5 rounded border border-border-light bg-bg-body text-text-secondary">app-managed · read-only</span>
+                                            )}
                                             <span className="text-xs text-text-tertiary truncate flex-1" title={loc.path}>{loc.path}</span>
                                             <span className="text-xs text-text-tertiary shrink-0">{items.length}</span>
                                             {loc.is_linked && (

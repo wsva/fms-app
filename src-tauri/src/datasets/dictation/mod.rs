@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::auth::workspace_identity;
-use crate::datasets::find_dataset_dir;
+use crate::datasets::{find_dataset_dir, find_dataset_dir_write};
 use crate::settings::SettingsState;
 
 // ============================================================
@@ -88,6 +88,19 @@ fn open_db(settings: &SettingsState, dataset_uuid: &str) -> Result<Connection, S
         return Err("Database file not found. Please generate the database first.".into());
     }
     log::debug!("Opening dataset DB: {}", db_path.display());
+    Connection::open(&db_path).map_err(|e| e.to_string())
+}
+
+/// Write-resolution variant of [`open_db`]: refuses a read-only base under the
+/// download root (dataset-layers.md §6) so dictation edits never mutate a
+/// downloaded dataset. Read commands keep using [`open_db`].
+fn open_db_write(settings: &SettingsState, dataset_uuid: &str) -> Result<Connection, String> {
+    let dataset_dir = find_dataset_dir_write(settings, dataset_uuid)?;
+    let db_path = dataset_dir.join("data.sqlite3");
+    if !db_path.exists() {
+        return Err("Database file not found. Please generate the database first.".into());
+    }
+    log::debug!("Opening dataset DB (write): {}", db_path.display());
     Connection::open(&db_path).map_err(|e| e.to_string())
 }
 
@@ -351,7 +364,7 @@ pub async fn listen_save_media(
     media: ListenMedia,
 ) -> Result<(), String> {
     log::info!("listen_save_media: dataset={}, media={}, source={}", dataset_uuid, media.uuid, media.source);
-    let conn = open_db(&settings, &dataset_uuid)?;
+    let conn = open_db_write(&settings, &dataset_uuid)?;
     conn.execute(
         "INSERT OR REPLACE INTO listen_media (uuid, source, duration_ms, created_at, updated_at) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -376,7 +389,7 @@ pub async fn listen_rename_media(
     new_source: String,
 ) -> Result<(), String> {
     log::info!("listen_rename_media: dataset={}, media={}, new_source={}", dataset_uuid, media_uuid, new_source);
-    let dataset_dir = find_dataset_dir(&settings, &dataset_uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &dataset_uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
     if !db_path.exists() {
         return Err("Database file not found. Please generate the database first.".into());
@@ -458,7 +471,7 @@ pub async fn listen_save_cue(
     cue: ListenCue,
 ) -> Result<(), String> {
     log::debug!("listen_save_cue: dataset={}, cue={}, order={}", dataset_uuid, cue.uuid, cue.order_num);
-    let conn = open_db(&settings, &dataset_uuid)?;
+    let conn = open_db_write(&settings, &dataset_uuid)?;
     conn.execute(
         "INSERT INTO listen_subtitle_cue \
          (uuid, subtitle_uuid, order_num, start_ms, end_ms, content, reference, confidence, version_created, version_superseded) \
@@ -495,7 +508,7 @@ pub async fn listen_delete_cue(
     cue_uuid: String,
 ) -> Result<(), String> {
     log::info!("listen_delete_cue: dataset={}, cue={}", dataset_uuid, cue_uuid);
-    let conn = open_db(&settings, &dataset_uuid)?;
+    let conn = open_db_write(&settings, &dataset_uuid)?;
     conn.execute("DELETE FROM listen_subtitle_cue WHERE uuid = ?1", [&cue_uuid])
         .map_err(|e| e.to_string())?;
     {
@@ -522,7 +535,7 @@ pub async fn listen_delete_media(
     media_uuid: String,
 ) -> Result<(), String> {
     log::info!("listen_delete_media: dataset={}, media={}", dataset_uuid, media_uuid);
-    let dataset_dir = find_dataset_dir(&settings, &dataset_uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &dataset_uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
     if !db_path.exists() {
         return Err("Database file not found. Please generate the database first.".into());
@@ -834,7 +847,7 @@ pub async fn subtitle_create_version(
     created_by: String,
 ) -> Result<i64, String> {
     log::info!("subtitle_create_version: subtitle={}, change_type={}, by={}", subtitle_uuid, change_type, created_by);
-    let conn = open_db(&settings, &dataset_uuid)?;
+    let conn = open_db_write(&settings, &dataset_uuid)?;
     
     // Get current version
     let current_version: i64 = conn
@@ -881,7 +894,7 @@ pub async fn subtitle_finalize_version(
     cues_deleted: i64,
 ) -> Result<(), String> {
     log::info!("subtitle_finalize_version: subtitle={}, v={}, +{} ~{} -{}", subtitle_uuid, version, cues_added, cues_modified, cues_deleted);
-    let conn = open_db(&settings, &dataset_uuid)?;
+    let conn = open_db_write(&settings, &dataset_uuid)?;
     
     conn.execute(
         "UPDATE listen_subtitle_version SET cues_added = ?1, cues_modified = ?2, cues_deleted = ?3 \
@@ -982,7 +995,7 @@ pub async fn subtitle_rollback_to_version(
     target_version: i64,
 ) -> Result<i64, String> {
     log::info!("subtitle_rollback_to_version: subtitle={}, target_v={}", subtitle_uuid, target_version);
-    let conn = open_db(&settings, &dataset_uuid)?;
+    let conn = open_db_write(&settings, &dataset_uuid)?;
     
     // Get current version
     let current_version: i64 = conn

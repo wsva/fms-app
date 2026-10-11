@@ -21,6 +21,15 @@ interface DatasetSummary {
     /** Root location directory this dataset was found under. */
     location: string;
     status: string;
+    /** True when this dataset lives under the reserved read-only download root,
+     *  so every mutating action is refused. */
+    is_read_only?: boolean;
+    /** True when this entry is a downloaded base (== is_read_only in Phase 1). */
+    downloaded?: boolean;
+    /** True when a writable overlay has diverged from this base (Phase 2). */
+    has_local_changes?: boolean;
+    /** `info.layer.role`, or `"flat"` when the dataset carries no layer block. */
+    layer_role?: string;
 }
 
 // Directory entry returned by `dataset_list_dirs` (mirrors DatasetDirEntry in Rust).
@@ -28,6 +37,8 @@ export interface DatasetDirEntry {
     name: string;
     path: string;
     is_linked: boolean;
+    /** True for the app-managed read-only download location (no remove button). */
+    is_read_only?: boolean;
 }
 
 const newMedia = (): ListenMedia => ({

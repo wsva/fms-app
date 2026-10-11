@@ -271,6 +271,11 @@ export default function StudioPage() {
   const hasWaveforms = !!detail?.has_waveforms;
   const hasSubtitles = !!detail?.has_subtitles;
 
+  // A dataset under the reserved download root is a read-only base: every Studio
+  // action mutates, so the whole pipeline is gated for it (dataset-layers.md §6).
+  const selectedDataset = datasets.find((d) => d.info.uuid === selectedUuid);
+  const isReadOnly = !!selectedDataset?.is_read_only;
+
   return (
     <div className="flex flex-col w-full h-full min-h-0 p-4 gap-3">
       {/* Header */}
@@ -285,13 +290,18 @@ export default function StudioPage() {
           <option value="">Select a dataset…</option>
           {datasets.map((ds) => (
             <option key={ds.path} value={ds.info.uuid}>
-              {ds.info.name}
+              {ds.info.name}{ds.is_read_only ? " (read-only)" : ""}
             </option>
           ))}
         </select>
         {detail && (
           <span className={datasetStatusBadgeClasses(detail.status)}>
             {datasetStatusLabel(detail.status)}
+          </span>
+        )}
+        {isReadOnly && (
+          <span className="px-2 py-0.5 text-xs rounded-md border border-border-light bg-bg-body text-text-secondary">
+            Downloaded · read-only
           </span>
         )}
         <button
@@ -328,7 +338,8 @@ export default function StudioPage() {
                 running={
                   running && runningStage === (editing ? "Update dataset" : "Create dataset")
                 }
-                disabled={running}
+                disabled={running || (editing && isReadOnly)}
+                hint={editing && isReadOnly ? "Downloaded datasets are read-only." : undefined}
                 runLabel={editing ? "Save" : "Create"}
                 onRun={editing ? handleUpdate : handleCreate}
               >
@@ -376,6 +387,18 @@ export default function StudioPage() {
               <p className="text-sm text-text-tertiary">
                 Select a dataset above (or create one) to run the pipeline stages.
               </p>
+            ) : isReadOnly ? (
+              <div className="flex flex-col gap-2 rounded-lg border border-border-light bg-bg-body p-4 text-sm text-text-secondary">
+                <span className="font-medium text-text-primary">
+                  Downloaded dataset — read-only
+                </span>
+                <p>
+                  ‘{selectedDataset?.info.name}’ is a downloaded base under the app-managed
+                  download location. It can be studied and its media plays normally, but its
+                  media, subtitles, database and cues cannot be edited here. Editing downloaded
+                  datasets arrives in a later update.
+                </p>
+              </div>
             ) : (
               <>
                 {/* Pipeline */}

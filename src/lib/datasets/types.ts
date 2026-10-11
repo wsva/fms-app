@@ -18,6 +18,26 @@ export interface DatasetSummary {
   /** Root location directory this dataset was found under. */
   location: string;
   status: DatasetStatus;
+  /** True when this dataset lives under the reserved read-only download root,
+   *  so every mutating action is refused. */
+  is_read_only?: boolean;
+  /** True when this entry is a downloaded base (== is_read_only in Phase 1). */
+  downloaded?: boolean;
+  /** True when a writable overlay has diverged from this base (Phase 2). */
+  has_local_changes?: boolean;
+  /** `info.layer.role`, or `"flat"` when the dataset carries no layer block. */
+  layer_role?: string;
+}
+
+/** Layer / read-only status of a dataset (`dataset_layer_status` command). */
+export interface DatasetLayerStatus {
+  uuid: string;
+  role: string;
+  is_read_only: boolean;
+  downloaded: boolean;
+  base_uuid: string | null;
+  base_version: string | null;
+  path: string;
 }
 
 export interface MediaFile {

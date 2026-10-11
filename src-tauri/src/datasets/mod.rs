@@ -43,7 +43,7 @@ pub(crate) use info::{
     assert_uuid_free, canonical_stamp, is_derived_index, now_row_stamp, now_stamp, read_info,
     read_info_opt, row_stamp_at, stamps_cmp, touch_info, write_info, DatasetInfo,
     FAVORITES_DATASET_UUID, FORMAT_BOOK, FORMAT_CARD, FORMAT_DICTATION, FORMAT_READ_ALOUD,
-    FORMAT_WIKI, INFO_FILE,
+    FORMAT_WIKI, INFO_FILE, LAYER_ROLE_FLAT,
 };
 // The hub's edit-time normalizer is the only caller outside this group; the row
 // stamps every type writes come through the ungated names above.
@@ -74,6 +74,21 @@ pub struct DatasetSummary {
     /// Root location directory this dataset was found under.
     pub location: String,
     pub status: String,
+    /// True when this dataset lives under the reserved read-only download root,
+    /// so every mutation is refused (dataset-layers.md §6).
+    #[serde(default)]
+    pub is_read_only: bool,
+    /// True when this entry is a downloaded base. Equal to `is_read_only` in
+    /// Phase 1 (no overlay growth yet).
+    #[serde(default)]
+    pub downloaded: bool,
+    /// True when a writable overlay has diverged from this base. Always false in
+    /// Phase 1 — overlay growth lands with the `merged/` cache (Phase 2).
+    #[serde(default)]
+    pub has_local_changes: bool,
+    /// `info.layer.role`, or `"flat"` when the dataset carries no layer block.
+    #[serde(default)]
+    pub layer_role: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -151,6 +166,10 @@ pub struct DatasetDirEntry {
     pub name: String,
     pub path: String,
     pub is_linked: bool,
+    /// True for the app-maintained download root, whose datasets are read-only
+    /// bases (dataset-layers.md §4.1). The UI renders it locked (no remove).
+    #[serde(default)]
+    pub is_read_only: bool,
 }
 
 fn dataset_meta_path(datasets_dir: &str) -> PathBuf {
@@ -246,6 +265,32 @@ impl<'de> Deserialize<'de> for DatasetType {
     }
 }
 
+/// The app-maintained read-only download root for a type:
+/// `<datasets_dir>/download/<type>/`. Every dataset here is a base pulled from
+/// the online server, read-only by location (dataset-layers.md §4.1). It is a
+/// *sibling* of the type dirs — never `<type>/download` — so it cannot collide
+/// with a user dataset named "download".
+pub(crate) fn download_root(settings: &SettingsState, dataset_type: DatasetType) -> PathBuf {
+    datasets_dir(settings).join("download").join(dataset_type.as_str())
+}
+
+/// The reserved parent of every type's download root: `<datasets_dir>/download`.
+fn download_base(settings: &SettingsState) -> PathBuf {
+    datasets_dir(settings).join("download")
+}
+
+/// True when `path` lives under the app-maintained download root, i.e. it is a
+/// read-only base. This is the single read-only predicate the write path uses.
+///
+/// Canonicalizes both sides when possible so a symlinked or relative path still
+/// matches; falls back to the raw path when the target does not exist yet.
+pub(crate) fn is_under_download_root(settings: &SettingsState, path: &Path) -> bool {
+    let base = download_base(settings);
+    let base_canon = fs::canonicalize(&base).unwrap_or(base);
+    let path_canon = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    path_canon.starts_with(&base_canon)
+}
+
 pub(crate) fn dataset_roots(settings: &SettingsState, dataset_type: DatasetType) -> Vec<PathBuf> {
     let base_dir = datasets_dir(settings);
     let type_dir = base_dir.join(dataset_type.as_str());
@@ -265,6 +310,15 @@ pub(crate) fn dataset_roots(settings: &SettingsState, dataset_type: DatasetType)
         if linked_path.exists() && linked_path.is_dir() {
             roots.push(linked_path);
         }
+    }
+    
+    // Append the read-only download root LAST. `find_dataset_dir_typed` returns
+    // the first match by root order, so a writable local dataset (or, later, an
+    // overlay) for a uuid is always resolved before its downloaded base
+    // (dataset-layers.md §4.4).
+    let dl = download_root(settings, dataset_type);
+    if dl.exists() && dl.is_dir() {
+        roots.push(dl);
     }
     
     roots
@@ -290,6 +344,7 @@ pub async fn dataset_list_dirs(
             name: format!("{} datasets", ds_type.as_str()),
             path: type_dir_str.clone(),
             is_linked: false,
+            is_read_only: false,
         });
     }
     
@@ -302,8 +357,21 @@ pub async fn dataset_list_dirs(
                 name: linked.name.clone(),
                 path: linked.path.clone(),
                 is_linked: true,
+                is_read_only: false,
             });
         }
+    }
+    
+    // Surface the app-maintained download root as a locked (read-only) entry so
+    // the UI can show where downloaded bases live without offering to remove it.
+    let dl = download_root(&settings, ds_type);
+    if dl.exists() && dl.is_dir() {
+        entries.push(DatasetDirEntry {
+            name: "Downloaded (read-only)".to_string(),
+            path: dl.to_string_lossy().into_owned(),
+            is_linked: false,
+            is_read_only: true,
+        });
     }
     
     // Sort alphabetically
@@ -332,6 +400,12 @@ pub async fn dataset_add_dir(
         return Err(format!("Path is not a directory: {}", path));
     }
     
+    // The download root is app-managed (read-only bases); it is never a manual
+    // linked location (dataset-layers.md §4.2).
+    if is_under_download_root(&settings, &target_path) {
+        return Err("The download location is app-managed and cannot be added manually".into());
+    }
+    
     let mut meta = read_dataset_meta(&default_str);
     
     // Check if already linked
@@ -357,6 +431,11 @@ pub async fn dataset_remove_dir(
 ) -> Result<(), String> {
     let default_dir = datasets_dir(&settings);
     let default_str = default_dir.to_string_lossy().to_string();
+    
+    // The download root is app-managed; refuse to unlink it (dataset-layers.md §4.2).
+    if is_under_download_root(&settings, &PathBuf::from(&path)) {
+        return Err("The download location is app-managed and cannot be removed".into());
+    }
     
     let mut meta = read_dataset_meta(&default_str);
     let initial_len = meta.linked_dirs.len();
@@ -557,7 +636,11 @@ pub(crate) fn move_to_trash(path: &Path) -> Result<PathBuf, String> {
 
 /// Scan a single directory and, if it looks like a dataset, build a summary.
 /// `location` is the root directory the dataset was found under.
-fn scan_dataset_dir(path: &Path, location: &str) -> Option<DatasetSummary> {
+fn scan_dataset_dir(
+    settings: &SettingsState,
+    path: &Path,
+    location: &str,
+) -> Option<DatasetSummary> {
     if !path.is_dir() {
         return None;
     }
@@ -570,12 +653,22 @@ fn scan_dataset_dir(path: &Path, location: &str) -> Option<DatasetSummary> {
         let media_dir = path.join("media");
         let media_count = list_media_files(&media_dir).len();
         let status = if path.join("data.sqlite3").exists() { "ready" } else { "not_ready" };
+        let read_only = is_under_download_root(settings, path);
+        let layer_role = info
+            .layer
+            .as_ref()
+            .map(|l| l.role.clone())
+            .unwrap_or_else(|| LAYER_ROLE_FLAT.to_string());
         return Some(DatasetSummary {
             info,
             media_count,
             path: path_str,
             location: location.to_string(),
             status: status.into(),
+            is_read_only: read_only,
+            downloaded: read_only,
+            has_local_changes: false,
+            layer_role,
         });
     }
 
@@ -601,7 +694,33 @@ fn scan_dataset_dir(path: &Path, location: &str) -> Option<DatasetSummary> {
         path: path_str,
         location: location.to_string(),
         status: "not_ready".into(),
+        is_read_only: false,
+        downloaded: false,
+        has_local_changes: false,
+        layer_role: LAYER_ROLE_FLAT.to_string(),
     })
+}
+
+/// Deduplicate a listing by dataset uuid, keeping the **first** occurrence.
+///
+/// `dataset_roots` appends the read-only download root last, so a writable local
+/// dataset (or a future overlay) for a uuid is always encountered before its
+/// downloaded base — keeping the first therefore prefers the writable copy
+/// (dataset-layers.md §4.4 Case 1). Entries with an empty uuid (raw, not-yet
+/// imported folders) are never deduped.
+pub(crate) fn dedup_by_uuid_first<T, F>(items: Vec<T>, uuid_of: F) -> Vec<T>
+where
+    F: Fn(&T) -> &str,
+{
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let uuid = uuid_of(&item);
+        if uuid.is_empty() || seen.insert(uuid.to_string()) {
+            out.push(item);
+        }
+    }
+    out
 }
 
 /// List all datasets across every configured dataset location.
@@ -631,12 +750,13 @@ pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<DatasetSummary> {
             Err(_) => continue,
         };
         for entry in entries.flatten() {
-            if let Some(summary) = scan_dataset_dir(&entry.path(), &location) {
+            if let Some(summary) = scan_dataset_dir(&settings, &entry.path(), &location) {
                 datasets.push(summary);
             }
         }
     }
 
+    datasets = dedup_by_uuid_first(datasets, |s| s.info.uuid.as_str());
     datasets.sort_by(|a, b| a.info.name.cmp(&b.info.name));
     log::info!("Found {} dataset(s)", datasets.len());
     datasets
@@ -719,7 +839,7 @@ pub async fn dataset_import(
     write_info(&dst, &info)?;
 
     log::info!("Imported dataset '{}' with {} media file(s)", dir_name, media_count);
-    Ok(DatasetSummary { info, media_count, path: dst.to_string_lossy().into_owned(), location: dir.to_string_lossy().into_owned(), status: "not_ready".into() })
+    Ok(DatasetSummary { info, media_count, path: dst.to_string_lossy().into_owned(), location: dir.to_string_lossy().into_owned(), status: "not_ready".into(), is_read_only: false, downloaded: false, has_local_changes: false, layer_role: LAYER_ROLE_FLAT.to_string() })
 }
 
 /// Get detailed information about a specific dataset, including its media files.
@@ -728,7 +848,7 @@ pub async fn dataset_get(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<DatasetDetail, String> {
-    let path = find_dataset_dir(&settings, &uuid)?;
+    let path = find_dataset_dir_read(&settings, &uuid)?;
     let info = read_info(&path)?;
 
     let media_dir = path.join("media");
@@ -749,6 +869,52 @@ pub async fn dataset_get(
     Ok(DatasetDetail { info, media, has_subtitles, has_waveforms, has_database, has_book, status: status.into() })
 }
 
+/// Layer / read-only status of a dataset, for status-before-acting checks
+/// (dataset-layers.md §6). `role` comes from `info.layer`; `is_read_only` /
+/// `downloaded` come from the dataset's *location* under the reserved download
+/// root, not from `info.json`.
+#[derive(Clone, Serialize)]
+pub struct DatasetLayerStatus {
+    pub uuid: String,
+    pub role: String,
+    pub is_read_only: bool,
+    pub downloaded: bool,
+    pub base_uuid: Option<String>,
+    pub base_version: Option<String>,
+    pub path: String,
+}
+
+/// Core layer-status resolution, reusable without Tauri `State` (MCP + command).
+pub(crate) fn layer_status(
+    settings: &SettingsState,
+    uuid: &str,
+) -> Result<DatasetLayerStatus, String> {
+    let (dir, _ty) = find_dataset_dir_typed(settings, uuid)?;
+    let info = read_info(&dir)?;
+    let read_only = is_under_download_root(settings, &dir);
+    let layer = info.layer.as_ref();
+    Ok(DatasetLayerStatus {
+        uuid: info.uuid,
+        role: layer
+            .map(|l| l.role.clone())
+            .unwrap_or_else(|| LAYER_ROLE_FLAT.to_string()),
+        is_read_only: read_only,
+        downloaded: read_only,
+        base_uuid: layer.and_then(|l| l.base_uuid.clone()),
+        base_version: layer.and_then(|l| l.base_version.clone()),
+        path: dir.to_string_lossy().into_owned(),
+    })
+}
+
+/// Report a dataset's layer / read-only status before attempting a mutation.
+#[tauri::command]
+pub async fn dataset_layer_status(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+) -> Result<DatasetLayerStatus, String> {
+    layer_status(&settings, &uuid)
+}
+
 /// Update the mutable descriptive fields of a dataset's `info.json`.
 ///
 /// Identity (`uuid`), layout (`type`/`format`) and history (`created_at`) are not
@@ -761,7 +927,7 @@ pub async fn dataset_update(
     description: Option<String>,
     language: Option<String>,
 ) -> Result<(), String> {
-    let path = find_dataset_dir(&settings, &uuid)?;
+    let path = find_dataset_dir_write(&settings, &uuid)?;
     let mut info = read_info(&path)?;
 
     if let Some(n) = name {
@@ -786,7 +952,7 @@ pub async fn dataset_delete(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<String, String> {
-    let path = find_dataset_dir(&settings, &uuid)?;
+    let path = find_dataset_dir_write(&settings, &uuid)?;
     log::info!("Deleting dataset at '{}'", path.display());
     let trashed = move_to_trash(&path)?;
     log::info!("Dataset {} moved to trash '{}'", uuid, trashed.display());
@@ -901,6 +1067,10 @@ pub async fn dataset_create(
         path: dst.to_string_lossy().into_owned(),
         location: root.to_string_lossy().into_owned(),
         status: "not_ready".into(),
+        is_read_only: false,
+        downloaded: false,
+        has_local_changes: false,
+        layer_role: LAYER_ROLE_FLAT.to_string(),
     })
 }
 
@@ -964,6 +1134,10 @@ pub async fn dataset_init_dir(
         path: dir.to_string_lossy().into_owned(),
         location: location.to_string_lossy().into_owned(),
         status: "not_ready".into(),
+        is_read_only: false,
+        downloaded: false,
+        has_local_changes: false,
+        layer_role: LAYER_ROLE_FLAT.to_string(),
     })
 }
 
@@ -989,7 +1163,7 @@ pub async fn dataset_sync_media(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<MediaSyncResult, String> {
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
     if !db_path.exists() {
         return Err("Database file not found. Create or initialize the dataset first.".into());
@@ -1094,7 +1268,7 @@ pub async fn dataset_info_save(
     uuid: String,
     content: String,
 ) -> Result<DatasetInfo, String> {
-    let dir = find_dataset_dir(&settings, &uuid)?;
+    let dir = find_dataset_dir_write(&settings, &uuid)?;
     let existing = read_info(&dir)?;
 
     let trimmed = content.trim_start_matches('\u{FEFF}');
@@ -1184,7 +1358,7 @@ pub async fn dataset_import_media(
     source_dir: String,
     link: bool,
 ) -> Result<usize, String> {
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let src = PathBuf::from(&source_dir);
     if !src.exists() || !src.is_dir() {
         return Err("Source directory does not exist".into());
@@ -1319,35 +1493,41 @@ fn segments_to_vtt(segments: &[transcribe_rs::TranscriptionSegment]) -> String {
     vtt
 }
 
-/// Find the dataset directory by UUID across all configured locations.
-pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
-    for root in dataset_roots(settings, DatasetType::Dictation) {
-        if !root.exists() {
-            continue;
-        }
-        let entries = match fs::read_dir(&root) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let info_path = path.join(INFO_FILE);
-            if !info_path.exists() {
-                continue;
-            }
-            let info = match read_info_opt(&path) {
-                Some(i) => i,
-                None => continue,
-            };
-            if info.uuid == uuid {
-                return Ok(path);
-            }
-        }
+/// Read-resolution: the effective directory a reader opens for `uuid`.
+///
+/// Scans every type's roots (including the read-only download root) via
+/// [`find_dataset_dir_typed`] and returns the first match — a writable local
+/// dataset before a downloaded base of the same uuid (root order, §4.4).
+///
+/// Phase 1 returns the resolved directory as-is. Phase 2 will redirect an
+/// overlay to its `merged/` cache so reads stay single-directory.
+pub(crate) fn find_dataset_dir_read(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
+    find_dataset_dir_typed(settings, uuid).map(|(path, _ty)| path)
+}
+
+/// Write-resolution: where a mutation to `uuid` lands.
+///
+/// A dataset under the app-maintained download root is a read-only base and is
+/// never a write target (dataset-layers.md §6). Phase 1 refuses with an
+/// actionable error; Phase 2 will instead create and return an overlay directory.
+pub(crate) fn find_dataset_dir_write(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
+    let (path, _ty) = find_dataset_dir_typed(settings, uuid)?;
+    if is_under_download_root(settings, &path) {
+        let name = read_info_opt(&path).map(|i| i.name).unwrap_or_else(|| uuid.to_string());
+        return Err(format!(
+            "cannot write: '{}' is a read-only base under the download root; editing downloaded datasets arrives in a later update",
+            name
+        ));
     }
-    Err(format!("Dataset with UUID {} not found", uuid))
+    Ok(path)
+}
+
+/// Find the dataset directory by UUID across all configured locations.
+///
+/// Thin alias for [`find_dataset_dir_read`], kept so existing call sites compile
+/// while they are classified read vs write (dataset-layers.md §12.3).
+pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
+    find_dataset_dir_read(settings, uuid)
 }
 
 /// Find a dataset directory by UUID across every dataset type (dictation, card,
@@ -1423,7 +1603,7 @@ pub async fn dataset_generate_subtitles(
     model_state: State<'_, ModelState>,
     uuid: String,
 ) -> Result<String, String> {
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let media_dir = dataset_dir.join("media");
     let subtitle_dir = dataset_dir.join("subtitle");
 
@@ -1581,7 +1761,7 @@ pub async fn dataset_generate_subtitle_single(
     uuid: String,
     media_uuid: String,
 ) -> Result<String, String> {
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
     if !db_path.exists() {
         return Err("Database not found. Please build the database first.".into());
@@ -1645,7 +1825,7 @@ pub async fn dataset_delete_subtitles(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<(), String> {
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let subtitle_dir = dataset_dir.join("subtitle");
 
     if subtitle_dir.exists() {
@@ -1678,7 +1858,7 @@ pub async fn dataset_delete_waveforms(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<(), String> {
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let waveform_dir = dataset_dir.join("waveform");
     log::info!("Deleting waveforms for dataset '{}'", uuid);
 
@@ -1717,7 +1897,7 @@ pub async fn dataset_generate_waveform(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<usize, String> {
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let media_dir = dataset_dir.join("media");
     let waveform_dir = dataset_dir.join("waveform");
     fs::create_dir_all(&waveform_dir).map_err(|e| e.to_string())?;
@@ -1774,7 +1954,7 @@ pub async fn dataset_generate_waveform_single(
     uuid: String,
     media_uuid: String,
 ) -> Result<String, String> {
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
     if !db_path.exists() {
         return Err("Database not found. Please build the database first.".into());
@@ -2050,7 +2230,7 @@ pub async fn dataset_delete_database(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<(), String> {
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
 
     if db_path.exists() {
@@ -2072,7 +2252,7 @@ pub async fn dataset_generate_database(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<(), String> {
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let media_dir = dataset_dir.join("media");
     let subtitle_dir = dataset_dir.join("subtitle");
     let transcript_dir = dataset_dir.join("transcript");
@@ -2184,7 +2364,7 @@ pub async fn dataset_write_subtitles_to_db(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<String, String> {
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let subtitle_dir = dataset_dir.join("subtitle");
     let db_path = dataset_dir.join("data.sqlite3");
 

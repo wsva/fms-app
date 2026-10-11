@@ -25,8 +25,8 @@ use uuid::Uuid;
 use crate::settings::SettingsState;
 
 use super::{
-    assert_uuid_free, dataset_roots, is_derived_index, move_to_trash, read_info_opt, touch_info,
-    write_info, DatasetInfo, DatasetType, FORMAT_WIKI, INFO_FILE,
+    assert_uuid_free, dataset_roots, is_derived_index, is_under_download_root, move_to_trash,
+    read_info_opt, touch_info, write_info, DatasetInfo, DatasetType, FORMAT_WIKI, INFO_FILE,
 };
 
 /// The derived FTS index inside a wiki dataset dir. Never synced, never listed.
@@ -197,6 +197,22 @@ pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<P
     ))
 }
 
+/// Write-resolution: refuses a read-only base under the download root
+/// (dataset-layers.md §6). Read commands keep using [`find_dataset_dir`]. The
+/// derived FTS index is also refused on a base, so indexing never writes into
+/// the app-managed download root.
+pub(crate) fn find_dataset_dir_write(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
+    let dir = find_dataset_dir(settings, uuid)?;
+    if is_under_download_root(settings, &dir) {
+        let name = read_info_opt(&dir).map(|i| i.name).unwrap_or_else(|| uuid.to_string());
+        return Err(format!(
+            "cannot write: '{}' is a read-only base under the download root; editing downloaded datasets arrives in a later update",
+            name
+        ));
+    }
+    Ok(dir)
+}
+
 /// Folder name for a new dataset: filesystem-safe form of the display name.
 fn folder_name_for(name: &str) -> String {
     let cleaned: String = name
@@ -266,6 +282,7 @@ pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<WikiDatasetSummary>
             });
         }
     }
+    out = crate::datasets::dedup_by_uuid_first(out, |s| s.uuid.as_str());
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     out
 }
@@ -374,7 +391,7 @@ pub(crate) fn import_dir(settings: &SettingsState, name: &str, path: &str) -> Re
 /// directory, then move the whole folder into the shared trash instead of destroying
 /// it, so the operation stays undoable (see [`move_to_trash`]). Returns the trash path.
 pub(crate) fn delete_dataset(settings: &SettingsState, uuid: &str) -> Result<String, String> {
-    let dir = find_dataset_dir(settings, uuid)?;
+    let dir = find_dataset_dir_write(settings, uuid)?;
     let type_dir = settings.datasets_dir().join(DatasetType::Wiki.as_str());
     let type_dir_str = type_dir.to_string_lossy().to_string();
     let mut meta = super::read_dataset_meta(&type_dir_str);
@@ -508,7 +525,7 @@ fn decode_utf8_prefix(buf: &[u8], truncated: bool) -> Option<String> {
 /// decides sync_log-append vs writeback-queue; under an `ApplyGuard` (rows
 /// arriving *from* the hub) it is a no-op and cannot echo.
 pub(crate) fn write_file(settings: &SettingsState, uuid: &str, rel: &str, content: &str) -> Result<(), String> {
-    let ds_dir = find_dataset_dir(settings, uuid)?;
+    let ds_dir = find_dataset_dir_write(settings, uuid)?;
     let clean = sanitize_rel(rel)?;
     if !is_markdown(&clean) {
         return Err(format!("Only markdown (.md) files can be written: {}", rel));
@@ -526,7 +543,7 @@ pub(crate) fn write_file(settings: &SettingsState, uuid: &str, rel: &str, conten
 }
 
 pub(crate) fn create_file(settings: &SettingsState, uuid: &str, rel: &str) -> Result<(), String> {
-    let ds_dir = find_dataset_dir(settings, uuid)?;
+    let ds_dir = find_dataset_dir_write(settings, uuid)?;
     let clean = sanitize_rel(rel)?;
     if ds_dir.join(&clean).exists() {
         return Err(format!("File already exists: {}", rel));
@@ -538,7 +555,7 @@ pub(crate) fn create_file(settings: &SettingsState, uuid: &str, rel: &str) -> Re
 /// journaled (git-style): the dir materializes on other devices as soon as
 /// the first file inside it syncs (`write_file` creates parent dirs).
 pub(crate) fn create_dir(settings: &SettingsState, uuid: &str, rel: &str) -> Result<(), String> {
-    let ds_dir = find_dataset_dir(settings, uuid)?;
+    let ds_dir = find_dataset_dir_write(settings, uuid)?;
     let clean = sanitize_rel(rel)?;
     let path = ds_dir.join(&clean);
     fs::create_dir_all(&path).map_err(|e| format!("Failed to create directory: {}", e))?;
@@ -547,7 +564,7 @@ pub(crate) fn create_dir(settings: &SettingsState, uuid: &str, rel: &str) -> Res
 }
 
 pub(crate) fn delete_file(settings: &SettingsState, uuid: &str, rel: &str) -> Result<(), String> {
-    let ds_dir = find_dataset_dir(settings, uuid)?;
+    let ds_dir = find_dataset_dir_write(settings, uuid)?;
     let clean = sanitize_rel(rel)?;
     if !is_markdown(&clean) {
         return Err(format!("Only markdown (.md) files can be deleted: {}", rel));
@@ -628,7 +645,7 @@ fn collect_markdown_files(dir: &Path, ds_root: &Path, out: &mut Vec<(PathBuf, St
 
 /// Rebuild the dataset's local FTS index. Returns the number of files indexed.
 pub(crate) fn index_dataset(settings: &SettingsState, uuid: &str) -> Result<u32, String> {
-    let ds_dir = find_dataset_dir(settings, uuid)?;
+    let ds_dir = find_dataset_dir_write(settings, uuid)?;
     let conn = open_fts_db(&ds_dir)?;
 
     let mut files = Vec::new();

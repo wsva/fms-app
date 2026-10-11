@@ -14,10 +14,8 @@ don't need to re-install app
 
 
 workflow
-1, gather infos
-2, define steps
-3, send to local model
-4, generate next jobs
+1, call model to generate prompt
+2, call agent to send prompt
 
 
 multi layer of dataset
@@ -29,15 +27,9 @@ multi layer of dataset
 6, don't affect local changes
 7, when read, combine two layers
 8, like docker image
-
-
-use sat-3l-sm huggingface
-to replace nltk/spacy
-then the whole workflow of dictation dataset free of python
-use ort to run onnx model
-https://github.com/19h/wtsplit-rs
-https://huggingface.co/segment-any-text/sat-3l-sm/tree/main
-
+9, can merge multi layer into one
+10, how to mark a dataset to readonly?
+11, this is a preparation for online sharing
 
 make mcp as a feature
 can build release without mcp server

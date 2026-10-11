@@ -242,9 +242,34 @@ pub struct DatasetInfo {
     pub updated_at: String,
     #[serde(default)]
     pub sharing: Sharing,
+    /// Layered-dataset metadata (base/overlay). Absent for a flat, self-contained
+    /// dataset, so a file written by an older build still parses. Additive like
+    /// `extra` — see `docs/design/dataset-layers.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<LayerBlock>,
     /// Anything this build does not model, preserved verbatim on write.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// `layer.role` value for a writable delta grown on top of a read-only base.
+pub const LAYER_ROLE_OVERLAY: &str = "overlay";
+/// `layer.role` value for a self-contained (non-layered) dataset.
+pub const LAYER_ROLE_FLAT: &str = "flat";
+
+/// Layered-dataset metadata block (dataset-layers.md). Optional and additive: a
+/// flat dataset has no `layer` key at all, and a base downloaded read-only is
+/// `role: "flat"` with no `base_uuid`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LayerBlock {
+    /// `"overlay"` (a writable delta over a base) or `"flat"` (self-contained).
+    pub role: String,
+    /// The uuid of the base this overlay grows on. `None` for a base/flat dataset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_uuid: Option<String>,
+    /// The base version this overlay was created against. `None` for a base/flat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_version: Option<String>,
 }
 
 fn default_spec() -> u32 {
@@ -271,6 +296,7 @@ impl DatasetInfo {
             created_at: now.clone(),
             updated_at: now,
             sharing: Sharing::default(),
+            layer: None,
             extra: Map::new(),
         }
     }
@@ -331,6 +357,24 @@ pub(crate) fn assert_uuid_free(settings: &SettingsState, uuid: &str) -> Result<(
         ));
     }
     Ok(())
+}
+
+/// Like [`assert_uuid_free`], but an overlay intentionally *shares* its base's
+/// uuid — the base lives under the read-only download root, the overlay in a
+/// writable root, and resolution finds the overlay first (root precedence). So a
+/// `role == "overlay"` layer bypasses the free-uuid check, exactly as the
+/// reserved Favorites id is exempt. Dormant until overlay growth exists
+/// (dataset-layers.md §4.4 / Phase 2).
+#[allow(dead_code)] // dormant until overlay creation exists (Phase 2)
+pub(crate) fn assert_uuid_free_for_layer(
+    settings: &SettingsState,
+    uuid: &str,
+    layer: Option<&LayerBlock>,
+) -> Result<(), String> {
+    if layer.map(|l| l.role.as_str()) == Some(LAYER_ROLE_OVERLAY) {
+        return Ok(());
+    }
+    assert_uuid_free(settings, uuid)
 }
 
 // ---------------------------------------------------------------------------

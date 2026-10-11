@@ -22,7 +22,7 @@ use std::path::Path;
 use rusqlite::Connection;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::datasets::{find_dataset_dir, touch_info, DatasetProgress};
+use crate::datasets::{find_dataset_dir_write, touch_info, DatasetProgress};
 use crate::settings::SettingsState;
 use crate::datasets::textsim::normalize;
 
@@ -574,7 +574,7 @@ pub async fn dataset_align_cues_transcript(
     uuid: String,
 ) -> Result<String, String> {
     log::info!("dataset_align_cues_transcript: dataset={}", uuid);
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
     let transcript_dir = dataset_dir.join("transcript");
 
@@ -742,7 +742,7 @@ pub async fn dataset_align_cues(
     dataset_uuid: String,
 ) -> Result<String, String> {
     log::info!("dataset_align_cues (book): dataset={}", dataset_uuid);
-    let dataset_dir = find_dataset_dir(&settings, &dataset_uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &dataset_uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
     let cache_path = dataset_dir.join("book_sentences.txt");
     let book_path = dataset_dir.join("book.txt");

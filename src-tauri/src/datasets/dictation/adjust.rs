@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use tauri::{Emitter, State};
 use uuid::Uuid;
 
-use crate::datasets::{find_dataset_dir, parse_vtt, touch_info, DatasetProgress};
+use crate::datasets::{find_dataset_dir, find_dataset_dir_write, parse_vtt, touch_info, DatasetProgress};
 use crate::models::ModelState;
 use crate::settings::SettingsState;
 use crate::datasets::dictation::align::similarity_score;
@@ -626,7 +626,7 @@ fn dataset_adjust_cue_time_sync(
     media_uuid_filter: Option<String>,
     strategy: SilenceStrategy,
 ) -> Result<String, String> {
-    let dataset_dir = find_dataset_dir(settings, uuid)?;
+    let dataset_dir = find_dataset_dir_write(settings, uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
     if !db_path.exists() {
         return Err("Database file not found. Please build the database first.".into());
@@ -1222,7 +1222,7 @@ pub async fn dataset_sync_cue_times_word_level(
     media_uuid: Option<String>,
 ) -> Result<String, String> {
     log::info!("dataset_sync_cue_times_word_level: dataset={}, media_uuid={:?}", uuid, media_uuid);
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
     if !db_path.exists() {
         return Err("Database file not found. Please build the database first.".into());
@@ -1611,7 +1611,7 @@ pub async fn dataset_sync_cue_times(
         uuid,
         threshold
     );
-    let dataset_dir = find_dataset_dir(&settings, &uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
     if !db_path.exists() {
         return Err("Database file not found. Please build the database first.".into());

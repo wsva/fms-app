@@ -56,6 +56,17 @@ export type Sharing = {
   subscribers: string[];
 };
 
+/** Layered-dataset metadata (mirrors `datasets::info::LayerBlock`). Absent for a
+ *  flat, self-contained dataset. See `docs/design/dataset-layers.md`. */
+export type LayerBlock = {
+  /** `overlay` = a writable delta over a base; `flat` = self-contained. */
+  role: 'overlay' | 'flat' | string;
+  /** The base uuid an overlay grows on; absent for a base/flat dataset. */
+  base_uuid?: string | null;
+  /** The base version this overlay was created against; absent for a base/flat. */
+  base_version?: string | null;
+};
+
 export type DatasetInfo = {
   /** info.json schema version. */
   spec: number;
@@ -72,6 +83,8 @@ export type DatasetInfo = {
   created_at: string;
   updated_at: string;
   sharing: Sharing;
+  /** Layer metadata; absent for a flat dataset. */
+  layer?: LayerBlock | null;
 };
 
 /** The app-owned Favorites dataset, identified by this reserved id (not a flag). */

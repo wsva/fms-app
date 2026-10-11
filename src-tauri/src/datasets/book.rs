@@ -8,8 +8,8 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::datasets::{
-    assert_uuid_free, dataset_roots, move_to_trash, now_stamp, read_info, read_info_opt, write_info,
-    DatasetInfo, DatasetType, FORMAT_BOOK, INFO_FILE,
+    assert_uuid_free, dataset_roots, is_under_download_root, move_to_trash, now_stamp, read_info,
+    read_info_opt, write_info, DatasetInfo, DatasetType, FORMAT_BOOK, INFO_FILE,
 };
 use crate::settings::SettingsState;
 
@@ -110,6 +110,21 @@ fn find_book_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String
         }
     }
     Err(format!("Book with UUID {} not found", uuid))
+}
+
+/// Write-resolution: refuses a read-only base under the download root.
+fn find_book_dir_write(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
+    let dir = find_book_dir(settings, uuid)?;
+    if is_under_download_root(settings, &dir) {
+        let name = read_info_opt(&dir)
+            .map(|i| i.name)
+            .unwrap_or_else(|| uuid.to_string());
+        return Err(format!(
+            "cannot write: '{}' is a read-only base under the download root; editing downloaded datasets arrives in a later update",
+            name
+        ));
+    }
+    Ok(dir)
 }
 
 /// Open (and initialize) a book's SQLite database.
@@ -281,7 +296,7 @@ pub async fn book_rename(
     if name.trim().is_empty() {
         return Err("Book name is required".into());
     }
-    let dir = find_book_dir(&settings, &uuid)?;
+    let dir = find_book_dir_write(&settings, &uuid)?;
     let mut info = read_info(&dir)?;
     info.name = name;
     info.updated_at = now_stamp();
@@ -296,7 +311,7 @@ pub async fn book_delete(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<String, String> {
-    let dir = find_book_dir(&settings, &uuid)?;
+    let dir = find_book_dir_write(&settings, &uuid)?;
     log::info!("[Book] Deleting book at '{}'", dir.display());
     let trashed = move_to_trash(&dir)?;
     log::info!("[Book] Book {} moved to trash '{}'", uuid, trashed.display());
@@ -355,7 +370,7 @@ pub async fn book_save_chapter(
     book_uuid: String,
     chapter: BookChapter,
 ) -> Result<(), String> {
-    let dir = find_book_dir(&settings, &book_uuid)?;
+    let dir = find_book_dir_write(&settings, &book_uuid)?;
     let conn = open_book_db(&dir)?;
     conn.execute(
         "INSERT OR REPLACE INTO book_chapter \
@@ -391,7 +406,7 @@ pub async fn book_delete_chapter(
     book_uuid: String,
     uuid: String,
 ) -> Result<(), String> {
-    let dir = find_book_dir(&settings, &book_uuid)?;
+    let dir = find_book_dir_write(&settings, &book_uuid)?;
     let conn = open_book_db(&dir)?;
     // Delete words belonging to sentences of this chapter, then sentences, then chapter.
     conn.execute(
@@ -507,7 +522,7 @@ pub async fn book_save_sentence(
     book_uuid: String,
     sentence: BookSentence,
 ) -> Result<(), String> {
-    let dir = find_book_dir(&settings, &book_uuid)?;
+    let dir = find_book_dir_write(&settings, &book_uuid)?;
     let conn = open_book_db(&dir)?;
     save_sentence_row(&conn, &sentence)?;
     {
@@ -528,7 +543,7 @@ pub async fn book_save_sentences(
     book_uuid: String,
     sentences: Vec<BookSentence>,
 ) -> Result<(), String> {
-    let dir = find_book_dir(&settings, &book_uuid)?;
+    let dir = find_book_dir_write(&settings, &book_uuid)?;
     let mut conn = open_book_db(&dir)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     for s in &sentences {
@@ -553,7 +568,7 @@ pub async fn book_delete_sentence(
     book_uuid: String,
     uuid: String,
 ) -> Result<(), String> {
-    let dir = find_book_dir(&settings, &book_uuid)?;
+    let dir = find_book_dir_write(&settings, &book_uuid)?;
     let conn = open_book_db(&dir)?;
     // Best-effort audio file removal.
     if let Ok(audio_path) = conn.query_row(
@@ -625,7 +640,7 @@ pub async fn book_save_word(
     book_uuid: String,
     word: BookSentenceWord,
 ) -> Result<(), String> {
-    let dir = find_book_dir(&settings, &book_uuid)?;
+    let dir = find_book_dir_write(&settings, &book_uuid)?;
     let conn = open_book_db(&dir)?;
     conn.execute(
         "INSERT OR REPLACE INTO book_sentence_word (uuid, sentence_uuid, word, word_type, note) \
@@ -657,7 +672,7 @@ pub async fn book_delete_word(
     book_uuid: String,
     uuid: String,
 ) -> Result<(), String> {
-    let dir = find_book_dir(&settings, &book_uuid)?;
+    let dir = find_book_dir_write(&settings, &book_uuid)?;
     let conn = open_book_db(&dir)?;
     conn.execute("DELETE FROM book_sentence_word WHERE uuid = ?1", [&uuid])
         .map_err(|e| e.to_string())?;
@@ -684,7 +699,7 @@ pub async fn book_write_audio(
     name: String,
     wav_base64: String,
 ) -> Result<AudioWriteResult, String> {
-    let dir = find_book_dir(&settings, &book_uuid)?;
+    let dir = find_book_dir_write(&settings, &book_uuid)?;
     let media_dir = dir.join("media");
     fs::create_dir_all(&media_dir).map_err(|e| e.to_string())?;
 
@@ -712,7 +727,7 @@ pub async fn book_import_audio(
     name: String,
     source_path: String,
 ) -> Result<AudioWriteResult, String> {
-    let dir = find_book_dir(&settings, &book_uuid)?;
+    let dir = find_book_dir_write(&settings, &book_uuid)?;
     let media_dir = dir.join("media");
     fs::create_dir_all(&media_dir).map_err(|e| e.to_string())?;
 

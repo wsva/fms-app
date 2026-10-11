@@ -5,7 +5,7 @@ use std::process::Command;
 use tauri::{AppHandle, Manager, State};
 
 use crate::datasets::dictation::align::split_book_sentences;
-use crate::datasets::find_dataset_dir;
+use crate::datasets::find_dataset_dir_write;
 use crate::settings::SettingsState;
 
 // ============================================================
@@ -271,7 +271,7 @@ pub async fn dataset_write_transcripts(
     settings: State<'_, SettingsState>,
     dataset_uuid: String,
 ) -> Result<String, String> {
-    let dataset_dir = find_dataset_dir(&settings, &dataset_uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &dataset_uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
     let transcript_dir = dataset_dir.join("transcript");
 
@@ -312,7 +312,7 @@ pub async fn dataset_parse_book(
     dataset_uuid: String,
     mode: Option<String>,
 ) -> Result<String, String> {
-    let dataset_dir = find_dataset_dir(&settings, &dataset_uuid)?;
+    let dataset_dir = find_dataset_dir_write(&settings, &dataset_uuid)?;
     let book_path = dataset_dir.join("book.txt");
     let db_path = dataset_dir.join("data.sqlite3");
 

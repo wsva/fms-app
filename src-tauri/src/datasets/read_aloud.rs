@@ -22,8 +22,8 @@ use uuid::Uuid;
 
 use crate::auth::workspace_identity;
 use crate::datasets::{
-    assert_uuid_free, dataset_roots, move_to_trash, now_stamp, read_info, read_info_opt, touch_info,
-    write_info, DatasetInfo, DatasetType, FORMAT_READ_ALOUD, INFO_FILE,
+    assert_uuid_free, dataset_roots, is_under_download_root, move_to_trash, now_stamp, read_info,
+    read_info_opt, touch_info, write_info, DatasetInfo, DatasetType, FORMAT_READ_ALOUD, INFO_FILE,
 };
 use crate::settings::SettingsState;
 use crate::datasets::textsim::similarity_score;
@@ -135,6 +135,20 @@ fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, Str
         }
     }
     Err(format!("Read-aloud dataset with UUID {} not found", uuid))
+}
+
+/// Write-resolution: refuses a read-only base under the download root
+/// (dataset-layers.md §6). Read commands keep using [`find_dataset_dir`].
+fn find_dataset_dir_write(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
+    let dir = find_dataset_dir(settings, uuid)?;
+    if is_under_download_root(settings, &dir) {
+        let name = read_info_opt(&dir).map(|i| i.name).unwrap_or_else(|| uuid.to_string());
+        return Err(format!(
+            "cannot write: '{}' is a read-only base under the download root; editing downloaded datasets arrives in a later update",
+            name
+        ));
+    }
+    Ok(dir)
 }
 
 /// Open (and initialize) a dataset's SQLite database.
@@ -310,7 +324,7 @@ pub async fn read_aloud_update(
     if name.trim().is_empty() {
         return Err("Name is required".into());
     }
-    let dir = find_dataset_dir(&settings, &uuid)?;
+    let dir = find_dataset_dir_write(&settings, &uuid)?;
     let mut info = read_info(&dir)?;
     info.name = name;
     if let Some(d) = description {
@@ -328,7 +342,7 @@ pub async fn read_aloud_delete(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<String, String> {
-    let dir = find_dataset_dir(&settings, &uuid)?;
+    let dir = find_dataset_dir_write(&settings, &uuid)?;
     log::info!("[ReadAloud] Deleting dataset at '{}'", dir.display());
     let trashed = move_to_trash(&dir)?;
     log::info!(
@@ -405,7 +419,7 @@ pub(crate) fn save_text_row(
     dataset_uuid: &str,
     text: &ReadText,
 ) -> Result<(), String> {
-    let dir = find_dataset_dir(settings, dataset_uuid)?;
+    let dir = find_dataset_dir_write(settings, dataset_uuid)?;
     let conn = open_db(&dir)?;
     conn.execute(
         "INSERT INTO read_text \
@@ -449,7 +463,7 @@ pub async fn read_aloud_delete_text(
     dataset_uuid: String,
     uuid: String,
 ) -> Result<(), String> {
-    let dir = find_dataset_dir(&settings, &dataset_uuid)?;
+    let dir = find_dataset_dir_write(&settings, &dataset_uuid)?;
     let conn = open_db(&dir)?;
     // Best-effort removal of every attempt's audio file.
     if let Ok(mut stmt) = conn.prepare("SELECT audio_path FROM read_attempt WHERE text_uuid = ?1") {
@@ -526,7 +540,7 @@ pub async fn read_aloud_delete_attempt(
     dataset_uuid: String,
     uuid: String,
 ) -> Result<(), String> {
-    let dir = find_dataset_dir(&settings, &dataset_uuid)?;
+    let dir = find_dataset_dir_write(&settings, &dataset_uuid)?;
     let conn = open_db(&dir)?;
     if let Ok(Some(rel)) = conn.query_row(
         "SELECT audio_path FROM read_attempt WHERE uuid = ?1",
@@ -564,7 +578,7 @@ pub(crate) fn save_attempt_row(
     dataset_uuid: &str,
     attempt: &ReadAttempt,
 ) -> Result<(), String> {
-    let dir = find_dataset_dir(settings, dataset_uuid)?;
+    let dir = find_dataset_dir_write(settings, dataset_uuid)?;
     let conn = open_db(&dir)?;
     conn.execute(
         "INSERT OR REPLACE INTO read_attempt \
@@ -638,7 +652,7 @@ pub async fn read_aloud_submit(
     wav_base64: String,
     recognized: String,
 ) -> Result<ReadAloudSubmitResult, String> {
-    let dir = find_dataset_dir(&settings, &dataset_uuid)?;
+    let dir = find_dataset_dir_write(&settings, &dataset_uuid)?;
 
     // Load the reference text. The read handle is scoped to this block so the
     // attempt write below gets a fresh connection instead of two live handles
