@@ -123,9 +123,7 @@ Note the shape: `transcribe → normalize_text` and `generate_waveform` are two 
 
 - Step `id`s are unique.
 - Every `depends_on` / `inputs` reference points at an existing step id.
-- Every `verify` / `adopt` id is one the domain's check provider actually registers — a typo
-  would silently disable a gate or a promotion, so it fails like a bad `depends_on` does. The
-  vocabulary is passed in from the binding layer; the engine only sees opaque strings.
+- Every `verify` / `adopt` id is one the domain's check provider actually registers — a typo would silently disable a gate or a promotion, so it fails like a bad `depends_on` does. The vocabulary is passed in from the binding layer; the engine only sees opaque strings.
 - The graph is **acyclic**.
 - Every `action` resolves to a registered executor (fail fast, not mid-run).
 - `name` and `version` are present.
@@ -170,8 +168,7 @@ Every step is in exactly one state:
 - `failed → ready` — automatic retry while `attempts` remain.
 - `blocked → ready` — the blocking condition clears (input arrives, dependency is retried and succeeds, manual unblock).
 - `completed → ready` — **invalidated** by evidence (see *Verification*), never by a clean probe.
-- `pending | ready → completed` — **adopted**: the step's `adopt` evidence is already clean on
-  disk (see *Verification*). The only upward move, and only for a step that asked for it.
+- `pending | ready → completed` — **adopted**: the step's `adopt` evidence is already clean on disk (see *Verification*). The only upward move, and only for a step that asked for it.
 - `any → skipped` — `when` false, or propagation from an upstream skip/ignore.
 
 `completed`, `failed` (retries exhausted) and `skipped` are terminal for the run unless an agent intervenes (retry / unblock / reset).
@@ -191,78 +188,94 @@ This is a pure function of the definition + current statuses, so it is stable an
 
 ## Verification — scoring progress against evidence
 
-Readiness is derived from the graph; it says nothing about whether the *artifacts a step
-produced* still exist. Verification is the one seam where the outside world is allowed to speak
-about a step, and the framework deliberately keeps it thin:
+Readiness is derived from the graph; it says nothing about whether the *artifacts a step produced* still exist. Verification is the one seam where the outside world is allowed to speak about a step, and the framework deliberately keeps it thin:
 
-- **The definition declares the relationship**, per step:
-  `verify: { blocks: [check ids], proves: [check ids] }`. `blocks` means "findings here say
-  *not yet*"; `proves` means "findings here contradict the claim that this step's output
-  holds". A step with no `verify:` is legitimately `unknown` — the absence of a binding is a
-  statement, not a gap.
-- **Checks are not engine concepts.** A check needs the domain's data access, so it lives in a
-  domain module that registers it under a stable id and hands the engine a `id → offender
-  count` map. The core never names a check, a file kind or a repair sentence; it only compares
-  opaque ids against the binding. Adding a new pipeline means a new provider, not an engine
-  change.
-- **Verdicts are a projection.** `verified` / `drifted` / `unknown` are recomputed on every
-  call and never written to `state.json`, so `state.json` stays exactly a replay of
-  `events.jsonl` and a verdict means "as of this probe". Render it beside a node's status, never
-  instead of it.
-- **A probe that could not measure cannot certify.** If any id a step binds was absent from the
-  evidence map (another domain's vocabulary, a short-circuited report), a would-be `verified`
-  downgrades to `unknown`. A clean bill of health over ids nobody measured is a lie.
-- **A probe only ever moves a step down.** With `apply` set, a `completed` step whose
-  `proves` evidence reports offenders goes back to `ready` (outputs kept, so `when:` guards
-  still resolve). A clean probe proves an artifact *exists*, never that this run made it — so
-  verification has no upward path, no promotion, ever.
-- **Adoption is the one upward move, and a step has to ask for it.** `adopt: [check ids]`
-  says: "if every one of these ids comes back measured *and* with zero offenders, record me
-  `completed` — the artifact is already on disk, and making the user run me again would claim
-  credit for work nobody did." Opt-in per step and deliberately rare, because **vacuity** is
-  the trap: a check that counts offenders over an empty subject (no media ⇒ no media is
-  missing subtitles) is vacuously clean. So an `adopt` list may name per-file ids only
-  alongside an id that *fails when the subject itself is absent* — one that reports an
-  offender exactly when there is nothing to walk, which turns a bundle of vacuous zeros into
-  a claim — and a step whose whole output is a single file may name only that file's
-  existence id.
-  Adoption never touches a step already `completed`, `failed`, `skipped` or `running` — a
-  human's judgement outranks the filesystem — and it withholds, with a reason, when an id was
-  not measured or reports offenders.
-- **Every status change costs an event.** Invalidation appends `invalidated` and adoption
-  appends `adopted`, like any other transition; neither gets a privileged path into
-  `state.json`. A probe or adoption that changes nothing writes nothing.
+- **The definition declares the relationship**, per step: `verify: { blocks: [check ids], proves: [check ids] }`. `blocks` means "findings here say *not yet*"; `proves` means "findings here contradict the claim that this step's output holds". A step with no `verify:` is legitimately `unknown` — the absence of a binding is a statement, not a gap.
+- **Checks are not engine concepts.** A check needs the domain's data access, so it lives in a domain module that registers it under a stable id and hands the engine a `id → offender count` map. The core never names a check, a file kind or a repair sentence; it only compares opaque ids against the binding. Adding a new pipeline means a new provider, not an engine change.
+- **Verdicts are a projection.** `verified` / `drifted` / `unknown` are recomputed on every call and never written to `state.json`, so `state.json` stays exactly a replay of `events.jsonl` and a verdict means "as of this probe". Render it beside a node's status, never instead of it.
+- **A probe that could not measure cannot certify.** If any id a step binds was absent from the evidence map (another domain's vocabulary, a short-circuited report), a would-be `verified` downgrades to `unknown`. A clean bill of health over ids nobody measured is a lie.
+- **A probe only ever moves a step down.** With `apply` set, a `completed` step whose `proves` evidence reports offenders goes back to `ready` (outputs kept, so `when:` guards still resolve). A clean probe proves an artifact *exists*, never that this run made it — so verification has no upward path, no promotion, ever.
+- **Adoption is the one upward move, and a step has to ask for it.** `adopt: [check ids]` says: "if every one of these ids comes back measured *and* with zero offenders, record me `completed` — the artifact is already on disk, and making the user run me again would claim credit for work nobody did." Opt-in per step and deliberately rare, because **vacuity** is the trap: a check that counts offenders over an empty subject (no media ⇒ no media is missing subtitles) is vacuously clean. So an `adopt` list may name per-file ids only alongside an id that *fails when the subject itself is absent* — one that reports an offender exactly when there is nothing to walk, which turns a bundle of vacuous zeros into a claim — and a step whose whole output is a single file may name only that file's existence id. Adoption never touches a step already `completed`, `failed`, `skipped` or `running` — a human's judgement outranks the filesystem — and it withholds, with a reason, when an id was not measured or reports offenders.
+- **Every status change costs an event.** Invalidation appends `invalidated` and adoption appends `adopted`, like any other transition; neither gets a privileged path into `state.json`. A probe or adoption that changes nothing writes nothing.
 
-The honesty rules — probes down-only, promotion only where a step opted in over non-vacuous
-evidence, and never over an id nobody measured — are what make it safe to let a
-read-only probe influence a run at all. The dictation instantiation (which check answers to
-which step, and what a probe cannot see at all) is in
-[`dictation.md`](./dictation.md#binding-checks-to-the-template).
+The honesty rules — probes down-only, promotion only where a step opted in over non-vacuous evidence, and never over an id nobody measured — are what make it safe to let a read-only probe influence a run at all. The dictation instantiation (which check answers to which step, and what a probe cannot see at all) is in [`dictation.md`](./dictation.md#binding-checks-to-the-template).
+
+### Why this seam exists
+
+A status answers *"what did this run do?"*, not *"what is true on disk right now?"* `completed` is recorded the instant an executor returns success, and nothing in the graph ever re-opens that claim against the world. Left alone, three ordinary events silently turn a green step into a lie:
+
+- **Out-of-band change.** A human, another run, or a sync deletes, edits or regenerates an artifact *after* the step completed. The state still says *done*; the files say otherwise.
+- **Interruption without a clean result.** A machine moved or a lease expired, and the output the step is credited for never landed — or landed somewhere now gone.
+- **Inherited credit.** A run was adopted or created on a subject already processed, so its `completed` reflects someone else's work rather than a transition this run earned.
+
+For a framework whose whole promise is *resume from files, ignore the conversation*, a stale `completed` is the most dangerous value a step can hold: `next()` reports nothing to do and the agent obeys. Getting "done" wrong costs more than getting "not yet" wrong, because a false `completed` **stops** work while a false `pending` merely starts it — the failure mode verification exists to catch is over-confidence, not under-reporting.
+
+The tempting alternatives are each rejected on principle:
+
+- **Fold the checks into `depends_on` / `when`.** A dependency edge is a statement about ordering *within one run*, evaluated once at scheduling time; it cannot re-say "the artifact that satisfied you three days ago has since gone stale". Readiness and truth are two different axes, so they stay two different mechanisms.
+- **Trust the executor's return code.** That code was a claim about a single moment, and the world is mutable afterward.
+- **Let a probe re-mark a step `completed` when the files look right.** That is precisely the lie the honesty rules forbid: clean files prove an artifact *exists*, never that *this run* made it. Promotion therefore stays the one explicit, opt-in, non-vacuous `adopt:` path — never a by-product of a probe.
+
+So verification is the *single* place the outside world is allowed to speak about a step, and the design's effort goes into making that narrow permission safe to grant: it stays thin (opaque ids and a count map), a projection (never written into `state.json`), and directional (it demotes freely but promotes only where a step asked and the evidence genuinely rules out vacuity). Every rule above is downstream of keeping this one seam honest.
+
+### Verification by example
+
+The rules above are deliberately abstract. This walks one *illustrative* binding through every outcome the engine can produce. It reuses the `process_dataset` steps from earlier and invents generic check ids (`audio_missing`, `transcript_missing`, `waveform_missing`, `subject_absent`) — none of this is a real pipeline; it is only here to show what each verdict and each move *means*.
+
+Suppose two steps carry a binding (and `download`, from the example, carries none):
+
+`````yaml
+  - id: transcribe
+    action: transcribe
+    depends_on: [extract_audio]
+    verify:
+      blocks: [audio_missing]        # findings here mean "not yet"
+      proves: [transcript_missing]   # findings here mean "my output no longer holds"
+
+  - id: generate_waveform
+    action: generate_waveform
+    depends_on: [extract_audio]
+    verify:
+      proves: [waveform_missing]
+    adopt: [subject_absent, waveform_missing]   # opt in to the one upward move
+`````
+
+A probe hands the engine a single evidence map — `id → offender count` — say `{ transcript_missing: 0, waveform_missing: 2, subject_absent: 0 }`. Every verdict below is a projection of that map against these bindings, recomputed on each call and never written to `state.json`.
+
+**1. No binding ⇒ `unknown`, and that is an answer.** `download` binds nothing, so no probe can say anything about it. Its verdict is `unknown` — not a gap to fill but a deliberate statement that the engine holds no subject-side evidence for this step.
+
+**2. `proves` clean *and measured* ⇒ `verified`.** `transcribe` binds `proves: [transcript_missing]` and the map reports it at `0`. The id was measured and came back clean, so `transcribe` reads `verified` — *as of this probe*. Nothing is persisted.
+
+**3. `proves` with offenders ⇒ `drifted`; `apply` demotes.** `generate_waveform` binds `proves: [waveform_missing]` and the map reports `2` ⇒ verdict `drifted`. On its own that is only a badge beside the node's status. If the call sets `apply` *and* the step was `completed`, the engine moves it back to `ready` (keeping its recorded `outputs`, so `when:` guards still resolve), appends one `invalidated` event naming `waveform_missing`, and rewrites state. A second identical probe finds it already `ready` and writes nothing.
+
+**4. A clean id nobody measured cannot certify.** Imagine a short-circuited probe that returns `{ subject_absent: 0 }` and omits `transcript_missing` entirely. `transcribe`'s only bound id is absent from the map, so its would-be `verified` downgrades to `unknown`. "Zero offenders" over an id nobody counted is not a clean bill of health — it is a lie, and the engine refuses to tell it.
+
+**5. Verification never moves a step up.** Even with every `proves` id clean, a `pending` `transcribe` stays `pending`. A clean probe proves the artifact *exists*, never that *this run* made it — a shipped dataset is indistinguishable from a processed one. The only upward move is adoption, and a step has to ask for it.
+
+**6. Adoption, and the vacuity trap.** `generate_waveform` opted in with `adopt: [subject_absent, waveform_missing]`. Adoption fires only when *every* listed id is present in the map *and* zero:
+
+| Evidence map | `subject_absent` | `waveform_missing` | Result |
+|---|---|---|---|
+| `{subject_absent: 0, waveform_missing: 0}` | measured, clean | measured, clean | **adopted** → `completed`, one `adopted` event |
+| `{subject_absent: 1, waveform_missing: 0}` | offender | clean | **withheld** — nothing to walk |
+| `{waveform_missing: 0}` | absent | clean | **withheld** — id not measured |
+| `{subject_absent: 0, waveform_missing: 2}` | clean | offenders | **withheld** — evidence disagrees |
+
+Row 2 is the whole reason `subject_absent` sits on the list. `waveform_missing` counts offenders over the audio files, so with *zero* audio files it comes back `0` **vacuously** — "no audio, therefore no audio is missing waveforms". Adopting on that alone would paint a green tick over work nobody did. `subject_absent` is the id that *fails when the subject itself is missing*: it reports an offender exactly when there is nothing to walk, which turns a bundle of vacuous zeros into a real claim.
+
+Adoption also never touches a step already `completed`, `failed`, `skipped` or `running` — a human's judgement outranks the filesystem — and it withholds *with a reason* (`not measured`, `the evidence disagrees`) rather than silently doing nothing.
 
 ### Refreshing a run's definition
 
-A run stores the definition text it was created from, and `load_bundle` enforces that
-`state.json` and `workflow.yaml` still agree — deliberately, so progress is never judged
-against intent that changed underneath it. That also makes a template edit a one-way door:
-every run opened before the edit would keep its older binding forever, and a check added to
-the vocabulary later would silently stop applying to datasets scanned earlier.
+A run stores the definition text it was created from, and `load_bundle` enforces that `state.json` and `workflow.yaml` still agree — deliberately, so progress is never judged against intent that changed underneath it. That also makes a template edit a one-way door: every run opened before the edit would keep its older binding forever, and a check added to the vocabulary later would silently stop applying to datasets scanned earlier.
 
-The engine allows exactly one narrow exception, decided by the run's own history rather than
-by a parameter:
+The engine allows exactly one narrow exception, decided by the run's own history rather than by a parameter:
 
-- `history_is_inherited_only(run)` is true when `events.jsonl` holds nothing but the run
-  opening, adoptions, invalidations and refreshes — no step was ever advanced, recorded,
-  skipped, retried or reset. Such a run is a *projection* of a template, not a piece of work.
-- Only for such a run may the binding layer call `rebind_definition(run, yaml)`: validate the
-  new text first, carry the status of every step that still exists under the same id, let the
-  added ones arrive through the ordinary recompute, drop the records of the ones that
-  vanished, and append `definition_refreshed` naming what was dropped.
-- A run holding earned progress keeps its definition, full stop. Nothing rewrites intent
-  because a newer file happened to exist.
+- `history_is_inherited_only(run)` is true when `events.jsonl` holds nothing but the run opening, adoptions, invalidations and refreshes — no step was ever advanced, recorded, skipped, retried or reset. Such a run is a *projection* of a template, not a piece of work.
+- Only for such a run may the binding layer call `rebind_definition(run, yaml)`: validate the new text first, carry the status of every step that still exists under the same id, let the added ones arrive through the ordinary recompute, drop the records of the ones that vanished, and append `definition_refreshed` naming what was dropped.
+- A run holding earned progress keeps its definition, full stop. Nothing rewrites intent because a newer file happened to exist.
 
-Whether two texts really differ is the caller's judgement, but it should be semantic: a
-comment-only edit to a template must not rewrite a run's file and journal a refresh that
-changed no behaviour.
+Whether two texts really differ is the caller's judgement, but it should be semantic: a comment-only edit to a template must not rewrite a run's file and journal a refresh that changed no behaviour.
 
 ---
 
@@ -305,6 +318,7 @@ Steps can pass values forward without the engine knowing what they mean:
 - A step declares `outputs`; the engine stores the produced references in `state.json` under that step.
 - A later step declares `inputs` referencing them, e.g. `${steps.transcribe.outputs.text}` or `${steps.download.outputs.path}`.
 - The executor reads its resolved inputs and writes its outputs; the framework only records the references.
+- **A `completed` must carry every name the step declares.** A missing output is not a partially-recorded step, it is a dependent that can never be scheduled: its `when:` guard or `inputs:` reference resolves against a name that never arrived and sits `blocked`, with nothing in `events.jsonl` explaining why. So `record` refuses such a completion and writes nothing — the step stays `running`, and the corrected call lands on it with its attempt intact. Values may arrive under `detail.outputs` or straight on `detail`; a value that genuinely does not exist is recorded as `"false"`/`"unknown"`, which is a judgement, while an absent key is only silence.
 
 If a workflow prefers, steps can instead communicate through an external store (filesystem, DB) and let the framework track **status only** — data flow is an opt-in convenience, never a requirement.
 
@@ -315,9 +329,9 @@ If a workflow prefers, steps can instead communicate through an external store (
 - **Retry** — `retry: { attempts, backoff }`: `failed → ready` until attempts are exhausted, then terminal `failed`.
 - **Timeout** — exceeding `timeout` yields `failed` (and retries if configured).
 - **`on_failure`** — per step (or a workflow default):
-  - `stop` — halt the run; dependents stay `pending`/`blocked`.
-  - `continue` — independent branches keep running; only the failed step's dependents are affected.
-  - `skip_dependents` — mark the transitive dependents `skipped` and move on.
+- `stop` — halt the run; dependents stay `pending`/`blocked`.
+- `continue` — independent branches keep running; only the failed step's dependents are affected.
+- `skip_dependents` — mark the transitive dependents `skipped` and move on.
 - **Blocked propagation** — a step whose dependency is `blocked`/`failed` becomes `blocked` (recoverable) rather than `failed`, so clearing the upstream issue resumes the downstream automatically.
 
 ---
