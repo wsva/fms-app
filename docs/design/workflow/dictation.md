@@ -143,7 +143,7 @@ The mapping moved from the report into the definition, where the pipeline alread
 
 | Field | Meaning |
 |---|---|
-| `verify.blocks` | check ids whose findings mean "not yet" |
+| `verify.blocks` | check ids whose findings mean "not yet" — advisory: they surface as `verification.gated` and the page warns about them, but the engine never withholds a `ready` step over a gate |
 | `verify.proves` | check ids whose findings mean "this step's output is missing, partial or drifted" |
 | `adopt` | check ids that must come back measured *and* clean for the step to be adopted as `completed` without running it |
 

@@ -57,7 +57,7 @@ A definition is a named, versioned set of **steps** forming a directed acyclic g
 | `when` | no | Condition/guard; if false the step is `skipped` (not failed) |
 | `inputs` | no | Named references to other steps' outputs (see *Data flow*) |
 | `outputs` | no | Named values this step produces, stored in state |
-| `verify` | no | `{ blocks, proves }` — which external checks this step answers to (see *Verification*) |
+| `verify` | no | `{ blocks, proves }` — which external checks this step answers to. The two are not equally powerful: `proves` is the only list that can retract a `completed`, `blocks` only annotates a verdict and reports a gate (see *Verification*) |
 | `adopt` | no | Check ids that must come back measured-and-clean for this step to be adopted as `completed` without running it (see *Verification*) |
 | `params` | no | Static arguments passed to the executor, verbatim by the engine; the binding layer substitutes `${run.dataset_uuid}` (see *Agent interface*) |
 | `retry` | no | `{ attempts, backoff }` — how many times to re-run on failure |
@@ -190,7 +190,8 @@ This is a pure function of the definition + current statuses, so it is stable an
 
 Readiness is derived from the graph; it says nothing about whether the *artifacts a step produced* still exist. Verification is the one seam where the outside world is allowed to speak about a step, and the framework deliberately keeps it thin:
 
-- **The definition declares the relationship**, per step: `verify: { blocks: [check ids], proves: [check ids] }`. `blocks` means "findings here say *not yet*"; `proves` means "findings here contradict the claim that this step's output holds". A step with no `verify:` is legitimately `unknown` — the absence of a binding is a statement, not a gap.
+- **The definition declares the relationship**, per step: `verify: { blocks: [check ids], proves: [check ids] }`. The two lists are not symmetric, and the asymmetry is the design: `proves` is about the output *this step claims*, so it is the only list that can judge a `completed` step and the only one that can ever change a status. `blocks` is about the *preconditions*, so it can only say "not yet" about a step that has claimed nothing. A step with no `verify:` is legitimately `unknown` — the absence of a binding is a statement, not a gap.
+- **`blocks` is advice, and only advice.** Offenders on a bound `blocks` id come back in the verdict beside the offending counts, and the step is listed in `verification.gated` — but only while it is `pending` or `ready`, because a gate on a step that already claims completion is a statement about someone else's files. Nothing is written, no status moves, and `next()` still hands the step back as ready: readiness is derived from the graph alone, so **holding off on a gated step is the caller's job**, and a step bound by `blocks` alone can only ever read `unknown` — nothing is claimed about its output, so nothing can agree or disagree with it, whatever the gate says. Withholding a gated step inside `next()` is the tempting alternative; it is refused because a decision that depends on a filesystem reading no one persisted would make the loop non-reproducible, which is the one property *Readiness derivation* exists to guarantee. Do not confuse the `blocks:` list with the `blocked` *state* — that one is derived from the graph (a failed or blocking-policy dependency) and is written to `state.json`; this one never is.
 - **Checks are not engine concepts.** A check needs the domain's data access, so it lives in a domain module that registers it under a stable id and hands the engine a `id → offender count` map. The core never names a check, a file kind or a repair sentence; it only compares opaque ids against the binding. Adding a new pipeline means a new provider, not an engine change.
 - **Verdicts are a projection.** `verified` / `drifted` / `unknown` are recomputed on every call and never written to `state.json`, so `state.json` stays exactly a replay of `events.jsonl` and a verdict means "as of this probe". Render it beside a node's status, never instead of it.
 - **A probe that could not measure cannot certify.** If any id a step binds was absent from the evidence map (another domain's vocabulary, a short-circuited report), a would-be `verified` downgrades to `unknown`. A clean bill of health over ids nobody measured is a lie.
@@ -199,6 +200,21 @@ Readiness is derived from the graph; it says nothing about whether the *artifact
 - **Every status change costs an event.** Invalidation appends `invalidated` and adoption appends `adopted`, like any other transition; neither gets a privileged path into `state.json`. A probe or adoption that changes nothing writes nothing.
 
 The honesty rules — probes down-only, promotion only where a step opted in over non-vacuous evidence, and never over an id nobody measured — are what make it safe to let a read-only probe influence a run at all. The dictation instantiation (which check answers to which step, and what a probe cannot see at all) is in [`dictation.md`](./dictation.md#binding-checks-to-the-template).
+
+### The same rules in plain terms
+
+The rules above are dense; this is the same content said plainly. The check ids are the illustrative ones from *Verification by example* below — no pipeline named here is a real one.
+
+A run is a checklist, each item ticked when it finishes — and a tick only ever says *"this finished at that moment."* Nothing re-opens it. So if `transcribe` went green on Monday and someone deletes its transcripts on Tuesday, the checklist still reads green, `next()` finds nothing to do, and an agent obediently does nothing. **Verification is the spot check that catches that.**
+
+- **Who does the checking.** A separate piece of code looks at the real files and returns numbers — `transcript_missing: 2`. The engine has no idea what a transcript is: it receives a list of check names with an offender count each and matches opaque strings against the binding in the YAML.
+- **What each list is for.** `proves: [transcript_missing]` means "findings here say my result has gone bad". `blocks: [audio_missing]` means "findings here say I should not have started yet" — which the engine reports and does not enforce.
+- **The three labels.** *verified* — the check ran and found nothing. *drifted* — it ran, found offenders, and so contradicts the green tick. *unknown* — there is no binding, or the check never ran: an honest "I can't tell", never a pass. They are shown beside the status and are not saved anywhere.
+- **A spot check may only move a step backwards.** A `completed` step found drifted goes back to `ready` so it can be redone. Files that look fine do **not** turn a step green: their existence never proves *this run* made them — they may be someone else's work from before, or shipped with the subject. The reasoning is the asymmetry: wrongly saying "done" stops all work, while wrongly saying "not done" costs only some extra work.
+- **The one exception is adoption.** A step may opt in with `adopt: [subject_absent, waveform_missing]`, meaning "if every one of these comes back measured *and* clean, mark me done without running me — the result is already on disk". That is what keeps a subject prepared by hand, or by another device, from being reprocessed.
+- **The trap is a vacuous pass.** "No audio file is missing waveforms" is satisfied by a folder holding no audio at all — no files, so no offenders. Adopt on that and a green tick lands over nothing. So an `adopt` list must name, beside its per-file checks, one that *fails when the subject itself is absent* (`subject_absent`), and adoption is refused outright if any listed check did not run.
+
+> In one line: verification lets the real files **veto** a green tick, and lets them **grant** one only for the steps that asked for it, only when the evidence is solid.
 
 ### Why this seam exists
 
@@ -264,6 +280,8 @@ A probe hands the engine a single evidence map — `id → offender count` — s
 Row 2 is the whole reason `subject_absent` sits on the list. `waveform_missing` counts offenders over the audio files, so with *zero* audio files it comes back `0` **vacuously** — "no audio, therefore no audio is missing waveforms". Adopting on that alone would paint a green tick over work nobody did. `subject_absent` is the id that *fails when the subject itself is missing*: it reports an offender exactly when there is nothing to walk, which turns a bundle of vacuous zeros into a real claim.
 
 Adoption also never touches a step already `completed`, `failed`, `skipped` or `running` — a human's judgement outranks the filesystem — and it withholds *with a reason* (`not measured`, `the evidence disagrees`) rather than silently doing nothing.
+
+**7. A `blocks` finding gates, and gating writes nothing.** Suppose the map also reports `audio_missing: 1`. `transcribe` binds it under `blocks`, so the verdict payload names the offender and `transcribe` appears in `verification.gated` — and that is the entire effect. Its status is untouched, no event is appended, and if it was `ready` then `next()` still offers it, because a probe is not the scheduler. Read the gate as what the evidence says about *starting* the step; the caller decides.
 
 ### Refreshing a run's definition
 
