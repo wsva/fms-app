@@ -19,7 +19,7 @@ This is the **domain** half of the workflow docs. [`core.md`](./core.md) specifi
 | The join itself (verdicts, invalidation) | `src-tauri/src/workflow/core/mod.rs::verify` → `workflow_verify` command + MCP tool |
 | Adoption (clean evidence ⇒ `completed`, the one upward move) | `src-tauri/src/workflow/core/mod.rs::adopt` → `workflow_adopt` command + MCP tool |
 | Refreshing a run's definition, while and only while its whole history was inherited | `src-tauri/src/workflow/core/mod.rs::{history_is_inherited_only, rebind_definition}`, called from `verify.rs::adopt` |
-| The one call an agent starts from: identity + audit + every run scored against it + model state + a hint | `src-tauri/src/datasets/report.rs` → `dataset_full_report` MCP tool (read-only: scores with `apply: false`, so it describes drift and adopts nothing) |
+| The one call an agent starts from: identity + audit + every run scored against it + model state + a hint | `src-tauri/src/datasets/report.rs` → `dataset_full_report` MCP tool (read-only: scores with `apply: false`, so it describes drift and adopts nothing). Its `audit` section is a **projection** of `dataset_audit`: exact counts, at most 5 offenders per check, a shared finding hoisted into `item_detail`; its `workflow.runs` is **ranked** — `canonical_run_id` first, then the most advanced — and carries `verdicts` only for `completed` steps |
 | The recipe that drives this pipeline from goose | `docs/ai/goose_recipe/dataset_dictation.yaml` (the runnable recipe) + `dataset_dictation.md` (same instructions, prose form — keep the two in sync) |
 | Rendering the verdicts | `src/lib/workflow/verify.ts` (labels and sentences only — no ids) |
 | In-app Run buttons per step | `src/lib/workflow/step-ops.ts` (`STEP_OPS`, keyed by step id) |
@@ -29,6 +29,8 @@ This is the **domain** half of the workflow docs. [`core.md`](./core.md) specifi
 The template is not duplicated anywhere: the frontend fetches it at runtime, so editing the YAML edits the graph, the Run order, the evidence binding and the agent's instructions at once.
 
 **Why the template's `version` was not bumped when `verify:` was added.** `load_bundle` refuses a run whose `state.json` name/version differs from its stored `workflow.yaml`. Bumping to 3 would have made every existing `dictation-<uuid>` run unloadable — a schema addition that is purely additive should cost nobody their history. Old runs keep working; their stored YAML simply has no bindings, so every step verifies as `unknown` until the run is recreated.
+
+**Why version 5 was bumped anyway.** Adding `adopt:` changed what a scan may conclude, and handing steps their subject in `params` changed what a step means as a call; version 5 gives the long steps a `timeout:`, which changes what the *engine* does to a claimed step — the thing that used to reap a live transcription back to `ready` at 300 s and have forty-seven files transcribed twice. A bump costs an existing run nothing (it keeps the definition it was created under and its own lease rules) but it does mean the newer rules never reach a run that already earned progress — only a purely-inherited run is rebound. So the fix for a long-running step in an old run is to record it, not to wait for the template.
 
 ## The pipeline
 
@@ -54,6 +56,8 @@ Two shape decisions are worth keeping in mind when editing it:
 ## The page
 
 Four breadcrumb levels, each one a full-width list: **kind → dataset → template → workflow**. There is no back/forward chrome — the breadcrumb *is* the navigation, and a run view is reachable only through its dataset, which is the only context in which its run directory makes sense. Runs are addressed as `dictation-<uuid>` (`runIdFor`), matching the on-disk `<dataset>/workflows/<run_id>/` layout so a run travels with the dataset when it syncs.
+
+That id is a convention, not a constraint: nothing stops a second run, and an agent that called `workflow_create` with an id of its own has produced exactly one. So the backend names the convention too (`workflow::canonical_run_id`) and `dataset_full_report` ranks runs by it — the hint follows the run the page shows, and says out loud when a dataset carries more than one. Before that, the hint followed `runs[0]` in *directory* order, and a three-hour session did all its work in an orphan run while this page's run sat untouched.
 
 Three rules the page obeys:
 

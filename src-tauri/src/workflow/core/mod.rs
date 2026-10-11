@@ -137,6 +137,10 @@ pub struct Step {
     pub params: Map<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryPolicy>,
+    /// How long a claim on this step stays live — the lease timeout in seconds
+    /// (see [`Step::lease_secs`] and [`engine::LEASE_TIMEOUT_SECS`]). Not a work
+    /// budget and not an executor deadline: this build has no executor, so the
+    /// only thing it governs is when an unreaped `running` step is assumed dead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -166,6 +170,17 @@ impl Step {
     /// [`adopt`] skips a step whose list is absent or empty).
     fn adopt_ids(&self) -> &[String] {
         self.adopt.as_deref().unwrap_or(&[])
+    }
+    /// Seconds a claim on this step is honoured for before [`engine::recompute`]
+    /// reaps it back to `pending`. Defaults to [`engine::LEASE_TIMEOUT_SECS`],
+    /// which is tuned for a crash, not for a long batch: a step that legitimately
+    /// outlives 5 minutes (transcribing a dataset, say) has to raise `timeout:`
+    /// itself, or the engine declares it dead while it is still being worked on.
+    fn lease_secs(&self) -> i64 {
+        self.timeout
+            .filter(|t| *t > 0)
+            .map(|t| t.min(i64::MAX as u64) as i64)
+            .unwrap_or(engine::LEASE_TIMEOUT_SECS)
     }
 }
 
@@ -347,19 +362,52 @@ pub(crate) fn next_steps(base: &Path, run_id: &str) -> Result<Value, String> {
             "inputs": inputs,
             "declared_outputs": step.outputs,
             "max_attempts": step.max_attempts(),
+            "lease_secs": step.lease_secs(),
         }));
     }
 
+    // A step claimed and never reported is the one state in which nothing is
+    // runnable *and* nothing will ever become runnable by itself. Name it:
+    // "no runnable steps" reads to a waiting agent like "the app is busy",
+    // which is how a session ends with a claimed step and no result.
+    let claimed: Vec<Value> = def
+        .steps
+        .iter()
+        .filter_map(|s| {
+            let ss = state.steps.get(&s.id)?;
+            (ss.status == Status::Running).then(|| {
+                json!({
+                    "id": s.id,
+                    "lease": ss.lease,
+                    "started_at": ss.started_at,
+                    "attempt": ss.attempt,
+                    "lease_secs": s.lease_secs(),
+                })
+            })
+        })
+        .collect();
+
     let run_status = engine::classify_run(&def, &state);
-    let hint = if steps.is_empty() {
-        format!("no runnable steps (run_status={run_status}); call workflow_status for blocked/failed reasons")
-    } else {
+    let hint = if !steps.is_empty() {
         format!(
             "{} step(s) ready; call workflow_advance(run_id, step) to claim one, do the work, then report via workflow_record",
             steps.len()
         )
+    } else if let Some(held) = claimed.first().and_then(|c| c["id"].as_str()) {
+        format!(
+            "no runnable steps: '{}' is claimed{} and its outcome was never reported, so nothing \
+             else can start. Report it with workflow_record(run_id, step, \
+             event=completed|failed) — a reaped lease makes the step ready again and \
+             workflow_record accepts a ready step, so recovery needs no intervene. \
+             workflow_intervene(op=reset) only hands the claim to someone else while the work \
+             may still be running.",
+            held,
+            if claimed.len() > 1 { format!(" (with {} other(s))", claimed.len() - 1) } else { String::new() },
+        )
+    } else {
+        format!("no runnable steps (run_status={run_status}); call workflow_status for blocked/failed reasons")
     };
-    Ok(json!({ "run_id": run_id, "run_status": run_status, "steps": steps, "hint": hint }))
+    Ok(json!({ "run_id": run_id, "run_status": run_status, "steps": steps, "claimed": claimed, "hint": hint }))
 }
 
 /// Claim a `ready` step (single-flight via lease) and hand its resolved action
@@ -380,17 +428,49 @@ pub(crate) fn advance(
     match ss.status {
         Status::Ready => {}
         Status::Running => {
-            if engine::lease_live(ss.status, ss.heartbeat, now) {
+            if engine::lease_live(step, ss.heartbeat, now) {
                 return Err(format!(
-                    "step '{step_id}' is already claimed by '{}'; wait for it, or intervene (reset) if that lease is stale",
-                    ss.lease.clone().unwrap_or_else(|| "another agent".into())
+                    "step '{step_id}' is already claimed by '{}' (lease held for {}s of its {}s); \
+                     wait for it, or workflow_intervene(op=reset) if that claim is stale",
+                    ss.lease.clone().unwrap_or_else(|| "another agent".into()),
+                    now - ss.heartbeat.unwrap_or(now),
+                    step.lease_secs(),
                 ));
             }
             // Expired lease: fall through and re-claim (executors are idempotent).
         }
         other => {
+            // Name the obstacle instead of forwarding to another call: the reason is
+            // already in hand, and an agent that has to make one more round trip to
+            // learn why a step is not ready usually does not make it.
+            let unmet: Vec<String> = step
+                .depends_on
+                .iter()
+                .filter(|dep| {
+                    !matches!(
+                        state.steps.get(dep.as_str()).map(|s| s.status),
+                        Some(Status::Completed) | Some(Status::Skipped)
+                    )
+                })
+                .map(|dep| {
+                    let st = state
+                        .steps
+                        .get(dep.as_str())
+                        .map(|s| s.status.as_str())
+                        .unwrap_or("pending");
+                    format!("'{dep}' is '{st}'")
+                })
+                .collect();
+            let why = if unmet.is_empty() {
+                ss.reason
+                    .clone()
+                    .unwrap_or_else(|| "no dependency is unmet, so this status was recorded".into())
+            } else {
+                format!("unfinished dependencies: {}", unmet.join(", "))
+            };
             return Err(format!(
-                "step '{step_id}' is '{:?}', not 'ready', so it cannot be advanced. Call workflow_status to see why.",
+                "step '{step_id}' is '{:?}', not 'ready', so it cannot be advanced: {why}. Advance \
+                 what it waits on first, or workflow_intervene to change this step's state.",
                 other
             ))
         }
@@ -426,7 +506,8 @@ pub(crate) fn advance(
         "params": step.params,
         "inputs": inputs,
         "declared_outputs": step.outputs,
-        "hint": "perform the action, then report the outcome with workflow_record(run_id, step, event=completed|failed|blocked, detail)",
+        "lease_secs": step.lease_secs(),
+        "hint": "perform the action, then report the outcome with workflow_record(run_id, step, event=completed|failed|blocked, detail) before this step's lease expires",
     }))
 }
 

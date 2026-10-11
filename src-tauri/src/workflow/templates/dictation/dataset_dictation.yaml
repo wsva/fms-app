@@ -83,7 +83,20 @@ name: process_dictation_dataset
 # Version 4 hands every dataset-scoped step its subject in `params`, which changes
 # what a step *means as a call* — an agent following version 3 literally could not
 # perform it.
-version: 4
+# Version 5 gives the long steps a `timeout:`. A claim is reaped after 300s without
+# a report, which is a crash timeout and not a work budget: transcribing a dataset
+# takes hours, so the engine used to declare live work dead, return the step to
+# `ready` and let the same files be transcribed twice. This changes what the engine
+# does with a claimed step, so it is a new version — and a run that already exists
+# keeps its own lease rules until its definition is rebound (which a scan does only
+# for a run whose whole history is adoptions).
+version: 5
+
+# `timeout:` on a step is its lease, in seconds: how long `running` with nobody
+# reporting the outcome is tolerated before the engine calls the work interrupted
+# and returns the step to `ready`. Leave it off a step that finishes in seconds;
+# raise it on anything that can legitimately run for minutes, or the claim is reaped
+# while the work is still happening.
 
 steps:
   # ── Stage 0: STT model readiness ────────────────────────────────────────────
@@ -173,6 +186,10 @@ steps:
     # outcome — `media_none` is what turns those four zeros into a claim.
     adopt: [media_none, subtitles_missing, subtitles_unreadable, subtitles_not_imported, subtitles_out_of_sync]
     retry: { attempts: 2, backoff: "1m" }
+    # Hours, not minutes: dozens of files transcribed inline on whatever CPU this
+    # machine has. The 300s default would reap the claim mid-work, the step would go
+    # back to `ready` and the same audio would be transcribed a second time over.
+    timeout: 14400
 
   - id: generate_waveforms
     title: Generate waveforms
@@ -180,6 +197,7 @@ steps:
     action: dataset_generate_waveforms
     params:
       uuid: "${run.dataset_uuid}"
+    timeout: 3600
     depends_on:
       - sync_media
     verify:
@@ -212,6 +230,7 @@ steps:
     action: dataset_align_cues
     params:
       uuid: "${run.dataset_uuid}"
+    timeout: 3600
     depends_on:
       - detect_reference
     verify:
@@ -224,6 +243,7 @@ steps:
     action: dataset_align_cues_transcript
     params:
       uuid: "${run.dataset_uuid}"
+    timeout: 3600
     depends_on:
       - detect_reference
     verify:
@@ -250,6 +270,7 @@ steps:
     # zero. This is the only step whose evidence can say "some adjustment exists"
     # but never which mode or strategy made it — see docs/design/workflow/dictation.md.
     adopt: [media_none, cues_unadjusted, adjust_blocked_no_waveform]
+    timeout: 3600
     params:
       uuid: "${run.dataset_uuid}"
       mode: "new"

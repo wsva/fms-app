@@ -164,7 +164,7 @@ impl DatasetMcpServer {
         ok(&v)
     }
 
-    #[tool(name = "workflow_next", description = "Return the runnable (ready, unclaimed) steps of a run with their resolved action, static params and data-flow inputs, ready for the agent to execute. Empty when nothing is runnable; the hint explains the current run_status. Each entry is an executable call: a dataset-scoped run fills in the subject, so `params.uuid` names the dataset its actions work on.")]
+    #[tool(name = "workflow_next", description = "Return the runnable (ready, unclaimed) steps of a run with their resolved action, static params and data-flow inputs, ready for the agent to execute. Each step carries `lease_secs`: how long a claim on it is honoured before the engine assumes the work died — a step that legitimately runs longer than that (transcribing a dataset) must be given a bigger `timeout:` in the definition. Also returns `claimed`: the steps held by a lease with no recorded outcome, which is why nothing may be runnable; report them with workflow_record before anything else. Empty `steps` with empty `claimed` means genuinely nothing can run; the hint explains the current run_status. Each entry is an executable call: a dataset-scoped run fills in the subject, so `params.uuid` names the dataset its actions work on.")]
     async fn workflow_next(
         &self,
         Parameters(param): Parameters<WorkflowRunParam>,
@@ -185,7 +185,7 @@ impl DatasetMcpServer {
         crate::workflow::definition_text(state.inner(), param.dataset_uuid.as_deref(), &param.run_id)
     }
 
-    #[tool(name = "workflow_advance", description = "Claim a ready step (single-flight via a lease) and hand its resolved action + inputs back to you to perform. This does NOT execute anything: the response is the call to make — `action` plus `params`, whose `uuid` is the dataset this run is filed under — and you must report the outcome with workflow_record before your turn ends. A step you claimed and never reported sits `running` under your lease while nothing is running. Errors if the step is not ready or is already claimed by a live lease.")]
+    #[tool(name = "workflow_advance", description = "Claim a ready step (single-flight via a lease) and hand its resolved action + inputs back to you to perform. This does NOT execute anything: the response is the call to make — `action` plus `params`, whose `uuid` is the dataset this run is filed under — and you must report the outcome with workflow_record before your turn ends. `lease_secs` in the response is how long you have: after that the engine reaps the claim back to ready, so work still in flight gets performed twice and the step you are on can be re-claimed by anyone. A step you claimed and never reported sits `running` under your lease while nothing is running. Errors if the step is not ready — naming what it waits on — or is already claimed by a live lease.")]
     async fn workflow_advance(
         &self,
         Parameters(param): Parameters<WorkflowAdvanceParam>,

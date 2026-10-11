@@ -16,11 +16,19 @@
 //!
 //! Desktop-only, like the audit and the engine it reads.
 
+use std::path::Path;
+
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
 use crate::datasets::{find_dataset_dir_typed, read_info, DatasetType};
 use crate::settings::SettingsState;
+
+/// Offenders one check lists in a *report*. `dataset_audit` caps at 100 because
+/// the page renders a table of them; a report is read by a model, and 47 copies
+/// of one sentence about 47 different files teach it nothing the exact `count`
+/// has not already told it — for the price of a few thousand context tokens.
+const REPORT_ITEM_CAP: usize = 5;
 
 /// Assemble the report for one dataset: identity, audit, workflow record, model
 /// state, and one actionable `hint` naming the next call to make.
@@ -75,7 +83,98 @@ fn audit_section(
             obj.remove(key);
         }
     }
-    Ok(value)
+    Ok(slim_audit(value))
+}
+
+/// Project the audit down for a report reader: every check keeps its verdict, its
+/// exact count and its advice, but lists only a sample of offenders and says a
+/// finding shared by several files once (`item_detail`) instead of once per file.
+/// The full list is one `dataset_audit` call away, which each check's `advice`
+/// already tells the reader to want.
+fn slim_audit(mut value: Value) -> Value {
+    if let Some(checks) = value.get_mut("checks").and_then(Value::as_array_mut) {
+        for check in checks.iter_mut() {
+            slim_check(check);
+        }
+    }
+    value
+}
+
+fn slim_check(check: &mut Value) {
+    let Some(map) = check.as_object_mut() else {
+        return;
+    };
+    let items = match map.remove("items") {
+        Some(Value::Array(items)) => items,
+        _ => Vec::new(),
+    };
+    // `truncated` speaks for the audit's own cap, which this projection replaces.
+    map.remove("truncated");
+    let shown: Vec<Value> = items.iter().take(REPORT_ITEM_CAP).cloned().collect();
+    if items.len() > shown.len() {
+        map.insert("items_omitted".into(), json!(items.len() - shown.len()));
+    }
+    match shared_detail(&shown) {
+        // One finding, many files: name the finding once, keep the files a list.
+        Some(detail) => {
+            map.insert("item_detail".into(), json!(detail));
+            map.insert(
+                "items".into(),
+                Value::Array(
+                    shown
+                        .iter()
+                        .filter_map(|i| i.get("source").and_then(Value::as_str))
+                        .map(|s| Value::String(s.to_string()))
+                        .collect(),
+                ),
+            );
+        }
+        // Different reasons per file — those are the findings worth reading.
+        None => {
+            map.insert("items".into(), Value::Array(shown));
+        }
+    }
+}
+
+/// The one finding behind every shown offender, with each file's own name
+/// replaced by `<file>`. `None` when they differ after all, or when there is only
+/// one item and hoisting would buy nothing.
+fn shared_detail(items: &[Value]) -> Option<String> {
+    if items.len() < 2 {
+        return None;
+    }
+    // Generalize everything first, then compare: the finding sentence has to be
+    // read once per file either way, and this way no borrow straddles a loop.
+    let candidates: Option<Vec<String>> = items
+        .iter()
+        .map(|item| {
+            let obj = item.as_object()?;
+            let detail = obj.get("detail").and_then(Value::as_str)?;
+            let source = obj.get("source").and_then(Value::as_str)?;
+            Some(generalize(detail, source))
+        })
+        .collect();
+    let candidates = candidates?;
+    let first = candidates.first()?;
+    candidates.iter().all(|c| c == first).then(|| first.clone())
+}
+
+/// Replace every spelling of one finding's file — the source path and its
+/// extension-less stem, which is how the artefacts beside it are named — with
+/// `<file>`.
+fn generalize(detail: &str, source: &str) -> String {
+    let stem = Path::new(source).with_extension("");
+    let stem = stem.to_string_lossy();
+    let out = if source.is_empty() {
+        detail.to_string()
+    } else {
+        detail.replace(source, "<file>")
+    };
+    if stem.is_empty() || stem.as_ref() == source {
+        out
+    } else {
+        out.replace(stem.as_ref(), "<file>")
+    }
 }
 
 /// Every run this dataset carries, scored against the audit, plus what is
@@ -113,9 +212,58 @@ fn workflow_section(
                 obj.insert("next".into(), next);
             }
         }
+        slim_run(&mut scored);
         runs.push(scored);
     }
-    Ok(json!({ "run_count": runs.len(), "runs": runs }))
+    order_runs(uuid, &mut runs);
+    Ok(json!({
+        "run_count": runs.len(),
+        // The id the app's own page would use, whether or not it exists: with more
+        // than one run in play, a reader needs to know which one the UI shows.
+        "canonical_run_id": crate::workflow::canonical_run_id(uuid),
+        "runs": runs,
+    }))
+}
+
+/// Drop what a report reader cannot act on: `verdicts` for steps that have not
+/// claimed to be finished. A `verified` verdict on a `ready` step only says the
+/// evidence agrees with work nobody has done yet, and the audit's counts already
+/// say that — while every verdict worth reading (`drifted`, `undecidable`) sits on
+/// a `completed` step, which is what this keeps.
+fn slim_run(run: &mut Value) {
+    if let Some(Value::Object(verdicts)) = run.get_mut("verdicts") {
+        verdicts.retain(|_, v| v.get("status").and_then(Value::as_str) == Some("completed"));
+    }
+}
+
+/// Put the run a caller should act on first: the one the app's page drives, then
+/// the most advanced, then by id so two reports of one dataset read identically.
+///
+/// Directory order is not a ranking, and treating it as one cost a real session
+/// three hours: an agent worked in a stray run the report happened to list first
+/// while the canonical run — the one the user looks at — never moved, and both
+/// `workflow_advance` and `workflow_record` were perfectly happy about that.
+fn order_runs(dataset_uuid: &str, runs: &mut Vec<Value>) {
+    let canonical = crate::workflow::canonical_run_id(dataset_uuid);
+    // An owned rank key, not a borrowed one: the id is read out of the run the
+    // comparator is handed, so a `sort_by_key` closure cannot return it.
+    runs.sort_by(|a, b| rank(a, &canonical).cmp(&rank(b, &canonical)));
+}
+
+fn rank(run: &Value, canonical: &str) -> (i32, std::cmp::Reverse<u64>, String) {
+    let id = run.get("run_id").and_then(Value::as_str).unwrap_or("");
+    (
+        if id == canonical { 0 } else { 1 },
+        // An unreadable run has no `counts`, so it ranks last — a run whose
+        // progress is unknown is never the one to tell an agent to work in.
+        std::cmp::Reverse(
+            run.get("counts")
+                .and_then(|c| c.get("completed"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        ),
+        id.to_string(),
+    )
 }
 
 /// The STT model state, minus the parts that are not about this dataset.
@@ -149,12 +297,15 @@ fn next_action(report: &Value) -> String {
     }
 
     let workflow = &report["workflow"];
+    let canonical = workflow["canonical_run_id"].as_str().unwrap_or("");
     if workflow["run_count"].as_u64().unwrap_or(0) == 0 {
-        return "no workflow run recorded for this dataset — call workflow_builtin_templates, \
-                then workflow_adopt with that YAML as definition_yaml to open a run whose \
-                statuses come from the audit above (every step whose adopt: checks were \
-                measured clean is marked completed without being run)"
-            .into();
+        return format!(
+            "no workflow run recorded for this dataset — call workflow_builtin_templates, then \
+             workflow_adopt with that YAML as definition_yaml and run_id='{canonical}' (the id the \
+             app's Workflow page uses) to open a run whose statuses come from the audit above: \
+             every step whose adopt: checks were measured clean is marked completed without \
+             being run"
+        );
     }
 
     let run = &workflow["runs"][0];
@@ -199,13 +350,38 @@ fn next_action(report: &Value) -> String {
                      on a dependency's output, so record that dependency first",
                     id_list(&run["blocked"]).join(", ")
                 ),
-                other => format!(
-                    "run '{run_id}' is '{other}' with nothing ready — call workflow_status for the \
-                     per-step reasons"
-                ),
+                other => {
+                    // Nothing ready and the run is neither complete nor blocked: a step
+                    // is claimed and nobody reported its outcome. That is the one dead
+                    // end which looks from here like the app being busy, so name the
+                    // claim and the call that clears it — a session that reads "stalled"
+                    // as "in progress" ends its turn and leaves the run claimed forever.
+                    let claimed = claimed_steps(run);
+                    if claimed.is_empty() {
+                        format!(
+                            "run '{run_id}' is '{other}' with nothing ready — call workflow_status \
+                             for the per-step reasons"
+                        )
+                    } else {
+                        format!(
+                            "run '{run_id}' is stalled: {}; its outcome was never reported, so \
+                             nothing else can start. workflow_record(run_id='{run_id}', step, \
+                             event=completed) if you did the work, event=failed if you did not \
+                             (a reaped lease returns the step to ready and workflow_record accepts \
+                             a ready step), workflow_intervene(op=reset) only to hand the claim over",
+                            claimed.join("; ")
+                        )
+                    }
+                }
             }
         }
     };
+
+    // Several runs on one dataset is a real state, not a detail: they are separate
+    // histories, and progress recorded in one is invisible in the others.
+    if let Some(note) = multi_run_note(workflow) {
+        hint.push_str(&note);
+    }
 
     // The one prerequisite no run knows about: without a loaded model every
     // transcription step fails, and that reads like a pipeline bug.
@@ -231,6 +407,70 @@ fn id_list(value: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Steps claimed and not yet reported, phrased the way the hint names them.
+///
+/// Reads the `steps` view rather than `next.claimed` because the view is what the
+/// engine writes after reaping: a step whose lease has expired is already back to
+/// `pending` there, so a hint built this way never tells an agent to report a claim
+/// nobody holds.
+fn claimed_steps(run: &Value) -> Vec<String> {
+    run.get("steps")
+        .and_then(Value::as_object)
+        .map(|steps| {
+            steps
+                .iter()
+                .filter(|(_, view)| view.get("status").and_then(Value::as_str) == Some("running"))
+                .map(|(id, view)| {
+                    let holder = view
+                        .get("lease")
+                        .and_then(Value::as_str)
+                        .unwrap_or("an agent");
+                    match view.get("started_at").and_then(Value::as_str) {
+                        Some(started) => format!("'{id}' is claimed by '{holder}' since {started}"),
+                        None => format!("'{id}' is claimed by '{holder}'"),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The sentence explaining which run the hint follows, when a dataset carries more
+/// than one. `None` when there is only one, which is the normal case and needs no
+/// qualification of the hint above it.
+fn multi_run_note(workflow: &Value) -> Option<String> {
+    let runs = workflow.get("runs").and_then(Value::as_array)?;
+    if runs.len() < 2 {
+        return None;
+    }
+    let chosen = runs[0].get("run_id").and_then(Value::as_str).unwrap_or("?");
+    let others: Vec<&str> = runs
+        .iter()
+        .skip(1)
+        .filter_map(|r| r.get("run_id").and_then(Value::as_str))
+        .collect();
+    let canonical = workflow
+        .get("canonical_run_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let followed = if canonical.is_empty() || canonical == chosen {
+        format!("'{chosen}' is the run the app's Workflow page uses")
+    } else {
+        format!(
+            "this hint follows '{chosen}'; the Workflow page uses '{canonical}', which is either \
+             behind or does not exist yet (workflow_adopt with run_id='{canonical}' opens it)"
+        )
+    };
+    Some(format!(
+        " Note: this dataset carries {} runs and they are separate histories — {} — so work \
+         recorded in '{chosen}' does not show up in [{}]. Consolidate by finishing or deleting \
+         the stray run(s), never by copying statuses between them.",
+        runs.len(),
+        followed,
+        others.join(", "),
+    ))
 }
 
 #[cfg(test)]
@@ -366,5 +606,154 @@ mod tests {
             "stt_model": loaded(),
         }));
         assert_eq!(hint, "no audit provider for 'book' datasets yet");
+    }
+
+    #[test]
+    fn a_stalled_run_names_the_claimed_step_and_the_call_that_clears_it() {
+        let hint = next_action(&report(
+            json!({
+                "run_count": 1,
+                "runs": [{
+                    "run_id": "dictation-u",
+                    "run_status": "in_progress",
+                    "ready": [],
+                    "failed": [],
+                    "blocked": [],
+                    "verification": { "drifted": [] },
+                    "steps": {
+                        "generate_subtitles": {
+                            "status": "running", "lease": "agent", "started_at": "2026-10-11T03:54:33Z"
+                        }
+                    },
+                }],
+            }),
+            loaded(),
+        ));
+        assert!(hint.contains("stalled"), "{hint}");
+        assert!(hint.contains("generate_subtitles"), "{hint}");
+        assert!(hint.contains("workflow_record"), "{hint}");
+    }
+
+    /// A reaped lease is not a claim, and telling an agent to report one would
+    /// send it at an error — the step is `ready` again and only needs doing.
+    #[test]
+    fn a_reaped_claim_is_not_reported_as_still_claimed() {
+        let hint = next_action(&report(
+            json!({
+                "run_count": 1,
+                "runs": [{
+                    "run_id": "dictation-u",
+                    "run_status": "in_progress",
+                    "ready": [],
+                    "failed": [],
+                    "blocked": [],
+                    "verification": { "drifted": [] },
+                    "steps": {
+                        "generate_subtitles": {
+                            "status": "pending", "reason": "interrupted: lease expired after 300s"
+                        }
+                    },
+                }],
+            }),
+            loaded(),
+        ));
+        assert!(!hint.contains("stalled"), "{hint}");
+        assert!(hint.contains("workflow_status"), "{hint}");
+    }
+
+    /// The bug this ordering exists for: an orphan run sorted first by accident of
+    /// the filesystem, and a whole session ran inside it while the run the user
+    /// looks at stayed where it was.
+    #[test]
+    fn the_run_the_page_drives_is_ordered_first_even_when_it_is_behind() {
+        let mut runs = vec![
+            json!({ "run_id": "dictation-stray", "counts": { "completed": 4 } }),
+            json!({ "run_id": "dictation-u", "counts": { "completed": 1 } }),
+        ];
+        order_runs("u", &mut runs);
+        assert_eq!(runs[0]["run_id"], json!("dictation-u"));
+
+        let hint = next_action(&report(
+            json!({
+                "run_count": 2,
+                "canonical_run_id": "dictation-u",
+                "runs": [runs[0].clone(), runs[1].clone()],
+            }),
+            loaded(),
+        ));
+        assert!(hint.contains("dictation-stray"), "{hint}");
+        assert!(hint.contains("separate histories"), "{hint}");
+        assert!(hint.contains("Workflow page uses 'dictation-u'") || hint.contains("'dictation-u' is the run"), "{hint}");
+    }
+
+    #[test]
+    fn with_no_canonical_run_the_hint_follows_the_most_advanced_one() {
+        let mut runs = vec![
+            json!({ "run_id": "alpha", "counts": { "completed": 2 } }),
+            json!({ "run_id": "beta", "counts": { "completed": 5 } }),
+            json!({ "run_id": "gamma", "error": "unreadable state.json" }),
+        ];
+        order_runs("u", &mut runs);
+        assert_eq!(runs[0]["run_id"], json!("beta"));
+        assert_eq!(runs[1]["run_id"], json!("alpha"));
+        // An unreadable run has no known progress, so it is never the one to work in.
+        assert_eq!(runs[2]["run_id"], json!("gamma"));
+    }
+
+    #[test]
+    fn a_report_keeps_only_verdicts_that_claim_progress() {
+        let mut run = json!({
+            "verdicts": {
+                "a": { "status": "ready", "verdict": "verified" },
+                "b": { "status": "completed", "verdict": "drifted" },
+            },
+        });
+        slim_run(&mut run);
+        assert!(run["verdicts"].get("a").is_none());
+        assert_eq!(run["verdicts"]["b"]["verdict"], json!("drifted"));
+    }
+
+    /// Seventy-odd files sharing one finding is one sentence, not seventy: the
+    /// count stays exact and the sample stays readable. The whole source —
+    /// directory included — folds away, since the artefacts beside it are named
+    /// the same way and the un-folded names stay in `items`.
+    #[test]
+    fn a_shared_finding_is_said_once_and_the_rest_are_counted() {
+        let mut check = json!({
+            "id": "waveforms_missing",
+            "level": "problem",
+            "count": 7,
+            "truncated": false,
+            "items": (0..7)
+                .map(|i| json!({
+                    "source": format!("de/b{i}.mp3"),
+                    "detail": format!("no waveform/de/b{i}.json — the player has no peaks"),
+                }))
+                .collect::<Vec<_>>(),
+        });
+        slim_check(&mut check);
+        assert_eq!(check["item_detail"], json!("no waveform/<file>.json — the player has no peaks"));
+        assert_eq!(check["items"].as_array().unwrap().len(), REPORT_ITEM_CAP);
+        assert_eq!(check["items_omitted"], json!(7 - REPORT_ITEM_CAP));
+        assert_eq!(check["count"], json!(7));
+        assert!(check["items"][0].is_string());
+        assert!(check.get("truncated").is_none());
+    }
+
+    #[test]
+    fn findings_that_differ_stay_per_file() {
+        let mut check = json!({
+            "id": "cue_sanity",
+            "count": 2,
+            "truncated": false,
+            "items": [
+                { "source": "a.mp3", "detail": "cue 3 overlaps cue 4" },
+                { "source": "b.mp3", "detail": "cue 2 is empty" },
+            ],
+        });
+        slim_check(&mut check);
+        assert!(check.get("item_detail").is_none());
+        assert!(check.get("items_omitted").is_none());
+        assert_eq!(check["items"][0]["detail"], json!("cue 3 overlaps cue 4"));
     }
 }

@@ -10,8 +10,15 @@ use serde_json::{Map, Value};
 
 use super::{Definition, OnFailure, RunState, Status, Step};
 
-/// A `running` step whose heartbeat is older than this is treated as
-/// interrupted (its executor died mid-flight) and returned to `pending`.
+/// A `running` step whose heartbeat is older than its own [`Step::lease_secs`]
+/// (this being the default) is treated as interrupted (its executor died
+/// mid-flight) and returned to `pending`.
+///
+/// The default is a *crash* timeout, not a work budget, and the two are easy to
+/// confuse: it is deliberately short so a dead claim frees the pipeline quickly.
+/// A step that legitimately runs longer than this must say so with `timeout:`,
+/// or the engine reaps a claim that is still being worked on and the work is
+/// performed twice — once by the live executor and once by whoever re-claims it.
 pub(super) const LEASE_TIMEOUT_SECS: i64 = 300;
 
 /// Parse an exact `${steps.<id>.outputs.<key>}` reference.
@@ -170,10 +177,13 @@ pub(super) fn topo_order(def: &Definition) -> Vec<String> {
     order
 }
 
-/// Whether a `running` step's lease is still live (heartbeat within timeout).
-pub(super) fn lease_live(status: Status, heartbeat: Option<i64>, now: i64) -> bool {
-    status == Status::Running
-        && heartbeat.map(|hb| now - hb < LEASE_TIMEOUT_SECS).unwrap_or(false)
+/// Whether a `running` step's lease is still live (heartbeat within its own
+/// timeout). Callers gate on the status themselves, since a lease only means
+/// anything for a step that is actually claimed.
+pub(super) fn lease_live(step: &Step, heartbeat: Option<i64>, now: i64) -> bool {
+    heartbeat
+        .map(|hb| now - hb < step.lease_secs())
+        .unwrap_or(false)
 }
 
 /// Recompute all derived statuses in place. Recorded statuses (`completed`,
@@ -185,13 +195,20 @@ pub(super) fn recompute(def: &Definition, state: &mut RunState, now: i64) {
         state.steps.entry(step.id.clone()).or_default();
     }
 
-    // Reap interrupted steps: running with an expired lease → pending.
+    // Reap interrupted steps: running with an expired lease → pending. The reason
+    // quotes the timeout, so a reader can tell "this claim was too old" from
+    // "this step was never finished" — and a step reaped far too early can be
+    // given a longer `timeout:` instead of being worked around by hand.
     for step in &def.steps {
         if let Some(ss) = state.steps.get_mut(&step.id) {
-            if ss.status == Status::Running && !lease_live(ss.status, ss.heartbeat, now) {
+            if ss.status == Status::Running && !lease_live(step, ss.heartbeat, now) {
                 ss.status = Status::Pending;
                 ss.lease = None;
-                ss.reason = Some("interrupted: lease expired".into());
+                ss.reason = Some(format!(
+                    "interrupted: lease expired after {}s without a heartbeat (raise this step's \
+                     `timeout:` if the work legitimately takes longer)",
+                    step.lease_secs()
+                ));
             }
         }
     }

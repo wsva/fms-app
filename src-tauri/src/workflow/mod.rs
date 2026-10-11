@@ -60,6 +60,19 @@ const DEFINITION_FILE: &str = "workflow.yaml";
 /// [`bind_subject`] in this layer is what resolves it.
 const SUBJECT_REF: &str = "${run.dataset_uuid}";
 
+/// The run id a dataset's own page opens and keeps progress in: `dictation-<uuid>`.
+///
+/// Nothing enforces it — an agent that called `workflow_create` with an id of its
+/// own simply added another run, and runs are independent records. It is a
+/// convention worth naming in the backend all the same, because a read-only report
+/// that has to speak about *the* run of a dataset (see
+/// [`crate::datasets::report`]) must know which one the UI is driving, and the
+/// frontend writes the same string (`runIdFor` in
+/// `src/components/tools/WorkflowPage.tsx`). Only dictation has one today.
+pub(crate) fn canonical_run_id(dataset_uuid: &str) -> String {
+    format!("{}-{}", DatasetType::Dictation.as_str(), dataset_uuid)
+}
+
 /// Resolve the run *base directory* for a call that only needs a **scope** —
 /// creating a run or listing runs, where no existing run is being named.
 ///

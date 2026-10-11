@@ -2,6 +2,43 @@
 #   goose run --recipe docs/ai/goose_recipe/dataset_dictation.yaml --with-streamable-http-extension http://127.0.0.1:35711/mcp
 # Check with:
 #   goose recipe validate docs/ai/goose_recipe/dataset_dictation.yaml
+# Context budget: the fmsapp extension advertises ~163 tools, which is most of the
+# per-turn baseline before anything is said. Narrow it to the tools this recipe
+# actually names by adding `available_tools` under the `fmsapp` extension in
+# %APPDATA%\Block\goose\config\config.yaml:
+#   fmsapp:
+#     enabled: true
+#     type: streamable_http
+#     http_url: http://127.0.0.1:35711/mcp
+#     available_tools:
+#       - dataset_list
+#       - dataset_get
+#       - dataset_full_report
+#       - dataset_audit
+#       - dataset_list_files
+#       - dataset_sync_media
+#       - dataset_init_dir
+#       - dataset_generate_subtitles
+#       - dataset_generate_subtitle_single
+#       - dataset_generate_waveforms
+#       - dataset_generate_waveform_single
+#       - dataset_align_cues
+#       - dataset_align_cues_transcript
+#       - dataset_adjust_cue_time
+#       - dataset_write_subtitles_to_db
+#       - model_status
+#       - model_download
+#       - model_load
+#       - web_service_get_status
+#       - workflow_builtin_templates
+#       - workflow_list
+#       - workflow_status
+#       - workflow_next
+#       - workflow_advance
+#       - workflow_record
+#       - workflow_verify
+#       - workflow_adopt
+#       - workflow_intervene
 version: 1.0.0
 title: build-dictation-dataset
 description: Drive one dictation dataset to a prepared state through the workflow engine - subtitles, waveforms, cue alignment, silence-snapping - with every step measured against the disk and recorded in a resumable run.
@@ -26,27 +63,27 @@ instructions: |-
   ## Workflow
 
   ### Step 0: One report instead of five calls
-  Call **`dataset_full_report`** with the dataset uuid. It is read-only and writes nothing.
+  Call **`dataset_full_report`** with the dataset uuid. It is read-only and writes nothing, and it already includes the STT model state - do **not** also call `model_status`, `dataset_audit`, `workflow_list` or `workflow_status` to start: each re-sends what this one returned.
 
   Read `hint` first - it names the next call. Then, in this order:
   - `audit.facts` - the six guard facts (`has_media`, `has_subtitles`, `has_waveforms`, `has_database`, `has_book`, `has_transcript`) that a step's `when:` reads.
-  - `audit.checks[]` - every check with a stable `id`, an exact `count`, up to 100 offending files in `items`, and `advice`. **`count: 0` means measured and clean; an id that is absent from the list means not measured and proves nothing.**
+  - `audit.checks[]` - every check with a stable `id`, an exact `count`, `advice` and a sample of at most 5 offenders in `items`. When the sampled offenders share one finding it is hoisted into `item_detail` with `<file>` standing for each name and `items` becomes a plain list of file names; `items_omitted` counts those not shown. **`count: 0` means measured and clean; an id that is absent from the list means not measured and proves nothing.** Need the full list of offenders? That is what `dataset_audit` is for.
   - `audit.media_on_disk` vs `audit.media_in_db`, `subtitles_in_db`, `cues_in_db`.
-  - `workflow.runs[]` - one entry per run recorded inside the dataset: `steps` (per-step status), `verdicts` (per-step verdict), `ready` / `blocked` / `failed`, the engine's `hints`, and `next.steps` with each runnable step's `action` and its `params` / `inputs` already resolved.
+  - `workflow.runs[]` - one entry per run recorded inside the dataset, **ordered by the run you should act on**: `workflow.canonical_run_id` first, then the most advanced. Each entry has `steps` (per-step status), `verdicts` (only for `completed` steps - a verdict on work nobody has done yet proves nothing), `ready` / `blocked` / `failed`, the engine's `hints`, and `next.steps` with each runnable step's `action` and its `params` / `inputs` already resolved.
   - `stt_model.active_version` - `null` means transcription will fail.
 
   ### Step 1: Get a run to work in
-  **If `workflow.run_count` is 0:**
+  Work in the run named `dictation-<uuid>` - `workflow.canonical_run_id` says it, and it is the id the app's Workflow page reads and writes. **Never `workflow_create` a run of your own devising**: two runs are two separate histories, and progress recorded in the stray one is invisible in the one the user sees.
+
+  **If no run named `dictation-<uuid>` is in `workflow.runs[]`:**
   1. Call `workflow_builtin_templates` and take the `dataset_dictation` entry's `yaml`.
-  2. Call `workflow_adopt` with `dataset_uuid`, `run_id: "dictation-<uuid>"` and `definition_yaml` set to that yaml.
+  2. Call `workflow_adopt` with `dataset_uuid`, `run_id: "dictation-<uuid>"` and `definition_yaml` set to that yaml. Do this even when *other* runs already exist - their record is not this run's.
 
   `workflow_adopt` opens the run *and* marks `completed` every step whose `adopt:` checks were all measured clean - so a dataset prepared by hand, by another device or by an earlier session shows its real state instead of offering work already done. Read:
   - `adoption.adopted` - the steps it marked completed without running.
   - `adoption.withheld[]` - the steps it refused, each with `why`: `"not measured"` (the check could not run) or `"the evidence disagrees"` (the check found offenders).
-  - `adoption.refreshed` / `adoption.refresh_error` - whether the run was rebound to the current template text. Only a run whose history holds nothing but inherited progress can be rebound; a run that earned progress keeps the definition it was created from.
+  - `adoption.refreshed` / `adoption.refresh_error` - whether the run was rebound to the current template text. Only a run whose history holds nothing but inherited progress can be rebound; a run that earned progress keeps the definition it was created from - including its lease rules.
   - `adopt_hint` - one sentence saying the same.
-
-  Use `run_id: "dictation-<uuid>"`: that is the id the app's Workflow page uses, so you and the page share one run instead of creating two.
 
   **If a run already exists**, do not create another. If `workflow.runs[0].error` is set the run is unreadable - tell the user before recreating or removing `<dataset>/workflows/<run_id>`.
 
@@ -60,12 +97,12 @@ instructions: |-
 
   ### Step 3: Run what is runnable, one step at a time
   Call `workflow_next` with `dataset_uuid` and `run_id`. It returns `steps[]`, each with `id`, `action`, `params`, resolved `inputs` and `declared_outputs`. Then, per step:
-  1. `workflow_advance` with `dataset_uuid`, `run_id`, `step`, `agent_id: "goose"` - claims a lease, so two agents cannot run the same step, and hands back the action to perform.
+  1. `workflow_advance` with `dataset_uuid`, `run_id`, `step`, `agent_id: "goose"` - claims a lease, so two agents cannot run the same step, and hands back the action to perform. Its `lease_secs` is how long that claim is honoured: after that the engine assumes the work died, returns the step to `ready` and lets it be re-claimed - so a step you are still working on would be done twice. The long steps in this pipeline carry a `timeout:` of their own for exactly that reason; if a step's `lease_secs` is too small for the work on this machine, say so to the user rather than working around it.
   2. Perform the action (table below): call the tool the response names in `action`, with exactly the `params` it handed back - they already carry the dataset `uuid` of the run you are in, so you never have to remember it. **Nothing but that tool returning counts as performing the step.** `workflow_record` is bookkeeping about a call you made, not about a number you read: `dataset_sync_media` was once skipped entirely while its step was recorded `completed` with counts copied from `dataset_full_report`.
   3. `workflow_record` with `dataset_uuid`, `run_id`, `step`, `event: "completed"` and `detail: { outputs: { ... } }` - include **every** name in `declared_outputs`, even when the value is the string `"false"`. The engine **refuses** a completion that omits one and writes nothing, so the step stays `running` and your corrected call lands on it: a dependent reading that name through a `when:` guard would otherwise sit `blocked` forever with nothing in the log naming the cause. (`values` may also sit straight on `detail` instead of under `outputs`; both are read.)
   4. On error: `workflow_record` with `event: "failed"` and `detail: { reason: "<the tool's message>" }`. Steps that declare `retry` go back to `ready` on their own until the attempts run out; the rest become `failed` immediately.
 
-  Repeat until `workflow_next` returns no steps. Do not run a `blocked` step - it is waiting on a dependency's output. A step whose `when:` guard is false is `skipped` by the engine; never force it with `workflow_intervene`. **Do not end your turn on a step you have claimed and not reported**: it then sits `running` under your lease while nothing is running, and the next session has to wait out the lease and redo the claim.
+  Repeat until `workflow_next` returns no steps. When it returns none but its `claimed[]` is not empty, that claim is why nothing can run - report it (step 3.3 or 3.4) before anything else; do not wait on it or re-advance it. Do not run a `blocked` step - it is waiting on a dependency's output, and `workflow_advance` will name it for you. A step whose `when:` guard is false is `skipped` by the engine; never force it with `workflow_intervene`. **Do not end your turn on a step you have claimed and not reported**: it then sits `running` under your lease while nothing is running, and `dataset_full_report` will read "stalled" - which is what it means, and what you have to fix first.
 
   ### Step 4: Action table
 
@@ -98,7 +135,7 @@ instructions: |-
 
   ## Recovery
   - After any restart or crash call `workflow_status` with `dataset_uuid` and `run_id`: it recomputes derived statuses and reaps expired leases, so a step a dead agent left `running` becomes runnable again. This is what makes the run resumable - read it before doing anything else.
-  - **A step sitting at `running` with a `started` but no `completed` event was never reported.** Either the action is still going (a `running` lease is held for 5 minutes) or whoever claimed it stopped. `workflow_status` reaps an expired lease and re-derives the step to `ready`, so no `workflow_intervene` is needed: if the work actually finished on disk, `workflow_record` accepts a completion on a `ready` step; if it did not, `workflow_advance` claims it again and you run the action. Use `intervene` for what it is for - `failed` (`retry`), `blocked` (`unblock`), and a human override.
+  - **A step sitting at `running` with a `started` but no `completed` event was never reported.** Either the action is still going (a claim lasts the step's `timeout:`, 300s if it declares none) or whoever claimed it stopped. `workflow_status` reaps an expired lease and re-derives the step to `ready`, so no `workflow_intervene` is needed: if the work actually finished on disk, `workflow_record` accepts a completion on a `ready` step; if it did not, `workflow_advance` claims it again and you run the action. Use `intervene` for what it is for - `failed` (`retry`), `blocked` (`unblock`), and a human override.
   - `workflow_intervene` with `dataset_uuid`, `run_id`, `step` and `op` - `retry` (failed -> ready, attempt counter reset), `unblock` (blocked -> pending), `skip`, `reset` (wipe the step's state). These are manual overrides: ask the user before `skip` or `reset`, and never use them to get past a check that is telling the truth.
   - Every transition is journalled in `<dataset>/workflows/<run_id>/events.jsonl`. `completed` after `started` is progress the run earned; `adopted` and `invalidated` are progress it inherited or had taken away. `workflow_list` summarises runs without loading them.
 
@@ -108,6 +145,7 @@ instructions: |-
   - **Never invent a status.** Statuses come from `workflow_record`, `workflow_verify` and `workflow_adopt`. What you decide is which action to run and what its outputs were. A status you record for a step whose action tool never returned in this session is an invented status, however true the numbers in its `detail` are.
   - **Read-only first.** `dataset_full_report` and `workflow_verify` without `apply` never write; call them as often as you like.
   - **One step at a time.** Subtitle generation and cue adjustment can take minutes on a large dataset. Record each step before starting the next, so an interruption leaves a resumable run rather than an unknown one.
+  - **One run per dataset.** Act on `workflow.canonical_run_id`; if the report's `hint` says the dataset carries several runs, they are separate histories and the one you are working in is the one the user sees. Consolidate by finishing or deleting a run, never by recording the same progress twice.
   - **Stop on error and report it.** Tool messages are written to be actionable - they say what to call next.
 activities: []
 parameters: []

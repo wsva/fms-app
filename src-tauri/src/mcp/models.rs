@@ -22,14 +22,41 @@ struct ModelLoadParam {
     version: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ModelStatusParam {
+    /// Ask for the catalogue as the Models page renders it — descriptions, blob
+    /// and HuggingFace URLs, accuracy/speed scores included. Costs a few thousand
+    /// context tokens and answers a question no pipeline asks.
+    #[serde(default)]
+    full: bool,
+}
+
+/// The keys of a catalogue entry a caller chooses a model with: what it is, whether
+/// it is on disk, what it costs and which languages it knows. Everything else on
+/// `ModelVersionInfo` is page furniture.
+const CHOOSABLE_KEYS: [&str; 5] = ["id", "label", "downloaded", "size_mb", "languages"];
+
 #[tool_router(router = models_router, vis = "pub(crate)")]
 impl DatasetMcpServer {
-    #[tool(name = "model_status", description = "Get STT model status: downloaded models, loaded model, the user's preferred default (default_version), and an actionable 'hint' field telling you exactly what to do next. If hint says 'Call model_load', do NOT call model_download — the model is already downloaded. Always check model_status before model_download.")]
-    async fn model_status(&self) -> String {
-        log::info!("[MCP] model_status");
+    #[tool(name = "model_status", description = "Get STT model status: downloaded models, loaded model, the user's preferred default (default_version), and an actionable 'hint' field telling you exactly what to do next. If hint says 'Call model_load', do NOT call model_download — the model is already downloaded. Always check model_status before model_download. Each model is trimmed to id/label/downloaded/size_mb/languages unless you pass full=true. Driving a dataset pipeline? Do not call this at all: dataset_full_report already reports the loaded model under stt_model.")]
+    async fn model_status(&self, Parameters(param): Parameters<ModelStatusParam>) -> String {
+        log::info!("[MCP] model_status: full={}", param.full);
         let state = self.app.state::<ModelState>();
         match crate::models::model_get_status(state).await {
-            Ok(resp) => serde_json::to_string_pretty(&resp).unwrap_or_default(),
+            Ok(resp) => {
+                let mut value =
+                    serde_json::to_value(&resp).unwrap_or_else(|_| serde_json::json!({}));
+                if !param.full {
+                    if let Some(models) = value.get_mut("models").and_then(|v| v.as_array_mut()) {
+                        for model in models.iter_mut() {
+                            if let Some(obj) = model.as_object_mut() {
+                                obj.retain(|k, _| CHOOSABLE_KEYS.contains(&k.as_str()));
+                            }
+                        }
+                    }
+                }
+                serde_json::to_string_pretty(&value).unwrap_or_default()
+            }
             Err(e) => serde_json::json!({"error": e}).to_string(),
         }
     }

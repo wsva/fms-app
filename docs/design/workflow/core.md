@@ -61,7 +61,7 @@ A definition is a named, versioned set of **steps** forming a directed acyclic g
 | `adopt` | no | Check ids that must come back measured-and-clean for this step to be adopted as `completed` without running it (see *Verification*) |
 | `params` | no | Static arguments passed to the executor, verbatim by the engine; the binding layer substitutes `${run.dataset_uuid}` (see *Agent interface*) |
 | `retry` | no | `{ attempts, backoff }` — how many times to re-run on failure |
-| `timeout` | no | Max run duration; exceeding it ⇒ `failed` (or retry) |
+| `timeout` | no | Lease seconds — how long a claim on this step is honoured before `recompute` treats it as interrupted (default 300, see *Resumability*). Not a work budget: nothing here stops a running action. |
 | `on_failure` | no | `stop` \| `continue` \| `skip_dependents` (default `stop`) |
 
 Only `id` and `action` are mandatory; everything else has a sensible default so a minimal definition stays small.
@@ -305,7 +305,9 @@ This is the reason the framework exists.
 
 - **State is the resume point; events are the audit.** A restarted agent reads `state.json`, ignores any prior conversation, recomputes, and continues.
 - **Atomic writes.** `state.json` is written to a temp file then renamed, so a crash mid-write never leaves a half-written snapshot. Events are appended and flushed.
-- **Interrupted steps.** A step left `running` whose lease has expired on resume is treated as *interrupted*. Policy: re-run it (executors should be **idempotent**) or mark it `failed`. The lease/heartbeat distinguishes "still running elsewhere" from "died mid-flight".
+- **Interrupted steps.** A step left `running` whose lease has expired on resume is treated as *interrupted*: `recompute` returns it to `pending` (and so to `ready`) with a reason naming the timeout it ran out of. Policy: re-run it (executors should be **idempotent**) or mark it `failed`. The lease/heartbeat distinguishes "still running elsewhere" from "died mid-flight".
+- **A lease is a crash detector, not a work budget.** The default is short on purpose — 300 s without a report and the claim is presumed dead, so a crashed agent does not hold a pipeline hostage. That default is wrong for anything that legitimately runs for minutes, and being wrong is expensive in the other direction: the engine reaps work that is still happening, the step goes back to `ready`, and the same files are processed twice while the first executor is still running. A long step therefore declares its own `timeout:` (the dictation template gives transcription four hours). There is no heartbeat *renewal* call: the claim is stamped at `advance` and the only way to extend it is to report.
+- **A claimed-and-unreported step is a stall, and is named as one.** `next` returns `claimed[]` alongside an empty `steps[]`, `advance` refuses a live claim quoting how long it has been held, and the dataset report's hint says "stalled" with the call that clears it. Left unnamed this reads to a waiting agent as "the app is busy", which is how a session ends its turn and leaves the run claimed forever.
 - **Idempotent executors.** Because a step may be re-run after an interruption, actions should be safe to repeat (or record enough checkpoint data to resume). The framework does not assume atomicity of the work itself.
 - **Version binding.** `state.json` records the definition `name` + `version` (and optionally a content hash). If the loaded definition differs, the state is **stale**: require an explicit migration or reset rather than silently applying old state to a new graph.
 
@@ -327,7 +329,7 @@ If a workflow prefers, steps can instead communicate through an external store (
 ## Failure, retry & propagation
 
 - **Retry** — `retry: { attempts, backoff }`: `failed → ready` until attempts are exhausted, then terminal `failed`.
-- **Timeout** — exceeding `timeout` yields `failed` (and retries if configured).
+- **Timeout** — a step's `timeout:` is its lease: an unreported `running` claim older than it is reaped back towards `ready` (see *Resumability & crash safety*). It never makes a step `failed` by itself, because nothing in this build measures how long an action took.
 - **`on_failure`** — per step (or a workflow default):
 - `stop` — halt the run; dependents stay `pending`/`blocked`.
 - `continue` — independent branches keep running; only the failed step's dependents are affected.
@@ -352,7 +354,7 @@ An agent never needs to understand the domain — only a small generic command s
 |---|---|
 | `list` / `load` | Discover runs; load a definition + its state |
 | `status(run)` | Definition + current state + what's `ready`, `blocked`, `failed`, and *why* |
-| `next(run)` | The runnable step(s) with resolved action + inputs |
+| `next(run)` | The runnable step(s) with resolved action + inputs, each with its `lease_secs`, plus `claimed[]` — the steps held by an unreported claim, which is often why nothing is runnable |
 | `advance(run, step)` | Execute the bound action, record the result, re-evaluate |
 | `record(run, step, event, detail)` | Report an outcome (esp. when the agent itself did the work) |
 | `verify(run, apply?)` | Score the run against measured evidence; with `apply` it may only demote (see *Verification*) |
@@ -360,7 +362,7 @@ An agent never needs to understand the domain — only a small generic command s
 | `history_is_inherited_only(run)` / `rebind_definition(run, yaml)` | The guard and the act behind *Refreshing a run's definition* — only a run whose whole history was inherited may be pointed at newer intent |
 | `intervene(run, step, op)` | `retry` / `unblock` / `skip` / `reset` for manual recovery |
 
-Hints are actionable, e.g. *"step `validate` is blocked because dependency `normalize_text` failed; retry `normalize_text` or skip `validate`."*
+Hints are actionable, e.g. *"step `validate` is blocked because dependency `normalize_text` failed; retry `normalize_text` or skip `validate`."* An `advance` on a step that is not `ready` names what it waits on rather than sending the caller off to `status`, and an `advance` or `next` on a live claim quotes the step's lease (`lease_secs`) and how long it has been held.
 
 **`next` and `advance` hand back an executable call, not a riddle.** `params` are copied verbatim by the engine, which knows steps and dependencies but never what a step does — so the *binding* layer resolves the argument a dataset-scoped action always needs: `${run.dataset_uuid}` becomes the uuid of the dataset the run is filed under, read back out of that dataset's `info.json`, and the response names `dataset_uuid` at its root besides. Before that seam an agent was handed `action: dataset_generate_subtitles` with `params: {}` — a command with no subject, which it could only guess at or abandon. A workspace job has no subject, so the placeholder stays as written instead of resolving to something invented.
 
