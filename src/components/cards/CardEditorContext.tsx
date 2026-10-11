@@ -91,7 +91,11 @@ function CardEditModal({
         className={`relative bg-bg-card border border-border-default flex flex-col ${
           mobile
             ? "rounded-none w-full h-full px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]"
-            : "rounded-xl p-8 w-[80vw] h-[80vh]"
+            // Percentages, not `vw`/`vh`: the `fixed inset-0` overlay already
+            // tracks the window under the global <html> zoom, but viewport
+            // units get multiplied by the zoom factor — `80vh` would overshoot
+            // the window and overflow the modal at any level above 100%.
+            : "rounded-xl p-8 w-[80%] h-[80%] max-h-full max-w-full"
         }`}
       >
         {/* Close button (top-right corner, desktop only — on mobile it joins the header row) */}
