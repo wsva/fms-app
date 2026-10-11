@@ -17,9 +17,9 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::datasets::{
-    assert_uuid_free, canonical_stamp, dataset_roots, is_under_download_root, now_row_stamp,
-    now_stamp, read_info, read_info_opt, row_stamp_at, touch_info, write_info, DatasetInfo,
-    FORMAT_CARD, INFO_FILE,
+    assert_uuid_free, canonical_stamp, dataset_roots, fork_base_to_overlay, is_under_download_root,
+    now_row_stamp, now_stamp, read_info, read_info_opt, row_stamp_at, touch_info, write_info,
+    DatasetInfo, DatasetType, FORMAT_CARD, INFO_FILE,
 };
 use crate::settings::SettingsState;
 
@@ -166,16 +166,13 @@ pub(crate) fn find_card_dataset_dir(settings: &SettingsState, uuid: &str) -> Res
     Err(format!("Card dataset with UUID {} not found", uuid))
 }
 
-/// Write-resolution: refuses a read-only base under the download root
-/// (dataset-layers.md §6). Read commands keep using [`find_card_dataset_dir`].
+/// Write-resolution: forks a read-only base under the download root into a
+/// writable overlay (dataset-layers.md §6). Read commands keep using
+/// [`find_card_dataset_dir`].
 pub(crate) fn find_card_dataset_dir_write(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
     let dir = find_card_dataset_dir(settings, uuid)?;
     if is_under_download_root(settings, &dir) {
-        let name = read_info_opt(&dir).map(|i| i.name).unwrap_or_else(|| uuid.to_string());
-        return Err(format!(
-            "cannot write: '{}' is a read-only base under the download root; editing downloaded datasets arrives in a later update",
-            name
-        ));
+        return fork_base_to_overlay(settings, &dir, DatasetType::Card);
     }
     Ok(dir)
 }

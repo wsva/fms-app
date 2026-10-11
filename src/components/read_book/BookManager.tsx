@@ -522,7 +522,7 @@ export default function BookManager({ books, onBooksChanged }: Props) {
                     )}
                     {dir.is_read_only && (
                       <span className="text-xs px-1.5 py-0.5 rounded border border-border-light bg-bg-body text-text-secondary">
-                        app-managed · read-only
+                        app-managed
                       </span>
                     )}
                     <span className="text-xs text-text-tertiary">

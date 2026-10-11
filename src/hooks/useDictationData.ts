@@ -107,7 +107,11 @@ export function useDictationData() {
             .finally(() => setStateLoading(false));
     }, []);
 
-    useEffect(() => { loadDatasets(); }, [loadDatasets]);
+    // Re-run on reloadToken too: a mutation that forks a downloaded base into a
+    // new overlay changes the dataset's resolved path, so the list (and thus
+    // selectedDataset, which getMediaSrc reads) must refresh for newly added
+    // overlay media to resolve (dataset-layers.md Phase 2).
+    useEffect(() => { loadDatasets(); }, [loadDatasets, reloadToken]);
 
     // ── Favorites (cue UUIDs already cut into the Favorites dataset) ──
 

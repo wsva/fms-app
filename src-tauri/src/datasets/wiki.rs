@@ -25,8 +25,9 @@ use uuid::Uuid;
 use crate::settings::SettingsState;
 
 use super::{
-    assert_uuid_free, dataset_roots, is_derived_index, is_under_download_root, move_to_trash,
-    read_info_opt, touch_info, write_info, DatasetInfo, DatasetType, FORMAT_WIKI, INFO_FILE,
+    assert_uuid_free, dataset_roots, fork_base_to_overlay, is_derived_index, is_under_download_root,
+    move_to_trash, read_info_opt, touch_info, write_info, DatasetInfo, DatasetType, FORMAT_WIKI,
+    INFO_FILE,
 };
 
 /// The derived FTS index inside a wiki dataset dir. Never synced, never listed.
@@ -197,18 +198,14 @@ pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<P
     ))
 }
 
-/// Write-resolution: refuses a read-only base under the download root
-/// (dataset-layers.md §6). Read commands keep using [`find_dataset_dir`]. The
-/// derived FTS index is also refused on a base, so indexing never writes into
-/// the app-managed download root.
+/// Write-resolution: forks a read-only base under the download root into a
+/// writable overlay (dataset-layers.md §6). Read commands keep using
+/// [`find_dataset_dir`]. The derived FTS index is rebuilt inside the overlay, so
+/// indexing never writes into the app-managed download root.
 pub(crate) fn find_dataset_dir_write(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
     let dir = find_dataset_dir(settings, uuid)?;
     if is_under_download_root(settings, &dir) {
-        let name = read_info_opt(&dir).map(|i| i.name).unwrap_or_else(|| uuid.to_string());
-        return Err(format!(
-            "cannot write: '{}' is a read-only base under the download root; editing downloaded datasets arrives in a later update",
-            name
-        ));
+        return fork_base_to_overlay(settings, &dir, DatasetType::Wiki);
     }
     Ok(dir)
 }

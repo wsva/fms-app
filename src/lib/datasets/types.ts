@@ -18,12 +18,12 @@ export interface DatasetSummary {
   /** Root location directory this dataset was found under. */
   location: string;
   status: DatasetStatus;
-  /** True when this dataset lives under the reserved read-only download root,
-   *  so every mutating action is refused. */
+  /** True when this dataset resolves under the reserved read-only download root.
+   *  It is still editable: the first mutation forks it into a writable overlay. */
   is_read_only?: boolean;
-  /** True when this entry is a downloaded base (== is_read_only in Phase 1). */
+  /** True for a downloaded base, or an overlay forked from one. */
   downloaded?: boolean;
-  /** True when a writable overlay has diverged from this base (Phase 2). */
+  /** True when this entry is an overlay carrying local edits over its base. */
   has_local_changes?: boolean;
   /** `info.layer.role`, or `"flat"` when the dataset carries no layer block. */
   layer_role?: string;
@@ -35,6 +35,8 @@ export interface DatasetLayerStatus {
   role: string;
   is_read_only: boolean;
   downloaded: boolean;
+  /** True when a writable overlay exists on top of a base (detach/flatten apply). */
+  has_overlay: boolean;
   base_uuid: string | null;
   base_version: string | null;
   path: string;

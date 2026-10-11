@@ -43,7 +43,7 @@ pub(crate) use info::{
     assert_uuid_free, canonical_stamp, is_derived_index, now_row_stamp, now_stamp, read_info,
     read_info_opt, row_stamp_at, stamps_cmp, touch_info, write_info, DatasetInfo,
     FAVORITES_DATASET_UUID, FORMAT_BOOK, FORMAT_CARD, FORMAT_DICTATION, FORMAT_READ_ALOUD,
-    FORMAT_WIKI, INFO_FILE, LAYER_ROLE_FLAT,
+    FORMAT_WIKI, INFO_FILE, LAYER_ROLE_FLAT, LAYER_ROLE_OVERLAY, LayerBlock,
 };
 // The hub's edit-time normalizer is the only caller outside this group; the row
 // stamps every type writes come through the ungated names above.
@@ -659,6 +659,9 @@ fn scan_dataset_dir(
             .as_ref()
             .map(|l| l.role.clone())
             .unwrap_or_else(|| LAYER_ROLE_FLAT.to_string());
+        // An overlay lives in the writable area (so it is not read-only) but
+        // *has* a downloaded base and, by definition, local changes (§4.4).
+        let is_overlay = layer_role == LAYER_ROLE_OVERLAY;
         return Some(DatasetSummary {
             info,
             media_count,
@@ -666,8 +669,8 @@ fn scan_dataset_dir(
             location: location.to_string(),
             status: status.into(),
             is_read_only: read_only,
-            downloaded: read_only,
-            has_local_changes: false,
+            downloaded: read_only || is_overlay,
+            has_local_changes: is_overlay,
             layer_role,
         });
     }
@@ -879,6 +882,9 @@ pub struct DatasetLayerStatus {
     pub role: String,
     pub is_read_only: bool,
     pub downloaded: bool,
+    /// True when a writable overlay has been forked on top of a downloaded base
+    /// (i.e. `role == "overlay"`): there are local changes to detach or flatten.
+    pub has_overlay: bool,
     pub base_uuid: Option<String>,
     pub base_version: Option<String>,
     pub path: String,
@@ -893,13 +899,15 @@ pub(crate) fn layer_status(
     let info = read_info(&dir)?;
     let read_only = is_under_download_root(settings, &dir);
     let layer = info.layer.as_ref();
+    let is_overlay = layer.map(|l| l.role.as_str()) == Some(LAYER_ROLE_OVERLAY);
     Ok(DatasetLayerStatus {
         uuid: info.uuid,
         role: layer
             .map(|l| l.role.clone())
             .unwrap_or_else(|| LAYER_ROLE_FLAT.to_string()),
         is_read_only: read_only,
-        downloaded: read_only,
+        downloaded: read_only || is_overlay,
+        has_overlay: is_overlay,
         base_uuid: layer.and_then(|l| l.base_uuid.clone()),
         base_version: layer.and_then(|l| l.base_version.clone()),
         path: dir.to_string_lossy().into_owned(),
@@ -913,6 +921,66 @@ pub async fn dataset_layer_status(
     uuid: String,
 ) -> Result<DatasetLayerStatus, String> {
     layer_status(&settings, &uuid)
+}
+
+/// Detach a downloaded dataset's local overlay: the overlay directory is moved
+/// to the trash, reverting the uuid to its pristine read-only base
+/// (dataset-layers.md §11). Non-destructive to the base; undoable via the trash.
+pub(crate) fn layer_detach(settings: &SettingsState, uuid: &str) -> Result<String, String> {
+    let (dir, _ty) = find_dataset_dir_typed(settings, uuid)?;
+    let info = read_info(&dir)?;
+    if info.layer.as_ref().map(|l| l.role.as_str()) != Some(LAYER_ROLE_OVERLAY) {
+        return Err(format!(
+            "nothing to detach: '{}' has no local overlay (it is a {}); edit it first to grow an overlay, or delete it to remove the download",
+            info.name,
+            if is_under_download_root(settings, &dir) { "read-only base" } else { "flat dataset" }
+        ));
+    }
+    let trashed = move_to_trash(&dir)?;
+    log::info!("[Layer] Detached overlay for '{}' -> trash '{}'", uuid, trashed.display());
+    Ok(trashed.to_string_lossy().into_owned())
+}
+
+/// Detach a downloaded dataset's local overlay, reverting to the pristine base.
+#[tauri::command]
+pub async fn dataset_layer_detach(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+) -> Result<String, String> {
+    layer_detach(&settings, &uuid)
+}
+
+/// Flatten an overlay into a standalone writable dataset (todo item 9): strip the
+/// `layer` block so it no longer depends on `download/` (dataset-layers.md §11).
+/// Its media are hardlinks into the base, which survive the base's deletion (a
+/// hardlink is an independent directory entry), so nothing else needs copying.
+pub(crate) fn layer_flatten(
+    settings: &SettingsState,
+    uuid: &str,
+) -> Result<DatasetLayerStatus, String> {
+    let (dir, _ty) = find_dataset_dir_typed(settings, uuid)?;
+    let mut info = read_info(&dir)?;
+    if info.layer.as_ref().map(|l| l.role.as_str()) != Some(LAYER_ROLE_OVERLAY) {
+        return Err(format!(
+            "cannot flatten: '{}' is not an overlay (role '{}'); only a downloaded dataset's local overlay can be flattened into a standalone dataset",
+            info.name,
+            info.layer.as_ref().map(|l| l.role.as_str()).unwrap_or(LAYER_ROLE_FLAT)
+        ));
+    }
+    info.layer = None;
+    info.updated_at = now_stamp();
+    write_info(&dir, &info)?;
+    log::info!("[Layer] Flattened overlay '{}' into a standalone dataset at '{}'", uuid, dir.display());
+    layer_status(settings, uuid)
+}
+
+/// Flatten an overlay into a standalone writable dataset (drop the base link).
+#[tauri::command]
+pub async fn dataset_layer_flatten(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+) -> Result<DatasetLayerStatus, String> {
+    layer_flatten(&settings, &uuid)
 }
 
 /// Update the mutable descriptive fields of a dataset's `info.json`.
@@ -947,12 +1015,17 @@ pub async fn dataset_update(
 /// Delete a dataset: its whole directory moves into the shared trash rather than
 /// being destroyed, so the operation stays undoable (see [`move_to_trash`]).
 /// Returns the trash path.
+///
+/// Layered delete (dataset-layers.md §6): resolves the **top** layer and never
+/// forks. When an overlay exists it is the top layer, so deleting *detaches* the
+/// local edits and leaves the read-only base intact; deleting again removes the
+/// base (the download). A flat dataset deletes outright.
 #[tauri::command]
 pub async fn dataset_delete(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<String, String> {
-    let path = find_dataset_dir_write(&settings, &uuid)?;
+    let path = find_dataset_dir_read(&settings, &uuid)?;
     log::info!("Deleting dataset at '{}'", path.display());
     let trashed = move_to_trash(&path)?;
     log::info!("Dataset {} moved to trash '{}'", uuid, trashed.display());
@@ -1499,8 +1572,9 @@ fn segments_to_vtt(segments: &[transcribe_rs::TranscriptionSegment]) -> String {
 /// [`find_dataset_dir_typed`] and returns the first match — a writable local
 /// dataset before a downloaded base of the same uuid (root order, §4.4).
 ///
-/// Phase 1 returns the resolved directory as-is. Phase 2 will redirect an
-/// overlay to its `merged/` cache so reads stay single-directory.
+/// With the fork model an edited base resolves to its overlay — a self-contained
+/// writable dataset in the `<type>/` area — so reads stay single-directory with
+/// no `merged/` cache (dataset-layers.md §5 alternative).
 pub(crate) fn find_dataset_dir_read(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
     find_dataset_dir_typed(settings, uuid).map(|(path, _ty)| path)
 }
@@ -1508,18 +1582,108 @@ pub(crate) fn find_dataset_dir_read(settings: &SettingsState, uuid: &str) -> Res
 /// Write-resolution: where a mutation to `uuid` lands.
 ///
 /// A dataset under the app-maintained download root is a read-only base and is
-/// never a write target (dataset-layers.md §6). Phase 1 refuses with an
-/// actionable error; Phase 2 will instead create and return an overlay directory.
+/// never a write target (dataset-layers.md §6): the first write transparently
+/// **forks** it into a writable overlay in the `<type>/` area and returns that.
+/// A flat dataset, or an overlay that already exists, is returned as-is, so the
+/// fork happens once and is idempotent (the overlay then resolves first).
 pub(crate) fn find_dataset_dir_write(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
-    let (path, _ty) = find_dataset_dir_typed(settings, uuid)?;
+    let (path, ty) = find_dataset_dir_typed(settings, uuid)?;
     if is_under_download_root(settings, &path) {
-        let name = read_info_opt(&path).map(|i| i.name).unwrap_or_else(|| uuid.to_string());
-        return Err(format!(
-            "cannot write: '{}' is a read-only base under the download root; editing downloaded datasets arrives in a later update",
-            name
-        ));
+        return fork_base_to_overlay(settings, &path, ty);
     }
     Ok(path)
+}
+
+/// Fork a read-only base under the download root into a self-contained writable
+/// overlay (dataset-layers.md §6).
+///
+/// The overlay is an ordinary dataset directory in the writable `<type>/` area:
+/// the SQLite DB is **copied** (never hardlinked — row writes would otherwise
+/// reach through the link and corrupt the base), immutable media are
+/// **hardlinked** (falling back to a copy across volumes or on filesystems
+/// without hardlinks), and small mutable files (`.vtt`, waveform `.json`,
+/// `book.txt`, transcripts) are **copied** so an in-place edit can never reach
+/// the base inode. `info.json` is rewritten with `layer.role = "overlay"` so
+/// reads union and a later base re-pull can detect staleness (§4.3).
+///
+/// Exempt from `assert_uuid_free`: like [`ensure_favorites_dataset`], it
+/// legitimately writes a second directory carrying the base's uuid (§4.4).
+pub(crate) fn fork_base_to_overlay(
+    settings: &SettingsState,
+    base_dir: &Path,
+    dataset_type: DatasetType,
+) -> Result<PathBuf, String> {
+    let info = read_info(base_dir)?;
+
+    // Target: the first writable root for this type (never the download root).
+    let target_root = dataset_roots(settings, dataset_type)
+        .into_iter()
+        .find(|r| !is_under_download_root(settings, r))
+        .unwrap_or_else(|| datasets_dir(settings).join(dataset_type.as_str()));
+    fs::create_dir_all(&target_root).map_err(|e| format!("Failed to create datasets dir: {}", e))?;
+
+    // Collision-avoided dir name from the display name (same pattern as
+    // `ensure_favorites_dataset`); the overlay keeps the base's uuid inside.
+    let dir_name = sanitize_dir_name(&info.name).unwrap_or_else(|| info.uuid.clone());
+    let mut dst = target_root.join(&dir_name);
+    let mut n = 2;
+    while dst.exists() {
+        dst = target_root.join(format!("{}-{}", dir_name, n));
+        n += 1;
+    }
+    fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
+
+    // Walk the base tree, forking each file by kind (info.json written below).
+    fork_tree(base_dir, &dst)?;
+
+    let mut overlay_info = info.clone();
+    overlay_info.layer = Some(LayerBlock {
+        role: LAYER_ROLE_OVERLAY.to_string(),
+        base_uuid: Some(info.uuid.clone()),
+        base_version: Some(info.updated_at.clone()),
+    });
+    overlay_info.updated_at = now_stamp();
+    write_info(&dst, &overlay_info)?;
+
+    log::info!(
+        "[Layer] Forked read-only base '{}' into writable overlay at '{}'",
+        info.uuid,
+        dst.display()
+    );
+    Ok(dst)
+}
+
+/// Recursively fork `src` into `dst`: media hardlinked (copy fallback), the DB
+/// and every other file copied, `info.json` and any `overlay/`/`merged/` skipped
+/// (the caller writes `info.json` fresh; a pristine base has no overlay dirs).
+fn fork_tree(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let src_path = entry.path();
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if src_path.is_dir() {
+            if name == "overlay" || name == "merged" {
+                continue;
+            }
+            fork_tree(&src_path, &dst.join(&*file_name))?;
+            continue;
+        }
+        if name == INFO_FILE {
+            continue; // written fresh by the caller
+        }
+        let dst_path = dst.join(&file_name);
+        // Media (large, immutable) → hardlink, falling back to copy. Everything
+        // else (DB + sidecars, .vtt, waveform .json, book.txt, transcripts) →
+        // copy, so an in-place edit in the overlay can never reach the base.
+        if is_media_file(&name) && fs::hard_link(&src_path, &dst_path).is_ok() {
+            continue;
+        }
+        fs::copy(&src_path, &dst_path)
+            .map_err(|e| format!("Failed to fork {}: {}", src_path.display(), e))?;
+    }
+    Ok(())
 }
 
 /// Find the dataset directory by UUID across all configured locations.

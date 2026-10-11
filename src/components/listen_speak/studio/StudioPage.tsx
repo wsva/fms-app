@@ -166,7 +166,13 @@ export default function StudioPage() {
         if (typeof res === "string" && res.trim()) appendLog(res);
         if (typeof res === "number") appendLog(`Imported ${res} file(s).`);
         appendLog("--- done ---");
-        if (refresh && selectedUuid) await loadDetail(selectedUuid);
+        if (refresh) {
+          // A mutation may have forked a downloaded base into a new overlay,
+          // changing the resolved path and badges — refresh the list as well as
+          // the detail so the selector and media URLs point at the overlay.
+          await fetchDatasets();
+          if (selectedUuid) await loadDetail(selectedUuid);
+        }
       } catch (e) {
         appendLog(`Error: ${String(e)}`);
       } finally {
@@ -174,7 +180,7 @@ export default function StudioPage() {
         setRunningStage("");
       }
     },
-    [running, appendLog, loadDetail, selectedUuid]
+    [running, appendLog, loadDetail, selectedUuid, fetchDatasets]
   );
 
   // ---- Helpers ----
@@ -234,6 +240,34 @@ export default function StudioPage() {
     );
   }
 
+  // Revert a downloaded dataset to its pristine base: the local overlay is moved
+  // to the trash (dataset-layers.md §11). Undoable; the base is untouched.
+  async function handleDetach() {
+    if (!selectedUuid) return;
+    await runStage(
+      "Revert to downloaded",
+      async () => {
+        const res = await invoke<string>("dataset_layer_detach", { uuid: selectedUuid });
+        return `Reverted to the downloaded base. Local overlay moved to trash: ${res}`;
+      },
+      true
+    );
+  }
+
+  // Keep the edited copy as a standalone dataset, independent of the download
+  // (todo item 9): strips the layer link; hardlinked media survive base deletion.
+  async function handleFlatten() {
+    if (!selectedUuid) return;
+    await runStage(
+      "Keep as my own",
+      async () => {
+        await invoke("dataset_layer_flatten", { uuid: selectedUuid });
+        return "This is now a standalone dataset, independent of the download.";
+      },
+      true
+    );
+  }
+
   function handleImportMedia() {
     if (!selectedUuid) return;
     if (!sourceDir.trim()) {
@@ -271,10 +305,13 @@ export default function StudioPage() {
   const hasWaveforms = !!detail?.has_waveforms;
   const hasSubtitles = !!detail?.has_subtitles;
 
-  // A dataset under the reserved download root is a read-only base: every Studio
-  // action mutates, so the whole pipeline is gated for it (dataset-layers.md §6).
+  // A downloaded base is editable: the first mutation forks it into a writable
+  // overlay (dataset-layers.md §6), so the pipeline is never gated. The badges
+  // below tell a downloaded dataset (and whether it has local edits) apart.
   const selectedDataset = datasets.find((d) => d.info.uuid === selectedUuid);
-  const isReadOnly = !!selectedDataset?.is_read_only;
+  const isDownloaded = !!selectedDataset?.downloaded;
+  const hasLocalChanges = !!selectedDataset?.has_local_changes;
+  const isOverlay = selectedDataset?.layer_role === "overlay";
 
   return (
     <div className="flex flex-col w-full h-full min-h-0 p-4 gap-3">
@@ -290,7 +327,7 @@ export default function StudioPage() {
           <option value="">Select a dataset…</option>
           {datasets.map((ds) => (
             <option key={ds.path} value={ds.info.uuid}>
-              {ds.info.name}{ds.is_read_only ? " (read-only)" : ""}
+              {ds.info.name}{ds.downloaded ? (ds.has_local_changes ? " (downloaded · edited)" : " (downloaded)") : ""}
             </option>
           ))}
         </select>
@@ -299,10 +336,30 @@ export default function StudioPage() {
             {datasetStatusLabel(detail.status)}
           </span>
         )}
-        {isReadOnly && (
+        {isDownloaded && (
           <span className="px-2 py-0.5 text-xs rounded-md border border-border-light bg-bg-body text-text-secondary">
-            Downloaded · read-only
+            Downloaded{hasLocalChanges ? " · edited locally" : ""}
           </span>
+        )}
+        {isOverlay && (
+          <>
+            <button
+              className={btnSmSecondary}
+              onClick={handleDetach}
+              disabled={running}
+              title="Discard local edits and revert to the downloaded base"
+            >
+              Revert to downloaded
+            </button>
+            <button
+              className={btnSmSecondary}
+              onClick={handleFlatten}
+              disabled={running}
+              title="Detach from the download and keep this as your own standalone dataset"
+            >
+              Keep as my own
+            </button>
+          </>
         )}
         <button
           className={`${btnSmSecondary} inline-flex items-center gap-1 ml-auto`}
@@ -338,8 +395,7 @@ export default function StudioPage() {
                 running={
                   running && runningStage === (editing ? "Update dataset" : "Create dataset")
                 }
-                disabled={running || (editing && isReadOnly)}
-                hint={editing && isReadOnly ? "Downloaded datasets are read-only." : undefined}
+                disabled={running}
                 runLabel={editing ? "Save" : "Create"}
                 onRun={editing ? handleUpdate : handleCreate}
               >
@@ -387,18 +443,6 @@ export default function StudioPage() {
               <p className="text-sm text-text-tertiary">
                 Select a dataset above (or create one) to run the pipeline stages.
               </p>
-            ) : isReadOnly ? (
-              <div className="flex flex-col gap-2 rounded-lg border border-border-light bg-bg-body p-4 text-sm text-text-secondary">
-                <span className="font-medium text-text-primary">
-                  Downloaded dataset — read-only
-                </span>
-                <p>
-                  ‘{selectedDataset?.info.name}’ is a downloaded base under the app-managed
-                  download location. It can be studied and its media plays normally, but its
-                  media, subtitles, database and cues cannot be edited here. Editing downloaded
-                  datasets arrives in a later update.
-                </p>
-              </div>
             ) : (
               <>
                 {/* Pipeline */}

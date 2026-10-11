@@ -207,11 +207,32 @@ impl DatasetMcpServer {
         .map_err(|e| e.to_string())?)
     }
 
-    #[tool(name = "dataset_layer_status", description = "Report a dataset's layer / read-only status before acting on it: role ('overlay'|'flat'), is_read_only (true when it resolves under the reserved download root, so every mutation is refused), downloaded, base_uuid, base_version, and the resolved path. Call this to decide whether a write will be refused.")]
+    #[tool(name = "dataset_layer_status", description = "Report a dataset's layer / read-only status before acting on it: role ('overlay'|'flat'), is_read_only (true when it resolves under the reserved download root — the first write forks it into a writable overlay rather than being refused), downloaded, has_overlay (a local overlay exists that can be detached or flattened), base_uuid, base_version, and the resolved path.")]
     async fn dataset_layer_status(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::info!("[MCP] dataset_layer_status: uuid={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
         let status = datasets::layer_status(&settings, &param.uuid)?;
+        serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
+    }
+
+    #[tool(name = "dataset_layer_detach", description = "Detach a downloaded dataset's local overlay: move it to the trash and revert the uuid to its pristine read-only base. Undoable via the trash; the base is untouched. Errors with an actionable message when there is no overlay to detach.")]
+    async fn dataset_layer_detach(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_layer_detach: uuid={}", param.uuid);
+        let settings = self.app.state::<SettingsState>();
+        let trashed = datasets::layer_detach(&settings, &param.uuid)?;
+        Ok(serde_json::json!({
+            "detached": true,
+            "uuid": param.uuid,
+            "trash_path": trashed,
+        })
+        .to_string())
+    }
+
+    #[tool(name = "dataset_layer_flatten", description = "Flatten a downloaded dataset's overlay into a standalone writable dataset: strip the layer block so it no longer depends on the download root (its hardlinked media survive base deletion). Errors when the uuid is not an overlay. Returns the new layer status.")]
+    async fn dataset_layer_flatten(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_layer_flatten: uuid={}", param.uuid);
+        let settings = self.app.state::<SettingsState>();
+        let status = datasets::layer_flatten(&settings, &param.uuid)?;
         serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
     }
 
