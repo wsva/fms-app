@@ -353,9 +353,17 @@ impl ModelDownloader {
 
     /// Fetch HuggingFace file list with pagination support.
     async fn get_hf_files(&self, repo_id: &str, revision: &str) -> Result<Vec<UnifiedFile>, String> {
-        // Support HF_ENDPOINT env var for mirrors
-        let base_url = std::env::var("HF_ENDPOINT")
-            .unwrap_or_else(|_| self.provider.base_url().to_string());
+        // A plain Hugging Face download honors the standard HF_ENDPOINT env
+        // override. An explicitly chosen mirror (or ModelScope) is deliberate
+        // user intent and must win over any ambient HF_ENDPOINT — otherwise
+        // that variable silently forces the HF host and the provider selector
+        // appears to do nothing.
+        let base_url = if matches!(self.provider, HubProvider::HuggingFace { .. }) {
+            std::env::var("HF_ENDPOINT").unwrap_or_else(|_| self.provider.base_url().to_string())
+        } else {
+            self.provider.base_url().to_string()
+        };
+        log::info!("[download] HF host {} (provider {:?})", base_url, self.provider);
 
         let mut all_files = Vec::new();
         let mut next_url: Option<String> = Some(format!(
@@ -370,12 +378,17 @@ impl ModelDownloader {
                 return Err(format!("HuggingFace API error (HTTP {}): {}", resp.status(), url));
             }
 
-            // Parse Link header for pagination
+            // Parse Link header for pagination. The header is an absolute URL
+            // pointing at the canonical huggingface.co host even when the page
+            // was served by a mirror, so rebase it back onto `base_url` —
+            // otherwise the follow-up page escapes the mirror (and, in regions
+            // that block HF, fails outright).
             next_url = resp
                 .headers()
                 .get(reqwest::header::LINK)
                 .and_then(|v| v.to_str().ok())
-                .and_then(parse_link_next);
+                .and_then(parse_link_next)
+                .map(|u| rebase_to_base(&u, &base_url));
 
             let page: Vec<HfFile> = resp.json().await.map_err(|e| format!("Failed to parse HF response: {}", e))?;
             all_files.extend(page.into_iter().filter(|f| f.r#type == "file").map(|f| UnifiedFile {
@@ -455,6 +468,20 @@ fn parse_link_next(header: &str) -> Option<String> {
             None
         }
     })
+}
+
+/// Rewrite an absolute URL's scheme+authority to `base`, preserving its
+/// path+query. Used to keep HF pagination on the selected mirror host.
+fn rebase_to_base(absolute: &str, base: &str) -> String {
+    let scheme_end = match absolute.find("://") {
+        Some(i) => i + 3,
+        None => return absolute.to_string(),
+    };
+    let authority_end = match absolute[scheme_end..].find('/') {
+        Some(p) => scheme_end + p,
+        None => absolute.len(),
+    };
+    format!("{}{}", base.trim_end_matches('/'), &absolute[authority_end..])
 }
 
 /// Retry wrapper with exponential backoff.
@@ -963,4 +990,37 @@ fn extract_tar_gz(archive_path: &Path, model_dir: &Path, _model_id: &str) -> Res
 
     let _ = fs::remove_dir_all(&temp_extract_dir);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebase_keeps_mirror_host_on_pagination() {
+        // HF's Link header always points at the canonical host; a mirror must
+        // rewrite it back while preserving the exact path + encoded cursor.
+        let absolute = "https://huggingface.co/api/models/segment-any-text/sat-12l/tree/main?expand=false&recursive=true&limit=1000&cursor=abc%3D";
+        let got = rebase_to_base(absolute, "https://hf-mirror.com");
+        assert_eq!(
+            got,
+            "https://hf-mirror.com/api/models/segment-any-text/sat-12l/tree/main?expand=false&recursive=true&limit=1000&cursor=abc%3D"
+        );
+    }
+
+    #[test]
+    fn rebase_handles_trailing_slash_and_no_path() {
+        assert_eq!(
+            rebase_to_base("https://huggingface.co/x", "https://hf-mirror.com/"),
+            "https://hf-mirror.com/x"
+        );
+        assert_eq!(
+            rebase_to_base("https://huggingface.co", "https://hf-mirror.com"),
+            "https://hf-mirror.com"
+        );
+    }
 }

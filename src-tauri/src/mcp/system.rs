@@ -10,6 +10,8 @@ use crate::auth;
 use crate::capture;
 use crate::logger::LogBuffer;
 use crate::ocr::{self, OcrState};
+#[cfg(feature = "textsplit")]
+use crate::textsplit::{self, TextSplitState};
 use crate::settings::SettingsState;
 
 use super::{DatasetMcpServer, JsonValue};
@@ -56,6 +58,25 @@ struct AppStartDictationParam {
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct AppNotifyParam {
     message: String,
+}
+
+#[cfg(feature = "textsplit")]
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct TextSplitParam {
+    /// Text to segment into sentences.
+    text: String,
+    /// Optional model id (defaults to the built-in SaT 3L Small).
+    #[serde(default)]
+    model: Option<String>,
+    /// Optional boundary probability threshold (default 0.01).
+    #[serde(default)]
+    threshold: Option<f32>,
+    /// Strip surrounding whitespace from each sentence (default true).
+    #[serde(default)]
+    strip_whitespace: Option<bool>,
+    /// Also split on the input's own newlines (default true).
+    #[serde(default)]
+    split_on_input_newlines: Option<bool>,
 }
 
 #[tool_router(router = system_router, vis = "pub(crate)")]
@@ -110,6 +131,34 @@ impl DatasetMcpServer {
         let state = self.app.state::<OcrState>();
         let langs = ocr::ocr_list_languages(state).await?;
         Ok(serde_json::json!({"status": "ok", "languages": langs}).to_string())
+    }
+
+    #[cfg(feature = "textsplit")]
+    #[tool(name = "text_split", description = "Segment text into sentences using the SaT subword model (85+ languages). Pass the text and optional threshold/model. Auto-loads the model (download SaT 3L Small on the Models page first). Returns the list of sentences.")]
+    async fn text_split(&self, Parameters(param): Parameters<TextSplitParam>) -> Result<String, String> {
+        log::info!("[MCP] text_split: {} chars, model={:?}", param.text.chars().count(), param.model);
+        let state = self.app.state::<TextSplitState>();
+        let sentences = textsplit::text_split(
+            state,
+            param.text,
+            param.model.clone(),
+            param.threshold,
+            None,
+            None,
+            None,
+            param.strip_whitespace,
+            param.split_on_input_newlines,
+        )
+        .await?;
+        let count = sentences.len();
+        Ok(serde_json::json!({
+            "status": "ok",
+            "sentences": sentences,
+            "count": count,
+            "model": param.model,
+            "threshold": param.threshold,
+        })
+        .to_string())
     }
 
     #[tool(name = "capture_screenshot", description = "Minimize the app window and capture a screenshot using the native snipping tool (Windows) or full-screen capture (other platforms). Returns a data:image/png;base64 URL.")]

@@ -55,6 +55,7 @@ desktop = [
     "dep:tokio-tungstenite",
     "dep:serde_yaml",
     "server",
+    "textsplit",
 ]
 server = [
     "dep:axum",
@@ -65,6 +66,11 @@ server = [
     "dep:anyhow",
 ]
 stt = ["dep:transcribe-rs"]
+# Vendored SaT sentence segmentation (ported from wtsplit-rs). Desktop-only: it
+# runs the ONNX on the same statically-linked `ort` that `stt` already pulls in
+# via transcribe-rs, so `textsplit` depends on `stt` and adds `tokenizers` as
+# its only genuinely new crate. `ndarray`/`half` are already in the tree.
+textsplit = ["stt", "dep:ort", "dep:tokenizers", "dep:ndarray", "dep:half"]
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
@@ -75,6 +81,15 @@ tauri-plugin-single-instance = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 transcribe-rs = { version = "0.3.11", features = ["onnx"], optional = true }
+# Vendored SaT inference. Reuse the exact `ort`/`ndarray`/`half` versions
+# transcribe-rs already resolved (2.0.0-rc.12 / 0.17 / 2.7) so we link against
+# the single statically-provided ONNX Runtime rather than a second, dynamic one.
+ort = { version = "2.0.0-rc.12", optional = true, features = ["half"] }
+ndarray = { version = "0.17", optional = true }
+half = { version = "2.4", optional = true, features = ["num-traits"] }
+# XLM-RoBERTa subword tokenizer for SaT. Loaded from a local tokenizer.json,
+# so no HTTP/hf-hub feature is needed.
+tokenizers = { version = "0.21", optional = true, default-features = false, features = ["onig"] }
 transcribe-cpp = { version = "0.2.0", default-features = false, optional = true }
 tar = "0.4.44"
 flate2 = "1.0"

@@ -26,6 +26,10 @@ pub struct HfModelDef {
     pub folder: &'static str,
     /// Required files to download from the HF repo.
     pub files: &'static [HfModelFile],
+    /// Optional HuggingFace repo to source `tokenizer.json` from when the model
+    /// repo ships weights only (typical for ONNX exports, e.g. SaT models live
+    /// without a tokenizer). `None` means the tokenizer is part of `files`.
+    pub tokenizer_repo: Option<&'static str>,
     /// Total download size in MB (approximate).
     pub size_mb: u64,
     /// Supported language codes.
@@ -61,6 +65,7 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "model.safetensors", size_bytes: 344_000_000 },
             HfModelFile { path: "tokenizer.json", size_bytes: 0 },
         ],
+        tokenizer_repo: None,
         size_mb: 330,
         languages: &["en"],
     },
@@ -75,6 +80,7 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "model.safetensors", size_bytes: 862_000_000 },
             HfModelFile { path: "tokenizer.json", size_bytes: 0 },
         ],
+        tokenizer_repo: None,
         size_mb: 822,
         languages: &["en"],
     },
@@ -89,6 +95,7 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "model.safetensors", size_bytes: 344_000_000 },
             HfModelFile { path: "tokenizer.json", size_bytes: 0 },
         ],
+        tokenizer_repo: None,
         size_mb: 330,
         languages: &["en"],
     },
@@ -103,6 +110,7 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "model.safetensors", size_bytes: 862_000_000 },
             HfModelFile { path: "tokenizer.json", size_bytes: 0 },
         ],
+        tokenizer_repo: None,
         size_mb: 822,
         languages: &["en"],
     },
@@ -121,6 +129,7 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "model.safetensors", size_bytes: 0 },
             HfModelFile { path: "model.safetensors.index.json", size_bytes: 0 },
         ],
+        tokenizer_repo: None,
         size_mb: 880,
         languages: &["en"],
     },
@@ -135,8 +144,59 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "model.safetensors", size_bytes: 0 },
             HfModelFile { path: "model.safetensors.index.json", size_bytes: 0 },
         ],
+        tokenizer_repo: None,
         size_mb: 880,
         languages: &["en"],
+    },
+
+    // ========================================================================
+    // Text segmentation — SaT (segment-any-text)
+    // ========================================================================
+    // Subword sentence segmentation (XLM-RoBERTa backbone) run via the vendored
+    // `crate::textsplit` SaT port on the statically-linked `ort`. Consumed by
+    // the desktop "Split Text" page. The ONNX repo ships weights only, so the
+    // tokenizer is fetched from the XLM-RoBERTa backbone (see `tokenizer_repo`).
+    HfModelDef {
+        id: "segment-any-text/sat-3l-sm",
+        name: "SaT 3L Small (Sentence Splitter)",
+        description: "Subword sentence segmentation for 85+ languages",
+        model_type: "textsplit",
+        folder: "textsplit/segment-any-text/sat-3l-sm",
+        files: &[
+            HfModelFile { path: "config.json", size_bytes: 0 },
+            HfModelFile { path: "model_optimized.onnx", size_bytes: 427_756_189 },
+        ],
+        tokenizer_repo: Some("FacebookAI/xlm-roberta-base"),
+        size_mb: 430,
+        languages: &[],
+    },
+    HfModelDef {
+        id: "segment-any-text/sat-3l",
+        name: "SaT 3L (Sentence Splitter)",
+        description: "Higher-accuracy subword sentence segmentation for 85+ languages",
+        model_type: "textsplit",
+        folder: "textsplit/segment-any-text/sat-3l",
+        files: &[
+            HfModelFile { path: "config.json", size_bytes: 0 },
+            HfModelFile { path: "model_optimized.onnx", size_bytes: 427_946_487 },
+        ],
+        tokenizer_repo: Some("FacebookAI/xlm-roberta-base"),
+        size_mb: 430,
+        languages: &[],
+    },
+    HfModelDef {
+        id: "segment-any-text/sat-12l",
+        name: "SaT 12L (Sentence Splitter)",
+        description: "Most accurate 12-layer sentence segmentation. Slower, larger download",
+        model_type: "textsplit",
+        folder: "textsplit/segment-any-text/sat-12l",
+        files: &[
+            HfModelFile { path: "config.json", size_bytes: 0 },
+            HfModelFile { path: "model_optimized.onnx", size_bytes: 556_478_056 },
+        ],
+        tokenizer_repo: Some("FacebookAI/xlm-roberta-base"),
+        size_mb: 560,
+        languages: &[],
     },
 ];
 

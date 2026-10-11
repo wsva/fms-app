@@ -53,6 +53,10 @@ mod edge_tts;
 mod capture;
 #[cfg(feature = "desktop")]
 mod ocr;
+/// Vendored SaT sentence segmentation ("Split Text"). Gated on the `textsplit`
+/// feature (a subset of `desktop`), which also turns on `ort`/`tokenizers`.
+#[cfg(feature = "textsplit")]
+mod textsplit;
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -268,6 +272,10 @@ pub fn run() {
             sync::server::web_service_stop,
             ocr::ocr_recognize,
             ocr::ocr_list_languages,
+            models::model_download_hf,
+            textsplit::text_split_status,
+            textsplit::text_split,
+            textsplit::text_split_delete,
             xp::xp_get_user,
             xp::xp_get_history,
             xp::xp_award_dictation_cue,
@@ -407,6 +415,7 @@ pub fn run() {
         .manage(datasets::DatasetState::new())
         .manage(sync::server::WebServiceState::new())
         .manage(ocr::OcrState::new())
+        .manage(textsplit::TextSplitState::new())
         .manage(simple_words::SimpleWordsState::new())
         .manage(ai::agent_acp::AcpClientState::new())
         .setup(|app| {

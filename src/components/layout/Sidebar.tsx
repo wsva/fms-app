@@ -45,6 +45,7 @@ export type TabId =
   | "llm-chat"
   | "chat"
   | "ocr"
+  | "split-text"
   | "wiki"
   | "workspaces"
   | "logs"
@@ -80,6 +81,7 @@ const navGroups: NavGroup[] = [
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
       { id: "ocr", label: "OCR", icon: ScanText },
+      { id: "split-text", label: "Split Text", icon: ArrowUpDown },
       { id: "models", label: "Models", icon: Box },
       { id: "logs", label: "Logs", icon: FileText },
     ],

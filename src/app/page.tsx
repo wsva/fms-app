@@ -28,6 +28,7 @@ import WikiPage from "@/components/wiki/WikiPage";
 import LogPage from "@/components/tools/LogPage";
 import WorkspacesPage from "@/components/workspace/WorkspacesPage";
 import SimpleWordsPage from "@/components/tools/SimpleWordsPage";
+import SplitTextPage from "@/components/tools/SplitTextPage";
 import AgentDock from "@/components/agent/AgentDock";
 import type { AgentAction } from "@/lib/agent/types";
 
@@ -266,6 +267,9 @@ export default function Home() {
         </div>
         <div style={{ display: activeTab === "ocr" ? "flex" : "none" }} className="flex-1 min-h-0">
           <OcrPage />
+        </div>
+        <div style={{ display: activeTab === "split-text" ? "flex" : "none" }} className="flex-1 min-h-0">
+          <SplitTextPage />
         </div>
         <div style={{ display: activeTab === "wiki" ? "flex" : "none" }} className="flex-1 min-h-0">
           <WikiPage />

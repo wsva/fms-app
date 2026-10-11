@@ -536,6 +536,193 @@ pub async fn model_download(
 }
 
 // ---------------------------------------------------------------------------
+// HuggingFace catalog download (non-STT: OCR / TTS / textsplit)
+//
+// `catalog::MODELS` entries are file-list downloads from a HF repo, driven by
+// the `ModelDownloader` in `download.rs`. Progress + cancellation reuse the
+// same `ModelState.download_progress` / `cancel_flags` plumbing (and the
+// `model-download-progress` event) the STT Models page already speaks, so the
+// existing UI works for these too. Files land under
+// `{model_root}/candle/{folder}`, exactly where `index::scan_models` looks.
+// ---------------------------------------------------------------------------
+
+/// Directory a `catalog::HfModelDef`'s files are stored in.
+pub(crate) fn hf_model_dir(def: &catalog::HfModelDef) -> std::path::PathBuf {
+    index::model_root().join("candle").join(def.folder)
+}
+
+/// `save_dir` to hand `ModelDownloader` so its `save_dir + repo_id` layout
+/// resolves back to `hf_model_dir(def)`.
+fn hf_save_dir(def: &catalog::HfModelDef) -> std::path::PathBuf {
+    let candle = index::model_root().join("candle");
+    match def.folder.strip_suffix(def.id) {
+        Some(prefix) => candle.join(prefix.trim_end_matches('/')),
+        None => candle,
+    }
+}
+
+/// Whether a HF catalog model's files are present on disk. Requires every
+/// listed file plus (when `tokenizer_repo` is set) the separately-fetched
+/// `tokenizer.json`, so a partial download reads as "not downloaded" and is
+/// re-completable rather than getting stuck.
+pub(crate) fn hf_downloaded_on_disk(def: &catalog::HfModelDef) -> bool {
+    let dir = hf_model_dir(def);
+    let files_ok = !def.files.is_empty() && def.files.iter().all(|f| dir.join(f.path).exists());
+    let tokenizer_ok = match def.tokenizer_repo {
+        Some(_) => dir.join("tokenizer.json").exists(),
+        None => true,
+    };
+    files_ok && tokenizer_ok
+}
+
+/// Map a frontend provider key (from the model-card selector) to a
+/// `HubProvider`. Absent or unrecognized keys default to Hugging Face.
+fn hub_provider_from_key(key: Option<&str>) -> download::HubProvider {
+    match key {
+        Some("hf-mirror") => download::HubProvider::HfMirror { token: None },
+        Some("modelscope") => download::HubProvider::ModelScope { token: None },
+        _ => download::HubProvider::HuggingFace { token: None },
+    }
+}
+
+/// Canonical provider label recorded in the model index for a given key.
+fn provider_label(key: Option<&str>) -> &'static str {
+    match key {
+        Some("hf-mirror") => "hf-mirror",
+        Some("modelscope") => "modelscope",
+        _ => "huggingface",
+    }
+}
+
+#[tauri::command]
+pub async fn model_download_hf(
+    app: AppHandle,
+    state: State<'_, ModelState>,
+    index: State<'_, ModelIndexState>,
+    id: String,
+    provider: Option<String>,
+) -> Result<(), String> {
+    let def = catalog::find_model(&id).ok_or_else(|| format!("Unknown model: {}", id))?;
+
+    if hf_downloaded_on_disk(def) {
+        return Err("Model already downloaded".into());
+    }
+    {
+        let statuses = state.download_status.lock().unwrap();
+        if statuses.values().any(|s| *s == ModelStatus::Downloading) {
+            return Err("A download is already in progress".into());
+        }
+    }
+
+    log::info!("Starting HF download of model '{}' ({} MB)", id, def.size_mb);
+    {
+        let mut p = state.download_progress.lock().unwrap();
+        p.files = def
+            .files
+            .iter()
+            .map(|f| FileDownloadInfo {
+                file: f.path.to_string(),
+                bytes_downloaded: 0,
+                total_bytes: (f.size_bytes > 0).then_some(f.size_bytes),
+                speed: 0,
+                eta_seconds: None,
+            })
+            .collect();
+        p.overall_bytes_downloaded = 0;
+        p.overall_total_bytes = def.size_mb * 1024 * 1024;
+    }
+
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    state.cancel_flags.lock().unwrap().insert(id.clone(), cancel_flag.clone());
+
+    let provider_enum = hub_provider_from_key(provider.as_deref());
+    log::info!(
+        "HF download of '{}' requested via provider '{}'",
+        id,
+        provider_label(provider.as_deref())
+    );
+    let downloader = download::ModelDownloader::new(provider_enum.clone())?;
+    let options = download::DownloadOptions {
+        repo_id: id.clone(),
+        revision: None,
+        save_dir: hf_save_dir(def),
+        files: Some(def.files.iter().map(|f| f.path.to_string()).collect()),
+    };
+
+    let result = downloader
+        .download(options, Some(&app), Some(&state.download_progress), Some(&cancel_flag))
+        .await;
+
+    state.cancel_flags.lock().unwrap().remove(&id);
+
+    if let Err(e) = result {
+        log::error!("HF download failed for '{}': {}", id, e);
+        let _ = app.emit("model-status-changed", ());
+        return Err(e);
+    }
+
+    // Some ONNX repos (e.g. segment-any-text/sat-3l-sm) ship weights only; the
+    // tokenizer lives in the backbone repo. Fetch it into the same directory so
+    // the model is complete and `is_downloaded_dir` / `SaT::from_dir` succeed.
+    if let Some(tok_repo) = def.tokenizer_repo {
+        let target = hf_model_dir(def);
+        let tmp = target.join("_tokenizer");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let tok_result = download::ModelDownloader::new(provider_enum)?
+            .download(
+                download::DownloadOptions {
+                    repo_id: tok_repo.to_string(),
+                    revision: None,
+                    save_dir: tmp.clone(),
+                    files: Some(vec!["tokenizer.json".to_string()]),
+                },
+                Some(&app),
+                None,
+                Some(&cancel_flag),
+            )
+            .await;
+        if let Err(e) = tok_result {
+            let _ = std::fs::remove_dir_all(&tmp);
+            let _ = app.emit("model-status-changed", ());
+            return Err(format!("Failed to fetch tokenizer from '{}': {}", tok_repo, e));
+        }
+        // `ModelDownloader` nests files under `save_dir/<repo segments>/…`.
+        let landed = tok_repo
+            .split('/')
+            .fold(tmp.clone(), |p, c| p.join(c))
+            .join("tokenizer.json");
+        let dst = target.join("tokenizer.json");
+        let moved = std::fs::rename(&landed, &dst)
+            .or_else(|_| std::fs::copy(&landed, &dst).map(|_| ()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        if let Err(e) = moved {
+            let _ = app.emit("model-status-changed", ());
+            return Err(format!("Failed to place tokenizer: {}", e));
+        }
+    }
+
+    // Register in the unified index so it is reported as downloaded everywhere.
+    let root = index::model_root();
+    let files = index::collect_files(&hf_model_dir(def), &root);
+    let key = index::make_key(def.model_type, &id);
+    let entry = ModelIndexEntry {
+        model_type: def.model_type.to_string(),
+        id: id.clone(),
+        name: def.name.to_string(),
+        downloaded_at: Some(chrono::Utc::now().to_rfc3339()),
+        provider: Some(provider_label(provider.as_deref()).to_string()),
+        files,
+    };
+    if let Err(e) = index::upsert_entry(&index, key, entry) {
+        log::warn!("Failed to update model index after HF download: {}", e);
+    }
+
+    log::info!("Model '{}' downloaded successfully", id);
+    let _ = app.emit("model-status-changed", ());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Core logic (callable from managers without Tauri State)
 // ---------------------------------------------------------------------------
 
