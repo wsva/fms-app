@@ -451,17 +451,56 @@ pub(crate) fn record(
         ));
     }
 
-    let outputs = detail
+    let mut outputs = detail
         .as_ref()
         .and_then(|d| d.get("outputs"))
         .and_then(|o| o.as_object())
         .cloned()
         .unwrap_or_default();
+    // An agent's first instinct is to put the values straight on `detail`
+    // (`{"model_version": "parakeet-v3"}`) instead of nested under `outputs`.
+    // Accept that shape: the alternative is recording a completion with an empty
+    // output map, which silently strands every dependent that reads one.
+    if outputs.is_empty() {
+        if let Some(d) = detail.as_ref().and_then(|d| d.as_object()) {
+            outputs = d
+                .iter()
+                .filter(|(k, _)| !matches!(k.as_str(), "outputs" | "reason" | "error"))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+        }
+    }
     let reason = detail
         .as_ref()
         .and_then(|d| d.get("reason").or_else(|| d.get("error")))
         .and_then(|r| r.as_str())
         .map(|s| s.to_string());
+
+    // A completion missing a declared output is the one recording mistake whose
+    // cost only shows up three steps later: a dependent's `when:` guard or
+    // `inputs:` reference reads it, finds nothing, and sits `blocked` with no
+    // event ever naming the cause. Refuse the write instead — the step is still
+    // `running`, so the corrected call is accepted and nothing is lost.
+    if event_kind == "completed" {
+        let missing: Vec<&str> = step
+            .outputs
+            .iter()
+            .map(String::as_str)
+            .filter(|key| !outputs.contains_key(*key))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "step '{step_id}' declares outputs [{}] but this completion is missing [{}]. \
+                 Re-call workflow_record carrying those names under detail.outputs (or directly \
+                 on detail), using the string \"false\" or \"unknown\" when a value genuinely \
+                 does not exist so a dependent's 'when:' guard can resolve. Nothing was \
+                 written; '{step_id}' is still '{cur_status}'.",
+                step.outputs.join(", "),
+                missing.join(", "),
+                cur_status = cur.as_str(),
+            ));
+        }
+    }
 
     let max_attempts = step.max_attempts();
     let attempt = state.steps.get(step_id).and_then(|s| s.attempt).unwrap_or(1).max(1);
@@ -1237,6 +1276,47 @@ steps:
         assert!(gated["verification"]["gated"].as_array().unwrap().iter().any(|v| v == "follower"));
         // A gate is advice, not an action: nothing was applied, nothing was written.
         assert_eq!(gated["verification"]["changed"], json!(false));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A step a dependent reads through a `when:` guard. A completion that records
+    /// no value for that guard is not a partially-done step — it is a graph whose
+    /// next node can never be scheduled, with nothing in the log saying so.
+    const OUTPUT_YAML: &str = r#"name: probe
+version: 1
+steps:
+  - id: decider
+    action: dataset_get
+    outputs: [flag]
+  - id: follower
+    action: dataset_get
+    depends_on: [decider]
+    when: "${steps.decider.outputs.flag}"
+"#;
+
+    #[test]
+    fn a_completion_is_refused_when_it_omits_an_output_the_graph_reads() {
+        let base = temp_base("outputs");
+        create_run(&base, Some("probe".into()), OUTPUT_YAML, &[]).unwrap();
+        advance(&base, "probe", "decider", None).unwrap();
+
+        // Detail that says something about the work but carries none of what the
+        // step declares: refused, and the refusal is the fix instructions.
+        let err = record(&base, "probe", "decider", "completed", Some(json!({ "note": "done" })))
+            .expect_err("a declared output may not be silently omitted");
+        assert!(err.contains("flag"), "the error must name the missing output: {err}");
+        // Nothing was written, so the step is still `running` and the corrected
+        // call lands on it — no re-claim, no lost attempt.
+        assert_eq!(status(&base, "probe").unwrap()["steps"]["decider"]["status"], json!("running"));
+        assert_eq!(events_text(&base).matches("\"completed\"").count(), 0);
+
+        // The shape an agent reaches for naturally — the values straight on
+        // `detail` — is accepted, not just the nested one, and the guard resolves.
+        let done = record(&base, "probe", "decider", "completed", Some(json!({ "flag": "false" })))
+            .unwrap();
+        assert_eq!(done["steps"]["decider"]["outputs"]["flag"], json!("false"));
+        assert_eq!(done["steps"]["follower"]["status"], json!("skipped"));
 
         let _ = std::fs::remove_dir_all(&base);
     }

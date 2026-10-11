@@ -42,16 +42,21 @@ pub(crate) mod templates;
 /// who evaluates them and what they imply for a step's status.
 pub(crate) mod verify;
 
+use std::fs;
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
+use crate::datasets::DatasetType;
 use crate::settings::SettingsState;
 
 /// Sub-directory (inside a dataset, or under a workspace) that holds run dirs.
 const RUNS_SUBDIR: &str = "workflows";
+/// What makes a directory a run rather than a stray folder of the same name.
+const DEFINITION_FILE: &str = "workflow.yaml";
 
-/// Resolve the run *base directory* for a workflow call.
+/// Resolve the run *base directory* for a call that only needs a **scope** —
+/// creating a run or listing runs, where no existing run is being named.
 ///
 /// - `dataset_uuid` present → the dataset's own `<dataset>/workflows` dir, so a
 ///   dataset-scoped run travels with the dataset (self-contained, sync-friendly).
@@ -70,10 +75,94 @@ fn run_base(settings: &SettingsState, dataset_uuid: Option<&str>) -> Result<Path
     }
 }
 
+/// Every dataset's `workflows` dir that holds a run named `run_id`.
+///
+/// Cheap in practice: a handful of roots times a handful of dataset directories,
+/// each one `stat`. The caller has already established `run_id` is a single
+/// directory name ([`run_base_for`]), so this only joins it.
+fn dataset_run_bases(settings: &SettingsState, run_id: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for ty in DatasetType::ALL {
+        for root in crate::datasets::dataset_roots(settings, ty) {
+            let Ok(entries) = fs::read_dir(&root) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let base = entry.path().join(RUNS_SUBDIR);
+                if base.join(run_id).join(DEFINITION_FILE).is_file() {
+                    found.push(base);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Resolve the base directory of an **existing** run, which may be named with or
+/// without `dataset_uuid`.
+///
+/// The scope is not optional information — a dataset-scoped run lives inside its
+/// dataset and a job run inside the workspace — but requiring an agent to repeat
+/// the uuid on every one of the dozen calls in a pipeline was a real failure
+/// mode: a `workflow_record` that forgot it looked for the run in the workspace
+/// jobs dir, reported "not found", and left the step `running` forever. So the
+/// run id is allowed to identify the run: search the workspace jobs dir first
+/// (that is where a job is), then every dataset's `workflows/`.
+///
+/// An unambiguous hit wins. Several datasets holding the same run id are refused
+/// rather than guessed at, since writing progress to the wrong run is exactly the
+/// silent corruption the lease mechanism exists to prevent. Nothing found falls
+/// through to the scope of [`run_base`], where the engine's own "not found"
+/// reports the path it looked at.
+fn run_base_for(
+    settings: &SettingsState,
+    dataset_uuid: Option<&str>,
+    run_id: &str,
+) -> Result<PathBuf, String> {
+    let run_id = run_id.trim();
+    // An explicit scope is the caller's answer, and an id that could not name a
+    // single directory is left to the engine's own validation rather than joined
+    // onto a path here.
+    let explicit = dataset_uuid.map(str::trim).filter(|s| !s.is_empty()).is_some();
+    let searchable = !run_id.is_empty()
+        && !run_id.contains('/')
+        && !run_id.contains('\\')
+        && !run_id.contains("..");
+    if explicit || !searchable {
+        return run_base(settings, dataset_uuid);
+    }
+    let jobs = settings.workspace_subdir(RUNS_SUBDIR, "");
+    if jobs.join(run_id).join(DEFINITION_FILE).is_file() {
+        return Ok(jobs);
+    }
+    match dataset_run_bases(settings, run_id).as_slice() {
+        [] => Ok(jobs),
+        [only] => Ok(only.clone()),
+        many => {
+            let owners: Vec<String> = many
+                .iter()
+                .map(|base| {
+                    base.parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| base.display().to_string())
+                })
+                .collect();
+            Err(format!(
+                "run '{run_id}' exists in {} datasets ({}); pass dataset_uuid to say which one this \
+                 call is about, since writing progress to the wrong run would corrupt both",
+                many.len(),
+                owners.join(", "),
+            ))
+        }
+    }
+}
+
 // Run-scoped public API. These thin wrappers resolve the run base directory from
-// `(settings, dataset_uuid)` and hand the explicit path to the domain-free
-// [`core`] engine, so callers reference `crate::workflow::*` and never name the
-// `core` child module (which would otherwise shadow Rust's `core` crate).
+// `(settings, dataset_uuid, run_id)` — an existing run is found by its id even
+// when the caller omitted the scope (see [`run_base_for`]) — and hand the
+// explicit path to the domain-free [`core`] engine, so callers reference
+// `crate::workflow::*` and never name the `core` child module (which would
+// otherwise shadow Rust's `core` crate).
 
 pub(crate) fn list_runs(
     settings: &SettingsState,
@@ -88,6 +177,22 @@ pub(crate) fn create_run(
     run_id: Option<String>,
     definition_yaml: &str,
 ) -> Result<Value, String> {
+    // Creating is the one operation that must not search: it has no run to find
+    // yet, so the scope is the caller's to state. It does refuse to *shadow* one
+    // — an id already taken by a dataset-scoped run would otherwise quietly get
+    // a second, empty copy in the workspace jobs dir.
+    if dataset_uuid.map(str::trim).filter(|s| !s.is_empty()).is_none() {
+        if let Some(id) = run_id.as_deref().map(str::trim) {
+            if !id.is_empty() && !dataset_run_bases(settings, id).is_empty() {
+                return Err(format!(
+                    "run '{id}' already exists inside a dataset, so it cannot also be created as a \
+                     workspace job. Drive the existing one (the run-scoped tools find it by run_id \
+                     alone), or pass dataset_uuid to scope a new run to a dataset, or choose \
+                     another run_id."
+                ));
+            }
+        }
+    }
     // The check vocabulary comes from the binding layer, so `verify:` ids are
     // validated against what the app can actually evaluate.
     core::create_run(
@@ -103,7 +208,7 @@ pub(crate) fn status(
     dataset_uuid: Option<&str>,
     run_id: &str,
 ) -> Result<Value, String> {
-    core::status(&run_base(settings, dataset_uuid)?, run_id)
+    core::status(&run_base_for(settings, dataset_uuid, run_id)?, run_id)
 }
 
 pub(crate) fn definition_text(
@@ -111,7 +216,7 @@ pub(crate) fn definition_text(
     dataset_uuid: Option<&str>,
     run_id: &str,
 ) -> Result<String, String> {
-    core::definition_text(&run_base(settings, dataset_uuid)?, run_id)
+    core::definition_text(&run_base_for(settings, dataset_uuid, run_id)?, run_id)
 }
 
 pub(crate) fn next_steps(
@@ -119,7 +224,7 @@ pub(crate) fn next_steps(
     dataset_uuid: Option<&str>,
     run_id: &str,
 ) -> Result<Value, String> {
-    core::next_steps(&run_base(settings, dataset_uuid)?, run_id)
+    core::next_steps(&run_base_for(settings, dataset_uuid, run_id)?, run_id)
 }
 
 pub(crate) fn advance(
@@ -129,7 +234,12 @@ pub(crate) fn advance(
     step_id: &str,
     agent_id: Option<String>,
 ) -> Result<Value, String> {
-    core::advance(&run_base(settings, dataset_uuid)?, run_id, step_id, agent_id)
+    core::advance(
+        &run_base_for(settings, dataset_uuid, run_id)?,
+        run_id,
+        step_id,
+        agent_id,
+    )
 }
 
 pub(crate) fn record(
@@ -140,7 +250,13 @@ pub(crate) fn record(
     event_kind: &str,
     detail: Option<Value>,
 ) -> Result<Value, String> {
-    core::record(&run_base(settings, dataset_uuid)?, run_id, step_id, event_kind, detail)
+    core::record(
+        &run_base_for(settings, dataset_uuid, run_id)?,
+        run_id,
+        step_id,
+        event_kind,
+        detail,
+    )
 }
 
 pub(crate) fn intervene(
@@ -150,7 +266,7 @@ pub(crate) fn intervene(
     step_id: &str,
     op: &str,
 ) -> Result<Value, String> {
-    core::intervene(&run_base(settings, dataset_uuid)?, run_id, step_id, op)
+    core::intervene(&run_base_for(settings, dataset_uuid, run_id)?, run_id, step_id, op)
 }
 
 /// Score a dataset-scoped run against freshly measured evidence. Not a thin

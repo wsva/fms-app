@@ -38,8 +38,11 @@ struct WorkflowListParam {
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct WorkflowRunParam {
-    /// Optional dataset uuid the run lives under (see workflow_create). Omit for
-    /// workspace-level jobs.
+    /// Which dataset the run lives under. Optional: leave it out and the run is
+    /// located by `run_id` alone (searched in the workspace jobs dir, then in
+    /// every dataset's `workflows/`), so a call that forgets the scope still
+    /// reaches the right run — unless two datasets hold the same id, which is
+    /// then reported rather than guessed at.
     #[serde(default)]
     dataset_uuid: Option<String>,
     run_id: String,
@@ -47,6 +50,8 @@ struct WorkflowRunParam {
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct WorkflowAdvanceParam {
+    /// Which dataset the run lives under; optional, the run is located by its
+    /// `run_id` alone when this is omitted (see [`WorkflowRunParam`]).
     #[serde(default)]
     dataset_uuid: Option<String>,
     run_id: String,
@@ -58,19 +63,26 @@ struct WorkflowAdvanceParam {
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct WorkflowRecordParam {
+    /// Which dataset the run lives under; optional, the run is located by its
+    /// `run_id` alone when this is omitted (see [`WorkflowRunParam`]).
     #[serde(default)]
     dataset_uuid: Option<String>,
     run_id: String,
     step: String,
     /// One of: `completed`, `failed`, `blocked`.
     event: String,
-    /// Optional outcome detail: `{ outputs?: {...}, reason?/error?: "..." }`.
+    /// The outcome detail. Outputs go under `detail.outputs` — or straight on
+    /// `detail` (`{"model_version": "parakeet-v3"}`), which is accepted as well
+    /// — and a `completed` must carry every name the step declares. A
+    /// `reason`/`error` key names why a step did not complete.
     #[serde(default)]
     detail: JsonValue,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct WorkflowInterveneParam {
+    /// Which dataset the run lives under; optional, the run is located by its
+    /// `run_id` alone when this is omitted (see [`WorkflowRunParam`]).
     #[serde(default)]
     dataset_uuid: Option<String>,
     run_id: String,
@@ -141,7 +153,7 @@ impl DatasetMcpServer {
         ok(&v)
     }
 
-    #[tool(name = "workflow_status", description = "Load a run and return its definition metadata, per-step statuses, and what is ready/blocked/failed with actionable reasons and hints. Recomputes derived statuses and reaps expired leases, so it is always safe to call after a restart to resume. Pass dataset_uuid when the run is stored inside a dataset; omit for a workspace job.")]
+    #[tool(name = "workflow_status", description = "Load a run and return its definition metadata, per-step statuses, and what is ready/blocked/failed with actionable reasons and hints. Recomputes derived statuses and reaps expired leases, so it is always safe to call after a restart to resume. Pass dataset_uuid when you mean a particular dataset; omit it and the run is found by its run_id alone.")]
     async fn workflow_status(
         &self,
         Parameters(param): Parameters<WorkflowRunParam>,
@@ -194,7 +206,7 @@ impl DatasetMcpServer {
         ok(&v)
     }
 
-    #[tool(name = "workflow_record", description = "Report the outcome of a claimed step: event=completed (optionally with detail.outputs), failed (with detail.reason/error; auto-retries while attempts remain), or blocked (waiting on something external). Re-evaluates the DAG, appends events, and atomically rewrites state. Returns the updated status.")]
+    #[tool(name = "workflow_record", description = "Report the outcome of a claimed step: event=completed (with the step's declared values under detail.outputs, or directly on detail), failed (with detail.reason/error; auto-retries while attempts remain), or blocked (waiting on something external). A completion that omits a declared output is refused and writes nothing — the step stays running so the corrected call lands on it — because a dependent reading that name through a `when:` guard would otherwise sit blocked forever with no event naming the cause. Re-evaluates the DAG, appends events, and atomically rewrites state. Returns the updated status. Omit dataset_uuid and the run is still found by its run_id.")]
     async fn workflow_record(
         &self,
         Parameters(param): Parameters<WorkflowRecordParam>,

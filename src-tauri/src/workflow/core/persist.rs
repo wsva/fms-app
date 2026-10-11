@@ -44,8 +44,11 @@ pub(super) fn run_dir(base: &Path, run_id: &str) -> Result<PathBuf, String> {
     let dir = base.join(&id);
     if !dir.is_dir() {
         return Err(format!(
-            "workflow run '{id}' not found at {}. Create it with workflow_create, or list runs with workflow_list.",
-            dir.display()
+            "workflow run '{id}' not found at {base}. A dataset-scoped run lives inside its \
+             dataset at <dataset>/workflows/{id}, so if that is what you meant, pass its \
+             dataset_uuid; otherwise create one with workflow_create, or see what exists \
+             with workflow_list.",
+            base = dir.display()
         ));
     }
     Ok(dir)

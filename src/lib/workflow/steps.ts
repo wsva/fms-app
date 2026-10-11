@@ -66,6 +66,9 @@ export interface StepDef {
   when?: keyof DatasetFacts;
   /** Static params surfaced into the generated prompt. */
   params?: Record<string, unknown>;
+  /** Names this step must record on completion (the engine refuses a completion
+   *  that omits one, so a "Mark done" here still has to carry placeholders). */
+  outputs?: string[];
   /** Evidence binding, when the definition declares one. */
   verify?: StepVerify;
 }
@@ -91,6 +94,7 @@ interface RawStep {
   dependsOn?: unknown;
   when?: unknown;
   params?: unknown;
+  outputs?: unknown;
   verify?: unknown;
 }
 
@@ -141,6 +145,28 @@ function normalizeWhen(when: unknown): keyof DatasetFacts | undefined {
 function asStringArray(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   return v.filter((x): x is string => typeof x === "string");
+}
+
+/**
+ * Fill in whatever a step declares but the operation could not produce, so a
+ * recorded completion always carries every name the definition promises. The
+ * engine refuses a `completed` that omits one — and rightly so, since a
+ * dependent reading that name through a `when:` guard would sit `blocked`
+ * forever with nothing in the log naming the cause. A value nobody measured is
+ * therefore recorded as the honest placeholder `"unknown"`, never dropped.
+ */
+export function withDeclaredOutputs(
+  step: StepDef,
+  outputs: Record<string, unknown>,
+): Record<string, unknown> {
+  const filled = { ...outputs };
+  for (const key of step.outputs ?? []) {
+    // `undefined` is checked rather than `in`, because a mapper that reads a
+    // field the command did not return produces exactly that — and JSON drops
+    // undefined values on the way over, so the engine would see a missing name.
+    if (filled[key] === undefined || filled[key] === null) filled[key] = "unknown";
+  }
+  return filled;
 }
 
 /**
@@ -197,6 +223,8 @@ export function parseDefinition(yamlText: string): WorkflowDefinition {
     if (raw.params && typeof raw.params === "object" && !Array.isArray(raw.params)) {
       step.params = raw.params as Record<string, unknown>;
     }
+    const outputs = asStringArray(raw.outputs);
+    if (outputs.length) step.outputs = outputs;
     const verify = parseVerify(raw.verify);
     if (verify) step.verify = verify;
     return step;
@@ -429,10 +457,10 @@ export function buildPrompt(opts: {
   lines.push("Steps already known complete on disk (do NOT re-run unless I ask): " + (done.length ? done.join(", ") : "none") + ".");
   lines.push("Steps intentionally skipped: " + (skipped.length ? skipped.join(", ") : "none") + ".");
   lines.push("");
-  lines.push("Loop until the run is completed or blocked:");
-  lines.push("1. workflow_status(run_id) to sync derived statuses (safe to call after a restart).");
-  lines.push("2. workflow_next(run_id) for the ready steps.");
-  lines.push("3. For each ready step: workflow_advance(run_id, step), call the MCP tool with the same name as its action using the resolved inputs/params, then workflow_record(run_id, step, event=completed|failed, detail).");
+  lines.push("Loop until the run is completed or blocked (pass dataset_uuid on every call — this run lives inside the dataset):");
+  lines.push("1. workflow_status(dataset_uuid, run_id) to sync derived statuses (safe to call after a restart; it also reaps a step left running by an expired lease).");
+  lines.push("2. workflow_next(dataset_uuid, run_id) for the ready steps.");
+  lines.push("3. For each ready step: workflow_advance(dataset_uuid, run_id, step), call the MCP tool with the same name as its action using the resolved inputs/params, then workflow_record(dataset_uuid, run_id, step, event=completed|failed, detail) — a completion must carry every name in declared_outputs under detail.outputs, or it is refused.");
   lines.push("4. Use workflow_intervene (retry/skip/reset) to recover, and report progress as you go.");
   lines.push("");
   if (ready.length > 0) {

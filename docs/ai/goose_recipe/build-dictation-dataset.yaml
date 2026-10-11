@@ -62,7 +62,7 @@ instructions: |-
   Call `workflow_next` with `dataset_uuid` and `run_id`. It returns `steps[]`, each with `id`, `action`, `params`, resolved `inputs` and `declared_outputs`. Then, per step:
   1. `workflow_advance` with `dataset_uuid`, `run_id`, `step`, `agent_id: "goose"` - claims a lease, so two agents cannot run the same step, and hands back the action to perform.
   2. Perform the action (table below).
-  3. `workflow_record` with `dataset_uuid`, `run_id`, `step`, `event: "completed"` and `detail: { outputs: { ... } }` - include **every** name in `declared_outputs`, even when the value is the string `"false"`: a dependent step's `when:` guard reads those outputs, and a missing one leaves the dependent `blocked` forever.
+  3. `workflow_record` with `dataset_uuid`, `run_id`, `step`, `event: "completed"` and `detail: { outputs: { ... } }` - include **every** name in `declared_outputs`, even when the value is the string `"false"`. The engine **refuses** a completion that omits one and writes nothing, so the step stays `running` and your corrected call lands on it: a dependent reading that name through a `when:` guard would otherwise sit `blocked` forever with nothing in the log naming the cause. (`values` may also sit straight on `detail` instead of under `outputs`; both are read.)
   4. On error: `workflow_record` with `event: "failed"` and `detail: { reason: "<the tool's message>" }`. Steps that declare `retry` go back to `ready` on their own until the attempts run out; the rest become `failed` immediately.
 
   Repeat until `workflow_next` returns no steps. Do not run a `blocked` step - it is waiting on a dependency's output. A step whose `when:` guard is false is `skipped` by the engine; never force it with `workflow_intervene`.
@@ -97,10 +97,12 @@ instructions: |-
 
   ## Recovery
   - After any restart or crash call `workflow_status` with `dataset_uuid` and `run_id`: it recomputes derived statuses and reaps expired leases, so a step a dead agent left `running` becomes runnable again. This is what makes the run resumable - read it before doing anything else.
+  - **A step sitting at `running` with a `started` but no `completed` event was never reported.** Either the action is still going (a `running` lease is held for 5 minutes, then `workflow_status` returns the step to `pending`) or the `workflow_record` call failed - read its message before assuming the bookkeeping happened. Once the step is back at `pending`, `workflow_intervene` with `op: "retry"` puts it at `ready` so a `workflow_record` is accepted again; `record` refuses a `pending` step on purpose.
   - `workflow_intervene` with `dataset_uuid`, `run_id`, `step` and `op` - `retry` (failed -> ready, attempt counter reset), `unblock` (blocked -> pending), `skip`, `reset` (wipe the step's state). These are manual overrides: ask the user before `skip` or `reset`, and never use them to get past a check that is telling the truth.
   - Every transition is journalled in `<dataset>/workflows/<run_id>/events.jsonl`. `completed` after `started` is progress the run earned; `adopted` and `invalidated` are progress it inherited or had taken away. `workflow_list` summarises runs without loading them.
 
   ## Rules
+  - **Pass `dataset_uuid` on every call.** The run lives inside the dataset at `<dataset>/workflows/<run_id>`; a call that names only `run_id` is now located by search, but naming the dataset states which run you mean and is what the app's own Workflow page uses.
   - **A check that could not be measured is not clean.** `count: 0` proves something only when the subject exists - that is what the `media_none` check is for, and why an empty dataset adopts nothing.
   - **Never invent a status.** Statuses come from `workflow_record`, `workflow_verify` and `workflow_adopt`. What you decide is which action to run and what its outputs were.
   - **Read-only first.** `dataset_full_report` and `workflow_verify` without `apply` never write; call them as often as you like.

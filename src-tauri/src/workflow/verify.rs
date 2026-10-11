@@ -102,11 +102,17 @@ pub(crate) fn adopt(
     let evidence = evidence(settings, dataset_uuid)?;
     let mut refreshed = false;
     let mut refresh_error: Option<String> = None;
+    // A caller that means "no definition" says so with an empty string as often
+    // as with an absent field, and an empty YAML document is not a definition:
+    // treat blank text as none, so the run is reported rather than invented from
+    // nothing (or rebound to nothing).
+    let definition_yaml = definition_yaml.map(str::trim).filter(|s| !s.is_empty());
     if !core::run_exists(&base, run_id) {
         let yaml = definition_yaml.ok_or_else(|| {
             format!(
                 "no run '{run_id}' for dataset '{dataset_uuid}'; pass its workflow.yaml text as \
-                 yaml_text to open one, or call workflow_create_run first"
+                 definition_yaml (workflow_builtin_templates returns the current one) to open a \
+                 run, or call workflow_create first"
             )
         })?;
         core::create_run(&base, Some(run_id.to_string()), yaml, &check_ids())?;

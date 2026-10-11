@@ -30,6 +30,7 @@ import {
   stepById,
   buildPrompt,
   statusLabel,
+  withDeclaredOutputs,
 } from "@/lib/workflow/steps";
 import { getStepOp, KNOWN_COMMANDS, type FormField, type RunCtx, type StepOp } from "@/lib/workflow/step-ops";
 import {
@@ -814,7 +815,7 @@ export default function WorkflowPage() {
         runId: id,
         step: step.id,
         event: "completed",
-        detail: { outputs: op.outputs?.(result) ?? {} },
+        detail: { outputs: withDeclaredOutputs(step, op.outputs?.(result) ?? {}) },
       });
       setNotice(`“${step.title}” completed.`);
       if (op.emitListChanged) await emit("dataset-list-changed", {});
@@ -889,7 +890,7 @@ export default function WorkflowPage() {
       await invoke("workflow_record", {
         datasetUuid: selectedUuid,
         runId: id, step: step.id, event,
-        detail: event === "failed" ? { reason: "marked failed in UI" } : { outputs: {} },
+        detail: event === "failed" ? { reason: "marked failed in UI" } : { outputs: withDeclaredOutputs(step, {}) },
       });
       await refreshEngine(id, selectedUuid);
     } catch (e) {
