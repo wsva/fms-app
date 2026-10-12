@@ -2,7 +2,7 @@
 
 import { type ReactNode } from "react";
 import { ExternalLink, Star } from "lucide-react";
-import { type ModelVersionInfo, type DownloadProgress, type ModelStatus, formatBytes, formatSpeed, formatEta, statusLabel, statusBadgeClass, btnSmall } from "@/lib/models/types";
+import { type CardModelInfo, type DownloadProgress, type ModelStatus, formatBytes, formatSpeed, formatEta, statusLabel, statusBadgeClass, btnSmall } from "@/lib/models/types";
 
 // ---------------------------------------------------------------------------
 // Download progress bar
@@ -58,7 +58,8 @@ function DownloadProgressBar({ progress }: { progress: DownloadProgress }) {
 // ---------------------------------------------------------------------------
 
 interface ModelCardProps {
-  model: ModelVersionInfo;
+  /** Any catalog entry — an STT `ModelVersionInfo` or an HF-catalog model shaped to fit. */
+  model: CardModelInfo;
   status: ModelStatus;
   isDownloading: boolean;
   isDownloadInProgress: boolean;
@@ -71,7 +72,19 @@ interface ModelCardProps {
   onStop: () => void;
   onDelete: () => void;
   onCancelDelete: () => void;
-  onShowDetails: () => void;
+  /** Omit for catalogs with nothing to show in the details dialog (HF models carry no STT scores or blob URL). */
+  onShowDetails?: () => void;
+  /**
+   * True for models the app loads by itself on first use (the HF catalog: text-split,
+   * OCR, TTS). They have no session to start or stop, so the card hides the
+   * Load/Stop/Ready controls and keeps only the download and delete ones.
+   */
+  autoLoads?: boolean;
+  /**
+   * Replaces the status chip when `ModelStatus`'s own wording doesn't describe this
+   * model — a loaded SaT model is resident in memory, not "Running".
+   */
+  badge?: ReactNode;
   /** Whether this model is the user's preferred default (auto-loaded when nothing is loaded). */
   isDefault?: boolean;
   /** Provided on downloaded models only: mark this model as the default. */
@@ -99,6 +112,8 @@ export default function ModelCard({
   onDelete,
   onCancelDelete,
   onShowDetails,
+  autoLoads,
+  badge,
   isDefault,
   onSetDefault,
   defaultSaving,
@@ -108,6 +123,8 @@ export default function ModelCard({
   const isRunning = status === "Running";
   const isActive = model.downloaded && !isRunning && status === "Stopped";
   const isDownloaded = model.downloaded;
+  // A model the app loads on demand has no lifecycle to offer, only a download.
+  const showLifecycle = isDownloaded && !autoLoads;
 
   const borderClass = isRunning
     ? "border-accent bg-success-bg"
@@ -133,23 +150,25 @@ export default function ModelCard({
         </div>
         <div className="flex items-center gap-1.5">
           {/* Details button */}
-          <button
-            className="p-0.5 rounded hover:bg-bg-hover text-text-tertiary cursor-pointer"
-            onClick={onShowDetails}
-            title="Model details"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-          </button>
+          {onShowDetails && (
+            <button
+              className="p-0.5 rounded hover:bg-bg-hover text-text-tertiary cursor-pointer"
+              onClick={onShowDetails}
+              title="Model details"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+            </button>
+          )}
           {/* External link */}
           {externalUrl && (
             <a href={externalUrl} target="_blank" rel="noopener noreferrer" className="p-0.5 rounded hover:bg-bg-hover text-text-tertiary" title="View on provider">
               <ExternalLink size={14} />
             </a>
           )}
-          {/* Status badge */}
-          {status !== "NotDownloaded" && status !== "Downloaded" && (
+          {/* Status badge — unless the caller describes a state ModelStatus has no word for */}
+          {badge ?? (status !== "NotDownloaded" && status !== "Downloaded" && (
             <span className={statusBadgeClass(status)}>{statusLabel(status)}</span>
-          )}
+          ))}
           {/* Provider selector */}
           {providerSelector}
           {/* Delete button */}
@@ -186,57 +205,60 @@ export default function ModelCard({
         <DownloadProgressBar progress={downloadProgress} />
       )}
 
-      {/* Action buttons */}
-      <div className="flex flex-wrap items-center gap-1.5 mt-2">
-        {isDownloading && (
-          <button className={`${btnSmall} bg-error-text text-white hover:bg-error-hover`} onClick={onCancel}>
-            Cancel
-          </button>
-        )}
-        {isDownloaded && !isRunning && !isActive && (
-          <button
-            className={`${btnSmall} bg-success-text text-white hover:opacity-90`}
-            onClick={onLoad}
-            disabled={modelLoading || isDownloadInProgress}
-          >
-            Load
-          </button>
-        )}
-        {isRunning && (
-          <button className={`${btnSmall} bg-error-text text-white hover:bg-error-hover`} onClick={onStop} disabled={modelLoading}>
-            Stop
-          </button>
-        )}
-        {isActive && (
-          <span className="text-xs text-text-secondary italic">Ready</span>
-        )}
-        {onSetDefault && (
-          isDefault ? (
-            <span
-              className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-accent"
-              title="Loaded automatically when no model is running"
-            >
-              <Star size={12} fill="currentColor" />
-              Default
-            </span>
-          ) : (
-            <button
-              className="ml-auto flex items-center gap-1 px-2.5 py-1 text-xs rounded font-medium cursor-pointer transition-colors bg-bg-muted text-text-secondary hover:bg-accent-bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
-              onClick={onSetDefault}
-              disabled={modelLoading || defaultSaving || isDownloadInProgress}
-              title="Load this model automatically when none is running"
-            >
-              <Star size={12} />
-              {defaultSaving ? "Saving..." : "Set as default"}
+      {/* Action buttons. Empty for an undiscovered model with no controls to show, in
+          which case the row would just add stray vertical space. */}
+      {(isDownloading || showLifecycle || onSetDefault || confirmDelete) && (
+        <div className="flex flex-wrap items-center gap-1.5 mt-2">
+          {isDownloading && (
+            <button className={`${btnSmall} bg-error-text text-white hover:bg-error-hover`} onClick={onCancel}>
+              Cancel
             </button>
-          )
-        )}
-        {confirmDelete && (
-          <button className={`${btnSmall} bg-transparent text-text-secondary hover:bg-bg-hover`} onClick={onCancelDelete}>
-            Cancel
-          </button>
-        )}
-      </div>
+          )}
+          {showLifecycle && !isRunning && !isActive && (
+            <button
+              className={`${btnSmall} bg-success-text text-white hover:opacity-90`}
+              onClick={onLoad}
+              disabled={modelLoading || isDownloadInProgress}
+            >
+              Load
+            </button>
+          )}
+          {showLifecycle && isRunning && (
+            <button className={`${btnSmall} bg-error-text text-white hover:bg-error-hover`} onClick={onStop} disabled={modelLoading}>
+              Stop
+            </button>
+          )}
+          {showLifecycle && isActive && (
+            <span className="text-xs text-text-secondary italic">Ready</span>
+          )}
+          {onSetDefault && (
+            isDefault ? (
+              <span
+                className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-accent"
+                title="Loaded automatically when no model is running"
+              >
+                <Star size={12} fill="currentColor" />
+                Default
+              </span>
+            ) : (
+              <button
+                className="ml-auto flex items-center gap-1 px-2.5 py-1 text-xs rounded font-medium cursor-pointer transition-colors bg-bg-muted text-text-secondary hover:bg-accent-bg-hover disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={onSetDefault}
+                disabled={modelLoading || defaultSaving || isDownloadInProgress}
+                title="Load this model automatically when none is running"
+              >
+                <Star size={12} />
+                {defaultSaving ? "Saving..." : "Set as default"}
+              </button>
+            )
+          )}
+          {confirmDelete && (
+            <button className={`${btnSmall} bg-transparent text-text-secondary hover:bg-bg-hover`} onClick={onCancelDelete}>
+              Cancel
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

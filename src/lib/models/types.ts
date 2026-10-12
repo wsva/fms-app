@@ -26,14 +26,23 @@ export interface DownloadProgress {
   eta_seconds: number | null;
 }
 
-export interface ModelVersionInfo {
+/**
+ * The fields a model card renders. Every catalog in the app satisfies it — the
+ * STT list and the HuggingFace-catalog models (text-split, and later OCR/TTS)
+ * alike — which is what lets one card component style all of them.
+ */
+export interface CardModelInfo {
   id: string;
   label: string;
   description: string;
   downloaded: boolean;
-  languages: string[];
-  size_mb: number;
+  /** Engine/family chip: STT `engine_type`, HF catalog `model_type`. */
   engine_type: string;
+  size_mb: number;
+}
+
+export interface ModelVersionInfo extends CardModelInfo {
+  languages: string[];
   blob_url: string;
   hf_repo_url: string;
   accuracy_score: number;

@@ -4,11 +4,11 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { message } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, ChevronRight, ExternalLink, Download, Trash2, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
-import { type ModelVersionInfo, type DownloadProgress, type ModelStatus } from "@/lib/models/types";
+import { type CardModelInfo, type ModelVersionInfo, type DownloadProgress, type ModelStatus, statusBadgeClass } from "@/lib/models/types";
 import ModelCard from "./components/ModelCard";
 import ModelDetailsDialog from "./components/ModelDetailsDialog";
 
@@ -20,6 +20,35 @@ interface TextSplitModelInfo {
   downloaded: boolean;
   loaded: boolean;
   size_mb: number;
+}
+
+/**
+ * Feed an HF-catalog entry to the same card the STT models use. The catalog calls the
+ * title `name` and has no engine field, so the two are mapped here rather than the card
+ * growing a second markup branch per catalog.
+ */
+function asCardModel(m: TextSplitModelInfo): CardModelInfo {
+  return {
+    id: m.id,
+    label: m.name,
+    description: m.description,
+    downloaded: m.downloaded,
+    engine_type: "textsplit",
+    size_mb: m.size_mb,
+  };
+}
+
+/**
+ * Text-split models are loaded by the app on first use, so of the STT card's lifecycle
+ * only three states mean anything: a download in flight, the weights resident in memory
+ * (the card's "active" green, labelled `Loaded` through the badge override), and present
+ * on disk doing nothing.
+ */
+function textSplitCardStatus(m: TextSplitModelInfo, isDownloading: boolean): ModelStatus {
+  if (isDownloading) return "Downloading";
+  if (m.loaded) return "Running";
+  if (m.downloaded) return "Downloaded";
+  return "NotDownloaded";
 }
 
 // Download sources for HuggingFace-catalog models (Text Split). The key is
@@ -180,6 +209,14 @@ export default function ModelsPage() {
     }
   }
 
+  // Cancelling is safe by construction: `hf_downloaded_on_disk` requires every listed
+  // file, so a half-fetched model still reads as not downloaded and can be started again.
+  async function handleCancelTextSplit(id: string) {
+    if (!isTauri()) return;
+    try { await invoke("model_cancel_download", { version: id }); }
+    catch (e) { logError(`Text-split download cancel '${id}' failed: ${String(e)}`, "models"); }
+  }
+
   async function handleCancel(modelId: string) {
     if (!isTauri()) return;
     try { await invoke("model_cancel_download", { version: modelId }); }
@@ -236,6 +273,10 @@ export default function ModelsPage() {
 
   const isModelRunning = activeStatus === "Running";
   const isDownloadingAny = downloading || activeStatus === "Downloading";
+  // One download at a time is a backend rule — `model_download` and `model_download_hf`
+  // both refuse while anything is in flight — so a card greys out for any card's run,
+  // not just its own section's.
+  const anyDownloadInProgress = isDownloadingAny || tsDownloadingId !== null;
   const downloadedModels = models.filter((m) => m.downloaded);
   const availableModels = models.filter((m) => !m.downloaded);
 
@@ -274,7 +315,7 @@ export default function ModelsPage() {
                 model={model}
                 status={getModelStatus(model.id)}
                 isDownloading={downloadingVersion === model.id && isDownloadingAny}
-                isDownloadInProgress={isDownloadingAny}
+                isDownloadInProgress={anyDownloadInProgress}
                 downloadProgress={downloadProgress}
                 modelLoading={modelLoading}
                 confirmDelete={confirmDeleteId === model.id}
@@ -315,7 +356,7 @@ export default function ModelsPage() {
                       model={model}
                       status={getModelStatus(model.id)}
                       isDownloading={downloadingVersion === model.id && isDownloadingAny}
-                      isDownloadInProgress={isDownloadingAny}
+                      isDownloadInProgress={anyDownloadInProgress}
                       downloadProgress={downloadProgress}
                       modelLoading={modelLoading}
                       confirmDelete={false}
@@ -349,73 +390,44 @@ export default function ModelsPage() {
             <div className="flex flex-col gap-2">
               {textSplitModels.map((model) => {
                 const isDownloading = tsDownloadingId === model.id;
-                const pct =
-                  isDownloading && downloadProgress && downloadProgress.overall_total_bytes > 0
-                    ? Math.min(100, Math.round((downloadProgress.overall_bytes_downloaded / downloadProgress.overall_total_bytes) * 100))
-                    : null;
+                const provider = providerByModel[model.id] ?? "huggingface";
+                // The catalog's `id` is the HuggingFace repo id, so the repo page is one hop
+                // away — the link an STT card keeps inside its details dialog.
+                const repoUrl = `https://huggingface.co/${model.id}`;
                 return (
-                  <div key={model.id} className="rounded-xl border border-border-default bg-bg-card p-3">
-                    <div className="flex items-center gap-3">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-text-primary truncate" title={model.name}>{model.name}</p>
-                        <p className="text-xs text-text-tertiary truncate" title={model.description}>{model.description}</p>
-                      </div>
-
-                      {model.loaded && (
-                        <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/15 text-green-500 shrink-0">Loaded</span>
-                      )}
-                      <span className="text-xs text-text-tertiary shrink-0">{model.size_mb} MB</span>
-
-                      {model.downloaded ? (
-                        <button
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
-                            tsConfirmDelete === model.id
-                              ? "bg-error-text text-white border-error-text"
-                              : "bg-bg-muted text-text-secondary border-border-default hover:bg-error-bg hover:text-error-text"
-                          }`}
-                          onClick={() => handleDeleteTextSplit(model.id)}
-                        >
-                          <Trash2 size={14} /> {tsConfirmDelete === model.id ? "Confirm" : "Delete"}
-                        </button>
-                      ) : (
-                        <>
-                          <select
-                            value={providerByModel[model.id] ?? "huggingface"}
-                            onChange={(e) =>
-                              setProviderByModel((prev) => ({ ...prev, [model.id]: e.target.value }))
-                            }
-                            disabled={isDownloading}
-                            className="px-2 py-1 rounded-lg bg-bg-muted border border-border-default text-xs text-text-primary hover:bg-bg-hover transition-colors cursor-pointer"
-                            title="Download source hub"
-                          >
-                            {HF_PROVIDERS.map((p) => (
-                              <option key={p.key} value={p.key}>{p.label}</option>
-                            ))}
-                          </select>
-                          <button
-                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                            onClick={() => handleDownloadTextSplit(model.id, providerByModel[model.id] ?? "huggingface")}
-                            disabled={isDownloading || downloading}
-                          >
-                            {isDownloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-                            {isDownloading ? "Downloading…" : "Download"}
-                          </button>
-                        </>
-                      )}
-                    </div>
-
-                    {isDownloading && pct !== null && (
-                      <div className="mt-2">
-                        <div className="flex items-center justify-between text-xs text-text-tertiary mb-1">
-                          <span>Downloading…</span>
-                          <span>{pct}%</span>
-                        </div>
-                        <div className="h-1.5 rounded-full bg-bg-muted overflow-hidden">
-                          <div className="h-full bg-accent transition-[width] duration-200" style={{ width: `${pct}%` }} />
-                        </div>
-                      </div>
-                    )}
-                  </div>
+                  <ModelCard
+                    key={model.id}
+                    model={asCardModel(model)}
+                    status={textSplitCardStatus(model, isDownloading)}
+                    isDownloading={isDownloading}
+                    isDownloadInProgress={anyDownloadInProgress}
+                    downloadProgress={downloadProgress}
+                    modelLoading={false}
+                    confirmDelete={tsConfirmDelete === model.id}
+                    autoLoads
+                    externalUrl={repoUrl}
+                    badge={model.loaded ? <span className={statusBadgeClass("Running")}>Loaded</span> : undefined}
+                    providerSelector={!model.downloaded && !isDownloading ? (
+                      <select
+                        value={provider}
+                        onChange={(e) =>
+                          setProviderByModel((prev) => ({ ...prev, [model.id]: e.target.value }))
+                        }
+                        className="px-2 py-1 rounded-lg bg-bg-muted border border-border-default text-xs text-text-primary hover:bg-bg-hover transition-colors cursor-pointer"
+                        title="Download source hub"
+                      >
+                        {HF_PROVIDERS.map((p) => (
+                          <option key={p.key} value={p.key}>{p.label}</option>
+                        ))}
+                      </select>
+                    ) : undefined}
+                    onDownload={() => handleDownloadTextSplit(model.id, provider)}
+                    onCancel={() => handleCancelTextSplit(model.id)}
+                    onLoad={() => {}}
+                    onStop={() => {}}
+                    onDelete={() => handleDeleteTextSplit(model.id)}
+                    onCancelDelete={() => setTsConfirmDelete(null)}
+                  />
                 );
               })}
             </div>
