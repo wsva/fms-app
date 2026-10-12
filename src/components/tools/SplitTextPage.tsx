@@ -11,6 +11,7 @@ import {
   Copy,
   Check,
   Scissors,
+  Upload,
   X,
 } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
@@ -65,6 +66,7 @@ export default function SplitTextPage() {
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   // Deferred platform check: calling isTauri() during render diverges between
   // the prerendered (false) and client (true) trees and trips a hydration
   // mismatch. Resolve it once in an effect instead.
@@ -174,6 +176,25 @@ export default function SplitTextPage() {
       await message(msg, { title: "Split Text", kind: "error" });
     } finally {
       setSplitting(false);
+    }
+  }
+
+  function handlePickFile() {
+    fileInputRef.current?.click();
+  }
+
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file
+    if (!file) return;
+    setError("");
+    try {
+      const text = await file.text();
+      setInput(text);
+    } catch (err) {
+      const msg = String(err);
+      setError(`Failed to read file: ${msg}`);
+      logError(`file read failed: ${msg}`);
     }
   }
 
@@ -320,7 +341,25 @@ export default function SplitTextPage() {
             <section className="flex flex-col rounded-xl border border-border-default bg-bg-card p-4 min-w-0 min-h-0">
               <div className="flex items-center justify-between mb-2">
                 <h2 className="text-sm font-semibold text-text-primary">Input</h2>
-                <span className="text-xs text-text-tertiary">{input.length} characters</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-text-tertiary">{input.length} characters</span>
+                  <button
+                    type="button"
+                    onClick={handlePickFile}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-bg-muted border border-border-default text-xs font-medium text-text-primary hover:bg-bg-hover transition-colors"
+                    title="Upload a text file"
+                  >
+                    <Upload size={14} />
+                    Upload
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".txt,.md,.vtt,.srt,text/plain"
+                    onChange={handleFileChange}
+                    className="hidden"
+                  />
+                </div>
               </div>
               <textarea
                 value={input}
@@ -360,17 +399,16 @@ export default function SplitTextPage() {
                       : "Available in the desktop app."}
                   </div>
                 ) : (
-                  <ol className="flex flex-col gap-1">
+                  <ul className="flex flex-col gap-1">
                     {sentences.map((s, i) => (
                       <li
                         key={i}
                         className="flex gap-2 px-2 py-1.5 rounded-md bg-bg-card border border-border-default text-sm text-text-primary"
                       >
-                        <span className="shrink-0 tabular-nums text-text-tertiary w-7 text-right">{i + 1}.</span>
                         <span className="flex-1 min-w-0 break-words">{s}</span>
                       </li>
                     ))}
-                  </ol>
+                  </ul>
                 )}
               </div>
             </section>
