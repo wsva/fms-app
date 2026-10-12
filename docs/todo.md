@@ -33,3 +33,8 @@ multi layer of dataset
 
 make mcp as a feature
 can build release without mcp server
+
+
+status of all loaded models
+
+suggestions to improve MdEditor
