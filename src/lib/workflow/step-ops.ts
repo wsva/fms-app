@@ -211,18 +211,9 @@ export const STEP_OPS: Record<string, StepOp> = {
 
   split_book: {
     runLabel: "Split",
-    formFields: [
-      {
-        name: "mode",
-        label: "Engine",
-        type: "radios",
-        options: [
-          { value: "rust", label: "Built-in (Rust)", hint: "fast, no setup, simple heuristic" },
-          { value: "python", label: "Python + NLTK", hint: "higher quality; needs Python & nltk" },
-        ],
-      },
-    ],
-    defaults: () => ({ mode: "rust" }),
+    // No form: the stage always runs the SaT 3L model, so the only setup is
+    // downloading that model on the Models page.
+    formFields: [],
     gate: (ctx) =>
       needDataset(ctx)
         ? needDataset(ctx)
@@ -231,7 +222,7 @@ export const STEP_OPS: Record<string, StepOp> = {
           : has(ctx, "hasBook")
             ? undefined
             : "No book.txt in dataset.",
-    run: (ctx) => ({ command: "dataset_parse_book", args: { datasetUuid: ctx.uuid, mode: String(ctx.form.mode ?? "rust") } }),
+    run: (ctx) => ({ command: "dataset_parse_book", args: { datasetUuid: ctx.uuid } }),
     reloadAfter: true,
   },
 

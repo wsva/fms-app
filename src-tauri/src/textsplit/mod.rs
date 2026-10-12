@@ -3,7 +3,8 @@
 //! A faithful port of the SaT path from <https://github.com/19h/wtsplit-rs>,
 //! vendored against the statically-linked `ort` already in the tree (via
 //! transcribe-rs) rather than depending on the `wtpsplit` crate. Exposed as the
-//! desktop "Split Text" page and its `text_split` MCP twin.
+//! desktop "Split Text" page, its `text_split` MCP twin, and the dataset
+//! "Split Book" stage (`crate::datasets::tools::dataset_parse_book`).
 //!
 //! Only the subword (XLM-RoBERTa) sentence path is ported; all WtP / character
 //! hashing, paragraph segmentation, and language-adapter code is dropped.
@@ -36,6 +37,19 @@ pub type Result<T> = std::result::Result<T, String>;
 /// The single SaT model shipped in the catalog. Used as the default when the
 /// caller does not name a model.
 pub const DEFAULT_MODEL_ID: &str = "segment-any-text/sat-3l-sm";
+
+/// The model the "Split Book" stage (4a) runs: the full 3L, whose boundaries are
+/// more accurate than `-sm` on literary prose and whose cost is paid once per
+/// book rather than interactively.
+pub const BOOK_MODEL_ID: &str = "segment-any-text/sat-3l";
+
+/// Display name of [`BOOK_MODEL_ID`], so the Split Book stage's summary string
+/// cannot drift from the catalog entry it names.
+pub fn book_model_name() -> &'static str {
+    catalog_def(BOOK_MODEL_ID)
+        .map(|def| def.name)
+        .unwrap_or(BOOK_MODEL_ID)
+}
 
 /// The catalog `model_type` these models are registered under.
 const TEXTSPLIT_TYPE: &str = "textsplit";
@@ -295,9 +309,10 @@ impl TextSplitState {
         }
         let dir = resolve_model_dir(id)?;
         if !is_downloaded_dir(&dir) {
+            let name = catalog_def(id).map(|d| d.name).unwrap_or(id);
             return Err(format!(
-                "Model '{}' is not downloaded. Download \"SaT 3L Small\" on the Models page first.",
-                id
+                "Model '{}' ({}) is not downloaded. Download it on the Models page first.",
+                name, id
             ));
         }
         log::info!("[textsplit] Loading SaT model '{}' from {:?}", id, dir);
@@ -305,6 +320,29 @@ impl TextSplitState {
         inner.sat = Some(sat);
         inner.loaded_id = Some(id.to_string());
         Ok(())
+    }
+
+    /// Split `text` with the cached engine, loading `model_id` on first use.
+    /// The inference runs on a blocking thread so the async runtime stays free.
+    /// Shared by the [`text_split`] command and the "Split Book" stage so both
+    /// go down one locking and loading path.
+    pub async fn split_text(
+        &self,
+        text: String,
+        model_id: &str,
+        options: SaTOptions,
+    ) -> Result<Vec<String>> {
+        let shared = self.shared.clone();
+        let id = model_id.to_string();
+        tauri::async_runtime::spawn_blocking(move || {
+            let _split_guard = shared.split_lock.lock().unwrap();
+            let mut inner = shared.inner.lock().unwrap();
+            TextSplitState::ensure_loaded_locked(&mut inner, &id)?;
+            let sat = inner.sat.as_mut().ok_or_else(|| "Model not loaded".to_string())?;
+            sat.split(&text, &options)
+        })
+        .await
+        .map_err(|e| format!("Split task failed: {}", e))?
     }
 }
 
@@ -432,14 +470,5 @@ pub async fn text_split(
         split_on_input_newlines: split_on_input_newlines.unwrap_or(true),
     };
 
-    let shared = state.shared.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let _split_guard = shared.split_lock.lock().unwrap();
-        let mut inner = shared.inner.lock().unwrap();
-        TextSplitState::ensure_loaded_locked(&mut inner, &id)?;
-        let sat = inner.sat.as_mut().ok_or_else(|| "Model not loaded".to_string())?;
-        sat.split(&text, &options)
-    })
-    .await
-    .map_err(|e| format!("Split task failed: {}", e))?
+    state.split_text(text, &id, options).await
 }

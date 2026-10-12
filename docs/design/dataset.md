@@ -131,7 +131,7 @@ Text order is chronological only if every stored value has the same width and th
 | `media/` files | authored | — | yes, hashed |
 | `subtitle/*.vtt` | derived from STT, then hand-editable | regenerate subtitles | yes, hashed |
 | `book.txt` | authored | — | yes, hashed |
-| `book_sentences.txt` | derived | split book (Rust or bundled NLTK script) | yes, hashed |
+| `book_sentences.txt` | derived | split book (SaT 3L model) | yes, hashed |
 | `waveform/*.json` | derived | generate waveforms | yes, hashed |
 | `data.sqlite3` | derived *and* edited | build database | shipped whole by snapshot, then maintained by the row log; excluded from hashing |
 | `fts5.sqlite3` (wiki) | derived | built on first search | **never** — refused by hash, tar and file read |

@@ -119,13 +119,6 @@ export interface DatasetProgressEvt {
 /** Cue-time adjustment mode: write a new subtitle copy, or overwrite in place. */
 export type AdjustMode = "new" | "in_place";
 
-/**
- * Book-splitting engine for the "Split Book" stage:
- * - `rust`: built-in splitter, no setup, simple heuristic (lower quality).
- * - `python`: bundled NLTK script, higher quality, requires Python + nltk installed.
- */
-export type SplitBookMode = "rust" | "python";
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

@@ -403,9 +403,9 @@ fn multi_pass_align(cues: &[Cue], refs: &[Ref]) -> Vec<Match> {
 // ---------------------------------------------------------------------------
 
 /// Split a book/transcript text into sentences: paragraphs (`\n\n`) → lines
-/// (`\n`) → sentence boundaries. Rust port of dataset_studio's `split_book.py`
-/// sentence extraction, shared by the "split book" stage and transcript
-/// alignment so both agree on where sentences start and end.
+/// (`\n`) → sentence boundaries. The dependency-free heuristic behind transcript
+/// alignment and the align stage's `book.txt` fallback; the "split book" stage
+/// itself now caches SaT output, which align reads in preference to this.
 pub(crate) fn split_book_sentences(text: &str) -> Vec<String> {
     let mut sentences: Vec<String> = Vec::new();
     for para in text.split("\n\n") {

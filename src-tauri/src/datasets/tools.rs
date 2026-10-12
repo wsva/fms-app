@@ -4,15 +4,15 @@ use std::process::Command;
 
 use tauri::{AppHandle, Manager, State};
 
-use crate::datasets::dictation::align::split_book_sentences;
 use crate::datasets::find_dataset_dir_write;
 use crate::settings::SettingsState;
+use crate::textsplit::{self, SaTOptions, TextSplitState};
 
 // ============================================================
 // Conda environment resolution
 // ============================================================
 
-/// Conda environment that provides the Python deps (nltk, …) for the bundled
+/// Conda environment that provides the Python deps for the bundled
 /// dataset tools. Created via `conda env create -f environment.yml`.
 const CONDA_ENV: &str = "dataset_studio";
 
@@ -295,29 +295,26 @@ pub async fn dataset_write_transcripts(
 }
 
 /// Stage 4a: split `book.txt` into sentences and cache them (one per line) in
-/// `book_sentences.txt`. Two engines are offered via `mode`:
+/// `book_sentences.txt`, with the SaT model behind the "Split Text" page
+/// ([`textsplit::BOOK_MODEL_ID`]).
 ///
-/// - `"rust"` (default): built-in splitter (`datasets::dictation::align::split_book_sentences`).
-///   Self-contained and fast, but a simple heuristic — lower quality on
-///   abbreviations / edge cases. Boundaries match the transcript-align stage.
-/// - `"python"`: runs the bundled `split_book.py` (NLTK `sent_tokenize`, with the
-///   book's language auto-detected via the stopwords corpus) for higher-quality
-///   boundaries. Requires the `dataset_studio` conda env with nltk installed; the
-///   interpreter is resolved automatically, so `python` need not be on PATH.
+/// This replaces both former engines — the built-in heuristic and the bundled
+/// `split_book.py` (NLTK). SaT is multilingual out of the box and needs no
+/// Python environment, but the model has to be downloaded on the Models page
+/// first; the error then says exactly that.
 ///
 /// Returns a short summary for the UI log.
 #[tauri::command]
 pub async fn dataset_parse_book(
-    app: AppHandle,
     settings: State<'_, SettingsState>,
+    split_state: State<'_, TextSplitState>,
     dataset_uuid: String,
-    mode: Option<String>,
 ) -> Result<String, String> {
     let dataset_dir = find_dataset_dir_write(&settings, &dataset_uuid)?;
     let book_path = dataset_dir.join("book.txt");
     let db_path = dataset_dir.join("data.sqlite3");
 
-    log::info!("Parsing book for dataset '{}' (mode: {:?})", dataset_uuid, mode);
+    log::info!("Parsing book for dataset '{}' (SaT '{}')", dataset_uuid, textsplit::BOOK_MODEL_ID);
     if !book_path.exists() {
         return Err("book.txt not found in dataset directory.".into());
     }
@@ -325,33 +322,27 @@ pub async fn dataset_parse_book(
         return Err("Database file not found. Please generate the database first.".into());
     }
 
-    let output_path = dataset_dir.join("book_sentences.txt");
-
-    // Python engine: delegate to the bundled NLTK-based script.
-    if mode.as_deref() == Some("python") {
-        let script = resolve_script(&app, "split_book.py")?;
-        return run_python_script(
-            &script,
-            &[
-                book_path.to_str().unwrap_or(""),
-                output_path.to_str().unwrap_or(""),
-            ],
-        );
-    }
-
-    // Built-in Rust engine.
     let text = fs::read_to_string(&book_path)
         .map_err(|e| format!("Failed to read book.txt: {}", e))?;
     if text.trim().is_empty() {
         return Err("book.txt is empty.".into());
     }
 
-    let sentences = split_book_sentences(&text);
+    // One sentence per line, breaking on the model's boundaries and on the
+    // book's own newlines — the layout the align stage reads back.
+    let options = SaTOptions {
+        strip_whitespace: true,
+        split_on_input_newlines: true,
+        ..Default::default()
+    };
+    let sentences = split_state
+        .split_text(text, textsplit::BOOK_MODEL_ID, options)
+        .await?;
     if sentences.is_empty() {
         return Err("No sentences found in book.txt.".into());
     }
 
-    // One sentence per line, mirroring split_book.py's cache format.
+    let output_path = dataset_dir.join("book_sentences.txt");
     let mut out = String::new();
     for sentence in &sentences {
         out.push_str(sentence);
@@ -361,7 +352,8 @@ pub async fn dataset_parse_book(
         .map_err(|e| format!("Failed to write book_sentences.txt: {}", e))?;
 
     Ok(format!(
-        "Split {} sentences from book.txt (Rust)\nWritten to: book_sentences.txt",
-        sentences.len()
+        "Split {} sentences from book.txt ({})\nWritten to: book_sentences.txt",
+        sentences.len(),
+        textsplit::book_model_name()
     ))
 }

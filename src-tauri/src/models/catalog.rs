@@ -153,8 +153,9 @@ pub const MODELS: &[HfModelDef] = &[
     // Text segmentation — SaT (segment-any-text)
     // ========================================================================
     // Subword sentence segmentation (XLM-RoBERTa backbone) run via the vendored
-    // `crate::textsplit` SaT port on the statically-linked `ort`. Consumed by
-    // the desktop "Split Text" page. The ONNX repo ships weights only, so the
+    // `crate::textsplit` SaT port on the statically-linked `ort`. Consumed by the
+    // desktop "Split Text" page and by the dataset "Split Book" stage (which pins
+    // `textsplit::BOOK_MODEL_ID`). The ONNX repos ship weights only, so the
     // tokenizer is fetched from the XLM-RoBERTa backbone (see `tokenizer_repo`).
     HfModelDef {
         id: "segment-any-text/sat-3l-sm",
@@ -173,7 +174,7 @@ pub const MODELS: &[HfModelDef] = &[
     HfModelDef {
         id: "segment-any-text/sat-3l",
         name: "SaT 3L (Sentence Splitter)",
-        description: "Higher-accuracy subword sentence segmentation for 85+ languages",
+        description: "Higher-accuracy subword sentence segmentation for 85+ languages; the Split Book stage's model",
         model_type: "textsplit",
         folder: "textsplit/segment-any-text/sat-3l",
         files: &[

@@ -206,7 +206,7 @@ Summary of a dataset directory:
 3. **Generate waveforms** → Symphonia peak detection → JSON.
 4. **Generate database** → parse VTT → cues into `data.sqlite3`.
 5. *(optional)* **Transcripts / Book / Align** → write transcripts, split a book into sentences
-   (built-in Rust or bundled `split_book.py` with NLTK), align cues to subtitles
+   with the SaT 3L sentence-segmentation model, align cues to subtitles
    (`write_transcripts.py`; cue alignment is built-in Rust).
 
 **Sharing** ❌ — datasets (and future word sets) are designed to be shareable units. Planned

@@ -77,16 +77,26 @@ src-tauri/src/
 │   ├── report.rs           # The whole read-only picture of one dataset in one call: identity,
 │   │                       #   audit, every workflow run scored against it, STT model state,
 │   │                       #   actionable hint (`dataset_full_report`) — desktop
-│   ├── tools.rs            # Book splitting (`dataset_parse_book`, Rust or bundled `split_book.py`
-│   │                       #   via NLTK), Python script execution (`write_transcripts.py`) — desktop
+│   ├── tools.rs            # Book splitting (`dataset_parse_book`, via the vendored SaT model —
+│   │                       #   `textsplit::BOOK_MODEL_ID`), Python script execution (`write_transcripts.py`) — desktop
 │   └── textsim.rs          # Ratcliff-Obershelp similarity, shared by align + read_aloud
 │
 ├── models/                 # Whole group is `stt`-gated
 │   ├── mod.rs              # STT model management: download, status, transcription via `transcribe-rs`
 │   ├── download.rs         # Streaming model download with progress events
-│   ├── catalog.rs          # HuggingFace catalog of non-STT models (OCR, TTS)
+│   ├── catalog.rs          # HuggingFace catalog of non-STT models (OCR, TTS, text-split)
 │   ├── catalog_stt.rs      # STT model catalog
 │   └── index.rs            # Unified `{model_root}/index.json` over every downloaded model
+│
+├── textsplit/              # Vendored SaT (Segment any Text) sentence segmentation on `ort` +
+│   │                       #   `tokenizers`; `textsplit`-gated (a `desktop` subset) — desktop
+│   ├── mod.rs              # `SaT` engine, cached session (`TextSplitState`), the `text_split*`
+│   │                       #   commands, and the shared `split_text` seam the Split Book stage uses
+│   ├── config.rs           # Model config (chunk/stride ids) read from `config.json`
+│   ├── const.rs            # SaT constants (boundary index, default threshold, special token ids)
+│   ├── extract.rs          # Overlapping-chunk inference, hat/uniform weighting, thresholding
+│   ├── model.rs            # ONNX session wrapper
+│   └── utils.rs            # Offset/sentence post-processing helpers
 │
 ├── sync/                   # Cross-device sync; owns `PROTOCOL_VERSION`
 │   ├── mod.rs              # Group declarations + wire protocol version

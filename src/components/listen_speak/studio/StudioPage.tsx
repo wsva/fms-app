@@ -10,7 +10,6 @@ import {
   type DatasetDetail as DatasetDetailType,
   type DatasetProgressEvt,
   type AdjustMode,
-  type SplitBookMode,
   datasetStatusLabel,
   datasetStatusBadgeClasses,
   btnSmSecondary,
@@ -44,9 +43,6 @@ export default function StudioPage() {
   const [adjustMode, setAdjustMode] = useState<AdjustMode>("new");
   const [forceAdjust, setForceAdjust] = useState(false);
   const [silenceStrategy, setSilenceStrategy] = useState<string>("noise_floor");
-
-  // Split-book engine
-  const [splitBookMode, setSplitBookMode] = useState<SplitBookMode>("rust");
 
   // Run state
   const [running, setRunning] = useState(false);
@@ -598,50 +594,16 @@ export default function StudioPage() {
 
                   <StageRow
                     title="4a. Split Book"
-                    description="Split book.txt into sentences (book_sentences.txt cache)"
+                    description="Split book.txt into sentences with the SaT 3L model (book_sentences.txt cache)"
                     running={running && runningStage === "Split book"}
                     disabled={running}
                     hint={!hasDb ? "No database. Build the database first." : !hasBook ? "No book.txt in dataset." : undefined}
                     onRun={() =>
                       runStage("Split book", () =>
-                        invoke<string>("dataset_parse_book", {
-                          datasetUuid: selectedUuid,
-                          mode: splitBookMode,
-                        })
+                        invoke<string>("dataset_parse_book", { datasetUuid: selectedUuid })
                       )
                     }
-                  >
-                    <div className="flex flex-col gap-1 text-xs text-text-secondary">
-                      <label className="flex items-start gap-1.5 cursor-pointer">
-                        <input
-                          type="radio"
-                          name="split-book-mode"
-                          className="mt-0.5"
-                          checked={splitBookMode === "rust"}
-                          onChange={() => setSplitBookMode("rust")}
-                          disabled={running}
-                        />
-                        <span>
-                          <span className="font-medium text-text-primary">Built-in (Rust)</span> —
-                          fast, no setup, simple heuristic splitting
-                        </span>
-                      </label>
-                      <label className="flex items-start gap-1.5 cursor-pointer">
-                        <input
-                          type="radio"
-                          name="split-book-mode"
-                          className="mt-0.5"
-                          checked={splitBookMode === "python"}
-                          onChange={() => setSplitBookMode("python")}
-                          disabled={running}
-                        />
-                        <span>
-                          <span className="font-medium text-text-primary">Python + NLTK</span> —
-                          higher quality; requires Python &amp; nltk installed (e.g. via Miniconda)
-                        </span>
-                      </label>
-                    </div>
-                  </StageRow>
+                  />
 
                   <StageRow
                     title="4b. Align Cues (Book)"

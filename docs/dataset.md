@@ -25,7 +25,7 @@
 2, Generate waveform files in-app via Symphonia peak detection (pure Rust; no external tool)
 3, Create data.sqlite3
 4, Split subtitle into lines and write into database
-5, Split book into sentences (built-in Rust, or bundled split_book.py with NLTK) -> book_sentences.txt, then align cues to subtitles (built-in Rust)
+5, Split book into sentences with the SaT 3L sentence-segmentation model -> book_sentences.txt, then align cues to subtitles (built-in Rust)
 6, Generate or update info.json
 `````
 

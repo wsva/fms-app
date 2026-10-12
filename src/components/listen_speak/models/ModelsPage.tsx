@@ -341,7 +341,8 @@ export default function ModelsPage() {
               <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary">Text Split</h2>
             </div>
             <p className="text-xs text-text-tertiary mb-3">
-              Subword sentence-segmentation models (SaT) used by the <span className="font-medium">Split Text</span> tool.
+              Subword sentence-segmentation models (SaT) used by the <span className="font-medium">Split Text</span> tool and
+              by the <span className="font-medium">Split Book</span> stage (which runs SaT 3L).
               They load automatically on first use — no Start/Stop needed.
             </p>
 
