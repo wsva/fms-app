@@ -28,6 +28,19 @@ const shortcutList = [
     ["Enter", "continue list"],
 ];
 
+/** Nearest ancestor that actually scrolls. The wiki page scrolls its own
+ *  overflow-y-auto content pane, not the window, so preserving the window's
+ *  scroll position across a resize would be a no-op. */
+function scrollParent(el: HTMLElement): HTMLElement | null {
+    let p = el.parentElement;
+    while (p) {
+        const oy = getComputedStyle(p).overflowY;
+        if ((oy === "auto" || oy === "scroll") && p.scrollHeight > p.clientHeight) return p;
+        p = p.parentElement;
+    }
+    return null;
+}
+
 const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, preview, fullscreen, spellCheck, shortcutsOpen }, forwardedRef) => {
     const innerRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -39,10 +52,16 @@ const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, prev
             el.style.height = "";
             return;
         }
-        const scrollY = window.scrollY;
+        // Collapsing to height="auto" shrinks the pane's content, and the
+        // browser clamps its scrollTop away from the caret; re-expanding never
+        // brings it back, so the caret line lands pinned to the viewport
+        // bottom. Snapshot and restore the real scroll parent's offset.
+        const scroller = scrollParent(el);
+        const savedTop = scroller ? scroller.scrollTop : window.scrollY;
         el.style.height = "auto";
         el.style.height = el.scrollHeight + "px";
-        window.scrollTo(0, scrollY);
+        if (scroller) scroller.scrollTop = savedTop;
+        else window.scrollTo(0, savedTop);
     }, [fullscreen]);
 
     useEffect(() => {
