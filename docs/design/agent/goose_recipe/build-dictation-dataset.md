@@ -62,6 +62,11 @@ Read `hint` first — it names the next call. Then, in this order:
   status), `verdicts` (per-step verdict), `ready` / `blocked` / `failed`, the engine's
   `hints`, and `next.steps` with each runnable step's `action` and its `params` / `inputs`
   already resolved.
+- `workflow.expected_runs[]` — the run id of every built-in template of this dataset's
+  kind, `present: true` on the ones that exist. A dataset carries one run **per workflow**
+  by design (`dictation-<uuid>` is the build workflow,
+  `dictation-sync_cue_times-<uuid>` the cue-time sync), so name a run from this list
+  rather than inventing one.
 - `stt_model.active_version` — `null` means transcription will fail.
 
 ### Step 1 — get a run to work in
@@ -83,8 +88,10 @@ earlier session shows its real state instead of offering work already done. Read
   can be rebound; a run that earned progress keeps the definition it was created from.
 - `adopt_hint` — one sentence saying the same.
 
-Use `run_id: "dictation-<uuid>"`: that is the id the app's Workflow page uses, so the
-agent and the page share one run instead of creating two.
+Use `run_id: "dictation-<uuid>"`: that is this pipeline's run — the id the app's Workflow
+page reads and writes while the build workflow is open — so the agent and the page share
+one history instead of creating two. A different template is a different run
+(`workflow.expected_runs`), and progress in one is invisible in the other.
 
 **If a run already exists**, do not create another. If `workflow.runs[0].error` is set the
 run is unreadable — tell the user before recreating or removing

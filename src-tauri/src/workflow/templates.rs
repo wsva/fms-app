@@ -9,9 +9,10 @@
 //!
 //! Templates are grouped by dataset **category** (`dictation` / `book` /
 //! `card`), one directory each under `templates/`, because a given kind of
-//! dataset may grow several workflows over time. The Workflow page renders one
-//! tab per category; `builtin_templates` reports each template's `category` so
-//! the page (and an agent) can group them.
+//! dataset may grow several workflows over time — `dictation` has two today.
+//! The Workflow page renders one tab per category and lists the templates inside
+//! it; `builtin_templates` reports each template's `category` and `run_slug` so
+//! the page (and an agent) can group them and name their runs identically.
 //!
 //! The [`super`] module (`workflow/mod.rs`) owns the actual [`core::Definition`]
 //! parsing on top of these strings, so the templates themselves stay pure data.
@@ -23,6 +24,13 @@
 /// directory.
 pub(crate) const DICTATION_YAML: &str = include_str!("templates/dictation/build_dictation_dataset.yaml");
 
+/// The dictation *sync cue times* pipeline — copy timings from the dataset's VTT
+/// files into the cue rows it already has, without re-minting anything. The second
+/// template in the `dictation` category, and the reason a category's primary run id
+/// is not simply "the dictation run": see [`all`]`'s` run slug.
+pub(crate) const SYNC_CUE_TIMES_YAML: &str =
+    include_str!("templates/dictation/sync_dictation_cue_times.yaml");
+
 /// The Book library pipeline — create a book, author chapters / sentences, attach
 /// audio, build vocabulary. View / agent-facing (actions name real `book_*` tools).
 pub(crate) const BOOK_YAML: &str = include_str!("templates/book/build_book_library.yaml");
@@ -31,14 +39,21 @@ pub(crate) const BOOK_YAML: &str = include_str!("templates/book/build_book_libra
 /// index, sync online. View / agent-facing (actions name real `card_*` tools).
 pub(crate) const CARD_YAML: &str = include_str!("templates/card/setup_card_deck.yaml");
 
-/// Every built-in template, as `(category, id, yaml)` triples. `category` is the
-/// dataset type the Workflow page tabs on (`dictation` / `book` / `card`); `id`
-/// is the stable key that picks one within a category (a category may hold
-/// several). The definition's own `name`/`version` come from parsing the YAML.
-pub(crate) fn all() -> Vec<(&'static str, &'static str, &'static str)> {
+/// Every built-in template, as `(category, id, run_slug, yaml)` quadruples.
+/// `category` is the dataset type the Workflow page tabs on (`dictation` /
+/// `book` / `card`); `id` is the stable key that picks one within a category (a
+/// category may hold several). `run_slug` names the dataset-scoped run this
+/// template keeps its progress in: `None` is the category's *primary* workflow,
+/// whose run has always been `<category>-<uuid>` and keeps that id so the runs
+/// already on disk stay loadable; `Some(slug)` gives `<category>-<slug>-<uuid>`,
+/// so two workflows over one dataset are two histories. [`super::run_id_for`]
+/// applies the rule, and [`super::builtin_templates`] hands the slug to the page
+/// and to agents instead of making each side re-invent it.
+pub(crate) fn all() -> Vec<(&'static str, &'static str, Option<&'static str>, &'static str)> {
     vec![
-        ("dictation", "build_dictation_dataset", DICTATION_YAML),
-        ("book", "build_book_library", BOOK_YAML),
-        ("card", "setup_card_deck", CARD_YAML),
+        ("dictation", "build_dictation_dataset", None, DICTATION_YAML),
+        ("dictation", "sync_dictation_cue_times", Some("sync_cue_times"), SYNC_CUE_TIMES_YAML),
+        ("book", "build_book_library", None, BOOK_YAML),
+        ("card", "setup_card_deck", None, CARD_YAML),
     ]
 }

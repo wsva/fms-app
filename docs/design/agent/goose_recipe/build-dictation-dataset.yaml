@@ -69,11 +69,12 @@ instructions: |-
   - `audit.facts` - the six guard facts (`has_media`, `has_subtitles`, `has_waveforms`, `has_database`, `has_book`, `has_transcript`) that a step's `when:` reads.
   - `audit.checks[]` - every check with a stable `id`, an exact `count`, `advice` and a sample of at most 5 offenders in `items`. When the sampled offenders share one finding it is hoisted into `item_detail` with `<file>` standing for each name and `items` becomes a plain list of file names; `items_omitted` counts those not shown. **`count: 0` means measured and clean; an id that is absent from the list means not measured and proves nothing.** Need the full list of offenders? That is what `dataset_audit` is for.
   - `audit.media_on_disk` vs `audit.media_in_db`, `subtitles_in_db`, `cues_in_db`.
-  - `workflow.runs[]` - one entry per run recorded inside the dataset, **ordered by the run you should act on**: `workflow.canonical_run_id` first, then the most advanced. Each entry has `steps` (per-step status), `verdicts` (only for `completed` steps - a verdict on work nobody has done yet proves nothing), `ready` / `blocked` / `failed`, the engine's `hints`, and `next.steps` with each runnable step's `action` and its `params` / `inputs` already resolved.
+  - `workflow.runs[]` - one entry per run recorded inside the dataset, **ordered by the run you should act on**: the primary workflow's run (`workflow.canonical_run_id`) first, then the most advanced. Each entry has `steps` (per-step status), `verdicts` (only for `completed` steps - a verdict on work nobody has done yet proves nothing), `ready` / `blocked` / `failed`, the engine's `hints`, and `next.steps` with each runnable step's `action` and its `params` / `inputs` already resolved.
+  - `workflow.expected_runs[]` - the run id of every built-in template of this dataset's kind, `present: true` on the ones that exist on disk. A dataset legitimately carries one run **per workflow** - `dictation-<uuid>` is the build workflow, `dictation-sync_cue_times-<uuid>` is the cue-time sync - so this is how you name a run without inventing one.
   - `stt_model.active_version` - `null` means transcription will fail.
 
   ### Step 1: Get a run to work in
-  Work in the run named `dictation-<uuid>` - `workflow.canonical_run_id` says it, and it is the id the app's Workflow page reads and writes. **Never `workflow_create` a run of your own devising**: two runs are two separate histories, and progress recorded in the stray one is invisible in the one the user sees.
+  Work in the run named `dictation-<uuid>` - `workflow.canonical_run_id` says it, and it is the id the app's Workflow page reads and writes while the build workflow is open. **Never `workflow_create` a run of your own devising**: two runs are two separate histories, and progress recorded in the stray one is invisible in the one the user sees.
 
   **If no run named `dictation-<uuid>` is in `workflow.runs[]`:**
   1. Call `workflow_builtin_templates` and take the `build_dictation_dataset` entry's `yaml`.
@@ -145,7 +146,7 @@ instructions: |-
   - **Never invent a status.** Statuses come from `workflow_record`, `workflow_verify` and `workflow_adopt`. What you decide is which action to run and what its outputs were. A status you record for a step whose action tool never returned in this session is an invented status, however true the numbers in its `detail` are.
   - **Read-only first.** `dataset_full_report` and `workflow_verify` without `apply` never write; call them as often as you like.
   - **One step at a time.** Subtitle generation and cue adjustment can take minutes on a large dataset. Record each step before starting the next, so an interruption leaves a resumable run rather than an unknown one.
-  - **One run per dataset.** Act on `workflow.canonical_run_id`; if the report's `hint` says the dataset carries several runs, they are separate histories and the one you are working in is the one the user sees. Consolidate by finishing or deleting a run, never by recording the same progress twice.
+  - **One run per workflow, not per dataset.** Act on `workflow.canonical_run_id` for this recipe's build pipeline; other templates of the same dataset keep their own run (`workflow.expected_runs`), which is a second history on purpose. What is never allowed is a run id you invented: consolidate by finishing or deleting *that*, never by recording the same progress twice.
   - **Stop on error and report it.** Tool messages are written to be actionable - they say what to call next.
 activities: []
 parameters: []

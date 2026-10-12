@@ -226,9 +226,9 @@ mod tests {
         };
         let mut saw_subject_present = 0;
         let mut saw_exception = 0;
-        for (category, _, yaml) in crate::workflow::templates::all() {
+        for (category, template, _, yaml) in crate::workflow::templates::all() {
             let def: crate::workflow::core::Definition = serde_yaml::from_str(yaml)
-                .unwrap_or_else(|e| panic!("'{category}' template failed to parse: {e}"));
+                .unwrap_or_else(|e| panic!("'{template}' template failed to parse: {e}"));
             for step in &def.steps {
                 let adopt = match &step.adopt {
                     Some(a) if !a.is_empty() => a,
@@ -242,9 +242,9 @@ mod tests {
                 if any_per_subject && !any_subject_present {
                     assert!(
                         NAMED_EXCEPTIONS.contains(&step.id.as_str()),
-                        "step '{}' in the '{category}' template adopts on per_subject checks with no \
-                         subject_present guard; add a subject_present id (e.g. media_none) or list it \
-                         as a deliberate exception with its reason",
+                        "step '{}' in the '{template}' template ({category}) adopts on per_subject \
+                         checks with no subject_present guard; add a subject_present id (e.g. \
+                         media_none) or list it as a deliberate exception with its reason",
                         step.id
                     );
                     saw_exception += 1;
@@ -261,9 +261,9 @@ mod tests {
         let vocab = check_vocab();
         assert!(!vocab.is_empty(), "the check vocabulary must not be empty");
         let base = temp_base("templates");
-        for (category, _, yaml) in crate::workflow::templates::all() {
-            let result = crate::workflow::core::create_run(&base, Some(format!("probe-{category}")), yaml, &vocab);
-            assert!(result.is_ok(), "'{category}' template rejected: {}", result.unwrap_err());
+        for (category, template, _, yaml) in crate::workflow::templates::all() {
+            let result = crate::workflow::core::create_run(&base, Some(format!("probe-{template}")), yaml, &vocab);
+            assert!(result.is_ok(), "'{template}' ({category}) template rejected: {}", result.unwrap_err());
         }
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -196,7 +196,10 @@ export const STEP_OPS: Record<string, StepOp> = {
 
   sync_cue_times: {
     runLabel: "Sync",
-    formFields: [],
+    formFields: [
+      { name: "threshold", label: "Match threshold (0-100)", type: "text", placeholder: "70" },
+    ],
+    defaults: () => ({ threshold: "70" }),
     gate: (ctx) =>
       needDataset(ctx)
         ? needDataset(ctx)
@@ -205,7 +208,15 @@ export const STEP_OPS: Record<string, StepOp> = {
           : has(ctx, "hasSubtitles")
             ? undefined
             : "No subtitles. Generate subtitles first.",
-    run: (ctx) => ({ command: "dataset_sync_cue_times", args: { uuid: ctx.uuid } }),
+    run: (ctx) => {
+      const parsed = Number(ctx.form.threshold);
+      return {
+        command: "dataset_sync_cue_times",
+        // Blank or unparseable leaves the backend's own default in charge rather
+        // than sending a null the command would read as "no threshold given".
+        args: { uuid: ctx.uuid, threshold: Number.isFinite(parsed) ? parsed : undefined },
+      };
+    },
     reloadAfter: true,
   },
 
@@ -313,6 +324,24 @@ export const STEP_OPS: Record<string, StepOp> = {
       },
     }),
     reloadAfter: true,
+  },
+
+  // The sync pipeline's probe, and the guard input its optional generate step is
+  // evaluated against: one `dataset_audit` call answers "is there a media file with
+  // no subtitle anywhere?". An absent `subtitles_missing` check means *not measured*
+  // (the audit short-circuits when there is no data.sqlite3 to compare against), so
+  // it reads false — the honest answer, since generating subtitles would then have
+  // to build the database first, which is the build workflow's job.
+  detect_subtitles: {
+    runLabel: "Detect",
+    formFields: [],
+    gate: needDataset,
+    run: (ctx) => ({ command: "dataset_audit", args: { uuid: ctx.uuid } }),
+    outputs: (r) => {
+      const d = r as { checks?: { id: string; count: number }[] };
+      const missing = d?.checks?.find((c) => c.id === "subtitles_missing");
+      return { needs_subtitles: (missing?.count ?? 0) > 0 };
+    },
   },
 
   // Reads the dataset to surface which optional references exist. Its recorded

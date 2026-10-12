@@ -1,0 +1,133 @@
+# Sync cue times in an existing dictation dataset — a workflow.yaml definition.
+# Format: docs/design/workflow/core.md; this pipeline and its scan:
+# docs/design/workflow/dictation.md.
+#
+# App BUILT-IN template, baked into the binary via `include_str!` (see
+# `src-tauri/src/workflow/templates.rs`) under the `dictation` category and served
+# to the Workflow page and the `workflow_builtin_templates` MCP tool.
+#
+# This is the *improve an existing dataset* half of the dictation family. Its
+# sibling `build_dictation_dataset` is the one a raw media folder starts from;
+# this one assumes a dataset that already has media, cues and subtitle files, and
+# does the single job Studio calls "Sync Cue Times": copy timings out of the VTT
+# files into the cue rows already in data.sqlite3. Cue *text* is never touched,
+# no media are registered, no dataset is minted — so it is safe to run on a
+# practice-ready dataset whose wording was corrected by hand.
+#
+# `dataset_sync_cue_times` matches each DB cue to the closest fresh VTT cue by
+# Ratcliff-Obershelp similarity and updates `start_ms`/`end_ms` only when the score
+# reaches `threshold` (70 by default). Unmatched cues keep their timings and are
+# counted in the summary, so a partial sync is visible instead of silent. Lower the
+# threshold when too many cues go unmatched; raise it when the matches look wrong.
+#
+# Fresh subtitles are a *precondition*, not a phase of this workflow: the probe
+# records `needs_subtitles` and the generate step runs only on a dataset whose media
+# have neither a VTT nor cue rows yet. It sits behind that guard on purpose —
+# re-transcribing is slow and imports cues, which is the build workflow's business
+# and the one thing a caller of this workflow would not expect.
+#
+# `verify:`/`adopt:` here are narrower than the build template's, because the subject
+# is narrower. `subtitles_out_of_sync` is the only check that speaks of this step's
+# outcome: it reads "the VTT file and its rows disagree" (cue counts differ, or the
+# file was touched after the import), and a sync that ran bumps
+# `listen_subtitle.updated_at`, which clears the mtime half. So `proves` is honest —
+# a finding there means the sync did not take. `adopt:` must carry `media_none`,
+# because a per-file check counts offenders over whatever inventory it finds and
+# would read "zero offenders" vacuously on a dataset with no audio at all.
+#
+# What adoption cannot know, it says: an operator who hand-tuned cue timings in the
+# app *after* the last import also leaves `subtitles_out_of_sync` clean, so an
+# adopted `sync_cue_times` means "the rows already equal the VTT", never "a sync ran".
+# That is the desirable reading — the alternative would re-copy stale VTT timings over
+# deliberate edits. `cue_sanity` stays deliberately unbound, as in the build template:
+# a sync copies timings and is not the step responsible for what the VTT contains.
+#
+# This workflow keeps its own run: `dictation-sync_cue_times-<uuid>`, not the build
+# run's `dictation-<uuid>`. The rule lives in `templates::all()`'s run slug and
+# `workflow::run_id_for`; the Workflow page composes the same string from each
+# template's `run_slug` field rather than inventing one. Two workflows over one
+# dataset are two histories — progress recorded here is invisible in the build run
+# and the other way round, which is the point.
+#
+# `title` is a UI-only short label for the Workflow page's graph nodes; the engine
+# ignores unknown fields, so it is safe (and expected) to keep it here.
+
+name: sync_dictation_cue_times
+version: 1
+
+steps:
+  # ── Stage 1: is there anything to sync from? ────────────────────────────────
+  - id: detect_subtitles
+    title: Detect subtitles
+    description: >-
+      Read dataset_audit: media with neither a subtitle/<name>.vtt nor cue rows are
+      counted under `subtitles_missing`. Record "true"/"false" in
+      `needs_subtitles` so the optional step below can skip cleanly. An absent
+      `subtitles_missing` check (no data.sqlite3 yet, so the audit short-circuits)
+      records "false" — the sync step then goes blocked rather than running blind.
+    action: dataset_audit
+    params:
+      uuid: "${run.dataset_uuid}"
+    outputs:
+      - needs_subtitles
+
+  # ── Stage 2: the guarded prerequisite, off by default ───────────────────────
+  - id: generate_subtitles
+    title: Generate subtitles
+    description: >-
+      Only for a dataset that has no subtitles anywhere: STT-transcribe every media
+      file into VTT subtitles AND import them into data.sqlite3 as cues. Long
+      running, and incremental per file — media that already have a VTT are skipped,
+      so it fills gaps instead of overwriting work already done. Leave this step
+      skipped whenever the VTT files exist: generating them is the build workflow's
+      job, not this workflow's promise.
+      It transcribes inline, so one call over dozens of files can run for many
+      minutes; it is incremental per file, so a client whose call timed out lost the
+      response, not the work: call it again, or poll `dataset_audit` until
+      `subtitles_missing` reads 0, and only then record this step completed.
+    action: dataset_generate_subtitles
+    params:
+      uuid: "${run.dataset_uuid}"
+    depends_on:
+      - detect_subtitles
+    when: "${steps.detect_subtitles.outputs.needs_subtitles}"
+    verify:
+      blocks: [database_missing, media_new]
+      proves: [subtitles_missing, subtitles_unreadable, subtitles_not_imported, subtitles_out_of_sync]
+    adopt: [media_none, subtitles_missing, subtitles_unreadable, subtitles_not_imported, subtitles_out_of_sync]
+    retry: { attempts: 2, backoff: "1m" }
+    # Hours, not minutes: dozens of files transcribed on whatever CPU this machine
+    # has, and the 300s default lease would reap the claim mid-work.
+    timeout: 14400
+
+  # ── Stage 3: the task itself ────────────────────────────────────────────────
+  - id: sync_cue_times
+    title: Sync cue times
+    description: >-
+      Copy start_ms/end_ms from each media's fresh VTT cues into the matching DB cues
+      (best text similarity above `threshold`), leaving cue text, the media inventory
+      and every other artifact alone. Safe to re-run: a second pass shifts nothing,
+      because the timings it would copy are already the ones in the rows. Read the
+      returned summary for the matched / shifted / unmatched counts — unmatched cues
+      keep their old timings on purpose, so lower the threshold if too many went by.
+    action: dataset_sync_cue_times
+    params:
+      uuid: "${run.dataset_uuid}"
+      threshold: 70
+    depends_on:
+      - detect_subtitles
+      - generate_subtitles
+    verify:
+      # Nothing to write into, or nothing trustworthy to read: the sync has not
+      # happened and cannot have.
+      blocks: [database_missing, subtitles_not_imported, subtitles_unreadable]
+      # Rows still disagreeing with their VTT file says the copy did not take.
+      proves: [subtitles_out_of_sync]
+    # `media_none` is the guard that turns this zero into a claim: with no media at
+    # all there is no file to disagree with, which is not proof of a sync. See the
+    # header for why an adoption here means "rows equal the VTT", not "a sync ran".
+    adopt: [media_none, subtitles_out_of_sync]
+    retry: { attempts: 2, backoff: "30s" }
+    # Every cue of every media scored against every fresh cue of that file: quadratic
+    # per file, so a large dataset sits here for minutes rather than seconds.
+    timeout: 3600

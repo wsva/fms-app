@@ -39,6 +39,12 @@ export interface DatasetFacts {
   hasWaveforms: boolean;
   hasBook: boolean;
   hasTranscript: boolean;
+  /** Some media has neither a VTT nor cue rows — the audit's `subtitles_missing`
+   *  finding, i.e. exactly what the repair template's `needs_subtitles` guard
+   *  reads. Kept beside the six disk facts rather than derived from
+   *  `hasSubtitles`, because "any media has a subtitle" and "every media has one
+   *  somewhere" are different questions and only the second one is the guard. */
+  needsSubtitles: boolean;
 }
 
 /**
@@ -107,6 +113,10 @@ function humanize(id: string): string {
 /** Substring (engine `when` form) → the `DatasetFacts` key the client evaluates. */
 const FACT_GUARDS: Array<[string, keyof DatasetFacts]> = [
   ["has_media", "hasMedia"],
+  // The repair template's guard names the *need*, so it must not be read as
+  // `hasSubtitles`: "any subtitle exists" and "a subtitle is missing somewhere"
+  // are opposite answers, and only one of them is what that guard asks.
+  ["needs_subtitles", "needsSubtitles"],
   ["has_subtitles", "hasSubtitles"],
   ["has_database", "hasDatabase"],
   ["has_waveforms", "hasWaveforms"],
@@ -121,6 +131,7 @@ const FACT_KEYS = new Set<string>([
   "hasWaveforms",
   "hasBook",
   "hasTranscript",
+  "needsSubtitles",
 ]);
 
 /**

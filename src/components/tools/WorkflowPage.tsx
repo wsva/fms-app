@@ -56,8 +56,18 @@ import {
 // react-flow touches browser layout APIs on mount; keep it out of the SSG pass.
 const WorkflowGraph = dynamic(() => import("./WorkflowGraph"), { ssr: false });
 
-function runIdFor(uuid: string): string {
-  return `dictation-${uuid}`;
+/**
+ * The run id a template keeps this dataset's progress in — the same rule the
+ * backend applies (`workflow::run_id_for`), read off each template's own
+ * `run_slug` rather than invented here. A category's primary workflow carries no
+ * slug and has always been `<category>-<uuid>`; a second workflow over the same
+ * dataset is `<category>-<slug>-<uuid>`, because two workflows are two histories
+ * and one run id would make the later one overwrite the earlier's record.
+ */
+function runIdFor(tpl: BuiltinTemplate | undefined, uuid: string): string {
+  const category = tpl?.category || "dictation";
+  const slug = tpl?.run_slug ? `-${tpl.run_slug}` : "";
+  return `${category}${slug}-${uuid}`;
 }
 
 /**
@@ -152,6 +162,8 @@ interface BuiltinTemplate {
   name: string;
   version: number;
   step_count: number;
+  /** Present on a category's non-primary workflows: the middle of its run id. */
+  run_slug?: string | null;
   yaml: string;
 }
 
@@ -349,7 +361,7 @@ export default function WorkflowPage() {
   const selectedPath = selectedDataset?.path ?? "";
   const isRaw = !!selectedDataset && !selectedDataset.uuid;
   const selectedName = selectedDataset?.name ?? "";
-  const runId = runIdFor(selectedUuid);
+  const runId = runIdFor(activeTemplate, selectedUuid);
   const hasRun = engineView !== null;
 
   const appendLog = useCallback((text: string, level: string = "INFO") => {
@@ -427,7 +439,7 @@ export default function WorkflowPage() {
     const def = loadTemplateDoc(tpl);
     navigate({ ...nav, templateId: tpl.id });
     const ds = (kindDatasets[tpl.category as WorkflowCategory] ?? []).find((d) => d.key === nav.datasetKey);
-    if (tpl.category === "dictation" && ds?.uuid && def) void probeAndSync(ds.uuid, def.steps, tpl.yaml);
+    if (tpl.category === "dictation" && ds?.uuid && def) void probeAndSync(ds.uuid, def.steps, tpl.yaml, runIdFor(tpl, ds.uuid));
   };
 
   // Breadcrumb crumbs: jump back one level at a time, always clearing the run
@@ -595,6 +607,11 @@ export default function WorkflowPage() {
       hasWaveforms: report.facts.has_waveforms,
       hasBook: report.facts.has_book,
       hasTranscript: report.facts.has_transcript,
+      // Read from the finding, not the boolean, because that is what the repair
+      // template's `needs_subtitles` guard asks the engine — and an absent check
+      // (a folder with no data.sqlite3, where the audit short-circuits) is "not
+      // measured", which must not read as a request to transcribe.
+      needsSubtitles: report.checks.some((c) => c.id === "subtitles_missing" && c.count > 0),
     });
     setAudit(report);
     setInfoText(JSON.stringify(report.info, null, 2));
@@ -605,7 +622,7 @@ export default function WorkflowPage() {
   // run state from the engine. Explicit args because this also runs while
   // navigating into the workflow level, before the new `definition`/`nav` state
   // is visible to a closure.
-  const probeAndSync = useCallback(async (uuid: string, defs: StepDef[], yaml: string) => {
+  const probeAndSync = useCallback(async (uuid: string, defs: StepDef[], yaml: string, id: string) => {
     if (!isTauri() || !uuid) return;
     setScanning(true);
     setNotice("");
@@ -614,10 +631,10 @@ export default function WorkflowPage() {
       setCommitted(initialStatuses(defs));
       // Adopt before reading the state back, so the graph opens on the state the
       // dataset is in rather than on the absence of a record of it.
-      const { adopted, refreshed } = await adoptRun(runIdFor(uuid), uuid, yaml);
-      const live = await refreshEngine(runIdFor(uuid), uuid);
+      const { adopted, refreshed } = await adoptRun(id, uuid, yaml);
+      const live = await refreshEngine(id, uuid);
       // Verdicts only exist for a run that is on disk; a preview has no claims to check.
-      const verdicts = live ? await verifyRun(runIdFor(uuid), uuid) : null;
+      const verdicts = live ? await verifyRun(id, uuid) : null;
       // Lead with what needs doing: a scan that only says "done" is not actionable.
       const blocking = report.checks.filter((c) => c.level === "problem").length;
       const drift = report.checks.filter((c) => c.level === "warn").length;
@@ -656,8 +673,8 @@ export default function WorkflowPage() {
   }, [probeDataset, adoptRun, refreshEngine, verifyRun, appendLog]);
 
   const scan = useCallback(() => {
-    void probeAndSync(selectedUuid, steps, yamlText);
-  }, [probeAndSync, selectedUuid, steps, yamlText]);
+    void probeAndSync(selectedUuid, steps, yamlText, runId);
+  }, [probeAndSync, selectedUuid, steps, yamlText, runId]);
 
   // ---- Initialize a raw folder in place, then keep browsing it as a dataset ----
   // Drops back to the dataset's workflow list: the folder now has a uuid, so the

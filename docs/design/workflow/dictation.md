@@ -1,11 +1,11 @@
 # Dictation Workflow — the pipeline, the page, and scanning status
 
-This is the **domain** half of the workflow docs. [`core.md`](./core.md) specifies the domain-free engine (definitions, statuses, the three files, the agent surface) and never mentions audio. This document describes the one pipeline that exists end-to-end — turning a raw media folder into a practice-ready dictation dataset — plus the Workflow page that renders it and the read-only **scan** that reconciles a dataset's files against its database.
+This is the **domain** half of the workflow docs. [`core.md`](./core.md) specifies the domain-free engine (definitions, statuses, the three files, the agent surface) and never mentions audio. This document describes the pipelines that exist end-to-end — building a raw media folder into a practice-ready dictation dataset, and repairing the cue timings of one that is already built — plus the Workflow page that renders them and the read-only **scan** that reconciles a dataset's files against its database.
 
 | Doc | Owns | Changes when |
 |---|---|---|
 | [`core.md`](./core.md) | Steps, DAG, statuses, `state.json`/`events.jsonl`, the `workflow_*` surface | The engine changes |
-| This doc | The dictation template, its steps' artifacts, the audit checks, the page's scan UX | A check is added, a step is renamed, the report shape changes |
+| This doc | The dictation templates, their steps' artifacts, the audit checks, the page's scan UX | A check is added, a step is renamed, the report shape changes |
 
 **Promotion rule.** Most of this doc is dictation-specific, but the verification mechanism below (*Binding checks to the template*) is framework, and the engine now honours it — so the specification lives in [`core.md`](./core.md#verification--scoring-progress-against-evidence) and this file keeps only the dictation instantiation: which check answers to which step, and what a probe cannot see at all. That is the rule in action: mechanism is written up here as a proposal, and moves up the moment it is built — never before, so `core.md` never documents a field the engine does not honour.
 
@@ -13,26 +13,28 @@ This is the **domain** half of the workflow docs. [`core.md`](./core.md) specifi
 
 | Concern | Location |
 |---|---|
-| The template (DAG + `verify:`/`adopt:` binding, single source of truth) | `src-tauri/src/workflow/templates/dictation/build_dictation_dataset.yaml`, baked in via `include_str!` and served by `workflow_builtin_templates` |
+| The templates (DAG + `verify:`/`adopt:` binding, single source of truth) | `src-tauri/src/workflow/templates/dictation/build_dictation_dataset.yaml` (build a new dataset) and `sync_dictation_cue_times.yaml` (repair an existing one), both baked in via `include_str!` and served by `workflow_builtin_templates` with their `run_slug` |
 | The scan (read-only checks, each under a stable id) | `src-tauri/src/datasets/dictation/audit.rs` → `dataset_audit` command + MCP tool |
 | The check provider + vocabulary that binds the scan to a run | `src-tauri/src/workflow/verify.rs` (the only module naming both checks and steps) |
 | The join itself (verdicts, invalidation) | `src-tauri/src/workflow/core/mod.rs::verify` → `workflow_verify` command + MCP tool |
 | Adoption (clean evidence ⇒ `completed`, the one upward move) | `src-tauri/src/workflow/core/mod.rs::adopt` → `workflow_adopt` command + MCP tool |
 | Refreshing a run's definition, while and only while its whole history was inherited | `src-tauri/src/workflow/core/mod.rs::{history_is_inherited_only, rebind_definition}`, called from `verify.rs::adopt` |
-| The one call an agent starts from: identity + audit + every run scored against it + model state + a hint | `src-tauri/src/datasets/report.rs` → `dataset_full_report` MCP tool (read-only: scores with `apply: false`, so it describes drift and adopts nothing). Its `audit` section is a **projection** of `dataset_audit`: exact counts, at most 5 offenders per check, a shared finding hoisted into `item_detail`; its `workflow.runs` is **ranked** — `canonical_run_id` first, then the most advanced — and carries `verdicts` only for `completed` steps |
-| The recipe that drives this pipeline from goose | `docs/design/agent/goose_recipe/build-dictation-dataset.yaml` (the runnable recipe) + `build-dictation-dataset.md` (same instructions, prose form — keep the two in sync) |
+| The one call an agent starts from: identity + audit + every run scored against it + model state + a hint | `src-tauri/src/datasets/report.rs` → `dataset_full_report` MCP tool (read-only: scores with `apply: false`, so it describes drift and adopts nothing). Its `audit` section is a **projection** of `dataset_audit`: exact counts, at most 5 offenders per check, a shared finding hoisted into `item_detail`; its `workflow.runs` is **ranked** — the primary workflow's run first, then the most advanced — and carries `verdicts` only for `completed` steps. `workflow.expected_runs` names the run id of *every* built-in template of this dataset's kind, `present: true` on the ones that exist, so a caller after the sync-cue-times history does not have to guess its name |
+| The recipe that drives the build pipeline from goose | `docs/design/agent/goose_recipe/build-dictation-dataset.yaml` (the runnable recipe) + `build-dictation-dataset.md` (same instructions, prose form — keep the two in sync). The repair pipeline has no recipe of its own yet: it is two MCP calls, and `workflow.expected_runs` in the report names its run |
 | Rendering the verdicts | `src/lib/workflow/verify.ts` (labels and sentences only — no ids) |
-| In-app Run buttons per step | `src/lib/workflow/step-ops.ts` (`STEP_OPS`, keyed by step id) |
+| In-app Run buttons per step | `src/lib/workflow/step-ops.ts` (`STEP_OPS`, keyed by step id — so a step id shared by both dictation templates is implemented once) |
 | Client mirror of the engine's readiness rules | `src/lib/workflow/steps.ts` (parses the YAML, evaluates `when` against probed facts) |
 | The page | `src/components/tools/WorkflowPage.tsx` (+ `WorkflowGraph.tsx`) |
 
-The template is not duplicated anywhere: the frontend fetches it at runtime, so editing the YAML edits the graph, the Run order, the evidence binding and the agent's instructions at once.
+Neither template is duplicated anywhere: the frontend fetches them at runtime, so editing the YAML edits the graph, the Run order, the evidence binding and the agent's instructions at once.
 
 **Why the template's `version` was not bumped when `verify:` was added.** `load_bundle` refuses a run whose `state.json` name/version differs from its stored `workflow.yaml`. Bumping to 3 would have made every existing `dictation-<uuid>` run unloadable — a schema addition that is purely additive should cost nobody their history. Old runs keep working; their stored YAML simply has no bindings, so every step verifies as `unknown` until the run is recreated.
 
 **Why version 5 was bumped anyway.** Adding `adopt:` changed what a scan may conclude, and handing steps their subject in `params` changed what a step means as a call; version 5 gives the long steps a `timeout:`, which changes what the *engine* does to a claimed step — the thing that used to reap a live transcription back to `ready` at 300 s and have forty-seven files transcribed twice. A bump costs an existing run nothing (it keeps the definition it was created under and its own lease rules) but it does mean the newer rules never reach a run that already earned progress — only a purely-inherited run is rebound. So the fix for a long-running step in an old run is to record it, not to wait for the template.
 
-## The pipeline
+## The pipelines
+
+### Build: `build_dictation_dataset`
 
 `ensure_model` and `sync_media` head two independent branches that the tail joins:
 
@@ -53,17 +55,35 @@ Two shape decisions are worth keeping in mind when editing it:
 - **There is no "generate database" step.** Subtitle generation writes straight into `data.sqlite3`, so the cue inventory is a side effect of `generate_subtitles` rather than a stage of its own.
 - **The optional branches skip, never fail.** `detect_reference` exists purely so its recorded outputs can be resolved by `when:`. A guard that reads a value the run actually observed is what makes "no `book.txt`" a clean `skipped` instead of a `blocked` on an unresolvable reference.
 
+### Repair: `sync_dictation_cue_times`
+
+The *improve an existing dataset* half: three steps, one job — copy timings out of the dataset's VTT files into the cue rows it already has (what Studio calls "Sync Cue Times"). Cue *text* is never touched, no media are registered, no dataset is minted, so it is safe on a practice-ready dataset whose wording was corrected by hand.
+
+| Step | Action | Waits on | Guard | Artifact it produces |
+|---|---|---|---|---|
+| `detect_subtitles` | `dataset_audit` | — | — | recorded output `needs_subtitles` |
+| `generate_subtitles` | `dataset_generate_subtitles` | `detect_subtitles` | `needs_subtitles` | `subtitle/*.vtt` + cues, only where nothing exists yet |
+| `sync_cue_times` | `dataset_sync_cue_times` | `detect_subtitles`, `generate_subtitles` | — | `start_ms`/`end_ms` rewritten on cues matching a fresh VTT cue above `threshold` (70) |
+
+Three decisions give this shape:
+
+- **Fresh subtitles are a precondition, not a phase.** Re-transcribing is slow *and* imports cues, which is the build workflow's business — so the generate step sits behind `when: "${steps.detect_subtitles.outputs.needs_subtitles}"` and only a dataset whose media have neither a VTT nor cue rows runs it. Everyone else gets a clean `skipped`.
+- **Matching is by text similarity, so a partial sync is visible.** Unmatched cues keep their old timings and are counted in the returned summary; lower `threshold` when too many go unmatched, raise it when the matches look wrong.
+- **The bindings are narrower than the build template's, because the subject is.** `subtitles_out_of_sync` is the only check that speaks of this step's outcome — it reads "the VTT file and its rows disagree", and a sync that ran bumps `listen_subtitle.updated_at`, which clears the mtime half. So `proves` is honest: a finding there means the copy did not take. What adoption *cannot* know is said out loud in the template header: an operator who hand-tuned timings after the last import also leaves that check clean, so an adopted `sync_cue_times` means "the rows already equal the VTT", never "a sync ran" — which is the desirable reading, since the alternative would re-copy stale VTT timings over deliberate edits. `cue_sanity` stays deliberately unbound, as in the build template: a sync copies timings and is not responsible for what the VTT contains.
+
 ## The page
 
-Four breadcrumb levels, each one a full-width list: **kind → dataset → template → workflow**. There is no back/forward chrome — the breadcrumb *is* the navigation, and a run view is reachable only through its dataset, which is the only context in which its run directory makes sense. Runs are addressed as `dictation-<uuid>` (`runIdFor`), matching the on-disk `<dataset>/workflows/<run_id>/` layout so a run travels with the dataset when it syncs.
+Four breadcrumb levels, each one a full-width list: **kind → dataset → template → workflow**. There is no back/forward chrome — the breadcrumb *is* the navigation, and a run view is reachable only through its dataset, which is the only context in which its run directory makes sense.
 
-That id is a convention, not a constraint: nothing stops a second run, and an agent that called `workflow_create` with an id of its own has produced exactly one. So the backend names the convention too (`workflow::canonical_run_id`) and `dataset_full_report` ranks runs by it — the hint follows the run the page shows, and says out loud when a dataset carries more than one. Before that, the hint followed `runs[0]` in *directory* order, and a three-hour session did all its work in an orphan run while this page's run sat untouched.
+**Run identity.** A run is addressed `<category>-<slug>-<uuid>` and lives at `<dataset>/workflows/<run_id>/`, so it travels with the dataset when it syncs. The `slug` is what makes two workflows over one dataset two histories: a category's **primary** template carries no slug and keeps the bare `dictation-<uuid>` id every run on disk already has, while the sync-cue-times workflow writes to `dictation-sync_cue_times-<uuid>`. Progress recorded in one is invisible in the other — that is the point, and the alternative (one shared id) would have the second workflow overwrite the first's record. The rule exists in exactly one place per side and is passed across the boundary rather than re-invented: `workflow::run_id_for` (with `canonical_run_id` as its primary-workflow special case) and each template's `run_slug` field served by `workflow_builtin_templates`, which the page reads to compose the same string (`runIdFor(tpl, uuid)`).
+
+That is a convention, not a constraint: nothing stops a third run, and an agent that called `workflow_create` with an id of its own has produced exactly one. So `dataset_full_report` ranks runs with the primary workflow's first and names every template's run id in `workflow.expected_runs` (`present: true` on those that exist) — the hint follows the run the page shows by default, and when a dataset carries more than one it distinguishes a **second workflow** (a known template run — act on the one you mean) from a **stray** (an invented id — finish or delete it). Before that, the hint followed `runs[0]` in *directory* order, and a three-hour session did all its work in an orphan run while this page's run sat untouched.
 
 Three rules the page obeys:
 
 - **Never fabricate progress.** Before a run exists the graph is honestly all-`pending`, and the client projection derives only what the engine's `recompute` could derive from the DAG itself — guard skips and dependency readiness. On-disk facts colour the *Scan* panel and the Run buttons' gates; a verdict joins them as a **second marker beside a node's status**, never instead of it, and no amount of clean evidence can paint a node `completed`.
 - **Same command, two drivers.** A node's Run button invokes the Tauri command twin of the MCP tool an agent would call, then pairs it with `workflow_advance` / `workflow_record` so `state.json` stays truthful whichever way the step was performed.
-- **One kind is wired.** Book and card templates render their graphs, but the scan and the step registry are dictation-only (`isDictation` gates the whole inspector's evidence half).
+- **One kind is wired.** Book and card templates render their graphs, but the scan and the step registry are dictation-only (`isDictation` gates the whole inspector's evidence half) — which is why both dictation templates are runnable, Run buttons and all.
 
 ## Scan status
 
@@ -147,7 +167,7 @@ The mapping moved from the report into the definition, where the pipeline alread
 | `verify.proves` | check ids whose findings mean "this step's output is missing, partial or drifted" |
 | `adopt` | check ids that must come back measured *and* clean for the step to be adopted as `completed` without running it |
 
-The dictation binding, in full:
+The dictation binding, in full — both templates, with a step id shared by the two (`generate_subtitles`) listed once because it binds identically:
 
 | Step | `blocks` | `proves` | `adopt` |
 |---|---|---|---|
@@ -159,8 +179,10 @@ The dictation binding, in full:
 | `detect_reference` | — | — (records facts; nothing to prove) | — |
 | `align_cues` / `align_cues_transcript` | `subtitles_not_imported` | — (see *Not everything is verifiable*) | — |
 | `adjust_cue_times` | `waveforms_missing`, `subtitles_not_imported` | `cues_unadjusted` | `media_none`, `cues_unadjusted`, `adjust_blocked_no_waveform` |
+| `detect_subtitles` *(repair)* | — | — (records a fact; nothing to prove) | — |
+| `sync_cue_times` *(repair)* | `database_missing`, `subtitles_not_imported`, `subtitles_unreadable` | `subtitles_out_of_sync` | `media_none`, `subtitles_out_of_sync` |
 
-Five steps adopt, in two shapes. `init_dataset` and `sync_media` claim an **agreement**, and an agreement holds when there is nothing to disagree about: `database_missing` is one file's existence, and `media_new` + `media_gone` clean means the folder and the table match in *both* directions — so an empty dataset genuinely has nothing to sync, and needs no guard. The three artifact steps claim an **outcome**, which cannot be inherited from an inventory of zero: each lists `media_none` beside its per-file ids, and `adjust_cue_times` also lists `adjust_blocked_no_waveform`, because a media skipped for lack of a waveform was not adjusted and must veto the claim instead of hiding inside a zero count. Adopting `generate_subtitles` because a media-less dataset has no missing subtitles would put a green tick over work nobody did — the exact false confidence the rest of this design exists to prevent.
+Six steps adopt, in two shapes. `init_dataset` and `sync_media` claim an **agreement**, and an agreement holds when there is nothing to disagree about: `database_missing` is one file's existence, and `media_new` + `media_gone` clean means the folder and the table match in *both* directions — so an empty dataset genuinely has nothing to sync, and needs no guard. The four artifact steps claim an **outcome**, which cannot be inherited from an inventory of zero: each lists `media_none` beside its per-file ids, and `adjust_cue_times` also lists `adjust_blocked_no_waveform`, because a media skipped for lack of a waveform was not adjusted and must veto the claim instead of hiding inside a zero count. Adopting `generate_subtitles` because a media-less dataset has no missing subtitles would put a green tick over work nobody did — the exact false confidence the rest of this design exists to prevent. `sync_cue_times` is the outcome claim with the shortest reach: one id, `subtitles_out_of_sync`, whose reading is "the rows equal the VTT" and nothing more (see *Repair* above).
 
 How it is wired, as built:
 

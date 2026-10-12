@@ -60,17 +60,48 @@ const DEFINITION_FILE: &str = "workflow.yaml";
 /// [`bind_subject`] in this layer is what resolves it.
 const SUBJECT_REF: &str = "${run.dataset_uuid}";
 
-/// The run id a dataset's own page opens and keeps progress in: `dictation-<uuid>`.
+/// The run id a built-in template keeps its dataset's progress in.
+///
+/// `<category>-<uuid>` for a category's primary workflow, `<category>-<slug>-<uuid>`
+/// for any other template of the same category (see [`templates::all`]'s run slug):
+/// two workflows over one dataset are two histories, and sharing one run id would
+/// make the second one overwrite the first's record of what it did.
 ///
 /// Nothing enforces it — an agent that called `workflow_create` with an id of its
 /// own simply added another run, and runs are independent records. It is a
 /// convention worth naming in the backend all the same, because a read-only report
-/// that has to speak about *the* run of a dataset (see
-/// [`crate::datasets::report`]) must know which one the UI is driving, and the
-/// frontend writes the same string (`runIdFor` in
-/// `src/components/tools/WorkflowPage.tsx`). Only dictation has one today.
+/// that has to speak about *the* run of a dataset (see [`crate::datasets::report`])
+/// must know which one the UI is driving, and the frontend composes the same string
+/// from the `run_slug` each template is served with (`runIdFor` in
+/// `src/components/tools/WorkflowPage.tsx`).
+pub(crate) fn run_id_for(category: &str, run_slug: Option<&str>, dataset_uuid: &str) -> String {
+    match run_slug {
+        Some(slug) => format!("{category}-{slug}-{dataset_uuid}"),
+        None => format!("{category}-{dataset_uuid}"),
+    }
+}
+
+/// The run id a dictation dataset's *build* pipeline opens — the id that existed
+/// before a category could hold more than one template, kept bare so the runs
+/// already on disk stay loadable. [`run_id_for`] is the general rule; this is its
+/// one special case, spelled out because reports and recipes name it.
 pub(crate) fn canonical_run_id(dataset_uuid: &str) -> String {
-    format!("{}-{}", DatasetType::Dictation.as_str(), dataset_uuid)
+    run_id_for(DatasetType::Dictation.as_str(), None, dataset_uuid)
+}
+
+/// Every built-in template of one dataset *kind*'s run id, as
+/// `(category, template_id, run_id)` triples — including runs that do not exist
+/// yet. A report needs the whole set, not just the primary one: the page follows
+/// the run of whichever template the user selected, and an agent asked to "sync
+/// cue times" is looking for that template's run, which it can only open if it
+/// knows the name. Templates of other kinds are left out — a card dataset does
+/// not carry a dictation workflow, and listing its run id would only invite one.
+pub(crate) fn expected_runs(kind: &str, dataset_uuid: &str) -> Vec<(&'static str, &'static str, String)> {
+    templates::all()
+        .into_iter()
+        .filter(move |(category, ..)| *category == kind)
+        .map(|(category, id, slug, _)| (category, id, run_id_for(category, slug, dataset_uuid)))
+        .collect()
 }
 
 /// Resolve the run *base directory* for a call that only needs a **scope** —
@@ -396,10 +427,12 @@ pub(crate) fn adopt(
 
 /// List every built-in template shipped in the binary, each parsed once for its
 /// `name`/`version` metadata alongside its raw YAML text (so the frontend and
-/// an agent get the exact same definition, no second source of truth).
+/// an agent get the exact same definition, no second source of truth). Each entry
+/// also carries its `run_slug`, the piece of its run id a caller needs to name the
+/// run of *this* template — see [`run_id_for`].
 pub(crate) fn builtin_templates() -> Result<Value, String> {
     let mut out = Vec::new();
-    for (category, id, yaml) in templates::all() {
+    for (category, id, slug, yaml) in templates::all() {
         let def: core::Definition = serde_yaml::from_str(yaml)
             .map_err(|e| format!("built-in template '{id}' failed to parse: {e}"))?;
         out.push(json!({
@@ -408,6 +441,8 @@ pub(crate) fn builtin_templates() -> Result<Value, String> {
             "name": def.name,
             "version": def.version,
             "step_count": def.steps.len(),
+            "run_slug": slug,
+            "run_id": run_id_for(category, slug, "<uuid>"),
             "yaml": yaml,
         }));
     }
@@ -436,5 +471,50 @@ mod tests {
         assert_eq!(bound["params"]["uuid"], json!(SUBJECT_REF));
         assert_eq!(bound["params"]["mode"], json!("new"));
         assert!(bound.get("dataset_uuid").is_none());
+    }
+
+    /// Two workflows over one dataset have to be two histories. This is the only
+    /// mechanical guard on that rule: a repeated `(category, run_slug)` would hand
+    /// the second template the first one's run directory, and a repeated `id` would
+    /// make a template unreachable — `builtin_templates` and the Workflow page
+    /// address a template by id alone, and nothing detects the collision.
+    #[test]
+    fn every_built_in_template_addresses_its_own_run() {
+        use std::collections::HashSet;
+        let all = templates::all();
+        let ids: HashSet<&str> = all.iter().map(|(_, id, ..)| *id).collect();
+        assert_eq!(ids.len(), all.len(), "two built-in templates share an id");
+
+        // The primary keeps the bare historical id — existing runs on disk must
+        // stay loadable — and anything else in the category is namespaced.
+        assert_eq!(canonical_run_id("u"), "dictation-u");
+        assert_eq!(
+            run_id_for("dictation", Some("sync_cue_times"), "u"),
+            "dictation-sync_cue_times-u"
+        );
+
+        let runs: HashSet<String> = all
+            .iter()
+            .map(|(category, _, slug, _)| run_id_for(*category, *slug, "u"))
+            .collect();
+        assert_eq!(
+            runs.len(),
+            all.len(),
+            "two built-in templates would write into one run directory"
+        );
+    }
+
+    /// A report about one dataset must not advertise another kind's workflows: a
+    /// card template's run id inside a dictation report is an invitation to create
+    /// precisely the orphan run `expected_runs` exists to make unnecessary.
+    #[test]
+    fn expected_runs_are_scoped_to_the_dataset_kind() {
+        assert!(expected_runs("card", "u").iter().all(|(category, ..)| *category == "card"));
+        assert!(expected_runs("dictation", "u")
+            .iter()
+            .any(|(_, id, run)| *id == "sync_dictation_cue_times" && run == "dictation-sync_cue_times-u"));
+        assert!(expected_runs("dictation", "u")
+            .iter()
+            .all(|(_, _, run)| !run.contains("card") && !run.contains("book")));
     }
 }

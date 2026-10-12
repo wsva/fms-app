@@ -51,7 +51,7 @@ pub(crate) async fn full_report(app: &AppHandle, uuid: &str) -> Result<Value, St
         },
         "generated_at": chrono::Utc::now().to_rfc3339(),
         "audit": audit_section(&settings, uuid, dictation, ty.as_str())?,
-        "workflow": workflow_section(&settings, uuid, dictation)?,
+        "workflow": workflow_section(&settings, uuid, dictation, ty.as_str())?,
         "stt_model": stt_section(app).await,
     });
     // Last, because it reads the four sections above: the hint is a projection of
@@ -183,6 +183,7 @@ fn workflow_section(
     settings: &SettingsState,
     uuid: &str,
     dictation: bool,
+    kind: &str,
 ) -> Result<Value, String> {
     let listed = crate::workflow::list_runs(settings, Some(uuid))?;
     let none: &[Value] = &[];
@@ -216,11 +217,31 @@ fn workflow_section(
         runs.push(scored);
     }
     order_runs(uuid, &mut runs);
+    let on_disk: Vec<&str> = runs
+        .iter()
+        .filter_map(|r| r.get("run_id").and_then(Value::as_str))
+        .collect();
+    // One entry per built-in template of this dataset's kind, whether or not its
+    // run exists: a caller who means the *sync cue times* workflow has to be told
+    // that its run is `dictation-sync_cue_times-<uuid>` and not the build run, or
+    // it will record real work in the wrong history.
+    let expected_runs: Vec<Value> = crate::workflow::expected_runs(kind, uuid)
+        .into_iter()
+        .map(|(template_category, template_id, run_id)| {
+            json!({
+                "category": template_category,
+                "template_id": template_id,
+                "run_id": run_id,
+                "present": on_disk.contains(&run_id.as_str()),
+            })
+        })
+        .collect();
     Ok(json!({
         "run_count": runs.len(),
         // The id the app's own page would use, whether or not it exists: with more
         // than one run in play, a reader needs to know which one the UI shows.
         "canonical_run_id": crate::workflow::canonical_run_id(uuid),
+        "expected_runs": expected_runs,
         "runs": runs,
     }))
 }
@@ -300,11 +321,12 @@ fn next_action(report: &Value) -> String {
     let canonical = workflow["canonical_run_id"].as_str().unwrap_or("");
     if workflow["run_count"].as_u64().unwrap_or(0) == 0 {
         return format!(
-            "no workflow run recorded for this dataset — call workflow_builtin_templates, then \
-             workflow_adopt with that YAML as definition_yaml and run_id='{canonical}' (the id the \
-             app's Workflow page uses) to open a run whose statuses come from the audit above: \
-             every step whose adopt: checks were measured clean is marked completed without \
-             being run"
+            "no workflow run recorded for this dataset — call workflow_builtin_templates, pick the \
+             template the task needs, then workflow_adopt with that YAML as definition_yaml and that \
+             template's run id (workflow.expected_runs lists them; '{canonical}' is the primary \
+             workflow's, the one the app's Workflow page uses by default) to open a run whose \
+             statuses come from the audit above: every step whose adopt: checks were measured clean \
+             is marked completed without being run"
         );
     }
 
@@ -440,6 +462,11 @@ fn claimed_steps(run: &Value) -> Vec<String> {
 /// The sentence explaining which run the hint follows, when a dataset carries more
 /// than one. `None` when there is only one, which is the normal case and needs no
 /// qualification of the hint above it.
+///
+/// "More than one" splits in two, and the advice differs: a run whose id belongs to
+/// a built-in template is a *second workflow* over this dataset — legitimately its
+/// own history, and nothing to consolidate — while any other id is one the caller
+/// (or an agent) invented, which is the case that used to waste whole sessions.
 fn multi_run_note(workflow: &Value) -> Option<String> {
     let runs = workflow.get("runs").and_then(Value::as_array)?;
     if runs.len() < 2 {
@@ -455,22 +482,59 @@ fn multi_run_note(workflow: &Value) -> Option<String> {
         .get("canonical_run_id")
         .and_then(Value::as_str)
         .unwrap_or("");
+    let template_runs: Vec<&str> = workflow
+        .get("expected_runs")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|e| e.get("run_id").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    let strays: Vec<&str> = others
+        .iter()
+        .copied()
+        .filter(|id| !template_runs.contains(id))
+        .collect();
     let followed = if canonical.is_empty() || canonical == chosen {
-        format!("'{chosen}' is the run the app's Workflow page uses")
+        format!(
+            "'{chosen}' is the run of this dataset's primary workflow{} (every template keeps its \
+             own run — see workflow.expected_runs)",
+            if canonical.is_empty() {
+                ""
+            } else {
+                ", which the app's Workflow page uses by default"
+            }
+        )
     } else {
         format!(
-            "this hint follows '{chosen}'; the Workflow page uses '{canonical}', which is either \
-             behind or does not exist yet (workflow_adopt with run_id='{canonical}' opens it)"
+            "this hint follows '{chosen}'; the primary workflow's run is '{canonical}', which the \
+             app's Workflow page uses by default and is either behind or does not exist yet \
+             (workflow_adopt with run_id='{canonical}' opens it)"
         )
     };
-    Some(format!(
-        " Note: this dataset carries {} runs and they are separate histories — {} — so work \
-         recorded in '{chosen}' does not show up in [{}]. Consolidate by finishing or deleting \
-         the stray run(s), never by copying statuses between them.",
-        runs.len(),
-        followed,
-        others.join(", "),
-    ))
+    let note = if strays.is_empty() {
+        format!(
+            " Note: this dataset carries {} runs of named workflows and they are separate \
+             histories — {} — so work recorded in '{chosen}' does not show up in [{}]. Act on the \
+             run of the workflow you mean, never by copying statuses between them.",
+            runs.len(),
+            followed,
+            others.join(", "),
+        )
+    } else {
+        format!(
+            " Note: this dataset carries {} runs and they are separate histories — {} — so work \
+             recorded in '{chosen}' does not show up in [{}]. Consolidate by finishing or deleting \
+             the stray run(s) [{}], never by copying statuses between them.",
+            runs.len(),
+            followed,
+            others.join(", "),
+            strays.join(", "),
+        )
+    };
+    Some(note)
 }
 
 #[cfg(test)]
@@ -684,6 +748,34 @@ mod tests {
         assert!(hint.contains("dictation-stray"), "{hint}");
         assert!(hint.contains("separate histories"), "{hint}");
         assert!(hint.contains("Workflow page uses 'dictation-u'") || hint.contains("'dictation-u' is the run"), "{hint}");
+    }
+
+    /// A second workflow over one dataset is not an accident. Since `dictation`
+    /// ships two templates, a dataset carrying both their runs is the expected
+    /// state — so the hint must name them as workflows and stop telling the caller
+    /// to consolidate a legitimate history away. Only an id no template owns is a
+    /// stray, which the test above pins.
+    #[test]
+    fn a_second_templates_run_is_a_workflow_and_not_a_stray() {
+        let hint = next_action(&report(
+            json!({
+                "run_count": 2,
+                "canonical_run_id": "dictation-u",
+                "expected_runs": [
+                    { "template_id": "build_dictation_dataset", "run_id": "dictation-u", "present": true },
+                    { "template_id": "sync_dictation_cue_times", "run_id": "dictation-sync_cue_times-u", "present": true },
+                ],
+                "runs": [
+                    { "run_id": "dictation-u", "counts": { "completed": 3 }, "ready": ["adjust_cue_times"] },
+                    { "run_id": "dictation-sync_cue_times-u", "counts": { "completed": 1 } },
+                ],
+            }),
+            loaded(),
+        ));
+        assert!(hint.contains("runs of named workflows"), "{hint}");
+        assert!(hint.contains("Act on the run of the workflow you mean"), "{hint}");
+        assert!(hint.contains("dictation-sync_cue_times-u"), "{hint}");
+        assert!(!hint.contains("stray"), "{hint}");
     }
 
     #[test]
