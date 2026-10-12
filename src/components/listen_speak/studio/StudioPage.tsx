@@ -594,7 +594,7 @@ export default function StudioPage() {
 
                   <StageRow
                     title="4a. Split Book"
-                    description="Split book.txt into sentences with the SaT 3L model (book_sentences.txt cache)"
+                    description="Split book.txt into sentences with the SaT 3L Small model (book_sentences.txt cache)"
                     running={running && runningStage === "Split book"}
                     disabled={running}
                     hint={!hasDb ? "No database. Build the database first." : !hasBook ? "No book.txt in dataset." : undefined}

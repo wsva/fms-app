@@ -296,7 +296,7 @@ pub async fn dataset_write_transcripts(
 
 /// Stage 4a: split `book.txt` into sentences and cache them (one per line) in
 /// `book_sentences.txt`, with the SaT model behind the "Split Text" page
-/// ([`textsplit::BOOK_MODEL_ID`]).
+/// (`textsplit::DEFAULT_MODEL_ID`).
 ///
 /// This replaces both former engines — the built-in heuristic and the bundled
 /// `split_book.py` (NLTK). SaT is multilingual out of the box and needs no
@@ -310,11 +310,12 @@ pub async fn dataset_parse_book(
     split_state: State<'_, TextSplitState>,
     dataset_uuid: String,
 ) -> Result<String, String> {
+    let model_id = textsplit::DEFAULT_MODEL_ID;
     let dataset_dir = find_dataset_dir_write(&settings, &dataset_uuid)?;
     let book_path = dataset_dir.join("book.txt");
     let db_path = dataset_dir.join("data.sqlite3");
 
-    log::info!("Parsing book for dataset '{}' (SaT '{}')", dataset_uuid, textsplit::BOOK_MODEL_ID);
+    log::info!("Parsing book for dataset '{}' (SaT '{}')", dataset_uuid, model_id);
     if !book_path.exists() {
         return Err("book.txt not found in dataset directory.".into());
     }
@@ -336,7 +337,7 @@ pub async fn dataset_parse_book(
         ..Default::default()
     };
     let sentences = split_state
-        .split_text(text, textsplit::BOOK_MODEL_ID, options)
+        .split_text(text, model_id, options)
         .await?;
     if sentences.is_empty() {
         return Err("No sentences found in book.txt.".into());
@@ -354,6 +355,6 @@ pub async fn dataset_parse_book(
     Ok(format!(
         "Split {} sentences from book.txt ({})\nWritten to: book_sentences.txt",
         sentences.len(),
-        textsplit::book_model_name()
+        textsplit::model_name(model_id)
     ))
 }

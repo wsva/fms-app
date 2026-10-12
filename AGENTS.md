@@ -78,7 +78,7 @@ src-tauri/src/
 │   │                       #   audit, every workflow run scored against it, STT model state,
 │   │                       #   actionable hint (`dataset_full_report`) — desktop
 │   ├── tools.rs            # Book splitting (`dataset_parse_book`, via the vendored SaT model —
-│   │                       #   `textsplit::BOOK_MODEL_ID`), Python script execution (`write_transcripts.py`) — desktop
+│   │                       #   `textsplit::DEFAULT_MODEL_ID`), Python script execution (`write_transcripts.py`) — desktop
 │   └── textsim.rs          # Ratcliff-Obershelp similarity, shared by align + read_aloud
 │
 ├── models/                 # Whole group is `stt`-gated

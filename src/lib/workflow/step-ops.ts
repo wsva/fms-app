@@ -211,8 +211,8 @@ export const STEP_OPS: Record<string, StepOp> = {
 
   split_book: {
     runLabel: "Split",
-    // No form: the stage always runs the SaT 3L model, so the only setup is
-    // downloading that model on the Models page.
+    // No form: the stage always runs the SaT 3L Small model, the same one the
+    // Split Text page defaults to — so the only setup is having it downloaded.
     formFields: [],
     gate: (ctx) =>
       needDataset(ctx)

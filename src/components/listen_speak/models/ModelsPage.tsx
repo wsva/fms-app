@@ -342,7 +342,7 @@ export default function ModelsPage() {
             </div>
             <p className="text-xs text-text-tertiary mb-3">
               Subword sentence-segmentation models (SaT) used by the <span className="font-medium">Split Text</span> tool and
-              by the <span className="font-medium">Split Book</span> stage (which runs SaT 3L).
+              by the <span className="font-medium">Split Book</span> stage (which runs SaT 3L Small).
               They load automatically on first use — no Start/Stop needed.
             </p>
 

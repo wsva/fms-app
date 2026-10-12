@@ -4,7 +4,8 @@
 //! vendored against the statically-linked `ort` already in the tree (via
 //! transcribe-rs) rather than depending on the `wtpsplit` crate. Exposed as the
 //! desktop "Split Text" page, its `text_split` MCP twin, and the dataset
-//! "Split Book" stage (`crate::datasets::tools::dataset_parse_book`).
+//! "Split Book" stage (`crate::datasets::tools::dataset_parse_book`). Both run
+//! [`DEFAULT_MODEL_ID`] unless the caller names another model.
 //!
 //! Only the subword (XLM-RoBERTa) sentence path is ported; all WtP / character
 //! hashing, paragraph segmentation, and language-adapter code is dropped.
@@ -34,21 +35,16 @@ use utils::{indices_to_sentences, reinsert_space_probs, remove_spaces};
 /// Local result alias: this codebase surfaces errors to Tauri as `String`.
 pub type Result<T> = std::result::Result<T, String>;
 
-/// The single SaT model shipped in the catalog. Used as the default when the
-/// caller does not name a model.
+/// The catalog's reference model: the default for `text_split` when the caller
+/// names none, and the model the "Split Book" stage runs.
 pub const DEFAULT_MODEL_ID: &str = "segment-any-text/sat-3l-sm";
 
-/// The model the "Split Book" stage (4a) runs: the full 3L, whose boundaries are
-/// more accurate than `-sm` on literary prose and whose cost is paid once per
-/// book rather than interactively.
-pub const BOOK_MODEL_ID: &str = "segment-any-text/sat-3l";
-
-/// Display name of [`BOOK_MODEL_ID`], so the Split Book stage's summary string
-/// cannot drift from the catalog entry it names.
-pub fn book_model_name() -> &'static str {
-    catalog_def(BOOK_MODEL_ID)
+/// Display name of a catalog model, falling back to `id` itself, so user-facing
+/// strings always name the model they actually loaded.
+pub fn model_name(id: &str) -> &str {
+    catalog_def(id)
         .map(|def| def.name)
-        .unwrap_or(BOOK_MODEL_ID)
+        .unwrap_or(id)
 }
 
 /// The catalog `model_type` these models are registered under.
@@ -309,10 +305,9 @@ impl TextSplitState {
         }
         let dir = resolve_model_dir(id)?;
         if !is_downloaded_dir(&dir) {
-            let name = catalog_def(id).map(|d| d.name).unwrap_or(id);
             return Err(format!(
                 "Model '{}' ({}) is not downloaded. Download it on the Models page first.",
-                name, id
+                model_name(id), id
             ));
         }
         log::info!("[textsplit] Loading SaT model '{}' from {:?}", id, dir);
