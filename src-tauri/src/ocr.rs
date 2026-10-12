@@ -44,7 +44,7 @@ pub async fn ocr_list_languages(state: State<'_, OcrState>) -> Result<Vec<String
     let langs = tokio::task::spawn_blocking({
         let tesseract_exe = tesseract_exe.clone();
         move || {
-            let output = Command::new(&tesseract_exe)
+            let output = crate::no_window(Command::new(&tesseract_exe))
                 .arg("--list-langs")
                 .output()
                 .map_err(|e| format!("Failed to run tesseract: {}", e))?;
@@ -112,7 +112,7 @@ pub async fn ocr_recognize(
         let output_base = output_base.clone();
         let lang_arg = lang_arg.to_string();
         move || {
-            let output = Command::new(&tesseract_exe)
+            let output = crate::no_window(Command::new(&tesseract_exe))
                 .arg(&input_path)
                 .arg(&output_base)
                 .arg("-l")

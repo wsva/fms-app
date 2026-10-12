@@ -117,7 +117,8 @@ fn conda_env_dir_from_registry(env_name: &str) -> Option<PathBuf> {
 /// custom `envs_dirs` that the filesystem heuristic would miss.
 fn conda_env_dir_from_cli(env_name: &str) -> Option<PathBuf> {
     let conda = if cfg!(windows) { "conda.exe" } else { "conda" };
-    let output = Command::new(conda).args(["env", "list"]).output().ok()?;
+    let output = crate::no_window(Command::new(conda))
+        .args(["env", "list"]).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -238,7 +239,7 @@ pub fn resolve_script(app: &AppHandle, script_name: &str) -> Result<PathBuf, Str
 pub fn run_python_script(script_path: &Path, args: &[&str]) -> Result<String, String> {
     let python = resolve_conda_python()?;
     log::info!("Running Python script: {} with args: {:?}", script_path.display(), args);
-    let output = Command::new(&python)
+    let output = crate::no_window(Command::new(&python))
         .arg(script_path)
         .args(args)
         .output()

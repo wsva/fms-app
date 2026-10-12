@@ -77,6 +77,23 @@ fn install_crypto_provider() {
     }
 }
 
+/// Suppress the console window Windows allocates for a console-subsystem child
+/// spawned from a GUI-subsystem parent. Without this, every `tesseract` /
+/// `conda` / `python` invocation flashes a cmd window at the user, since the
+/// release binary runs with `windows_subsystem = "windows"` and the OS hands
+/// the child a fresh visible console. No-op off Windows.
+#[cfg(all(windows, feature = "desktop"))]
+pub(crate) fn no_window(mut cmd: std::process::Command) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd
+}
+
+#[cfg(all(not(windows), feature = "desktop"))]
+pub(crate) fn no_window(cmd: std::process::Command) -> std::process::Command {
+    cmd
+}
+
 // ---------------------------------------------------------------------------
 // Deep link handler for OAuth login callback
 // ---------------------------------------------------------------------------
