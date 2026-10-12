@@ -1,7 +1,7 @@
 # Run with:
-#   goose run --recipe docs/ai/goose_recipe/dataset_dictation.yaml --with-streamable-http-extension http://127.0.0.1:35711/mcp
+#   goose run --recipe docs/design/agent/goose_recipe/dataset_dictation.yaml --with-streamable-http-extension http://127.0.0.1:35711/mcp
 # Check with:
-#   goose recipe validate docs/ai/goose_recipe/dataset_dictation.yaml
+#   goose recipe validate docs/design/agent/goose_recipe/dataset_dictation.yaml
 # Context budget: the fmsapp extension advertises ~163 tools, which is most of the
 # per-turn baseline before anything is said. Narrow it to the tools this recipe
 # actually names by adding `available_tools` under the `fmsapp` extension in

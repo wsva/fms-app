@@ -4,11 +4,11 @@
 > form of the same instructions, and is the one to run:
 >
 > ```
-> goose run --recipe docs/ai/goose_recipe/dataset_dictation.yaml --with-streamable-http-extension http://127.0.0.1:35711/mcp
+> goose run --recipe docs/design/agent/goose_recipe/dataset_dictation.yaml --with-streamable-http-extension http://127.0.0.1:35711/mcp
 > ```
 >
 > This markdown version is kept for reading and diffing; run it with
-> `goose run -i docs/ai/goose_recipe/dataset_dictation.md …` if you prefer prose over
+> `goose run -i docs/design/agent/goose_recipe/dataset_dictation.md …` if you prefer prose over
 > YAML. Flags checked against goose 1.53.0, where `-i` is `--instructions` and `-r` on
 > `goose session` means *resume*, not recipe. Interactive instead: `goose session
 > --with-streamable-http-extension http://127.0.0.1:35711/mcp`, then point it at either

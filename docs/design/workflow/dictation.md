@@ -20,7 +20,7 @@ This is the **domain** half of the workflow docs. [`core.md`](./core.md) specifi
 | Adoption (clean evidence ⇒ `completed`, the one upward move) | `src-tauri/src/workflow/core/mod.rs::adopt` → `workflow_adopt` command + MCP tool |
 | Refreshing a run's definition, while and only while its whole history was inherited | `src-tauri/src/workflow/core/mod.rs::{history_is_inherited_only, rebind_definition}`, called from `verify.rs::adopt` |
 | The one call an agent starts from: identity + audit + every run scored against it + model state + a hint | `src-tauri/src/datasets/report.rs` → `dataset_full_report` MCP tool (read-only: scores with `apply: false`, so it describes drift and adopts nothing). Its `audit` section is a **projection** of `dataset_audit`: exact counts, at most 5 offenders per check, a shared finding hoisted into `item_detail`; its `workflow.runs` is **ranked** — `canonical_run_id` first, then the most advanced — and carries `verdicts` only for `completed` steps |
-| The recipe that drives this pipeline from goose | `docs/ai/goose_recipe/dataset_dictation.yaml` (the runnable recipe) + `dataset_dictation.md` (same instructions, prose form — keep the two in sync) |
+| The recipe that drives this pipeline from goose | `docs/design/agent/goose_recipe/dataset_dictation.yaml` (the runnable recipe) + `dataset_dictation.md` (same instructions, prose form — keep the two in sync) |
 | Rendering the verdicts | `src/lib/workflow/verify.ts` (labels and sentences only — no ids) |
 | In-app Run buttons per step | `src/lib/workflow/step-ops.ts` (`STEP_OPS`, keyed by step id) |
 | Client mirror of the engine's readiness rules | `src/lib/workflow/steps.ts` (parses the YAML, evaluates `when` against probed facts) |
