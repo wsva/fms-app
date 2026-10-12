@@ -378,8 +378,15 @@ export const STEP_OPS: Record<string, StepOp> = {
   },
 };
 
-/** A safe, dataset-less context used only to enumerate command names statically. */
-const ENUM_CTX: RunCtx = { uuid: "", path: "", name: "", description: "", facts: null, form: {} };
+/** A safe, dataset-less context used only to enumerate command names statically.
+ *  A Proxy rather than an object literal on purpose: every read answers `""`, so
+ *  no builder can throw on a field it dereferences (`ctx.form.path`) whichever
+ *  way the bundler treats this module. The static-export prerender proved it
+ *  matters: the server bundle emitted this context with *no* properties at all
+ *  (the client bundle kept them), and module-scope enumeration then crashed the
+ *  build with `Cannot read properties of undefined (reading 'path')`. Only
+ *  `.command` is read off the result, so empty argument values cost nothing. */
+const ENUM_CTX: RunCtx = new Proxy({} as RunCtx, { get: () => "" });
 
 /** Every Tauri command the registry can dispatch — powers the Add-step list. */
 export const KNOWN_COMMANDS: string[] = Array.from(
