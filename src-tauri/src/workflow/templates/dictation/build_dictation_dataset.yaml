@@ -1,4 +1,4 @@
-# Dictation dataset processing workflow — a workflow.yaml definition.
+# Build a dictation dataset from raw media — a workflow.yaml definition.
 # Format: docs/design/workflow/core.md; this pipeline and its scan:
 # docs/design/workflow/dictation.md.
 #
@@ -11,6 +11,12 @@
 # One illustrative *instance* of the generic framework: it takes raw audio, produces
 # subtitles / waveforms / the cue database, then aligns and adjusts cue times into a
 # practice-ready dictation dataset.
+#
+# This is the *new dataset* workflow: it starts from a folder holding media and
+# nothing else. A later workflow that improves an already-built dataset belongs
+# beside this one as its own template (`templates/all()` keys by id and a category
+# may carry several) rather than as an edit to this DAG — whose steps already
+# adopt whatever the dataset has on disk instead of redoing it.
 #
 # Every `action` names an existing MCP tool (mcp/datasets.rs, mcp/dictation.rs,
 # mcp/models.rs) or the matching Tauri command; the run is driven agent-in-the-loop:
@@ -74,7 +80,7 @@
 # hands. The one step that must not carry it is `init_dataset`, whose action takes
 # a `path` and mints the uuid — the subject does not exist until it has run.
 
-name: process_dictation_dataset
+name: build_dictation_dataset
 # Bumped for the `adopt:` lists, because they change what a scan is entitled to
 # conclude about a step. The earlier `verify:` addition stayed on version 2 — it
 # only annotated gates that could demote, never what could claim completion — and

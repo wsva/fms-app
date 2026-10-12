@@ -1,14 +1,14 @@
-# Process a Dictation Dataset (engine-driven)
+# Build a Dictation Dataset from Raw Media (engine-driven)
 
-> **How to run this.** `dataset_dictation.yaml` beside this file is the goose *recipe*
+> **How to run this.** `build-dictation-dataset.yaml` beside this file is the goose *recipe*
 > form of the same instructions, and is the one to run:
 >
 > ```
-> goose run --recipe docs/design/agent/goose_recipe/dataset_dictation.yaml --with-streamable-http-extension http://127.0.0.1:35711/mcp
+> goose run --recipe docs/design/agent/goose_recipe/build-dictation-dataset.yaml --with-streamable-http-extension http://127.0.0.1:35711/mcp
 > ```
 >
 > This markdown version is kept for reading and diffing; run it with
-> `goose run -i docs/design/agent/goose_recipe/dataset_dictation.md …` if you prefer prose over
+> `goose run -i docs/design/agent/goose_recipe/build-dictation-dataset.md …` if you prefer prose over
 > YAML. Flags checked against goose 1.53.0, where `-i` is `--instructions` and `-r` on
 > `goose session` means *resume*, not recipe. Interactive instead: `goose session
 > --with-streamable-http-extension http://127.0.0.1:35711/mcp`, then point it at either
@@ -29,9 +29,9 @@ media registered, subtitles generated *and* imported, waveforms, cues aligned to
 `book.txt` / `transcript/` when they exist, cue times snapped to silence — while
 recording every transition in a workflow run stored inside the dataset.
 
-The pipeline definition is `dataset_dictation` (built into the binary). Read it with
+The pipeline definition is `build_dictation_dataset` (built into the binary). Read it with
 `workflow_builtin_templates`; the file in the repo
-(`src-tauri/src/workflow/templates/dictation/dataset_dictation.yaml`) is the same text,
+(`src-tauri/src/workflow/templates/dictation/build_dictation_dataset.yaml`) is the same text,
 but an agent should never read files out of the source tree when a tool returns them.
 
 ## Prerequisites
@@ -68,7 +68,7 @@ Read `hint` first — it names the next call. Then, in this order:
 
 **If `workflow.run_count` is 0:**
 
-1. `workflow_builtin_templates` → take the `dataset_dictation` entry's `yaml`.
+1. `workflow_builtin_templates` → take the `build_dictation_dataset` entry's `yaml`.
 2. `workflow_adopt` `{ dataset_uuid, run_id: "dictation-<uuid>", definition_yaml: <that yaml> }`.
 
 `workflow_adopt` opens the run *and* marks `completed` every step whose `adopt:` checks

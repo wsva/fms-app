@@ -1,7 +1,7 @@
 # Run with:
-#   goose run --recipe docs/design/agent/goose_recipe/dataset_dictation.yaml --with-streamable-http-extension http://127.0.0.1:35711/mcp
+#   goose run --recipe docs/design/agent/goose_recipe/build-dictation-dataset.yaml --with-streamable-http-extension http://127.0.0.1:35711/mcp
 # Check with:
-#   goose recipe validate docs/design/agent/goose_recipe/dataset_dictation.yaml
+#   goose recipe validate docs/design/agent/goose_recipe/build-dictation-dataset.yaml
 # Context budget: the fmsapp extension advertises ~163 tools, which is most of the
 # per-turn baseline before anything is said. Narrow it to the tools this recipe
 # actually names by adding `available_tools` under the `fmsapp` extension in
@@ -53,7 +53,7 @@ instructions: |-
   - the app's Workflow page shows the same state you see;
   - steps the dataset already satisfies are adopted as completed instead of being re-run.
 
-  The pipeline definition is `dataset_dictation` (built into the binary). Read it with `workflow_builtin_templates`; the file in the repo (`src-tauri/src/workflow/templates/dictation/dataset_dictation.yaml`) is the same text, but never read files out of the source tree when a tool returns them.
+  The pipeline definition is `build_dictation_dataset` (built into the binary). Read it with `workflow_builtin_templates`; the file in the repo (`src-tauri/src/workflow/templates/dictation/build_dictation_dataset.yaml`) is the same text, but never read files out of the source tree when a tool returns them.
 
   ## Prerequisites
   - fms-app desktop running. It starts its web service on launch, and the MCP server is mounted on that at `http://127.0.0.1:35711/mcp` (Streamable HTTP, rmcp) - that URL is what goose connects to. If the port was taken, `web_service_get_status` reports the bound one.
@@ -76,7 +76,7 @@ instructions: |-
   Work in the run named `dictation-<uuid>` - `workflow.canonical_run_id` says it, and it is the id the app's Workflow page reads and writes. **Never `workflow_create` a run of your own devising**: two runs are two separate histories, and progress recorded in the stray one is invisible in the one the user sees.
 
   **If no run named `dictation-<uuid>` is in `workflow.runs[]`:**
-  1. Call `workflow_builtin_templates` and take the `dataset_dictation` entry's `yaml`.
+  1. Call `workflow_builtin_templates` and take the `build_dictation_dataset` entry's `yaml`.
   2. Call `workflow_adopt` with `dataset_uuid`, `run_id: "dictation-<uuid>"` and `definition_yaml` set to that yaml. Do this even when *other* runs already exist - their record is not this run's.
 
   `workflow_adopt` opens the run *and* marks `completed` every step whose `adopt:` checks were all measured clean - so a dataset prepared by hand, by another device or by an earlier session shows its real state instead of offering work already done. Read:

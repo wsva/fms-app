@@ -13,14 +13,14 @@ This is the **domain** half of the workflow docs. [`core.md`](./core.md) specifi
 
 | Concern | Location |
 |---|---|
-| The template (DAG + `verify:`/`adopt:` binding, single source of truth) | `src-tauri/src/workflow/templates/dictation/dataset_dictation.yaml`, baked in via `include_str!` and served by `workflow_builtin_templates` |
+| The template (DAG + `verify:`/`adopt:` binding, single source of truth) | `src-tauri/src/workflow/templates/dictation/build_dictation_dataset.yaml`, baked in via `include_str!` and served by `workflow_builtin_templates` |
 | The scan (read-only checks, each under a stable id) | `src-tauri/src/datasets/dictation/audit.rs` → `dataset_audit` command + MCP tool |
 | The check provider + vocabulary that binds the scan to a run | `src-tauri/src/workflow/verify.rs` (the only module naming both checks and steps) |
 | The join itself (verdicts, invalidation) | `src-tauri/src/workflow/core/mod.rs::verify` → `workflow_verify` command + MCP tool |
 | Adoption (clean evidence ⇒ `completed`, the one upward move) | `src-tauri/src/workflow/core/mod.rs::adopt` → `workflow_adopt` command + MCP tool |
 | Refreshing a run's definition, while and only while its whole history was inherited | `src-tauri/src/workflow/core/mod.rs::{history_is_inherited_only, rebind_definition}`, called from `verify.rs::adopt` |
 | The one call an agent starts from: identity + audit + every run scored against it + model state + a hint | `src-tauri/src/datasets/report.rs` → `dataset_full_report` MCP tool (read-only: scores with `apply: false`, so it describes drift and adopts nothing). Its `audit` section is a **projection** of `dataset_audit`: exact counts, at most 5 offenders per check, a shared finding hoisted into `item_detail`; its `workflow.runs` is **ranked** — `canonical_run_id` first, then the most advanced — and carries `verdicts` only for `completed` steps |
-| The recipe that drives this pipeline from goose | `docs/design/agent/goose_recipe/dataset_dictation.yaml` (the runnable recipe) + `dataset_dictation.md` (same instructions, prose form — keep the two in sync) |
+| The recipe that drives this pipeline from goose | `docs/design/agent/goose_recipe/build-dictation-dataset.yaml` (the runnable recipe) + `build-dictation-dataset.md` (same instructions, prose form — keep the two in sync) |
 | Rendering the verdicts | `src/lib/workflow/verify.ts` (labels and sentences only — no ids) |
 | In-app Run buttons per step | `src/lib/workflow/step-ops.ts` (`STEP_OPS`, keyed by step id) |
 | Client mirror of the engine's readiness rules | `src/lib/workflow/steps.ts` (parses the YAML, evaluates `when` against probed facts) |
@@ -119,13 +119,13 @@ Requirement knowledge used to be written down three times, in three languages, w
 |---|---|---|
 | `audit.rs` | `fix_step` on each check ("`cues_unadjusted` belongs to `adjust_cue_times`") | the report, agents |
 | `step-ops.ts` | a gate per step (`hasWaveforms ? undefined : "No waveforms. Generate waveforms first."`) | Run buttons |
-| `dataset_dictation.yaml` | `depends_on` + `when:` | the engine, the graph |
+| `build_dictation_dataset.yaml` | `depends_on` + `when:` | the engine, the graph |
 
 So "waveforms are a prerequisite of adjustment" appeared as a `fix_step` string, a hardcoded English sentence, and a DAG edge — and `fix_step` was dictation vocabulary baked into a report that should be generic.
 
 The first copy is gone: `AuditCheck` is now `{ id, label, level, count, items, truncated, advice }` and the mapping lives only in the template's `verify:` blocks, which the engine validates. Two copies remain on purpose, for now:
 
-- `dataset_dictation.yaml`'s `depends_on` + `when:` schedule the run; `verify:` judges the world. They overlap in spirit and differ in kind — a dependency edge cannot say "the waveform you were told about has since gone stale".
+- `build_dictation_dataset.yaml`'s `depends_on` + `when:` schedule the run; `verify:` judges the world. They overlap in spirit and differ in kind — a dependency edge cannot say "the waveform you were told about has since gone stale".
 - `step-ops.ts`'s gate sentences stay as fallback, because the audit short-circuits: with no `data.sqlite3` it reports `database_missing` and nothing else, so `blocks` ids like `media_new`/`waveforms_missing` come back *undecidable* rather than clean. Fact gates are then the only protection. Shrinking them to the binding is a follow-up for when checks stop short-circuiting.
 
 ## Binding checks to the template
@@ -219,7 +219,7 @@ So `proves` lists sufficient evidence only, an unbound step is legitimately `unk
 ## Build order
 
 1. ✅ Check registry keyed by id; `fix_step`/`fix_label` dropped from `AuditCheck` *(pure refactor, no behaviour change)*.
-2. ✅ `verify:` on `Step`, the binding in `dataset_dictation.yaml`, the id-existence rule in `validate.rs`. *(Built as `workflow_verify` rather than a `template_id` argument on `dataset_audit` — the carrier of a binding is the run's own stored definition, not a template the caller happens to name.)*
+2. ✅ `verify:` on `Step`, the binding in `build_dictation_dataset.yaml`, the id-existence rule in `validate.rs`. *(Built as `workflow_verify` rather than a `template_id` argument on `dataset_audit` — the carrier of a binding is the run's own stored definition, not a template the caller happens to name.)*
 3. ✅ Rung A + B in the page: findings grouped under steps, node badges, evidence-derived gate hints. `step-ops.ts`'s sentences *kept* as fallback — see *The duplication this design removed*.
 4. ✅ Rung D: `invalidated` on explicit `apply=true` — built out of order, ahead of C, because the join and the demotion path are one piece of code. Not built: a run-level opt-in flag, and any UI affordance for it.
 5. ○ Rung C: let `detect_reference` (and optionally a `verify_dataset` step) record audit facts as outputs.

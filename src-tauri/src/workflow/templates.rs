@@ -16,10 +16,12 @@
 //! The [`super`] module (`workflow/mod.rs`) owns the actual [`core::Definition`]
 //! parsing on top of these strings, so the templates themselves stay pure data.
 
-/// The Dataset Dictation pipeline — import a raw folder, generate subtitles /
+/// The dictation *build* pipeline — import a raw folder, generate subtitles /
 /// waveforms, align and adjust cue times. The only category wired for in-app
-/// execution so far.
-pub(crate) const DICTATION_YAML: &str = include_str!("templates/dictation/dataset_dictation.yaml");
+/// execution so far, and the one a brand-new dataset starts from; a workflow that
+/// improves an already-built dataset gets its own file (and `id`) in the same
+/// directory.
+pub(crate) const DICTATION_YAML: &str = include_str!("templates/dictation/build_dictation_dataset.yaml");
 
 /// The Book library pipeline — create a book, author chapters / sentences, attach
 /// audio, build vocabulary. View / agent-facing (actions name real `book_*` tools).
@@ -35,7 +37,7 @@ pub(crate) const CARD_YAML: &str = include_str!("templates/card/setup_card_deck.
 /// several). The definition's own `name`/`version` come from parsing the YAML.
 pub(crate) fn all() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
-        ("dictation", "process_dictation_dataset", DICTATION_YAML),
+        ("dictation", "build_dictation_dataset", DICTATION_YAML),
         ("book", "build_book_library", BOOK_YAML),
         ("card", "setup_card_deck", CARD_YAML),
     ]
