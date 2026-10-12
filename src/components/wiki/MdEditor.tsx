@@ -57,6 +57,15 @@ const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, prev
         e.preventDefault();
         const div = document.createElement("div");
         div.innerHTML = html;
+        // Rich-text formatting is stripped (the point of this handler), but links
+        // must survive as Markdown: a browser address-bar copy puts the page title
+        // in the anchor text and the actual URL only in its href, so taking plain
+        // textContent alone would drop the address entirely.
+        for (const a of Array.from(div.querySelectorAll("a[href]"))) {
+            const href = a.getAttribute("href") || "";
+            const text = a.textContent?.trim() || "";
+            a.replaceWith(text && text !== href ? `[${text}](${href})` : href);
+        }
         replaceRange(e.currentTarget, div.textContent || div.innerText || "");
     };
 
