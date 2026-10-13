@@ -64,6 +64,17 @@ interface ScopeQueue {
   oldest_edit_time: string | null;
 }
 
+/** The §19.4 five-cause "queue keeps growing" answer. `cause_index` maps a fault
+    to its §19.4 number (1-5); null for the non-fault states. `severity` drives
+    color so the UI need not re-derive it from `cause`. */
+interface QueueDiagnosis {
+  cause: string;
+  cause_index?: number | null;
+  severity?: string;
+  detail?: string;
+  action?: string;
+}
+
 interface HubStatus {
   address: string;
   reachable: boolean;
@@ -117,6 +128,8 @@ interface SyncStatusDetail {
   /** The `queued_count` total split per journal scope (§19.2). */
   queue_app?: ScopeQueue;
   queue_dataset?: ScopeQueue;
+  /** Why the queue is not draining (§19.4), named rather than left as a spinner. */
+  queue_diagnosis?: QueueDiagnosis;
   /** The hub advertises an app plane this device has never folded history/events
       from — a visible gap rather than a silent zero. */
   history_gap?: boolean;
@@ -617,6 +630,13 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   const lastRoundErrors = Array.isArray(lastRound?.errors)
     ? (lastRound!.errors as unknown[]).length
     : 0;
+  // Color the §19.4 diagnosis by its severity so a fault reads at a glance.
+  const diagClass = (sev?: string): string =>
+    sev === "error"
+      ? "text-red-600 dark:text-red-400"
+      : sev === "warn"
+      ? "text-amber-600 dark:text-amber-400"
+      : "text-text-tertiary";
 
   function renderDatasetCard(ds: PcDataset, i: number) {
     const st = syncState[ds.uuid];
@@ -834,6 +854,14 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
           when a stale backend omits the fields. */}
       {status && !isHub && (
         <div className="shrink-0 flex flex-col gap-1.5 p-2.5 rounded-lg border border-border-default bg-bg-card text-xs">
+          {status.queue_diagnosis && status.queue_diagnosis.cause !== "idle" && (
+            <div className={`flex items-center gap-2 flex-wrap ${diagClass(status.queue_diagnosis.severity)}`}>
+              <span className="font-medium">{status.queue_diagnosis.detail}</span>
+              {status.queue_diagnosis.action && (
+                <span className="text-text-tertiary">→ {status.queue_diagnosis.action}</span>
+              )}
+            </div>
+          )}
           {status.authority_kind && (
             <div className="flex items-center gap-2 flex-wrap text-text-secondary">
               <span>

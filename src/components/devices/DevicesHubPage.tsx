@@ -56,6 +56,15 @@ interface PairedDevice {
   bound_user_id?: string | null;
 }
 
+/** The §19.4 queue diagnosis: a named cause for a queue that is not draining. */
+interface QueueDiagnosis {
+  cause: string;
+  cause_index?: number | null;
+  severity?: string;
+  detail?: string;
+  action?: string;
+}
+
 interface SyncStatusDetail {
   role: string;
   cluster_id: string;
@@ -66,6 +75,9 @@ interface SyncStatusDetail {
   queued_count: number;
   chat_pending: number;
   devices: PairedDevice[];
+  /** The §19.4 five-cause "queue keeps growing" answer; absent on a stale
+   * backend. `severity` (ok/warn/error) drives color. */
+  queue_diagnosis?: QueueDiagnosis | null;
   /** Authority the connected cluster is serving (§7 / §19.2), from the capability
    * page: "lan_hub" | "registry" | "cloud_hub". Absent/null when the host serves
    * no /cluster (unreachable, or a website hub). */
@@ -663,6 +675,23 @@ export default function DevicesHubPage() {
               </div>
               {status.hub.error && (
                 <div className="text-xs text-red-600 dark:text-red-400">{status.hub.error}</div>
+              )}
+              {/* §19.4: name why the queue is not draining, beside the count. */}
+              {status.queue_diagnosis && status.queue_diagnosis.cause !== "idle" && (
+                <div
+                  className={`text-xs ${
+                    status.queue_diagnosis.severity === "error"
+                      ? "text-red-600 dark:text-red-400"
+                      : status.queue_diagnosis.severity === "warn"
+                      ? "text-amber-600 dark:text-amber-400"
+                      : "text-text-tertiary"
+                  }`}
+                >
+                  {status.queue_diagnosis.detail}
+                  {status.queue_diagnosis.action && (
+                    <span className="text-text-tertiary"> → {status.queue_diagnosis.action}</span>
+                  )}
+                </div>
               )}
             </div>
           )}

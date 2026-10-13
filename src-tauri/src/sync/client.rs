@@ -1392,6 +1392,10 @@ pub struct SyncStatusDetail {
     /// that scope is the "queue keeps growing" signal.
     pub queue_app: ScopeQueue,
     pub queue_dataset: ScopeQueue,
+    /// The five-cause "queue keeps growing" diagnosis (§19.4), derived from the
+    /// signals above plus the last round: names *why* the queue is not draining
+    /// (or that it is idle/draining) so the surface shows a cause, not a spinner.
+    pub queue_diagnosis: QueueDiagnosis,
     /// Whether the hub advertises the app plane this device has *not* folded
     /// history from (§19.2): a visible gap rather than a silent zero.
     pub history_gap: bool,
@@ -1655,6 +1659,21 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
         });
     }
 
+    // §19.4: name why the queue is not draining, from signals already in hand.
+    // Pure and synchronous; computed before the struct literal moves `hub`,
+    // `datasets`, `queue_*` and `last_round_val`.
+    let any_needs_resync = datasets.iter().any(|d| d.state == "needs_resync");
+    let queue_diagnosis = diagnose_queue(&QueueSignals {
+        hub_configured: !base.is_empty(),
+        hub_reachable: hub.reachable,
+        hub_paired: hub.paired,
+        app_advertised: app_adv,
+        queue_app_depth: queue_app.depth,
+        queue_dataset_depth: queue_dataset.depth,
+        any_needs_resync,
+        last_round: last_round_val.clone(),
+    });
+
     Ok(SyncStatusDetail {
         hub_kind: if super::hub_kind(&base) == super::HubKind::Website {
             "website".to_string()
@@ -1678,6 +1697,7 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
         features,
         queue_app,
         queue_dataset,
+        queue_diagnosis,
         history_gap,
         events_gap,
         last_round: last_round_val,
@@ -2565,6 +2585,191 @@ fn queue_by_scope(conn: &Connection) -> (ScopeQueue, ScopeQueue) {
         }
     }
     (app, dataset)
+}
+
+/// The five-cause "queue keeps growing" diagnosis (§19.4). `cause` is a stable
+/// machine slug; `cause_index` ties a fault back to its §19.4 number (1-5) and is
+/// `None` for the non-fault states (`idle`/`draining`/`no_hub`/`unknown`);
+/// `severity` (`ok`/`warn`/`error`) lets the UI and an agent color or triage
+/// without re-deriving it from `cause`.
+#[derive(Serialize, Clone, Debug)]
+pub struct QueueDiagnosis {
+    pub cause: String,
+    pub cause_index: Option<u8>,
+    pub severity: String,
+    pub detail: String,
+    pub action: String,
+}
+
+/// Plain inputs to [`diagnose_queue`], so the cause mapping is unit-testable with
+/// no DB and no network. Every field is already computed by `sync_status_detail`.
+#[derive(Clone, Debug)]
+pub struct QueueSignals {
+    pub hub_configured: bool,
+    pub hub_reachable: bool,
+    pub hub_paired: Option<bool>,
+    pub app_advertised: bool,
+    pub queue_app_depth: i64,
+    pub queue_dataset_depth: i64,
+    pub any_needs_resync: bool,
+    /// The persisted last-round result; scanned for `status`/`pushed`/`held` and
+    /// `errors[]`. `None` until the first round on this build.
+    pub last_round: Option<Value>,
+}
+
+/// Flatten a round result's `errors[]` into lowercase strings, joining each
+/// entry's `stage`/`scope`/`kind` tags with its `error` text so one `contains`
+/// check can match either the stage tag or the message.
+fn round_error_strings(lr: &Value) -> Vec<String> {
+    lr["errors"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|e| {
+                    let mut parts: Vec<String> = Vec::new();
+                    for k in ["stage", "scope", "kind", "error"] {
+                        if let Some(s) = e[k].as_str() {
+                            parts.push(s.to_string());
+                        }
+                    }
+                    parts.join(" ").to_lowercase()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn mk_diagnosis(
+    cause: &str,
+    cause_index: Option<u8>,
+    severity: &str,
+    detail: String,
+    action: &str,
+) -> QueueDiagnosis {
+    QueueDiagnosis {
+        cause: cause.to_string(),
+        cause_index,
+        severity: severity.to_string(),
+        detail,
+        action: action.to_string(),
+    }
+}
+
+/// Name why the writeback queue is not draining (§19.4). First match wins; the
+/// evaluation order is by signal reliability (an unreachable host is named before
+/// a scope check, because `features[]` is unknown when the host is down), while
+/// `cause_index` preserves the §19.4 numbering. Cause matching is substring-based
+/// on the fixed `hub_http_error` vocabulary (`(401)`/`(403)`/`(413)`/"not paired"/
+/// "suspended"/"Cannot reach hub") and the round's own error strings — if that
+/// vocabulary changes, these matchers move with it.
+fn diagnose_queue(sig: &QueueSignals) -> QueueDiagnosis {
+    let total = sig.queue_app_depth + sig.queue_dataset_depth;
+    let errors = sig.last_round.as_ref().map(round_error_strings).unwrap_or_default();
+    let has = |needle: &str| errors.iter().any(|e| e.contains(needle));
+    let lr_num = |k: &str| sig.last_round.as_ref().and_then(|lr| lr[k].as_i64()).unwrap_or(0);
+
+    // Nothing queued — no diagnosis owed.
+    if total == 0 {
+        return mk_diagnosis("idle", None, "ok", "no changes queued".to_string(), "");
+    }
+    // No hub to drain to.
+    if !sig.hub_configured {
+        return mk_diagnosis(
+            "no_hub",
+            None,
+            "warn",
+            format!("{total} change(s) queued but no hub is configured"),
+            "set a hub in Settings > Discover PC",
+        );
+    }
+    // Cause 4: unreachable. Named before scope/auth — with the host down the
+    // capability page and pairing state are unknown, so nothing more specific is
+    // trustworthy.
+    if !sig.hub_reachable {
+        return mk_diagnosis(
+            "unreachable",
+            Some(4),
+            "error",
+            format!("{total} change(s) queued; the hub is unreachable"),
+            "check the network and that the hub is running; every round retries",
+        );
+    }
+    // Cause 3: auth (401 / not paired).
+    if sig.hub_paired == Some(false)
+        || has("(401)")
+        || has("not paired")
+        || has("sign in again")
+        || has("pair this device")
+    {
+        return mk_diagnosis(
+            "auth",
+            Some(3),
+            "error",
+            format!("{total} change(s) queued; the hub is not accepting this device's auth"),
+            "LAN: run pc_pair_start; website: sign in again",
+        );
+    }
+    // Cause 2: suspended / over quota / payload too large.
+    if has("(403)")
+        || has("suspended")
+        || has("(413)")
+        || has("quota")
+        || has("too large for the hub")
+    {
+        return mk_diagnosis(
+            "suspended_or_quota",
+            Some(2),
+            "error",
+            format!("{total} change(s) queued; the hub refused the account (suspended, over quota, or too large)"),
+            "resolve the account limit or access with the hub owner",
+        );
+    }
+    // Cause 1: the connected host does not advertise the app journal, so the
+    // app-scope queue is held, not lost (INV-20).
+    if sig.queue_app_depth > 0
+        && (!sig.app_advertised || lr_num("held") > 0 || has("does not advertise app_journal"))
+    {
+        return mk_diagnosis(
+            "scope_not_advertised",
+            Some(1),
+            "warn",
+            format!(
+                "{} app-scope change(s) held: the connected host does not advertise app_journal",
+                sig.queue_app_depth
+            ),
+            "connect a hub that advertises app_journal; the queue is held, not lost (INV-20)",
+        );
+    }
+    // Cause 5: the journal regressed or was pruned past the cursor — a resync is owed.
+    if has("alarm") || has("prune") || has("regressed") || has("resync") || sig.any_needs_resync {
+        return mk_diagnosis(
+            "resync_required",
+            Some(5),
+            "warn",
+            format!("{total} change(s) queued; a resync is owed (journal reset or pruned past the cursor)"),
+            "run sync_run_round to take a fresh snapshot; sync_history_backfill for pruned history",
+        );
+    }
+    // A healthy last round against a non-empty queue: it is working down.
+    let status_ok = sig.last_round.as_ref().and_then(|lr| lr["status"].as_str()) == Some("ok");
+    let pushed = lr_num("pushed");
+    if status_ok && pushed > 0 && errors.is_empty() {
+        return mk_diagnosis(
+            "draining",
+            None,
+            "ok",
+            format!("{total} change(s) queued; the queue is working down (last round pushed {pushed})"),
+            "",
+        );
+    }
+    // No signal explains a non-empty queue.
+    mk_diagnosis(
+        "unknown",
+        None,
+        "warn",
+        format!("{total} change(s) queued and not draining; the last round gave no reason"),
+        "run sync_run_round, then re-check",
+    )
 }
 
 /// Pull the app-wide journal scope (`sync_log` rows logged under
@@ -3778,6 +3983,156 @@ mod tests {
         assert_eq!(e.upstream_origin, "https://x");
         assert_eq!(e.availability, "listed");
         assert_eq!(e.published_version, Some(7));
+    }
+
+    // -- §19.4 queue diagnosis ---------------------------------------------
+
+    /// A healthy, fully-connected follower with an empty queue — each test
+    /// perturbs one signal so the asserted cause is unambiguous.
+    fn signals() -> QueueSignals {
+        QueueSignals {
+            hub_configured: true,
+            hub_reachable: true,
+            hub_paired: Some(true),
+            app_advertised: true,
+            queue_app_depth: 0,
+            queue_dataset_depth: 0,
+            any_needs_resync: false,
+            last_round: None,
+        }
+    }
+
+    #[test]
+    fn round_error_strings_flattens_stages() {
+        let lr = json!({"errors": [
+            {"stage": "push", "scope": "@app", "error": "Host Does Not Advertise app_journal"},
+            {"kind": "xp", "error": "boom"}
+        ]});
+        let s = round_error_strings(&lr);
+        assert_eq!(s.len(), 2);
+        assert!(s[0].contains("push") && s[0].contains("@app"));
+        assert!(s[0].contains("does not advertise app_journal"), "lowercased: {}", s[0]);
+        assert!(s[1].contains("xp") && s[1].contains("boom"));
+        // No errors[] -> empty.
+        assert!(round_error_strings(&json!({"status": "ok"})).is_empty());
+    }
+
+    #[test]
+    fn diagnose_idle_when_nothing_queued() {
+        let d = diagnose_queue(&signals());
+        assert_eq!(d.cause, "idle");
+        assert_eq!(d.cause_index, None);
+        assert_eq!(d.severity, "ok");
+    }
+
+    #[test]
+    fn diagnose_no_hub() {
+        let mut s = signals();
+        s.hub_configured = false;
+        s.queue_app_depth = 2;
+        let d = diagnose_queue(&s);
+        assert_eq!(d.cause, "no_hub");
+        assert_eq!(d.cause_index, None);
+    }
+
+    #[test]
+    fn diagnose_unreachable_wins_over_scope() {
+        let mut s = signals();
+        s.hub_reachable = false;
+        s.app_advertised = false; // would be cause 1 if the host were up
+        s.queue_app_depth = 2;
+        let d = diagnose_queue(&s);
+        assert_eq!(d.cause, "unreachable");
+        assert_eq!(d.cause_index, Some(4));
+        assert_eq!(d.severity, "error");
+    }
+
+    #[test]
+    fn diagnose_auth_from_paired_false() {
+        let mut s = signals();
+        s.hub_paired = Some(false);
+        s.queue_dataset_depth = 2;
+        let d = diagnose_queue(&s);
+        assert_eq!(d.cause, "auth");
+        assert_eq!(d.cause_index, Some(3));
+    }
+
+    #[test]
+    fn diagnose_auth_from_401_error() {
+        let mut s = signals();
+        s.queue_dataset_depth = 2;
+        s.last_round = Some(json!({"status": "error", "errors": [
+            {"stage": "push", "error": "device not paired — pair this device with the hub first (401)"}
+        ]}));
+        let d = diagnose_queue(&s);
+        assert_eq!(d.cause, "auth");
+        assert_eq!(d.cause_index, Some(3));
+    }
+
+    #[test]
+    fn diagnose_suspended_from_403_error() {
+        let mut s = signals();
+        s.queue_app_depth = 1;
+        s.last_round = Some(json!({"status": "error", "errors": [
+            {"stage": "push", "error": "this account cannot access '/api/v1/app/changes' (403)"}
+        ]}));
+        let d = diagnose_queue(&s);
+        assert_eq!(d.cause, "suspended_or_quota");
+        assert_eq!(d.cause_index, Some(2));
+    }
+
+    #[test]
+    fn diagnose_scope_not_advertised() {
+        let mut s = signals();
+        s.app_advertised = false; // the website-today case (§16.2)
+        s.queue_app_depth = 3;
+        let d = diagnose_queue(&s);
+        assert_eq!(d.cause, "scope_not_advertised");
+        assert_eq!(d.cause_index, Some(1));
+        assert_eq!(d.severity, "warn");
+    }
+
+    #[test]
+    fn diagnose_resync_from_alarm_error() {
+        let mut s = signals();
+        s.queue_dataset_depth = 1;
+        s.last_round = Some(json!({"status": "error", "errors": [
+            {"scope": "@app", "stage": "alarm", "error": "hub seq 5 regressed below cursor 9; re-pulling from 0"}
+        ]}));
+        let d = diagnose_queue(&s);
+        assert_eq!(d.cause, "resync_required");
+        assert_eq!(d.cause_index, Some(5));
+    }
+
+    #[test]
+    fn diagnose_resync_from_needs_resync() {
+        let mut s = signals();
+        s.any_needs_resync = true;
+        s.queue_app_depth = 1;
+        let d = diagnose_queue(&s);
+        assert_eq!(d.cause, "resync_required");
+        assert_eq!(d.cause_index, Some(5));
+    }
+
+    #[test]
+    fn diagnose_draining() {
+        let mut s = signals();
+        s.queue_app_depth = 1;
+        s.last_round = Some(json!({"status": "ok", "pushed": 3, "errors": []}));
+        let d = diagnose_queue(&s);
+        assert_eq!(d.cause, "draining");
+        assert_eq!(d.cause_index, None);
+        assert_eq!(d.severity, "ok");
+    }
+
+    #[test]
+    fn diagnose_unknown() {
+        let mut s = signals();
+        s.queue_app_depth = 1; // healthy host, no last round, no signal
+        let d = diagnose_queue(&s);
+        assert_eq!(d.cause, "unknown");
+        assert_eq!(d.cause_index, None);
+        assert_eq!(d.severity, "warn");
     }
 
     #[test]

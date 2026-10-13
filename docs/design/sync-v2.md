@@ -540,7 +540,7 @@ A single screen, reachable from settings and mirrored by an MCP tool so an agent
 
 **Implemented (status slice):** `sync_status_detail` (and its MCP twin) now carry — the authority `authority_kind`/`epoch` and advertised `features[]` (from one guarded `GET /api/v1/cluster`; `None`/empty on an unreachable hub or a website with no `/cluster`, so it degrades like the round); the per-scope queue split `queue_app`/`queue_dataset`, each `{depth, oldest_edit_time}` (oldest = lexicographic min of `COALESCE(edit_time, queued_at)`, valid because stamps are fixed-width UTC per INV-6), with `queued_count` retained as the total for back-compat; the last-round result `last_round`/`last_round_at` including the round's typed `errors[]`; the `needs_history`/events gaps as `history_gap`/`events_gap` plus `events_backfilled_at`; and per-dataset provenance `upstream_kind`/`upstream_origin`/`availability`/`published_version` on each `DatasetStatus`.
 
-**Still open (next slice):** the dropped-pending count (INV-14 — needs apply-path instrumentation), the `resync_required` reason *history* (only the resulting `needs_resync` state is shown today), and the §19.4 five-cause "queue keeps growing" diagnosis contract.
+**Still open (next slice):** the dropped-pending count (INV-14 — needs apply-path instrumentation) and the `resync_required` reason *history* (only the resulting `needs_resync` state is shown today). The §19.4 five-cause "queue keeps growing" diagnosis is now implemented (see below).
 
 ### 19.3 Operator-side metrics
 
@@ -557,6 +557,8 @@ It is always one of:
 5. the journal was reset (`host_seq < cursor`, §10) and resync is required.
 
 The status surface names the cause rather than showing a spinner. An MCP tool exposes the same five-cause diagnosis so an agent can act on it without a human reading a log.
+
+**Implemented (diagnosis slice):** a pure `diagnose_queue(QueueSignals) -> QueueDiagnosis` in [`sync/client.rs`](../../src-tauri/src/sync/client.rs) maps signals `sync_status_detail` already holds — the persisted `last_round`'s typed `errors[]`/`held`/`status`/`pushed`, `hub.reachable`/`paired`, the advertised `features[]` (`app_journal_advertised`), the per-scope queue depths, and whether any dataset is `needs_resync` — onto the five causes. `QueueDiagnosis { cause, cause_index, severity, detail, action }` is surfaced as `SyncStatusDetail.queue_diagnosis` (so the existing `sync_status_detail` MCP tool carries it), rendered on both status pages, and returned on its own by a thin `sync_diagnose_queue` MCP tool. `cause_index` preserves the numbering above; `severity` (`ok`/`warn`/`error`) lets the UI and an agent triage without re-deriving it. Three non-fault states are also named — `idle` (nothing queued), `draining` (last round healthy and pushing), `no_hub` (nothing configured) — plus an `unknown` fallback. The *evaluation* order is by signal reliability, not the listing order: `unreachable` is named before the scope/auth checks because `features[]` and pairing are unknowable while the host is down; cause matching is substring-based on the fixed `hub_http_error` vocabulary (`(401)`/`(403)`/`(413)`/"not paired"/"suspended"/"Cannot reach hub") and the round's own error strings. No new endpoint and no `PROTOCOL_VERSION` bump — it is a derivation over reads the status surface already makes.
 
 ## 20. Requirement traceability
 
