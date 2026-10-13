@@ -15,6 +15,7 @@ import { insertAround, insertAtLineStart } from "./mdEditorInserts";
 import MarkdownViewer from "./markdown/markdown";
 import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
+import { tbGhost, tbDanger, tbSolid, tbToggle, tbToggleSoft, tbIcon, tbIconToggleSoft } from "@/lib/ui/toolbar";
 import {
   WikiDatasetSummary, HubWikiList, Selection, WikiSource, WikiFileEntry,
   WikiFileContent, selectionKey,
@@ -880,7 +881,7 @@ export default function WikiPage() {
                 <button
                   onClick={goBack}
                   disabled={historyIndex <= 0 || editing}
-                  className="p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors disabled:opacity-30 disabled:cursor-default"
+                  className={tbIcon}
                   title="Back (Alt+Left)"
                 >
                   <ArrowLeft size={16} />
@@ -888,18 +889,14 @@ export default function WikiPage() {
                 <button
                   onClick={goForward}
                   disabled={historyIndex >= history.length - 1 || editing}
-                  className="p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors disabled:opacity-30 disabled:cursor-default"
+                  className={tbIcon}
                   title="Forward (Alt+Right)"
                 >
                   <ArrowRight size={16} />
                 </button>
                 <button
                   onClick={() => setSearchOpen((v) => !v)}
-                  className={`p-1.5 rounded-md transition-colors ${
-                    searchOpen
-                      ? "bg-bg-hover text-text-primary"
-                      : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
-                  }`}
+                  className={tbIconToggleSoft(searchOpen)}
                   title={searchOpen ? "Hide search" : "Show search"}
                 >
                   <Search size={16} />
@@ -911,11 +908,7 @@ export default function WikiPage() {
               {!isHub && (
                 <button
                   onClick={toggleHubMode}
-                  className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors shrink-0 ${
-                    hubMode
-                      ? "bg-accent text-white hover:bg-accent/90"
-                      : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
-                  }`}
+                  className={`${tbToggle(hubMode)} shrink-0`}
                   title={hubMode ? "Leave hub browse" : "Browse the hub's wiki (read-only)"}
                 >
                   <Cloud size={14} />
@@ -929,7 +922,7 @@ export default function WikiPage() {
                 <button
                   onClick={() => handleDownload(hubSrc.uuid, hubSrc.rel)}
                   disabled={isLoading}
-                  className="flex items-center gap-1.5 px-3 py-1 text-sm bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50"
+                  className={tbSolid}
                   title="Download this dataset to edit locally"
                 >
                   <Download size={14} /> Download
@@ -939,7 +932,7 @@ export default function WikiPage() {
               {viewMode === "file" && canEdit && !editing && (
                 <button
                   onClick={startEdit}
-                  className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
+                  className={tbGhost}
                   title="Edit this file"
                 >
                   <Pencil size={14} /> Edit
@@ -949,7 +942,7 @@ export default function WikiPage() {
               {viewMode === "file" && canEdit && !editing && (
                 <button
                   onClick={handleDeleteCurrentFile}
-                  className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-error-text hover:bg-bg-hover rounded-md transition-colors"
+                  className={tbDanger}
                   title="Delete this file (moves to trash)"
                 >
                   <Trash2 size={14} /> Delete
@@ -961,11 +954,7 @@ export default function WikiPage() {
                   <button
                     onClick={() => void handleSave()}
                     disabled={saving || !mdDirty}
-                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors disabled:opacity-50 ${
-                      mdDirty
-                        ? "bg-accent text-white hover:bg-accent/90"
-                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
-                    }`}
+                    className={tbToggle(mdDirty)}
                     title="Save this file (Ctrl+S)"
                   >
                     <Save size={14} /> {saving ? "Saving..." : "Save"}
@@ -984,33 +973,21 @@ export default function WikiPage() {
                   )}
                   <button
                     onClick={() => setMdToolsOpen((v) => !v)}
-                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
-                      mdToolsOpen
-                        ? "bg-bg-hover text-text-primary"
-                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
-                    }`}
+                    className={tbToggleSoft(mdToolsOpen)}
                     title="Toggle symbols/format toolbar"
                   >
                     Tools
                   </button>
                   <button
                     onClick={() => setMdSpellCheck((v) => !v)}
-                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
-                      mdSpellCheck
-                        ? "bg-bg-hover text-text-primary"
-                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
-                    }`}
+                    className={tbToggleSoft(mdSpellCheck)}
                     title={mdSpellCheck ? "Disable spell check" : "Enable spell check"}
                   >
                     ABC
                   </button>
                   <button
                     onClick={() => setMdShortcutsOpen((v) => !v)}
-                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
-                      mdShortcutsOpen
-                        ? "bg-bg-hover text-text-primary"
-                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
-                    }`}
+                    className={tbToggleSoft(mdShortcutsOpen)}
                     title="Keyboard shortcuts"
                   >
                     <CircleHelp size={14} />
@@ -1021,11 +998,7 @@ export default function WikiPage() {
                     // when the draft matches the file it just leaves editing —
                     // nothing would be lost, so there is nothing to preview.
                     onClick={() => (mdDirty ? setMdView((v) => !v) : setEditing(false))}
-                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
-                      mdView
-                        ? "bg-bg-hover text-text-primary"
-                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
-                    }`}
+                    className={tbToggleSoft(mdView)}
                     title={mdView ? "Return to the editor" : mdDirty ? "View your unsaved changes rendered" : "Return to view"}
                   >
                     <Eye size={14} /> {mdView ? "Editor" : "View"}
@@ -1037,7 +1010,7 @@ export default function WikiPage() {
                 <button
                   onClick={handleDownloadDataset}
                   disabled={isLoading}
-                  className="flex items-center gap-1.5 px-3 py-1 text-sm bg-accent text-white rounded-md hover:bg-accent/90 disabled:opacity-50"
+                  className={tbSolid}
                   title="Download this dataset to edit locally"
                 >
                   <Download size={14} /> Download
@@ -1048,14 +1021,14 @@ export default function WikiPage() {
                 <>
                   <button
                     onClick={handleCreateFile}
-                    className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
+                    className={tbGhost}
                     title="New file in this folder"
                   >
                     <FilePlus size={14} /> New File
                   </button>
                   <button
                     onClick={handleCreateDir}
-                    className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
+                    className={tbGhost}
                     title="New folder in this folder"
                   >
                     <FolderPlus size={14} /> New Folder
@@ -1066,7 +1039,7 @@ export default function WikiPage() {
               {viewMode === "browse" && canMutateRoots && !hubMode && (
                 <button
                   onClick={handleDeleteDataset}
-                  className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-error-text hover:bg-bg-hover rounded-md transition-colors"
+                  className={tbDanger}
                   title="Delete this dataset (moves to trash)"
                 >
                   <Trash2 size={14} /> Delete Dataset
@@ -1076,7 +1049,7 @@ export default function WikiPage() {
               {viewMode === "datasets" && canMutateRoots && !hubMode && (
                 <button
                   onClick={handleCreateDataset}
-                  className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
+                  className={tbGhost}
                   title="New wiki dataset"
                 >
                   <Plus size={14} /> New Dataset
@@ -1087,7 +1060,7 @@ export default function WikiPage() {
                 <button
                   onClick={viewMode === "browse" ? refreshBrowse : loadLocalDatasets}
                   disabled={viewMode === "browse" ? browseLoading : isLoading}
-                  className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors disabled:opacity-50"
+                  className={tbGhost}
                   title="Refresh"
                 >
                   <RefreshCw size={14} className={(viewMode === "browse" ? browseLoading : isLoading) ? "animate-spin" : ""} />

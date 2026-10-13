@@ -16,6 +16,7 @@ import { FAVORITES_DATASET_UUID, type Cue } from "@/lib/types";
 import { useDictationData } from "@/hooks/useDictationData";
 import { isAudio } from "@/lib/listen/utils";
 import { datasetStatusLabel, datasetStatusBadgeClasses, type DatasetStatus } from "@/lib/datasets/types";
+import { tbGhost, tbToggle, tbIcon, tbIconToggle } from "@/lib/ui/toolbar";
 import { subscribe, getVoiceError, clearVoiceError } from "@/lib/voice-input";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
@@ -337,16 +338,16 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 {/* ── Location section (datasets view) ── */}
                 {!d.selectedDatasetUuid && (
                     <div className="flex items-center gap-1">
-                        <Button variant="ghost" size="sm" aria-label="Refresh locations" isDisabled={d.stateLoading} onPress={d.loadLocations}>
-                            <RefreshCw size={16} /> Refresh
-                        </Button>
+                        <button type="button" className={tbGhost} aria-label="Refresh locations" disabled={d.stateLoading} title="Refresh" onClick={d.loadLocations}>
+                            <RefreshCw size={14} /> Refresh
+                        </button>
                         {/* Adding a location needs a native folder picker (rfd), which
                             does not exist on mobile — there the dataset roots live in
                             app-private storage and are filled by the PC sync flow. */}
                         {!mobile && (
-                            <Button variant="ghost" size="sm" aria-label="Add location" isDisabled={d.stateLoading} onPress={d.handleAddLocation}>
-                                <FolderPlus size={16} /> Add Location
-                            </Button>
+                            <button type="button" className={tbGhost} aria-label="Add location" disabled={d.stateLoading} title="Add location" onClick={d.handleAddLocation}>
+                                <FolderPlus size={14} /> Add Location
+                            </button>
                         )}
                     </div>
                 )}
@@ -354,12 +355,12 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 {/* ── Dataset section (media list view) ── */}
                 {d.selectedDatasetUuid && !d.stateMediaUUID && (
                     <div className="flex items-center gap-1">
-                        <Button variant="ghost" size="sm" aria-label="Reload database" isDisabled={!d.selectedDatasetUuid || d.stateLoading} onPress={d.handleReload}>
-                            <Database size={16} /> Reload
-                        </Button>
-                        <Button size="sm" variant={mediaEditMode ? "primary" : "ghost"} aria-label="Toggle edit mode" isDisabled={!d.selectedDatasetUuid} onPress={() => setMediaEditMode((v) => !v)}>
-                            <Pencil size={16} /> {mediaEditMode ? "View" : "Edit"}
-                        </Button>
+                        <button type="button" className={tbGhost} aria-label="Reload database" disabled={!d.selectedDatasetUuid || d.stateLoading} title="Reload database" onClick={d.handleReload}>
+                            <Database size={14} /> Reload
+                        </button>
+                        <button type="button" className={tbToggle(mediaEditMode)} aria-label="Toggle edit mode" disabled={!d.selectedDatasetUuid} title={mediaEditMode ? "View" : "Edit"} onClick={() => setMediaEditMode((v) => !v)}>
+                            <Pencil size={14} /> {mediaEditMode ? "View" : "Edit"}
+                        </button>
                     </div>
                 )}
 
@@ -369,7 +370,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                         {/* Large mode is desktop-only: on a phone the focused cue already auto-enlarges
                             to medium, and text-4xl would eat too much vertical space. */}
                         {!mobile && (
-                            <Button size="sm" variant={d.stateDictMode === "large" ? "primary" : "ghost"} aria-label="Toggle large mode" isDisabled={d.stateCues.length === 0} onPress={() => {
+                            <button type="button" className={tbToggle(d.stateDictMode === "large")} aria-label="Toggle large mode" disabled={d.stateCues.length === 0} title="Large" onClick={() => {
                                 if (d.stateDictMode === "large") { d.setStateDictMode("full"); }
                                 else {
                                     // Jump focus to the first incomplete cue when entering large mode.
@@ -378,12 +379,12 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                                     d.setStateDictMode("large");
                                 }
                             }}>
-                                <Target size={16} /> Large
-                            </Button>
+                                <Target size={14} /> Large
+                            </button>
                         )}
-                        <Button size="sm" variant={d.stateDictStatus === "complete" ? "primary" : "ghost"} aria-label="Mark complete" isDisabled={d.stateCues.length === 0} onPress={d.handleDictStatusToggle}>
-                            <CheckCircle size={16} /> Complete
-                        </Button>
+                        <button type="button" className={tbToggle(d.stateDictStatus === "complete")} aria-label="Mark complete" disabled={d.stateCues.length === 0} title="Complete" onClick={d.handleDictStatusToggle}>
+                            <CheckCircle size={14} /> Complete
+                        </button>
                         {/* Keyboard-shortcut help is desktop-only: the Ctrl+ combos need a
                             hardware keyboard, and the touch equivalents (Clear / Show answer
                             buttons next to the field, Play and Mic in the cue sidebar) are
@@ -391,9 +392,9 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                         {!mobile && (
                             <Tooltip isOpen={helpOpen} onOpenChange={setHelpOpen}>
                                 <Tooltip.Trigger>
-                                    <Button size="sm" variant="ghost" aria-label="Keyboard shortcuts" onPress={() => setHelpOpen(true)}>
-                                        <HelpCircle size={16} /> Help
-                                    </Button>
+                                    <button type="button" className={tbGhost} aria-label="Keyboard shortcuts" title="Keyboard shortcuts" onClick={() => setHelpOpen(true)}>
+                                        <HelpCircle size={14} /> Help
+                                    </button>
                                 </Tooltip.Trigger>
                                 <Tooltip.Content>
                                     <div className="flex flex-col gap-0.5">
@@ -418,21 +419,21 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                     <div className="ml-auto flex shrink-0 items-center gap-1">
                         {/* Thick stroke: at 20px a default-weight arrow reads as a
                             hairline on a phone and is easy to miss as a touch target. */}
-                        <Button isIconOnly size="sm" variant="ghost" aria-label="Previous cue" isDisabled={d.stateCues.length === 0} onPress={() => navigateCue(-1)}>
+                        <button type="button" className={tbIcon} aria-label="Previous cue" disabled={d.stateCues.length === 0} title="Previous cue" onClick={() => navigateCue(-1)}>
                             <ArrowUp size={20} strokeWidth={3} />
-                        </Button>
-                        <Button isIconOnly size="sm" variant="ghost" aria-label="Next cue" isDisabled={d.stateCues.length === 0} onPress={() => navigateCue(1)}>
+                        </button>
+                        <button type="button" className={tbIcon} aria-label="Next cue" disabled={d.stateCues.length === 0} title="Next cue" onClick={() => navigateCue(1)}>
                             <ArrowDown size={20} strokeWidth={3} />
-                        </Button>
-                        <Button
-                            size="sm"
-                            variant={collapsed ? "primary" : "ghost"}
+                        </button>
+                        <button
+                            type="button"
+                            className={tbIconToggle(collapsed)}
                             aria-label={collapsed ? "Show player and waveform" : "Hide everything except the cues"}
                             aria-pressed={collapsed}
-                            onPress={handleToggleCollapsed}
+                            onClick={handleToggleCollapsed}
                         >
                             {collapsed ? <ChevronsUpDown size={16} /> : <ChevronsDownUp size={16} />}
-                        </Button>
+                        </button>
                     </div>
                 )}
             </div>
