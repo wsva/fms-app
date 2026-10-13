@@ -8,6 +8,7 @@ import {
   Trash2,
   FolderPlus,
   BookText,
+  Wand2,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import type { ReadAloudMeta, ReadText } from "@/lib/read_aloud/types";
@@ -159,8 +160,11 @@ export default function ReadAloudPage() {
               }}
             >
               <div className="flex flex-col min-w-0 flex-1">
-                <span className="text-sm text-text-primary truncate">
+                <span className="text-sm text-text-primary truncate flex items-center gap-1">
                   {t.title || "Untitled"}
+                  {t.normalized_content && (
+                    <Wand2 size={12} className="shrink-0 text-accent-bg" aria-label="Normalized reference set (used for scoring)" />
+                  )}
                 </span>
                 {t.note && (
                   <span className="text-[11px] text-text-tertiary truncate">{t.note}</span>

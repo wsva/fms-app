@@ -275,14 +275,14 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Dataset moved to trash", "trashed_to": trashed_to}).to_string())
     }
 
-    #[tool(name = "read_aloud_list_texts", description = "List all texts in a read-aloud dataset, ordered, with best score and attempt count.")]
+    #[tool(name = "read_aloud_list_texts", description = "List all texts in a read-aloud dataset, ordered, with best score and attempt count. normalized_content (when set) is the LLM-normalized reference used for scoring.")]
     async fn read_aloud_list_texts(&self, Parameters(param): Parameters<ReadAloudDatasetParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         let items = datasets::read_aloud::read_aloud_list_texts(settings, param.dataset_uuid).await?;
         Ok(serde_json::to_string_pretty(&items).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_save_text", description = "Create or update a text. Pass text as JSON with fields: uuid, dataset_uuid, order_num, title, note, content. The note holds source/location info.")]
+    #[tool(name = "read_aloud_save_text", description = "Create or update a text. Pass text as JSON with fields: uuid, dataset_uuid, order_num, title, note, content, and optionally normalized_content. The note holds source/location info. normalized_content is a derived, LLM-normalized reference for scoring (numbers/abbreviations spelled out to match STT output); it is null until produced, and editing content resets it to null automatically.")]
     async fn read_aloud_save_text(&self, Parameters(param): Parameters<ReadAloudTextParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         let text: datasets::read_aloud::ReadText = serde_json::from_value(param.text.into())

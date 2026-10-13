@@ -37,6 +37,7 @@ export default function TextEditor({ datasetUuid, text, newOrderNum, onClose, on
   const [title, setTitle] = useState(text?.title ?? "");
   const [note, setNote] = useState(text?.note ?? "");
   const [content, setContent] = useState(text?.content ?? "");
+  const [normalized, setNormalized] = useState(text?.normalized_content ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -53,13 +54,20 @@ export default function TextEditor({ datasetUuid, text, newOrderNum, onClose, on
     setSaving(true);
     setError(null);
     const now = nowIso();
+    const trimmedContent = content.trim();
+    const contentChanged = text != null && trimmedContent !== text.content.trim();
+    // Mirrors the backend staleness rule: editing the content invalidates a
+    // normalization that was derived from the old one. (Unedited fields equal
+    // the stored values here, so this only fires on a real content change.)
+    const normalizedValue = contentChanged ? null : normalized.trim() || null;
     const payload: ReadText = {
       uuid: text?.uuid ?? getUUID(),
       dataset_uuid: datasetUuid,
       order_num: text?.order_num ?? newOrderNum,
       title: title.trim(),
       note: note.trim(),
-      content: content.trim(),
+      content: trimmedContent,
+      normalized_content: normalizedValue,
       best_score: text?.best_score ?? null,
       attempt_count: text?.attempt_count ?? 0,
       created_at: text?.created_at ?? now,
@@ -114,6 +122,16 @@ export default function TextEditor({ datasetUuid, text, newOrderNum, onClose, on
             value={content}
             onChange={(e) => setContent(e.target.value)}
             placeholder="Paste the passage the user will read aloud…"
+          />
+        </div>
+
+        <div className="flex flex-col min-h-0">
+          <label className={label}>Normalized text for scoring (optional)</label>
+          <textarea
+            className={`${field} min-h-[80px] resize-y leading-relaxed`}
+            value={normalized}
+            onChange={(e) => setNormalized(e.target.value)}
+            placeholder="LLM-normalized reference — numbers and abbreviations spelled out so they match the transcription. Scoring uses this when set; editing the text above clears it."
           />
         </div>
 

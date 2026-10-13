@@ -62,6 +62,12 @@ pub struct ReadText {
     pub note: String,
     /// The reference text the user reads.
     pub content: String,
+    /// LLM-normalized reference for scoring (numbers, abbreviations spelled
+    /// out so they match what STT transcribes). Derived and disposable:
+    /// `save_text_row` resets it whenever `content` changes; scoring falls back
+    /// to `content` while it is null.
+    #[serde(default)]
+    pub normalized_content: Option<String>,
     /// Best score across all attempts (computed/stored, null if never attempted).
     pub best_score: Option<f64>,
     /// Number of recorded attempts (computed on read, not persisted).
@@ -165,6 +171,7 @@ fn open_db(dir: &Path) -> Result<Connection, String> {
             title        TEXT NOT NULL DEFAULT '',
             note         TEXT NOT NULL DEFAULT '',
             content      TEXT NOT NULL DEFAULT '',
+            normalized_content TEXT,
             best_score   REAL,
             created_at   TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
@@ -185,10 +192,29 @@ fn open_db(dir: &Path) -> Result<Connection, String> {
         ",
     )
     .map_err(|e| e.to_string())?;
+    // Idempotent migration: datasets created before the normalization column.
+    let has_normalized: bool = conn
+        .prepare("SELECT 1 FROM PRAGMA_table_info('read_text') WHERE name = 'normalized_content'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if !has_normalized {
+        conn.execute("ALTER TABLE read_text ADD COLUMN normalized_content TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
     // §3.4: a per-dataset tombstone table (travels with snapshots) so a delete
     // is durable and can collide with a resurrected offline edit.
     crate::sync::change_log::ensure_tombstones(&conn)?;
     Ok(conn)
+}
+
+/// The reference text scoring compares against: the LLM-normalized variant when
+/// present (non-empty), the raw content otherwise. NULL/empty means "not
+/// normalized yet" — the fallback is what makes the column disposable.
+fn effective_reference(content: &str, normalized: Option<&str>) -> String {
+    match normalized {
+        Some(n) if !n.trim().is_empty() => n.to_string(),
+        _ => content.to_string(),
+    }
 }
 
 /// Resolve a stored relative audio path to an absolute path for playback.
@@ -372,7 +398,8 @@ pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result
     let conn = open_db(&dir)?;
     let mut stmt = conn
         .prepare(
-            "SELECT t.uuid, t.dataset_uuid, t.order_num, t.title, t.note, t.content, t.best_score, \
+            "SELECT t.uuid, t.dataset_uuid, t.order_num, t.title, t.note, t.content, t.normalized_content, \
+                    t.best_score, \
                     (SELECT COUNT(*) FROM read_attempt a WHERE a.text_uuid = t.uuid) AS attempt_count, \
                     t.created_at, t.updated_at \
              FROM read_text t ORDER BY t.order_num, t.created_at",
@@ -387,10 +414,11 @@ pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result
                 title: row.get(3)?,
                 note: row.get(4)?,
                 content: row.get(5)?,
-                best_score: row.get(6)?,
-                attempt_count: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                normalized_content: row.get(6)?,
+                best_score: row.get(7)?,
+                attempt_count: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -402,7 +430,7 @@ pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result
     // stored column stays a write-on-submit cache; nothing is migrated).
     let mut best: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT a.text_uuid, a.recognized, t.content FROM read_attempt a \
+        "SELECT a.text_uuid, a.recognized, t.content, t.normalized_content FROM read_attempt a \
          JOIN read_text t ON t.uuid = a.text_uuid",
     ) {
         if let Ok(rows) = stmt.query_map([], |row| {
@@ -410,10 +438,12 @@ pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         }) {
-            for (text_uuid, recognized, content) in rows.flatten() {
-                let s = score_value(&content, &recognized);
+            for (text_uuid, recognized, content, normalized) in rows.flatten() {
+                let reference = effective_reference(&content, normalized.as_deref());
+                let s = score_value(&reference, &recognized);
                 let e = best.entry(text_uuid).or_insert(s);
                 if s > *e {
                     *e = s;
@@ -445,6 +475,10 @@ pub async fn read_aloud_save_text(
 /// command and both sync apply paths (hub replay, follower pull-apply), so an
 /// edit made on any device reaches the journal exactly once — `commit_change`
 /// self-suppresses while a remote change is being applied.
+///
+/// Staleness rule: `normalized_content` is derived from `content`, so editing
+/// the content resets it to NULL (re-normalize afterwards); a same-content save
+/// (a title/order/note edit, or a round-tripped sync apply) preserves it.
 pub(crate) fn save_text_row(
     settings: &SettingsState,
     dataset_uuid: &str,
@@ -454,13 +488,16 @@ pub(crate) fn save_text_row(
     let conn = open_db(&dir)?;
     conn.execute(
         "INSERT INTO read_text \
-         (uuid, dataset_uuid, order_num, title, note, content, best_score, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+         (uuid, dataset_uuid, order_num, title, note, content, normalized_content, best_score, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
          ON CONFLICT(uuid) DO UPDATE SET \
            order_num = excluded.order_num, \
            title = excluded.title, \
            note = excluded.note, \
            content = excluded.content, \
+           normalized_content = CASE WHEN read_text.content = excluded.content \
+               THEN COALESCE(excluded.normalized_content, read_text.normalized_content) \
+               ELSE NULL END, \
            updated_at = excluded.updated_at",
         rusqlite::params![
             text.uuid,
@@ -469,6 +506,7 @@ pub(crate) fn save_text_row(
             text.title,
             text.note,
             text.content,
+            text.normalized_content,
             text.best_score,
             text.created_at,
             text.updated_at
@@ -541,7 +579,7 @@ pub async fn read_aloud_list_attempts(
     let mut stmt = conn
         .prepare(
             "SELECT a.uuid, a.text_uuid, a.user_id, a.audio_path, a.recognized, a.score, a.created_at, \
-                    t.content \
+                    t.content, t.normalized_content \
              FROM read_attempt a LEFT JOIN read_text t ON t.uuid = a.text_uuid \
              WHERE a.text_uuid = ?1 ORDER BY a.created_at DESC",
         )
@@ -551,13 +589,16 @@ pub async fn read_aloud_list_attempts(
             let audio_path: Option<String> = row.get(3)?;
             let recognized: String = row.get(4)?;
             let stored_score: f64 = row.get(5)?;
-            // Re-score against the reference text with the current metric so
-            // history is comparable across metric changes; fall back to the
-            // stored value if the text row is gone.
-            let score = row
-                .get::<_, Option<String>>(7)?
-                .map(|content| score_value(&content, &recognized))
-                .unwrap_or(stored_score);
+            // Re-score against the effective reference (normalized when present)
+            // with the current metric so history is comparable across metric
+            // changes; fall back to the stored value if the text row is gone.
+            let score = match row.get::<_, Option<String>>(7)? {
+                Some(content) => score_value(
+                    &effective_reference(&content, row.get::<_, Option<String>>(8)?.as_deref()),
+                    &recognized,
+                ),
+                None => stored_score,
+            };
             Ok(ReadAttempt {
                 uuid: row.get(0)?,
                 text_uuid: row.get(1)?,
@@ -703,9 +744,12 @@ pub async fn read_aloud_submit(
     let content: String = {
         let conn = open_db(&dir)?;
         conn.query_row(
-            "SELECT content FROM read_text WHERE uuid = ?1",
+            "SELECT content, normalized_content FROM read_text WHERE uuid = ?1",
             [&text_uuid],
-            |row| row.get(0),
+            |row| {
+                let content: String = row.get(0)?;
+                Ok(effective_reference(&content, row.get::<_, Option<String>>(1)?.as_deref()))
+            },
         )
         .map_err(|_| format!("Text {} not found in dataset", text_uuid))?
     };

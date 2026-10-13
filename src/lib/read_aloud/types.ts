@@ -27,6 +27,12 @@ export interface ReadText {
   note: string;
   /** The reference text the user reads. */
   content: string;
+  /**
+   * LLM-normalized reference used for scoring (numbers/abbreviations spelled
+   * out to match STT output). Derived and disposable: null until produced, and
+   * editing `content` resets it to null on the backend.
+   */
+  normalized_content: string | null;
   /** Best score across attempts (null if never attempted). */
   best_score: number | null;
   /** Number of recorded attempts (computed on read). */
