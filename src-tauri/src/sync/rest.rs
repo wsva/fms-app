@@ -537,6 +537,26 @@ fn snapshot_db_copy(dir: &Path) -> Option<PathBuf> {
     Some(dest)
 }
 
+/// Publish hygiene (§17.6 item 1): drop the legacy per-dataset practice tables
+/// from a frozen snapshot copy so a borrower's `migrate_legacy` /
+/// `migrate_legacy_attempts` seeds nothing — the publisher's pre-v2 schedule and
+/// scores never ride the content channel to a subscriber. The receiver's
+/// `open_card_db` / `open_read_aloud_db` recreate both empty on first open
+/// (`CREATE TABLE IF NOT EXISTS`), so this cannot break the installing side. The
+/// manifest never hashes `data.sqlite3` (`compute_manifest` filters `is_db_file`),
+/// so the served `x-snapshot-hash` is unaffected. Any future archive that ships a
+/// dataset DB off-device must call this too.
+fn sanitize_snapshot_db(path: &Path) {
+    if let Ok(conn) = rusqlite::Connection::open(path) {
+        // Idempotent; a deck carries at most one of these (card_review for card
+        // decks, read_attempt for read-aloud). Each table's indexes drop with it.
+        let _ = conn.execute_batch(
+            "DROP TABLE IF EXISTS card_review;\
+             DROP TABLE IF EXISTS read_attempt;",
+        );
+    }
+}
+
 async fn manifest(State(st): State<RestState>, axum::extract::Path(uuid): axum::extract::Path<String>) -> Response {
     let settings = st.app.state::<SettingsState>();
     let (dir, ty) = match datasets::find_dataset_dir_typed(&settings, &uuid) {
@@ -574,6 +594,9 @@ async fn snapshot(State(st): State<RestState>, axum::extract::Path(uuid): axum::
     // Freeze a consistent DB image, then hash + archive the non-DB set exactly
     // as the manifest endpoint would (the manifest excludes the DB itself).
     let snap_db = snapshot_db_copy(&dir);
+    if let Some(sp) = &snap_db {
+        sanitize_snapshot_db(sp);
+    }
     let cache = crate::datasets::dictation::open_app_db(&settings).ok();
     let m = compute_manifest(&dir, &uuid, cache.as_ref());
 
@@ -1621,4 +1644,93 @@ async fn chat_attachment(
 
 fn json_error(status: StatusCode, msg: &str) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A throwaway dataset dir with a `data.sqlite3` carrying both content tables
+    /// (`card`, `read_text`) and both legacy practice tables (`card_review`,
+    /// `read_attempt`), each with one row. The caller removes the dir.
+    fn seeded_dataset_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fms-snap-sanitize-{tag}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = rusqlite::Connection::open(dir.join("data.sqlite3")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE card (uuid TEXT PRIMARY KEY, front TEXT);
+             INSERT INTO card (uuid, front) VALUES ('c1', 'hello');
+             CREATE TABLE card_review (uuid TEXT PRIMARY KEY, card_uuid TEXT, familiarity INTEGER);
+             INSERT INTO card_review (uuid, card_uuid, familiarity) VALUES ('r1', 'c1', 4);
+             CREATE TABLE read_text (uuid TEXT PRIMARY KEY, content TEXT);
+             INSERT INTO read_text (uuid, content) VALUES ('t1', 'world');
+             CREATE TABLE read_attempt (uuid TEXT PRIMARY KEY, text_uuid TEXT, score REAL);
+             INSERT INTO read_attempt (uuid, text_uuid, score) VALUES ('a1', 't1', 88.0);",
+        )
+        .unwrap();
+        drop(conn);
+        dir
+    }
+
+    fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            rusqlite::params![name],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
+    fn row_count(conn: &rusqlite::Connection, table: &str) -> i64 {
+        conn.query_row(
+            &format!("SELECT count(*) FROM {table}"),
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn sanitize_snapshot_db_drops_practice_tables_keeps_content() {
+        let dir = seeded_dataset_dir("drops");
+        // Mirror snapshot(): freeze a point-in-time copy, then sanitize it.
+        let copy = snapshot_db_copy(&dir).expect("a dataset DB exists to copy");
+        sanitize_snapshot_db(&copy);
+
+        let conn = rusqlite::Connection::open(&copy).unwrap();
+        assert!(!table_exists(&conn, "card_review"), "publisher schedule must be stripped");
+        assert!(!table_exists(&conn, "read_attempt"), "publisher scores must be stripped");
+        assert!(table_exists(&conn, "card"), "content table must survive");
+        assert!(table_exists(&conn, "read_text"), "content table must survive");
+        assert_eq!(row_count(&conn, "card"), 1);
+        assert_eq!(row_count(&conn, "read_text"), 1);
+        drop(conn);
+
+        let _ = std::fs::remove_file(&copy);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sanitize_snapshot_db_is_idempotent() {
+        let dir = seeded_dataset_dir("idempotent");
+        let copy = snapshot_db_copy(&dir).expect("a dataset DB exists to copy");
+        sanitize_snapshot_db(&copy);
+        // A second pass must be a harmless no-op (DROP TABLE IF EXISTS).
+        sanitize_snapshot_db(&copy);
+
+        let conn = rusqlite::Connection::open(&copy).unwrap();
+        assert!(!table_exists(&conn, "card_review"));
+        assert!(!table_exists(&conn, "read_attempt"));
+        assert_eq!(row_count(&conn, "card"), 1);
+        assert_eq!(row_count(&conn, "read_text"), 1);
+        drop(conn);
+
+        let _ = std::fs::remove_file(&copy);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
