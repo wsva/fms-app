@@ -104,15 +104,28 @@ fn open_db_write(settings: &SettingsState, dataset_uuid: &str) -> Result<Connect
     Connection::open(&db_path).map_err(|e| e.to_string())
 }
 
-/// Open the app-level database (for dictation progress, etc.).
-/// Uses the current workspace directory if set, otherwise falls back to global app data dir.
-pub(crate) fn open_app_db(settings: &SettingsState) -> Result<Connection, String> {
+/// Where the app-level database lives for the current workspace: the workspace
+/// dir when one is selected, else the global app data dir. Split out from
+/// [`open_app_db`] because a caller that needs to `ATTACH` this file (card review
+/// state, [`crate::datasets::cards::review`]) has to name the *path*, not a
+/// second connection, and the two must never disagree about which DB is "the
+/// app DB" — a workspace-local review table would silently reset on workspace
+/// switch.
+pub(crate) fn app_db_path(settings: &SettingsState) -> std::path::PathBuf {
     let db_dir = match settings.workspace_dir.lock().unwrap().as_ref() {
         Some(ws_dir) => ws_dir.clone(),
         None => crate::app_paths::data_root(),
     };
-    std::fs::create_dir_all(&db_dir).map_err(|e| e.to_string())?;
-    let db_path = db_dir.join("app.sqlite3");
+    db_dir.join("app.sqlite3")
+}
+
+/// Open the app-level database (for dictation progress, etc.).
+/// Uses the current workspace directory if set, otherwise falls back to global app data dir.
+pub(crate) fn open_app_db(settings: &SettingsState) -> Result<Connection, String> {
+    let db_path = app_db_path(settings);
+    if let Some(dir) = db_path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
     log::debug!("[Dictation] Opening app DB: {}", db_path.display());
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     conn.execute_batch(

@@ -1615,11 +1615,15 @@ async fn apply_change(
             let card_uuid = str_field("card_uuid")?;
             crate::datasets::cards::card_delete(settings.clone(), ds, card_uuid).await.map(|_| true)
         }
-        "card_review" => {
-            let card_uuid = str_field("card_uuid")?;
-            let quality = payload.get("quality").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            crate::datasets::cards::card_test_submit(settings.clone(), ds, card_uuid, quality).await.map(|_| true)
-        }
+        // A review is a stored *result*, so it is applied by keeping the event the
+        // author sent — never by re-running the rating against this node's history,
+        // which is how one review used to fold twice per round (INV-23, §17.1).
+        "card_review" => crate::datasets::cards::review::apply_remote(
+            settings.inner(),
+            &ds,
+            payload,
+            write_identity,
+        ),
         "card_tag_save" => {
             let tag: Tag = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
             crate::datasets::cards::card_tag_save(settings.clone(), ds, tag).await.map(|_| true)

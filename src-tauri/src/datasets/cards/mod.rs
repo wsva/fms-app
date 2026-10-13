@@ -3,14 +3,16 @@
 //! types, via [`crate::datasets::dataset_roots`]).
 //!
 //! Bidirectional dataset sync — Last-Write-Wins conflict resolution plus
-//! per-dataset `sync_state` tracking — lives in [`sync`].
+//! per-dataset `sync_state` tracking — lives in [`sync`]. Per-user review state
+//! (the SM-2 schedule, now an append-only event log in the app DB) lives in
+//! [`review`].
 
+pub(crate) mod review;
 pub(crate) mod sync;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -18,7 +20,7 @@ use uuid::Uuid;
 
 use crate::datasets::{
     assert_uuid_free, canonical_stamp, dataset_roots, fork_base_to_overlay, is_under_download_root,
-    now_row_stamp, now_stamp, read_info, read_info_opt, row_stamp_at, touch_info, write_info,
+    now_row_stamp, now_stamp, read_info, read_info_opt, touch_info, write_info,
     DatasetInfo, DatasetType, FORMAT_CARD, INFO_FILE,
 };
 use crate::settings::SettingsState;
@@ -930,6 +932,28 @@ pub async fn card_dataset_move(
 // Commands: Card CRUD
 // ---------------------------------------------------------------------------
 
+/// Read one `card` row selected as `SELECT c.*` (the 12 content columns, in
+/// declaration order). When a review query appends the acting user's effective
+/// familiarity, pass its column index to `familiarity_override` so the UI shows
+/// *my* standing rather than the value the deck shipped (sync-v2.md §17).
+fn read_card(row: &rusqlite::Row<'_>, familiarity_override: Option<usize>) -> Result<Card, rusqlite::Error> {
+    let idx = familiarity_override.unwrap_or(5);
+    Ok(Card {
+        uuid: row.get(0)?,
+        question: row.get(1)?,
+        suggestion: row.get(2)?,
+        answer: row.get(3)?,
+        note: row.get(4)?,
+        familiarity: row.get(idx)?,
+        question_hash: row.get(6)?,
+        source_card_uuid: row.get(7)?,
+        source_dataset_uuid: row.get(8)?,
+        deleted_at: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
+
 /// List cards in a dataset with optional filtering.
 #[tauri::command]
 pub async fn card_list(
@@ -942,7 +966,8 @@ pub async fn card_list(
     offset: Option<i64>,
 ) -> Result<(Vec<Card>, i64), String> {
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
-    let conn = open_card_db(&path)?;
+    let ctx = review::open(settings.inner(), &path, &dataset_uuid)?;
+    let conn = &ctx.conn;
 
     let filter = filter.unwrap_or(CardFilter::All);
     let limit = limit.unwrap_or(100);
@@ -950,16 +975,25 @@ pub async fn card_list(
 
     let mut conditions = vec!["c.deleted_at IS NULL".to_string()];
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    // [`review::LATEST_JOIN`] reads the acting user from `?1`, so the identity is
+    // the first bound value; every index below is computed from `params.len()`,
+    // so the tag/keyword/limit slots shift along with it automatically.
+    params.push(Box::new(ctx.me.clone()));
+
+    // The card row plus my newest review, in one statement: the queue's "due /
+    // fresh / mature" notions are all per-user now, so a plain `FROM card c`
+    // would answer a different question than the review draw does.
+    let from = format!("FROM card c {}", review::LATEST_JOIN);
 
     // Apply filter
     match filter {
         CardFilter::Normal => {
             conditions.push("length(c.question) > 0".into());
             conditions.push("length(c.answer) > 0".into());
-            conditions.push("c.familiarity < 6".into());
+            conditions.push(format!("{} < 6", review::FAMILIARITY));
         }
         CardFilter::Easy => {
-            conditions.push("c.familiarity = 6".into());
+            conditions.push(format!("{} = 6", review::FAMILIARITY));
         }
         CardFilter::Incomplete => {
             conditions.push("(length(c.question) = 0 OR length(c.answer) = 0)".into());
@@ -996,7 +1030,7 @@ pub async fn card_list(
     let where_clause = conditions.join(" AND ");
 
     // Count query
-    let count_sql = format!("SELECT COUNT(*) FROM card c WHERE {}", where_clause);
+    let count_sql = format!("SELECT COUNT(*) {} WHERE {}", from, where_clause);
     let count_params: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let total: i64 = conn
         .query_row(&count_sql, count_params.as_slice(), |row| row.get(0))
@@ -1004,7 +1038,9 @@ pub async fn card_list(
 
     // Data query
     let data_sql = format!(
-        "SELECT c.* FROM card c WHERE {} ORDER BY c.updated_at DESC LIMIT ?{} OFFSET ?{}",
+        "SELECT c.*, {} {} WHERE {} ORDER BY c.updated_at DESC LIMIT ?{} OFFSET ?{}",
+        review::FAMILIARITY,
+        from,
         where_clause,
         params.len() + 1,
         params.len() + 2,
@@ -1015,22 +1051,7 @@ pub async fn card_list(
 
     let mut stmt = conn.prepare(&data_sql).map_err(|e| e.to_string())?;
     let cards = stmt
-        .query_map(data_params.as_slice(), |row| {
-            Ok(Card {
-                uuid: row.get(0)?,
-                question: row.get(1)?,
-                suggestion: row.get(2)?,
-                answer: row.get(3)?,
-                note: row.get(4)?,
-                familiarity: row.get(5)?,
-                question_hash: row.get(6)?,
-                source_card_uuid: row.get(7)?,
-                source_dataset_uuid: row.get(8)?,
-                deleted_at: row.get(9)?,
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
-            })
-        })
+        .query_map(data_params.as_slice(), |row| read_card(row, Some(12)))
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
@@ -1046,29 +1067,20 @@ pub async fn card_get(
     card_uuid: String,
 ) -> Result<Card, String> {
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
-    let conn = open_card_db(&path)?;
+    let ctx = review::open(settings.inner(), &path, &dataset_uuid)?;
 
-    conn.query_row(
-        "SELECT * FROM card WHERE uuid = ?1",
-        rusqlite::params![card_uuid],
-        |row| {
-            Ok(Card {
-                uuid: row.get(0)?,
-                question: row.get(1)?,
-                suggestion: row.get(2)?,
-                answer: row.get(3)?,
-                note: row.get(4)?,
-                familiarity: row.get(5)?,
-                question_hash: row.get(6)?,
-                source_card_uuid: row.get(7)?,
-                source_dataset_uuid: row.get(8)?,
-                deleted_at: row.get(9)?,
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
-            })
-        },
-    )
-    .map_err(|_| "Card not found".to_string())
+    // Same overlay as the list, so opening a card shows the standing I am in —
+    // not the value the deck shipped with.
+    let sql = format!(
+        "SELECT c.*, {} FROM card c {} WHERE c.uuid = ?2",
+        review::FAMILIARITY,
+        review::LATEST_JOIN
+    );
+    ctx.conn
+        .query_row(&sql, rusqlite::params![ctx.me.as_str(), card_uuid], |row| {
+            read_card(row, Some(12))
+        })
+        .map_err(|_| "Card not found".to_string())
 }
 
 /// Create or update a card. If uuid is empty, a new card is created.
@@ -1467,26 +1479,30 @@ pub async fn card_get_tags(
 // Commands: SM-2 Review
 // ---------------------------------------------------------------------------
 
-/// Eligibility for the review pool. Requires the card row to be aliased `c`, and is
-/// shared by `card_test_get` and `card_test_stats` so the numbers shown in the UI
-/// always describe the queue that actually serves cards.
-const REVIEW_ELIGIBLE: &str = "c.deleted_at IS NULL AND c.familiarity < 6 \
-    AND length(c.question) > 0 AND length(c.answer) > 0";
+/// Eligibility for *my* review pool: live, not graduated by me yet, and complete.
+/// Shared by `card_test_get` and `card_test_stats` so the numbers shown in the UI
+/// always describe the queue that actually serves cards — and so both mean
+/// "familiar to **the acting user**", never "familiar to whoever owns the file"
+/// (sync-v2.md §17).
+fn review_eligible() -> String {
+    format!(
+        "c.deleted_at IS NULL AND {} < 6 AND length(c.question) > 0 AND length(c.answer) > 0",
+        review::FAMILIARITY
+    )
+}
 
-/// A reviewed card that has come back due. Requires the review row aliased `cr`
-/// and one bound parameter: the moment to measure against, in
+/// A card I have rated that has come back due. Bound parameters are positional
+/// across the whole statement: `?1` is the acting `user_id` (consumed by
+/// [`review::LATEST_JOIN`]), `?2` the moment to measure against in
 /// [`crate::datasets::now_row_stamp`] form.
 ///
-/// The bound comes from Rust rather than from `datetime('now')` because the
+/// The bound still comes from Rust rather than `datetime('now')` because the
 /// comparison SQLite performs is textual, and its naive
 /// `2026-10-09 07:12:34` sorts before *every* RFC 3339 stamp (`' '` 0x20 <
 /// `'T'` 0x54): a card due at 06:00 would compare as later than "now 07:12" and
 /// never come back due until the date rolled over. One shape on both sides makes
 /// text order mean instant order again.
-const REVIEW_DUE: &str = "cr.next_review_at <= ?1";
-
-/// A card no review has ever been recorded for. Requires the card row aliased `c`.
-const REVIEW_FRESH: &str = "NOT EXISTS (SELECT 1 FROM card_review cr WHERE cr.card_uuid = c.uuid)";
+const REVIEW_DUE: &str = "cr.next_review_at IS NOT NULL AND cr.next_review_at <= ?2";
 
 /// Get the next card for review (SM-2 spaced repetition).
 #[tauri::command]
@@ -1494,48 +1510,44 @@ pub async fn card_test_get(
     settings: State<'_, SettingsState>,
     dataset_uuid: String,
 ) -> Result<Option<(Card, Option<CardReview>)>, String> {
+    // Read resolution on purpose: drawing a card is practice, not an edit, so it
+    // must not fork a read-only base into an overlay ([`review`] module docs).
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
-    let conn = open_card_db(&path)?;
+    let ctx = review::open(settings.inner(), &path, &dataset_uuid)?;
+    let conn = &ctx.conn;
+    // The acting user is `?1` in every review query (see [`review::LATEST_JOIN`]).
+    let me = ctx.me.as_str();
+    let eligible = review_eligible();
 
     // First try to find a card that is due for review
     let due_now = now_row_stamp();
     let due_sql = format!(
-        "SELECT c.*, cr.uuid, cr.card_uuid, cr.familiarity, cr.interval_days, \
-         cr.ease_factor, cr.repetitions, cr.last_review_at, cr.next_review_at \
-         FROM card c \
-         JOIN card_review cr ON cr.card_uuid = c.uuid \
+        "SELECT c.*, {}, cr.uuid, cr.reviewed_at, cr.interval_days, \
+         cr.ease_factor, cr.repetitions, cr.next_review_at \
+         FROM card c {} \
          WHERE {} AND {} \
-         ORDER BY RANDOM() * (6 - c.familiarity) DESC \
+         ORDER BY RANDOM() * (6 - {}) DESC \
          LIMIT 1",
-        REVIEW_ELIGIBLE, REVIEW_DUE
+        review::FAMILIARITY,
+        review::LATEST_JOIN,
+        eligible,
+        REVIEW_DUE,
+        review::FAMILIARITY
     );
     let due_result = conn.query_row(
         &due_sql,
-        rusqlite::params![due_now],
+        rusqlite::params![me, due_now],
         |row| {
-            let card = Card {
-                uuid: row.get(0)?,
-                question: row.get(1)?,
-                suggestion: row.get(2)?,
-                answer: row.get(3)?,
-                note: row.get(4)?,
-                familiarity: row.get(5)?,
-                question_hash: row.get(6)?,
-                source_card_uuid: row.get(7)?,
-                source_dataset_uuid: row.get(8)?,
-                deleted_at: row.get(9)?,
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
-            };
+            let card = read_card(row, Some(12))?;
             let review = CardReview {
-                uuid: row.get(12)?,
-                card_uuid: row.get(13)?,
-                familiarity: row.get(14)?,
+                uuid: row.get(13)?,
+                card_uuid: row.get(0)?,
+                familiarity: row.get(12)?,
                 interval_days: row.get(15)?,
                 ease_factor: row.get(16)?,
                 repetitions: row.get(17)?,
-                last_review_at: row.get(18)?,
-                next_review_at: row.get(19)?,
+                last_review_at: row.get(14)?,
+                next_review_at: row.get(18)?,
             };
             Ok((card, Some(review)))
         },
@@ -1545,35 +1557,21 @@ pub async fn card_test_get(
         return Ok(Some(result));
     }
 
-    // No due reviews — pick from cards that have never been reviewed
+    // No due reviews — pick from cards I have never rated
     let new_sql = format!(
-        "SELECT c.* FROM card c \
+        "SELECT c.*, {} FROM card c {} \
          WHERE {} AND {} \
-         ORDER BY RANDOM() * (6 - c.familiarity) DESC \
+         ORDER BY RANDOM() * (6 - {}) DESC \
          LIMIT 1",
-        REVIEW_ELIGIBLE, REVIEW_FRESH
+        review::FAMILIARITY,
+        review::LATEST_JOIN,
+        eligible,
+        review::UNRATED,
+        review::FAMILIARITY
     );
-    let new_result = conn.query_row(
-        &new_sql,
-        [],
-        |row| {
-            let card = Card {
-                uuid: row.get(0)?,
-                question: row.get(1)?,
-                suggestion: row.get(2)?,
-                answer: row.get(3)?,
-                note: row.get(4)?,
-                familiarity: row.get(5)?,
-                question_hash: row.get(6)?,
-                source_card_uuid: row.get(7)?,
-                source_dataset_uuid: row.get(8)?,
-                deleted_at: row.get(9)?,
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
-            };
-            Ok((card, None))
-        },
-    );
+    let new_result = conn.query_row(&new_sql, rusqlite::params![me], |row| {
+        Ok((read_card(row, Some(12))?, None))
+    });
 
     match new_result {
         Ok(result) => Ok(Some(result)),
@@ -1592,25 +1590,37 @@ pub async fn card_test_stats(
     dataset_uuid: String,
 ) -> Result<CardTestStats, String> {
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
-    let conn = open_card_db(&path)?;
+    let ctx = review::open(settings.inner(), &path, &dataset_uuid)?;
 
     let due_now = now_row_stamp();
-    let sql = format!(
-        "SELECT \
-           (SELECT COUNT(*) FROM card c JOIN card_review cr ON cr.card_uuid = c.uuid WHERE {} AND {}), \
-           (SELECT COUNT(*) FROM card c WHERE {} AND {}), \
-           (SELECT COUNT(*) FROM card c WHERE c.deleted_at IS NULL AND c.familiarity >= 6), \
-           (SELECT COUNT(*) FROM card c WHERE c.deleted_at IS NULL AND c.familiarity < 6 \
-              AND (length(c.question) = 0 OR length(c.answer) = 0)), \
-           (SELECT COUNT(*) FROM card c WHERE c.deleted_at IS NULL)",
-        REVIEW_ELIGIBLE,
-        REVIEW_DUE,
-        REVIEW_ELIGIBLE,
-        REVIEW_FRESH,
+    // Every number below is *mine*: the same join the draw uses, so the badge
+    // counts the queue that would actually serve me (memory: stats and selector
+    // share their predicates). `total` is the one deck-level figure — how many
+    // cards this dataset publishes — and needs no review row, so it reads the
+    // plain table.
+    let from = format!("FROM card c {}", review::LATEST_JOIN);
+    let eligible = review_eligible();
+    let due_q = format!("{} WHERE {} AND {}", from, eligible, REVIEW_DUE);
+    let fresh_q = format!("{} WHERE {} AND {}", from, eligible, review::UNRATED);
+    let mature_q = format!(
+        "{} WHERE c.deleted_at IS NULL AND {} >= 6",
+        from,
+        review::FAMILIARITY
     );
-
-    let (due, fresh, mature, incomplete, total) = conn
-        .query_row(&sql, rusqlite::params![due_now], |row| {
+    let incomplete_q = format!(
+        "{} WHERE c.deleted_at IS NULL AND {} < 6 \
+         AND (length(c.question) = 0 OR length(c.answer) = 0)",
+        from,
+        review::FAMILIARITY
+    );
+    let sql = format!(
+        "SELECT ({}), ({}), ({}), ({}), \
+         (SELECT COUNT(*) FROM card c WHERE c.deleted_at IS NULL)",
+        due_q, fresh_q, mature_q, incomplete_q,
+    );
+    let (due, fresh, mature, incomplete, total) = ctx
+        .conn
+        .query_row(&sql, rusqlite::params![ctx.me.as_str(), due_now], |row| {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
@@ -1639,7 +1649,13 @@ pub async fn card_test_stats(
     })
 }
 
-/// Submit a review result and update SM-2 state.
+/// Submit a review result: append the resulting event, change nothing else.
+///
+/// The deck DB is opened read-resolved and is not written at all — no
+/// `card_review` upsert, no `UPDATE card SET familiarity`, no `touch_info`. All
+/// three used to make a rating a *content* mutation of a shared deck, which is
+/// what pushed practice state into the content channel and onto the website as an
+/// edit (sync-v2.md §17.1).
 #[tauri::command]
 pub async fn card_test_submit(
     settings: State<'_, SettingsState>,
@@ -1647,99 +1663,38 @@ pub async fn card_test_submit(
     card_uuid: String,
     quality: i32,
 ) -> Result<CardReview, String> {
-    let path = find_card_dataset_dir_write(&settings, &dataset_uuid)?;
-    let conn = open_card_db(&path)?;
-    let now = now_row_stamp();
-
-    // Get existing review or create defaults
-    let existing = conn.query_row(
-        "SELECT * FROM card_review WHERE card_uuid = ?1",
-        rusqlite::params![card_uuid],
-        |row| {
-            Ok(CardReview {
-                uuid: row.get(0)?,
-                card_uuid: row.get(1)?,
-                familiarity: row.get(2)?,
-                interval_days: row.get(3)?,
-                ease_factor: row.get(4)?,
-                repetitions: row.get(5)?,
-                last_review_at: row.get(6)?,
-                next_review_at: row.get(7)?,
-            })
-        },
-    )
-    .ok();
-
-    let (interval_days, ease_factor, repetitions, familiarity) = if let Some(ref rev) = existing {
-        sm2_next(quality, rev.repetitions, rev.interval_days, rev.ease_factor)
-    } else {
-        sm2_next(quality, 0, 0, 250)
-    };
-
-    // Calculate next_review_at
-    let next_review = Utc::now() + chrono::Duration::days(interval_days as i64);
-    let next_review_at = row_stamp_at(next_review);
-
-    let review_uuid = existing
-        .as_ref()
-        .map(|r| r.uuid.clone())
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-
-    // Upsert review
-    conn.execute(
-        "INSERT INTO card_review (uuid, card_uuid, familiarity, interval_days, ease_factor, \
-         repetitions, last_review_at, next_review_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(uuid) DO UPDATE SET
-            familiarity = ?3, interval_days = ?4, ease_factor = ?5,
-            repetitions = ?6, last_review_at = ?7, next_review_at = ?8",
-        rusqlite::params![
-            review_uuid,
-            card_uuid,
-            familiarity,
-            interval_days,
-            ease_factor,
-            repetitions,
-            now,
-            next_review_at,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Update card familiarity
-    conn.execute(
-        "UPDATE card SET familiarity = ?1, updated_at = ?2 WHERE uuid = ?3",
-        rusqlite::params![familiarity, now, card_uuid],
-    )
-    .map_err(|e| e.to_string())?;
-
-    update_dataset_timestamp(&path)?;
+    let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
+    let ctx = review::open(settings.inner(), &path, &dataset_uuid)?;
+    let ev = review::record_rating(&ctx.conn, &ctx.me, &dataset_uuid, &card_uuid, quality)?;
 
     log::info!(
-        "[Cards] Review submitted: card='{}', quality={}, next_interval={}d",
+        "[Cards] Review recorded: card='{}', quality={}, next_interval={}d",
         card_uuid,
         quality,
-        interval_days
+        ev.interval_days
     );
 
+    // The journal carries the *result*, not the instruction to compute it, so any
+    // node — the author included, when its own change echoes back — applies this
+    // with `INSERT OR IGNORE` and lands on the same schedule (INV-23).
     {
         let _ = crate::sync::change_log::commit_change(
             &settings,
             "card_review",
             &dataset_uuid,
-            &serde_json::json!({ "card_uuid": card_uuid, "quality": quality }),
+            &review::payload(&ev),
         );
     }
 
     Ok(CardReview {
-        uuid: review_uuid,
+        uuid: ev.uuid,
         card_uuid,
-        familiarity,
-        interval_days,
-        ease_factor,
-        repetitions,
-        last_review_at: Some(now),
-        next_review_at: Some(next_review_at),
+        familiarity: ev.familiarity,
+        interval_days: ev.interval_days,
+        ease_factor: ev.ease_factor,
+        repetitions: ev.repetitions,
+        last_review_at: Some(ev.reviewed_at),
+        next_review_at: ev.next_review_at,
     })
 }
 

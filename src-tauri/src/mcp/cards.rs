@@ -255,7 +255,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "cards_indexed": count}).to_string())
     }
 
-    #[tool(name = "card_test_next", description = "Get the next card due for review using SM-2 spaced repetition. Returns the card and its review state, or null if no cards are due.")]
+    #[tool(name = "card_test_next", description = "Get the next card due for review using SM-2 spaced repetition. Returns the card and its review state, or null if no cards are due. Reviews are per user: this is the *current* workspace's schedule, not the deck's stored one.")]
     async fn card_test_next(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::info!("[MCP] card_test_next: dataset={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
@@ -294,7 +294,7 @@ impl DatasetMcpServer {
         }}).to_string())
     }
 
-    #[tool(name = "card_test_stats", description = "Count what the review queue holds for a dataset: due (overdue, served first), fresh (never reviewed, served only once due is empty), mature (familiarity 6, out of rotation), incomplete (missing question or answer, skipped), total, and serving = which pool the next draw comes from.")]
+    #[tool(name = "card_test_stats", description = "Count what the review queue holds for a dataset *for the current user*: due (overdue, served first), fresh (never reviewed by this user, served only once due is empty), mature (familiarity 6, out of rotation), incomplete (missing question or answer, skipped), total, and serving = which pool the next draw comes from.")]
     async fn card_test_stats(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::info!("[MCP] card_test_stats: dataset={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
@@ -362,7 +362,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"tags": items, "count": items.len()}).to_string())
     }
 
-    #[tool(name = "card_sync", description = "Perform a full bidirectional sync for a card dataset with the online server. Pulls remote changes and pushes local changes. Only works for datasets owned by the current user.")]
+    #[tool(name = "card_sync", description = "Perform a full bidirectional sync for a card dataset with the online server. Pulls remote changes and pushes local changes. Only works for datasets owned by the current user, and never for a read-only shared copy under the download root.")]
     async fn card_sync(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::info!("[MCP] card_sync: dataset={}", param.uuid);
         let settings = self.app.state::<SettingsState>();

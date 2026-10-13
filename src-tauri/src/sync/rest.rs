@@ -1171,10 +1171,13 @@ async fn replay(
             let card_uuid = extract_str(&ch.payload, "card_uuid")?;
             datasets::cards::card_delete(settings.clone(), dataset_uuid, card_uuid).await
         }
+        // The hub stores the author's event verbatim and logs it onward under the
+        // originating identity (`apply_remote` does the append, since this replay
+        // path runs without an `ApplyGuard`). Re-running `card_test_submit` here
+        // would fold the rating a second time on top of the hub's own history.
         "card_review" => {
-            let card_uuid = extract_str(&ch.payload, "card_uuid")?;
-            let quality = ch.payload.get("quality").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            datasets::cards::card_test_submit(settings.clone(), dataset_uuid, card_uuid, quality).await.map(|_| ())
+            datasets::cards::review::apply_remote(settings.inner(), &dataset_uuid, &ch.payload, write_identity)
+                .map(|_| ())
         }
         "card_tag_save" => {
             let tag: Tag =

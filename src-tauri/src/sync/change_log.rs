@@ -153,7 +153,10 @@ impl ChangeClass {
             | "dictation" => ChangeClass::State,
             // counter: XP is enqueued as an amount delta (§3.6).
             "xp" => ChangeClass::Counter,
-            // append-only: review history + anything unrecognised (safe: keep).
+            // append-only: a card review is one stored *result* per rating (an
+            // event row keyed by its own uuid, `datasets::cards::review`), so it is
+            // never coalesced and replay is `INSERT OR IGNORE` (INV-23, §17).
+            // Read attempts are the same shape.
             "card_review" | "read_attempt_save" | "read_attempt_delete" => ChangeClass::AppendOnly,
             _ => ChangeClass::AppendOnly,
         }
@@ -170,13 +173,13 @@ impl ChangeClass {
 // ---------------------------------------------------------------------------
 
 /// Change-log scope for **per-user app data** (`dictation` progress, `xp`
-/// awards). Those tables live in the app DB, not in any dataset DB, so binding
-/// their journal rows to a dataset uuid made delivery depend on the receiver
-/// having subscribed to that dataset — and awards with no dataset at all (book
-/// reading XP) landed under the empty scope, which no route served and no puller
-/// ever read. They all share one named scope the hub serves from its own
-/// endpoint (`GET /api/v1/app/changes`) and every device pulls once per round,
-/// dataset subscriptions or not.
+/// awards, `card_review` events). Those tables live in the app DB, not in any
+/// dataset DB, so binding their journal rows to a dataset uuid made delivery
+/// depend on the receiver having subscribed to that dataset — and awards with no
+/// dataset at all (book reading XP) landed under the empty scope, which no route
+/// served and no puller ever read. They all share one named scope the hub serves
+/// from its own endpoint (`GET /api/v1/app/changes`) and every device pulls once
+/// per round, dataset subscriptions or not.
 ///
 /// The scope is a *journal* key only: the dataset a change refers to stays inside
 /// the payload (`xp` carries `dataset_uuid`; `dictation` needs none, its media +
@@ -185,8 +188,14 @@ pub const APP_SCOPE: &str = "@app";
 
 /// Whether `kind` mutates per-user app data and therefore journals under
 /// [`APP_SCOPE`] instead of under a dataset uuid.
+///
+/// `card_review` joined this list deliberately (sync-v2.md §17): a rating is
+/// about the *user*, not the deck, so logging it under the deck's uuid both made
+/// delivery depend on that deck's subscriptions and — worse — let the resulting
+/// `card.updated_at` bump ride the content channel as if someone had edited the
+/// card. The deck uuid it refers to now travels inside the payload instead.
 pub fn is_app_scope_kind(kind: &str) -> bool {
-    matches!(kind, "dictation" | "xp")
+    matches!(kind, "dictation" | "xp" | "card_review")
 }
 
 /// The journal scope a change of `kind` belongs to: [`APP_SCOPE`] for per-user
@@ -235,7 +244,19 @@ pub fn object_id_for(kind: &str, payload: &Value, user_key: &str) -> String {
             format!("{user_key}:{m}:{s}")
         }
         "card_save" => get("uuid"),
-        "card_delete" | "card_review" | "card_set_tags" => get("card_uuid"),
+        "card_delete" | "card_set_tags" => get("card_uuid"),
+        // One event per rating, so the id is the event uuid — and it must still
+        // carry the owner: the `@app` scope is shared by every user, and a deck
+        // two people practise has the same `card_uuid` on both sides. A payload
+        // from before this shape has no event uuid, so fall back to the card.
+        "card_review" => {
+            let e = get("event_uuid");
+            if e.is_empty() {
+                format!("{user_key}:{}", get("card_uuid"))
+            } else {
+                format!("{user_key}:{e}")
+            }
+        }
         "card_tag_save" => get("uuid"),
         "card_tag_delete" => get("tag_uuid"),
         "book_chapter_save" | "book_chapter_delete"

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::datasets::cards::{find_card_dataset_dir, open_card_db};
-use crate::datasets::{canonical_stamp, stamps_cmp, touch_info};
+use crate::datasets::{canonical_stamp, is_under_download_root, stamps_cmp, touch_info};
 use crate::settings::SettingsState;
 
 // ---------------------------------------------------------------------------
@@ -434,6 +434,34 @@ fn get_access_token(settings: &SettingsState) -> Result<String, String> {
 // Commands
 // ---------------------------------------------------------------------------
 
+/// A sync round is a **write**: pulled rows land in this deck's DB, and the local
+/// rows it then pushes were produced by earlier rounds writing here. A dataset
+/// under the download root is a read-only base — the online registry's copy, not
+/// ours to mutate — so the round is refused rather than forked: an overlay of a
+/// shared base would be a second, unpublished author of content we do not own
+/// (sync-v2.md §16.3).
+///
+/// Prospective today: nothing populates the download root, and the auto-sync arm
+/// only reaches decks inside the writable type root
+/// ([`crate::sync::client`]'s `local_copy` test). The guard is what keeps it that
+/// way when an adoption flow starts putting bases there.
+fn ensure_sync_target_writable(
+    settings: &SettingsState,
+    dataset_dir: &std::path::Path,
+    dataset_uuid: &str,
+) -> Result<(), String> {
+    if is_under_download_root(settings, dataset_dir) {
+        return Err(format!(
+            "Card dataset {dataset_uuid} is a read-only shared copy ({}); \
+             its content belongs to the publisher. Copy it into your own workspace \
+             to edit or sync it — practice reviews are recorded separately and need \
+             no sync round here.",
+            dataset_dir.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Full bidirectional sync for a card dataset.
 #[tauri::command]
 pub async fn card_sync_full(
@@ -441,6 +469,7 @@ pub async fn card_sync_full(
     dataset_uuid: String,
 ) -> Result<SyncResult, String> {
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
+    ensure_sync_target_writable(settings.inner(), &path, &dataset_uuid)?;
     let conn = open_card_db(&path)?;
 
     // Get access token
@@ -565,6 +594,7 @@ async fn card_sync_full_inner(
     dataset_uuid: &str,
 ) -> Result<SyncResult, String> {
     let path = find_card_dataset_dir(settings, dataset_uuid)?;
+    ensure_sync_target_writable(settings, &path, dataset_uuid)?;
     let conn = open_card_db(&path)?;
 
     // Get access token
