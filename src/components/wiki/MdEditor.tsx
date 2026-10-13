@@ -8,7 +8,7 @@
 
 import { forwardRef, useCallback, useEffect, useRef } from "react";
 import MarkdownViewer from "./markdown/markdown";
-import { insertAround, insertAtLineStart, replaceRange } from "./mdEditorInserts";
+import { insertAround, insertAtLineStart, insertLink, replaceRange } from "./mdEditorInserts";
 
 type Props = {
     value: string;
@@ -23,6 +23,7 @@ const shortcutList = [
     ["Ctrl+B", "bold"],
     ["Ctrl+I", "italic"],
     ["Ctrl+`", "inline code"],
+    ["Ctrl+K", "link"],
     ["Tab", "indent"],
     ["Shift+Tab", "dedent"],
     ["Enter", "continue list"],
@@ -68,7 +69,10 @@ const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, prev
         if (innerRef.current) {
             autoResize(innerRef.current);
         }
-    }, [value, autoResize]);
+        // `preview` matters: while the textarea is display:none, scrollHeight
+        // reads 0, so a value change during preview would leave a stale
+        // height="0px" when switching back. Re-measure on preview exit.
+    }, [value, preview, autoResize]);
 
     const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
         const html = e.clipboardData.getData("text/html");
@@ -92,29 +96,46 @@ const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, prev
         const isMac = navigator.userAgent.includes("Mac");
         const ctrl = isMac ? e.metaKey : e.ctrlKey;
 
+        // While an IME is composing, Enter/Tab belong to the candidate
+        // picker — intercepting them would hijack confirmation.
+        if (e.nativeEvent.isComposing) return;
+
         if (e.key === "Enter") {
-            const textarea = innerRef.current!;
+            const textarea = e.currentTarget;
             const start = textarea.selectionStart;
             const val = textarea.value;
             const lineStart = val.lastIndexOf("\n", start - 1) + 1;
             const line = val.slice(lineStart, start);
-            const unordered = line.match(/^- (.*)/);
-            const ordered = line.match(/^(\d+)\. (.*)/);
+            // Indent-tolerant so nested list items keep their depth; the
+            // actual bullet (`-` or `*`) is repeated, not forced to `-`.
+            const unordered = line.match(/^(\s*)([-*]) (.*)/);
+            const ordered = line.match(/^(\s*)(\d+)\. (.*)/);
+            const quote = line.match(/^(>\s?)(.*)/);
             if (unordered) {
                 e.preventDefault();
-                if (!unordered[1]) {
+                // Empty item drops marker and indent, exiting the list.
+                if (!unordered[3]) {
                     replaceRange(textarea, "", lineStart, start);
                 } else {
-                    replaceRange(textarea, "\n- ", start, start);
+                    replaceRange(textarea, `\n${unordered[1]}${unordered[2]} `, start, start);
                 }
                 return;
             }
             if (ordered) {
                 e.preventDefault();
-                if (!ordered[2]) {
+                if (!ordered[3]) {
                     replaceRange(textarea, "", lineStart, start);
                 } else {
-                    replaceRange(textarea, `\n${parseInt(ordered[1]) + 1}. `, start, start);
+                    replaceRange(textarea, `\n${ordered[1]}${parseInt(ordered[2]) + 1}. `, start, start);
+                }
+                return;
+            }
+            if (quote) {
+                e.preventDefault();
+                if (!quote[2]) {
+                    replaceRange(textarea, "", lineStart, start);
+                } else {
+                    replaceRange(textarea, "\n> ", start, start);
                 }
                 return;
             }
@@ -122,26 +143,50 @@ const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, prev
 
         if (e.key === "Tab") {
             e.preventDefault();
-            if (e.shiftKey) {
-                const textarea = innerRef.current!;
-                const start = textarea.selectionStart;
-                const lineStart = textarea.value.lastIndexOf("\n", start - 1) + 1;
-                const spaces = textarea.value.slice(lineStart).match(/^ {1,2}/)?.[0] ?? "";
-                if (spaces) {
-                    replaceRange(textarea, "", lineStart, lineStart + spaces.length);
+            const textarea = e.currentTarget;
+            const { selectionStart: start, selectionEnd: end, value } = textarea;
+            if (!value.slice(start, end).includes("\n")) {
+                if (e.shiftKey) {
+                    const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+                    const spaces = value.slice(lineStart).match(/^ {1,2}/)?.[0] ?? "";
+                    if (spaces) {
+                        replaceRange(textarea, "", lineStart, lineStart + spaces.length);
+                    }
+                } else {
+                    replaceRange(textarea, "  ");
                 }
-            } else {
-                replaceRange(innerRef.current!, "  ");
+                return;
             }
+            // Multi-line selection: indent/outdent every touched line instead
+            // of overwriting the selection with spaces.
+            const blockStart = value.lastIndexOf("\n", start - 1) + 1;
+            let blockEnd = value.indexOf("\n", end);
+            if (blockEnd === -1) blockEnd = value.length;
+            // A selection ending exactly at a line start doesn't touch that line.
+            if (end === value.lastIndexOf("\n", end - 1) + 1) blockEnd = end - 1;
+            const block = value.slice(blockStart, blockEnd);
+            const lines = block.split("\n");
+            const newBlock = e.shiftKey
+                ? lines.map((l) => l.replace(/^ {1,2}/, "")).join("\n")
+                : lines.map((l) => "  " + l).join("\n");
+            if (newBlock === block) return;
+            replaceRange(textarea, newBlock, blockStart, blockEnd);
+            // Reselect the block so Tab can be pressed repeatedly to go deeper.
+            setTimeout(() => textarea.setSelectionRange(blockStart, blockStart + newBlock.length), 0);
             return;
         }
 
         if (ctrl) {
             const ta = innerRef.current;
             if (!ta) return;
-            if (e.key === "b") { e.preventDefault(); insertAround(ta, "**", "**"); }
-            else if (e.key === "i") { e.preventDefault(); insertAround(ta, "*", "*"); }
-            else if (e.key === "`") { e.preventDefault(); insertAround(ta, "`", "`"); }
+            // With Shift held e.key arrives uppercase; normalize so Ctrl+B/I
+            // keep working.
+            switch (e.key.toLowerCase()) {
+                case "b": e.preventDefault(); insertAround(ta, "**", "**"); break;
+                case "i": e.preventDefault(); insertAround(ta, "*", "*"); break;
+                case "`": e.preventDefault(); insertAround(ta, "`", "`"); break;
+                case "k": e.preventDefault(); insertLink(ta); break;
+            }
         }
     };
     
