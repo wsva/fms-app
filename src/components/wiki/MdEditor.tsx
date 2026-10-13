@@ -1,11 +1,11 @@
 "use client";
 
-// Body of the wiki markdown editor. Header chrome (Save / View / Fullscreen /
-// Spell-check / Help toggles) and the Symbols/German/Format/Lists Tools panel
-// both live on the wiki page's sub-toolbars now, so this component is
-// controlled for those flags and exposes only the textarea, the Shortcuts
-// panel, and the word/char counter. The rendered markdown view is a page-level
-// concern: the wiki page swaps this component for its shared view renderer.
+// Body of the wiki markdown editor. Header chrome (Save / View / Spell-check /
+// Help toggles) and the Symbols/German/Format/Lists Tools panel both live on
+// the wiki page's sub-toolbars now, so this component is controlled for those
+// flags and exposes only the textarea, the Shortcuts panel, and the word/char
+// counter. The rendered markdown view is a page-level concern: the wiki page
+// swaps this component for its shared view renderer.
 
 import { forwardRef, useCallback, useEffect, useRef } from "react";
 import { insertAround, insertAtLineStart, insertLink, replaceRange } from "./mdEditorInserts";
@@ -13,7 +13,9 @@ import { insertAround, insertAtLineStart, insertLink, replaceRange } from "./mdE
 type Props = {
     value: string;
     onChange: (value: string) => void;
-    fullscreen: boolean;
+    // Fullscreen stretch mode is kept for future embedders; the wiki page no
+    // longer offers the toggle, so it stays at its default there.
+    fullscreen?: boolean;
     spellCheck: boolean;
     shortcutsOpen: boolean;
 };
@@ -41,7 +43,7 @@ function scrollParent(el: HTMLElement): HTMLElement | null {
     return null;
 }
 
-const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, fullscreen, spellCheck, shortcutsOpen }, forwardedRef) => {
+const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, fullscreen = false, spellCheck, shortcutsOpen }, forwardedRef) => {
     const innerRef = useRef<HTMLTextAreaElement | null>(null);
 
     const wordCount = value.trim() ? value.trim().split(/\s+/).length : 0;

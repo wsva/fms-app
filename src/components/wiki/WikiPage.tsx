@@ -7,7 +7,7 @@ import { openPath } from "@tauri-apps/plugin-opener";
 import {
   RefreshCw, ArrowLeft, ArrowRight, Cloud, Download, Pencil, Eye,
   Folder, FileText, BookMarked, FilePlus, FolderPlus, Plus, Trash2,
-  Save, Maximize2, Minimize2, CircleHelp, Search, ExternalLink,
+  Save, CircleHelp, Search, ExternalLink,
 } from "lucide-react";
 import WikiSearch from "./WikiSearch";
 import MdEditor from "./MdEditor";
@@ -216,7 +216,6 @@ export default function WikiPage() {
   // read-only mode uses — and the rest are passed into MdEditor as flags.
   const [mdToolsOpen, setMdToolsOpen] = useState(false);
   const [mdView, setMdView] = useState(false);
-  const [mdFullscreen, setMdFullscreen] = useState(false);
   const [mdSpellCheck, setMdSpellCheck] = useState(false);
   const [mdShortcutsOpen, setMdShortcutsOpen] = useState(false);
 
@@ -229,13 +228,12 @@ export default function WikiPage() {
     if (ta) fn(ta);
   };
 
-  // Every exit path funnels through `editing === false`, so clearing the five
+  // Every exit path funnels through `editing === false`, so clearing the four
   // toggles there keeps a subsequent Edit click starting from a clean state.
   useEffect(() => {
     if (!editing) {
       setMdToolsOpen(false);
       setMdView(false);
-      setMdFullscreen(false);
       setMdSpellCheck(false);
       setMdShortcutsOpen(false);
     }
@@ -760,7 +758,6 @@ export default function WikiPage() {
         : `${treeDatasets.length} dataset${treeDatasets.length === 1 ? "" : "s"}`;
 
   const mdDirty = editContent !== fileContent;
-  const inEditorFullscreen = editing && mdFullscreen;
 
   return (
     <div className="flex h-full w-full bg-bg-body min-w-0">
@@ -777,9 +774,7 @@ export default function WikiPage() {
           {/* Content column: breadcrumb nav on top, scrollable view below */}
           <div className="flex-1 flex flex-col min-h-0 min-w-0">
             {/* Breadcrumb navigation — mirrors the dictation page's
-                Wiki › dataset › directory › file trail. Hidden while the
-                editor is in fullscreen to reclaim vertical space. */}
-            {!inEditorFullscreen && (
+                Wiki › dataset › directory › file trail. */}
             <nav className="shrink-0 flex items-center gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
               <button
                 className={`shrink-0 cursor-pointer hover:underline ${viewMode === "datasets" ? "text-text-primary font-medium" : "text-accent"}`}
@@ -828,7 +823,6 @@ export default function WikiPage() {
                 </>
               )}
             </nav>
-            )}
 
             {/* Shared sub-toolbar: always shown under the breadcrumb, whether
                 viewing the dataset list, a dataset's directory, or a file.
@@ -940,18 +934,6 @@ export default function WikiPage() {
                     title="Toggle symbols/format toolbar"
                   >
                     Tools
-                  </button>
-                  <button
-                    onClick={() => setMdFullscreen((v) => !v)}
-                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
-                      mdFullscreen
-                        ? "bg-bg-hover text-text-primary"
-                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
-                    }`}
-                    title={mdFullscreen ? "Exit fullscreen" : "Fullscreen editor"}
-                  >
-                    {mdFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-                    <span>{mdFullscreen ? "Minimize" : "Fullscreen"}</span>
                   </button>
                   <button
                     onClick={() => setMdSpellCheck((v) => !v)}
@@ -1217,24 +1199,23 @@ export default function WikiPage() {
                 : selection ? (
                 <div className="h-full flex flex-col min-h-0">
                   {/* Body: editor (edit mode) or rendered markdown (view mode) */}
-                  <div className={inEditorFullscreen ? "flex-1 flex flex-col min-h-0" : "flex-1 overflow-y-auto min-h-0"}>
+                  <div className="flex-1 overflow-y-auto min-h-0">
                     {editing ? (
                       mdView ? (
                         // The draft through the same renderer view mode uses, so the
                         // toggle is WYSIWYG-equal to the saved view. onWikiLink is
                         // deliberately not wired: navigating would silently discard
                         // the unsaved draft.
-                        <div className={inEditorFullscreen ? "flex-1 overflow-y-auto min-h-0 px-6 pt-6 pb-[50vh]" : "px-6 pt-6 pb-[50vh]"}>
+                        <div className="px-6 pt-6 pb-[50vh]">
                           {fileTruncated && <TruncatedNote />}
                           <MarkdownViewer content={editContent} withTOC={true} />
                         </div>
                       ) : (
-                        <div className={inEditorFullscreen ? "flex-1 flex flex-col min-h-0 px-4 py-3" : "px-4 py-3"}>
+                        <div className="px-4 py-3">
                           <MdEditor
                             ref={mdTextareaRef}
                             value={editContent}
                             onChange={setEditContent}
-                            fullscreen={mdFullscreen}
                             spellCheck={mdSpellCheck}
                             shortcutsOpen={mdShortcutsOpen}
                           />
