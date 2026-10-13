@@ -318,7 +318,7 @@ async fn send_archive(
     let url = format!("{base}{UPLOAD_PATH}?{qs}");
 
     // A generous overall timeout: this is a whole-archive PUT over WAN.
-    let client = reqwest::Client::builder()
+    let client = crate::auth::hub_client_builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(3600))
         .build()

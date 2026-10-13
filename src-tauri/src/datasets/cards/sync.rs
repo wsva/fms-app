@@ -93,12 +93,14 @@ async fn pull_changes(
 ) -> Result<SyncPullResponse, String> {
     let url = format!(
         "{}/api/card/sync/pull?dataset_uuid={}&since={}",
-        crate::auth::BASE_URL.trim_end_matches('/'),
+        crate::auth::base_url(),
         dataset_uuid,
         since,
     );
 
-    let client = reqwest::Client::new();
+    let client = crate::auth::hub_client_builder()
+        .build()
+        .map_err(|e| format!("Pull client build failed: {}", e))?;
     let response = client
         .get(&url)
         .header("Authorization", format!("Bearer {}", access_token))
@@ -136,11 +138,13 @@ async fn push_changes(
 ) -> Result<SyncPushResponse, String> {
     let url = format!(
         "{}/api/card/sync/push?dataset_uuid={}",
-        crate::auth::BASE_URL.trim_end_matches('/'),
+        crate::auth::base_url(),
         dataset_uuid,
     );
 
-    let client = reqwest::Client::new();
+    let client = crate::auth::hub_client_builder()
+        .build()
+        .map_err(|e| format!("Push client build failed: {}", e))?;
     let response = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", access_token))

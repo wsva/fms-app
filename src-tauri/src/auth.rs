@@ -5,10 +5,52 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::settings::SettingsState;
 use crate::workspace::WorkspaceState;
 
-/// The single origin this build talks to: OAuth login is verified against it, and
-/// so is card sync. `pub(crate)` so `datasets::cards::sync` cannot be pointed
-/// anywhere else by dataset content — those requests carry the bearer token.
-pub(crate) const BASE_URL: &str = "https://lusworkshop.site";
+/// Production origin this build talks to by default: OAuth login is verified
+/// against it, and so is card sync.
+pub(crate) const DEFAULT_BASE_URL: &str = "https://lusworkshop.site";
+
+/// The single hub/auth origin. Defaults to [`DEFAULT_BASE_URL`]; a developer can
+/// point it at a local/staging box by exporting `FMS_BASE_URL` (e.g.
+/// `https://100.124.177.123`). Because [`crate::sync::hub_kind`] classifies an
+/// origin by comparing it to this value, overriding it makes the dev box count as
+/// `HubKind::Website` (Bearer auth, upload, feature-detection) *and* redirects
+/// login / card-sync there — the two things needed to exercise the website path
+/// end-to-end against a dev server. No env var (the shipped default) is byte-for
+/// byte the old compile-time constant. Trailing slashes are trimmed so origin
+/// comparison and `{base}/path` formatting stay consistent.
+pub(crate) fn base_url() -> String {
+    let from_env = std::env::var("FMS_BASE_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty());
+    from_env.unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
+}
+
+/// Dev-only TLS escape hatch. When `FMS_DEV_IGNORE_TLS=1` is set, the returned
+/// builder accepts invalid/self-signed certificates (and skips hostname
+/// verification) so a developer can point `FMS_BASE_URL` + `pc_url` at an HTTPS
+/// box with a self-signed cert. **Unset — the production and mobile default —
+/// leaves verification fully strict.** rustls (`rustls-tls`) uses its own bundled
+/// roots and never reads the OS trust store, so installing the CA in Windows has
+/// no effect on these native reqwest calls; this flag is the supported dev route.
+pub(crate) fn apply_dev_tls(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    if std::env::var("FMS_DEV_IGNORE_TLS").map(|v| v.trim() == "1").unwrap_or(false) {
+        log::warn!("[dev] FMS_DEV_IGNORE_TLS=1 — TLS certificate + hostname verification DISABLED (dev only, never ship enabled)");
+        builder
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true)
+    } else {
+        builder
+    }
+}
+
+/// A `ClientBuilder` with the dev TLS hatch pre-applied ([`apply_dev_tls`]).
+/// Callers still chain their own timeouts and `.build()`. Byte-for-byte the same
+/// as `reqwest::Client::builder()` when `FMS_DEV_IGNORE_TLS` is unset, so the
+/// production/mobile trust path is untouched.
+pub(crate) fn hub_client_builder() -> reqwest::ClientBuilder {
+    apply_dev_tls(reqwest::Client::builder())
+}
 
 /// Deep link scheme used for login callback.
 const DEEP_LINK_SCHEME: &str = "fms-app";
@@ -156,7 +198,7 @@ pub async fn auth_open_login(app: AppHandle) -> Result<String, String> {
     let callback = format!("{}://login", DEEP_LINK_SCHEME);
     let login_url = format!(
         "{}/oauth2/login?desktop_callback={}",
-        BASE_URL,
+        base_url(),
         urlencoding::encode(&callback)
     );
     log::info!("auth_open_login: url={}", login_url);
@@ -197,12 +239,15 @@ pub async fn auth_login_password(
     password: String,
 ) -> Result<AuthUser, String> {
     log::info!("[Auth] login: verifying credentials for '{}'", email);
-    let client = reqwest::Client::new();
+    let base = base_url();
+    let client = apply_dev_tls(reqwest::Client::builder())
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
     let body = serde_json::json!({
         "data": { "Nickname": email, "Email": email, "Password": password }
     });
     let resp = client
-        .post(format!("{}/api/oauth2/signin", BASE_URL))
+        .post(format!("{}/api/oauth2/signin", base))
         .json(&body)
         .send()
         .await
@@ -211,7 +256,7 @@ pub async fn auth_login_password(
             // unknown issuer, DNS, timeout, no crypto provider) is visible in
             // the in-app Logs page, not just reqwest's generic top-level text.
             let detail = err_chain(&e);
-            log::error!("[Auth] login: signin request to {} failed: {}", BASE_URL, detail);
+            log::error!("[Auth] login: signin request to {} failed: {}", base, detail);
             format!("Signin request failed: {}", detail)
         })?;
 
@@ -377,15 +422,17 @@ pub async fn auth_logout(
     let tokens = read_tokens(&settings)?;
 
     if let Some(ref t) = tokens {
-        let client = reqwest::Client::new();
-        let _ = client
-            .post(format!(
-                "{}/api/oauth2/logout?user_id={}",
-                BASE_URL, t.user_id
-            ))
-            .header("Authorization", format!("Bearer {}", t.access_token))
-            .send()
-            .await;
+        if let Ok(client) = apply_dev_tls(reqwest::Client::builder()).build() {
+            let _ = client
+                .post(format!(
+                    "{}/api/oauth2/logout?user_id={}",
+                    base_url(),
+                    t.user_id
+                ))
+                .header("Authorization", format!("Bearer {}", t.access_token))
+                .send()
+                .await;
+        }
     }
 
     delete_tokens(&settings)?;
@@ -398,9 +445,11 @@ pub async fn auth_logout(
 // ---------------------------------------------------------------------------
 
 async fn fetch_user_info(access_token: &str) -> Result<AuthUser, String> {
-    let client = reqwest::Client::new();
+    let client = apply_dev_tls(reqwest::Client::builder())
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
     let resp = client
-        .get(format!("{}/api/oauth2/userinfo", BASE_URL))
+        .get(format!("{}/api/oauth2/userinfo", base_url()))
         .header("Authorization", format!("Bearer {}", access_token))
         .send()
         .await

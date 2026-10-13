@@ -327,7 +327,7 @@ async fn hub_get_json(
     qs: &str,
 ) -> Result<Value, String> {
     let base = hub_base(settings)?;
-    let client = reqwest::Client::builder()
+    let client = crate::auth::hub_client_builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(30))
         .build()
@@ -1031,7 +1031,7 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
         // origin is up. Role/cluster/protocol are LAN concepts — left null.
         hub.role = Some("website".to_string());
         let probe = async {
-            let client = reqwest::Client::builder()
+            let client = crate::auth::hub_client_builder()
                 .connect_timeout(Duration::from_secs(6))
                 .timeout(Duration::from_secs(12))
                 .build()
@@ -1049,7 +1049,7 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
         }
     } else {
         let probe = async {
-            let client = reqwest::Client::builder()
+            let client = crate::auth::hub_client_builder()
                 .connect_timeout(Duration::from_secs(6))
                 .timeout(Duration::from_secs(12))
                 .build()
@@ -1298,7 +1298,7 @@ pub async fn pc_check_status(
         }));
     }
     let result = async {
-        let client = reqwest::Client::builder()
+        let client = crate::auth::hub_client_builder()
             .connect_timeout(Duration::from_secs(8))
             .timeout(Duration::from_secs(15))
             .build()
@@ -1350,7 +1350,7 @@ pub async fn pc_list_datasets(
         return Err("pc_url is not set — use Settings › Discover PC".to_string());
     }
     let result = async {
-        let client = reqwest::Client::builder()
+        let client = crate::auth::hub_client_builder()
             .connect_timeout(Duration::from_secs(8))
             .timeout(Duration::from_secs(20))
             .build()
@@ -1430,7 +1430,7 @@ pub async fn pc_changes_since(
         format!("/api/v1/datasets/{uuid}/changes")
     };
     let qs = build_query(&[("after", after.to_string())]);
-    let client = reqwest::Client::builder()
+    let client = crate::auth::hub_client_builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(30))
         .build()
@@ -1476,7 +1476,7 @@ pub async fn pc_fetch_file(
     let base = hub_base(&settings)?;
     let api_path = "/api/v1/file";
     let qs = build_query(&[("dataset", uuid), ("path", path)]);
-    let client = reqwest::Client::builder()
+    let client = crate::auth::hub_client_builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(120))
         .build()
@@ -1823,7 +1823,7 @@ async fn hub_protocol_version(settings: &SettingsState) -> Option<u32> {
     if super::hub_kind(&base) == super::HubKind::Website {
         return None;
     }
-    let client = reqwest::Client::builder()
+    let client = crate::auth::hub_client_builder()
         .connect_timeout(Duration::from_secs(6))
         .timeout(Duration::from_secs(10))
         .build()
@@ -2529,7 +2529,7 @@ pub async fn pc_pair_start(
         return Err("No PC address — enter or discover the PC address first.".into());
     }
     let ident = ensure_device_identity(&settings)?;
-    let client = reqwest::Client::builder()
+    let client = crate::auth::hub_client_builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(15))
         .build()

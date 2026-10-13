@@ -59,11 +59,12 @@ fn same_origin(a: &str, b: &str) -> bool {
     !a.is_empty() && norm(a) == norm(b)
 }
 
-/// Classify a resolved hub base URL. Only the compile-time website origin
-/// counts as [`HubKind::Website`] — a `pc_url` of anything else keeps the
-/// byte-identical LAN path (dev guide §10.4).
+/// Classify a resolved hub base URL. Only the configured website origin
+/// (`crate::auth::base_url()`, overridable via `FMS_BASE_URL` for dev) counts as
+/// [`HubKind::Website`] — a `pc_url` of anything else keeps the byte-identical
+/// LAN path (dev guide §10.4).
 pub(crate) fn hub_kind(base: &str) -> HubKind {
-    if same_origin(base, crate::auth::BASE_URL) {
+    if same_origin(base, &crate::auth::base_url()) {
         HubKind::Website
     } else {
         HubKind::LanPc
