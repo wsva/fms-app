@@ -1,0 +1,78 @@
+# Run with:
+#   goose run --recipe docs/design/agent/goose_recipe/normalize-read-aloud-texts.yaml --with-streamable-http-extension http://127.0.0.1:35711/mcp
+# Check with:
+#   goose recipe validate docs/design/agent/goose_recipe/normalize-read-aloud-texts.yaml
+# Context budget: the fmsapp extension advertises ~163 tools. Narrow it to just the
+# five this recipe names by adding `available_tools` under the `fmsapp` extension in
+# %APPDATA%\Block\goose\config\config.yaml:
+#   fmsapp:
+#     enabled: true
+#     type: streamable_http
+#     http_url: http://127.0.0.1:35711/mcp
+#     available_tools:
+#       - read_aloud_list
+#       - read_aloud_list_texts
+#       - read_aloud_list_attempts
+#       - read_aloud_score
+#       - read_aloud_save_text
+version: 1.0.0
+title: normalize-read-aloud-texts
+description: Backfill LLM-normalized scoring references for read-aloud texts - spell out numbers/abbreviations so they match what STT transcribes - and keep only the variants that measurably improve a real recorded attempt's score.
+instructions: |-
+  # Normalize Read-Aloud Texts (measurement-gated backfill)
+
+  ## Goal
+  For a read-aloud dataset, produce a `normalized_content` for texts whose raw `content` would score badly against a transcript purely because of *spelling* mismatch - digits ("20" vs the spoken "zwanzig"), ordinals, dates, currency, `%`/`±`/math symbols, and common abbreviations ("vgl.", "usw.", "bzw."). Scoring already prefers `normalized_content` over `content` when it is set, and re-scores stored attempts on read, so a good normalization lifts a text's `best_score` with no re-recording.
+
+  You are the LLM here: you generate the normalized variant yourself. **A normalization earns its place only if it beats the raw text against the user's own recorded transcripts** - `read_aloud_score` is a pure, persist-nothing preview, so this is a real automated quality gate, not a judgement call. A variant that rewords, reorders or "corrects" the text scores *worse* and is rejected by the gate.
+
+  ## Prerequisites
+  - fms-app desktop running; MCP at `http://127.0.0.1:35711/mcp` (see `web_service_get_status` if the port was taken).
+  - A read-aloud dataset uuid from `read_aloud_list`. If the user named none, list the datasets and ask which one (or "all").
+  - This gate needs recorded attempts. A dataset whose texts have no attempts cannot be measured here - see "Texts with no attempts".
+
+  ## Why not the workflow engine
+  Normalization is a coarse, per-text internal loop that lives inside one dataset; the run/resume granularity of the engine does not fit it, and read-aloud has no `verify:` check provider yet (verification is dictation-only). This recipe therefore drives the atomic MCP tools directly and keeps the gate in *how you call them*, not in a state machine.
+
+  ## Workflow
+
+  ### Step 0: Do the numbers actually hurt? (measure before you write)
+  For the dataset, call `read_aloud_list_texts`. For a representative text that has attempts (`attempt_count > 0`), call `read_aloud_list_attempts` and look at whether low-scoring transcripts differ from `content` at number/abbreviation tokens (the `chunks` from step 2 will show this precisely). If transcripts already contain spelled-out words that match `content`, normalization buys nothing - tell the user and stop rather than churning every row.
+
+  ### Step 1: Establish the raw baseline (never trust best_score for this)
+  `read_aloud_list_texts[].best_score` reflects whatever reference is *currently* effective - raw `content`, or a `normalized_content` already set (possibly a bad one). To compare fairly, compute the raw baseline yourself:
+  - For each text, call `read_aloud_list_attempts` to get every `recognized` transcript.
+  - `raw_best` = the highest `score` from `read_aloud_score({ content: text.content, recognized })` over those attempts.
+  Do this with `text.content` explicitly, so a previously stored normalization does not contaminate the baseline.
+
+  ### Step 2: Generate a candidate, then gate it
+  Write one candidate normalization per text under these rules - the **prompt contract**:
+  - Expand ONLY: cardinals, ordinals, dates/times, currency, percentages, units and math symbols (`%` -> `Prozent`, `+/-` -> `plus minus`), and abbreviations *as they are spoken* (`vgl.` -> `vergleiche`, `usw.` -> `und so weiter`, `bzw.` -> `beziehungsweise`, `Dr.` -> `Doktor`).
+  - NEVER: reword, reorder, correct, translate, add or drop content, or change case beyond what reading aloud implies. Punctuation and capitalisation are already ignored by the metric, so leave them alone - changing them is churn with no score effect.
+  - Output the normalized text only, no commentary.
+
+  Gate it before saving:
+  - `candidate_best` = highest `score` from `read_aloud_score({ content: candidate, recognized })` over the *same* attempts used for `raw_best`.
+  - **Save only if `candidate_best > raw_best`.** Equal means the mismatch was not spelling (leave `normalized_content` untouched - writing it would be churn). Lower means the candidate reworded something - discard it, keep the raw text.
+  - Inspect the winning call's `chunks` / counts (hits/substitutions/deletions/insertions, `wer`, `mer`) so you can report *what* the normalization fixed.
+
+  ### Step 3: Save the winner (round-trip the whole row)
+  Take the **exact** text object from `read_aloud_list_texts`, set its `normalized_content` to the candidate (leave every other field - `uuid`, `content`, `title`, `note`, `order_num`, `best_score`, `created_at`, `updated_at` - precisely as it came back), and call `read_aloud_save_text({ dataset_uuid, text })`.
+  - Sending the full row untouched-except-normalization is what keeps the backend's staleness rule happy: because `content` is unchanged, the UPSERT preserves/overwrites `normalized_content` with your value.
+  - After the first save the row is re-scorable: re-read `read_aloud_list_texts` and confirm `best_score` rose to `candidate_best` (the recompute-on-read makes this visible immediately - no re-recording).
+
+  ### Step 4: Report
+  For each text list: raw baseline, gated score, delta, and the tokens the normalization changed; and every text you left alone *with the reason* (no numeric/abbrev mismatch / candidate did not improve / no attempts to measure). Do not silently normalize the whole dataset - the point of the gate is that most texts may correctly need nothing.
+
+  ## Texts with no attempts (unmeasurable)
+  There is no transcript to score against, so the gate cannot run and scoring does not happen yet anyway. Default is to **skip** them. Optionally set a conservative candidate so a future recording benefits, but only when `content` visibly contains digits/abbreviations worth expanding, and label it clearly as unverified in the report - you cannot prove it helps.
+
+  ## Rules
+  - **Never write a normalization the gate did not accept.** An unmeasured edit can *lower* a text's effective score, and because scoring prefers `normalized_content` when set, a bad variant silently degrades every future attempt.
+  - **Removing a normalization is not supported through save.** With `content` unchanged, sending `normalized_content: null` is coalesced back to the stored value - the reset only fires on a content edit. So never nullify; instead overwrite a poor variant with a strictly-better candidate (COALESCE takes your non-null value). If a stored normalization is worse than raw and no candidate beats raw, that row needs a human decision - report it, do not improvise.
+  - **Always pass `dataset_uuid`.** `read_aloud_save_text` needs it to resolve the dataset directory.
+  - **Read-only first.** `read_aloud_list*` and `read_aloud_score` never write; call `read_aloud_score` as often as you like - it is the whole basis of the gate.
+  - **One text at a time**, save after each accepted gate. On a tool error, stop and surface its message (they are written to say what to do next).
+  - **Do not batch-edit `content`.** Any change to `content` resets `normalized_content` to null by design; normalization is done against final text only.
+activities: []
+parameters: []
