@@ -7,7 +7,7 @@ import { MicGlyph } from "@/components/voice/MicGlyph";
 import type { ReadAttempt, ReadAloudSubmitResult, ReadText } from "@/lib/read_aloud/types";
 import { GOOD_SCORE, PASS_SCORE, scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { useRecorder } from "@/components/read_book/useRecorder";
-import { highlightDifferences } from "@/components/read_book/diff";
+import AsrDiff from "@/components/read_aloud/AsrDiff";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 import { isTauri } from "@/lib/tauri";
 import { logError, logInfo } from "@/lib/logger";
@@ -181,9 +181,9 @@ export default function PracticePanel({ datasetUuid, text, onScored }: Props) {
           <div className="text-xs text-text-tertiary">
             XP: +1 at {PASS_SCORE}% or more, +1 more at {GOOD_SCORE}% or more (once per text).
           </div>
-          {/* Diff of transcript vs reference */}
+          {/* Diff of transcript vs reference (rendered from the scoring alignment) */}
           <div className="mt-1 p-2 rounded bg-bg-muted text-text-primary leading-relaxed whitespace-pre-wrap break-words">
-            {highlightDifferences(text.content, result.attempt.recognized)}
+            <AsrDiff summary={result.summary} />
           </div>
           {result.attempt.audio_url && (
             <button

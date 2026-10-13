@@ -7,8 +7,8 @@
 //! `info.json`, a `data.sqlite3` (texts + attempts) and a `media/` folder that
 //! holds every recorded take.
 //!
-//! Scoring reuses the shared Ratcliff-Obershelp `similarity_score` (0-100) from
-//! `textsim`, the same metric used for cue alignment.
+//! Scoring uses the word-alignment ASR metric from `asr_metric` —
+//! `score = WIP × 100` with H/S/D/I counts and alignment chunks (0-100).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,7 +27,7 @@ use crate::datasets::{
     FORMAT_READ_ALOUD, INFO_FILE,
 };
 use crate::settings::SettingsState;
-use crate::datasets::textsim::similarity_score;
+use crate::datasets::asr_metric::{score_asr, score_value, AsrScoreSummary};
 use crate::xp::{xp_award_internal, XpAwardResult};
 
 /// Score thresholds for the scaled XP reward.
@@ -85,7 +85,7 @@ pub struct ReadAttempt {
     pub audio_url: Option<String>,
     /// STT transcript of the recording.
     pub recognized: String,
-    /// Similarity score 0-100 against the reference text.
+    /// WIP-based ASR score 0-100 against the reference text.
     pub score: f64,
     pub created_at: String,
 }
@@ -94,6 +94,9 @@ pub struct ReadAttempt {
 #[derive(Clone, Serialize)]
 pub struct ReadAloudSubmitResult {
     pub score: f64,
+    /// The full scoring picture (WER/MER, H/S/D/I, alignment chunks) for the
+    /// submitted transcript.
+    pub summary: AsrScoreSummary,
     pub attempt: ReadAttempt,
     /// XP awarded for this submission (0 when below threshold or already earned).
     pub xp_awarded: i64,
@@ -375,7 +378,7 @@ pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result
              FROM read_text t ORDER BY t.order_num, t.created_at",
         )
         .map_err(|e| e.to_string())?;
-    let items = stmt
+    let mut items: Vec<ReadText> = stmt
         .query_map([], |row| {
             Ok(ReadText {
                 uuid: row.get(0)?,
@@ -393,6 +396,36 @@ pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
+
+    // Recompute `best_score` from the stored transcripts with the current
+    // metric, so attempts scored under an older scale never surface (the
+    // stored column stays a write-on-submit cache; nothing is migrated).
+    let mut best: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT a.text_uuid, a.recognized, t.content FROM read_attempt a \
+         JOIN read_text t ON t.uuid = a.text_uuid",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        }) {
+            for (text_uuid, recognized, content) in rows.flatten() {
+                let s = score_value(&content, &recognized);
+                let e = best.entry(text_uuid).or_insert(s);
+                if s > *e {
+                    *e = s;
+                }
+            }
+        }
+    }
+    for text in &mut items {
+        if let Some(s) = best.get(&text.uuid) {
+            text.best_score = Some(*s);
+        }
+    }
     Ok(items)
 }
 
@@ -507,21 +540,32 @@ pub async fn read_aloud_list_attempts(
     let conn = open_db(&dir)?;
     let mut stmt = conn
         .prepare(
-            "SELECT uuid, text_uuid, user_id, audio_path, recognized, score, created_at \
-             FROM read_attempt WHERE text_uuid = ?1 ORDER BY created_at DESC",
+            "SELECT a.uuid, a.text_uuid, a.user_id, a.audio_path, a.recognized, a.score, a.created_at, \
+                    t.content \
+             FROM read_attempt a LEFT JOIN read_text t ON t.uuid = a.text_uuid \
+             WHERE a.text_uuid = ?1 ORDER BY a.created_at DESC",
         )
         .map_err(|e| e.to_string())?;
     let items = stmt
         .query_map([&text_uuid], |row| {
             let audio_path: Option<String> = row.get(3)?;
+            let recognized: String = row.get(4)?;
+            let stored_score: f64 = row.get(5)?;
+            // Re-score against the reference text with the current metric so
+            // history is comparable across metric changes; fall back to the
+            // stored value if the text row is gone.
+            let score = row
+                .get::<_, Option<String>>(7)?
+                .map(|content| score_value(&content, &recognized))
+                .unwrap_or(stored_score);
             Ok(ReadAttempt {
                 uuid: row.get(0)?,
                 text_uuid: row.get(1)?,
                 user_id: row.get(2)?,
                 audio_url: resolve_audio_url(&dir, &audio_path),
                 audio_path,
-                recognized: row.get(4)?,
-                score: row.get(5)?,
+                recognized,
+                score,
                 created_at: row.get(6)?,
             })
         })
@@ -628,11 +672,12 @@ pub(crate) fn count_texts(settings: &SettingsState, dataset_uuid: &str) -> usize
         .unwrap_or(0)
 }
 
-/// Pure similarity score (0-100) between a reference text and a transcript.
-/// Exposed so the frontend/MCP can preview a score without persisting anything.
+/// Pure ASR score (WIP × 100) plus the word-level alignment picture between a
+/// reference text and a transcript. Exposed so the frontend/MCP can preview a
+/// score and render the diff without persisting anything.
 #[tauri::command]
-pub async fn read_aloud_score(content: String, recognized: String) -> Result<f64, String> {
-    Ok(similarity_score(&content, &recognized))
+pub async fn read_aloud_score(content: String, recognized: String) -> Result<AsrScoreSummary, String> {
+    Ok(score_asr(&content, &recognized))
 }
 
 /// Submit a recorded take: persist the audio, score it against the reference
@@ -665,7 +710,8 @@ pub async fn read_aloud_submit(
         .map_err(|_| format!("Text {} not found in dataset", text_uuid))?
     };
 
-    let score = similarity_score(&content, &recognized);
+    let summary = score_asr(&content, &recognized);
+    let score = summary.score;
 
     // Persist the recording.
     let attempt_uuid = Uuid::new_v4().to_string();
@@ -746,6 +792,7 @@ pub async fn read_aloud_submit(
 
     Ok(ReadAloudSubmitResult {
         score,
+        summary,
         attempt,
         xp_awarded: total_awarded,
         lifetime_xp,

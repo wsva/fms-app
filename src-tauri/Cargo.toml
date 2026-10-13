@@ -114,6 +114,10 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 symphonia = { version = "0.5", features = ["all", "opt-simd"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
+# NFC normalization for word-level ASR scoring (datasets/asr_metric.rs): STT
+# transcripts and reference texts must compare equal regardless of Unicode
+# form. Already in the tree transitively, so this adds no new fetches.
+unicode-normalization = "0.1"
 log = { version = "0.4", features = ["std"] }
 lazy_static = "1.4"
 tauri-plugin-fs = "2.5.2"

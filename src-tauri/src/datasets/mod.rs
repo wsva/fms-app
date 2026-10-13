@@ -11,6 +11,7 @@
 //! still lives in this file next to the dictation pipeline — split it out as a
 //! follow-up now that the descriptor has left.
 
+pub(crate) mod asr_metric;
 pub(crate) mod book;
 pub(crate) mod cards;
 pub(crate) mod dictation;

@@ -312,13 +312,15 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Attempt deleted"}).to_string())
     }
 
-    #[tool(name = "read_aloud_score", description = "Compute the similarity score (0-100) between a reference text and a recognized transcript, without persisting anything. Score >= 60 passes.")]
+    #[tool(name = "read_aloud_score", description = "Compute the WIP-based ASR score (0-100) and the word-level alignment (wer, mer, hits/substitutions/deletions/insertions, chunks) between a reference text and a recognized transcript, without persisting anything. Score >= 60 passes. Use the chunks to see exactly which words were misread, inserted, or skipped. Also returned inside read_aloud_submit results.")]
     async fn read_aloud_score(&self, Parameters(param): Parameters<ReadAloudScoreParam>) -> Result<String, String> {
-        let score = datasets::read_aloud::read_aloud_score(param.content, param.recognized).await?;
-        Ok(serde_json::json!({"score": score, "passed": score >= 60.0}).to_string())
+        let summary = datasets::read_aloud::read_aloud_score(param.content, param.recognized).await?;
+        let mut v = serde_json::to_value(&summary).map_err(|e| format!("Failed to serialize summary: {}", e))?;
+        v["passed"] = serde_json::json!(v.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0) >= 60.0);
+        Ok(serde_json::to_string_pretty(&v).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_submit", description = "Submit a reading attempt: stores the (optional) recording, scores the recognized transcript against the reference text, saves the attempt, and awards scaled XP (1 XP at score >= 60, +1 more at >= 80). Returns the score, saved attempt, and XP awarded.")]
+    #[tool(name = "read_aloud_submit", description = "Submit a reading attempt: stores the (optional) recording, scores the recognized transcript against the reference text with the WIP-based ASR metric, saves the attempt, and awards scaled XP (1 XP at score >= 60, +1 more at >= 80). Returns the score, the full scoring summary (alignment chunks included), the saved attempt, and XP awarded.")]
     async fn read_aloud_submit(&self, Parameters(param): Parameters<ReadAloudSubmitParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_submit: dataset={}, text={}", param.dataset_uuid, param.text_uuid);
         let settings = self.app.state::<SettingsState>();
