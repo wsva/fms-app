@@ -236,6 +236,14 @@ impl DatasetMcpServer {
         serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
     }
 
+    #[tool(name = "dataset_evict", description = "Evict an adopted (downloaded) dataset to reclaim device storage: deletes the read-only base directory but keeps its provenance, so practice progress and XP survive and a re-download rejoins them. Refuses a copy that is not an adopted download (a writable local dataset, or an edited overlay of a base) with an actionable message. Returns {evicted, uuid, freed_bytes}.")]
+    async fn dataset_evict(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_evict: uuid={}", param.uuid);
+        let settings = self.app.state::<SettingsState>();
+        let result = crate::sync::client::evict_dataset_inner(&settings, &param.uuid)?;
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
     #[tool(name = "dataset_read_file", description = "Read a file from a dataset directory (e.g. info.json, a VTT subtitle, book.txt)")]
     async fn dataset_read_file(
         &self,

@@ -213,6 +213,28 @@ fn check_cluster_contract(v: &Value, errs: &mut Vec<String>) {
     }
 }
 
+/// Assert the versioned registry-read contract (INV-8/INV-20): the exact key set
+/// of `GET /api/v1/registry/{uuid}/manifest`, and that a host with no `/cluster`
+/// page default-denies `registry_reads` (so adoption falls back to the live
+/// route). Drives [`conformance::sample_registry_manifest_json`], no socket.
+fn check_registry_contract(v: &Value, errs: &mut Vec<String>) {
+    let manifest = conformance::sample_registry_manifest_json();
+    let expect = &v["expect"];
+
+    let got = key_set(&manifest);
+    let want = expected_keys(expect, "keys");
+    if got != want {
+        errs.push(format!("registry manifest keys {got:?} != expected {want:?}"));
+    }
+    if let Some(feature) = expect.get("denied_feature").and_then(|s| s.as_str()) {
+        if conformance::host_without_cluster_advertises(feature) {
+            errs.push(format!(
+                "a host with no /cluster page must not advertise {feature:?} (default-deny, INV-20)"
+            ));
+        }
+    }
+}
+
 fn run_vector(v: &Value) -> Vec<String> {
     let mut errs = Vec::new();
     match v.get("check").and_then(|c| c.as_str()).unwrap_or("") {
@@ -221,6 +243,7 @@ fn run_vector(v: &Value) -> Vec<String> {
         "prune_forces_resync" => check_prune_forces_resync(v, &mut errs),
         "features" => check_features(v, &mut errs),
         "cluster_contract" => check_cluster_contract(v, &mut errs),
+        "registry_contract" => check_registry_contract(v, &mut errs),
         other => errs.push(format!("unknown check {other:?}")),
     }
     errs

@@ -96,3 +96,29 @@ pub fn sample_cluster_json() -> Value {
     };
     serde_json::to_value(info).expect("conformance: serialize cluster")
 }
+
+/// A sample `GET /api/v1/registry/{uuid}/manifest?version=N` payload — the
+/// versioned-read contract the adoption flow deserializes when a host advertises
+/// `registry_reads` (sync-v2.md §7, §8.4). Pins the shape without a socket; the
+/// live cross-host check activates when the website serves the route (phase 3
+/// website-side / 7a). `current_version` is what the client records as the
+/// adopted copy's `published_version`.
+pub fn sample_registry_manifest_json() -> Value {
+    serde_json::json!({
+        "uuid": "ds-conformance",
+        "current_version": 3,
+        "overall_hash": "a".repeat(64),
+        "row_hash": "b".repeat(64),
+        "files": {},
+    })
+}
+
+/// Whether a host that served **no** `/cluster` page advertises `feature`
+/// (default-deny, INV-20). The `registry_contract` vector asserts this is false
+/// for `registry_reads`, documenting that versioned reads stay off until a host
+/// opts in — so today's website adoption uses the live `/datasets` route
+/// unchanged. Delegates to the same [`crate::sync::client::advertises`] the round
+/// gates on.
+pub fn host_without_cluster_advertises(feature: &str) -> bool {
+    crate::sync::client::advertises(&None, feature)
+}

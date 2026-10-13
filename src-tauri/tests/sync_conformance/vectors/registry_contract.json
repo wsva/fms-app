@@ -1,0 +1,10 @@
+{
+  "name": "registry_contract",
+  "invariant": "INV-8 / INV-20 — GET /api/v1/registry/{uuid}/manifest?version=N is the pinned, version-addressed read a client adopts from; a host that advertises no /cluster page serves no registry",
+  "check": "registry_contract",
+  "notes": "Pins the versioned-read contract the adoption flow deserializes when a host advertises 'registry_reads' in /cluster features[]: 'current_version' is recorded into dataset_sync_state.published_version (the immutable version an adopted copy is stamped against, INV-8), and 'overall_hash'/'row_hash'/'files' drive the install + short-circuit exactly as the live /datasets manifest does. The harness also asserts host_without_cluster_advertises('registry_reads') == false — the default-deny gate (INV-20) means today's website, which serves no /cluster page, falls back to the live /api/v1/datasets/{uuid}/manifest|snapshot route unchanged; only the read route and published_version differ, never the install location or provenance. The cross-host parity check activates when the website grows the versioned registry route (phase 3 website-side / 7a).",
+  "expect": {
+    "keys": ["uuid", "current_version", "overall_hash", "row_hash", "files"],
+    "denied_feature": "registry_reads"
+  }
+}

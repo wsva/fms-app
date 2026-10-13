@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
-import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog, Upload, LogIn } from "lucide-react";
+import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog, Upload, LogIn, Archive } from "lucide-react";
 import { logError } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
@@ -435,6 +435,36 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     }
   }
 
+  // Free the disk space of an adopted (website-downloaded) copy without
+  // unsubscribing: the read-only base under download/ is removed and the copy
+  // flips to "Not downloaded" (progress/XP in the app DB are untouched, INV-9),
+  // so the existing Download button re-pulls it on demand. The backend refuses a
+  // copy that lives in a writable location, or one with an edited overlay on top
+  // (detach the overlay first) — its actionable message is surfaced verbatim.
+  async function handleEvict(uuid: string, name: string) {
+    if (busyUuid) return;
+    if (
+      !confirm(
+        `Evict the downloaded copy of "${name}"? This frees the disk space and keeps it re-downloadable; your progress is untouched.`
+      )
+    ) {
+      return;
+    }
+    setBusyUuid(uuid);
+    setMessage("");
+    try {
+      const res = await invoke<{ evicted: boolean; freed_bytes: number }>("dataset_evict", { uuid });
+      const mb = ((res.freed_bytes ?? 0) / (1024 * 1024)).toFixed(1);
+      setMessage(`Evicted “${name}” — freed ${mb} MB. Re-download any time.`);
+    } catch (e) {
+      setMessage(`Evict failed: ${String(e)}`);
+    } finally {
+      setBusyUuid("");
+      loadLocalState();
+      loadStatus();
+    }
+  }
+
   // Drop a local copy the hub no longer offers (unsubscribe). Guarded so a
   // dataset still listed by a reachable hub cannot be deleted.
   async function handleForgetDataset(uuid: string, name: string) {
@@ -586,6 +616,22 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
               >
                 <Download size={14} />
                 {busyUuid === ds.uuid ? "Downloading…" : "Download"}
+              </button>
+            )}
+            {/* Evict frees the disk space of an adopted website copy (read-only
+                base under download/) without unsubscribing — it flips to "Not
+                downloaded" and the Download button above re-pulls it. Only the
+                website origin adopts into the download root; a LAN mirror stays
+                writable and is deleted from the Datasets page instead. */}
+            {state === "downloaded" && isWebsite && (
+              <button
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50 shrink-0"
+                onClick={() => handleEvict(ds.uuid, ds.name)}
+                disabled={!!busyUuid}
+                title="Free disk space — keeps it re-downloadable, progress untouched"
+              >
+                <Archive size={14} />
+                {busyUuid === ds.uuid ? "Evicting…" : "Evict"}
               </button>
             )}
           </div>

@@ -382,6 +382,7 @@ pub fn run() {
             simple_words::simple_words_reload,
             // PC sync + discovery (available on desktop too, for testing).
             sync::client::dataset_sync_snapshot,
+            sync::client::dataset_evict,
             sync::client::sync_run_round,
             sync::client::sync_backfill_history,
             sync::client::writeback_flush,
@@ -750,6 +751,7 @@ macro_rules! mobile_invoke_handler {
             simple_words::simple_words_reload,
             // PC sync + discovery client.
             sync::client::dataset_sync_snapshot,
+            sync::client::dataset_evict,
             sync::client::sync_run_round,
             sync::client::sync_backfill_history,
             sync::client::writeback_flush,

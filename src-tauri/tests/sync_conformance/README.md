@@ -40,6 +40,7 @@ Drop a new `vectors/<name>.json`. The runner dispatches on `check`:
 | `prune_forces_resync`   | INV-5 a delete is never lost to retention  | `scope`, `seed`, `prune.keep_days`, `after`, `expect.{seed_op,resync_required}` |
 | `features`              | INV-20 scopes a host advertises            | `expect.features`                             |
 | `cluster_contract`      | INV-12/INV-20 `/cluster` payload shape     | `expect.{keys,features}`                      |
+| `registry_contract`     | INV-8/INV-20 versioned registry read shape | `expect.{keys,denied_feature}`                |
 
 Common fields:
 
@@ -60,3 +61,15 @@ the advertised `features[]` (`features`), both driven by the same
 desktop-only: there is no website backend and no cross-host parity check yet.
 Those land in phase 7a, when the website serves the journal and must pass these
 same vectors unchanged.
+
+## Scope for phase 3 (registry adoption)
+
+`registry_contract` pins the versioned registry read
+(`GET /api/v1/registry/{uuid}/manifest?version=N`) the adoption flow
+deserializes — via `conformance::sample_registry_manifest_json`, no socket — and
+asserts the default-deny gate: a host with no `/cluster` page does not advertise
+`registry_reads`, so adoption falls back to the live `/api/v1/datasets/{uuid}`
+route unchanged (only the read route and `published_version` differ). It is
+still a shape + gate check, not a cross-host parity check: the live route
+activates when the website serves the versioned registry endpoint and advertises
+`registry_reads` (phase 3 website-side / 7a).

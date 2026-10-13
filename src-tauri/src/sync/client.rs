@@ -365,6 +365,29 @@ fn type_root(settings: &SettingsState, dataset_type: &str) -> std::path::PathBuf
     settings.datasets_dir().join(dataset_type)
 }
 
+/// Where a snapshot download installs, and the provenance it carries, decided by
+/// the *kind* of the connected host (sync-v2.md §6.1, §8.4):
+/// * the website is a **registry** — adopt into the read-only download root under
+///   `upstream_kind = "registry"` (a pinned copy, never a mirror of a cluster);
+/// * a LAN PC is the **cluster authority** — mirror into the writable type root
+///   under `upstream_kind = "desktop_hub"`.
+/// Pure path/label selection (no host I/O), so it is unit-testable.
+fn adoption_target(
+    settings: &SettingsState,
+    base: &str,
+    dataset_type: &str,
+) -> (std::path::PathBuf, &'static str) {
+    match super::hub_kind(base) {
+        super::HubKind::Website => {
+            let ty = dataset_type
+                .parse::<datasets::DatasetType>()
+                .unwrap_or(datasets::DatasetType::Dictation);
+            (datasets::download_root(settings, ty), "registry")
+        }
+        super::HubKind::LanPc => (type_root(settings, dataset_type), "desktop_hub"),
+    }
+}
+
 fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS writeback_queue (
@@ -833,8 +856,21 @@ pub async fn dataset_sync_snapshot(
     let base = hub_base(&settings)?;
     let client = reqwest::Client::new();
 
+    // Capability negotiation (sync-v2.md §7): a website host that advertises
+    // `registry_reads` serves the pinned, per-version registry routes; anything
+    // else (a LAN hub, or today's website) falls back to the live dataset routes.
+    // The install location and provenance are decided by host kind below either
+    // way — only the read route and the recorded `published_version` differ.
+    let cluster = fetch_cluster(&settings).await;
+    let registry_reads =
+        super::hub_kind(&base) == super::HubKind::Website && advertises(&cluster, "registry_reads");
+
     // 1. Manifest -> compare hash.
-    let api_path = format!("/api/v1/datasets/{uuid}/manifest");
+    let api_path = if registry_reads {
+        format!("/api/v1/registry/{uuid}/manifest")
+    } else {
+        format!("/api/v1/datasets/{uuid}/manifest")
+    };
     let mreq = hub_request(
         client.get(format!("{base}{api_path}")),
         &settings,
@@ -855,6 +891,10 @@ pub async fn dataset_sync_snapshot(
     // Which local root to unpack into; the PC reports it in the manifest.
     // Fall back to "dictation" for older PCs that predate the field.
     let dataset_type = m["dataset_type"].as_str().unwrap_or("dictation").to_string();
+    // The pinned version a registry read resolved to (INV-8); None on the live
+    // route, which is not version-addressed.
+    let published_version: Option<i64> =
+        if registry_reads { m["current_version"].as_i64() } else { None };
 
     let stored: Option<String> = {
         let conn = datasets::dictation::open_app_db(&settings)?;
@@ -876,11 +916,12 @@ pub async fn dataset_sync_snapshot(
     }
 
     // 2. Always flush local changes before replacing the dataset dir.
-    let cluster = fetch_cluster(&settings).await;
     let _ = writeback_flush_inner(&settings, &cluster).await;
 
-    // 3. Prepare temp paths under <datasets>/<type>.
-    let root = type_root(&settings, &dataset_type);
+    // 3. Prepare temp paths under the install root the host kind selects: the
+    //    read-only download root for a registry adoption (website), the writable
+    //    type root for a cluster mirror (LAN hub).
+    let (root, upstream_kind) = adoption_target(&settings, &base, &dataset_type);
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     let tmp_dir = root.join(format!("{uuid}.tmp"));
     let final_dir = root.join(&uuid);
@@ -889,14 +930,29 @@ pub async fn dataset_sync_snapshot(
     let _ = std::fs::remove_file(&part);
     std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
 
-    // 4. Stream the tar.gz to disk, emitting progress.
-    let snap_path = format!("/api/v1/datasets/{uuid}/snapshot");
+    // 4. Stream the tar.gz to disk, emitting progress. A registry read pins the
+    //    snapshot to the version the manifest resolved to, so the bytes and the
+    //    `published_version` recorded below can never drift apart (INV-8).
+    let snap_path = if registry_reads {
+        format!("/api/v1/registry/{uuid}/snapshot")
+    } else {
+        format!("/api/v1/datasets/{uuid}/snapshot")
+    };
+    let snap_qs = match published_version {
+        Some(v) if registry_reads => format!("version={v}"),
+        _ => String::new(),
+    };
+    let snap_url = if snap_qs.is_empty() {
+        format!("{base}{snap_path}")
+    } else {
+        format!("{base}{snap_path}?{snap_qs}")
+    };
     let sreq = hub_request(
-        client.get(format!("{base}{snap_path}")),
+        client.get(snap_url),
         &settings,
         "GET",
         &snap_path,
-        "",
+        &snap_qs,
         b"",
     )?;
     let resp = sreq.send().await.map_err(|e| e.to_string())?;
@@ -960,19 +1016,22 @@ pub async fn dataset_sync_snapshot(
     let _ = std::fs::remove_file(&part);
 
     // 7. Record sync state (with the incremental cursor this snapshot carries)
-    //    and stamp provenance from the connected host (sync-v2.md §6.1). A
-    //    snapshot is a full re-establishment of the copy, so it is the one
-    //    place where overwriting `upstream_kind` / `upstream_origin` is safe:
-    //    the bytes on disk now came from *this* host and no other.
-    let (upstream_kind, upstream_origin) = upstream_of(&base);
+    //    and stamp provenance (sync-v2.md §6.1). `upstream_kind` came from
+    //    `adoption_target` — `registry` for a website adoption, `desktop_hub` for
+    //    a LAN mirror; the origin is the connected host either way. A snapshot is
+    //    a full re-establishment of the copy, so it is the one place where
+    //    overwriting provenance is safe: the bytes on disk now came from *this*
+    //    host and no other. `published_version` is the pinned registry version
+    //    (NULL on the live route).
+    let upstream_origin = upstream_of(&base).1;
     {
         let conn = datasets::dictation::open_app_db(&settings)?;
         ensure_sync_tables(&conn)?;
         conn.execute(
             "INSERT OR REPLACE INTO dataset_sync_state \
              (dataset_uuid, overall_hash, synced_at, bytes, file_count, \"cursor\", \
-              upstream_kind, upstream_origin, availability) \
-             VALUES (?1, ?2, datetime('now'), ?3, ?4, ?5, ?6, ?7, \
+              upstream_kind, upstream_origin, published_version, availability) \
+             VALUES (?1, ?2, datetime('now'), ?3, ?4, ?5, ?6, ?7, ?8, \
                      COALESCE((SELECT availability FROM dataset_sync_state WHERE dataset_uuid = ?1), 'listed'))",
             params![
                 &uuid,
@@ -982,6 +1041,7 @@ pub async fn dataset_sync_snapshot(
                 snapshot_seq,
                 upstream_kind,
                 upstream_origin,
+                published_version,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -998,6 +1058,67 @@ pub async fn dataset_sync_snapshot(
         bytes: received,
         file_count,
     })
+}
+
+/// Evict an adopted (download-root) dataset to reclaim device storage (§16.4).
+///
+/// Deletes the read-only base directory but *keeps* its provenance row
+/// (`upstream_kind`/`upstream_origin`, `published_version`, `availability`) with
+/// an empty `overall_hash` — the sentinel the Status surface reads as "not on
+/// device". Progress and XP live in the app DB, never in the directory (INV-9),
+/// so they survive untouched and a re-download ([`dataset_sync_snapshot`]) rejoins
+/// them. Refuses anything that is not an adopted base: a writable local dataset,
+/// or an edited overlay — the read resolver returns the overlay (not under the
+/// download root), so this never pulls a base out from under an overlay.
+pub(crate) fn evict_dataset_inner(settings: &SettingsState, uuid: &str) -> Result<Value, String> {
+    let (dir, _ty) = datasets::find_dataset_dir_typed(settings, uuid)?;
+    if !datasets::is_under_download_root(settings, &dir) {
+        return Err(
+            "only adopted (downloaded) datasets can be evicted; this copy lives in a writable \
+             location — delete it from the Datasets page, or, if it is an edited overlay of a \
+             downloaded base, detach the overlay first (dataset_layer_detach)"
+                .to_string(),
+        );
+    }
+    // The download size on record is the freed-space figure we report.
+    let freed_bytes: i64 = {
+        let conn = datasets::dictation::open_app_db(settings)?;
+        ensure_sync_tables(&conn)?;
+        conn.query_row(
+            "SELECT COALESCE(bytes, 0) FROM dataset_sync_state WHERE dataset_uuid = ?1",
+            params![uuid],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    };
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("evict failed: {e}"))?;
+    // Clear the on-disk facts, keep provenance. An empty `overall_hash` is how
+    // `sync_status_detail` reports "not on device", and a re-download restores
+    // the rest via INSERT OR REPLACE.
+    {
+        let conn = datasets::dictation::open_app_db(settings)?;
+        ensure_sync_tables(&conn)?;
+        let _ = conn.execute(
+            "UPDATE dataset_sync_state \
+             SET overall_hash = '', bytes = 0, file_count = 0, \"cursor\" = NULL, \
+                 synced_at = datetime('now') \
+             WHERE dataset_uuid = ?1",
+            params![uuid],
+        );
+    }
+    log::info!("[sync] evicted adopted dataset {uuid} ({freed_bytes} bytes freed)");
+    Ok(json!({ "evicted": true, "uuid": uuid, "freed_bytes": freed_bytes }))
+}
+
+/// Evict an adopted dataset to reclaim device storage (command twin of
+/// [`evict_dataset_inner`]). Progress and XP are kept; re-download with
+/// [`dataset_sync_snapshot`].
+#[tauri::command]
+pub async fn dataset_evict(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+) -> Result<Value, String> {
+    evict_dataset_inner(&settings, &uuid)
 }
 
 /// Upload all pending writeback changes to the PC.
@@ -1335,6 +1456,10 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
         let cursor = entry.and_then(|e| e.cursor);
         let state = match entry {
             None => "not_downloaded",
+            // An evicted adoption keeps its provenance row but clears the hash:
+            // no bytes on device, so it reports exactly like a never-downloaded
+            // dataset and re-downloads the same way. See `dataset_evict`.
+            Some(e) if e.overall_hash.is_empty() => "not_downloaded",
             Some(_) if cursor.is_none() => "needs_resync",
             Some(_) => "downloaded",
         };
@@ -1938,12 +2063,7 @@ fn prune_local_dataset(
         );
         return PruneOutcome::SkippedProvenance;
     }
-    for ty in ["dictation", "card", "book", "read_aloud", "wiki"] {
-        let dir = type_root(settings, ty).join(uuid);
-        if dir.exists() {
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-    }
+    remove_dataset_dirs(settings, uuid);
     let _ = conn.execute("DELETE FROM dataset_sync_state WHERE dataset_uuid = ?1", params![uuid]);
     PruneOutcome::Deleted
 }
@@ -1953,13 +2073,26 @@ fn prune_local_dataset(
 /// a foreign catalog* from deleting a copy; an explicit user action
 /// ([`sync_forget_dataset`]) is a different question and bypasses the guard.
 fn remove_local_dataset_unchecked(settings: &SettingsState, conn: &Connection, uuid: &str) {
+    remove_dataset_dirs(settings, uuid);
+    let _ = conn.execute("DELETE FROM dataset_sync_state WHERE dataset_uuid = ?1", params![uuid]);
+}
+
+/// Remove every on-disk copy of `uuid`: each writable type root *and* the
+/// read-only download root, so an adopted base cannot survive a prune or an
+/// explicit forget. Best-effort — a missing directory is not an error.
+fn remove_dataset_dirs(settings: &SettingsState, uuid: &str) {
     for ty in ["dictation", "card", "book", "read_aloud", "wiki"] {
         let dir = type_root(settings, ty).join(uuid);
         if dir.exists() {
             let _ = std::fs::remove_dir_all(&dir);
         }
+        if let Ok(dt) = ty.parse::<datasets::DatasetType>() {
+            let dl = datasets::download_root(settings, dt).join(uuid);
+            if dl.exists() {
+                let _ = std::fs::remove_dir_all(&dl);
+            }
+        }
     }
-    let _ = conn.execute("DELETE FROM dataset_sync_state WHERE dataset_uuid = ?1", params![uuid]);
 }
 
 /// Where a card dataset's website round trip should go, decided by provenance
@@ -2181,7 +2314,7 @@ async fn fetch_cluster(settings: &SettingsState) -> Option<super::ClusterInfo> {
 
 /// Whether `cluster` advertises `feature`. A host that served no `/cluster` page
 /// (`None`) advertises nothing — default-deny (INV-20).
-fn advertises(cluster: &Option<super::ClusterInfo>, feature: &str) -> bool {
+pub(crate) fn advertises(cluster: &Option<super::ClusterInfo>, feature: &str) -> bool {
     cluster
         .as_ref()
         .map(|c| c.features.iter().any(|f| f == feature))
@@ -3225,6 +3358,15 @@ mod tests {
         .unwrap();
     }
 
+    /// Create a minimal dataset directory (just a valid `info.json`) at `dir`, so
+    /// `find_dataset_dir_typed` resolves it. Mirrors what a snapshot install
+    /// leaves on disk for the resolver/eviction/fork tests below.
+    fn write_dataset(dir: &std::path::Path, uuid: &str, ty: datasets::DatasetType, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let info = datasets::info::DatasetInfo::new(uuid.to_string(), ty, "test-v1", name.to_string());
+        datasets::info::write_info(dir, &info).unwrap();
+    }
+
     // -- migration ----------------------------------------------------------
 
     #[test]
@@ -3553,5 +3695,152 @@ mod tests {
             back.features,
             vec!["dataset_journal".to_string(), "app_journal".to_string()]
         );
+    }
+
+    // -- phase-3 registry adoption (sync-v2.md §6.1 / §8.4 / §16.4) ----------
+
+    #[test]
+    fn adoption_target_website_adopts_into_download_root() {
+        let (settings, dir) = temp_settings("adopt-web");
+        let website = crate::auth::base_url();
+        let (root, kind) = adoption_target(&settings, &website, "dictation");
+        assert_eq!(kind, "registry", "a website download is a registry adoption");
+        assert_eq!(
+            root,
+            datasets::download_root(&settings, datasets::DatasetType::Dictation),
+            "adoption installs under the read-only download root"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adoption_target_lan_mirrors_into_type_root() {
+        let (settings, dir) = temp_settings("adopt-lan");
+        let (root, kind) = adoption_target(&settings, "http://192.168.1.50:8756", "dictation");
+        assert_eq!(kind, "desktop_hub", "a LAN pull is a cluster mirror");
+        assert_eq!(
+            root,
+            type_root(&settings, "dictation"),
+            "a mirror installs into the writable type root"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_skips_registry_adoption_against_website_catalog() {
+        let (settings, dir) = temp_settings("prune-registry");
+        let uuid = "ds-adopted";
+        let website = crate::auth::base_url();
+        let (_, origin) = upstream_of(&website);
+        let base = datasets::download_root(&settings, datasets::DatasetType::Dictation).join(uuid);
+        write_dataset(&base, uuid, datasets::DatasetType::Dictation, "Adopted");
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        insert_state(&conn, uuid, "registry", &origin, "listed");
+        // The website round reports itself as `cloud_hub`; a `registry` adoption
+        // never matches, so absence from the visibility-filtered catalog is not
+        // deletion (INV-7). This is the phase-1 SkippedProvenance floor, extended
+        // to the phase-3 registry kind.
+        let out = prune_local_dataset(&settings, &conn, uuid, ("cloud_hub", &origin));
+        assert_eq!(out, PruneOutcome::SkippedProvenance);
+        assert!(base.exists(), "an adopted registry copy survives catalog absence");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removal_sweeps_download_root_copy() {
+        let (settings, dir) = temp_settings("sweep-download");
+        let uuid = "ds-sweep";
+        // An adopted base lives under the download root, which the old sweep
+        // (type roots only) would have missed — §3.
+        let base = datasets::download_root(&settings, datasets::DatasetType::Dictation).join(uuid);
+        write_dataset(&base, uuid, datasets::DatasetType::Dictation, "Sweep");
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        insert_state(&conn, uuid, "registry", "http://website", "listed");
+        remove_local_dataset_unchecked(&settings, &conn, uuid);
+        assert!(!base.exists(), "an adopted download-root copy is swept on removal");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dataset_sync_state WHERE dataset_uuid = ?1", params![uuid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn evict_refuses_a_writable_copy() {
+        let (settings, dir) = temp_settings("evict-refuse");
+        let uuid = "ds-writable";
+        // A mirror in the writable type root is not an adoption — eviction must
+        // refuse it and point at the Datasets page (§16.4).
+        let target = type_root(&settings, "dictation").join(uuid);
+        write_dataset(&target, uuid, datasets::DatasetType::Dictation, "Writable");
+        let err = evict_dataset_inner(&settings, uuid).unwrap_err();
+        assert!(err.contains("adopted"), "error should explain only adopted copies evict: {err}");
+        assert!(target.exists(), "a refused copy is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn evict_deletes_base_and_clears_hash_keeping_provenance() {
+        let (settings, dir) = temp_settings("evict-ok");
+        let uuid = "ds-evict";
+        let base = datasets::download_root(&settings, datasets::DatasetType::Dictation).join(uuid);
+        write_dataset(&base, uuid, datasets::DatasetType::Dictation, "Evict");
+        {
+            let conn = datasets::dictation::open_app_db(&settings).unwrap();
+            ensure_sync_tables(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO dataset_sync_state \
+                 (dataset_uuid, overall_hash, synced_at, bytes, file_count, \
+                  upstream_kind, upstream_origin, published_version, availability) \
+                 VALUES (?1, 'abc', datetime('now'), 4096, 3, 'registry', 'http://website', 7, 'listed')",
+                params![uuid],
+            )
+            .unwrap();
+        }
+        let out = evict_dataset_inner(&settings, uuid).unwrap();
+        assert_eq!(out["evicted"], json!(true));
+        assert_eq!(out["freed_bytes"], json!(4096), "the recorded size is the freed figure");
+        assert!(!base.exists(), "the adopted base directory is removed");
+        // The row survives with provenance but an empty hash — the sentinel the
+        // Status surface reads as "not on device"; progress/XP live in the app DB
+        // and are untouched (INV-9).
+        let conn = datasets::dictation::open_app_db(&settings).unwrap();
+        let (hash, kind, pv): (String, String, Option<i64>) = conn
+            .query_row(
+                "SELECT overall_hash, upstream_kind, published_version \
+                 FROM dataset_sync_state WHERE dataset_uuid = ?1",
+                params![uuid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(hash, "", "eviction clears the hash so Status reports not-downloaded");
+        assert_eq!(kind, "registry", "provenance is kept");
+        assert_eq!(pv, Some(7), "published_version is kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_dataset_dir_write_forks_download_base_to_overlay() {
+        let (settings, dir) = temp_settings("fork-overlay");
+        let uuid = "ds-fork";
+        let base = datasets::download_root(&settings, datasets::DatasetType::Dictation).join(uuid);
+        write_dataset(&base, uuid, datasets::DatasetType::Dictation, "Forkable");
+        // The approved edit policy: a write resolves to a writable overlay, never
+        // the read-only base...
+        let overlay = datasets::find_dataset_dir_write(&settings, uuid).unwrap();
+        assert!(
+            !datasets::is_under_download_root(&settings, &overlay),
+            "the write target is outside the read-only download root"
+        );
+        assert!(
+            overlay.starts_with(type_root(&settings, "dictation")),
+            "the overlay lands in the writable type root: {}",
+            overlay.display()
+        );
+        // ...and the base stays pristine and re-downloadable.
+        assert!(base.join("info.json").exists(), "the base is left intact");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
