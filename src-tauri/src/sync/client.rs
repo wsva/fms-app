@@ -1820,7 +1820,7 @@ async fn apply_change(
     use crate::datasets::book::{BookChapter, BookSentence, BookSentenceWord};
     use crate::datasets::cards::{Card, Tag};
     use crate::datasets::dictation::{ListenCue, ListenDictation};
-    use crate::datasets::read_aloud::{ReadAttempt, ReadText};
+    use crate::datasets::read_aloud::ReadText;
     let ds = dataset_uuid.to_string();
     let str_field = |k: &str| -> Result<String, String> {
         payload
@@ -1943,16 +1943,14 @@ async fn apply_change(
             let uuid = str_field("uuid")?;
             crate::datasets::read_aloud::read_aloud_delete_text(settings.clone(), ds, uuid).await.map(|_| true)
         }
+        // Attempts are per-user events in the app DB, applied by keeping the
+        // event the author sent (INSERT OR IGNORE) — never by rewriting the
+        // dataset. `@app` passes no dataset, so it is read from the payload.
         "read_attempt_save" => {
-            let mut attempt: ReadAttempt = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
-            // Per-user history: rebind to this device's identity, mirroring the
-            // hub's `dictation` rule rather than trusting the payload.
-            attempt.user_id = write_identity.to_string();
-            crate::datasets::read_aloud::save_attempt_row(settings.inner(), &ds, &attempt).map(|_| true)
+            crate::datasets::read_aloud::apply_remote_save(settings.inner(), &ds, payload, write_identity)
         }
         "read_attempt_delete" => {
-            let uuid = str_field("uuid")?;
-            crate::datasets::read_aloud::read_aloud_delete_attempt(settings.clone(), ds, uuid).await.map(|_| true)
+            crate::datasets::read_aloud::apply_remote_delete(settings.inner(), &ds, payload, write_identity)
         }
         // Wiki datasets: the .md files *are* the rows. Both arms resolve the
         // local copy under <datasets>/wiki and journal through commit_change,

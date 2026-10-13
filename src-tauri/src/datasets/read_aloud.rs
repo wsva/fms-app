@@ -12,19 +12,20 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use base64::Engine;
-use chrono::Utc;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tauri::{Emitter, State};
 use uuid::Uuid;
 
 use crate::auth::workspace_identity;
 use crate::datasets::{
-    assert_uuid_free, dataset_roots, fork_base_to_overlay, is_under_download_root, move_to_trash,
-    now_stamp, read_info, read_info_opt, touch_info, write_info, DatasetInfo, DatasetType,
-    FORMAT_READ_ALOUD, INFO_FILE,
+    assert_uuid_free, canonical_stamp, dataset_roots, fork_base_to_overlay, is_under_download_root,
+    move_to_trash, now_row_stamp, now_stamp, read_info, read_info_opt, touch_info, write_info,
+    DatasetInfo, DatasetType, FORMAT_READ_ALOUD, INFO_FILE,
 };
 use crate::settings::SettingsState;
 use crate::datasets::asr_metric::{score_asr, score_value, AsrScoreSummary};
@@ -217,12 +218,293 @@ fn effective_reference(content: &str, normalized: Option<&str>) -> String {
     }
 }
 
-/// Resolve a stored relative audio path to an absolute path for playback.
-fn resolve_audio_url(dir: &Path, audio_path: &Option<String>) -> Option<String> {
-    audio_path
-        .as_ref()
-        .filter(|p| !p.is_empty())
-        .map(|rel| dir.join(rel).to_string_lossy().into_owned())
+/// Resolve a stored audio path to an absolute path for playback. Two bases are
+/// tried: the per-user workspace audio dir (a new take, stored as a bare file
+/// name) and the dataset dir (a legacy take migrated in place with its original
+/// dataset-relative `media/…` path). A take recorded on another device resolves
+/// to neither and yields `None` — recordings are device-local (§17).
+fn resolve_audio_url(dataset_dir: &Path, audio_dir: &Path, audio_path: &Option<String>) -> Option<String> {
+    let rel = audio_path.as_ref().filter(|p| !p.is_empty())?;
+    if let Some(name) = Path::new(rel).file_name() {
+        let local = audio_dir.join(name);
+        if local.exists() {
+            return Some(local.to_string_lossy().into_owned());
+        }
+    }
+    let legacy = dataset_dir.join(rel);
+    if legacy.exists() {
+        return Some(legacy.to_string_lossy().into_owned());
+    }
+    None
+}
+
+// ============================================================
+// Attempt events — per-user practice history in the app DB (§17)
+// ============================================================
+//
+// A recorded take is an *event*, not a mutation of the dataset. Rows live in the
+// app DB (`read_attempt_event`), keyed by their own uuid and owned by `user_id`,
+// and the recording itself lives in a per-user workspace dir — never inside the
+// dataset. So practising a read-only adopted base needs no overlay, never
+// dirties a published hash or a `read_text` row (INV-9), and one user's scores
+// and recordings no longer ride the content channel to everyone who syncs the
+// dataset. Replay is `INSERT OR IGNORE` by event uuid; convergence is set
+// equality, exactly like card reviews (`datasets/cards/review.rs`).
+
+/// One recorded attempt as a per-user event.
+#[derive(Clone, Debug)]
+struct AttemptEvent {
+    uuid: String,
+    user_id: String,
+    dataset_uuid: String,
+    text_uuid: String,
+    /// Device-local recording reference: a bare file name under [`audio_dir`] for
+    /// a new take, or a legacy dataset-relative path for a migrated one.
+    audio_path: Option<String>,
+    recognized: String,
+    score: f64,
+    created_at: String,
+}
+
+/// Create the event table + migration marker in the app DB. Idempotent, and safe
+/// to call on any connection to the app DB.
+fn ensure_attempt_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS read_attempt_event (
+            uuid         TEXT PRIMARY KEY,
+            user_id      TEXT NOT NULL,
+            dataset_uuid TEXT NOT NULL,
+            text_uuid    TEXT NOT NULL,
+            audio_path   TEXT,
+            recognized   TEXT NOT NULL DEFAULT '',
+            score        REAL NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_rae_owner_text
+            ON read_attempt_event(user_id, dataset_uuid, text_uuid, created_at);
+
+        /* One row per (dataset, user) already folded out of the legacy in-dataset
+           `read_attempt` table, so the seed costs one indexed lookup per open. */
+        CREATE TABLE IF NOT EXISTS read_attempt_migrated (
+            dataset_uuid TEXT NOT NULL,
+            user_id      TEXT NOT NULL,
+            migrated_at  TEXT NOT NULL,
+            PRIMARY KEY (dataset_uuid, user_id)
+        );",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// The per-user, device-local directory attempt recordings live in: beside
+/// `app.sqlite3` (same workspace resolution), never inside a dataset dir, so
+/// recordings stay out of the shared manifest.
+fn audio_dir(settings: &SettingsState) -> PathBuf {
+    settings.workspace_subdir("read_aloud_audio", "")
+}
+
+/// Open the app DB with the attempt schema ensured, for the event-only paths
+/// (append, delete, replay) that need no dataset content.
+fn open_app_attempts(settings: &SettingsState) -> Result<Connection, String> {
+    let conn = crate::datasets::dictation::open_app_db(settings)?;
+    ensure_attempt_schema(&conn)?;
+    Ok(conn)
+}
+
+/// A read-aloud dataset DB (read-resolved) with the app DB attached, plus the
+/// identity whose attempts the queries see and the dirs audio resolves against.
+/// Dropping this drops the attachment. Used by the reads that join attempt
+/// events onto `read_text` (list texts / list attempts) and by the lazy seed.
+struct AttemptCtx {
+    conn: Connection,
+    me: String,
+    dataset_dir: PathBuf,
+    audio_dir: PathBuf,
+}
+
+/// Open a dataset for practice reads: its own DB for content, the app DB
+/// attached for my attempt events, under one connection so the join stays in SQL.
+/// Takes the **read** resolved directory on purpose — reading practice state is
+/// not editing, so it must not fork a read-only base into an overlay.
+fn open_attempts(settings: &SettingsState, dataset_uuid: &str) -> Result<AttemptCtx, String> {
+    let dataset_dir = find_dataset_dir(settings, dataset_uuid)?;
+    let me = workspace_identity(settings);
+    let app_path = crate::datasets::dictation::app_db_path(settings);
+    // Open it once for real so the file and its tables exist before the ATTACH.
+    {
+        let app_conn = crate::datasets::dictation::open_app_db(settings)?;
+        ensure_attempt_schema(&app_conn)?;
+    }
+    let conn = open_db(&dataset_dir)?;
+    let _ = conn.busy_timeout(Duration::from_secs(5));
+    conn.execute("ATTACH DATABASE ?1 AS app", params![app_path.to_string_lossy().as_ref()])
+        .map_err(|e| format!("attaching app DB '{}': {e}", app_path.display()))?;
+    let ctx = AttemptCtx { conn, me, dataset_dir, audio_dir: audio_dir(settings) };
+    migrate_legacy_attempts(&ctx.conn, &ctx.me, dataset_uuid)?;
+    Ok(ctx)
+}
+
+/// Fold this dataset's legacy in-dataset `read_attempt` rows into app-DB events
+/// for the acting user, once per (dataset, user). Only *their own* rows (or the
+/// unowned single-user legacy rows) are seeded, never another user's takes
+/// (§17.5). Stamps are canonicalized so ordering matches new takes.
+fn migrate_legacy_attempts(conn: &Connection, me: &str, dataset_uuid: &str) -> Result<(), String> {
+    let seeded: bool = conn
+        .query_row(
+            "SELECT 1 FROM app.read_attempt_migrated WHERE dataset_uuid = ?1 AND user_id = ?2",
+            params![dataset_uuid, me],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if seeded {
+        return Ok(());
+    }
+    let now = now_row_stamp();
+    let rows: Vec<(String, String, Option<String>, String, f64, Option<String>)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT uuid, text_uuid, audio_path, recognized, score, created_at FROM read_attempt \
+                 WHERE user_id = ?1 OR user_id = '' OR user_id IS NULL",
+            )
+            .map_err(|e| e.to_string())?;
+        let mapped = stmt
+            .query_map(params![me], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+            })
+            .map_err(|e| e.to_string())?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (uuid, text_uuid, audio_path, recognized, score, created_at) in rows {
+        let created = created_at.map(|c| canonical_stamp(&c)).unwrap_or_else(|| now.clone());
+        conn.execute(
+            "INSERT OR IGNORE INTO app.read_attempt_event \
+             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![uuid, me, dataset_uuid, text_uuid, audio_path, recognized, score, created],
+        )
+        .map_err(|e| format!("seeding attempt events: {e}"))?;
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO app.read_attempt_migrated (dataset_uuid, user_id, migrated_at) VALUES (?1, ?2, ?3)",
+        params![dataset_uuid, me, now],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Store one attempt event. `INSERT OR IGNORE` by uuid, so an author receiving
+/// its own echo — or two devices converging on the same take — is a no-op.
+fn append_attempt_event(conn: &Connection, ev: &AttemptEvent) -> Result<bool, String> {
+    let changed = conn
+        .execute(
+            "INSERT OR IGNORE INTO read_attempt_event \
+             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![ev.uuid, ev.user_id, ev.dataset_uuid, ev.text_uuid, ev.audio_path, ev.recognized, ev.score, ev.created_at],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(changed > 0)
+}
+
+/// The journal payload for one attempt event. `audio_url` is deliberately absent:
+/// it is the sender's absolute path and is re-resolved per device on read.
+fn attempt_payload(ev: &AttemptEvent) -> Value {
+    json!({
+        "uuid": ev.uuid,
+        "user_id": ev.user_id,
+        "dataset_uuid": ev.dataset_uuid,
+        "text_uuid": ev.text_uuid,
+        "audio_path": ev.audio_path,
+        "recognized": ev.recognized,
+        "score": ev.score,
+        "created_at": ev.created_at,
+    })
+}
+
+/// Keep a stored stamp in the one fixed-width UTC shape ordering depends on.
+fn canonical_or_now(value: Option<&str>) -> String {
+    match value {
+        Some(raw) if !raw.is_empty() => canonical_stamp(raw),
+        _ => now_row_stamp(),
+    }
+}
+
+/// Replay one journaled `read_attempt_save`: store the event it describes. The
+/// `@app` scope passes no dataset, so it is read out of the payload (as `xp` and
+/// `card_review` do). Returns `false` when the event was already present — the
+/// normal outcome for the author receiving its own echo, not an error.
+pub(crate) fn apply_remote_save(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    payload: &Value,
+    write_identity: &str,
+) -> Result<bool, String> {
+    let get = |k: &str| payload.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let uuid = get("uuid");
+    if uuid.is_empty() {
+        return Err("read_attempt_save change carries no uuid".to_string());
+    }
+    let dataset_uuid = if dataset_uuid.is_empty() { get("dataset_uuid") } else { dataset_uuid.to_string() };
+    if dataset_uuid.is_empty() {
+        return Err("read_attempt_save change carries no dataset_uuid".to_string());
+    }
+    let ev = AttemptEvent {
+        uuid,
+        // Per-user history: attribute to the identity the hub bound the device
+        // to, never to the `user_id` the device declared (the `dictation` rule).
+        user_id: if write_identity.is_empty() { get("user_id") } else { write_identity.to_string() },
+        dataset_uuid: dataset_uuid.clone(),
+        text_uuid: get("text_uuid"),
+        audio_path: payload.get("audio_path").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        recognized: get("recognized"),
+        score: payload.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        created_at: canonical_or_now(payload.get("created_at").and_then(|v| v.as_str())),
+    };
+    let conn = open_app_attempts(settings)?;
+    let inserted = append_attempt_event(&conn, &ev)?;
+    if inserted {
+        // Log it onward so other followers receive the same event uuid; the
+        // pull-side `ApplyGuard` suppresses this, so it is how a hub fans out.
+        let _ = crate::sync::change_log::commit_change_as(
+            settings, "read_attempt_save", &dataset_uuid, &attempt_payload(&ev), &ev.user_id,
+        );
+    }
+    Ok(inserted)
+}
+
+/// Replay one journaled `read_attempt_delete`: drop the event for its owner and
+/// best-effort remove the local recording. The delete lives only in the `@app`
+/// journal — no dataset tombstone (that would open and mutate a downloaded base).
+pub(crate) fn apply_remote_delete(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    payload: &Value,
+    write_identity: &str,
+) -> Result<bool, String> {
+    let get = |k: &str| payload.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let uuid = get("uuid");
+    if uuid.is_empty() {
+        return Err("read_attempt_delete change carries no uuid".to_string());
+    }
+    let dataset_uuid = if dataset_uuid.is_empty() { get("dataset_uuid") } else { dataset_uuid.to_string() };
+    let me = if write_identity.is_empty() { get("user_id") } else { write_identity.to_string() };
+    let conn = open_app_attempts(settings)?;
+    if let Ok(Some(rel)) = conn.query_row(
+        "SELECT audio_path FROM read_attempt_event WHERE uuid = ?1",
+        params![uuid],
+        |row| row.get::<_, Option<String>>(0),
+    ) {
+        if let Some(name) = Path::new(&rel).file_name() {
+            let _ = fs::remove_file(audio_dir(settings).join(name));
+        }
+    }
+    let deleted = conn
+        .execute("DELETE FROM read_attempt_event WHERE uuid = ?1 AND user_id = ?2", params![uuid, me])
+        .map_err(|e| e.to_string())?;
+    let _ = crate::sync::change_log::commit_change_as(
+        settings, "read_attempt_delete", &dataset_uuid,
+        &json!({ "uuid": uuid, "dataset_uuid": dataset_uuid }), &me,
+    );
+    Ok(deleted > 0)
 }
 
 /// Build a filesystem-safe directory/file name from a title.
@@ -394,14 +676,15 @@ pub async fn read_aloud_list_texts(
 }
 
 pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result<Vec<ReadText>, String> {
-    let dir = find_dataset_dir(settings, dataset_uuid)?;
-    let conn = open_db(&dir)?;
-    let mut stmt = conn
+    // Attempt stats are per-user practice state, so they come from the app DB
+    // (attached), never from the shared `read_text.best_score` column — a text
+    // downloaded from someone else must not surface their scores as mine (§17).
+    let ctx = open_attempts(settings, dataset_uuid)?;
+    let mut stmt = ctx
+        .conn
         .prepare(
             "SELECT t.uuid, t.dataset_uuid, t.order_num, t.title, t.note, t.content, t.normalized_content, \
-                    t.best_score, \
-                    (SELECT COUNT(*) FROM read_attempt a WHERE a.text_uuid = t.uuid) AS attempt_count, \
-                    t.created_at, t.updated_at \
+                    t.best_score, t.created_at, t.updated_at \
              FROM read_text t ORDER BY t.order_num, t.created_at",
         )
         .map_err(|e| e.to_string())?;
@@ -416,24 +699,25 @@ pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result
                 content: row.get(5)?,
                 normalized_content: row.get(6)?,
                 best_score: row.get(7)?,
-                attempt_count: row.get(8)?,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
+                attempt_count: 0,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
 
-    // Recompute `best_score` from the stored transcripts with the current
-    // metric, so attempts scored under an older scale never surface (the
-    // stored column stays a write-on-submit cache; nothing is migrated).
+    // Recompute `best_score` + `attempt_count` from *my* stored transcripts with
+    // the current metric, so attempts scored under an older scale never surface.
+    let mut count: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut best: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT a.text_uuid, a.recognized, t.content, t.normalized_content FROM read_attempt a \
-         JOIN read_text t ON t.uuid = a.text_uuid",
+    if let Ok(mut stmt) = ctx.conn.prepare(
+        "SELECT a.text_uuid, a.recognized, t.content, t.normalized_content \
+         FROM app.read_attempt_event a JOIN read_text t ON t.uuid = a.text_uuid \
+         WHERE a.user_id = ?1",
     ) {
-        if let Ok(rows) = stmt.query_map([], |row| {
+        if let Ok(rows) = stmt.query_map(params![&ctx.me], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -442,6 +726,7 @@ pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result
             ))
         }) {
             for (text_uuid, recognized, content, normalized) in rows.flatten() {
+                *count.entry(text_uuid.clone()).or_insert(0) += 1;
                 let reference = effective_reference(&content, normalized.as_deref());
                 let s = score_value(&reference, &recognized);
                 let e = best.entry(text_uuid).or_insert(s);
@@ -452,9 +737,10 @@ pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result
         }
     }
     for text in &mut items {
-        if let Some(s) = best.get(&text.uuid) {
-            text.best_score = Some(*s);
-        }
+        text.attempt_count = count.get(&text.uuid).copied().unwrap_or(0);
+        // Best is mine alone: a text I have never attempted shows no score, even
+        // if the row carried a publisher's cached `best_score`.
+        text.best_score = best.get(&text.uuid).copied();
     }
     Ok(items)
 }
@@ -525,7 +811,9 @@ pub(crate) fn save_text_row(
     Ok(())
 }
 
-/// Delete a text, all its attempts, and their audio files.
+/// Delete a text. Per-user attempt events are left in the app DB (orphaned but
+/// harmless — every read joins on `text_uuid`): a content edit never touches
+/// practice data, mirroring how deleting a card leaves its review events.
 #[tauri::command]
 pub async fn read_aloud_delete_text(
     settings: State<'_, SettingsState>,
@@ -534,30 +822,15 @@ pub async fn read_aloud_delete_text(
 ) -> Result<(), String> {
     let dir = find_dataset_dir_write(&settings, &dataset_uuid)?;
     let conn = open_db(&dir)?;
-    // Best-effort removal of every attempt's audio file.
-    if let Ok(mut stmt) = conn.prepare("SELECT audio_path FROM read_attempt WHERE text_uuid = ?1") {
-        let paths: Vec<Option<String>> = stmt
-            .query_map([&uuid], |row| row.get::<_, Option<String>>(0))
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        for rel in paths.into_iter().flatten() {
-            let _ = fs::remove_file(dir.join(rel));
-        }
-    }
-    conn.execute("DELETE FROM read_attempt WHERE text_uuid = ?1", [&uuid])
-        .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM read_text WHERE uuid = ?1", [&uuid])
         .map_err(|e| e.to_string())?;
     let _ = touch_info(&dir);
-    // The attempt rows go with it by cascade, so one change entry suffices — the
-    // apply path deletes the same way.
     {
         let _ = crate::sync::change_log::commit_change(
             &settings,
             "read_text_delete",
             &dataset_uuid,
-            &serde_json::json!({ "uuid": uuid }),
+            &json!({ "uuid": uuid }),
         );
     }
     Ok(())
@@ -574,18 +847,20 @@ pub async fn read_aloud_list_attempts(
     dataset_uuid: String,
     text_uuid: String,
 ) -> Result<Vec<ReadAttempt>, String> {
-    let dir = find_dataset_dir(&settings, &dataset_uuid)?;
-    let conn = open_db(&dir)?;
-    let mut stmt = conn
+    // Only *my* attempts, read from the app DB and joined onto the dataset's text
+    // for re-scoring — practising never wrote into the dataset (§17).
+    let ctx = open_attempts(&settings, &dataset_uuid)?;
+    let mut stmt = ctx
+        .conn
         .prepare(
             "SELECT a.uuid, a.text_uuid, a.user_id, a.audio_path, a.recognized, a.score, a.created_at, \
                     t.content, t.normalized_content \
-             FROM read_attempt a LEFT JOIN read_text t ON t.uuid = a.text_uuid \
-             WHERE a.text_uuid = ?1 ORDER BY a.created_at DESC",
+             FROM app.read_attempt_event a LEFT JOIN read_text t ON t.uuid = a.text_uuid \
+             WHERE a.text_uuid = ?1 AND a.user_id = ?2 ORDER BY a.created_at DESC",
         )
         .map_err(|e| e.to_string())?;
     let items = stmt
-        .query_map([&text_uuid], |row| {
+        .query_map(params![&text_uuid, &ctx.me], |row| {
             let audio_path: Option<String> = row.get(3)?;
             let recognized: String = row.get(4)?;
             let stored_score: f64 = row.get(5)?;
@@ -599,11 +874,12 @@ pub async fn read_aloud_list_attempts(
                 ),
                 None => stored_score,
             };
+            let audio_url = resolve_audio_url(&ctx.dataset_dir, &ctx.audio_dir, &audio_path);
             Ok(ReadAttempt {
                 uuid: row.get(0)?,
                 text_uuid: row.get(1)?,
                 user_id: row.get(2)?,
-                audio_url: resolve_audio_url(&dir, &audio_path),
+                audio_url,
                 audio_path,
                 recognized,
                 score,
@@ -616,86 +892,81 @@ pub async fn read_aloud_list_attempts(
     Ok(items)
 }
 
-/// Delete a single attempt and its audio file.
+/// Delete a single attempt (my event) and its device-local recording.
 #[tauri::command]
 pub async fn read_aloud_delete_attempt(
     settings: State<'_, SettingsState>,
     dataset_uuid: String,
     uuid: String,
 ) -> Result<(), String> {
-    let dir = find_dataset_dir_write(&settings, &dataset_uuid)?;
-    let conn = open_db(&dir)?;
+    delete_attempt_inner(&settings, &dataset_uuid, &uuid)
+}
+
+/// Delete my attempt event from the app DB, best-effort remove its recording,
+/// and journal under `@app`. Shared by the command; the sync apply path uses
+/// [`apply_remote_delete`]. Never touches the dataset directory.
+fn delete_attempt_inner(settings: &SettingsState, dataset_uuid: &str, uuid: &str) -> Result<(), String> {
+    let me = workspace_identity(settings);
+    let conn = open_app_attempts(settings)?;
     if let Ok(Some(rel)) = conn.query_row(
-        "SELECT audio_path FROM read_attempt WHERE uuid = ?1",
-        [&uuid],
+        "SELECT audio_path FROM read_attempt_event WHERE uuid = ?1 AND user_id = ?2",
+        params![uuid, &me],
         |row| row.get::<_, Option<String>>(0),
     ) {
-        let _ = fs::remove_file(dir.join(rel));
+        if let Some(name) = Path::new(&rel).file_name() {
+            let _ = fs::remove_file(audio_dir(settings).join(name));
+        }
+        // A migrated legacy take still points into the dataset's media dir.
+        if let Ok(dir) = find_dataset_dir(settings, dataset_uuid) {
+            let _ = fs::remove_file(dir.join(&rel));
+        }
     }
-    conn.execute("DELETE FROM read_attempt WHERE uuid = ?1", [&uuid])
-        .map_err(|e| e.to_string())?;
-    {
-        let _ = crate::sync::change_log::commit_change(
-            &settings,
-            "read_attempt_delete",
-            &dataset_uuid,
-            &serde_json::json!({ "uuid": uuid }),
-        );
-    }
+    conn.execute(
+        "DELETE FROM read_attempt_event WHERE uuid = ?1 AND user_id = ?2",
+        params![uuid, &me],
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = crate::sync::change_log::commit_change_as(
+        settings,
+        "read_attempt_delete",
+        dataset_uuid,
+        &json!({ "uuid": uuid, "dataset_uuid": dataset_uuid }),
+        &me,
+    );
     Ok(())
 }
 
-/// Persist one attempt row, roll the text's `best_score` forward, and journal the
-/// change. Shared by `read_aloud_submit` and both sync apply paths (hub replay,
-/// follower pull-apply) so an attempt recorded on any device converges the same
-/// way everywhere.
-///
-/// The recording itself is not part of the change: the WAV lives in the dataset's
-/// `media/` and travels as an ordinary file through the manifest (§3.2). Only
-/// `audio_path` is stored — `audio_url` in the payload is the sender's absolute
-/// path and is ignored, since each device re-resolves it on read. Attempts are
-/// per-user history, so an apply path overwrites `user_id` with the identity the
-/// hub bound the device to (like the `dictation` kind) rather than trusting it.
+/// Persist one attempt as a per-user event in the app DB and journal it under
+/// `@app`. Shared by `read_aloud_submit`; the sync apply paths use
+/// [`apply_remote_save`]. Nothing is written into the dataset directory — the
+/// recording lives in the per-user audio dir and the row in the app DB — so
+/// practising never forks an adopted base nor dirties a `read_text` row (INV-9).
+/// `audio_url` on the incoming attempt is the sender's absolute path and is
+/// ignored; each device re-resolves it on read.
 pub(crate) fn save_attempt_row(
     settings: &SettingsState,
     dataset_uuid: &str,
     attempt: &ReadAttempt,
 ) -> Result<(), String> {
-    let dir = find_dataset_dir_write(settings, dataset_uuid)?;
-    let conn = open_db(&dir)?;
-    conn.execute(
-        "INSERT OR REPLACE INTO read_attempt \
-         (uuid, text_uuid, user_id, audio_path, recognized, score, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![
-            attempt.uuid,
-            attempt.text_uuid,
-            attempt.user_id,
-            attempt.audio_path,
-            attempt.recognized,
-            attempt.score,
-            attempt.created_at
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Track the best score seen for this text.
-    conn.execute(
-        "UPDATE read_text SET best_score = MAX(COALESCE(best_score, 0), ?1), \
-         updated_at = datetime('now') WHERE uuid = ?2",
-        rusqlite::params![attempt.score, attempt.text_uuid],
-    )
-    .map_err(|e| e.to_string())?;
-    let _ = touch_info(&dir);
-
-    {
-        let _ = crate::sync::change_log::commit_change(
-            settings,
-            "read_attempt_save",
-            dataset_uuid,
-            &serde_json::to_value(attempt).unwrap_or_default(),
-        );
-    }
+    let conn = open_app_attempts(settings)?;
+    let ev = AttemptEvent {
+        uuid: attempt.uuid.clone(),
+        user_id: attempt.user_id.clone(),
+        dataset_uuid: dataset_uuid.to_string(),
+        text_uuid: attempt.text_uuid.clone(),
+        audio_path: attempt.audio_path.clone(),
+        recognized: attempt.recognized.clone(),
+        score: attempt.score,
+        created_at: canonical_stamp(&attempt.created_at),
+    };
+    append_attempt_event(&conn, &ev)?;
+    let _ = crate::sync::change_log::commit_change_as(
+        settings,
+        "read_attempt_save",
+        dataset_uuid,
+        &attempt_payload(&ev),
+        &ev.user_id,
+    );
     Ok(())
 }
 
@@ -736,11 +1007,9 @@ pub async fn read_aloud_submit(
     wav_base64: String,
     recognized: String,
 ) -> Result<ReadAloudSubmitResult, String> {
-    let dir = find_dataset_dir_write(&settings, &dataset_uuid)?;
+    let dir = find_dataset_dir(&settings, &dataset_uuid)?;
 
-    // Load the reference text. The read handle is scoped to this block so the
-    // attempt write below gets a fresh connection instead of two live handles
-    // on the same dataset DB.
+    // Load the reference text (read-only). Practising never writes to the dataset.
     let content: String = {
         let conn = open_db(&dir)?;
         conn.query_row(
@@ -757,36 +1026,37 @@ pub async fn read_aloud_submit(
     let summary = score_asr(&content, &recognized);
     let score = summary.score;
 
-    // Persist the recording.
+    // Persist the recording in the per-user audio dir — never inside the dataset,
+    // so a take stays out of the shared manifest and needs no overlay (§17).
     let attempt_uuid = Uuid::new_v4().to_string();
     let file_name = format!("{}.wav", attempt_uuid);
-    let media_dir = dir.join("media");
-    fs::create_dir_all(&media_dir).map_err(|e| e.to_string())?;
+    let audio_root = audio_dir(&settings);
     let audio_path = if wav_base64.trim().is_empty() {
         None
     } else {
+        fs::create_dir_all(&audio_root).map_err(|e| e.to_string())?;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(wav_base64.trim())
             .map_err(|e| format!("Invalid base64 audio: {}", e))?;
-        fs::write(media_dir.join(&file_name), &bytes).map_err(|e| e.to_string())?;
-        Some(format!("media/{}", file_name))
+        fs::write(audio_root.join(&file_name), &bytes).map_err(|e| e.to_string())?;
+        Some(file_name)
     };
 
     let user_id = workspace_identity(&settings);
-    let now = Utc::now().to_rfc3339();
+    let now = now_row_stamp();
 
     let attempt = ReadAttempt {
         uuid: attempt_uuid,
         text_uuid: text_uuid.clone(),
         user_id: user_id.clone(),
-        audio_url: resolve_audio_url(&dir, &audio_path),
+        audio_url: audio_path.as_ref().map(|f| audio_root.join(f).to_string_lossy().into_owned()),
         audio_path,
         recognized,
         score,
         created_at: now,
     };
-    // Row write + `best_score` roll-up + change journal, through the same path a
-    // synced attempt arrives by.
+    // Event write + `@app` change journal, through the same path a synced attempt
+    // arrives by.
     save_attempt_row(&settings, &dataset_uuid, &attempt)?;
 
     // Scaled XP: 1 XP for passing (>=60), +1 more for a strong read (>=80).
@@ -842,4 +1112,244 @@ pub async fn read_aloud_submit(
         lifetime_xp,
         level,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_settings(tag: &str) -> (SettingsState, PathBuf) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fms-read-aloud-test-{tag}-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let settings = SettingsState::new();
+        settings.set_workspace_dir(Some(dir.clone()));
+        (settings, dir)
+    }
+
+    /// A real read-aloud dataset with one text, built through the production path.
+    fn dataset_with_text(settings: &SettingsState, content: &str) -> (String, String) {
+        let meta = create_dataset(settings, "Practise".into(), String::new()).unwrap();
+        let text_uuid = Uuid::new_v4().to_string();
+        let now = now_stamp();
+        save_text_row(
+            settings,
+            &meta.uuid,
+            &ReadText {
+                uuid: text_uuid.clone(),
+                dataset_uuid: meta.uuid.clone(),
+                order_num: 0,
+                title: "T".into(),
+                note: String::new(),
+                content: content.into(),
+                normalized_content: None,
+                best_score: None,
+                attempt_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+            },
+        )
+        .unwrap();
+        (meta.uuid, text_uuid)
+    }
+
+    fn attempt(text_uuid: &str, user_id: &str, score: f64) -> ReadAttempt {
+        ReadAttempt {
+            uuid: Uuid::new_v4().to_string(),
+            text_uuid: text_uuid.to_string(),
+            user_id: user_id.to_string(),
+            audio_path: None,
+            audio_url: None,
+            recognized: "hello world".into(),
+            score,
+            created_at: now_row_stamp(),
+        }
+    }
+
+    fn event_count(settings: &SettingsState) -> i64 {
+        let conn = open_app_attempts(settings).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM read_attempt_event", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// A minimal dataset directory (info.json + initialized DB) at an arbitrary
+    /// path, so a test can place one under the read-only download root.
+    fn write_dataset_at(dir: &Path, uuid: &str, text_uuid: &str) {
+        fs::create_dir_all(dir).unwrap();
+        let info = DatasetInfo::new(uuid.to_string(), DatasetType::Read, FORMAT_READ_ALOUD, "Base".into());
+        write_info(dir, &info).unwrap();
+        let conn = open_db(dir).unwrap();
+        conn.execute(
+            "INSERT INTO read_text (uuid, dataset_uuid, order_num, title, note, content, created_at, updated_at) \
+             VALUES (?1, ?2, 0, 'T', '', 'hello world', datetime('now'), datetime('now'))",
+            params![text_uuid, uuid],
+        )
+        .unwrap();
+    }
+
+    // -- the core move: attempts are app-DB events, not dataset content --------
+
+    #[test]
+    fn attempt_lands_in_app_db_not_the_dataset() {
+        let (settings, _dir) = temp_settings("app-db");
+        let (ds, text) = dataset_with_text(&settings, "hello world");
+
+        save_attempt_row(&settings, &ds, &attempt(&text, "local", 95.0)).unwrap();
+
+        // The event lives in the app DB.
+        assert_eq!(event_count(&settings), 1);
+
+        // The dataset DB is untouched: no legacy attempt row, no best_score bump.
+        let dataset_dir = find_dataset_dir(&settings, &ds).unwrap();
+        let conn = open_db(&dataset_dir).unwrap();
+        let legacy: i64 = conn
+            .query_row("SELECT COUNT(*) FROM read_attempt", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(legacy, 0, "practising must not write into the dataset DB");
+        let best: Option<f64> = conn
+            .query_row("SELECT best_score FROM read_text WHERE uuid = ?1", params![text], |r| r.get(0))
+            .unwrap();
+        assert!(best.is_none(), "read_text.best_score is never touched by practising");
+
+        // list_texts surfaces my attempt, recomputed from the app-DB event.
+        let texts = list_texts(&settings, &ds).unwrap();
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].attempt_count, 1);
+        assert!(texts[0].best_score.is_some());
+    }
+
+    #[test]
+    fn practising_a_download_root_base_does_not_fork() {
+        let (settings, _dir) = temp_settings("no-fork");
+        let ds = Uuid::new_v4().to_string();
+        let text = Uuid::new_v4().to_string();
+        let base = crate::datasets::download_root(&settings, DatasetType::Read).join("Base");
+        write_dataset_at(&base, &ds, &text);
+        assert!(is_under_download_root(&settings, &base), "base must sit under the download root");
+
+        save_attempt_row(&settings, &ds, &attempt(&text, "local", 90.0)).unwrap();
+
+        // No overlay was forked into the writable read-aloud root.
+        let writable = settings.datasets_dir().join(DatasetType::Read.as_str());
+        let forked = fs::read_dir(&writable).map(|e| e.flatten().count()).unwrap_or(0);
+        assert_eq!(forked, 0, "practising a download-root base must not fork an overlay");
+        // The attempt still landed, and the base still resolves to itself.
+        assert_eq!(event_count(&settings), 1);
+        assert_eq!(find_dataset_dir(&settings, &ds).unwrap(), base);
+    }
+
+    #[test]
+    fn list_texts_counts_only_my_attempts() {
+        let (settings, _dir) = temp_settings("owner");
+        let (ds, text) = dataset_with_text(&settings, "hello world");
+        // Two of mine plus one belonging to someone else, seeded straight into the
+        // app DB (as another device's replay would).
+        let conn = open_app_attempts(&settings).unwrap();
+        for (u, user, day) in [
+            ("a", "local", "01"),
+            ("b", "local", "02"),
+            ("c", "other", "03"),
+        ] {
+            conn.execute(
+                "INSERT INTO read_attempt_event \
+                 (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, NULL, 'hello world', 90, ?5)",
+                params![u, user, ds, text, format!("2026-01-{day}T00:00:00Z")],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let texts = list_texts(&settings, &ds).unwrap();
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].attempt_count, 2, "only my attempts count");
+    }
+
+    #[test]
+    fn delete_attempt_removes_my_event_and_journals_under_app() {
+        let (settings, _dir) = temp_settings("delete");
+        let (ds, text) = dataset_with_text(&settings, "hello world");
+        let a = attempt(&text, "local", 90.0);
+        save_attempt_row(&settings, &ds, &a).unwrap();
+        assert_eq!(event_count(&settings), 1);
+
+        delete_attempt_inner(&settings, &ds, &a.uuid).unwrap();
+        assert_eq!(event_count(&settings), 0, "my event is gone from the app DB");
+
+        // The delete journaled under the shared @app scope, not the dataset uuid,
+        // and wrote no dataset tombstone (that would open a downloaded base).
+        let conn = open_app_attempts(&settings).unwrap();
+        let scope: String = conn
+            .query_row(
+                "SELECT dataset_uuid FROM writeback_queue WHERE kind = 'read_attempt_delete' \
+                 ORDER BY queued_at DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(scope, crate::sync::change_log::APP_SCOPE);
+    }
+
+    #[test]
+    fn legacy_attempts_seed_events_once() {
+        let (settings, _dir) = temp_settings("migrate");
+        let (ds, text) = dataset_with_text(&settings, "hello world");
+        let dataset_dir = find_dataset_dir(&settings, &ds).unwrap();
+        // A legacy in-dataset attempt, unowned as single-user rows were.
+        {
+            let conn = open_db(&dataset_dir).unwrap();
+            conn.execute(
+                "INSERT INTO read_attempt (uuid, text_uuid, user_id, audio_path, recognized, score, created_at) \
+                 VALUES ('legacy-1', ?1, '', NULL, 'hello world', 80, '2026-01-01T00:00:00Z')",
+                params![text],
+            )
+            .unwrap();
+        }
+        // First practice-open seeds it into the app DB.
+        { let _ctx = open_attempts(&settings, &ds).unwrap(); }
+        assert_eq!(event_count(&settings), 1);
+
+        // A later legacy row is NOT seeded: the migration marker blocks a re-seed.
+        {
+            let conn = open_db(&dataset_dir).unwrap();
+            conn.execute(
+                "INSERT INTO read_attempt (uuid, text_uuid, user_id, audio_path, recognized, score, created_at) \
+                 VALUES ('legacy-2', ?1, '', NULL, 'hello', 50, '2026-01-02T00:00:00Z')",
+                params![text],
+            )
+            .unwrap();
+        }
+        { let _ctx = open_attempts(&settings, &ds).unwrap(); }
+        assert_eq!(event_count(&settings), 1, "migration marker prevents a second seed");
+    }
+
+    // -- replay: a journaled event applied from another device -----------------
+
+    #[test]
+    fn apply_remote_save_stores_event_and_is_idempotent() {
+        let (settings, _dir) = temp_settings("replay");
+        let (ds, text) = dataset_with_text(&settings, "hello world");
+        let uuid = Uuid::new_v4().to_string();
+        // `@app` passes no dataset, so it travels in the payload.
+        let payload = json!({
+            "uuid": uuid, "user_id": "", "dataset_uuid": ds, "text_uuid": text,
+            "audio_path": null, "recognized": "hello world", "score": 88.0,
+            "created_at": "2026-01-01T00:00:00Z",
+        });
+        let inserted = apply_remote_save(&settings, "", &payload, "alice").unwrap();
+        assert!(inserted, "first replay stores the event");
+        // Attributed to the identity the hub bound, not the (empty) declared one.
+        let conn = open_app_attempts(&settings).unwrap();
+        let owner: String = conn
+            .query_row("SELECT user_id FROM read_attempt_event WHERE uuid = ?1", params![uuid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(owner, "alice");
+        // Replaying the same event (an echo) is a no-op, not a duplicate.
+        let again = apply_remote_save(&settings, "", &payload, "alice").unwrap();
+        assert!(!again, "replay is INSERT OR IGNORE by event uuid");
+        assert_eq!(event_count(&settings), 1);
+    }
 }

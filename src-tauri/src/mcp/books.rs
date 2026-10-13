@@ -291,7 +291,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Text saved"}).to_string())
     }
 
-    #[tool(name = "read_aloud_delete_text", description = "Delete a text and all its recorded attempts and audio.")]
+    #[tool(name = "read_aloud_delete_text", description = "Delete a text. Per-user attempt history is left untouched in the app DB (a content edit never removes practice data).")]
     async fn read_aloud_delete_text(&self, Parameters(param): Parameters<ReadAloudDeleteTextParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         datasets::read_aloud::read_aloud_delete_text(settings, param.dataset_uuid, param.uuid).await?;

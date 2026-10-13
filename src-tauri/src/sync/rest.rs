@@ -52,7 +52,7 @@ use crate::datasets;
 use crate::datasets::book::{BookChapter, BookSentence, BookSentenceWord};
 use crate::datasets::cards::{Card, Tag};
 use crate::datasets::dictation::{ListenCue, ListenDictation};
-use crate::datasets::read_aloud::{ReadAttempt, ReadText};
+use crate::datasets::read_aloud::ReadText;
 use crate::settings::SettingsState;
 use crate::sync;
 use crate::xp;
@@ -1268,17 +1268,14 @@ async fn replay(
             datasets::read_aloud::read_aloud_delete_text(settings.clone(), dataset_uuid, uuid).await
         }
         "read_attempt_save" => {
-            let mut attempt: ReadAttempt =
-                serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
-            // Per-user history: attribute to the enforced identity, never to the
-            // `user_id` the device declared (same rule as the `dictation` kind).
-            attempt.user_id = write_identity.to_string();
-            datasets::read_aloud::save_attempt_row(settings.inner(), &dataset_uuid, &attempt)
+            // Per-user practice history: store the event the author sent in the
+            // app DB (INSERT OR IGNORE), never a write into the shared dataset.
+            datasets::read_aloud::apply_remote_save(settings.inner(), &dataset_uuid, &ch.payload, write_identity)
+                .map(|_| ())
         }
         "read_attempt_delete" => {
-            let uuid = extract_str(&ch.payload, "uuid")?;
-            datasets::read_aloud::read_aloud_delete_attempt(settings.clone(), dataset_uuid, uuid)
-                .await
+            datasets::read_aloud::apply_remote_delete(settings.inner(), &dataset_uuid, &ch.payload, write_identity)
+                .map(|_| ())
         }
         "wiki_file_save" => {
             let rel = extract_str(&ch.payload, "rel_path")?;

@@ -194,8 +194,13 @@ pub const APP_SCOPE: &str = "@app";
 /// delivery depend on that deck's subscriptions and — worse — let the resulting
 /// `card.updated_at` bump ride the content channel as if someone had edited the
 /// card. The deck uuid it refers to now travels inside the payload instead.
+///
+/// `read_attempt_save`/`read_attempt_delete` joined for the same reason: a
+/// recorded take is per-user practice history, so it is stored as an event in the
+/// app DB and journaled here rather than written into the shared dataset (which
+/// used to fork an adopted base and ship one user's scores to every subscriber).
 pub fn is_app_scope_kind(kind: &str) -> bool {
-    matches!(kind, "dictation" | "xp" | "card_review")
+    matches!(kind, "dictation" | "xp" | "card_review" | "read_attempt_save" | "read_attempt_delete")
 }
 
 /// The journal scope a change of `kind` belongs to: [`APP_SCOPE`] for per-user
@@ -263,10 +268,11 @@ pub fn object_id_for(kind: &str, payload: &Value, user_key: &str) -> String {
         | "book_sentence_save" | "book_sentence_delete"
         | "book_word_save" | "book_word_delete" => get("uuid"),
         "book_sentences_save" => String::new(),
-        // Read-aloud texts are editable rows; attempts are insert-once history.
-        // Both carry their own uuid, as does each delete payload.
-        "read_text_save" | "read_text_delete"
-        | "read_attempt_save" | "read_attempt_delete" => get("uuid"),
+        // Read-aloud texts are editable dataset content, keyed by their uuid.
+        "read_text_save" | "read_text_delete" => get("uuid"),
+        // Attempts are per-user events under `@app`, so the id must carry the
+        // owner (the scope is shared by every user), exactly like `card_review`.
+        "read_attempt_save" | "read_attempt_delete" => format!("{user_key}:{}", get("uuid")),
         // Wiki files are content-addressed by their dataset-relative path.
         "wiki_file_save" | "wiki_file_delete" => get("rel_path"),
         // A counter delta is never folded, but it still needs an id that is
@@ -618,7 +624,7 @@ pub fn table_for_kind(kind: &str) -> &'static str {
         "book_sentence_save" | "book_sentences_save" | "book_sentence_delete" => "book_sentences",
         "book_word_save" | "book_word_delete" => "book_sentence_words",
         "read_text_save" | "read_text_delete" => "read_text",
-        "read_attempt_save" | "read_attempt_delete" => "read_attempt",
+        "read_attempt_save" | "read_attempt_delete" => "read_attempt_event",
         _ => "row",
     }
 }
@@ -754,8 +760,11 @@ pub fn commit_change_as(
             )?;
             // Deletes also land in the dataset DB's `tombstones` (§3.4) so a
             // delete survives as an explicit record inside snapshots, not only in
-            // the app-level log. Only dataset-scoped kinds can be deletes.
-            if op_for(kind) == "delete" {
+            // the app-level log. Only *dataset-scoped* deletes: an `@app` delete
+            // (a per-user read-attempt removal) has no dataset DB to tombstone —
+            // writing one would open and mutate a downloaded base — so it lives
+            // only in the journal, which every device replays.
+            if op_for(kind) == "delete" && !is_app_scope_kind(kind) {
                 record_delete_tombstone(settings, dataset_uuid, &object_id, kind, &edit_time);
             }
             Ok(())
@@ -770,5 +779,62 @@ pub fn commit_change_as(
     #[cfg(not(feature = "desktop"))]
     {
         crate::sync::client::enqueue_change(settings, kind, scope, payload, user_key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // A read attempt is per-user practice history: it journals under the shared
+    // `@app` scope (never a dataset uuid), so delivery does not depend on the
+    // receiver subscribing to the dataset, and its scores/recordings do not ride
+    // the content channel to every subscriber (sync-v2.md §17).
+    #[test]
+    fn read_attempts_are_app_scoped() {
+        for kind in ["read_attempt_save", "read_attempt_delete"] {
+            assert!(is_app_scope_kind(kind), "{kind} must be an @app kind");
+            assert_eq!(scope_for(kind, "ds"), APP_SCOPE);
+            // Append-only: one stored event per take, replayed by INSERT OR IGNORE.
+            assert!(matches!(ChangeClass::of(kind), ChangeClass::AppendOnly));
+        }
+    }
+
+    // The `@app` scope is shared by every user, so the object id must carry the
+    // owner — otherwise one user's take would collide with (and lose a
+    // later-wins contest against) another's for the same text.
+    #[test]
+    fn read_attempt_object_id_carries_owner() {
+        assert_eq!(
+            object_id_for("read_attempt_save", &json!({ "uuid": "u" }), "me"),
+            "me:u"
+        );
+        assert_eq!(
+            object_id_for("read_attempt_delete", &json!({ "uuid": "u" }), "me"),
+            "me:u"
+        );
+    }
+
+    // Read-aloud *texts* stay dataset-scoped content: keyed by bare uuid, and a
+    // delete still records a dataset tombstone (the gate added for @app deletes
+    // must not swallow them).
+    #[test]
+    fn read_texts_stay_dataset_scoped() {
+        for kind in ["read_text_save", "read_text_delete"] {
+            assert!(!is_app_scope_kind(kind));
+            assert_eq!(scope_for(kind, "ds"), "ds");
+            assert_eq!(object_id_for(kind, &json!({ "uuid": "t" }), "me"), "t");
+        }
+        // The tombstone gate keys off exactly this predicate.
+        assert_eq!(op_for("read_text_delete"), "delete");
+        assert_eq!(op_for("read_attempt_delete"), "delete");
+        assert!(is_app_scope_kind("read_attempt_delete") && !is_app_scope_kind("read_text_delete"));
+    }
+
+    #[test]
+    fn attempt_events_map_to_their_table() {
+        assert_eq!(table_for_kind("read_attempt_save"), "read_attempt_event");
+        assert_eq!(table_for_kind("read_attempt_delete"), "read_attempt_event");
     }
 }
