@@ -524,6 +524,8 @@ Sync fails silently more often than it fails loudly. Every invariant that says "
 
 Every round emits one structured log line with: `authority_kind`, `epoch`, `features[]` as fetched at the start of the round, scopes attempted, and per scope `{pushed, pulled, dropped_pending, refused, deduped, resync_required}` plus cursor before/after and `pruned_up_to` if the journal reported it. Individual rejections log at `warn` with the typed error from §7. `features[]` is re-fetched on every round, on any 4xx that names a scope, and on every epoch change (INV-20).
 
+**Implemented (status slice):** the round's result JSON (`status`, `pushed`, `held`, `applied`, `resynced`, `pruned`, `history`, `errors[]`) is now also *persisted*, not only logged — `sync_round_inner` upserts it into `app_sync_state.last_round_json` with a `last_round_at` stamp before returning. A persist failure never fails the round (logged at `warn` at most). This lets the status surface (§19.2) report what the previous round did without running a new one.
+
 ### 19.2 What the status surface shows
 
 A single screen, reachable from settings and mirrored by an MCP tool so an agent can read it, that names:
@@ -535,6 +537,10 @@ A single screen, reachable from settings and mirrored by an MCP tool so an agent
 - `resync_required` history with the reason (retention gap, epoch bump, host reinstall);
 - `needs_history` gaps (§17.6 item 2) rather than hiding them;
 - provenance of every dataset (`upstream_kind`, `upstream_origin`, `cursor`, `availability`).
+
+**Implemented (status slice):** `sync_status_detail` (and its MCP twin) now carry — the authority `authority_kind`/`epoch` and advertised `features[]` (from one guarded `GET /api/v1/cluster`; `None`/empty on an unreachable hub or a website with no `/cluster`, so it degrades like the round); the per-scope queue split `queue_app`/`queue_dataset`, each `{depth, oldest_edit_time}` (oldest = lexicographic min of `COALESCE(edit_time, queued_at)`, valid because stamps are fixed-width UTC per INV-6), with `queued_count` retained as the total for back-compat; the last-round result `last_round`/`last_round_at` including the round's typed `errors[]`; the `needs_history`/events gaps as `history_gap`/`events_gap` plus `events_backfilled_at`; and per-dataset provenance `upstream_kind`/`upstream_origin`/`availability`/`published_version` on each `DatasetStatus`.
+
+**Still open (next slice):** the dropped-pending count (INV-14 — needs apply-path instrumentation), the `resync_required` reason *history* (only the resulting `needs_resync` state is shown today), and the §19.4 five-cause "queue keeps growing" diagnosis contract.
 
 ### 19.3 Operator-side metrics
 

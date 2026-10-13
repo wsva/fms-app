@@ -486,6 +486,11 @@ fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
     ensure_column(conn, "dataset_sync_state", "availability", "TEXT NOT NULL DEFAULT 'listed'")?;
     ensure_column(conn, "app_sync_state", "upstream_kind", "TEXT NOT NULL DEFAULT 'desktop_hub'")?;
     ensure_column(conn, "app_sync_state", "upstream_origin", "TEXT NOT NULL DEFAULT ''")?;
+    // Migration (sync-v2.md §19.2): persist the last round's result JSON so the
+    // status surface can show "what the previous round did" without running one.
+    // Nullable — NULL until the first round completes on this build.
+    ensure_column(conn, "app_sync_state", "last_round_json", "TEXT")?;
+    ensure_column(conn, "app_sync_state", "last_round_at", "TEXT")?;
     Ok(())
 }
 
@@ -654,6 +659,35 @@ fn set_app_events_history_backfilled(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Persist the round-result JSON (§19.2) so the status surface can report the
+/// last round without running one. Single-row upsert; a failure here must never
+/// fail the round itself (the caller logs at most).
+fn set_last_round(conn: &Connection, result: &Value) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO app_sync_state (id, last_round_json, last_round_at, updated_at) \
+         VALUES (1, ?1, datetime('now'), datetime('now')) \
+         ON CONFLICT(id) DO UPDATE SET last_round_json = excluded.last_round_json, \
+             last_round_at = excluded.last_round_at, updated_at = excluded.updated_at",
+        params![result.to_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Read back the persisted round result: `(json, stamped_at)`. A stored blob that
+/// no longer parses yields `None` for the JSON but keeps the stamp, so a corrupt
+/// row degrades to "a round ran at T" rather than breaking the surface.
+fn last_round(conn: &Connection) -> (Option<Value>, Option<String>) {
+    conn.query_row(
+        "SELECT last_round_json, last_round_at FROM app_sync_state WHERE id = 1",
+        [],
+        |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+    )
+    .ok()
+    .map(|(j, at)| (j.and_then(|s| serde_json::from_str::<Value>(&s).ok()), at))
+    .unwrap_or((None, None))
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,18 +1208,26 @@ pub struct SyncStateEntry {
     /// Incremental row-log cursor (§3.2). `None` = a NULL cursor, i.e. this copy
     /// predates incremental sync and is due one resync before deltas apply.
     pub cursor: Option<i64>,
+    /// Provenance of the host this copy came from (§6.1): `"desktop_hub"` (a LAN
+    /// mirror) | `"registry"` (a website adoption) | `"cloud_hub"`, and its origin
+    /// URL (empty = unknown / pre-migration). Surfaced on the status page (§19.2).
+    pub upstream_kind: String,
+    pub upstream_origin: String,
+    /// Registry availability: `"listed"` | `"withdrawn"` (INV-22 — a withdrawn
+    /// upstream still leaves the local copy practicable).
+    pub availability: String,
+    /// The registry version this copy was adopted at (`None` for a LAN mirror).
+    pub published_version: Option<i64>,
 }
 
-/// Read the local `dataset_sync_state` table (what has been pulled and when).
-#[tauri::command]
-pub async fn dataset_sync_state(
-    settings: State<'_, SettingsState>,
-) -> Result<Vec<SyncStateEntry>, String> {
-    let conn = datasets::dictation::open_app_db(&settings)?;
-    ensure_sync_tables(&conn)?;
+/// Read every `dataset_sync_state` row, including the phase-1/3 provenance
+/// columns. Extracted so both the [`dataset_sync_state`] command and
+/// [`sync_status_detail`] share one query (and one unit test covers it).
+fn local_sync_entries(conn: &Connection) -> Result<Vec<SyncStateEntry>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT dataset_uuid, overall_hash, synced_at, bytes, file_count, \"cursor\" \
+            "SELECT dataset_uuid, overall_hash, synced_at, bytes, file_count, \"cursor\", \
+                    upstream_kind, upstream_origin, availability, published_version \
              FROM dataset_sync_state",
         )
         .map_err(|e| e.to_string())?;
@@ -1198,10 +1240,24 @@ pub async fn dataset_sync_state(
                 bytes: r.get(3)?,
                 file_count: r.get(4)?,
                 cursor: r.get(5)?,
+                upstream_kind: r.get(6)?,
+                upstream_origin: r.get(7)?,
+                availability: r.get(8)?,
+                published_version: r.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?;
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// Read the local `dataset_sync_state` table (what has been pulled and when).
+#[tauri::command]
+pub async fn dataset_sync_state(
+    settings: State<'_, SettingsState>,
+) -> Result<Vec<SyncStateEntry>, String> {
+    let conn = datasets::dictation::open_app_db(&settings)?;
+    ensure_sync_tables(&conn)?;
+    local_sync_entries(&conn)
 }
 
 /// Number of changes waiting to be uploaded (for the UI badge).
@@ -1241,6 +1297,15 @@ pub struct DatasetStatus {
     pub file_count: i64,
     /// Whether the hub's current `seq` is ahead of our `cursor` (rows to pull).
     pub hub_ahead: bool,
+    /// Provenance of the host this copy came from (§6.1 / §19.2): `"desktop_hub"` |
+    /// `"registry"` | `"cloud_hub"`, empty when the dataset is catalog-only (never
+    /// pulled here).
+    pub upstream_kind: String,
+    pub upstream_origin: String,
+    /// Registry availability: `"listed"` | `"withdrawn"` (INV-22); empty when unknown.
+    pub availability: String,
+    /// The registry version adopted (`None` for a LAN mirror or a catalog-only row).
+    pub published_version: Option<i64>,
 }
 
 /// Live view of the connected hub from its unauthenticated `/status`.
@@ -1267,6 +1332,16 @@ pub struct HubStatus {
     /// "connected" from "connected and allowed". The state is read off the first
     /// *signed* call of the round instead of being guessed from an empty catalog.
     pub paired: Option<bool>,
+}
+
+/// One journal scope's writeback backlog: how many changes are waiting, and the
+/// oldest pending `edit_time` among them (§19.2). A nonzero depth against a host
+/// that does not accept the scope is the "queue keeps growing" signal; the oldest
+/// stamp says how long the head has been stuck.
+#[derive(Serialize, Clone, Debug)]
+pub struct ScopeQueue {
+    pub depth: i64,
+    pub oldest_edit_time: Option<String>,
 }
 
 /// Aggregated local + hub sync state for the Status surface (§3.5).
@@ -1298,6 +1373,37 @@ pub struct SyncStatusDetail {
     /// (`GET /app/state`, §3.6). `None` = never: nothing has owed it, or the hub
     /// predates protocol v4 and cannot serve it — the round result says which.
     pub history_backfilled_at: Option<String>,
+    /// When this device last folded the hub's *whole* practice-event history
+    /// (reviews + attempts) into its own (§19.2). `None` = never, or the hub
+    /// predates protocol v6.
+    pub events_backfilled_at: Option<String>,
+    /// Authority the cluster is currently serving (§7 / §19.2), from the
+    /// capability page: `"lan_hub"` | `"registry"` | `"cloud_hub"`. `None` when
+    /// the host serves no `/cluster` (unreachable, or a website hub).
+    pub authority_kind: Option<String>,
+    /// The authority's election epoch (`None` alongside `authority_kind`).
+    pub epoch: Option<u32>,
+    /// Scopes the authority advertises it can serve (§7); empty when no
+    /// capability page is reachable.
+    pub features: Vec<String>,
+    /// Per-scope writeback backlog (§19.2): the `queued_count` total split into
+    /// the app-wide journal scope and the per-dataset scope, each with the oldest
+    /// pending `edit_time`. A nonzero depth against a host that does not accept
+    /// that scope is the "queue keeps growing" signal.
+    pub queue_app: ScopeQueue,
+    pub queue_dataset: ScopeQueue,
+    /// Whether the hub advertises the app plane this device has *not* folded
+    /// history from (§19.2): a visible gap rather than a silent zero.
+    pub history_gap: bool,
+    /// Same for the practice-event half (protocol v6): the hub can serve events
+    /// this device has never backfilled — a hub upgrade may be owed, or a round.
+    pub events_gap: bool,
+    /// The last completed round's result JSON (§19.2) — status, pushed/held/
+    /// applied/resynced/pruned/errors — so the surface reports the previous round
+    /// without running one. `None` until the first round on this build.
+    pub last_round: Option<Value>,
+    /// When that round was persisted.
+    pub last_round_at: Option<String>,
 }
 
 /// Assemble the full [`SyncStatusDetail`]. Awaits (hub `/status` + catalog) run
@@ -1398,6 +1504,13 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
         }
     }
 
+    // Capability page (§7 / §19.2): one extra GET so the surface can name the
+    // authority and its advertised scopes. Guarded — None on any failure (an
+    // unreachable hub, or a website that serves no /cluster), exactly like the
+    // round degrades. Fetched above the synchronous reads so no rusqlite handle
+    // (which is !Send) is ever held across the await.
+    let cluster = fetch_cluster(settings).await;
+
     // 3. Everything below is synchronous SQLite / in-process reads.
     let role = settings.role();
     let cluster_id = settings.cluster_id();
@@ -1406,27 +1519,7 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
     let conn = datasets::dictation::open_app_db(settings)?;
     ensure_sync_tables(&conn)?;
 
-    let mut local: Vec<SyncStateEntry> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT dataset_uuid, overall_hash, synced_at, bytes, file_count, \"cursor\" \
-                 FROM dataset_sync_state",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(SyncStateEntry {
-                    dataset_uuid: r.get(0)?,
-                    overall_hash: r.get(1)?,
-                    synced_at: r.get(2)?,
-                    bytes: r.get(3)?,
-                    file_count: r.get(4)?,
-                    cursor: r.get(5)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        rows.filter_map(|r| r.ok()).collect()
-    };
+    let mut local: Vec<SyncStateEntry> = local_sync_entries(&conn)?;
     // Mark datasets the hub pruned past our cursor (a resync is forced on the
     // next round — surface it here so the Status page can warn before one runs).
     for e in &mut local {
@@ -1447,9 +1540,30 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
     let queued_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM writeback_queue", [], |r| r.get(0))
         .unwrap_or(0);
+    let (queue_app, queue_dataset) = queue_by_scope(&conn);
     let app_cursor = app_cursor(&conn);
     let history_backfilled_at = app_history_backfilled(&conn);
+    let events_backfilled_at = app_events_history_backfilled(&conn);
+    let (last_round_val, last_round_at) = last_round(&conn);
     drop(conn);
+
+    // Authority + gaps (§19.2). `hub_proto` prefers the capability page and falls
+    // back to the /status probe; a host that can serve the app plane but whose
+    // history this device has not folded is a *visible* gap, not a silent zero.
+    let hub_proto = cluster
+        .as_ref()
+        .map(|c| c.protocol_version)
+        .or(hub.protocol_version);
+    let app_adv = app_journal_advertised(&cluster, &base, hub_proto);
+    let history_gap = app_adv && history_backfilled_at.is_none();
+    let events_gap =
+        matches!(hub_proto, Some(p) if p >= EVENTS_PROTOCOL) && events_backfilled_at.is_none();
+    let authority_kind = cluster.as_ref().map(|c| c.authority_kind.clone());
+    let epoch = cluster.as_ref().map(|c| c.epoch);
+    let features = cluster
+        .as_ref()
+        .map(|c| c.features.clone())
+        .unwrap_or_default();
 
     let chat_pending = if role == "hub" {
         0
@@ -1514,6 +1628,10 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
             bytes: entry.map(|e| e.bytes).unwrap_or(0),
             file_count: entry.map(|e| e.file_count).unwrap_or(0),
             hub_ahead,
+            upstream_kind: entry.map(|e| e.upstream_kind.clone()).unwrap_or_default(),
+            upstream_origin: entry.map(|e| e.upstream_origin.clone()).unwrap_or_default(),
+            availability: entry.map(|e| e.availability.clone()).unwrap_or_default(),
+            published_version: entry.and_then(|e| e.published_version),
         });
     }
     for e in &local {
@@ -1530,6 +1648,10 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
             bytes: e.bytes,
             file_count: e.file_count,
             hub_ahead: false,
+            upstream_kind: e.upstream_kind.clone(),
+            upstream_origin: e.upstream_origin.clone(),
+            availability: e.availability.clone(),
+            published_version: e.published_version,
         });
     }
 
@@ -1550,6 +1672,16 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
         devices,
         app_cursor,
         history_backfilled_at,
+        events_backfilled_at,
+        authority_kind,
+        epoch,
+        features,
+        queue_app,
+        queue_dataset,
+        history_gap,
+        events_gap,
+        last_round: last_round_val,
+        last_round_at,
     })
 }
 
@@ -2396,6 +2528,45 @@ fn pending_writeback_count(settings: &SettingsState) -> i64 {
         .unwrap_or(0)
 }
 
+/// Per-scope writeback queue depth + oldest pending `edit_time` (§19.2). Splits
+/// the single `writeback_queue` into the `@app` scope (per-user practice/progress)
+/// and the dataset scope (shared content) using the one classifier both the hub
+/// append and the follower enqueue use, so the surface reports the same scopes the
+/// journal does. Stamps are fixed-width UTC (INV-6), so the lexicographic min is
+/// the oldest. Returns `(app, dataset)`; an empty/unreadable queue yields zeros.
+fn queue_by_scope(conn: &Connection) -> (ScopeQueue, ScopeQueue) {
+    let mut app = ScopeQueue { depth: 0, oldest_edit_time: None };
+    let mut dataset = ScopeQueue { depth: 0, oldest_edit_time: None };
+    let rows: Vec<(String, Option<String>)> = (|| {
+        let mut stmt = conn
+            .prepare("SELECT kind, COALESCE(edit_time, queued_at) FROM writeback_queue")
+            .ok()?;
+        let mapped = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })
+            .ok()?;
+        Some(mapped.filter_map(|x| x.ok()).collect())
+    })()
+    .unwrap_or_default();
+    for (kind, stamp) in rows {
+        let target = if crate::sync::change_log::is_app_scope_kind(&kind) {
+            &mut app
+        } else {
+            &mut dataset
+        };
+        target.depth += 1;
+        if let Some(s) = stamp {
+            match &target.oldest_edit_time {
+                None => target.oldest_edit_time = Some(s),
+                Some(cur) if s < *cur => target.oldest_edit_time = Some(s),
+                Some(_) => {}
+            }
+        }
+    }
+    (app, dataset)
+}
+
 /// Pull the app-wide journal scope (`sync_log` rows logged under
 /// [`crate::sync::change_log::APP_SCOPE`]): per-user `dictation` progress and `xp`
 /// awards. Those tables live in the app DB, so they are never part of a dataset
@@ -3108,7 +3279,7 @@ pub async fn sync_round_inner(
         }
     }
 
-    Ok(json!({
+    let result = json!({
         "status": if errors.is_empty() { "ok" } else { "partial" },
         "hub_kind": if is_website { "website" } else { "lan" },
         "pushed": pushed,
@@ -3119,7 +3290,16 @@ pub async fn sync_round_inner(
         "cards": cards,
         "history": history,
         "errors": errors,
-    }))
+    });
+    // Persist for the status surface (§19.2): a failure to record must not fail
+    // the round, so log at most and still return the result.
+    if let Ok(conn) = datasets::dictation::open_app_db(settings.inner()) {
+        let _ = ensure_sync_tables(&conn);
+        if let Err(e) = set_last_round(&conn, &result) {
+            log::warn!("[sync] could not persist last-round result: {e}");
+        }
+    }
+    Ok(result)
 }
 
 /// Tauri entry point for the round (Datasets Sync page + MCP).
@@ -3501,6 +3681,103 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "{table}.{col} should exist exactly once");
         }
+    }
+
+    // -- §19.2 status-slice helpers ----------------------------------------
+
+    #[test]
+    fn queue_by_scope_splits_app_and_dataset() {
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        // One app-scope row (`xp`) and one dataset-scope row (`card`), distinct
+        // `edit_time`. `queue_by_scope` splits on `is_app_scope_kind`.
+        conn.execute(
+            "INSERT INTO writeback_queue (id, kind, dataset_uuid, payload, queued_at, edit_time) \
+             VALUES ('q1', 'xp', 'app', '{}', '2026-01-01 00:00:00', '2026-01-05 00:00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO writeback_queue (id, kind, dataset_uuid, payload, queued_at, edit_time) \
+             VALUES ('q2', 'card', 'ds-1', '{}', '2026-01-01 00:00:00', '2026-01-03 00:00:00')",
+            [],
+        )
+        .unwrap();
+        let (app, dataset) = queue_by_scope(&conn);
+        assert_eq!(app.depth, 1);
+        assert_eq!(dataset.depth, 1);
+        assert_eq!(app.oldest_edit_time.as_deref(), Some("2026-01-05 00:00:00"));
+        assert_eq!(dataset.oldest_edit_time.as_deref(), Some("2026-01-03 00:00:00"));
+
+        // A second, older app-scope row moves the app oldest back (min stamp);
+        // the dataset scope is untouched.
+        conn.execute(
+            "INSERT INTO writeback_queue (id, kind, dataset_uuid, payload, queued_at, edit_time) \
+             VALUES ('q3', 'dictation', 'app', '{}', '2026-01-01 00:00:00', '2026-01-02 00:00:00')",
+            [],
+        )
+        .unwrap();
+        let (app, dataset) = queue_by_scope(&conn);
+        assert_eq!(app.depth, 2);
+        assert_eq!(app.oldest_edit_time.as_deref(), Some("2026-01-02 00:00:00"));
+        assert_eq!(dataset.depth, 1);
+
+        // An empty queue reports zero depth and no stamp.
+        let empty = mem_conn();
+        ensure_sync_tables(&empty).unwrap();
+        let (a, d) = queue_by_scope(&empty);
+        assert_eq!(a.depth, 0);
+        assert!(a.oldest_edit_time.is_none());
+        assert_eq!(d.depth, 0);
+        assert!(d.oldest_edit_time.is_none());
+    }
+
+    #[test]
+    fn last_round_round_trips() {
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        // A fresh DB has no persisted round.
+        let (v, at) = last_round(&conn);
+        assert!(v.is_none());
+        assert!(at.is_none());
+
+        let result = json!({"status": "ok", "applied": 3});
+        set_last_round(&conn, &result).unwrap();
+        let (v, at) = last_round(&conn);
+        assert_eq!(v, Some(result));
+        assert!(at.is_some(), "a stamp is written alongside the JSON");
+
+        // Upsert: a second round replaces the first and stays a single row.
+        set_last_round(&conn, &json!({"status": "ok", "applied": 5})).unwrap();
+        let (v, _) = last_round(&conn);
+        assert_eq!(v.unwrap()["applied"].as_i64(), Some(5));
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM app_sync_state", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "single-row table stays single-row");
+    }
+
+    #[test]
+    fn local_sync_entries_reads_provenance() {
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO dataset_sync_state \
+             (dataset_uuid, overall_hash, synced_at, bytes, file_count, \"cursor\", \
+              upstream_kind, upstream_origin, availability, published_version) \
+             VALUES ('ds-1', 'h', '2026-01-01', 10, 2, 9, 'registry', 'https://x', 'listed', 7)",
+            [],
+        )
+        .unwrap();
+        let entries = local_sync_entries(&conn).unwrap();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.dataset_uuid, "ds-1");
+        assert_eq!(e.cursor, Some(9));
+        assert_eq!(e.upstream_kind, "registry");
+        assert_eq!(e.upstream_origin, "https://x");
+        assert_eq!(e.availability, "listed");
+        assert_eq!(e.published_version, Some(7));
     }
 
     #[test]

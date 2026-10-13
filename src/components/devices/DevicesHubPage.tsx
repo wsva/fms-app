@@ -66,6 +66,14 @@ interface SyncStatusDetail {
   queued_count: number;
   chat_pending: number;
   devices: PairedDevice[];
+  /** Authority the connected cluster is serving (§7 / §19.2), from the capability
+   * page: "lan_hub" | "registry" | "cloud_hub". Absent/null when the host serves
+   * no /cluster (unreachable, or a website hub). */
+  authority_kind?: string | null;
+  /** The authority's election epoch (null alongside authority_kind). */
+  epoch?: number | null;
+  /** Scopes the authority advertises it can serve; empty when none reachable. */
+  features?: string[];
 }
 
 // A discovered PC returned by the `pc_discover` command.
@@ -567,6 +575,31 @@ export default function DevicesHubPage() {
               value={<span className="font-mono">v{status.protocol_version}</span>}
               explanation="Wire protocol version this build speaks. A device and its hub must share the same version to sync."
             />
+
+            {/* Authority (§7 / §19.2): which host currently serves the cluster and
+                the scopes it advertises. Absent when the hub serves no /cluster. */}
+            {status.authority_kind && (
+              <StatusRow
+                label="Authority:"
+                value={
+                  <span className="inline-flex items-center gap-1.5 flex-wrap">
+                    <span className="font-mono">{status.authority_kind}</span>
+                    {status.epoch != null && (
+                      <span className="text-text-tertiary">epoch {status.epoch}</span>
+                    )}
+                    {(status.features ?? []).map((f) => (
+                      <span
+                        key={f}
+                        className="px-1.5 py-0.5 rounded bg-bg-hover text-text-tertiary font-mono text-xs"
+                      >
+                        {f}
+                      </span>
+                    ))}
+                  </span>
+                }
+                explanation="The host currently serving this cluster and the sync scopes it advertises it can serve. A follower only pulls a scope the authority lists, so a missing scope explains why some data does not arrive."
+              />
+            )}
           </div>
         )}
 

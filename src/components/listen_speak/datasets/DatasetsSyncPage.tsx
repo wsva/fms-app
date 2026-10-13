@@ -46,6 +46,22 @@ interface DatasetStatus {
   bytes: number;
   file_count: number;
   hub_ahead: boolean;
+  /** Provenance of the host this copy came from (§6.1 / §19.2): "desktop_hub" |
+      "registry" | "cloud_hub"; empty when catalog-only (never pulled here). */
+  upstream_kind?: string;
+  upstream_origin?: string;
+  /** Registry availability: "listed" | "withdrawn" (INV-22); empty when unknown. */
+  availability?: string;
+  /** The registry version adopted; null for a LAN mirror or a catalog-only row. */
+  published_version?: number | null;
+}
+
+/** One journal scope's writeback backlog (§19.2). A nonzero `depth` against a
+    host that does not accept the scope is the "queue keeps growing" signal;
+    `oldest_edit_time` says how long the head has been stuck. */
+interface ScopeQueue {
+  depth: number;
+  oldest_edit_time: string | null;
 }
 
 interface HubStatus {
@@ -88,6 +104,28 @@ interface SyncStatusDetail {
       since the journal above is pruned); null = never, which for a follower means
       its older practice/XP is still not here. */
   history_backfilled_at: string | null;
+  /** When this device imported the hub's whole practice-event history (reviews +
+      attempts); null = never, or the hub predates protocol v6. */
+  events_backfilled_at?: string | null;
+  /** Authority the cluster is serving (§7 / §19.2), from the capability page;
+      null when the host serves no /cluster (unreachable, or a website hub). */
+  authority_kind?: string | null;
+  /** The authority's election epoch (null alongside authority_kind). */
+  epoch?: number | null;
+  /** Scopes the authority advertises it can serve; empty when none reachable. */
+  features?: string[];
+  /** The `queued_count` total split per journal scope (§19.2). */
+  queue_app?: ScopeQueue;
+  queue_dataset?: ScopeQueue;
+  /** The hub advertises an app plane this device has never folded history/events
+      from — a visible gap rather than a silent zero. */
+  history_gap?: boolean;
+  events_gap?: boolean;
+  /** The last completed round's persisted result (§19.2) — status, pushed/held/
+      applied/resynced/pruned/errors — so the surface reports it without running
+      a new round; null until the first round on this build. */
+  last_round?: Record<string, unknown> | null;
+  last_round_at?: string | null;
 }
 
 interface SyncProgress {
@@ -571,6 +609,15 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   // hidden. Defaults to false while status is still loading or on non-Tauri.
   const isHub = status?.role === "hub";
 
+  // §19.2 diagnostics surfaced off the last persisted round. `last_round` is an
+  // opaque JSON blob, so coerce defensively — a stale/odd shape renders as zeros
+  // rather than throwing.
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const lastRound = status?.last_round ?? null;
+  const lastRoundErrors = Array.isArray(lastRound?.errors)
+    ? (lastRound!.errors as unknown[]).length
+    : 0;
+
   function renderDatasetCard(ds: PcDataset, i: number) {
     const st = syncState[ds.uuid];
     const detail = statusByUuid[ds.uuid];
@@ -640,6 +687,18 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
         {detail?.hub_ahead && state === "downloaded" && (
           <span className="text-xs text-text-tertiary">
             Hub has newer changes — run "Sync now" to pull them.
+          </span>
+        )}
+
+        {/* Provenance (§19.2): where this copy came from and whether its registry
+            listing is still live. Hidden for a catalog-only row (never pulled). */}
+        {detail?.upstream_kind && (
+          <span className="text-xs text-text-tertiary flex items-center gap-1 flex-wrap">
+            <span className="font-mono">{detail.upstream_kind}</span>
+            {detail.published_version != null && <span>v{detail.published_version}</span>}
+            {detail.availability === "withdrawn" && (
+              <span className="text-amber-600 dark:text-amber-400">withdrawn upstream</span>
+            )}
           </span>
         )}
 
@@ -765,6 +824,68 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
             >
               Devices &amp; Hub →
             </button>
+          )}
+        </div>
+      )}
+
+      {/* §19.2 diagnostics (follower only — a hub serves, it does not pull):
+          authority + advertised scopes, per-scope queue depth, backfill gaps,
+          and what the last round actually did. All additive, degrades to nothing
+          when a stale backend omits the fields. */}
+      {status && !isHub && (
+        <div className="shrink-0 flex flex-col gap-1.5 p-2.5 rounded-lg border border-border-default bg-bg-card text-xs">
+          {status.authority_kind && (
+            <div className="flex items-center gap-2 flex-wrap text-text-secondary">
+              <span>
+                authority <span className="font-mono">{status.authority_kind}</span>
+                {status.epoch != null && <> · epoch {status.epoch}</>}
+              </span>
+              {(status.features ?? []).map((f) => (
+                <span key={f} className="px-1.5 py-0.5 rounded bg-bg-hover text-text-tertiary font-mono">
+                  {f}
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="flex items-center gap-2 flex-wrap text-text-tertiary">
+            <span>
+              queue @app {status.queue_app?.depth ?? 0} / dataset {status.queue_dataset?.depth ?? 0}
+            </span>
+            {(status.queue_app?.depth ?? 0) > 0 && status.queue_app?.oldest_edit_time && (
+              <span className="text-amber-600 dark:text-amber-400">
+                oldest app {status.queue_app.oldest_edit_time}
+              </span>
+            )}
+            {(status.queue_dataset?.depth ?? 0) > 0 && status.queue_dataset?.oldest_edit_time && (
+              <span className="text-amber-600 dark:text-amber-400">
+                oldest dataset {status.queue_dataset.oldest_edit_time}
+              </span>
+            )}
+          </div>
+          {status.history_gap && (
+            <span className="text-amber-600 dark:text-amber-400">
+              history not imported — run a round, or force it with sync_history_backfill
+            </span>
+          )}
+          {status.events_gap && (
+            <span className="text-amber-600 dark:text-amber-400">
+              practice events not imported — a hub upgrade may be owed, then a round
+            </span>
+          )}
+          {lastRound && (
+            <div className="flex items-center gap-2 flex-wrap text-text-tertiary">
+              <span>
+                last round <span className="font-mono">{String(lastRound.status ?? "?")}</span>
+              </span>
+              <span>
+                pushed {num(lastRound.pushed)} · applied {num(lastRound.applied)} · held{" "}
+                {num(lastRound.held)}
+              </span>
+              {lastRoundErrors > 0 && (
+                <span className="text-red-600 dark:text-red-400">{lastRoundErrors} error(s)</span>
+              )}
+              {status.last_round_at && <span>{status.last_round_at}</span>}
+            </div>
           )}
         </div>
       )}
