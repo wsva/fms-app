@@ -1,6 +1,6 @@
 # FmS Sync Design v2 — one journal, four surfaces
 
-This document is the **target architecture** for sync across the three parties a real user has: the **local hub**, the **local followers**, and the **website**. It supersedes nothing physically: [`sync.md`](./sync.md) stays the authority for the LAN cluster mechanics it already specifies (journal shape, writeback kind classification, tombstones, snapshot rules, trust zones, build order for the desktop/follower pair), and [`../app_dev_guide_20261013_063113.md`](../app_dev_guide_20261013_063113.md) stays the record of what the deployed website does *today*. v2 changes what the website is *for*, and adds the rules that make a device talking to both hubs safe.
+This document is the **target architecture** for sync across the three parties a real user has: the **local hub**, the **local followers**, and the **website**. It physically supersedes nothing: [`sync.md`](./sync.md) stays the authority for the LAN cluster mechanics it already specifies (journal shape, writeback kind classification, tombstones, snapshot rules, trust zones, build order for the desktop/follower pair), and [`../app_dev_guide_20261013_063113.md`](../app_dev_guide_20261013_063113.md) stays the record of what the deployed website does *today*. v2 changes what the website is *for*, and adds the rules that make a device talking to both hubs safe.
 
 **Design order matters here.** v2 is written against the ideal contract, not against the endpoints that exist. Where the website falls short of the contract, the gap is website work to be scheduled — not an app-side workaround. The app must not invent a second semantics because a route is missing.
 
@@ -66,33 +66,55 @@ And one contract violation on the website side: publish means *pin*, but the web
 
 ## 5. Invariants
 
-These are the contract. Each one is testable, and §13 says how.
+These are the contract. Each one is testable, and [§13](#13-how-we-know-it-is-right) says how. They are grouped by the property they protect — a new invariant belongs in exactly one group, and if it does not fit any of them the group list is what should grow.
+
+**Journal authority** — who mints `seq`, and when a stale writer is refused.
 
 | # | Invariant | Why it exists |
 | --- | --- | --- |
 | INV-1 | **Only the authority mints journal `seq`.** No other node, and nothing on the website, assigns a sequence number. | Two sequence writers is two truths. |
 | INV-2 | **The journal is append-only and `seq` is never reused.** `AUTOINCREMENT`, retention records `pruned_up_to`, entries are never rewritten in place. | Reused rowids make a stale cursor look current ([`sync.md` §3.2](./sync.md)). |
 | INV-3 | **Every change carries a stable `change_id` and is idempotent on it.** Acks may be lost; retries must be no-ops. | Counter deltas applied twice are silent corruption. |
+| INV-13 | **Authority handover increments an epoch; a node holding a stale epoch is refused on write.** | Split brain is unrecoverable corruption, not a bug. |
+
+**Convergence** — how two nodes that disagree end up identical.
+
+| # | Invariant | Why it exists |
+| --- | --- | --- |
 | INV-4 | **A rejected change returns the winner's payload.** The loser applies it with no enqueue and no log. | Otherwise the loser advances its cursor past a row it never got. |
 | INV-5 | **Conflicts resolve against durable current state** — the live row's `updated_at` and the `tombstones` table — never against a prunable log entry. | `sync_log` records vanish at retention; the row does not. |
 | INV-6 | **All stamps are canonical fixed-width UTC and compared as instants**; a stamp more than a few minutes in the future is clamped to the receiver's `now`. | Text order lies about mixed formats; one wrong clock otherwise wins forever. |
+| INV-14 | **A pull never clobbers an unsent local edit** (pending entry with a later `edit_time` is skipped), **and a newer pulled entry drops the pending one.** Dropping is LWW by design; every drop is counted and surfaced on the status surface (§19.2) so silent loss cannot accumulate unnoticed. | Offline work is not undone by convergence — and when it must lose, the user sees it. |
+| INV-16 | **Derived totals are recomputed from rows, never accumulated** (`lifetime_xp = SUM(amount)`). | Dedup *is* convergence; a skipped duplicate otherwise leaves the total permanently ahead. |
+| INV-23 | **A journaled change carries a *result*, not an *input*.** Replaying it must be a no-op or a first application — never a re-execution whose outcome depends on the receiver's history. | A stored fold (`{card_uuid, quality}`) applied twice silently compounds ([§17.1](#171-the-defect-that-forced-this)). XP already obeys this by logging the absolute total; every append-only kind must. |
+
+**Boundaries** — what crosses which line, and who is allowed to write where.
+
+| # | Invariant | Why it exists |
+| --- | --- | --- |
 | INV-7 | **Nothing is deleted because of absence from a catalog that is not its own upstream.** Prune is provenance-scoped. | §3 fact 1. |
-| INV-8 | **A published version is immutable, and a registry read never resolves to mutable workspace state.** | Share means share. |
+| INV-8 | **A published version is immutable to every client, and a registry read never resolves to mutable workspace state.** The operator retains a metadata-only takedown primitive (§11.5) that marks a version unavailable without rewriting it. | Share means share — for users, and a sanctioned abuse path for the operator. |
+| INV-17 | **Nothing crosses the publish boundary implicitly.** Mirroring and publishing are separate, explicit acts. | §3's contract violation. |
+| INV-19 | **One upstream per scope per device.** A device's `@app` writes go to exactly one authority; mirroring from that authority onward is not a second upstream. | Two hosts accepting the same ledger means two sequence spaces over one set of rows; derived totals would *hide* the divergence instead of surfacing it. |
+| INV-20 | **A host is written to only for scopes it advertises** in `features[]`. An unadvertised scope is refused with an actionable error, never silently dropped or queued forever. `features[]` is re-read at the start of every round, on any 4xx that names a scope, and on every epoch change (§19.1). | Today three `HubKind::Website` guards short-circuit app-data sync with `Ok(0)`/skip: the queue grows and nothing reports it (§16.2). An origin test degrades silently; a capability test cannot — but only while the cache is fresh. |
+| INV-22 | **Withdrawal never deletes a practice copy.** If a publisher unpublishes or narrows visibility, an adopter's local dataset is kept and marked `unpublished`, and its progress keeps pointing at it. | A catalog that *shrinks* is the common case, not an edge case; INV-7 covers the hub switch, this covers the ordinary passage of time. |
+
+**Durability** — what must survive a crash, a reinstall, and a retention prune.
+
+| # | Invariant | Why it exists |
+| --- | --- | --- |
 | INV-9 | **No runtime state is ever written inside a dataset directory.** Local state lives in the app DB. | `overall_hash` covers every non-DB file ([`sync.md` §3.2](./sync.md)); a stray cache file dirties every follower. |
 | INV-10 | **Write order is dataset DB first, journal append second**, and a crash between them is detected by the logical row hash and healed by **at most one** automatic resync per round. | Log-first loses rows; a naive file-hash drift check loops forever. |
 | INV-11 | **A snapshot is internally consistent and names its own position**: read `seq` before packing, return it in a header, and have the receiver set its cursor from it. Snapshot content comes from a `VACUUM INTO` / backup-API copy, never the live file. | Torn DB + "did I already have that change?" ([`sync.md` §3.3, §8](./sync.md)). |
-| INV-12 | **Version and capability negotiation precede any mutation.** `GET /api/v1/cluster` first; a host lacking the feature refuses the write rather than half-applying it. | Three devices never upgrade in one moment. |
-| INV-13 | **Authority handover increments an epoch; a node holding a stale epoch is refused on write.** | Split brain is unrecoverable corruption, not a bug. |
-| INV-14 | **A pull never clobbers an unsent local edit** (pending entry with a later `edit_time` is skipped), **and a newer pulled entry drops the pending one.** | Offline work is not undone by convergence. |
 | INV-15 | **Any node can rebuild full state from one snapshot plus journal replay** — no capability restricted to the original machine. | Recoverability is the point of the journal. |
-| INV-16 | **Derived totals are recomputed from rows, never accumulated** (`lifetime_xp = SUM(amount)`). | Dedup *is* convergence; a skipped duplicate otherwise leaves the total permanently ahead. |
-| INV-17 | **Nothing crosses the publish boundary implicitly.** Mirroring and publishing are separate, explicit acts. | §3's contract violation. |
+| INV-21 | **Every `@app` kind is either state-readable or non-prunable.** A kind the state route enumerates is exportable in full via `after=0` / state read regardless of retention; a kind it does not enumerate must not be pruned on the authority. Today `dictation` and `xp` satisfy the first arm and `card_review` violates the second (§17.6 item 2) — that gap is a phase-7a blocker, not an accepted steady state. | A user must be able to leave a cloud authority for a PC, or a desktop authority for a cloud, without losing a year of practice. Journal *pages* are pruned; the state read is what makes exit lossless. |
+
+**Negotiation** — what a host promises before it writes anything.
+
+| # | Invariant | Why it exists |
+| --- | --- | --- |
+| INV-12 | **Version and capability negotiation precede any mutation.** `GET /api/v1/cluster` first; a host lacking the feature refuses the write rather than half-applying it. | Three devices never upgrade in one moment. |
 | INV-18 | **A change is applied by the same code path a UI action uses** (the replayed command function), never by raw SQL, so invariants the command enforces survive sync. | Sync that bypasses the domain layer invents a second, divergent domain. |
-| INV-19 | **One upstream per scope per device.** A device's `@app` writes go to exactly one authority; mirroring from that authority onward is not a second upstream. | Two hosts accepting the same ledger means two sequence spaces over one set of rows; derived totals would *hide* the divergence instead of surfacing it. |
-| INV-20 | **A host is written to only for scopes it advertises** in `features[]`. An unadvertised scope is refused with an actionable error, never silently dropped or queued forever. | Today three `HubKind::Website` guards short-circuit app-data sync with `Ok(0)`/skip: the queue grows and nothing reports it (§16.2). An origin test degrades silently; a capability test cannot. |
-| INV-21 | **The `@app` journal is exportable in full** — `after=0` (or a state read) yields every row a device ever pushed, regardless of retention. | A user must be able to leave a cloud authority for a PC, or a desktop authority for a cloud, without losing a year of practice. Journal *pages* are pruned; the state read is what makes exit lossless. |
-| INV-22 | **Withdrawal never deletes a practice copy.** If a publisher unpublishes or narrows visibility, an adopter's local dataset is kept and marked `unpublished`, and its progress keeps pointing at it. | A catalog that *shrinks* is the common case, not an edge case; INV-7 covers the hub switch, this covers the ordinary passage of time. |
-| INV-23 | **A journaled change carries a *result*, not an *input*.** Replaying it must be a no-op or a first application — never a re-execution whose outcome depends on the receiver's history. | A stored fold (`{card_uuid, quality}`) applied twice silently compounds ([§17.1](#171-the-defect-that-forced-this)). XP already obeys this by logging the absolute total; every append-only kind must. |
 
 ## 6. State model
 
@@ -109,7 +131,7 @@ dataset_sync_state(
   upstream_origin TEXT NOT NULL DEFAULT '',            -- host origin, or the registry account
   cursor          INTEGER,         -- journal seq in *upstream's* number space; NULL = needs resync
   published_version INTEGER,      -- registry copies only: the version we adopted
-  availability    TEXT NOT NULL DEFAULT 'listed',  -- 'listed' | 'withdrawn' (INV-22)
+  availability    TEXT NOT NULL DEFAULT 'listed',  -- 'listed' | 'withdrawn' (INV-22). Adoption is atomic — the row is written only after the snapshot lands — so there is no 'adopting' intermediate.
   synced_at TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0, file_count INTEGER NOT NULL DEFAULT 0
 );
 -- app_sync_state grows the same upstream_kind / upstream_origin pair, so the
@@ -162,7 +184,7 @@ The largest simplification in v2: **the desktop hub and the cloud hub serve the 
 | `GET /api/v1/inbox?scope=&after=S` | drain proposals | same page shape as `/changes`, plus author + proposal seq |
 | `POST /api/v1/inbox/ack` | report verdicts | `accepted[]`, `rejected[{change_id, winner_seq, winner_payload}]` (INV-4) |
 | `GET /api/v1/file?dataset=&path=`, `GET .../snapshot` | bytes | `Range` honoured; `snapshot` is bootstrap/resync only; `data.sqlite3*` never through `/file` |
-| `POST /api/v1/publish` | pin a version | `{uuid, version, visibility, tag_uuids}` from the current `content_id`; writes `versions/`, never `live/` (INV-8, INV-17) |
+| `POST /api/v1/publish` | pin a version | `{uuid, version, visibility, tag_uuids}` from the current `content_id`; `visibility ∈ {private, unlisted, public}`; writes `versions/`, never `live/` (INV-8, INV-17) |
 | `GET /api/v1/registry/{uuid}/versions`, `GET .../manifest?version=N`, `GET .../snapshot?version=N` | published reads | every registry read takes a version; the *current* version is resolved server-side from the pin, not from the live dir |
 | `POST /api/v1/subscriptions` | subscribe / unsubscribe | REST, so the app can do what the market page does today |
 | `GET /api/v1/chat/messages?after_id=`, `GET /api/v1/chat/attachment/{uuid}` | chat | hosted by the authority only |
@@ -191,7 +213,7 @@ The only path by which a non-authority edits become cluster state:
 1. The website UI writes to `live/` **optimistically** so the page stays responsive, and appends the same change to `inbox/` with a `change_id` and the author identity.
 2. The hub drains: `GET /inbox?after=S` → for each proposal, apply through the **normal command path** (INV-18) under the standard conflict rules (INV-5, INV-14), which mints a journal `seq` → `POST /inbox/ack`.
 3. The website rolls `live/` back to the authoritative row on rejection (INV-4) and re-renders. Nothing a subscriber can see was ever affected (INV-17).
-4. Drain cadence is the hub's: app start, on a timer, on `Sync now`, and on network restore.
+4. Drain cadence is the hub's: app start, on a timer, on `Sync now`, and on network restore. The drain holds a per-cluster advisory lock; overlapping triggers coalesce onto the running drain rather than starting a second one, so `change_id` dedup (INV-3) is a safety net, not the primary defense.
 
 This subsumes today's card-sync round trip: `POST /api/card/sync/push` is a proposal and `pull` is mirror reading, so **card rows get one conflict engine instead of two** (§3 fact 3). The app's card client keeps its cursor in the same per-upstream slot as everything else, and its target is chosen by the dataset's provenance rather than hard-wired to the website origin.
 
@@ -236,9 +258,34 @@ Optimistic write to `live/` is the one deliberate exception to "the mirror is re
 | Phone offline for months in practice mode | `@app` queue drains on reconnect; dedup by `change_id` makes the flood safe (INV-3) |
 | Two authorities both accept one device's `@app` writes | refused — one upstream per scope (INV-19) |
 
-## 11. Limits and operations
+## 11. Limits, operations, and lifecycle
 
-Quotas are per account (storage, proposals pending, mirror lag), and every limit is reported in `/api/v1/cluster` so a client can size batches instead of discovering caps by failure. A cloud authority must serialize per-scope journal appends across instances — a single-instance in-process lock is not enough once the website is the journal host; use one writer per cluster (sticky routing or a shared lease) or refuse writes. Website-side retention mirrors the desktop's: journal entries pruned after 30 days with `pruned_up_to` recorded, tombstones forever, versions forever (they are the user's published work).
+### 11.1 Quotas
+
+Quotas are per account (storage, proposals pending, mirror lag), and every limit is reported in `/api/v1/cluster` so a client can size batches instead of discovering caps by failure.
+
+### 11.2 Cloud authority serialization
+
+A cloud authority must serialize per-scope journal appends across instances — a single-instance in-process lock is not enough once the website is the journal host. Use one writer per cluster (sticky routing or a shared lease) or refuse writes with `503 retry-after`. A lease flap mid-append surfaces as `409 epoch conflict`, which forces the client to re-read `/api/v1/cluster` (INV-20) and retry; the app never assumes the lease is stable across a round.
+
+### 11.3 Content-addressed store GC
+
+`live/` blobs are reference-counted against the trees that name them; a blob no `live/` tree references is collectable. `versions/` blobs are permanent by INV-8, except when §11.5 marks a version unavailable, at which point the bytes may be reclaimed after the operator's retention window. GC is a website-side concern only: a client never sees a blob disappear that a manifest it holds still names.
+
+### 11.4 Retention
+
+Website-side retention mirrors the desktop's: journal entries pruned after 30 days with `pruned_up_to` recorded, tombstones forever, versions forever (they are the user's published work). `@app` kinds not enumerated by the state route are the one exception to journal pruning (INV-21) — they are not prunable at all until §17.6 item 2 closes.
+
+### 11.5 Takedown
+
+An operator retains a takedown primitive that marks a published version `unavailable` without rewriting the artifact: subscribers keep their local copies (INV-22), reads on that version return `410 Gone`, and the pin resolves to the next-lower available version or none. This is the only sanctioned mutation of `versions/`, and it is metadata-only — the bytes stay, so an overturned takedown restores the version by flipping the flag back.
+
+### 11.6 Account lifecycle
+
+- **Password rotation** does not invalidate device keys; a device key is revoked only by explicit user action, and a revoked key gets `401 re-pair` at the next round.
+- **Account suspension** freezes writes (`403 suspended`, retryable only by support) while reads on public registry entries continue; `@app` queue growth on the client is surfaced on the status surface (§19.2), not silently dropped.
+- **Account deletion** unpins every published version (INV-22 protects adopters), revokes every device key, and schedules the mirror + inbox + `versions/` blobs for reclamation after the operator retention window. Journal export via `GET /api/v1/app/state` remains available to the user for the same window (INV-21 exit story).
+- **Storage quota exceeded mid-round** returns `413 quota` with current usage in the body; the client stops the round, keeps the queue, and surfaces the state rather than retrying.
 
 ## 12. Delta from what exists
 
@@ -260,7 +307,7 @@ Quotas are per account (storage, proposals pending, mirror lag), and every limit
 
 ## 13. How we know it is right
 
-- **One conformance suite, two hosts.** The same test vectors run against `sync/rest.rs` (desktop) and the website routes: identical responses for identical journal states. A host that passes is contract-complete; nothing in the app can "work on one and silently half-work on the other".
+- **One conformance suite, two hosts.** The same test vectors run against `sync/rest.rs` (desktop) and the website routes: identical responses for identical journal states. A host that passes is contract-complete; nothing in the app can "work on one and silently half-work on the other". The suite is a phase-2 deliverable, checked into `src-tauri/tests/sync_conformance/`, and CI runs it against both hosts on every sync-touching PR — a host that fails is treated as broken, not as a known difference.
 - **Property tests** on the invariants: replay a journal twice → byte-identical state (INV-3); random interleavings of two nodes converging → same `content_id` (INV-1, INV-5); a crash injected between the two writes of INV-10 → exactly one resync, no data loss; stamp fuzzing across formats and offsets (INV-6).
 - **Differential check** for the file contract: the manifest hash recipe must stay byte-equal across TypeScript and Rust for the same tree — it already is verified equal ([guide §4.1](../app_dev_guide_20261013_063113.md)), so keep it as a CI assertion, not a one-time experiment.
 - **Fault drills**: hub switched mid-life, hub offline a month, cursor past `pruned_up_to`, 413 on a publish, handover and hand-back.
@@ -268,27 +315,27 @@ Quotas are per account (storage, proposals pending, mirror lag), and every limit
 
 ## 14. Build order
 
-Each phase is shippable and keeps every existing device usable. Phase 0 is app-only and is worth doing whatever else we decide, because it removes live data-loss and false-cursor hazards that §3 documents.
+Each phase is shippable and keeps every existing device usable. Phases 0 and 1 are both app-only and are worth doing whatever else we decide: phase 0 closes the *live* card-review double-apply defect §17.1 documents, and phase 1 removes the false-cursor and cross-hub-prune hazards §3 documents. Phase 0 ships first because a rating today corrupts the author's own schedule on every round; the hazards phase 1 closes only bite once a device talks to two hosts.
 
-0. **App-side safety floor.** Provenance + per-upstream cursors + prune scoping (§6.1); card-sync target chosen by provenance; refuse prune-by-absence against any host that is not a dataset's recorded upstream; and refuse the card round trip for a deck under the download root (§16.3, third item) — prospective rather than live, since nothing populates that root yet, but it is the guard the adoption flow will need the day it exists.
-0b. **Card review plane moves to the user.** Review events into the app DB under `@app`, replay made idempotent, `card` rows no longer written by practice (§17). App-only, no website work — and this is the live one: a rating today double-applies on the LAN and reaches the website as a *content edit* that subscribers are permitted to push.
-1. **Contract hardening.** `GET /api/v1/cluster` with `authority_kind`, `epoch`, `features[]`; both hosts serve it; the client negotiates before writing (INV-12).
-2. **Registry split on the website.** `versions/` + per-version reads + `POST /publish` + `POST /subscriptions` (INV-8, INV-17). Fixes §3's contract violation.
-3. **Mirror push, incremental.** Journal + changed-file push replaces whole-archive upload for refresh; content-addressed file store; `snapshot` demoted to bootstrap.
-4. **Inbox.** Proposal queue, drain, ack-with-winner; fold the card round trip into it and delete the second conflict engine.
-5. **App-data display on the website.** `@app` mirror, recomputed totals, history surface for progress as well as XP.
-6. **Cloud authority, split in two.**
-   - **6a — `@app`-only authority.** The website serves `POST/GET /api/v1/app/changes` + `GET /api/v1/app/state` and advertises `app_journal` in `features[]`; the four origin guards in §16.2 become capability checks. This alone enables the **no-local-hub mode** (§16) — the cheapest full win in this plan, and the one that serves a user with no PC at all.
-   - **6b — dataset scopes hosted too.** Full journal hosting + handover with epoch, so multiple devices can *edit* shared state against the cloud (INV-13, INV-15). Nothing in 6a depends on it.
-7. **Optional.** Website editing beyond card types (needs a per-type row write API), follower fallback proposals from a signed device, per-account quotas in the UI.
+0. **Card review plane moves to the user.** Review events into the app DB under `@app`, replay made idempotent, `card` rows no longer written by practice (§17). App-only, no website work — and this is the *live* defect: a rating today double-applies on the LAN and reaches the website as a content edit that subscribers are permitted to push.
+1. **App-side safety floor.** Provenance + per-upstream cursors + prune scoping (§6.1); card-sync target chosen by provenance; refuse prune-by-absence against any host that is not a dataset's recorded upstream; and refuse the card round trip for a deck under the download root (§16.3, third item) — prospective rather than live, since nothing populates that root yet, but it is the guard the adoption flow will need the day it exists.
+2. **Contract hardening.** `GET /api/v1/cluster` with `authority_kind`, `epoch`, `features[]`; both hosts serve it; the client negotiates before writing (INV-12). The conformance suite (§13) lands here.
+3. **Registry split on the website.** `versions/` + per-version reads + `POST /publish` + `POST /subscriptions` (INV-8, INV-17). Fixes §3's contract violation.
+4. **Mirror push, incremental.** Journal + changed-file push replaces whole-archive upload for refresh; content-addressed file store; `snapshot` demoted to bootstrap.
+5. **Inbox.** Proposal queue, drain, ack-with-winner; fold the card round trip into it and delete the second conflict engine.
+6. **App-data display on the website.** `@app` mirror, recomputed totals, history surface for progress as well as XP.
+7. **Cloud authority, split in two.**
+   - **7a — `@app`-only authority.** The website serves `POST/GET /api/v1/app/changes` + `GET /api/v1/app/state` and advertises `app_journal` in `features[]`; the four origin guards in §16.2 become capability checks. This alone enables the **no-local-hub mode** (§16) — the cheapest full win in this plan, and the one that serves a user with no PC at all. Closing §17.6 item 2 (state read over `card_review_event`) is part of this phase, not deferred past it (INV-21).
+   - **7b — dataset scopes hosted too.** Full journal hosting + handover with epoch, so multiple devices can *edit* shared state against the cloud (INV-13, INV-15). Nothing in 7a depends on it.
+8. **Optional.** Website editing beyond card types (needs a per-type row write API), follower fallback proposals from a signed device, per-account quotas in the UI.
 
 ## 15. Open questions
 
-1. **Does the website edit anything but cards?** The inbox is type-agnostic, but a cue/book/read-aloud edit needs the website to know the row shape and the command's invariants. Cheap for cards (already built), expensive per extra type. Decide the target set for phase 4 rather than designing a general row API now.
-2. **Chat on a cloud authority.** The store is already workspace-scoped (`<workspace>/chat`), so it moves with the authority, but attachments need the same content-addressed store. Worth including in phase 6 or explicitly deferring.
+1. **Does the website edit anything but cards?** The inbox is type-agnostic, but a cue/book/read-aloud edit needs the website to know the row shape and the command's invariants. Cheap for cards (already built), expensive per extra type. Decide the target set for phase 5 rather than designing a general row API now.
+2. **Chat on a cloud authority.** The store is already workspace-scoped (`<workspace>/chat`), so it moves with the authority, but attachments need the same content-addressed store. Worth including in phase 7 or explicitly deferring.
 3. **Storage model for `versions/`.** Full tar.gz per version is simple and matches today's `_archive`; content-addressed blocks with a per-version manifest is far cheaper in space. v2 needs immutable reads either way; the choice is capacity, not correctness.
 4. **How expensive should handover be?** Deliberately a manual, epoch-bumping operation now. If users turn out to want phone-primary sync, the alternative is `authority_kind = cloud` as the *default* for new accounts, which is a product decision, not a protocol one.
-5. **Do followers of a desktop authority ever mirror directly to the website?** The design says no (INV-1). The one case that hurts is a laptop that has been offline for months and comes back huge. Answer is still "through the hub", with the hub's queue as the arbiter — but worth confirming before phase 5.
+5. **Do followers of a desktop authority ever mirror directly to the website?** The design says no (INV-1). The one case that hurts is a laptop that has been offline for months and comes back huge. Answer is still "through the hub", with the hub's queue as the arbiter — but worth confirming before phase 6.
 6. **How much history does the website render?** The `@app` mirror makes XP and progress displayable, but "history" is open-ended (ledger vs daily rollups vs per-dataset stats). Decide the exact surface, not the general case.
 7. **~~Does a practice client get any local writing at all?~~ Answered** by §17: the second option is taken for reviews — they live as `@app` rows keyed against the shared object and never inside its directory. Still open for the *note-taking* case (`read_text_save`-class kinds): does a practice client get its own notes on a shared text?
 8. **Where does a practice-mode market live in the UI?** Download/evict/search is a different shape from the dataset management page the desktop shows. Design it as its own surface rather than hiding controls on the management page, or every gated control becomes an accidental affordance.
@@ -328,7 +375,14 @@ Website work: `POST /api/v1/app/changes` (per-user keys, dedup by `change_id`, t
 
 1. **Refuse, do not fork.** [`find_dataset_dir_write`](../../src-tauri/src/datasets/mod.rs#L1589-L1595) forks a downloaded base into a writable overlay on the first write. Under an authority that hosts dataset scopes that is right — the fork becomes journaled state. In this mode an overlay is a dead end: it diverges from the shared base, cannot be published (no dataset journal exists), and no desktop will ever pick it up. Same call, different verdict: **refuse with an actionable error** ("read-only shared copy; your practice is recorded separately"). See §15 question 7 for the alternative.
 2. **Reviews and attempts belong to the user, not the dataset.** [`is_app_scope_kind`](../../src-tauri/src/sync/change_log.rs#L186-L190) covers only `dictation` and `xp`, so `card_review` and `read_attempt_save` journal under the **dataset** scope — per-user history filed as a write into someone else's shared content. For `card_review` this understates the problem: the state is not per-user *representable* today (no user column) and its journal payload is a fold, so replay double-applies it. §17 is the accepted model; `read_attempt_save` needs the same treatment.
-3. **A downloaded base must never be a write target — and one route today skips the guard.** [`card_sync_full`](../../src-tauri/src/datasets/cards/sync.rs#L437-L444) resolves its directory with the **read** resolver and then opens that DB and applies pulled rows, so a card deck living under the download root would be written straight into the frozen base, past the fork/refuse logic. Two verified facts make this **prospective, not live**: `dataset_sync_snapshot` extracts into `type_root` = `<datasets>/<type>/<uuid>` ([`client.rs#L361-L366`](../../src-tauri/src/sync/client.rs#L361-L366)) — a writable root — and **no current code path populates `download_root`** ([`is_under_download_root`](../../src-tauri/src/datasets/mod.rs#L283-L293) is only ever read, never written to), so the read-only-by-location machinery is armed for an adoption flow that does not exist yet. The half that *is* live is different and worse: because a rating writes `card.familiarity` and bumps `card.updated_at` (§17.1), the card push channel ships **practice state as content edits**, and the website accepts them by design — `canPushDataset` admits the owner **or a subscriber** ([guide §3.6](../app_dev_guide_20261013_063113.md)), and a successful push bumps the catalog `snapshot_seq` for every follower. The fix is §17, not a provenance gate: a co-editor editing *content* is the site's intent; a subscriber's studying appearing as an edit is not.
+3. **A downloaded base must never be a write target — and one route today skips the guard.** [`card_sync_full`](../../src-tauri/src/datasets/cards/sync.rs#L437-L444) resolves its directory with the **read** resolver and then opens that DB and applies pulled rows, so a card deck living under the download root would be written straight into the frozen base, past the fork/refuse logic.
+
+   Two verified facts make this **prospective, not live**:
+
+   - `dataset_sync_snapshot` extracts into `type_root` = `<datasets>/<type>/<uuid>` ([`client.rs#L361-L366`](../../src-tauri/src/sync/client.rs#L361-L366)) — a writable root, not the download root.
+   - **No current code path populates `download_root`** ([`is_under_download_root`](../../src-tauri/src/datasets/mod.rs#L283-L293) is only ever read, never written to), so the read-only-by-location machinery is armed for an adoption flow that does not exist yet.
+
+   The half that *is* live is different and worse: because a rating writes `card.familiarity` and bumps `card.updated_at` (§17.1), the card push channel ships **practice state as content edits**, and the website accepts them by design — `canPushDataset` admits the owner **or a subscriber** ([guide §3.6](../app_dev_guide_20261013_063113.md)), and a successful push bumps the catalog `snapshot_seq` for every follower. The fix is §17, not a provenance gate: a co-editor editing *content* is the site's intent; a subscriber's studying appearing as an edit is not.
 
 ### 16.4 Storage, eviction, and the way out
 
@@ -389,7 +443,7 @@ XP already solved this exact problem: the hub logs the **absolute total after ap
 ### 17.2 The accepted model
 
 - **`card_review_event` in the app DB**: `uuid PK, user_id, dataset_uuid, card_uuid, quality, reviewed_at, familiarity, interval_days, ease_factor, repetitions, next_review_at` — one row per rating, **carrying its outcome**. The uuid is minted by the device that took the rating, so `INSERT OR IGNORE` on that uuid *is* the whole idempotency story, and it is why the kind's `AppendOnly` classification finally matches its behavior.
-- **`card_review_latest` view**: the newest event per `(user_id, dataset_uuid, card_uuid)`, selected by `MAX(reviewed_at || '#' || uuid)`. Including the uuid in the sort key is what makes the winner the *same row* on every node rather than "usually the same".
+- **`card_review_latest` view**: the newest event per `(user_id, dataset_uuid, card_uuid)`, selected by `MAX(reviewed_at || '#' || uuid)`. Including the uuid in the sort key is what makes the winner the *same row* on every node rather than "usually the same". The string-max trick works only because `reviewed_at` is fixed-width UTC (INV-6), so lexicographic order equals instant order; a variable-width or local-time stamp would silently break the tiebreak and re-introduce path dependence.
 - **State is read, never re-derived on replay.** Two devices rating one card offline keep both events and agree on which one is current. Convergence is set equality — no conflict engine, no coalescing, and no path dependence.
 - **Journal**: kind `card_review` joins [`is_app_scope_kind`](../../src-tauri/src/sync/change_log.rs#L186-L190), so `scope_for` files it under `@app`; `object_id_for` returns `{user_key}:{event uuid}` — unique per event, so the pending-edit guard can never suppress the whole kind by matching an empty id (the trap that bit `dictation` and `xp`).
 - **Effective familiarity** for every read is `COALESCE(my latest review, c.familiarity)`: the shipped column stays as the deck's seed value — imports and online exports legitimately carry it — but practice no longer writes it, so a dataset's content stops changing when someone studies.
@@ -407,7 +461,7 @@ XP already solved this exact problem: the hub logs the **absolute total after ap
 
 ### 17.4 Mixed versions
 
-Deliberately a payload **superset**, not a new kind: the new event payload keeps `card_uuid` and `quality` and adds `event_uuid`, `user_id`, `reviewed_at` and the resulting state. An old hub replays it through the old fold (its own behavior, unchanged); a new node that meets a legacy payload (no `event_uuid`) folds it and logs a warning. The limit is honest: an old hub re-mints a follower's change in its own legacy shape, so a mixed fleet keeps the old semantics **until the hub upgrades** — upgrade the authority first. No `PROTOCOL_VERSION` bump is needed because nothing is refused, only folded rather than stored.
+Deliberately a payload **superset**, not a new kind: the new event payload keeps `card_uuid` and `quality` and adds `event_uuid`, `user_id`, `reviewed_at` and the resulting state. An old hub replays it through the old fold (its own behavior, unchanged); a new node that meets a legacy payload (no `event_uuid`) folds it and logs a warning. Concretely: the un-upgraded hub strips fields it does not know (`event_uuid`, `user_id`, `reviewed_at`, resulting state) when it re-mints a follower's push, so a new node reading back its own change finds a legacy payload and folds locally. The limit is honest: a mixed fleet keeps the old semantics **until the hub upgrades** — upgrade the authority first, and treat `card_review` replay on a mixed fleet as best-effort until then. No `PROTOCOL_VERSION` bump is needed because nothing is refused, only folded rather than stored.
 
 ### 17.5 Cost, and what is not changed
 
@@ -417,7 +471,7 @@ Deliberately a payload **superset**, not a new kind: the new event payload keeps
 | cards read paths | `card_test_get`, `card_test_stats`, the browse list and its familiarity filter move to the per-user join; the review draw gets a `user_id` binding |
 | replay | one arm in each host dispatching to [`review::apply_remote`](../../src-tauri/src/datasets/cards/review.rs) (insert-or-ignore by event uuid) with a legacy fold fallback |
 | journal | `is_app_scope_kind` + `object_id_for` (2 lines each) |
-| website | **nothing** — its card channel carries cards and tags only, so its contract is untouched; review sync to a cloud authority still waits on phase 6a |
+| website | **nothing** — its card channel carries cards and tags only, so its contract is untouched; review sync to a cloud authority still waits on phase 7a |
 | not changed | the `card` table, `card_save`/`card_set_tags` semantics, snapshots, publishing, the download root |
 
 ### 17.6 What shipped, and the three open ends
@@ -437,7 +491,67 @@ Deliberately **not** done, each with the reason it is safe to leave:
 2. **`GET /api/v1/app/state` does not serve review events.** It backfills `dictation` and `xp` only, so a device whose app cursor is older than the hub's prune mark gets every retained `card_review` row from the journal pull but cannot recover the pruned ones. `needs_history` still reports the gap rather than hiding it, and the events are append-only, so a future state read over `card_review_event` is additive — no wire change to what is shipped now.
 3. **`read_attempt_save` is untouched.** It journals under the dataset scope and its payload is still a fold (`§16.3` item 2). It is the same defect with the same remedy, and doing both in one change would have doubled the review surface for no gain: read attempts already carry their own uuid, so they are half-way to the event shape already.
 
-## 18. Requirement traceability
+## 18. Change-kind catalogue
+
+Every journaled kind, its class, its scope, and the rule that makes its replay safe. A new kind must appear here before it ships; a kind missing from this table is a defect, and a kind whose class and payload disagree is the defect §17.1 documents.
+
+| Kind | Class | Scope | Payload contract | Notes |
+| --- | --- | --- | --- | --- |
+| `dictation` | `State` (coalesces) | `@app` | current progress row for `(user_key, media_uuid)` | absolute, LWW by `edit_time` |
+| `xp` | `Counter` (never coalesces) | `@app` | **absolute `lifetime_xp` after applying**, not a delta | INV-16, INV-23; a skipped duplicate leaves the total correct |
+| `card_review` | `AppendOnly` (never coalesces) | `@app` (post-§17; dataset scope before) | one event with its outcome: `{event_uuid, user_id, card_uuid, quality, reviewed_at, resulting state}` | INV-23; `INSERT OR IGNORE` by `event_uuid` is the whole idempotency story |
+| `read_attempt_save` | `AppendOnly` | dataset (today) → `@app` (planned, §16.3 item 2) | one attempt with its outcome | same defect as pre-§17 `card_review`; scheduled with the read-aloud plane |
+| `card`, `tag`, `card_tag` | `State` | dataset | current row + `updated_at` | LWW against the live row (INV-5) |
+| `cue` | `State` | dataset | current cue row | LWW |
+| `subtitle`, `media` | `State` | dataset | row + content hash | LWW |
+| `book_*`, `read_aloud_*` | `State` | dataset | current row | LWW |
+| tombstone (any kind) | n/a | dataset or `@app` | `object_id`, `deleted_at` | kept forever (INV-5) |
+
+Rules the table enforces, all corollaries of §5:
+
+- Every `AppendOnly` kind carries a result, not an input (INV-23). If replaying it needs to fold, it is misclassified.
+- Every `Counter` kind stores the post-apply absolute, not the delta (INV-16).
+- Every kind has exactly one scope. A kind that appears under two scopes is the defect §16.3 item 2 documents.
+- Object ids are unique per event and never empty — the pending-edit trap that bit `dictation` and `xp` before §17.2.
+- A new kind is added here in the same PR that adds it to [`is_app_scope_kind`](../../src-tauri/src/sync/change_log.rs) / [`scope_for`](../../src-tauri/src/sync/change_log.rs), or the review is incomplete.
+
+## 19. Observability and status surface
+
+Sync fails silently more often than it fails loudly. Every invariant that says "refused", "counted", or "surfaced" needs a place the user — and the agent — can actually see it. This section is the contract those references point at.
+
+### 19.1 What a round logs
+
+Every round emits one structured log line with: `authority_kind`, `epoch`, `features[]` as fetched at the start of the round, scopes attempted, and per scope `{pushed, pulled, dropped_pending, refused, deduped, resync_required}` plus cursor before/after and `pruned_up_to` if the journal reported it. Individual rejections log at `warn` with the typed error from §7. `features[]` is re-fetched on every round, on any 4xx that names a scope, and on every epoch change (INV-20).
+
+### 19.2 What the status surface shows
+
+A single screen, reachable from settings and mirrored by an MCP tool so an agent can read it, that names:
+
+- the authority (`kind`, `epoch`, `origin`) and every scope's advertised capability (INV-20);
+- per-scope queue depth and the oldest pending `edit_time`;
+- **dropped-pending count** (INV-14 losses — a nonzero value is a red flag, not a statistic);
+- last-round result and the typed error of any refused write;
+- `resync_required` history with the reason (retention gap, epoch bump, host reinstall);
+- `needs_history` gaps (§17.6 item 2) rather than hiding them;
+- provenance of every dataset (`upstream_kind`, `upstream_origin`, `cursor`, `availability`).
+
+### 19.3 Operator-side metrics
+
+The website authority exports per-cluster counters mirroring §19.2 (queue depth, drain latency, inbox age, publish rate, takedown count). A follower never exports anything; it only reads its own state. The desktop hub logs the same counters to the rotating app log so a support bundle carries them.
+
+### 19.4 "The queue keeps growing" — a diagnosis contract
+
+It is always one of:
+
+1. the authority does not advertise the scope (INV-20, §16.2);
+2. the account is suspended or over quota (§11.6);
+3. auth is failing (`401 re-pair`, §11.6);
+4. the network is unreachable and the retry budget is exhausted;
+5. the journal was reset (`host_seq < cursor`, §10) and resync is required.
+
+The status surface names the cause rather than showing a spinner. An MCP tool exposes the same five-cause diagnosis so an agent can act on it without a human reading a log.
+
+## 20. Requirement traceability
 
 The seven product requirements this design was written against (stated by the product owner, in their order), and where each is answered:
 

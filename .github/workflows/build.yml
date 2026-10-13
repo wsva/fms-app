@@ -5,13 +5,66 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src-tauri/src/sync/**'
+      - 'src-tauri/src/conformance.rs'
+      - 'src-tauri/src/datasets/cards/sync.rs'
+      - 'src-tauri/tests/sync_conformance/**'
+      - '.github/workflows/build.yml'
 
 jobs:
+  # ──────────────────────────────────────────────
+  # Sync conformance + provenance unit tests (sync-v2.md §13).
+  # Runs on every PR that touches the sync subsystem and on every
+  # release tag. Deliberately separate from the bundle builds so a
+  # contract regression fails fast without a full Tauri build.
+  # ──────────────────────────────────────────────
+  conformance:
+    name: Sync conformance
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev \
+            librsvg2-dev \
+            pkg-config libclang-dev \
+            libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev \
+            libxrandr-dev libx11-dev \
+            libdbus-1-dev \
+            libwayland-dev libegl-dev \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libgbm-dev libdrm-dev
+
+      - name: Run conformance vectors
+        working-directory: src-tauri
+        run: cargo test --test sync_conformance
+
+      - name: Run provenance unit tests
+        working-directory: src-tauri
+        run: cargo test --lib sync::client::tests
+
   # ──────────────────────────────────────────────
   # Desktop builds (Windows, Linux)
   # ──────────────────────────────────────────────
   build-desktop:
     name: ${{ matrix.label }}
+    # Release bundles are built on tags / manual dispatch only — a PR runs the
+    # conformance job above, not a full platform bundle.
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -104,6 +157,7 @@ jobs:
   release:
     name: Create Release
     needs: build-desktop
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write

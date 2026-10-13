@@ -440,7 +440,69 @@ fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
         conn.execute("ALTER TABLE app_sync_state ADD COLUMN backfilled_at TEXT", [])
             .map_err(|e| e.to_string())?;
     }
+    // Migration (sync-v2.md §6.1, phase 1): provenance columns. A cursor is only
+    // meaningful against the seq space of the host that minted it, so every row
+    // records which host that was. `upstream_kind` defaults to `desktop_hub` for
+    // pre-existing rows because a LAN hub was the only origin writing this table
+    // before the migration; `upstream_origin` defaults to empty and is treated as
+    // "unknown" — the first round after migration NULLs the cursor so the row
+    // re-establishes itself against the currently connected host (INV-7, INV-19).
+    ensure_column(conn, "dataset_sync_state", "row_hash", "TEXT")?;
+    ensure_column(conn, "dataset_sync_state", "upstream_kind", "TEXT NOT NULL DEFAULT 'desktop_hub'")?;
+    ensure_column(conn, "dataset_sync_state", "upstream_origin", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(conn, "dataset_sync_state", "published_version", "INTEGER")?;
+    ensure_column(conn, "dataset_sync_state", "availability", "TEXT NOT NULL DEFAULT 'listed'")?;
+    ensure_column(conn, "app_sync_state", "upstream_kind", "TEXT NOT NULL DEFAULT 'desktop_hub'")?;
+    ensure_column(conn, "app_sync_state", "upstream_origin", "TEXT NOT NULL DEFAULT ''")?;
     Ok(())
+}
+
+/// Idempotent `ALTER TABLE ... ADD COLUMN` guarded by a `pragma_table_info`
+/// check — the same pattern the surrounding migrations use. Kept as a helper so
+/// the phase-1 provenance additions read as one block.
+fn ensure_column(conn: &Connection, table: &str, name: &str, decl: &str) -> Result<(), String> {
+    let exists: bool = conn
+        .prepare(&format!(
+            "SELECT 1 FROM pragma_table_info('{table}') WHERE name = '{name}'"
+        ))
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if exists {
+        return Ok(());
+    }
+    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN \"{name}\" {decl}"), [])
+        .map_err(|e| e.to_string())
+        .map(|_| ())
+}
+
+/// One-time cursor reset for pre-migration rows: a `dataset_sync_state` row whose
+/// `upstream_origin` is empty was written before provenance existed, so its
+/// `cursor` belongs to an unknown host's seq space. NULLing it forces the
+/// existing "NULL cursor → one snapshot resync" path (documented at
+/// [client.rs#L398-L410]) to re-establish the cursor against whichever host the
+/// device is now talking to. Runs at most once per row (the migration stamps
+/// `upstream_origin` from then on). Returns the number of rows reset so the
+/// caller can log it.
+fn reset_cursors_without_provenance(conn: &Connection) -> Result<usize, String> {
+    let n = conn
+        .execute(
+            "UPDATE dataset_sync_state SET \"cursor\" = NULL \
+             WHERE (upstream_origin IS NULL OR upstream_origin = '') AND \"cursor\" IS NOT NULL",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
+/// Provenance stamp for the currently connected host, derived from its base URL.
+/// `upstream_kind` is the wire-visible value from sync-v2.md §6.1
+/// (`desktop_hub | cloud_hub | registry | local`); phase 1 only ever writes the
+/// first two — `registry` lands with the adoption flow in phase 3.
+fn upstream_of(base: &str) -> (&'static str, String) {
+    match super::hub_kind(base) {
+        super::HubKind::Website => ("cloud_hub", base.trim_end_matches('/').to_string()),
+        super::HubKind::LanPc => ("desktop_hub", base.trim_end_matches('/').to_string()),
+    }
 }
 
 /// Read this device's cursor into the app-wide journal scope (`None` = never
@@ -463,6 +525,51 @@ fn set_app_cursor(conn: &Connection, seq: i64) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Stamp provenance on the single-row `app_sync_state` (sync-v2.md §6.1). Only
+/// fills an empty origin — a row already stamped for a different host is left
+/// alone, so a partial round against a foreign host cannot silently rewrite the
+/// `@app` scope's upstream (INV-19). Returns `true` when the row was stamped,
+/// `false` when the existing stamp was kept.
+fn stamp_app_provenance(
+    conn: &Connection,
+    upstream_kind: &str,
+    upstream_origin: &str,
+) -> Result<bool, String> {
+    // Make sure the row exists so the UPDATE has something to touch. The
+    // ON CONFLICT branch preserves any cursor/backfill stamp already there.
+    conn.execute(
+        "INSERT INTO app_sync_state (id, updated_at) VALUES (1, datetime('now')) \
+         ON CONFLICT(id) DO NOTHING",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    let n = conn
+        .execute(
+            "UPDATE app_sync_state \
+             SET upstream_kind = ?1, upstream_origin = ?2 \
+             WHERE id = 1 AND (upstream_origin IS NULL OR upstream_origin = '')",
+            params![upstream_kind, upstream_origin],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(n > 0)
+}
+
+/// Read the recorded `@app` upstream, if any; a fresh install returns `None`.
+/// This is the read side of the [`stamp_app_provenance`] stamp. Phase 1 only
+/// *writes* `@app` provenance (so a later round can see which host minted the
+/// cursor); the INV-19 check that refuses an `@app` round against a foreign host
+/// reads it in a later phase, so today it is exercised by the unit tests only.
+#[allow(dead_code)]
+fn app_provenance(conn: &Connection) -> Option<(String, String)> {
+    conn.query_row(
+        "SELECT upstream_kind, upstream_origin FROM app_sync_state WHERE id = 1",
+        [],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+    .ok()
+    .filter(|(_, origin)| !origin.is_empty())
 }
 
 /// When this device last folded the hub's *whole* app-data history into its own
@@ -834,15 +941,30 @@ pub async fn dataset_sync_snapshot(
     let _ = std::fs::remove_dir_all(&old_dir);
     let _ = std::fs::remove_file(&part);
 
-    // 7. Record sync state (with the incremental cursor this snapshot carries).
+    // 7. Record sync state (with the incremental cursor this snapshot carries)
+    //    and stamp provenance from the connected host (sync-v2.md §6.1). A
+    //    snapshot is a full re-establishment of the copy, so it is the one
+    //    place where overwriting `upstream_kind` / `upstream_origin` is safe:
+    //    the bytes on disk now came from *this* host and no other.
+    let (upstream_kind, upstream_origin) = upstream_of(&base);
     {
         let conn = datasets::dictation::open_app_db(&settings)?;
         ensure_sync_tables(&conn)?;
         conn.execute(
             "INSERT OR REPLACE INTO dataset_sync_state \
-             (dataset_uuid, overall_hash, synced_at, bytes, file_count, \"cursor\") \
-             VALUES (?1, ?2, datetime('now'), ?3, ?4, ?5)",
-            params![&uuid, &hash, received as i64, file_count as i64, snapshot_seq],
+             (dataset_uuid, overall_hash, synced_at, bytes, file_count, \"cursor\", \
+              upstream_kind, upstream_origin, availability) \
+             VALUES (?1, ?2, datetime('now'), ?3, ?4, ?5, ?6, ?7, \
+                     COALESCE((SELECT availability FROM dataset_sync_state WHERE dataset_uuid = ?1), 'listed'))",
+            params![
+                &uuid,
+                &hash,
+                received as i64,
+                file_count as i64,
+                snapshot_seq,
+                upstream_kind,
+                upstream_origin,
+            ],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -1732,9 +1854,71 @@ fn has_pending_local_edit(conn: &Connection, dataset_uuid: &str, kind: &str, obj
         .unwrap_or(false)
 }
 
-/// Remove a local dataset the hub no longer offers: delete its directory under
-/// every type root and drop its `dataset_sync_state` row (prune-by-absence).
-fn prune_local_dataset(settings: &SettingsState, conn: &Connection, uuid: &str) {
+/// Outcome of a prune-by-absence attempt (sync-v2.md §5 INV-7, §6.1). The
+/// caller logs it; the round never fails on a skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PruneOutcome {
+    /// Row's provenance matched the connected host and the local copy is gone.
+    Deleted,
+    /// Row's provenance names a different upstream — absence from *this* host's
+    /// catalog is not evidence of deletion (INV-7).
+    SkippedProvenance,
+    /// Row is marked withdrawn; INV-22 forbids deleting a practice copy just
+    /// because the publisher narrowed visibility.
+    SkippedWithdrawn,
+    /// No row to prune.
+    Missing,
+}
+
+/// Remove a local dataset the connected host no longer offers: delete its
+/// directory under every type root and drop its `dataset_sync_state` row.
+///
+/// Prune is provenance-scoped (INV-7): a dataset whose recorded upstream is a
+/// different host is *not* evidence of deletion just because the currently
+/// connected host does not list it. Without this guard, pointing a machine at
+/// the website destroys its LAN-synced copies — the website catalog is
+/// visibility-filtered by construction (§3 fact 1).
+fn prune_local_dataset(
+    settings: &SettingsState,
+    conn: &Connection,
+    uuid: &str,
+    connected: (&str, &str),
+) -> PruneOutcome {
+    // Read provenance + availability first; the row may not exist (a caller can
+    // reach this path from a stale in-memory list).
+    let row: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT COALESCE(upstream_kind, ''), COALESCE(upstream_origin, ''), \
+                    COALESCE(availability, 'listed') \
+             FROM dataset_sync_state WHERE dataset_uuid = ?1",
+            params![uuid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
+    let (row_kind, row_origin, availability) = match row {
+        Some(v) => v,
+        None => return PruneOutcome::Missing,
+    };
+    if availability == "withdrawn" {
+        log::info!(
+            "[sync] prune skipped for {uuid}: marked withdrawn (INV-22)"
+        );
+        return PruneOutcome::SkippedWithdrawn;
+    }
+    // An empty `row_origin` means the row predates the phase-1 migration and
+    // has not yet been re-stamped by a round. Treat as "unknown upstream" and
+    // skip rather than delete — the next round either stamps it (and a later
+    // prune can act) or the user forgets it explicitly.
+    if row_origin.is_empty() || (row_kind.as_str(), row_origin.as_str()) != connected {
+        log::warn!(
+            "[sync] prune skipped for {uuid}: upstream is ({}, {}), connected host is ({}, {}) — absence from this catalog is not deletion (INV-7)",
+            row_kind,
+            row_origin,
+            connected.0,
+            connected.1,
+        );
+        return PruneOutcome::SkippedProvenance;
+    }
     for ty in ["dictation", "card", "book", "read_aloud", "wiki"] {
         let dir = type_root(settings, ty).join(uuid);
         if dir.exists() {
@@ -1742,6 +1926,112 @@ fn prune_local_dataset(settings: &SettingsState, conn: &Connection, uuid: &str) 
         }
     }
     let _ = conn.execute("DELETE FROM dataset_sync_state WHERE dataset_uuid = ?1", params![uuid]);
+    PruneOutcome::Deleted
+}
+
+/// Unconditional local-copy removal: every type root plus the sync-state row.
+/// The provenance guard in [`prune_local_dataset`] exists to stop *absence from
+/// a foreign catalog* from deleting a copy; an explicit user action
+/// ([`sync_forget_dataset`]) is a different question and bypasses the guard.
+fn remove_local_dataset_unchecked(settings: &SettingsState, conn: &Connection, uuid: &str) {
+    for ty in ["dictation", "card", "book", "read_aloud", "wiki"] {
+        let dir = type_root(settings, ty).join(uuid);
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+    let _ = conn.execute("DELETE FROM dataset_sync_state WHERE dataset_uuid = ?1", params![uuid]);
+}
+
+/// Where a card dataset's website round trip should go, decided by provenance
+/// rather than by the currently connected host (sync-v2.md §3 fact 3, §12).
+///
+/// The website's `/api/card/sync/{pull,push}` endpoints exist only on the
+/// website origin; a LAN hub syncs card content through the dataset-scope
+/// journal (kind `card`) and the writeback queue. So the router has three
+/// verdicts, not two:
+///
+/// * [`CardSyncTarget::Website`] — the deck's upstream is the cloud hub, run
+///   today's round trip.
+/// * [`CardSyncTarget::Skip`] — the deck's upstream is a desktop hub, the LAN
+///   journal already carries its rows; running the website round trip as well
+///   would be the second conflict engine §3 fact 3 names.
+/// * `Err(_)` — provenance and the connected host disagree (INV-19). Refuse
+///   with an actionable message rather than silently switching targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CardSyncTarget {
+    Website { origin: String },
+    Skip { reason: String },
+}
+
+/// Look up a card dataset's recorded upstream and decide the round-trip target.
+/// Falls back to the currently connected host when the row has no provenance
+/// yet (pre-migration or freshly-synced copy); the caller's next write stamps
+/// it. Reads through the app DB, so it is cheap and safe to call from any
+/// card-sync entry point.
+pub(crate) fn card_sync_target(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+) -> Result<CardSyncTarget, String> {
+    let base = pc_base(settings);
+    if base.is_empty() {
+        return Err("no hub configured; card sync needs an upstream".to_string());
+    }
+    let (connected_kind, connected_origin) = upstream_of(&base);
+    let conn = datasets::dictation::open_app_db(settings)?;
+    ensure_sync_tables(&conn)?;
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT COALESCE(upstream_kind, ''), COALESCE(upstream_origin, '') \
+             FROM dataset_sync_state WHERE dataset_uuid = ?1",
+            params![dataset_uuid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    let (row_kind, row_origin) = match row {
+        Some((k, o)) if !o.is_empty() => (k, o),
+        // No provenance yet: adopt the connected host as this deck's upstream
+        // and stamp it, so the next call takes the recorded-path branch.
+        _ => {
+            let _ = conn.execute(
+                "INSERT INTO dataset_sync_state \
+                 (dataset_uuid, overall_hash, synced_at, upstream_kind, upstream_origin) \
+                 VALUES (?1, '', datetime('now'), ?2, ?3) \
+                 ON CONFLICT(dataset_uuid) DO UPDATE SET \
+                   upstream_kind = excluded.upstream_kind, \
+                   upstream_origin = excluded.upstream_origin \
+                 WHERE dataset_sync_state.upstream_origin IS NULL \
+                    OR dataset_sync_state.upstream_origin = ''",
+                params![dataset_uuid, connected_kind, connected_origin],
+            );
+            (connected_kind.to_string(), connected_origin.clone())
+        }
+    };
+    if row_kind != connected_kind || row_origin != connected_origin {
+        return Err(format!(
+            "card dataset {dataset_uuid} syncs against {row_kind} '{row_origin}', \
+             but the currently connected host is {connected_kind} '{connected_origin}'. \
+             One upstream per scope per device (INV-19): reconnect to the recorded \
+             upstream, or use 'forget hub' on that copy and re-adopt it from this host."
+        ));
+    }
+    match row_kind.as_str() {
+        "cloud_hub" => Ok(CardSyncTarget::Website { origin: row_origin }),
+        "desktop_hub" => Ok(CardSyncTarget::Skip {
+            reason: format!(
+                "deck is upstreamed by a desktop hub ({row_origin}); its rows travel \
+                 through the dataset-scope journal, so the website card round trip \
+                 would be a second conflict engine (§3 fact 3)"
+            ),
+        }),
+        // `registry` and `local` are declared in the schema but never written in
+        // phase 1 (registry adoption lands with phase 3). Treat as a skip with
+        // an explicit reason rather than an error, so a hand-written row does
+        // not brick the round.
+        other => Ok(CardSyncTarget::Skip {
+            reason: format!("upstream_kind '{other}' has no card round trip in phase 1"),
+        }),
+    }
 }
 
 /// Explicit "unsubscribe" for a dataset the hub no longer offers (or a copy the
@@ -1760,7 +2050,7 @@ pub async fn sync_forget_dataset(
     }
     let conn = datasets::dictation::open_app_db(&settings)?;
     ensure_sync_tables(&conn)?;
-    prune_local_dataset(&settings, &conn, &uuid);
+    remove_local_dataset_unchecked(&settings, &conn, &uuid);
     log::info!("[sync] forgot local dataset {uuid}");
     Ok(())
 }
@@ -1943,6 +2233,11 @@ async fn pull_app_scope(
             let conn = datasets::dictation::open_app_db(settings.inner())?;
             ensure_sync_tables(&conn)?;
             let _ = set_app_cursor(&conn, after);
+            // The round reached the host even if the retries did not — stamp
+            // provenance so a future round against a different host is visible
+            // to the INV-19 check rather than silently switching.
+            let (k, o) = upstream_of(&pc_base(settings.inner()));
+            let _ = stamp_app_provenance(&conn, k, &o);
             return Ok(AppPull { applied: 0, needs_history, hub_protocol });
         }
     };
@@ -1979,6 +2274,10 @@ async fn pull_app_scope(
     let conn = datasets::dictation::open_app_db(settings.inner())?;
     ensure_sync_tables(&conn)?;
     let _ = set_app_cursor(&conn, hub_seq.max(after));
+    // Stamp the `@app` upstream from the connected host (sync-v2.md §6.1). Only
+    // fills an empty origin — see [`stamp_app_provenance`].
+    let (k, o) = upstream_of(&pc_base(settings.inner()));
+    let _ = stamp_app_provenance(&conn, k, &o);
     Ok(AppPull { applied, needs_history, hub_protocol })
 }
 
@@ -2180,12 +2479,33 @@ pub async fn sync_round_inner(
     // `/app/state` — dev guide §6), so one round is file-level only: catalog ->
     // per-dataset manifest hash -> snapshot re-pull on drift, plus prune-by-
     // absence. Card datasets additionally run their own Bearer pull/push.
-    let is_website = super::hub_kind(&pc_base(&settings)) == super::HubKind::Website;
+    let base = pc_base(&settings);
+    let is_website = super::hub_kind(&base) == super::HubKind::Website;
+    // Provenance of the host this round is talking to (sync-v2.md §6.1). Every
+    // write to `dataset_sync_state` / `app_sync_state` in this round stamps
+    // these two values; every prune-by-absence checks against them (INV-7).
+    let (connected_kind, connected_origin) = upstream_of(&base);
+    let connected = (connected_kind, connected_origin.as_str());
     if is_website {
         log::info!(
             "[sync] website hub contract v{} round",
             super::WEBSITE_CONTRACT_VERSION
         );
+    }
+    // Phase-1 migration: pre-provenance rows carry a cursor from an unknown
+    // host's seq space. NULL them once so the normal "NULL cursor → snapshot
+    // resync" path re-establishes each row against whichever host is connected
+    // now. Idempotent — after the first round every row has a real origin.
+    {
+        let conn = datasets::dictation::open_app_db(&settings)?;
+        ensure_sync_tables(&conn)?;
+        match reset_cursors_without_provenance(&conn) {
+            Ok(0) => {}
+            Ok(n) => log::info!(
+                "[sync] phase-1 migration: reset {n} cursor(s) with unknown provenance"
+            ),
+            Err(e) => log::warn!("[sync] phase-1 cursor reset failed: {e}"),
+        }
     }
     let mut errors: Vec<Value> = Vec::new();
     let mut resynced: Vec<String> = Vec::new();
@@ -2242,8 +2562,15 @@ pub async fn sync_round_inner(
         if !catalog_map.contains_key(&uuid) {
             if catalog_ok {
                 let conn = datasets::dictation::open_app_db(&settings)?;
-                prune_local_dataset(&settings, &conn, &uuid);
-                pruned.push(uuid);
+                match prune_local_dataset(&settings, &conn, &uuid, connected) {
+                    PruneOutcome::Deleted => pruned.push(uuid),
+                    PruneOutcome::SkippedProvenance | PruneOutcome::SkippedWithdrawn => {
+                        // Not an error and not a prune: the copy stays, the row
+                        // stays, and the next round against the recorded upstream
+                        // is the one that can act on it (INV-7, INV-22).
+                    }
+                    PruneOutcome::Missing => {}
+                }
             }
             continue;
         }
@@ -2360,12 +2687,22 @@ pub async fn sync_round_inner(
                 }
             }
             drop(_guard);
-            // Advance the row cursor to the hub's high-water mark.
+            // Advance the row cursor to the hub's high-water mark, and stamp
+            // provenance if the row does not yet have it (a pre-migration copy
+            // reaching its first incremental round against a real host). We do
+            // *not* overwrite provenance on a partial round — only a snapshot
+            // re-establishes a copy from scratch (INV-7).
             let conn = datasets::dictation::open_app_db(&settings)?;
             ensure_sync_tables(&conn)?;
             let _ = conn.execute(
                 "UPDATE dataset_sync_state SET \"cursor\" = ?2 WHERE dataset_uuid = ?1",
                 params![uuid, hub_seq],
+            );
+            let _ = conn.execute(
+                "UPDATE dataset_sync_state \
+                 SET upstream_kind = ?2, upstream_origin = ?3 \
+                 WHERE dataset_uuid = ?1 AND (upstream_origin IS NULL OR upstream_origin = '')",
+                params![uuid, connected_kind, connected_origin],
             );
         }
 
@@ -2731,4 +3068,290 @@ pub async fn wiki_hub_search(
     )
     .await?;
     serde_json::from_value(v).map_err(|e| format!("Unexpected wiki/dataset/search response: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Tests — phase-1 provenance floor (sync-v2.md §6.1, INV-7 / INV-19 / INV-22)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn mem_conn() -> Connection {
+        Connection::open_in_memory().unwrap()
+    }
+
+    /// A `SettingsState` backed by a throwaway temp workspace, so every
+    /// filesystem/DB touch stays hermetic. The caller removes `dir` afterwards.
+    fn temp_settings(tag: &str) -> (SettingsState, PathBuf) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fms-sync-test-{tag}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = SettingsState::new();
+        settings.set_workspace_dir(Some(dir.clone()));
+        (settings, dir)
+    }
+
+    fn insert_state(conn: &Connection, uuid: &str, kind: &str, origin: &str, availability: &str) {
+        conn.execute(
+            "INSERT INTO dataset_sync_state \
+             (dataset_uuid, overall_hash, synced_at, upstream_kind, upstream_origin, availability) \
+             VALUES (?1, '', datetime('now'), ?2, ?3, ?4)",
+            params![uuid, kind, origin, availability],
+        )
+        .unwrap();
+    }
+
+    // -- migration ----------------------------------------------------------
+
+    #[test]
+    fn ensure_sync_tables_is_idempotent() {
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        ensure_sync_tables(&conn).unwrap();
+        for (table, col) in [
+            ("dataset_sync_state", "upstream_kind"),
+            ("dataset_sync_state", "upstream_origin"),
+            ("dataset_sync_state", "availability"),
+            ("dataset_sync_state", "published_version"),
+            ("dataset_sync_state", "row_hash"),
+            ("app_sync_state", "upstream_kind"),
+            ("app_sync_state", "upstream_origin"),
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{col}'"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{table}.{col} should exist exactly once");
+        }
+    }
+
+    #[test]
+    fn reset_cursors_nulls_pre_migration_row_once() {
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        // Pre-migration copy: a real cursor but no recorded upstream.
+        conn.execute(
+            "INSERT INTO dataset_sync_state (dataset_uuid, overall_hash, synced_at, \"cursor\") \
+             VALUES ('ds-old', 'h', '2026-01-01', 42)",
+            [],
+        )
+        .unwrap();
+        // A row that already knows its upstream must be left alone.
+        insert_state(&conn, "ds-stamped", "desktop_hub", "http://lan-a", "listed");
+        conn.execute(
+            "UPDATE dataset_sync_state SET \"cursor\" = 7 WHERE dataset_uuid = 'ds-stamped'",
+            [],
+        )
+        .unwrap();
+
+        let n = reset_cursors_without_provenance(&conn).unwrap();
+        assert_eq!(n, 1, "only the unstamped row is reset");
+        let cur: Option<i64> = conn
+            .query_row("SELECT \"cursor\" FROM dataset_sync_state WHERE dataset_uuid = 'ds-old'", [], |r| r.get(0))
+            .unwrap();
+        assert!(cur.is_none(), "pre-migration cursor is NULLed");
+        let kept: Option<i64> = conn
+            .query_row("SELECT \"cursor\" FROM dataset_sync_state WHERE dataset_uuid = 'ds-stamped'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, Some(7), "a stamped row keeps its cursor");
+        // Idempotent: a second pass finds nothing to reset.
+        assert_eq!(reset_cursors_without_provenance(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn upstream_of_classifies_hub_kind() {
+        let (k, o) = upstream_of("http://192.168.1.50:8756/");
+        assert_eq!(k, "desktop_hub");
+        assert_eq!(o, "http://192.168.1.50:8756", "trailing slash is trimmed");
+        let website = crate::auth::base_url();
+        let (k2, o2) = upstream_of(&website);
+        assert_eq!(k2, "cloud_hub");
+        assert_eq!(o2, website.trim_end_matches('/'));
+    }
+
+    #[test]
+    fn stamp_app_provenance_only_fills_empty() {
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        assert!(app_provenance(&conn).is_none());
+        assert!(stamp_app_provenance(&conn, "desktop_hub", "http://a").unwrap());
+        assert_eq!(
+            app_provenance(&conn),
+            Some(("desktop_hub".to_string(), "http://a".to_string()))
+        );
+        // INV-19: a round against a different host must not rewrite the stamp.
+        assert!(!stamp_app_provenance(&conn, "cloud_hub", "http://b").unwrap());
+        assert_eq!(app_provenance(&conn).unwrap().1, "http://a");
+    }
+
+    // -- prune scoping (INV-7 / INV-22) -------------------------------------
+
+    #[test]
+    fn prune_refuses_foreign_upstream() {
+        let (settings, dir) = temp_settings("prune-foreign");
+        let uuid = "ds-foreign";
+        let target = type_root(&settings, "dictation").join(uuid);
+        std::fs::create_dir_all(&target).unwrap();
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        insert_state(&conn, uuid, "desktop_hub", "http://lan-a", "listed");
+
+        let out = prune_local_dataset(&settings, &conn, uuid, ("cloud_hub", "http://website"));
+        assert_eq!(out, PruneOutcome::SkippedProvenance);
+        assert!(target.exists(), "a foreign-upstreamed copy survives absence");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dataset_sync_state WHERE dataset_uuid = ?1", params![uuid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_deletes_matching_upstream() {
+        let (settings, dir) = temp_settings("prune-match");
+        let uuid = "ds-match";
+        let target = type_root(&settings, "dictation").join(uuid);
+        std::fs::create_dir_all(&target).unwrap();
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        insert_state(&conn, uuid, "desktop_hub", "http://lan-a", "listed");
+
+        let out = prune_local_dataset(&settings, &conn, uuid, ("desktop_hub", "http://lan-a"));
+        assert_eq!(out, PruneOutcome::Deleted);
+        assert!(!target.exists(), "the matching copy is removed");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dataset_sync_state WHERE dataset_uuid = ?1", params![uuid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_never_deletes_withdrawn() {
+        let (settings, dir) = temp_settings("prune-withdrawn");
+        let uuid = "ds-withdrawn";
+        let target = type_root(&settings, "dictation").join(uuid);
+        std::fs::create_dir_all(&target).unwrap();
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        insert_state(&conn, uuid, "desktop_hub", "http://lan-a", "withdrawn");
+
+        // Provenance matches, but INV-22 forbids deleting a withdrawn copy.
+        let out = prune_local_dataset(&settings, &conn, uuid, ("desktop_hub", "http://lan-a"));
+        assert_eq!(out, PruneOutcome::SkippedWithdrawn);
+        assert!(target.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_missing_row_is_missing() {
+        let (settings, dir) = temp_settings("prune-missing");
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        let out = prune_local_dataset(&settings, &conn, "nope", ("desktop_hub", "http://lan-a"));
+        assert_eq!(out, PruneOutcome::Missing);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- card-sync routing (INV-19) -----------------------------------------
+
+    #[test]
+    fn card_sync_target_routes_cloud_hub_to_website() {
+        let (settings, dir) = temp_settings("cst-web");
+        let website = crate::auth::base_url();
+        settings.settings.lock().unwrap().pc_url = website.clone();
+        let (ck, co) = upstream_of(&website);
+        let uuid = "deck-web";
+        {
+            let conn = datasets::dictation::open_app_db(&settings).unwrap();
+            ensure_sync_tables(&conn).unwrap();
+            insert_state(&conn, uuid, ck, &co, "listed");
+        }
+        match card_sync_target(&settings, uuid).unwrap() {
+            CardSyncTarget::Website { origin } => assert_eq!(origin, co),
+            other => panic!("expected Website, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn card_sync_target_skips_desktop_hub() {
+        let (settings, dir) = temp_settings("cst-lan");
+        settings.settings.lock().unwrap().pc_url = "http://192.168.1.50:8756".to_string();
+        let uuid = "deck-lan";
+        {
+            let conn = datasets::dictation::open_app_db(&settings).unwrap();
+            ensure_sync_tables(&conn).unwrap();
+            insert_state(&conn, uuid, "desktop_hub", "http://192.168.1.50:8756", "listed");
+        }
+        // A LAN-upstreamed deck travels through the dataset journal, not the
+        // website card round trip (§3 fact 3).
+        assert!(matches!(
+            card_sync_target(&settings, uuid).unwrap(),
+            CardSyncTarget::Skip { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn card_sync_target_adopts_connected_when_unstamped() {
+        let (settings, dir) = temp_settings("cst-adopt");
+        settings.settings.lock().unwrap().pc_url = "http://192.168.1.50:8756".to_string();
+        let uuid = "deck-fresh";
+        {
+            let conn = datasets::dictation::open_app_db(&settings).unwrap();
+            ensure_sync_tables(&conn).unwrap();
+            // Pre-migration row: no provenance recorded.
+            conn.execute(
+                "INSERT INTO dataset_sync_state (dataset_uuid, overall_hash, synced_at) \
+                 VALUES (?1, '', datetime('now'))",
+                params![uuid],
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            card_sync_target(&settings, uuid).unwrap(),
+            CardSyncTarget::Skip { .. }
+        ));
+        // The fallback stamped the connected host as this deck's upstream.
+        let conn = datasets::dictation::open_app_db(&settings).unwrap();
+        let (k, o): (String, String) = conn
+            .query_row(
+                "SELECT upstream_kind, upstream_origin FROM dataset_sync_state WHERE dataset_uuid = ?1",
+                params![uuid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(k, "desktop_hub");
+        assert_eq!(o, "http://192.168.1.50:8756");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn card_sync_target_refuses_disagreement() {
+        let (settings, dir) = temp_settings("cst-refuse");
+        // Connected host is a LAN desktop hub...
+        settings.settings.lock().unwrap().pc_url = "http://192.168.1.50:8756".to_string();
+        // ...but the deck is recorded against the website. INV-19: refuse.
+        let website = crate::auth::base_url();
+        let (ck, co) = upstream_of(&website);
+        let uuid = "deck-split";
+        {
+            let conn = datasets::dictation::open_app_db(&settings).unwrap();
+            ensure_sync_tables(&conn).unwrap();
+            insert_state(&conn, uuid, ck, &co, "listed");
+        }
+        let err = card_sync_target(&settings, uuid).unwrap_err();
+        assert!(err.contains("INV-19"), "error should name INV-19: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

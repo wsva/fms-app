@@ -1,0 +1,23 @@
+{
+  "name": "changes_page_shape",
+  "invariant": "sync-v2.md §7 — journal page shape",
+  "check": "page_shape",
+  "scope": "dataset",
+  "notes": "Phase 1 pins the shape the desktop hub emits today: the page carries `hub_seq`. §7 names the phase-2 target `host_seq`; the rename is a deliberate wire change in a later phase, at which point this vector updates with it. `after = 0` is a real start cursor ('everything after seq 0'); the NULL sentinel `-1` always forces a resync and is covered by cursor_null_triggers_resync.",
+  "seed": [
+    {
+      "object_id": "cue:1",
+      "kind": "cue_save",
+      "edit_time": "2026-01-01T00:00:00Z",
+      "user_key": "u1",
+      "payload": { "text": "hello" }
+    }
+  ],
+  "after": 0,
+  "expect": {
+    "keys": ["dataset_uuid", "entries", "pruned_up_to", "hub_seq", "resync_required"],
+    "entry_keys": ["seq", "object_id", "kind", "op", "edit_time", "user_key", "payload"],
+    "resync_required": false,
+    "entry_count": 1
+  }
+}

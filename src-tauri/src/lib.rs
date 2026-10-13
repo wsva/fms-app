@@ -13,6 +13,11 @@ mod datasets;
 /// only) and the client half (`client`/`discover`/`change_log`) that the Android
 /// thin client runs. Owns `PROTOCOL_VERSION`.
 mod sync;
+/// Test-only conformance seam (sync-v2.md §13). `#[doc(hidden)]` scaffolding
+/// that lets the `tests/sync_conformance/` integration suite drive the hub
+/// journal engine without booting a Tauri app. Always compiled.
+#[doc(hidden)]
+pub mod conformance;
 /// Ollama LLM client, cross-device chat, and the Goose agent integrations.
 mod ai;
 /// STT model download/lifecycle/transcription, download catalogs, and the

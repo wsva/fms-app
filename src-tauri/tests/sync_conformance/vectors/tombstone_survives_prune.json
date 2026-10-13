@@ -1,0 +1,22 @@
+{
+  "name": "tombstone_survives_prune",
+  "invariant": "INV-5 — a delete is never silently lost to retention",
+  "check": "prune_forces_resync",
+  "scope": "dataset",
+  "notes": "A delete journals with op `delete` (the tombstone). After a retention pass drops the old row and raises `pruned_up_to`, a follower whose cursor sits below the mark is told `resync_required` rather than being handed a journal with a silent hole — the resync re-reads the snapshot whose `tombstones` table still carries the delete. This vector pins the journal half of that guarantee.",
+  "seed": [
+    {
+      "object_id": "cue:1",
+      "kind": "cue_delete",
+      "edit_time": "2000-01-01T00:00:00Z",
+      "user_key": "u1",
+      "payload": {}
+    }
+  ],
+  "prune": { "keep_days": 0 },
+  "after": 0,
+  "expect": {
+    "seed_op": "delete",
+    "resync_required": true
+  }
+}

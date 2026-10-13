@@ -470,6 +470,24 @@ pub async fn card_sync_full(
 ) -> Result<SyncResult, String> {
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
     ensure_sync_target_writable(settings.inner(), &path, &dataset_uuid)?;
+    // Provenance gate (sync-v2.md §3 fact 3, INV-19): the website card round
+    // trip only belongs on decks upstreamed by the cloud hub. A deck adopted
+    // from a LAN hub travels through the dataset-scope journal, and running
+    // the website path as well would be a second conflict engine. A deck
+    // whose recorded upstream disagrees with the currently connected host is
+    // refused with an actionable error rather than silently switched.
+    match crate::sync::client::card_sync_target(settings.inner(), &dataset_uuid)? {
+        crate::sync::client::CardSyncTarget::Skip { reason } => {
+            log::info!("[CardSync] skipping {dataset_uuid}: {reason}");
+            return Ok(SyncResult {
+                pulled: 0,
+                pushed: 0,
+                conflicts: 0,
+                server_time: String::new(),
+            });
+        }
+        crate::sync::client::CardSyncTarget::Website { .. } => {}
+    }
     let conn = open_card_db(&path)?;
 
     // Get access token
@@ -595,6 +613,20 @@ async fn card_sync_full_inner(
 ) -> Result<SyncResult, String> {
     let path = find_card_dataset_dir(settings, dataset_uuid)?;
     ensure_sync_target_writable(settings, &path, dataset_uuid)?;
+    // Same provenance gate as [`card_sync_full`] — the auto-sync fan-out must
+    // not quietly reach a LAN-upstreamed deck through the website origin.
+    match crate::sync::client::card_sync_target(settings, dataset_uuid)? {
+        crate::sync::client::CardSyncTarget::Skip { reason } => {
+            log::info!("[CardSync] skipping {dataset_uuid}: {reason}");
+            return Ok(SyncResult {
+                pulled: 0,
+                pushed: 0,
+                conflicts: 0,
+                server_time: String::new(),
+            });
+        }
+        crate::sync::client::CardSyncTarget::Website { .. } => {}
+    }
     let conn = open_card_db(&path)?;
 
     // Get access token

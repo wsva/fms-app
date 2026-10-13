@@ -1,0 +1,22 @@
+{
+  "name": "cursor_null_triggers_resync",
+  "invariant": "INV-11 — a NULL/unknown cursor below the prune mark forces one resync",
+  "check": "resync",
+  "scope": "dataset",
+  "notes": "A follower with no usable cursor sends `after = -1` (the NULL sentinel). When the hub has pruned past that point, the page must report `resync_required` and ship zero entries, so the follower takes one snapshot instead of replaying a journal with a hole in it.",
+  "seed": [
+    {
+      "object_id": "cue:1",
+      "kind": "cue_save",
+      "edit_time": "2026-01-01T00:00:00Z",
+      "user_key": "u1",
+      "payload": {}
+    }
+  ],
+  "prune_mark": 5,
+  "after": -1,
+  "expect": {
+    "resync_required": true,
+    "entry_count": 0
+  }
+}
