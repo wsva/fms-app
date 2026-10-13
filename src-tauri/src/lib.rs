@@ -388,6 +388,11 @@ pub fn run() {
             sync::client::sync_forget_dataset,
             sync::client::pc_pair_start,
             sync::client::pc_pair_reset_identity,
+            sync::upload::dataset_export_upload,
+            sync::upload::dataset_upload_state,
+            sync::upload::dataset_remint_uuid,
+            sync::upload::sync_local_datasets,
+            sync::client::sync_hub_kind,
             sync::discover::pc_discover,
             // Read-only hub wiki browse (works from any follower role/platform).
             sync::client::wiki_hub_list,
@@ -751,6 +756,11 @@ macro_rules! mobile_invoke_handler {
             sync::client::sync_forget_dataset,
             sync::client::pc_pair_start,
             sync::client::pc_pair_reset_identity,
+            sync::upload::dataset_export_upload,
+            sync::upload::dataset_upload_state,
+            sync::upload::dataset_remint_uuid,
+            sync::upload::sync_local_datasets,
+            sync::client::sync_hub_kind,
             sync::discover::pc_discover,
             // Read-only hub wiki browse (works from any follower role/platform).
             sync::client::wiki_hub_list,

@@ -108,12 +108,13 @@ tokio = { version = "1", features = ["full"] }
 rfd = { version = "0.15", optional = true }
 dirs = "6"
 futures-util = "0.3"
+bytes = "1"
 base64 = "0.22"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 symphonia = { version = "0.5", features = ["all", "opt-simd"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 # NFC normalization for word-level ASR scoring (datasets/asr_metric.rs): STT
 # transcripts and reference texts must compare equal regardless of Unicode
 # form. Already in the tree transitively, so this adds no new fetches.

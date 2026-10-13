@@ -122,6 +122,27 @@ pub fn get_stored_user_id(settings: &SettingsState) -> Option<String> {
         .map(|t| t.user_id)
 }
 
+/// The OAuth2 access token for the website hub, read from the single stored
+/// token file — there is deliberately no second token store (dev guide T1).
+/// `datasets::cards::sync` and `sync::client`'s website path both take it
+/// from here, so a logout (token file removed) ends every bearer-authorized
+/// flow at once.
+pub(crate) fn get_access_token(settings: &SettingsState) -> Result<String, String> {
+    read_tokens(settings)?
+        .map(|t| t.access_token)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Not logged in. Please log in first.".to_string())
+}
+
+/// Drop the stored token after the website rejected it with 401 (expired or
+/// revoked server-side). The website has no silent-refresh route, so the only
+/// recovery is a fresh login; clearing the file makes every surface agree on
+/// "logged out" instead of replaying a dead token each request.
+pub(crate) fn token_rejected(settings: &SettingsState) {
+    let _ = delete_tokens(settings);
+    log::warn!("[Auth] website hub returned 401 — stored token cleared, sign in again");
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------

@@ -193,6 +193,11 @@ export default function DevicesHubPage() {
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [pairError, setPairError] = useState("");
 
+  // Hub kind of the address being viewed ("website" | "lan" | ""), resolved by
+  // the backend's `hub_kind` so the compile-time website origin stays the single
+  // source of truth. Pairing is a LAN concept — the flow hides for "website".
+  const [hubKind, setHubKind] = useState("");
+
   const [message, setMessage] = useState("");
 
   const pcUrl = (global?.pc_url ?? "").trim();
@@ -281,6 +286,29 @@ export default function DevicesHubPage() {
       if (!g || !(g.pc_url ?? "").trim()) discover();
     })();
   }, [loadSettings, loadWorkspace, loadStatus, loadDevices, discover]);
+
+  // Resolve the hub kind for the address being viewed (the complete manual draft
+  // when in Manual mode, else the saved hub) so the pairing flow — a LAN-only
+  // concept the website does not implement — hides for the website origin. The
+  // backend's `hub_kind` is a plain origin compare, no network, safe per-keystroke.
+  const viewUrl = entryMode === "manual" ? parseHubOrigin(manualUrl) || pcUrl : pcUrl;
+  useEffect(() => {
+    if (!isTauri() || !viewUrl.trim()) {
+      setHubKind("");
+      return;
+    }
+    let alive = true;
+    invoke<string>("sync_hub_kind", { pcUrl: viewUrl })
+      .then((k) => {
+        if (alive) setHubKind(k);
+      })
+      .catch(() => {
+        if (alive) setHubKind("");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [viewUrl]);
 
   // ---- Role designation (desktop only) --------------------------------
 
@@ -484,6 +512,10 @@ export default function DevicesHubPage() {
   // Drives both the manual hint and the auto-commit guard above.
   const manualOrigin = parseHubOrigin(manualUrl);
   const currentHubOrigin = parseHubOrigin(pcUrl);
+  // Pairing (and the cluster binding it establishes) is a LAN concept — the
+  // website authenticates by account token, not device signature, so there is
+  // nothing to pair. Hide the whole pairing row for the website origin.
+  const isWebsiteHub = hubKind === "website";
 
   return (
     <div className="flex flex-col w-full h-full min-h-0 overflow-y-auto p-4 gap-4">
@@ -698,6 +730,23 @@ export default function DevicesHubPage() {
               </div>
             </div>
 
+            {isWebsiteHub ? (
+              <div className="flex items-center gap-2 flex-wrap pt-2 border-t border-border-light">
+                <p className="text-xs text-text-tertiary leading-relaxed">
+                  This is the <span className="font-medium">website hub</span> — it authenticates
+                  with your account token, so there is nothing to pair. Upload and pull datasets on
+                  the Datasets Sync page.
+                </p>
+                <button
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover shrink-0 ml-auto"
+                  onClick={() => invoke("auth_open_login").catch((e) => setMessage(`Sign-in failed: ${String(e)}`))}
+                  title="Sign in to the website in your browser"
+                >
+                  Sign in
+                </button>
+              </div>
+            ) : (
+              <>
             {/* Pairing row: the device identity is generated automatically; the
                 only user gesture is asking the hub owner to approve this device.
                 The control now says which side of the authorization gate you are
@@ -767,12 +816,14 @@ export default function DevicesHubPage() {
                 ? "Reachable but not authorized: the hub rejects this device’s signature, so sync stays blocked until Pair is approved on the PC."
                 : "Connecting only decides which machine this device can reach; Pairing is what lets it read and write the hub’s data. Approve the pairing once, then sync runs unattended."}
             </p>
+              </>
+            )}
 
             {/* Only Forget hub gets explained. The list's empty entry disconnects by
                 clearing the address, and since connecting adopts the hub's cluster id
                 again, that temporary detach needs no caption of its own. Unpairing is
                 a hub-side action, so the text points there instead. */}
-            {(pcUrl || clusterId) && (
+            {!isWebsiteHub && (pcUrl || clusterId) && (
               <p className="text-xs text-text-tertiary leading-relaxed">
                 <span className="font-medium text-text-secondary">Forget hub / re-pair</span> drops
                 the cluster id, which is what you want before attaching a different hub. Choosing

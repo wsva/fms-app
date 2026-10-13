@@ -25,6 +25,57 @@ pub(crate) mod server;
 pub(crate) mod change_log;
 pub(crate) mod client;
 pub(crate) mod discover;
+pub(crate) mod upload;
+
+// ---------------------------------------------------------------------------
+// Hub kind — which of the two hub implementations a base URL points at
+// ---------------------------------------------------------------------------
+
+/// The two hubs a follower can talk to. The LAN PC hub (`sync::server` +
+/// `sync::rest`) speaks the full device-HMAC protocol with a row journal;
+/// the website hub (`auth::BASE_URL`, Next.js + Postgres) speaks only the
+/// read contract + card sync documented in
+/// `docs/app_dev_guide_20261013_063113.md` — no journal, no pairing, no
+/// cluster/role headers. Every outbound round asks [`hub_kind`] once and
+/// degrades instead of failing on the endpoints the website does not serve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HubKind {
+    /// The website at `crate::auth::BASE_URL` — OAuth2 Bearer auth.
+    Website,
+    /// Another FmS machine on the LAN/tailnet — device-HMAC signing.
+    LanPc,
+}
+
+/// Compare two base URLs by origin only (scheme and trailing slashes ignored),
+/// the same tolerance `pc_base`/`resolve_pc_url` apply when storing them.
+fn same_origin(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        s.trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string()
+    };
+    !a.is_empty() && norm(a) == norm(b)
+}
+
+/// Classify a resolved hub base URL. Only the compile-time website origin
+/// counts as [`HubKind::Website`] — a `pc_url` of anything else keeps the
+/// byte-identical LAN path (dev guide §10.4).
+pub(crate) fn hub_kind(base: &str) -> HubKind {
+    if same_origin(base, crate::auth::BASE_URL) {
+        HubKind::Website
+    } else {
+        HubKind::LanPc
+    }
+}
+
+/// Wire-contract pin (dev guide §T8): the version of the website's
+/// list/manifest/snapshot/file/card-sync field names this client implements
+/// (guide §3). The names are the contract — a renamed field on either side is
+/// breaking, so bump this *with* the guide, and never silently accept a new
+/// field shape. Logged once per website round so a mismatch is on the record.
+pub(crate) const WEBSITE_CONTRACT_VERSION: u32 = 1;
 
 /// Wire protocol version for the hub<->follower sync REST API and the request
 /// signature format. Carried by `/status`, the discovery beacon, and every

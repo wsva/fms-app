@@ -64,6 +64,25 @@ struct SyncFileParam {
     path: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct HubUploadParam {
+    /// Local dataset uuid to pack and upload.
+    dataset_uuid: String,
+    /// `private|shared|public` — honoured only on the uuid's first upload.
+    #[serde(default)]
+    visibility: Option<String>,
+    /// Tag uuids to attach on the hub (website-side tags, not local ones).
+    #[serde(default)]
+    tag_uuids: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct HubKindParam {
+    /// Candidate hub address to classify. Empty falls back to the saved pc_url.
+    #[serde(default)]
+    pc_url: Option<String>,
+}
+
 #[tool_router(router = sync_router, vis = "pub(crate)")]
 impl DatasetMcpServer {
     #[tool(name = "web_service_get_status", description = "Get the web service status: whether it's running, port, enabled features, and URLs.")]
@@ -293,7 +312,7 @@ impl DatasetMcpServer {
     #[tool(name = "sync_fetch_file", description = "Fetch one non-DB file from the connected hub (GET /file?dataset=&path=) and report its size + sha256 (bytes are not echoed). Verifies the incremental file-transfer path without pulling a whole snapshot.")]
     async fn sync_fetch_file(&self, Parameters(param): Parameters<SyncFileParam>) -> Result<String, String> {
         log::info!("[MCP] sync_fetch_file: uuid={} path={}", param.uuid, param.path);
-        let bytes = sync::client::pc_fetch_file(self.app.state::<SettingsState>(), param.uuid.clone(), param.path.clone()).await?;
+        let bytes = sync::client::pc_fetch_file(self.app.state::<SettingsState>(), param.uuid.clone(), param.path.clone(), None).await?;
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(&bytes);
@@ -327,5 +346,54 @@ impl DatasetMcpServer {
         let settings = self.app.state::<SettingsState>();
         let detail = sync::client::sync_status_detail(&settings).await?;
         serde_json::to_string(&detail).map_err(|e| e.to_string())
+    }
+
+    #[tool(name = "hub_dataset_upload", description = "Export one local dataset and upload it to the website hub (POST /api/dataset/upload, OAuth bearer). The DB is frozen via the SQLite backup API and shipped as data.sqlite3; info.json's updated_at is refreshed before packing. Requires pc_url to be the website origin and the user to be signed in. Returns the hub's {dataset, version, archive_sha256, archive_size}. A 409 comes back tagged 'owned-by-other' — recover via hub_remint_uuid (save as new copy), never a silent overwrite. 413 means the archive exceeds the hub's size cap.")]
+    async fn hub_dataset_upload(&self, Parameters(param): Parameters<HubUploadParam>) -> Result<String, String> {
+        log::info!("[MCP] hub_dataset_upload: uuid={}", param.dataset_uuid);
+        let v = sync::upload::dataset_export_upload(
+            self.app.clone(),
+            self.app.state::<SettingsState>(),
+            param.dataset_uuid.clone(),
+            param.visibility,
+            param.tag_uuids,
+        )
+        .await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "hub_upload_state", description = "List what this device has uploaded to the website hub (dataset_upload_state table in the app DB): { dataset_uuid, version, archive_sha256, archive_size, uploaded_at }. Lets an agent tell 'this copy is already uploaded (vN)' from 'it changed locally since'. Read-only.")]
+    async fn hub_upload_state(&self) -> Result<String, String> {
+        log::info!("[MCP] hub_upload_state");
+        let rows = sync::upload::dataset_upload_state(self.app.state::<SettingsState>()).await?;
+        Ok(serde_json::to_string(&rows).unwrap_or_default())
+    }
+
+    #[tool(name = "hub_local_datasets", description = "Enumerate every LOCAL dataset across all types (dictation, card, book, read_aloud, wiki) as { uuid, name, dataset_type }. Upload is type-agnostic, so this is the list a Website Hub upload targets pick from — including copies not yet in the hub catalog. Read-only.")]
+    async fn hub_local_datasets(&self) -> Result<String, String> {
+        log::info!("[MCP] hub_local_datasets");
+        let rows = sync::upload::sync_local_datasets(self.app.state::<SettingsState>()).await?;
+        Ok(serde_json::to_string(&rows).unwrap_or_default())
+    }
+
+    #[tool(name = "hub_kind", description = "Classify a hub address as 'website' (OAuth Bearer, file + card only, no pairing/cluster) or 'lan' (device-HMAC, full protocol). Empty pc_url falls back to the saved setting. Lets an agent tell which affordances apply before talking to it.")]
+    async fn hub_kind(&self, Parameters(param): Parameters<HubKindParam>) -> Result<String, String> {
+        log::info!("[MCP] hub_kind");
+        let kind = sync::client::sync_hub_kind(self.app.state::<SettingsState>(), param.pc_url).await?;
+        Ok(serde_json::to_string(&kind).unwrap_or_default())
+    }
+
+    #[tool(name = "hub_remint_uuid", description = "409 recovery: the hub says this dataset's uuid belongs to another account, so mint a fresh uuid locally (rewrite info.json, rename the directory, repoint local fork lineage + sync state) and upload the copy under the new identity. This is the 'save as new copy' path — it never overwrites the hub's existing row. Returns { old_uuid, new_uuid, upload }.")]
+    async fn hub_remint_uuid(&self, Parameters(param): Parameters<HubUploadParam>) -> Result<String, String> {
+        log::info!("[MCP] hub_remint_uuid: uuid={}", param.dataset_uuid);
+        let v = sync::upload::dataset_remint_uuid(
+            self.app.clone(),
+            self.app.state::<SettingsState>(),
+            param.dataset_uuid.clone(),
+            param.visibility,
+            param.tag_uuids,
+        )
+        .await?;
+        Ok(v.to_string())
     }
 }

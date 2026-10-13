@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::fs;
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -87,6 +86,7 @@ pub struct SyncResult {
 
 /// Pull changes from the online server for a dataset.
 async fn pull_changes(
+    settings: &SettingsState,
     dataset_uuid: &str,
     since: &str,
     access_token: &str,
@@ -106,8 +106,19 @@ async fn pull_changes(
         .await
         .map_err(|e| format!("Pull request failed: {}", e))?;
 
-    if !response.status().is_success() {
-        return Err(format!("Pull failed with status: {}", response.status()));
+    // The website has no silent refresh path: a 401 means the stored token is
+    // dead — clear it so every surface stops offering it, and tell the user to
+    // sign in again (T5).
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        crate::auth::token_rejected(settings);
+        return Err("Sign in again on the Settings page (the hub rejected your token)".into());
+    }
+    if !status.is_success() {
+        // 403 etc. carry a server-written reason; surface it verbatim and never
+        // retry (T7 error hygiene).
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Pull failed with status: {status}: {body}"));
     }
 
     response
@@ -118,6 +129,7 @@ async fn pull_changes(
 
 /// Push local changes to the online server.
 async fn push_changes(
+    settings: &SettingsState,
     dataset_uuid: &str,
     changes: &SyncPushRequest,
     access_token: &str,
@@ -137,8 +149,14 @@ async fn push_changes(
         .await
         .map_err(|e| format!("Push request failed: {}", e))?;
 
-    if !response.status().is_success() {
-        return Err(format!("Push failed with status: {}", response.status()));
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        crate::auth::token_rejected(settings);
+        return Err("Sign in again on the Settings page (the hub rejected your token)".into());
+    }
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Push failed with status: {status}: {body}"));
     }
 
     response
@@ -292,6 +310,98 @@ fn get_local_changes(conn: &Connection, since: &str) -> Result<Vec<SyncCard>, St
     Ok(cards)
 }
 
+/// Apply pulled tags to the local `tag` table, mirroring the card LWW rules:
+/// tombstone via `deleted_at`, every write re-stamps in canonical form so the
+/// `updated_at > cursor` comparison in [`get_local_tags`] keeps working (T5,
+/// dev guide §3.5 — pull returns tags, the client must handle them).
+fn apply_pulled_tags(conn: &Connection, tags: &[SyncTag]) -> Result<i32, String> {
+    let mut count = 0i32;
+    for tag in tags {
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT updated_at FROM tag WHERE uuid = ?1",
+                rusqlite::params![tag.uuid],
+                |row| row.get(0),
+            )
+            .ok();
+
+        match existing {
+            None => {
+                if tag.deleted_at.is_none() {
+                    conn.execute(
+                        "INSERT INTO tag (uuid, name, color, deleted_at, created_at, updated_at) \\n                         VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
+                        rusqlite::params![
+                            tag.uuid,
+                            tag.name,
+                            tag.color,
+                            canonical_stamp(&tag.created_at),
+                            canonical_stamp(&tag.updated_at),
+                        ],
+                    )
+                    .map_err(|e| e.to_string())?;
+                    count += 1;
+                }
+            }
+            Some(local_updated_at) => {
+                let order = stamp_order(&local_updated_at, &tag.updated_at);
+                if let Some(ref remote_deleted) = tag.deleted_at {
+                    // Equal stamp honours the delete, same rule as cards.
+                    if order != Ordering::Greater {
+                        conn.execute(
+                            "UPDATE tag SET deleted_at = ?1, updated_at = ?1 WHERE uuid = ?2",
+                            rusqlite::params![canonical_stamp(remote_deleted), tag.uuid],
+                        )
+                        .map_err(|e| e.to_string())?;
+                        count += 1;
+                    }
+                } else if order == Ordering::Less {
+                    conn.execute(
+                        "UPDATE tag SET name = ?2, color = ?3, deleted_at = NULL, updated_at = ?4 \\n                         WHERE uuid = ?1",
+                        rusqlite::params![
+                            tag.uuid,
+                            tag.name,
+                            tag.color,
+                            canonical_stamp(&tag.updated_at),
+                        ],
+                    )
+                    .map_err(|e| e.to_string())?;
+                    count += 1;
+                }
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// Local tag rows changed since the cursor — the tags half of the push payload
+/// (the old `tags: Vec::new()` TODO sites). Same canonicalized-cursor shape as
+/// [`get_local_changes`].
+fn get_local_tags(conn: &Connection, since: &str) -> Result<Vec<SyncTag>, String> {
+    let since = canonical_stamp(since);
+    let mut stmt = conn
+        .prepare(
+            "SELECT uuid, name, color, deleted_at, created_at, updated_at \\n             FROM tag WHERE updated_at > ?1 ORDER BY updated_at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let tags = stmt
+        .query_map(rusqlite::params![since], |row| {
+            Ok(SyncTag {
+                uuid: row.get(0)?,
+                name: row.get(1)?,
+                color: row.get(2)?,
+                deleted_at: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(tags)
+}
+
 /// Update the sync state after a successful sync.
 fn update_sync_state(
     conn: &Connection,
@@ -310,28 +420,10 @@ fn update_sync_state(
     Ok(())
 }
 
-/// Get the access token from stored auth.
+/// Get the access token from stored auth — one token store, shared with the
+/// hub client seam (T1); see [`crate::auth::get_access_token`].
 fn get_access_token(settings: &SettingsState) -> Result<String, String> {
-    // Read the auth tokens file directly
-    let auth_path = if let Some(ws_dir) = settings.workspace_dir.lock().unwrap().as_ref() {
-        ws_dir.join("auth.json")
-    } else {
-        crate::app_paths::data_root().join("auth.json")
-    };
-
-    if !auth_path.exists() {
-        return Err("Not logged in. Please log in first.".into());
-    }
-
-    let content = fs::read_to_string(&auth_path).map_err(|e| e.to_string())?;
-    let content = content.trim_start_matches('\u{FEFF}');
-    let tokens: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
-
-    tokens
-        .get("access_token")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "No access token found".to_string())
+    crate::auth::get_access_token(settings)
 }
 
 // ---------------------------------------------------------------------------
@@ -371,37 +463,48 @@ pub async fn card_sync_full(
         &last_synced_at
     );
 
-    let pull_result = pull_changes(&dataset_uuid, &last_synced_at, &access_token).await?;
+    let pull_result = pull_changes(&settings, &dataset_uuid, &last_synced_at, &access_token).await?;
     let server_time = pull_result.server_time.clone();
 
     // Calculate clock offset
     let clock_offset_ms = 0i32; // Simplified: would need proper datetime diff
 
-    // Apply pulled cards
+    // Apply pulled cards + tags (the pull response carries both — T5)
     let pulled = apply_pulled_cards(&conn, &pull_result.cards)?;
+    apply_pulled_tags(&conn, &pull_result.tags)?;
     log::info!("[CardSync] Pulled {} card(s)", pulled);
 
     // Phase 2: Push local changes
     let local_changes = get_local_changes(&conn, &last_synced_at)?;
+    let local_tags = get_local_tags(&conn, &last_synced_at)?;
+    let mut conflicts = 0i32;
 
-    let pushed = if !local_changes.is_empty() {
+    let pushed = if !local_changes.is_empty() || !local_tags.is_empty() {
         log::info!(
-            "[CardSync] Pushing {} local change(s) for dataset '{}'",
+            "[CardSync] Pushing {} card(s) + {} tag(s) for dataset '{}'",
             local_changes.len(),
+            local_tags.len(),
             dataset_uuid
         );
 
         let push_request = SyncPushRequest {
             cards: local_changes,
-            tags: Vec::new(), // TODO: sync tags
+            tags: local_tags,
         };
 
-        let push_result = push_changes(&dataset_uuid, &push_request, &access_token).await?;
+        let push_result = push_changes(&settings, &dataset_uuid, &push_request, &access_token).await?;
         log::info!(
             "[CardSync] Pushed {} card(s), {} conflict(s)",
             push_result.accepted,
             push_result.conflicts.len()
         );
+        // Conflict hygiene (T5): rows the server says it won keep their local
+        // `updated_at > cursor`, so the next pull refetches the authoritative
+        // version — nothing to re-push or surface beyond the log.
+        conflicts = push_result.conflicts.len() as i32;
+        for c in push_result.conflicts.iter().filter(|c| c.winner == "remote") {
+            log::info!("[CardSync] remote wins for {}; next pull reconciles", c.uuid);
+        }
 
         push_result.accepted
     } else {
@@ -417,7 +520,7 @@ pub async fn card_sync_full(
     Ok(SyncResult {
         pulled,
         pushed,
-        conflicts: 0,
+        conflicts,
         server_time,
     })
 }
@@ -477,18 +580,24 @@ async fn card_sync_full_inner(
     });
 
     // Pull
-    let pull_result = pull_changes(dataset_uuid, &last_synced_at, &access_token).await?;
+    let pull_result = pull_changes(settings, dataset_uuid, &last_synced_at, &access_token).await?;
     let server_time = pull_result.server_time.clone();
     let pulled = apply_pulled_cards(&conn, &pull_result.cards)?;
+    apply_pulled_tags(&conn, &pull_result.tags)?;
 
     // Push
     let local_changes = get_local_changes(&conn, &last_synced_at)?;
-    let pushed = if !local_changes.is_empty() {
+    let local_tags = get_local_tags(&conn, &last_synced_at)?;
+    let mut conflicts = 0i32;
+    let pushed = if !local_changes.is_empty() || !local_tags.is_empty() {
         let push_request = SyncPushRequest {
             cards: local_changes,
-            tags: Vec::new(),
+            tags: local_tags,
         };
-        let push_result = push_changes(dataset_uuid, &push_request, &access_token).await?;
+        let push_result = push_changes(settings, dataset_uuid, &push_request, &access_token).await?;
+        // Remote-won rows keep `updated_at > cursor`, so the next pull refetches
+        // the authoritative version instead of a re-push (T5 conflict hygiene).
+        conflicts = push_result.conflicts.len() as i32;
         push_result.accepted
     } else {
         0
@@ -503,7 +612,7 @@ async fn card_sync_full_inner(
     Ok(SyncResult {
         pulled,
         pushed,
-        conflicts: 0,
+        conflicts,
         server_time,
     })
 }

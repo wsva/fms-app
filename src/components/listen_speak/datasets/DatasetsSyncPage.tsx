@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
-import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog } from "lucide-react";
+import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog, Upload, LogIn } from "lucide-react";
 import { logError } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
@@ -68,6 +68,10 @@ interface PairedDevice {
 }
 
 interface SyncStatusDetail {
+  /** Which hub the configured origin resolves to: "website" (OAuth Bearer,
+      file + card only) or "lan" (device-HMAC, full protocol). Gates the
+      pairing/cluster/app-data affordances and unlocks the Upload surface. */
+  hub_kind: string;
   role: string;
   cluster_id: string;
   protocol_version: number;
@@ -91,6 +95,33 @@ interface SyncProgress {
   received: number;
   total: number;
   phase: "download" | "extract" | "done";
+}
+
+// ---- Website-hub upload (mirrors sync/upload.rs, T2) -----------------------
+
+/** `dataset-upload-progress` payload. `pack` has no total (streaming gzip);
+    `upload` carries sent/total bytes; `done` clears the row. */
+interface UploadProgress {
+  uuid: string;
+  phase: "pack" | "upload" | "done";
+  sent: number;
+  total?: number;
+}
+
+/** A dataset that lives on this machine (any type) — an upload candidate. */
+interface LocalDataset {
+  uuid: string;
+  name: string;
+  dataset_type: string;
+}
+
+/** A row of `dataset_upload_state` (this device's upload history). */
+interface UploadStateEntry {
+  dataset_uuid: string;
+  version: number;
+  archive_sha256: string;
+  archive_size: string;
+  uploaded_at: string;
 }
 
 // Subset of the global settings this page needs (mirrors settings.rs).
@@ -138,6 +169,17 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   const [progress, setProgress] = useState<Record<string, SyncProgress>>({});
   const [message, setMessage] = useState<string>("");
 
+  // Website-hub upload surface (T2). Local datasets are the upload candidates;
+  // `uploadState` records what this device already pushed ("uploaded vN"); the
+  // dialog drives a single in-flight upload with a visibility choice.
+  const [localDatasets, setLocalDatasets] = useState<LocalDataset[]>([]);
+  const [uploadState, setUploadState] = useState<Record<string, UploadStateEntry>>({});
+  const [uploadProgress, setUploadProgress] = useState<Record<string, UploadProgress>>({});
+  const [uploadingUuid, setUploadingUuid] = useState<string>("");
+  const [uploadTarget, setUploadTarget] = useState<LocalDataset | null>(null);
+  const [uploadVisibility, setUploadVisibility] = useState<string>("private");
+  const [needsSignIn, setNeedsSignIn] = useState(false);
+
   // Aggregate sync status (§3.5) — the single source for role, cluster, hub
   // reachability, per-dataset state, and queued/pending counts. Read-only; the
   // page never mutates it directly, it reloads after each round/action.
@@ -149,6 +191,10 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   const [activeSection, setActiveSection] = useState<string>("dictation");
 
   const pcUrl = (global?.pc_url ?? "").trim();
+
+  // The website hub is the only origin that accepts dataset uploads and speaks
+  // OAuth (no pairing/cluster/app-data). Defaults false while status loads.
+  const isWebsite = status?.hub_kind === "website";
 
   // ---- Loaders ----------------------------------------------------------
 
@@ -191,6 +237,25 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     }
   }, []);
 
+  // Load the website-upload surface: every local dataset (candidate) plus what
+  // this device has already pushed. Cheap and read-only; harmless on LAN (the
+  // Upload UI itself is gated on `isWebsite`).
+  const loadUploadSurface = useCallback(async () => {
+    if (!isTauri()) return;
+    try {
+      const [locals, states] = await Promise.all([
+        invoke<LocalDataset[]>("sync_local_datasets"),
+        invoke<UploadStateEntry[]>("dataset_upload_state"),
+      ]);
+      setLocalDatasets(locals);
+      const map: Record<string, UploadStateEntry> = {};
+      for (const s of states) map[s.dataset_uuid] = s;
+      setUploadState(map);
+    } catch (e) {
+      logError(`Failed to load upload surface: ${String(e)}`, "datasets");
+    }
+  }, []);
+
   const fetchPcDatasets = useCallback(async () => {
     if (!pcUrl) {
       setPcDatasets([]);
@@ -199,6 +264,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     }
     setLoadingList(true);
     setListError("");
+    setNeedsSignIn(false);
     try {
       // Native command hits the PC with reqwest — no WebView cross-origin fetch.
       const data = await invoke<PcDataset[]>("pc_list_datasets", { pcUrl });
@@ -206,10 +272,21 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       setUnpaired(false);
     } catch (e) {
       // A 401 from the PC means "not paired yet" — surface the Pair button.
+      // On the website hub the same slot is a token problem: the shared
+      // hub_http_error wording ("sign in again", 401) needs a Sign-in action,
+      // not pairing (pairing is a LAN concept).
       const text = String(e);
-      const notPaired = text.includes("not paired") || text.includes("pairing denied");
+      const signIn = text.includes("sign in again") || /\b401\b/.test(text) || text.includes("access token");
+      const notPaired = !signIn && (text.includes("not paired") || text.includes("pairing denied"));
       setUnpaired(notPaired);
-      setListError(notPaired ? "This device is not paired with the source PC yet." : `Cannot reach the PC at ${pcUrl}.`);
+      setNeedsSignIn(signIn);
+      setListError(
+        signIn
+          ? "Sign in to reach the website hub — it rejected or did not receive your access token."
+          : notPaired
+          ? "This device is not paired with the source PC yet."
+          : `Cannot reach the PC at ${pcUrl}.`
+      );
       setPcDatasets([]);
     } finally {
       setLoadingList(false);
@@ -224,8 +301,9 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       await loadSettings();
       loadLocalState();
       loadStatus();
+      loadUploadSurface();
     })();
-  }, [loadSettings, loadLocalState, loadStatus]);
+  }, [loadSettings, loadLocalState, loadStatus, loadUploadSurface]);
 
   useEffect(() => {
     fetchPcDatasets();
@@ -253,6 +331,30 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     });
     return () => {
       progressReq.current?.();
+    };
+  }, []);
+
+  // Track upload progress events (T2): packing, then byte-streaming to the hub.
+  const uploadReq = useRef<(() => void) | undefined>(undefined);
+  useEffect(() => {
+    if (!isTauri()) return;
+    const un = listen<UploadProgress>("dataset-upload-progress", (evt) => {
+      const p = evt.payload;
+      if (p.phase === "done") {
+        setUploadProgress((prev) => {
+          const next = { ...prev };
+          delete next[p.uuid];
+          return next;
+        });
+      } else {
+        setUploadProgress((prev) => ({ ...prev, [p.uuid]: p }));
+      }
+    });
+    un.then((fn) => {
+      uploadReq.current = fn;
+    });
+    return () => {
+      uploadReq.current?.();
     };
   }, []);
 
@@ -297,6 +399,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       setSyncing(false);
       loadLocalState();
       loadStatus();
+      loadUploadSurface();
     }
   }
 
@@ -346,6 +449,67 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       loadStatus();
     } catch (e) {
       setMessage(`Could not remove: ${String(e)}`);
+    }
+  }
+
+  // ---- Website-hub upload (T2) ------------------------------------------
+
+  // Open the upload dialog for one local dataset. Visibility defaults to
+  // private; the hub only honours it on the uuid's first upload anyway.
+  function openUploadDialog(ds: LocalDataset) {
+    setUploadVisibility("private");
+    setUploadTarget(ds);
+  }
+
+  // Pack + POST the archive. A 409 tagged `owned-by-other` means the hub already
+  // holds this uuid under a different account — offer "save as new copy"
+  // (`dataset_remint_uuid`, which mints a fresh id and re-uploads in one step).
+  async function runUpload(ds: LocalDataset, visibility: string) {
+    setUploadingUuid(ds.uuid);
+    setMessage("");
+    const finish = () => {
+      setUploadingUuid("");
+      setUploadProgress((prev) => {
+        const next = { ...prev };
+        delete next[ds.uuid];
+        return next;
+      });
+      loadUploadSurface();
+      loadLocalState();
+      loadStatus();
+      fetchPcDatasets();
+    };
+    try {
+      const res = await invoke<{ version?: number }>("dataset_export_upload", {
+        datasetUuid: ds.uuid,
+        visibility,
+      });
+      setMessage(`Uploaded “${ds.name}” v${res?.version ?? "?"}.`);
+      setUploadTarget(null);
+    } catch (e) {
+      const text = String(e);
+      if (text.includes("owned-by-other")) {
+        if (
+          confirm(
+            `The hub already holds “${ds.name}” under a different account. Save it as a new copy under your account and upload? This mints a fresh id and never overwrites the hub's copy.`
+          )
+        ) {
+          try {
+            const res = await invoke<{ version?: number; new_uuid?: string }>("dataset_remint_uuid", {
+              datasetUuid: ds.uuid,
+              visibility,
+            });
+            setMessage(`Saved as a new copy and uploaded v${res?.version ?? "?"}.`);
+            setUploadTarget(null);
+          } catch (e2) {
+            setMessage(`Upload failed: ${String(e2)}`);
+          }
+        }
+      } else {
+        setMessage(`Upload failed: ${text}`);
+      }
+    } finally {
+      finish();
     }
   }
 
@@ -497,6 +661,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
               loadSettings();
               loadLocalState();
               loadStatus();
+              loadUploadSurface();
               fetchPcDatasets();
             }}
             disabled={loadingList}
@@ -520,6 +685,11 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
           <span className="text-text-secondary">
             {isHub ? (
               "hub · serving datasets to paired devices"
+            ) : isWebsite ? (
+              <>
+                Website Hub <span className="font-mono">{status.hub.address || "not configured"}</span>
+                {status.hub.reachable ? " · reachable" : " · unreachable"}
+              </>
             ) : (
               <>
                 hub <span className="font-mono">{status.hub.address || "not configured"}</span>
@@ -535,7 +705,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
           {/* Per-user practice data (dictation progress, XP) travels in its own
               journal scope, not in a dataset snapshot — so it converges even when
               nothing is subscribed. `null` = no app-data pull has landed yet. */}
-          {!isHub && (
+          {!isHub && !isWebsite && (
             <span className="text-text-tertiary">
               app data {status.app_cursor == null ? "not pulled yet" : `cursor ${status.app_cursor}`}
               {" · "}
@@ -600,7 +770,18 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
           {listError && (
             <div className="px-3 py-2 text-sm rounded-md bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300">
               {listError}
-              {unpaired && onNavigate && (
+              {/* Website: a token problem is fixed by signing in, never by pairing
+                  (pairing is a LAN concept). LAN unpaired: point at Devices & Hub. */}
+              {needsSignIn && (
+                <button
+                  className="ml-2 inline-flex items-center gap-1 underline font-medium"
+                  onClick={() => invoke("auth_open_login").catch((err) => setMessage(`Sign-in failed: ${String(err)}`))}
+                >
+                  <LogIn size={14} />
+                  Sign in
+                </button>
+              )}
+              {unpaired && !isWebsite && onNavigate && (
                 <button
                   className="ml-2 underline font-medium"
                   onClick={() => onNavigate("devices-hub")}
@@ -693,10 +874,126 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
                 ))}
               </div>
             )}
+
+            {/* Website-hub upload (T2). Local datasets across every type are the
+                upload candidates — including copies the hub catalog doesn't list
+                yet. Gated to the website origin; a LAN hub never accepts uploads. */}
+            {isWebsite && (
+              <div className="flex flex-col gap-2">
+                <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
+                  Upload to website hub
+                </p>
+                <p className="text-xs text-text-tertiary">
+                  Subscribing to a shared dataset is browser-only on the website, so a shared
+                  dataset shows up in your catalog here only after you subscribe to it on the
+                  website market page.
+                </p>
+                {localDatasets.length === 0 ? (
+                  <p className="text-sm text-text-tertiary px-1">No local datasets to upload.</p>
+                ) : (
+                  localDatasets.map((ds) => {
+                    const up = uploadProgress[ds.uuid];
+                    const done = uploadState[ds.uuid];
+                    const pct =
+                      up && up.phase === "upload" && up.total
+                        ? Math.min(100, Math.round((up.sent / up.total) * 100))
+                        : 0;
+                    return (
+                      <div
+                        key={ds.uuid}
+                        className="flex flex-col gap-2 p-3 rounded-lg border border-border-default bg-bg-card"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="flex flex-col min-w-0 flex-1">
+                            <span className="font-medium truncate">{ds.name}</span>
+                            <span className="text-xs text-text-tertiary">
+                              {ds.dataset_type}
+                              {done ? ` · uploaded v${done.version} (${done.uploaded_at})` : ""}
+                            </span>
+                          </div>
+                          <button
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
+                            onClick={() => openUploadDialog(ds)}
+                            disabled={!!uploadingUuid}
+                            title="Pack this local dataset and upload it to the website hub"
+                          >
+                            <Upload size={14} />
+                            {uploadingUuid === ds.uuid ? "Uploading…" : done ? "Re-upload" : "Upload"}
+                          </button>
+                        </div>
+                        {up && up.phase !== "done" && (
+                          <div className="flex flex-col gap-1">
+                            <div className="h-1.5 w-full rounded bg-bg-hover overflow-hidden">
+                              <div
+                                className="h-full bg-accent-bg transition-[width]"
+                                style={{ width: up.phase === "pack" ? "40%" : `${pct}%` }}
+                              />
+                            </div>
+                            <span className="text-xs text-text-tertiary">
+                              {up.phase === "pack" ? "Packing…" : `Uploading… ${pct}%`}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
           </div>
         </>
       )}
         </>
+      )}
+
+      {/* Upload dialog: pick a visibility, then pack + stream. Blocks closing
+          while an upload is in flight so the running task is never orphaned. */}
+      {uploadTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => !uploadingUuid && setUploadTarget(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-lg border border-border-default bg-bg-card p-4 flex flex-col gap-3"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="font-semibold truncate">Upload “{uploadTarget.name}”</h2>
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="text-text-secondary">Visibility</span>
+              <select
+                className="px-2 py-1.5 rounded-md border border-border-default bg-bg-body text-text-primary"
+                value={uploadVisibility}
+                onChange={(e) => setUploadVisibility(e.target.value)}
+                disabled={!!uploadingUuid}
+              >
+                <option value="private">Private</option>
+                <option value="shared">Shared</option>
+                <option value="public">Public</option>
+              </select>
+              <span className="text-xs text-text-tertiary">
+                The hub applies visibility only on the dataset’s first upload; re-uploads keep
+                the recorded setting.
+              </span>
+            </label>
+            <div className="flex justify-end gap-2">
+              <button
+                className="px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50"
+                onClick={() => setUploadTarget(null)}
+                disabled={!!uploadingUuid}
+              >
+                Cancel
+              </button>
+              <button
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50"
+                onClick={() => runUpload(uploadTarget, uploadVisibility)}
+                disabled={!!uploadingUuid}
+              >
+                {uploadingUuid ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+                {uploadingUuid ? "Uploading…" : "Upload"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

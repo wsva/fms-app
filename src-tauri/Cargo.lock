@@ -2164,6 +2164,7 @@ dependencies = [
  "arboard",
  "axum",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "dirs 6.0.0",
  "edge-tts-rust",

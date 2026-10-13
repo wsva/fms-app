@@ -247,6 +247,117 @@ pub(crate) fn with_device_auth(
         .header("x-fms-protocol", crate::sync::PROTOCOL_VERSION.to_string()))
 }
 
+// ---------------------------------------------------------------------------
+// Website-hub auth seam (T1) — origin-selected auth for every hub request
+// ---------------------------------------------------------------------------
+
+/// Resolve the effective hub base for a request: the persisted `pc_url`, which
+/// holds either a LAN PC origin or the website origin — [`super::hub_kind`]
+/// classifies it per call, so the website path is purely additive and the LAN
+/// signing path stays byte-identical (dev guide §10.4).
+fn hub_base(settings: &SettingsState) -> Result<String, String> {
+    let base = pc_base(settings);
+    if base.is_empty() {
+        return Err("No hub configured. Set the PC address (or the website origin).".into());
+    }
+    Ok(base)
+}
+
+/// Attach origin-appropriate auth to an outbound hub request. Website:
+/// `Authorization: Bearer <access token>` and **no** `x-fms-*` headers — the
+/// website's principal is an account, not a device, and a future strict-mode
+/// route could reject unknown signing headers (dev guide §2). LAN: the exact
+/// device-HMAC signing of [`with_device_auth`]. Missing/empty token on the
+/// website path degrades to an anonymous request rather than failing here: a
+/// 401 comes back from the gate and [`hub_http_error`] turns it into the
+/// sign-in message, while public reads keep working without a login.
+pub(crate) fn hub_request(
+    req: reqwest::RequestBuilder,
+    settings: &SettingsState,
+    method: &str,
+    path: &str,
+    query: &str,
+    body: &[u8],
+) -> Result<reqwest::RequestBuilder, String> {
+    match super::hub_kind(&pc_base(settings)) {
+        super::HubKind::Website => match crate::auth::get_access_token(settings) {
+            Ok(token) => Ok(req.header("Authorization", format!("Bearer {}", token))),
+            Err(_) => Ok(req),
+        },
+        super::HubKind::LanPc => with_device_auth(req, settings, method, path, query, body),
+    }
+}
+
+/// Map a non-2xx hub response to an app message that keeps the status code and
+/// says what to do next (dev guide §T7). For the website the codes carry fixed
+/// meanings (§2): 401 = anonymous/token problem, 403 = identified but not
+/// allowed — a token refresh never fixes that, so the message asks for access,
+/// not for a re-login. 5xx stays verbatim and marked retryable.
+async fn hub_http_error(resp: reqwest::Response, api_path: &str) -> String {
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    let server_msg = body["error"].as_str().unwrap_or("");
+    match status.as_u16() {
+        401 => {
+            if server_msg.contains("not paired") {
+                format!("{server_msg} — pair this device with the hub first (401)")
+            } else {
+                "sign in again — the hub rejected or did not receive your access token (401)"
+                    .to_string()
+            }
+        }
+        403 => format!(
+            "this account cannot access '{}', or the API key is read-only (403){}",
+            api_path,
+            if server_msg.is_empty() { String::new() } else { format!(" — {server_msg}") }
+        ),
+        404 => format!("'{api_path}' is not on this hub (404){}",
+            if server_msg.is_empty() { String::new() } else { format!(" — {server_msg}") }),
+        409 => format!("ownership/type conflict with the hub's catalog (409): {server_msg}"),
+        413 => format!("too large for the hub's limits (413): {server_msg}"),
+        c => format!("hub request '{api_path}' failed (HTTP {c}): {server_msg}"),
+    }
+}
+
+/// Signed/bearer GET returning parsed JSON, auth chosen by origin (T1). The
+/// shared route for every website-capable hub read: catalog, manifest, file.
+async fn hub_get_json(
+    settings: &SettingsState,
+    api_path: &str,
+    qs: &str,
+) -> Result<Value, String> {
+    let base = hub_base(settings)?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = if qs.is_empty() {
+        format!("{base}{api_path}")
+    } else {
+        format!("{base}{api_path}?{qs}")
+    };
+    let req = hub_request(client.get(&url), settings, "GET", api_path, qs, b"")?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Cannot reach hub at {base}: {e}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED
+        && super::hub_kind(&base) == super::HubKind::Website
+    {
+        // The website mints tokens only; an expired/revoked one has no silent
+        // refresh route, so clear it and send the user to sign in (T5).
+        crate::auth::token_rejected(settings);
+    }
+    if !status.is_success() {
+        return Err(hub_http_error(resp, api_path).await);
+    }
+    resp.json::<Value>()
+        .await
+        .map_err(|e| format!("Unexpected response from hub at '{api_path}': {e}"))
+}
+
 /// Local root a dataset type syncs into: `<datasets>/<type>` (e.g.
 /// `<datasets>/dictation`, `<datasets>/card`, `<datasets>/book`). Mirrors the
 /// PC-side layout so every existing read path discovers the unpacked dataset.
@@ -471,6 +582,11 @@ pub async fn writeback_flush_inner(settings: &SettingsState) -> Result<usize, St
     if base.is_empty() {
         return Ok(0);
     }
+    // The website hub has no `POST /sync/changes` journal (dev guide §6):
+    // entries stay queued for a LAN hub instead of failing every round.
+    if super::hub_kind(&base) == super::HubKind::Website {
+        return Ok(0);
+    }
     let client = reqwest::Client::new();
     let mut flushed = 0usize;
 
@@ -590,30 +706,24 @@ pub async fn dataset_sync_snapshot(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<SyncResult, String> {
-    let base = pc_base(&settings);
-    if base.is_empty() {
-        return Err("No PC configured. Use Discover PC or set the PC address.".into());
-    }
+    let base = hub_base(&settings)?;
     let client = reqwest::Client::new();
-    
+
     // 1. Manifest -> compare hash.
-    let mreq = with_device_auth(
-        client.get(format!("{base}/api/v1/datasets/{uuid}/manifest")),
+    let api_path = format!("/api/v1/datasets/{uuid}/manifest");
+    let mreq = hub_request(
+        client.get(format!("{base}{api_path}")),
         &settings,
         "GET",
-        &format!("/api/v1/datasets/{uuid}/manifest"),
+        &api_path,
         "",
         b"",
     )?;
-    let m: Value = mreq
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+    let mresp = mreq.send().await.map_err(|e| e.to_string())?;
+    if !mresp.status().is_success() {
+        return Err(hub_http_error(mresp, &api_path).await);
+    }
+    let m: Value = mresp.json().await.map_err(|e| e.to_string())?;
 
     let hash = m["overall_hash"].as_str().unwrap_or("").to_string();
     let total_bytes = m["total_bytes"].as_u64().unwrap_or(0);
@@ -655,20 +765,19 @@ pub async fn dataset_sync_snapshot(
     std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
 
     // 4. Stream the tar.gz to disk, emitting progress.
-    let sreq = with_device_auth(
-        client.get(format!("{base}/api/v1/datasets/{uuid}/snapshot")),
+    let snap_path = format!("/api/v1/datasets/{uuid}/snapshot");
+    let sreq = hub_request(
+        client.get(format!("{base}{snap_path}")),
         &settings,
         "GET",
-        &format!("/api/v1/datasets/{uuid}/snapshot"),
+        &snap_path,
         "",
         b"",
     )?;
-    let resp = sreq
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
+    let resp = sreq.send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(hub_http_error(resp, &snap_path).await);
+    }
 
     // The hub's change-log seq this snapshot already reflects. Recorded as the
     // follower's cursor so the next `/changes` pull continues from here (§3.3).
@@ -866,6 +975,10 @@ pub struct HubStatus {
 /// Aggregated local + hub sync state for the Status surface (§3.5).
 #[derive(Serialize)]
 pub struct SyncStatusDetail {
+    /// Which hub implementation `hub.address` points at: `"website"` (OAuth2
+    /// Bearer, file + card sync only) or `"lan"` (device-HMAC, full protocol).
+    /// The frontend gates pairing/cluster/app-data affordances on this.
+    pub hub_kind: String,
     pub role: String,
     pub cluster_id: String,
     pub protocol_version: u32,
@@ -911,6 +1024,29 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
     };
     if base.is_empty() {
         hub.error = Some("no hub configured — use Settings › Discover PC".to_string());
+    } else if super::hub_kind(&base) == super::HubKind::Website {
+        // The website serves no `/status` (dev guide §6) and its catalog is
+        // visibility-gated, so an *anonymous* lite list is the honest
+        // reachability probe: any HTTP answer (incl. 401/403) proves the
+        // origin is up. Role/cluster/protocol are LAN concepts — left null.
+        hub.role = Some("website".to_string());
+        let probe = async {
+            let client = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(6))
+                .timeout(Duration::from_secs(12))
+                .build()
+                .map_err(|e| e.to_string())?;
+            client
+                .get(format!("{base}/api/v1/datasets?lite=1"))
+                .send()
+                .await
+                .map_err(|e| format!("cannot reach website hub at {base}: {e}"))
+        }
+        .await;
+        match probe {
+            Ok(_) => hub.reachable = true,
+            Err(e) => hub.error = Some(e),
+        }
     } else {
         let probe = async {
             let client = reqwest::Client::builder()
@@ -1043,6 +1179,11 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
     //    dataset was removed upstream (`removed_on_hub`).
     let mut datasets: Vec<DatasetStatus> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // On the website path the `/status` probe carries no counts (T3), so the
+    // catalog doubles as the dataset count once it is fetched below.
+    if hub.role.as_deref() == Some("website") {
+        hub.dataset_count = Some(catalog.len() as i64);
+    }
     for c in &catalog {
         let uuid = c["uuid"].as_str().unwrap_or("").to_string();
         if uuid.is_empty() {
@@ -1092,6 +1233,11 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
     }
 
     Ok(SyncStatusDetail {
+        hub_kind: if super::hub_kind(&base) == super::HubKind::Website {
+            "website".to_string()
+        } else {
+            "lan".to_string()
+        },
         role,
         cluster_id,
         protocol_version: crate::sync::PROTOCOL_VERSION,
@@ -1131,6 +1277,25 @@ pub async fn pc_check_status(
     );
     if base.is_empty() {
         return Err("pc_url is not set — use Settings › Discover PC".to_string());
+    }
+    // Website hub: no `/api/v1/status` route (dev guide §6). Probe reachability
+    // through the anonymous-safe lite catalog instead, and report a synthetic
+    // status so the connect flow succeeds without cluster adoption.
+    if super::hub_kind(&base) == super::HubKind::Website {
+        let count = match hub_get_json(&settings, "/api/v1/datasets", "lite=1").await {
+            Ok(v) => v.as_array().map(|a| a.len() as i64).unwrap_or(0),
+            Err(e) => {
+                log::error!("[sync] pc_check_status (website) FAILED: {e}");
+                return Err(e);
+            }
+        };
+        log::info!("[sync] pc_check_status (website) OK: {count} readable dataset(s)");
+        return Ok(json!({
+            "ok": true,
+            "app_name": "fms-website-hub",
+            "website_contract": super::WEBSITE_CONTRACT_VERSION,
+            "dataset_count": count,
+        }));
     }
     let result = async {
         let client = reqwest::Client::builder()
@@ -1190,7 +1355,7 @@ pub async fn pc_list_datasets(
             .timeout(Duration::from_secs(20))
             .build()
             .map_err(|e| e.to_string())?;
-        let req = with_device_auth(
+        let req = hub_request(
             client.get(format!("{base}/api/v1/datasets")),
             &settings,
             "GET",
@@ -1201,17 +1366,13 @@ pub async fn pc_list_datasets(
         let resp = req
             .send()
             .await
-            .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            let body: Value = resp.json().await.unwrap_or(Value::Null);
-            let msg = body["error"].as_str().unwrap_or("device not paired");
-            return Err(format!("{msg} (http://{base})"));
+            .map_err(|e| format!("Cannot reach hub at {base}: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(hub_http_error(resp, "/api/v1/datasets").await);
         }
-        resp.error_for_status()
-            .map_err(|e| e.to_string())?
-            .json::<Value>()
+        resp.json::<Value>()
             .await
-            .map_err(|e| format!("Unexpected response from PC: {e}"))
+            .map_err(|e| format!("Unexpected response from hub: {e}"))
     }
     .await;
     match &result {
@@ -1219,6 +1380,25 @@ pub async fn pc_list_datasets(
         Err(e) => log::error!("[sync] pc_list_datasets FAILED: {e}"),
     }
     result
+}
+
+/// Classify a hub address the UI is about to use: `"website"` (OAuth Bearer,
+/// file + card only — no pairing/cluster) or `"lan"` (device-HMAC, full
+/// protocol). Lets the Devices & Hub page hide the pairing flow for the website
+/// origin *before* the address is saved. Thin wrapper over [`super::hub_kind`],
+/// so the compile-time website origin stays the single source of truth; falls
+/// back to the saved `pc_url` when no candidate is passed.
+#[tauri::command]
+pub async fn sync_hub_kind(
+    settings: State<'_, SettingsState>,
+    pc_url: Option<String>,
+) -> Result<String, String> {
+    let base = resolve_pc_url(&settings, pc_url.as_deref());
+    Ok(if super::hub_kind(&base) == super::HubKind::Website {
+        "website".to_string()
+    } else {
+        "lan".to_string()
+    })
 }
 
 /// `GET /api/v1/datasets/{uuid}/changes?after=S` — one incremental change-log
@@ -1236,6 +1416,11 @@ pub async fn pc_changes_since(
     after: i64,
 ) -> Result<Value, String> {
     let base = pc_base(&settings);
+    // No row journal on the website hub — the caller's round must not even ask
+    // (dev guide §6); file level converges by manifest hash instead.
+    if super::hub_kind(&base) == super::HubKind::Website {
+        return Err("the website hub serves no row journal (/changes)".to_string());
+    }
     if base.is_empty() {
         return Err("pc_url is not set — use Settings › Discover PC".to_string());
     }
@@ -1277,16 +1462,18 @@ pub async fn pc_changes_since(
 /// `GET /api/v1/file?dataset=D&path=P` — fetch one non-DB file from the hub
 /// (§3.2). Streams the raw bytes back; callers splice them into the dataset
 /// directory. The signed query matches the URL verbatim so a captured request
-/// cannot be re-pointed at another path.
+/// cannot be re-pointed at another path. `range` (T6, e.g. `"bytes=0-1023"`) is
+/// passed through — both hubs honour it (206 + Content-Range), which is what
+/// lets a follower resume a partial media fetch instead of re-pulling whole
+/// files. Never point it at `data.sqlite3` or its sidecars: the hub refuses
+/// those by design, rows go through card sync.
 pub async fn pc_fetch_file(
     settings: State<'_, SettingsState>,
     uuid: String,
     path: String,
+    range: Option<String>,
 ) -> Result<Vec<u8>, String> {
-    let base = pc_base(&settings);
-    if base.is_empty() {
-        return Err("pc_url is not set — use Settings › Discover PC".to_string());
-    }
+    let base = hub_base(&settings)?;
     let api_path = "/api/v1/file";
     let qs = build_query(&[("dataset", uuid), ("path", path)]);
     let client = reqwest::Client::builder()
@@ -1294,7 +1481,7 @@ pub async fn pc_fetch_file(
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| e.to_string())?;
-    let req = with_device_auth(
+    let req = hub_request(
         client.get(format!("{base}{api_path}?{qs}")),
         &settings,
         "GET",
@@ -1302,18 +1489,18 @@ pub async fn pc_fetch_file(
         &qs,
         b"",
     )?;
+    let req = match range {
+        Some(r) => req.header("Range", r),
+        None => req,
+    };
     let resp = req
         .send()
         .await
-        .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?;
-    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        let body: Value = resp.json().await.unwrap_or(Value::Null);
-        let msg = body["error"].as_str().unwrap_or("device not paired");
-        return Err(format!("{msg} (http://{base})"));
+        .map_err(|e| format!("Cannot reach hub at {base}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(hub_http_error(resp, api_path).await);
     }
     let bytes = resp
-        .error_for_status()
-        .map_err(|e| format!("/file request failed: {e}"))?
         .bytes()
         .await
         .map_err(|e| format!("Failed to read /file body: {e}"))?;
@@ -1328,36 +1515,10 @@ pub async fn pc_fetch_file(
 
 /// Signed GET returning parsed JSON. `path` is the URL path (no query), `qs`
 /// the exact pre-encoded query string appended to the URL and folded into the
-/// v2 signature. Shared by the round's catalog + manifest reads.
+/// v2 signature. Shared by the round's catalog + manifest reads. Website
+/// origins take the Bearer path of [`hub_get_json`] instead — same signature.
 async fn signed_get_json(settings: &SettingsState, path: &str, qs: &str) -> Result<Value, String> {
-    let base = pc_base(settings);
-    if base.is_empty() {
-        return Err("pc_url is not set — use Settings › Discover PC".to_string());
-    }
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(8))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let url = if qs.is_empty() {
-        format!("{base}{path}")
-    } else {
-        format!("{base}{path}?{qs}")
-    };
-    let req = with_device_auth(client.get(&url), settings, "GET", path, qs, b"")?;
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?;
-    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        let b: Value = resp.json().await.unwrap_or(Value::Null);
-        return Err(format!("{} (http://{base})", b["error"].as_str().unwrap_or("device not paired")));
-    }
-    resp.error_for_status()
-        .map_err(|e| e.to_string())?
-        .json::<Value>()
-        .await
-        .map_err(|e| e.to_string())
+    hub_get_json(settings, path, qs).await
 }
 
 /// `GET /datasets?lite=1` — the hub's current dataset catalog (uuid → type).
@@ -1657,6 +1818,11 @@ async fn hub_protocol_version(settings: &SettingsState) -> Option<u32> {
     if base.is_empty() {
         return None;
     }
+    // The website advertises no protocol version (no `/status` route, dev
+    // guide §6) — `None` keeps every protocol-gated pull skipped.
+    if super::hub_kind(&base) == super::HubKind::Website {
+        return None;
+    }
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(6))
         .timeout(Duration::from_secs(10))
@@ -1683,6 +1849,13 @@ async fn pull_app_scope(
     errors: &mut Vec<Value>,
 ) -> Result<AppPull, String> {
     let scope = crate::sync::change_log::APP_SCOPE;
+    // Feature-detect first (T3): the website hub serves no app journal, and
+    // probing it every round would log a 404 storm where the honest answer is
+    // "this hub cannot deliver app-scope deltas" (dev guide §6).
+    if super::hub_kind(&pc_base(settings.inner())) == super::HubKind::Website {
+        log::info!("[sync] website hub has no /app/changes — skipping app-data pull");
+        return Ok(AppPull { applied: 0, needs_history: false, hub_protocol: None });
+    }
     let hub_protocol = hub_protocol_version(settings.inner()).await;
     match hub_protocol {
         Some(p) if p >= APP_SCOPE_PROTOCOL => {}
@@ -1831,6 +2004,10 @@ async fn backfill_app_history(
     force: bool,
 ) -> Result<Option<Value>, String> {
     let scope = crate::sync::change_log::APP_SCOPE;
+    if super::hub_kind(&pc_base(settings)) == super::HubKind::Website {
+        log::info!("[sync] website hub has no /app/state — history backfill not available");
+        return Ok(None);
+    }
     let conn = datasets::dictation::open_app_db(settings)?;
     ensure_sync_tables(&conn)?;
     if !force && app_history_backfilled(&conn).is_some() {
@@ -1995,11 +2172,23 @@ pub async fn sync_round_inner(
     if pc_base(&settings).is_empty() {
         return Err("No PC configured. Use Discover PC or set the PC address.".into());
     }
+    // Website hub (T4): it serves no row journal (`/changes`, `/app/changes`,
+    // `/app/state` — dev guide §6), so one round is file-level only: catalog ->
+    // per-dataset manifest hash -> snapshot re-pull on drift, plus prune-by-
+    // absence. Card datasets additionally run their own Bearer pull/push.
+    let is_website = super::hub_kind(&pc_base(&settings)) == super::HubKind::Website;
+    if is_website {
+        log::info!(
+            "[sync] website hub contract v{} round",
+            super::WEBSITE_CONTRACT_VERSION
+        );
+    }
     let mut errors: Vec<Value> = Vec::new();
     let mut resynced: Vec<String> = Vec::new();
     let mut pruned: Vec<String> = Vec::new();
     let mut applied = 0i64;
     let mut history: Option<Value> = None;
+    let mut cards: Vec<Value> = Vec::new();
 
     // 1. Push local edits first so the hub holds our changes before we pull.
     let pushed = writeback_flush_inner(&settings).await.unwrap_or_else(|e| {
@@ -2015,11 +2204,13 @@ pub async fn sync_round_inner(
         Vec::new()
     });
     let mut catalog_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut catalog_type: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for d in &catalog {
         let u = d["uuid"].as_str().unwrap_or("").to_string();
         let t = d["dataset_type"].as_str().unwrap_or("").to_string();
         if !u.is_empty() {
-            catalog_map.insert(u, t);
+            catalog_map.insert(u.clone(), t.clone());
+            catalog_type.insert(u, t);
         }
     }
 
@@ -2049,6 +2240,54 @@ pub async fn sync_round_inner(
                 let conn = datasets::dictation::open_app_db(&settings)?;
                 prune_local_dataset(&settings, &conn, &uuid);
                 pruned.push(uuid);
+            }
+            continue;
+        }
+
+        let cursor_is_hash = cursor_opt.is_some() && !stored_hash.is_empty();
+        if is_website {
+            // File drift only: the website's manifest hash covers the same
+            // frozen non-DB recipe (§4.1); DB rows travel through card sync.
+            if !cursor_is_hash {
+                match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
+                    Ok(_) => resynced.push(uuid.clone()),
+                    Err(e) => errors.push(json!({ "uuid": uuid, "stage": "snapshot", "error": e })),
+                }
+            } else {
+                match fetch_manifest_hash(&settings, &uuid).await {
+                    Ok(h) if !h.is_empty() && h != stored_hash => {
+                        match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await
+                        {
+                            Ok(_) => resynced.push(uuid.clone()),
+                            Err(e) => {
+                                errors.push(json!({ "uuid": uuid, "stage": "snapshot", "error": e }))
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(json!({ "uuid": uuid, "stage": "manifest", "error": e }))
+                    }
+                    _ => {}
+                }
+            }
+            // Catalog rows absent locally are left to the explicit per-dataset
+            // Download — a round never auto-pulls media the user hasn't adopted.
+            if catalog_type.get(&uuid).map(String::as_str) == Some("card") {
+                let local_copy = type_root(&settings, "card").join(&uuid).exists();
+                if local_copy {
+                    match crate::datasets::cards::sync::card_sync_full(settings.clone(), uuid.clone()).await
+                    {
+                        Ok(r) => cards.push(json!({
+                            "uuid": uuid,
+                            "pulled": r.pulled,
+                            "pushed": r.pushed,
+                            "conflicts": r.conflicts,
+                        })),
+                        Err(e) => {
+                            errors.push(json!({ "uuid": uuid, "stage": "card_sync", "error": e }))
+                        }
+                    }
+                }
             }
             continue;
         }
@@ -2142,11 +2381,16 @@ pub async fn sync_round_inner(
 
     // 5. Per-user app data (`dictation` progress + `xp` awards) journals under its
     //    own scope, so it is pulled once per round regardless of which datasets
-    //    this device subscribes to (see [`pull_app_scope`]).
-    let app = pull_app_scope(&settings, &mut errors).await.unwrap_or_else(|e| {
-        errors.push(json!({ "scope": "@app", "stage": "app_changes", "error": e }));
+    //    this device subscribes to (see [`pull_app_scope`]). Website hubs serve no
+    //    journal — steps 5/6 are LAN-only (T3 guard, dev guide §6).
+    let app = if is_website {
         AppPull { applied: 0, needs_history: false, hub_protocol: None }
-    });
+    } else {
+        pull_app_scope(&settings, &mut errors).await.unwrap_or_else(|e| {
+            errors.push(json!({ "scope": "@app", "stage": "app_changes", "error": e }));
+            AppPull { applied: 0, needs_history: false, hub_protocol: None }
+        })
+    };
     applied += app.applied;
 
     // 6. History backfill (§3.6): the journal is forward-only and pruned, so a
@@ -2166,10 +2410,12 @@ pub async fn sync_round_inner(
 
     Ok(json!({
         "status": if errors.is_empty() { "ok" } else { "partial" },
+        "hub_kind": if is_website { "website" } else { "lan" },
         "pushed": pushed,
         "applied": applied,
         "resynced": resynced,
         "pruned": pruned,
+        "cards": cards,
         "history": history,
         "errors": errors,
     }))
@@ -2274,6 +2520,11 @@ pub async fn pc_pair_start(
     pc_url: Option<String>,
 ) -> Result<Value, String> {
     let base = resolve_pc_url(&settings, pc_url.as_deref());
+    if super::hub_kind(&base) == super::HubKind::Website {
+        return Err("Pairing is a local-network concept — the website hub authenticates \
+                    your account, so sign in instead."
+            .into());
+    }
     if base.is_empty() {
         return Err("No PC address — enter or discover the PC address first.".into());
     }
@@ -2397,36 +2648,8 @@ pub(crate) async fn pc_get_json(
     api_path: &str,
     query: &[(&str, String)],
 ) -> Result<Value, String> {
-    let base = pc_base(settings);
-    if base.is_empty() {
-        return Err("pc_url is not set — use Settings › Discover PC".to_string());
-    }
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(8))
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
     let qs = build_query(query);
-    let url = if qs.is_empty() {
-        format!("{base}{api_path}")
-    } else {
-        format!("{base}{api_path}?{qs}")
-    };
-    let req = with_device_auth(client.get(&url), settings, "GET", api_path, &qs, b"")?;
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?;
-    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        let body: Value = resp.json().await.unwrap_or(Value::Null);
-        let msg = body["error"].as_str().unwrap_or("device not paired");
-        return Err(format!("{msg} (http://{base})"));
-    }
-    resp.error_for_status()
-        .map_err(|e| format!("Request to PC failed: {e}"))?
-        .json::<Value>()
-        .await
-        .map_err(|e| format!("Unexpected response from PC: {e}"))
+    hub_get_json(settings, api_path, &qs).await
 }
 
 // ---------------------------------------------------------------------------
