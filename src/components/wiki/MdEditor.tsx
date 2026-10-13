@@ -1,19 +1,18 @@
 "use client";
 
-// Body of the wiki markdown editor. Header chrome (Save / Preview / Fullscreen /
+// Body of the wiki markdown editor. Header chrome (Save / View / Fullscreen /
 // Spell-check / Help toggles) and the Symbols/German/Format/Lists Tools panel
 // both live on the wiki page's sub-toolbars now, so this component is
 // controlled for those flags and exposes only the textarea, the Shortcuts
-// panel, the Markdown preview, and the word/char counter.
+// panel, and the word/char counter. The rendered markdown view is a page-level
+// concern: the wiki page swaps this component for its shared view renderer.
 
 import { forwardRef, useCallback, useEffect, useRef } from "react";
-import MarkdownViewer from "./markdown/markdown";
 import { insertAround, insertAtLineStart, insertLink, replaceRange } from "./mdEditorInserts";
 
 type Props = {
     value: string;
     onChange: (value: string) => void;
-    preview: boolean;
     fullscreen: boolean;
     spellCheck: boolean;
     shortcutsOpen: boolean;
@@ -42,7 +41,7 @@ function scrollParent(el: HTMLElement): HTMLElement | null {
     return null;
 }
 
-const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, preview, fullscreen, spellCheck, shortcutsOpen }, forwardedRef) => {
+const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, fullscreen, spellCheck, shortcutsOpen }, forwardedRef) => {
     const innerRef = useRef<HTMLTextAreaElement | null>(null);
 
     const wordCount = value.trim() ? value.trim().split(/\s+/).length : 0;
@@ -69,10 +68,7 @@ const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, prev
         if (innerRef.current) {
             autoResize(innerRef.current);
         }
-        // `preview` matters: while the textarea is display:none, scrollHeight
-        // reads 0, so a value change during preview would leave a stale
-        // height="0px" when switching back. Re-measure on preview exit.
-    }, [value, preview, autoResize]);
+    }, [value, autoResize]);
 
     const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
         const html = e.clipboardData.getData("text/html");
@@ -211,7 +207,6 @@ const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, prev
                 className={[
                     "w-full text-lg leading-relaxed p-1.5 outline-none resize-none overflow-hidden bg-bg-input border border-border-default rounded-md text-text-primary",
                     fullscreen ? "flex-1 min-h-0" : "min-h-40",
-                    preview ? "hidden" : "",
                 ].join(" ")}
                 value={value}
                 rows={1}
@@ -228,22 +223,10 @@ const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, prev
                 }}
             />
 
-            {/* Preview */}
-            {preview && (
-                <div className={[
-                    "bg-bg-input border border-border-default rounded-md p-2",
-                    fullscreen ? "flex-1 overflow-y-auto min-h-0" : "min-h-40",
-                ].join(" ")}>
-                    <MarkdownViewer content={value} withTOC />
-                </div>
-            )}
-
             {/* Word / char count */}
-            {!preview && (
-                <div className="text-xs text-text-tertiary text-right px-1">
-                    {wordCount} words · {charCount} chars
-                </div>
-            )}
+            <div className="text-xs text-text-tertiary text-right px-1">
+                {wordCount} words · {charCount} chars
+            </div>
         </div>
     );
 });

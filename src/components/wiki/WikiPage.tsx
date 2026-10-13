@@ -210,11 +210,12 @@ export default function WikiPage() {
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // Editor chrome toggles. MdEditor is fully controlled for these five flags;
-  // the sub-toolbar below owns the buttons and this page owns the state so the
-  // editor itself can stay a body-only component.
+  // Editor chrome toggles. The sub-toolbar owns the buttons and this page owns
+  // the state so the editor itself can stay a body-only component. mdView is
+  // consumed here — it swaps the body for the same rendered-view renderer the
+  // read-only mode uses — and the rest are passed into MdEditor as flags.
   const [mdToolsOpen, setMdToolsOpen] = useState(false);
-  const [mdPreview, setMdPreview] = useState(false);
+  const [mdView, setMdView] = useState(false);
   const [mdFullscreen, setMdFullscreen] = useState(false);
   const [mdSpellCheck, setMdSpellCheck] = useState(false);
   const [mdShortcutsOpen, setMdShortcutsOpen] = useState(false);
@@ -233,7 +234,7 @@ export default function WikiPage() {
   useEffect(() => {
     if (!editing) {
       setMdToolsOpen(false);
-      setMdPreview(false);
+      setMdView(false);
       setMdFullscreen(false);
       setMdSpellCheck(false);
       setMdShortcutsOpen(false);
@@ -941,17 +942,6 @@ export default function WikiPage() {
                     Tools
                   </button>
                   <button
-                    onClick={() => setMdPreview((v) => !v)}
-                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
-                      mdPreview
-                        ? "bg-bg-hover text-text-primary"
-                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
-                    }`}
-                    title={mdPreview ? "Return to editor" : "Preview rendered markdown"}
-                  >
-                    {mdPreview ? "Editor" : "Preview"}
-                  </button>
-                  <button
                     onClick={() => setMdFullscreen((v) => !v)}
                     className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
                       mdFullscreen
@@ -986,11 +976,19 @@ export default function WikiPage() {
                     <CircleHelp size={14} />
                   </button>
                   <button
-                    onClick={() => setEditing(false)}
-                    className="flex items-center gap-1.5 px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
-                    title="Return to view"
+                    // One View button replaces the old Preview toggle: with unsaved
+                    // changes it renders the live draft (staying in edit mode), and
+                    // when the draft matches the file it just leaves editing —
+                    // nothing would be lost, so there is nothing to preview.
+                    onClick={() => (mdDirty ? setMdView((v) => !v) : setEditing(false))}
+                    className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
+                      mdView
+                        ? "bg-bg-hover text-text-primary"
+                        : "text-text-secondary hover:text-text-primary hover:bg-bg-hover"
+                    }`}
+                    title={mdView ? "Return to the editor" : mdDirty ? "View your unsaved changes rendered" : "Return to view"}
                   >
-                    <Eye size={14} /> View
+                    <Eye size={14} /> {mdView ? "Editor" : "View"}
                   </button>
                 </>
               )}
@@ -1064,7 +1062,7 @@ export default function WikiPage() {
                 that operate directly on MdEditor's textarea via the shared
                 insert helpers, so this panel now sits alongside the other
                 sub-toolbars instead of squeezing in above the textarea. */}
-            {editing && mdToolsOpen && (
+            {editing && mdToolsOpen && !mdView && (
               <div className="shrink-0 flex flex-wrap gap-x-6 gap-y-3 px-4 py-2 border-b border-border-default bg-bg-card">
                 <div>
                   <div className="text-xs text-text-tertiary uppercase tracking-wide mb-1">Symbols</div>
@@ -1221,17 +1219,27 @@ export default function WikiPage() {
                   {/* Body: editor (edit mode) or rendered markdown (view mode) */}
                   <div className={inEditorFullscreen ? "flex-1 flex flex-col min-h-0" : "flex-1 overflow-y-auto min-h-0"}>
                     {editing ? (
-                      <div className={inEditorFullscreen ? "flex-1 flex flex-col min-h-0 px-4 py-3" : "px-4 py-3"}>
-                        <MdEditor
-                          ref={mdTextareaRef}
-                          value={editContent}
-                          onChange={setEditContent}
-                          preview={mdPreview}
-                          fullscreen={mdFullscreen}
-                          spellCheck={mdSpellCheck}
-                          shortcutsOpen={mdShortcutsOpen}
-                        />
-                      </div>
+                      mdView ? (
+                        // The draft through the same renderer view mode uses, so the
+                        // toggle is WYSIWYG-equal to the saved view. onWikiLink is
+                        // deliberately not wired: navigating would silently discard
+                        // the unsaved draft.
+                        <div className={inEditorFullscreen ? "flex-1 overflow-y-auto min-h-0 px-6 pt-6 pb-[50vh]" : "px-6 pt-6 pb-[50vh]"}>
+                          {fileTruncated && <TruncatedNote />}
+                          <MarkdownViewer content={editContent} withTOC={true} />
+                        </div>
+                      ) : (
+                        <div className={inEditorFullscreen ? "flex-1 flex flex-col min-h-0 px-4 py-3" : "px-4 py-3"}>
+                          <MdEditor
+                            ref={mdTextareaRef}
+                            value={editContent}
+                            onChange={setEditContent}
+                            fullscreen={mdFullscreen}
+                            spellCheck={mdSpellCheck}
+                            shortcutsOpen={mdShortcutsOpen}
+                          />
+                        </div>
+                      )
                     ) : fileKind === "markdown" ? (
                       <div className="px-6 pt-6 pb-[50vh]">
                         {fileTruncated && <TruncatedNote />}
