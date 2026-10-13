@@ -935,6 +935,14 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
                 pushed {num(lastRound.pushed)} · applied {num(lastRound.applied)} · held{" "}
                 {num(lastRound.held)}
               </span>
+              {/* INV-14 LWW loss: a nonzero count means un-pushed local edits were
+                  overwritten by a newer hub entry this round — a red flag of silent
+                  loss, not a routine statistic, so it only renders when > 0. */}
+              {num(lastRound.dropped_pending) > 0 && (
+                <span className="text-red-600 dark:text-red-400">
+                  {num(lastRound.dropped_pending)} local edit(s) overwritten (INV-14)
+                </span>
+              )}
               {lastRoundErrors > 0 && (
                 <span className="text-red-600 dark:text-red-400">{lastRoundErrors} error(s)</span>
               )}

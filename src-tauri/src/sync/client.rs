@@ -2206,29 +2206,103 @@ async fn apply_change(
     }
 }
 
-/// Conservative later-wins guard for Phase 4: when a local writeback entry for
-/// the same (kind, dataset, object) is still un-pushed, the local edit wins and
-/// the pulled row is skipped (it will be reconciled once our push lands and
-/// echoes back). Phase 5 sharpens this with a real `edit_time` column.
+/// The un-pushed local edit for one row, if any: the outer `Option` is `None`
+/// when nothing is queued (or `object_id` is empty, which never guards), and
+/// `Some(inner)` when a row exists, where `inner` is its `edit_time` (`None` for
+/// a legacy pre-Phase-5 row queued before the column existed).
+///
 /// A kind with no single-row identity (`book_sentences_save` bulk inserts) can
 /// never be matched meaningfully, so an empty `object_id` on either side must not
 /// participate in the guard — comparing "" to "" would suppress every pulled row
 /// of that kind for as long as one un-pushed row sat in the queue. Matching is on
 /// the `object_id` column `enqueue_change` stamped at queue time, so both sides
 /// are compared in the same per-user form (see
-/// [`crate::sync::change_log::object_id_for`]); pre-Phase-6 rows carry a NULL id
-/// and simply never block a pull.
-fn has_pending_local_edit(conn: &Connection, dataset_uuid: &str, kind: &str, object_id: &str) -> bool {
+/// [`crate::sync::change_log::object_id_for`]). Coalescing in `enqueue_change`
+/// folds repeat edits to one row per key, so `LIMIT 1` is the whole pending set.
+fn pending_local_edit(
+    conn: &Connection,
+    dataset_uuid: &str,
+    kind: &str,
+    object_id: &str,
+) -> Option<Option<String>> {
     if object_id.is_empty() {
-        return false;
+        return None;
     }
     conn
         .prepare_cached(
-            "SELECT 1 FROM writeback_queue \
+            "SELECT edit_time FROM writeback_queue \
              WHERE kind = ?1 AND dataset_uuid = ?2 AND object_id = ?3 LIMIT 1",
         )
-        .and_then(|mut s| s.exists(params![kind, dataset_uuid, object_id]))
-        .unwrap_or(false)
+        .and_then(|mut s| {
+            s.query_row(params![kind, dataset_uuid, object_id], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+        })
+        // `Ok(None)` (a row with a NULL `edit_time`) stays `Some(None)`; a
+        // no-row `Err` becomes the outer `None`.
+        .ok()
+}
+
+/// Conservative later-wins guard: `true` when a local writeback entry for the
+/// same (kind, dataset, object) is still un-pushed. Used by the history-backfill
+/// fold, where an import must never undo offline practice (local always wins,
+/// no stamp comparison). The journal-pull paths use [`pending_local_edit`] +
+/// [`lww_outcome`] instead, which let a *newer* pulled entry drop the pending
+/// edit (INV-14).
+fn has_pending_local_edit(conn: &Connection, dataset_uuid: &str, kind: &str, object_id: &str) -> bool {
+    pending_local_edit(conn, dataset_uuid, kind, object_id).is_some()
+}
+
+/// Delete the un-pushed local edit for one row (INV-14: a newer pulled entry
+/// drops the pending one). Returns the number of queue rows removed. A no-op
+/// when `object_id` is empty or nothing is queued.
+fn drop_pending_local_edit(
+    conn: &Connection,
+    dataset_uuid: &str,
+    kind: &str,
+    object_id: &str,
+) -> Result<usize, String> {
+    if object_id.is_empty() {
+        return Ok(0);
+    }
+    conn.execute(
+        "DELETE FROM writeback_queue \
+         WHERE kind = ?1 AND dataset_uuid = ?2 AND object_id = ?3",
+        params![kind, dataset_uuid, object_id],
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// What the journal-pull apply path does with a pulled entry when a local edit
+/// to the same row is still un-pushed (INV-14).
+#[derive(PartialEq, Eq, Debug)]
+enum LwwOutcome {
+    /// The local edit is newer, equal, or unstamped — protect it, skip the pull.
+    Skip,
+    /// The pulled entry is provably newer — drop the pending local edit, count
+    /// the loss, and apply the pulled entry.
+    DropAndApply,
+}
+
+/// Pure INV-14 last-writer-wins decision, called ONLY when a pending local edit
+/// exists (`pending_local_edit` returned `Some`). `pulled` is the incoming
+/// entry's `edit_time`; `pending_stamp` is the queued local edit's. The local
+/// edit is dropped only when the pulled entry is *strictly* newer.
+///
+/// The comparison parses both stamps via [`datasets::info::stamps_cmp`] rather
+/// than comparing text: text order is not instant order across stamp shapes
+/// (`'Z'` out-ranks `'+'`, and SQLite's `datetime('now')` space form sorts before
+/// every RFC-3339 stamp), which is exactly how `apply_pulled_cards` once lost a
+/// newer local edit to an older remote one. `None` (either side unreadable) or
+/// any non-`Greater` result protects the local edit.
+fn lww_outcome(pulled: Option<&str>, pending_stamp: Option<&str>) -> LwwOutcome {
+    match (pulled, pending_stamp) {
+        (Some(q), Some(p)) => match datasets::info::stamps_cmp(q, p) {
+            Some(std::cmp::Ordering::Greater) => LwwOutcome::DropAndApply,
+            _ => LwwOutcome::Skip,
+        },
+        _ => LwwOutcome::Skip,
+    }
 }
 
 /// Outcome of a prune-by-absence attempt (sync-v2.md §5 INV-7, §6.1). The
@@ -2495,6 +2569,9 @@ struct AppPull {
     /// The hub's protocol as probed this round, handed to the backfill so it does
     /// not need a second `/status` GET.
     hub_protocol: Option<u32>,
+    /// Un-pushed local edits this pull dropped to a provably newer hub entry
+    /// (INV-14 LWW). A nonzero value is a red flag surfaced on the status page.
+    dropped_pending: i64,
 }
 
 /// The hub's advertised `protocol_version`, read off its unsigned `/status` (so
@@ -2845,7 +2922,7 @@ async fn pull_app_scope(
     // this skips exactly as before — no 404 storm, no probe (dev guide §6).
     if !app_journal_advertised(cluster, &pc_base(settings.inner()), hub_protocol) {
         log::info!("[sync] host advertises no app_journal — skipping app-data pull");
-        return Ok(AppPull { applied: 0, needs_history: false, hub_protocol });
+        return Ok(AppPull { applied: 0, needs_history: false, hub_protocol, dropped_pending: 0 });
     }
 
     let (cursor, stamped) = {
@@ -2871,7 +2948,7 @@ async fn pull_app_scope(
                 // fail the same way and only double-report one fault. `needs_history`
                 // stays a per-round decision: the flag is recomputed next round from
                 // the cursor and the stamp, so a transient failure is retried anyway.
-                return Ok(AppPull { applied: 0, needs_history: false, hub_protocol });
+                return Ok(AppPull { applied: 0, needs_history: false, hub_protocol, dropped_pending: 0 });
             }
         };
         let hub_seq = p["hub_seq"].as_i64().unwrap_or(after);
@@ -2921,13 +2998,14 @@ async fn pull_app_scope(
             // to the INV-19 check rather than silently switching.
             let (k, o) = upstream_of(&pc_base(settings.inner()));
             let _ = stamp_app_provenance(&conn, k, &o);
-            return Ok(AppPull { applied: 0, needs_history, hub_protocol });
+            return Ok(AppPull { applied: 0, needs_history, hub_protocol, dropped_pending: 0 });
         }
     };
     let hub_seq = page["hub_seq"].as_i64().unwrap_or(after);
 
     let entries = page["entries"].as_array().cloned().unwrap_or_default();
     let mut applied = 0i64;
+    let mut dropped = 0i64;
     if !entries.is_empty() {
         let _guard = crate::sync::change_log::ApplyGuard::new();
         let conn = datasets::dictation::open_app_db(settings.inner())?;
@@ -2937,10 +3015,15 @@ async fn pull_app_scope(
             let object_id = ent["object_id"].as_str().unwrap_or("");
             let user_key = ent["user_key"].as_str().unwrap_or("");
             let payload = ent["payload"].clone();
-            // A local edit to the same row that has not been pushed yet wins; it
-            // lands on the hub with the next push and echoes back afterwards.
-            if has_pending_local_edit(&conn, scope, kind, object_id) {
-                continue;
+            // INV-14: an un-pushed local edit to the same row wins unless the
+            // pulled entry is provably newer, in which case the pending edit is
+            // dropped (LWW) and the loss counted + surfaced (§19.2).
+            if let Some(pe) = pending_local_edit(&conn, scope, kind, object_id) {
+                if lww_outcome(ent["edit_time"].as_str(), pe.as_deref()) == LwwOutcome::Skip {
+                    continue; // local edit is newer/equal (or unstamped) — protect it
+                }
+                let _ = drop_pending_local_edit(&conn, scope, kind, object_id);
+                dropped += 1;
             }
             // `dictation` needs no dataset and `xp` carries its own, so the row is
             // applied with an empty dataset argument.
@@ -2961,7 +3044,7 @@ async fn pull_app_scope(
     // fills an empty origin — see [`stamp_app_provenance`].
     let (k, o) = upstream_of(&pc_base(settings.inner()));
     let _ = stamp_app_provenance(&conn, k, &o);
-    Ok(AppPull { applied, needs_history, hub_protocol })
+    Ok(AppPull { applied, needs_history, hub_protocol, dropped_pending: dropped })
 }
 
 /// Fold the hub's *whole* history for this identity into the local app DB (§3.6).
@@ -3253,6 +3336,7 @@ pub async fn sync_round_inner(
     let mut resynced: Vec<String> = Vec::new();
     let mut pruned: Vec<String> = Vec::new();
     let mut applied = 0i64;
+    let mut dropped_pending = 0i64;
     let mut history: Option<Value> = None;
     let mut cards: Vec<Value> = Vec::new();
 
@@ -3461,8 +3545,15 @@ pub async fn sync_round_inner(
                 let object_id = ent["object_id"].as_str().unwrap_or("");
                 let user_key = ent["user_key"].as_str().unwrap_or("");
                 let payload = ent["payload"].clone();
-                if has_pending_local_edit(&conn, &uuid, kind, object_id) {
-                    continue; // local un-pushed edit wins; reconciled on next echo
+                // INV-14: an un-pushed local edit to the same row wins unless the
+                // pulled entry is provably newer, in which case the pending edit
+                // is dropped (LWW) and the loss counted + surfaced (§19.2).
+                if let Some(pe) = pending_local_edit(&conn, &uuid, kind, object_id) {
+                    if lww_outcome(ent["edit_time"].as_str(), pe.as_deref()) == LwwOutcome::Skip {
+                        continue; // local edit is newer/equal (or unstamped) — protect it
+                    }
+                    let _ = drop_pending_local_edit(&conn, &uuid, kind, object_id);
+                    dropped_pending += 1;
                 }
                 match apply_change(&settings, &uuid, kind, &payload, user_key).await {
                     Ok(true) => applied += 1,
@@ -3513,9 +3604,20 @@ pub async fn sync_round_inner(
         .await
         .unwrap_or_else(|e| {
             errors.push(json!({ "scope": "@app", "stage": "app_changes", "error": e }));
-            AppPull { applied: 0, needs_history: false, hub_protocol: None }
+            AppPull { applied: 0, needs_history: false, hub_protocol: None, dropped_pending: 0 }
         });
     applied += app.applied;
+    // INV-14: total un-pushed local edits dropped to a newer hub entry this round,
+    // across both journal scopes. A nonzero value is a red flag, not a statistic
+    // (§19.2), so log it per scope (§19.1) and carry it on the round result.
+    let dropped_total = dropped_pending + app.dropped_pending;
+    if dropped_total > 0 {
+        log::warn!(
+            "[sync] INV-14: dropped {dropped_total} pending local edit(s) to newer hub entries (app {}, dataset {})",
+            app.dropped_pending,
+            dropped_pending
+        );
+    }
 
     // 6. History backfill (§3.6): the journal is forward-only and pruned, so a
     //    device that has never completed a state read — new, or behind a gap — is
@@ -3552,6 +3654,7 @@ pub async fn sync_round_inner(
         "pushed": pushed,
         "held": held,
         "applied": applied,
+        "dropped_pending": dropped_total,
         "resynced": resynced,
         "pruned": pruned,
         "cards": cards,
@@ -4110,6 +4213,97 @@ mod tests {
         assert_eq!(old.resync_reason.as_deref(), Some("provenance_reset"));
         assert_eq!(new.cursor, Some(7));
         assert_eq!(new.resync_reason, None);
+    }
+
+    // -- INV-14 LWW drop (§19.2 last open item) ----------------------------
+
+    /// Insert one writeback-queue row with an explicit `object_id` + `edit_time`,
+    /// the two columns `pending_local_edit` matches/reads on.
+    fn insert_queue_row(
+        conn: &Connection,
+        id: &str,
+        kind: &str,
+        scope: &str,
+        object_id: &str,
+        edit_time: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO writeback_queue \
+             (id, kind, dataset_uuid, payload, queued_at, edit_time, object_id) \
+             VALUES (?1, ?2, ?3, '{}', datetime('now'), ?4, ?5)",
+            params![id, kind, scope, edit_time, object_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn lww_outcome_drops_only_when_pulled_strictly_newer() {
+        // Pulled strictly newer than the pending local edit -> drop + apply.
+        assert_eq!(
+            lww_outcome(Some("2026-01-05T00:00:00.000Z"), Some("2026-01-03T00:00:00.000Z")),
+            LwwOutcome::DropAndApply
+        );
+        // Pulled older -> protect the local edit.
+        assert_eq!(
+            lww_outcome(Some("2026-01-01T00:00:00.000Z"), Some("2026-01-03T00:00:00.000Z")),
+            LwwOutcome::Skip
+        );
+        // Equal -> not strictly newer -> protect.
+        assert_eq!(
+            lww_outcome(Some("2026-01-03T00:00:00.000Z"), Some("2026-01-03T00:00:00.000Z")),
+            LwwOutcome::Skip
+        );
+        // Either stamp missing -> protect (no silent loss on a legacy row).
+        assert_eq!(lww_outcome(None, Some("2026-01-03T00:00:00.000Z")), LwwOutcome::Skip);
+        assert_eq!(lww_outcome(Some("2026-01-05T00:00:00.000Z"), None), LwwOutcome::Skip);
+        // Offsets are honoured as instants, not compared as text: 07:12:34Z is
+        // the same instant as 15:12:34+08:00, so neither is strictly newer.
+        assert_eq!(
+            lww_outcome(
+                Some("2026-01-03T07:12:34.000Z"),
+                Some("2026-01-03T15:12:34.000+08:00")
+            ),
+            LwwOutcome::Skip
+        );
+    }
+
+    #[test]
+    fn pending_local_edit_reads_the_queued_stamp() {
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        // An empty object_id never guards (bulk-insert kinds have no row identity).
+        insert_queue_row(&conn, "q0", "book_sentences_save", "ds-1", "", Some("2026-01-03T00:00:00.000Z"));
+        assert_eq!(pending_local_edit(&conn, "ds-1", "book_sentences_save", ""), None);
+        // No row for this key -> outer None.
+        assert_eq!(pending_local_edit(&conn, "ds-1", "card_save", "missing"), None);
+        // A queued row -> Some(Some(edit_time)).
+        insert_queue_row(&conn, "q1", "card_save", "ds-1", "card-9", Some("2026-01-03T00:00:00.000Z"));
+        assert_eq!(
+            pending_local_edit(&conn, "ds-1", "card_save", "card-9"),
+            Some(Some("2026-01-03T00:00:00.000Z".to_string()))
+        );
+        // A legacy row with a NULL edit_time -> Some(None) (row exists, unstamped).
+        insert_queue_row(&conn, "q2", "card_save", "ds-1", "card-old", None);
+        assert_eq!(pending_local_edit(&conn, "ds-1", "card_save", "card-old"), Some(None));
+        // has_pending_local_edit delegates: true for a queued row, false for the
+        // empty-object_id kind that never guards.
+        assert!(has_pending_local_edit(&conn, "ds-1", "card_save", "card-9"));
+        assert!(!has_pending_local_edit(&conn, "ds-1", "book_sentences_save", ""));
+    }
+
+    #[test]
+    fn drop_pending_local_edit_removes_the_row_once() {
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        insert_queue_row(&conn, "q1", "card_save", "ds-1", "card-9", Some("2026-01-03T00:00:00.000Z"));
+        // First drop removes the one queued row.
+        assert_eq!(drop_pending_local_edit(&conn, "ds-1", "card_save", "card-9").unwrap(), 1);
+        assert_eq!(pending_local_edit(&conn, "ds-1", "card_save", "card-9"), None);
+        // A second drop is a no-op.
+        assert_eq!(drop_pending_local_edit(&conn, "ds-1", "card_save", "card-9").unwrap(), 0);
+        // An empty object_id never deletes (it would sweep unrelated bulk rows).
+        insert_queue_row(&conn, "q2", "book_sentences_save", "ds-1", "", Some("2026-01-03T00:00:00.000Z"));
+        assert_eq!(drop_pending_local_edit(&conn, "ds-1", "book_sentences_save", "").unwrap(), 0);
     }
 
     // -- §19.4 queue diagnosis ---------------------------------------------
