@@ -146,7 +146,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 className={`text-left p-4 border border-border-default rounded-lg transition-colors ${ready ? "hover:bg-bg-hover cursor-pointer" : "opacity-70 cursor-not-allowed"}`}
                 disabled={!ready}
                 onClick={() => ready && d.setSelectedDatasetUuid(ds.info.uuid)}
-                title={ready ? undefined : "Not ready — generate the database in Datasets > Studio first"}
+                title={ready ? undefined : "Not ready — generate the database in the Workflow page first"}
             >
                 <div className="flex items-center gap-2">
                     <span className="font-medium text-text-primary">{ds.info.name}</span>
@@ -457,7 +457,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                     {d.locations.length === 0 && d.datasets.length === 0 ? (
                         <p className="text-text-secondary">{mobile
                             ? "No datasets available. Open More \u203A Datasets and tap Sync to pull one from your PC."
-                            : "No datasets available. Use the \"Add dataset location\" button in the toolbar to link a directory containing datasets, or generate a database in Datasets > Studio first."}</p>
+                            : "No datasets available. Use the \"Add dataset location\" button in the toolbar to link a directory containing datasets, or generate a database in the Workflow page first."}</p>
                     ) : (
                         <>
                             {d.locations.map((loc) => {

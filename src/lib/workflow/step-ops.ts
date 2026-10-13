@@ -2,7 +2,7 @@
 // In-app step operations registry for the Workflow page.
 //
 // Each dictation pipeline step maps to a typed Tauri command twin (the very
-// command Studio invokes and the MCP tool wraps), so clicking a graph node's
+// command this page invokes and the MCP tool wraps), so clicking a graph node's
 // Run button performs the identical core work a goose agent would drive over
 // `/mcp`. The page pairs this with the `workflow_*` engine command twins
 // (advance -> run -> record) so a run's `state.json` stays in sync.
@@ -111,8 +111,8 @@ export const STEP_OPS: Record<string, StepOp> = {
     reloadAfter: true,
   },
 
-  // Metadata of the selected dataset (Studio's "Edit Dataset"). Brand-new empty
-  // datasets are still created from Studio (kept until removed) or the raw-folder
+  // Metadata of the selected dataset (the "Edit Dataset" step). Brand-new empty
+  // datasets are still created here (kept until removed) or the raw-folder
   // "Initialize" flow in this page's header.
   create_dataset: {
     runLabel: "Save",

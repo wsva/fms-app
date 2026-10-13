@@ -6,7 +6,6 @@ import { useAuth } from "@/hooks/useAuth";
 import LoginModal from "@/components/auth/LoginModal";
 import {
   Box,
-  SlidersHorizontal,
   Settings,
   Headphones,
   MessageSquare,
@@ -35,7 +34,6 @@ export type TabId =
   | "read-book"
   | "read-aloud"
   | "cards"
-  | "studio"
   | "workflow"
   | "datasets-sync"
   | "devices-hub"
@@ -72,7 +70,6 @@ const navGroups: NavGroup[] = [
     icon: Wrench,
     tabs: [
       { id: "workspaces", label: "Workspaces", icon: FolderKanban },
-      { id: "studio", label: "Dataset Studio", icon: SlidersHorizontal },
       { id: "workflow", label: "Workflow", icon: Workflow },
       { id: "devices-hub", label: "Devices & Hub", icon: Users },
       { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown },
@@ -99,7 +96,7 @@ const rootTabs: TabDef[] = [
 ];
 
 // Tabs reachable in the Android thin client. Everything else (OCR,
-// Edge TTS, LLM Chat, Logs, Simple Words, Dataset Studio pipeline) is hidden.
+// Edge TTS, LLM Chat, Logs, Simple Words, Workflow pipeline) is hidden.
 // "models" is enabled to verify local STT (transcribe-rs/ONNX) on Android.
 const MOBILE_VISIBLE_TABS: TabId[] = [
   "dictation",

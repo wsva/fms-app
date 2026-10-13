@@ -14,7 +14,7 @@
  *              marked by a pulsing dot — the button itself never pulses, so
  *              pressing it neither swaps box models nor blinks like an alarm
  *  processing  the spinner every other busy control in this app already uses
- *              (OcrPage, TtsPage, StageRow, BookAdvanced)
+ *              (OcrPage, TtsPage, BookAdvanced)
  *
  * The tint uses `bg-error-bg`/`text-error-text` rather than HeroUI's `danger`
  * variant on purpose: those are the app's theme variables, redefined by every

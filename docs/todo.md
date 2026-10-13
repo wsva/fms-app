@@ -37,4 +37,9 @@ can build release without mcp server
 
 status of all loaded models
 
-suggestions to improve MdEditor
+modify website
+
+add a nornalized field to read aloud
+use workflow to normalize text
+convert number to word
+convert abbreviation to full form

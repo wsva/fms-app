@@ -599,8 +599,8 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
   // Platform facts (`isTauri()`, `mobile`) only exist inside the WebView, so
   // nothing platform-dependent may be rendered before mount — otherwise the
   // prerendered HTML and the first client render disagree and React has to
-  // regenerate the tree (hydration error). Same discipline as StudioPage and
-  // DatasetsSyncPage, which both branch behind a `mounted` guard.
+  // regenerate the tree (hydration error). Same discipline as the other
+  // platform-aware pages, which branch behind a `mounted` guard.
   if (!mounted) return null;
 
   if (!isTauri()) {
