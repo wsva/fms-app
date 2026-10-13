@@ -16,3 +16,11 @@
     max-height: calc(100% - 1rem);
     max-width: 60%;
 }
+
+/* This panel is absolute inside a content-sized `.card-md` box, so its
+   percentage max-height has no viewport-relative bound to clamp against — unlike
+   the wiki's fixed panel, whose flex chain sizes the list scroller. Keep a
+   viewport ceiling for this scope so a long answer TOC cannot outgrow the modal. */
+.card-md #text-table-of-contents {
+    max-height: calc(80vh - 2em);
+}

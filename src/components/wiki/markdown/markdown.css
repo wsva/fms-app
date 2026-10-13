@@ -9,8 +9,12 @@
     right: 1.5rem;
     top: 6rem;
     z-index: 200;
-    /* Percentage rather than 100vh: this box is fixed, so it resolves against
-       the viewport already corrected for the global page zoom. */
+    /* Column flex container + percentage clamp so the list below can scroll *inside*
+       the panel. Percentage rather than 100vh: this box is fixed, so it resolves
+       against the viewport already corrected for the global page zoom, while a
+       viewport unit would be multiplied by it and overshoot the window. */
+    display: flex;
+    flex-direction: column;
     max-height: calc(100% - 6rem);
     overflow: hidden;
     background: var(--bg-card);
@@ -57,9 +61,15 @@
 
 #table-of-contents:hover #text-table-of-contents {
     display: block;
+    /* The scroller: min-height: 0 lets this flex item shrink below its content
+       once the panel hits its max-height, so a long TOC scrolls vertically
+       instead of being clipped away. contain stops the chain to the page behind
+       once the list reaches either end. */
+    flex: 1 1 auto;
+    min-height: 0;
     padding: 0.5em 0.5em 0.5em 0;
-    overflow: auto;
-    max-height: calc(80vh - 2em);
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
 #table-of-contents:hover h2 {
