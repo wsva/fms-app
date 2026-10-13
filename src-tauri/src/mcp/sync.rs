@@ -83,6 +83,14 @@ struct HubKindParam {
     pc_url: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct MirrorPushParam {
+    /// One dataset uuid to mirror; omitted (or empty) pushes every dataset scope
+    /// with journal rows.
+    #[serde(default)]
+    scope: Option<String>,
+}
+
 #[tool_router(router = sync_router, vis = "pub(crate)")]
 impl DatasetMcpServer {
     #[tool(name = "web_service_get_status", description = "Get the web service status: whether it's running, port, enabled features, and URLs.")]
@@ -411,6 +419,13 @@ impl DatasetMcpServer {
             param.tag_uuids,
         )
         .await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "sync_mirror_push", description = "Push this desktop hub's dataset-scope change journal up to the account website's mirror (POST /api/v1/changes, sync-v2 phase 4). The website keeps a read-only mirror of the hub's journal so it can render the owner's real state; this is the app-side pusher that feeds it. Incremental (a per-scope cursor is stored in the app DB) and idempotent (the website dedups on change_id), so re-running is safe. Pass an optional scope (a dataset uuid) to push just one; omitted, it mirrors every dataset scope with journal rows. Target is always the account website (not the LAN pc_url) and needs the user signed in. Meaningful on a role=hub desktop — only a hub journals dataset-scope changes, so other roles normally report zero scopes (surfaced in `note`, not an error). The @app scope is not mirrored here (that is the cloud-authority writeback leg). Returns { target, role, scopes:[{scope, cursor_before, cursor_after, pushed, deduped, refused, gap_skipped, errors[]}], totals, errors[], note }.")]
+    async fn sync_mirror_push(&self, Parameters(param): Parameters<MirrorPushParam>) -> Result<String, String> {
+        log::info!("[MCP] sync_mirror_push: scope={:?}", param.scope);
+        let v = sync::mirror::sync_mirror_push(self.app.state::<SettingsState>(), param.scope).await?;
         Ok(v.to_string())
     }
 }

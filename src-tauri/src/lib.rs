@@ -398,6 +398,8 @@ pub fn run() {
             sync::upload::dataset_upload_state,
             sync::upload::dataset_remint_uuid,
             sync::upload::sync_local_datasets,
+            // Desktop-hub → website mirror push (sync-v2 phase 4).
+            sync::mirror::sync_mirror_push,
             sync::client::sync_hub_kind,
             sync::discover::pc_discover,
             // Read-only hub wiki browse (works from any follower role/platform).
