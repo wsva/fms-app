@@ -24,6 +24,12 @@ function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+// localStorage key for a per-file draft. Dataset uuid + rel is stable across
+// app restarts, so a work-in-progress edit survives every navigation path
+// (file switch, breadcrumb, Back, even closing the app) and reappears the
+// next time the file is opened for editing.
+const draftKey = (uuid: string, rel: string) => `wiki-draft:${uuid}:${rel}`;
+
 // Strip a dataset-root-relative wiki link to a clean rel path.
 function normalizeWikiRel(relativePath: string): string {
   return relativePath.replace(/^\.?\//, "").replace(/\\/g, "/");
@@ -209,6 +215,9 @@ export default function WikiPage() {
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
+  // True while the current edit session started from a persisted draft rather
+  // than the on-disk file; drives the toolbar hint and its Revert action.
+  const [draftRestored, setDraftRestored] = useState(false);
 
   // Editor chrome toggles. The sub-toolbar owns the buttons and this page owns
   // the state so the editor itself can stay a body-only component. mdView is
@@ -426,8 +435,21 @@ export default function WikiPage() {
     !hubMode && selection?.source.kind === "dataset" && selection.source.rel !== "" && fileKind === "markdown";
 
   const startEdit = () => {
-    setEditContent(fileContent);
+    // Reopen with the persisted draft when one exists and still differs from
+    // the saved file; the auto-save effect writes it continuously while dirty.
+    const src = selection?.source;
+    const stored = src?.kind === "dataset" ? localStorage.getItem(draftKey(src.uuid, src.rel)) : null;
+    const useDraft = stored !== null && stored !== fileContent;
+    setDraftRestored(useDraft);
+    setEditContent(useDraft ? stored : fileContent);
     setEditing(true);
+  };
+
+  const discardDraft = () => {
+    const src = selection?.source;
+    if (src?.kind === "dataset") localStorage.removeItem(draftKey(src.uuid, src.rel));
+    setEditContent(fileContent);
+    setDraftRestored(false);
   };
 
   const handleSave = async () => {
@@ -441,12 +463,36 @@ export default function WikiPage() {
       });
       setFileContent(editContent);
       setEditing(false);
+      setDraftRestored(false);
+      localStorage.removeItem(draftKey(selection.source.uuid, selection.source.rel));
     } catch (err) {
       await message(err instanceof Error ? err.message : String(err), { title: "Save failed", kind: "error" });
     } finally {
       setSaving(false);
     }
   };
+
+  // Draft auto-save safety net: while the draft diverges from disk, persist it
+  // debounced so a keystroke burst is one write; once it matches disk again,
+  // clear the key so a later Edit never restores a stale draft. Removal also
+  // happens on save and via the toolbar's Revert button.
+  useEffect(() => {
+    const src = selection?.source;
+    if (!editing || src?.kind !== "dataset") return;
+    const key = draftKey(src.uuid, src.rel);
+    if (editContent === fileContent) {
+      localStorage.removeItem(key);
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem(key, editContent);
+      } catch {
+        // Quota or privacy-mode failure: best-effort only, saving still works.
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [editing, editContent, fileContent, selection]);
 
   // Ctrl+S (Cmd+S on Mac) still triggers Save while editing, now that the
   // button lives on the sub-toolbar. Uses a ref so the effect only re-binds on
@@ -924,6 +970,18 @@ export default function WikiPage() {
                   >
                     <Save size={14} /> {saving ? "Saving..." : "Save"}
                   </button>
+                  {draftRestored && (
+                    <span className="flex items-center gap-2 text-xs text-warning-text select-none">
+                      Restored unsaved draft
+                      <button
+                        onClick={discardDraft}
+                        className="px-2 py-0.5 rounded-md border border-border-default text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
+                        title="Discard the draft and edit the saved file instead"
+                      >
+                        Revert to saved
+                      </button>
+                    </span>
+                  )}
                   <button
                     onClick={() => setMdToolsOpen((v) => !v)}
                     className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors ${
