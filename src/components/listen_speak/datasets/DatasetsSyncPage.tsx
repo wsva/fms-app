@@ -54,6 +54,9 @@ interface DatasetStatus {
   availability?: string;
   /** The registry version adopted; null for a LAN mirror or a catalog-only row. */
   published_version?: number | null;
+  /** Why this copy owes a resync (§19.2), present only when state is needs_resync:
+      "retention_gap" | "journal_regressed" | "provenance_reset" | "no_cursor". */
+  resync_reason?: string | null;
 }
 
 /** One journal scope's writeback backlog (§19.2). A nonzero `depth` against a
@@ -638,6 +641,21 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       ? "text-amber-600 dark:text-amber-400"
       : "text-text-tertiary";
 
+  // Human text for a `needs_resync` cause (§19.2). An unknown/absent code falls
+  // back to the generic "one snapshot due" wording rather than rendering blank.
+  const resyncReasonLabel = (code?: string | null): string => {
+    switch (code) {
+      case "retention_gap":
+        return "Retention gap — the hub pruned changes older than this copy's cursor.";
+      case "journal_regressed":
+        return "Hub journal regressed (reset/reinstall) — full re-pull due.";
+      case "provenance_reset":
+        return "Re-establishing against the currently connected host.";
+      default:
+        return "Predates incremental sync — one snapshot due.";
+    }
+  };
+
   function renderDatasetCard(ds: PcDataset, i: number) {
     const st = syncState[ds.uuid];
     const detail = statusByUuid[ds.uuid];
@@ -719,6 +737,14 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
             {detail.availability === "withdrawn" && (
               <span className="text-amber-600 dark:text-amber-400">withdrawn upstream</span>
             )}
+          </span>
+        )}
+
+        {/* Resync cause (§19.2): why this copy owes one snapshot, named rather
+            than a bare "Resync due" badge. Only when a resync is actually owed. */}
+        {state === "needs_resync" && (
+          <span className="text-xs text-amber-600 dark:text-amber-400">
+            {resyncReasonLabel(detail?.resync_reason)}
           </span>
         )}
 

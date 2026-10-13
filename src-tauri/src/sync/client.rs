@@ -491,6 +491,13 @@ fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
     // Nullable — NULL until the first round completes on this build.
     ensure_column(conn, "app_sync_state", "last_round_json", "TEXT")?;
     ensure_column(conn, "app_sync_state", "last_round_at", "TEXT")?;
+    // Migration (sync-v2.md §19.2): record *why* a copy owes a resync, so the
+    // status surface can say "retention gap" / "journal regressed" instead of a
+    // bare `needs_resync`. Nullable — NULL means nothing is owed (or the reason
+    // was never recorded, which `classify_resync_reason` reads as `no_cursor`).
+    // A successful `dataset_sync_snapshot` clears it: its INSERT OR REPLACE does
+    // not list this column, so the re-inserted row defaults it back to NULL.
+    ensure_column(conn, "dataset_sync_state", "resync_reason", "TEXT")?;
     Ok(())
 }
 
@@ -523,7 +530,7 @@ fn ensure_column(conn: &Connection, table: &str, name: &str, decl: &str) -> Resu
 fn reset_cursors_without_provenance(conn: &Connection) -> Result<usize, String> {
     let n = conn
         .execute(
-            "UPDATE dataset_sync_state SET \"cursor\" = NULL \
+            "UPDATE dataset_sync_state SET \"cursor\" = NULL, resync_reason = 'provenance_reset' \
              WHERE (upstream_origin IS NULL OR upstream_origin = '') AND \"cursor\" IS NOT NULL",
             [],
         )
@@ -1218,6 +1225,11 @@ pub struct SyncStateEntry {
     pub availability: String,
     /// The registry version this copy was adopted at (`None` for a LAN mirror).
     pub published_version: Option<i64>,
+    /// Why this copy currently owes a resync (§19.2), or `None` when it does not:
+    /// `"retention_gap"` | `"journal_regressed"` | `"provenance_reset"`. A NULL
+    /// cursor with no recorded reason is surfaced as `"no_cursor"` by
+    /// [`classify_resync_reason`].
+    pub resync_reason: Option<String>,
 }
 
 /// Read every `dataset_sync_state` row, including the phase-1/3 provenance
@@ -1227,7 +1239,7 @@ fn local_sync_entries(conn: &Connection) -> Result<Vec<SyncStateEntry>, String> 
     let mut stmt = conn
         .prepare(
             "SELECT dataset_uuid, overall_hash, synced_at, bytes, file_count, \"cursor\", \
-                    upstream_kind, upstream_origin, availability, published_version \
+                    upstream_kind, upstream_origin, availability, published_version, resync_reason \
              FROM dataset_sync_state",
         )
         .map_err(|e| e.to_string())?;
@@ -1244,10 +1256,37 @@ fn local_sync_entries(conn: &Connection) -> Result<Vec<SyncStateEntry>, String> 
                 upstream_origin: r.get(7)?,
                 availability: r.get(8)?,
                 published_version: r.get(9)?,
+                resync_reason: r.get(10)?,
             })
         })
         .map_err(|e| e.to_string())?;
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// Record *why* a copy owes a resync (sync-v2.md §19.2). Written at the moment
+/// the round detects the condition, before the snapshot that should heal it: a
+/// successful `dataset_sync_snapshot` clears the column again (its INSERT OR
+/// REPLACE omits it), a failed one leaves the reason visible on the next status
+/// read. A no-op when the row does not exist yet — the snapshot will create it.
+fn set_resync_reason(conn: &Connection, uuid: &str, reason: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE dataset_sync_state SET resync_reason = ?2 WHERE dataset_uuid = ?1",
+        params![uuid, reason],
+    )
+    .map_err(|e| e.to_string())
+    .map(|_| ())
+}
+
+/// Decide what `DatasetStatus.resync_reason` should read for a dataset in `state`
+/// (§19.2). Pure so the mapping is unit-testable with no DB. Only a `needs_resync`
+/// copy carries a reason: the stored one when the round recorded it, else
+/// `"no_cursor"` (a NULL cursor that predates incremental sync, or a copy never
+/// pulled against a host that records reasons). Every other state gets `None`.
+fn classify_resync_reason(state: &str, stored: Option<String>) -> Option<String> {
+    if state != "needs_resync" {
+        return None;
+    }
+    Some(stored.unwrap_or_else(|| "no_cursor".to_string()))
 }
 
 /// Read the local `dataset_sync_state` table (what has been pulled and when).
@@ -1306,6 +1345,10 @@ pub struct DatasetStatus {
     pub availability: String,
     /// The registry version adopted (`None` for a LAN mirror or a catalog-only row).
     pub published_version: Option<i64>,
+    /// Why this copy owes a resync (§19.2), populated only when `state ==
+    /// "needs_resync"`: `"retention_gap"` | `"journal_regressed"` |
+    /// `"provenance_reset"` | `"no_cursor"`. `None` in every other state.
+    pub resync_reason: Option<String>,
 }
 
 /// Live view of the connected hub from its unauthenticated `/status`.
@@ -1636,6 +1679,7 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
             upstream_origin: entry.map(|e| e.upstream_origin.clone()).unwrap_or_default(),
             availability: entry.map(|e| e.availability.clone()).unwrap_or_default(),
             published_version: entry.and_then(|e| e.published_version),
+            resync_reason: classify_resync_reason(state, entry.and_then(|e| e.resync_reason.clone())),
         });
     }
     for e in &local {
@@ -1656,6 +1700,10 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
             upstream_origin: e.upstream_origin.clone(),
             availability: e.availability.clone(),
             published_version: e.published_version,
+            resync_reason: classify_resync_reason(
+                if hub.reachable { "removed_on_hub" } else { "needs_resync" },
+                e.resync_reason.clone(),
+            ),
         });
     }
 
@@ -3365,6 +3413,13 @@ pub async fn sync_round_inner(
                     "[sync] {uuid}: hub_seq {hub_seq} < local cursor {c} — journal regressed, forcing resync"
                 );
                 errors.push(json!({ "uuid": &uuid, "stage": "alarm", "error": format!("hub seq {hub_seq} regressed below cursor {c}") }));
+                // Record why this copy is about to be re-pulled (§19.2); a
+                // successful snapshot below clears it again.
+                if let Ok(conn) = datasets::dictation::open_app_db(&settings) {
+                    if ensure_sync_tables(&conn).is_ok() {
+                        let _ = set_resync_reason(&conn, &uuid, "journal_regressed");
+                    }
+                }
                 match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
                     Ok(r) => {
                         if r.updated {
@@ -3377,7 +3432,14 @@ pub async fn sync_round_inner(
             }
         }
         if resync_required {
-            // NULL/gap cursor: take one fresh snapshot (sets cursor + hash).
+            // NULL/gap cursor: take one fresh snapshot (sets cursor + hash). The
+            // hub raised `resync_required` because our cursor sits below its
+            // prune watermark — record that cause (§19.2) before healing it.
+            if let Ok(conn) = datasets::dictation::open_app_db(&settings) {
+                if ensure_sync_tables(&conn).is_ok() {
+                    let _ = set_resync_reason(&conn, &uuid, "retention_gap");
+                }
+            }
             match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
                 Ok(r) => {
                     if r.updated {
@@ -3874,6 +3936,7 @@ mod tests {
             ("dataset_sync_state", "availability"),
             ("dataset_sync_state", "published_version"),
             ("dataset_sync_state", "row_hash"),
+            ("dataset_sync_state", "resync_reason"),
             ("app_sync_state", "upstream_kind"),
             ("app_sync_state", "upstream_origin"),
         ] {
@@ -3983,6 +4046,70 @@ mod tests {
         assert_eq!(e.upstream_origin, "https://x");
         assert_eq!(e.availability, "listed");
         assert_eq!(e.published_version, Some(7));
+    }
+
+    // -- §19.2 resync reason history ---------------------------------------
+
+    #[test]
+    fn classify_resync_reason_only_names_needs_resync() {
+        // A recorded reason passes through verbatim when a resync is owed...
+        assert_eq!(
+            classify_resync_reason("needs_resync", Some("retention_gap".into())),
+            Some("retention_gap".into())
+        );
+        // ...a NULL cursor with no recorded reason falls back to `no_cursor`...
+        assert_eq!(
+            classify_resync_reason("needs_resync", None),
+            Some("no_cursor".into())
+        );
+        // ...and every other state carries no reason even if one is stored.
+        assert_eq!(classify_resync_reason("downloaded", Some("retention_gap".into())), None);
+        assert_eq!(classify_resync_reason("removed_on_hub", None), None);
+        assert_eq!(classify_resync_reason("not_downloaded", None), None);
+    }
+
+    #[test]
+    fn set_resync_reason_round_trips() {
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        insert_state(&conn, "ds-1", "desktop_hub", "https://pc", "listed");
+        // A no-op on a row that does not exist; the write lands on one that does.
+        set_resync_reason(&conn, "missing", "retention_gap").unwrap();
+        set_resync_reason(&conn, "ds-1", "retention_gap").unwrap();
+        let entries = local_sync_entries(&conn).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].resync_reason.as_deref(), Some("retention_gap"));
+    }
+
+    #[test]
+    fn reset_cursors_without_provenance_records_reason() {
+        let conn = mem_conn();
+        ensure_sync_tables(&conn).unwrap();
+        // A pre-provenance row: empty origin, live cursor. The migration NULLs the
+        // cursor and names why, so the status surface can say "re-establishing".
+        insert_state(&conn, "ds-old", "desktop_hub", "", "listed");
+        conn.execute(
+            "UPDATE dataset_sync_state SET \"cursor\" = 5 WHERE dataset_uuid = 'ds-old'",
+            [],
+        )
+        .unwrap();
+        // A row with real provenance is left alone.
+        insert_state(&conn, "ds-new", "registry", "https://x", "listed");
+        conn.execute(
+            "UPDATE dataset_sync_state SET \"cursor\" = 7 WHERE dataset_uuid = 'ds-new'",
+            [],
+        )
+        .unwrap();
+
+        let n = reset_cursors_without_provenance(&conn).unwrap();
+        assert_eq!(n, 1, "only the pre-provenance row is reset");
+        let entries = local_sync_entries(&conn).unwrap();
+        let old = entries.iter().find(|e| e.dataset_uuid == "ds-old").unwrap();
+        let new = entries.iter().find(|e| e.dataset_uuid == "ds-new").unwrap();
+        assert_eq!(old.cursor, None);
+        assert_eq!(old.resync_reason.as_deref(), Some("provenance_reset"));
+        assert_eq!(new.cursor, Some(7));
+        assert_eq!(new.resync_reason, None);
     }
 
     // -- §19.4 queue diagnosis ---------------------------------------------
