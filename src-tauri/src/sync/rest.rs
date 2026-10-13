@@ -7,6 +7,7 @@
 //! expects:
 //!
 //! * `GET  /api/v1/status`                     - handshake / TCP-probe target
+//! * `GET  /api/v1/cluster`                    - capability advertisement (features[], authority_kind, epoch)
 //! * `POST /api/v1/pair/request`               - device pairing handshake (confirm dialog)
 //! * `GET  /api/v1/pair/status`                - poll a pending pairing request
 //! * `GET  /api/v1/datasets/{uuid}/manifest`   - snapshot metadata + overall hash
@@ -25,7 +26,8 @@
 //!
 //! Auth is owned by the outer trust-zone layer in `web_service.rs`: loopback +
 //! Tailscale pass unauthenticated; other networks need a valid per-device
-//! Ed25519 signature (see `pairing.rs`) except `/status` and `/pair/*` here.
+//! Ed25519 signature (see `pairing.rs`) except `/status`, `/cluster`, and
+//! `/pair/*` here.
 //! The legacy shared `api_token` is no longer enforced.
 
 use std::io::Write as _;
@@ -66,6 +68,7 @@ pub struct RestState {
 pub fn router(app: AppHandle) -> Router {
     Router::new()
         .route("/status", get(status))
+        .route("/cluster", get(cluster))
         .route("/pair/request", post(pair_request))
         .route("/pair/status", get(pair_status))
         .route("/datasets", get(datasets_list))
@@ -128,6 +131,34 @@ async fn status(State(st): State<RestState>) -> Response {
             role: settings.role(),
             cluster_id: settings.cluster_id(),
             machine: crate::sync::machine_name(),
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /cluster — capability advertisement (sync-v2.md §7)
+// ---------------------------------------------------------------------------
+
+/// "Who am I talking to, and what can it do for me." A pre-pairing probe like
+/// `/status`: it carries the authority kind, cluster id, epoch, protocol
+/// version, and the `features[]` list the client negotiates against before it
+/// writes (INV-12). A host that does not serve this route advertises nothing and
+/// the client default-denies — which is exactly today's website behavior, so
+/// adding the route changes nothing for a follower until it starts consulting it.
+async fn cluster(State(st): State<RestState>) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    (
+        StatusCode::OK,
+        Json(sync::ClusterInfo {
+            // A desktop web service is always the LAN/tailnet authority kind,
+            // matching `client::upstream_of`'s provenance vocabulary.
+            authority_kind: "desktop_hub".to_string(),
+            cluster_id: settings.cluster_id(),
+            // Placeholder until handover (phase 7b) defines the bump rule.
+            epoch: 0,
+            protocol_version: sync::PROTOCOL_VERSION,
+            features: sync::HUB_FEATURES.iter().map(|s| s.to_string()).collect(),
         }),
     )
         .into_response()

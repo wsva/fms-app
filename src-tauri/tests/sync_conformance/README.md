@@ -39,6 +39,7 @@ Drop a new `vectors/<name>.json`. The runner dispatches on `check`:
 | `resync`                | INV-11 NULL cursor below the mark resyncs  | `scope`, `seed`, `prune_mark`, `after`, `expect.{resync_required,entry_count}` |
 | `prune_forces_resync`   | INV-5 a delete is never lost to retention  | `scope`, `seed`, `prune.keep_days`, `after`, `expect.{seed_op,resync_required}` |
 | `features`              | INV-20 scopes a host advertises            | `expect.features`                             |
+| `cluster_contract`      | INV-12/INV-20 `/cluster` payload shape     | `expect.{keys,features}`                      |
 
 Common fields:
 
@@ -51,8 +52,11 @@ Keep `notes` filled in: it is where the invariant reference and any phase-1 vs
 phase-2 naming caveat (e.g. `hub_seq` today, `host_seq` in §7's target shape) is
 recorded.
 
-## Scope for phase 1
+## Scope for phase 2
 
-This suite is scaffolding, not yet a contract. It is desktop-only; there is no
-website backend, no cross-host parity check, and no fault drill yet. Those land
-in phase 2 when the website serves the journal.
+The suite now pins the `GET /api/v1/cluster` contract (`cluster_contract`) and
+the advertised `features[]` (`features`), both driven by the same
+`sync::HUB_FEATURES` / `sync::ClusterInfo` the hub serves. It is still
+desktop-only: there is no website backend and no cross-host parity check yet.
+Those land in phase 7a, when the website serves the journal and must pass these
+same vectors unchanged.

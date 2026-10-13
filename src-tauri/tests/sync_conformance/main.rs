@@ -183,6 +183,36 @@ fn check_features(v: &Value, errs: &mut Vec<String>) {
     }
 }
 
+/// Assert the `GET /api/v1/cluster` payload shape (INV-12/INV-20): the exact key
+/// set the client deserializes into `sync::ClusterInfo`, and the `features[]`
+/// list it negotiates against. Drives [`conformance::sample_cluster_json`], the
+/// same struct the hub serializes, so no socket is opened.
+fn check_cluster_contract(v: &Value, errs: &mut Vec<String>) {
+    let cluster = conformance::sample_cluster_json();
+    let expect = &v["expect"];
+
+    let got = key_set(&cluster);
+    let want = expected_keys(expect, "keys");
+    if got != want {
+        errs.push(format!("cluster keys {got:?} != expected {want:?}"));
+    }
+    let mut got_features: Vec<String> = cluster
+        .get("features")
+        .and_then(|f| f.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    got_features.sort();
+    let mut want_features = expected_keys(expect, "features");
+    want_features.sort();
+    if got_features != want_features {
+        errs.push(format!("cluster features {got_features:?} != expected {want_features:?}"));
+    }
+}
+
 fn run_vector(v: &Value) -> Vec<String> {
     let mut errs = Vec::new();
     match v.get("check").and_then(|c| c.as_str()).unwrap_or("") {
@@ -190,6 +220,7 @@ fn run_vector(v: &Value) -> Vec<String> {
         "resync" => check_resync(v, &mut errs),
         "prune_forces_resync" => check_prune_forces_resync(v, &mut errs),
         "features" => check_features(v, &mut errs),
+        "cluster_contract" => check_cluster_contract(v, &mut errs),
         other => errs.push(format!("unknown check {other:?}")),
     }
     errs

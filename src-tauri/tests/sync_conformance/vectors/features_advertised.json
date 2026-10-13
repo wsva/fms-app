@@ -2,7 +2,7 @@
   "name": "features_advertised",
   "invariant": "INV-20 — a host is written to only for scopes it advertises",
   "check": "features",
-  "notes": "Placeholder for the phase-2 `features[]` contract negotiated over `GET /api/v1/cluster`. Today the desktop hub serves exactly two journal scopes; phase 2 grows this list (`registry_reads`, `chat`, ...) and turns this vector into the cross-host parity assertion. The same list must be served unchanged by the website host in phase 2.",
+  "notes": "The features[] list the desktop hub advertises over GET /api/v1/cluster, read from the single source sync::HUB_FEATURES (so it can never drift from the routes the hub mounts). Today the hub serves exactly two journal scopes; phase 7a grows this list (registry_reads, chat, ...) as the website host learns to serve them, and the same list must then be served unchanged by the website — the cross-host parity assertion INV-20 names.",
   "expect": {
     "features": ["dataset_journal", "app_journal"]
   }

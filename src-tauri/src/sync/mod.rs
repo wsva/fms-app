@@ -15,6 +15,8 @@
 //!   whole-directory snapshots. Named `change_log` rather than `log` to avoid
 //!   colliding with the `log` crate under uniform paths.
 
+use serde::{Deserialize, Serialize};
+
 #[cfg(feature = "desktop")]
 pub(crate) mod pairing;
 #[cfg(feature = "desktop")]
@@ -69,6 +71,41 @@ pub(crate) fn hub_kind(base: &str) -> HubKind {
     } else {
         HubKind::LanPc
     }
+}
+
+/// The journal capabilities a desktop hub serves today (sync-v2.md §7
+/// `features[]`). Single source of truth: the `GET /api/v1/cluster` handler
+/// serializes it and the conformance seam asserts it, so the advertised list can
+/// never drift from the routes actually mounted in [`rest`].
+///
+/// * `dataset_journal` — `GET /datasets/{uuid}/changes` row deltas.
+/// * `app_journal` — `GET /app/changes` + `GET /app/state` for the `@app` scope.
+///
+/// Phase 7a grows this with `registry_reads`, `chat`, ... as the website host
+/// learns to serve them. A capability the host does not list is refused, never
+/// silently attempted (INV-20).
+pub(crate) const HUB_FEATURES: &[&str] = &["dataset_journal", "app_journal"];
+
+/// The `GET /api/v1/cluster` payload — "who am I talking to, and what can it do
+/// for me" (sync-v2.md §7). Serialized by the desktop hub, deserialized by the
+/// client, and sample-built by the conformance seam, so one struct pins the
+/// contract on all three sides.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct ClusterInfo {
+    /// Provenance vocabulary shared with `client::upstream_of`: `"desktop_hub"`
+    /// for a LAN/tailnet PC, `"cloud_hub"` for the website authority. Lets the
+    /// client cross-check the host it reached against the upstream it stamps
+    /// (INV-19).
+    pub authority_kind: String,
+    /// Cluster (hub identity group) this host belongs to.
+    pub cluster_id: String,
+    /// Authority epoch — a placeholder `0` until handover (phase 7b) gives it a
+    /// bump rule. Reserved now so the field is on the wire from the start.
+    pub epoch: u32,
+    /// Wire protocol version, mirrored from `/status` so one read suffices.
+    pub protocol_version: u32,
+    /// Advertised capabilities; see [`HUB_FEATURES`].
+    pub features: Vec<String>,
 }
 
 /// Wire-contract pin (dev guide §T8): the version of the website's

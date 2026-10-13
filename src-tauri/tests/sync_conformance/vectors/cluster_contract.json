@@ -1,0 +1,10 @@
+{
+  "name": "cluster_contract",
+  "invariant": "INV-12 / INV-20 — GET /api/v1/cluster advertises the negotiated contract a client checks before it writes",
+  "check": "cluster_contract",
+  "notes": "Pins the shape of the capability page the desktop hub serves and the client deserializes into sync::ClusterInfo. 'epoch' is the constant 0 placeholder until handover (phase 7b) defines a bump rule; 'authority_kind' reuses the phase-1 provenance vocabulary ('desktop_hub' / 'cloud_hub'). The website host must serve a byte-identical shape (with authority_kind 'cloud_hub' and its own features[]) when it grows the route in phase 7a — that is the cross-host parity claim of §13.",
+  "expect": {
+    "keys": ["authority_kind", "cluster_id", "epoch", "protocol_version", "features"],
+    "features": ["dataset_journal", "app_journal"]
+  }
+}

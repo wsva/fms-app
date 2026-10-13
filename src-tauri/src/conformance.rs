@@ -71,11 +71,28 @@ pub fn set_prune_mark(conn: &Connection, scope: &str, pruned_up_to: i64) {
 
 /// The journal capabilities this host serves today (sync-v2.md §7 `features[]`).
 ///
-/// Phase 1 advertises only the two journal scopes that actually exist on the
-/// desktop hub. Phase 2 grows this into the full contract (`registry_reads`,
-/// `chat`, ...) negotiated over `GET /api/v1/cluster`, at which point the
-/// `features_advertised` vector becomes the cross-host parity assertion INV-20
-/// names.
+/// Delegates to [`crate::sync::HUB_FEATURES`] — the same single source the
+/// `GET /api/v1/cluster` handler serializes — so the `features_advertised`
+/// vector asserts the real advertised list and can never drift from the routes
+/// the hub mounts. Phase 7a grows that list (`registry_reads`, `chat`, ...) as
+/// the website host learns to serve them; this vector is the cross-host parity
+/// assertion INV-20 names.
 pub fn advertised_features() -> Vec<&'static str> {
-    vec!["dataset_journal", "app_journal"]
+    crate::sync::HUB_FEATURES.to_vec()
+}
+
+/// A sample `GET /api/v1/cluster` payload, built from the same
+/// [`crate::sync::ClusterInfo`] the hub serializes and the client deserializes.
+/// The `cluster_contract` vector asserts its shape without booting axum or
+/// opening a socket — pinning the negotiated contract on all three sides.
+pub fn sample_cluster_json() -> Value {
+    let info = crate::sync::ClusterInfo {
+        authority_kind: "desktop_hub".to_string(),
+        cluster_id: "cluster-conformance".to_string(),
+        // Placeholder until handover (phase 7b) defines the bump rule.
+        epoch: 0,
+        protocol_version: crate::sync::PROTOCOL_VERSION,
+        features: crate::sync::HUB_FEATURES.iter().map(|s| s.to_string()).collect(),
+    };
+    serde_json::to_value(info).expect("conformance: serialize cluster")
 }

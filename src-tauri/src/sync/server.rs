@@ -351,7 +351,8 @@ fn zone_trusted(ip: std::net::IpAddr) -> bool {
 ///   hostname at 127.0.0.1 gets 403;
 /// * trusted-zone peers pass with no credentials;
 /// * untrusted peers reach only the handshake paths (`/api/v1/status`,
-///   `/api/v1/pair/*`); everything else needs valid device-signature headers
+///   `/api/v1/cluster`, `/api/v1/pair/*`); everything else needs valid
+///   device-signature headers
 ///   (`x-fms-device` / `x-fms-ts` / `x-fms-sig`, verified in `pairing.rs`).
 async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
     let peer = req
@@ -399,8 +400,13 @@ async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) ->
     }
 
     // Untrusted zone: pairing handshake routes stay open, everything else
-    // requires a valid per-device Ed25519 signature.
-    if path == "/api/v1/status" || path.starts_with("/api/v1/pair/") {
+    // requires a valid per-device Ed25519 signature. `/cluster` joins `/status`
+    // as a pre-pairing "who am I talking to" probe (sync-v2.md §7); it exposes
+    // nothing `/status` does not already (cluster_id, role, features).
+    if path == "/api/v1/status"
+        || path == "/api/v1/cluster"
+        || path.starts_with("/api/v1/pair/")
+    {
         req.extensions_mut().insert(sync::pairing::AuthContext::trusted());
         return next.run(req).await;
     }

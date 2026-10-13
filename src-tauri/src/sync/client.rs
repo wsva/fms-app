@@ -684,14 +684,31 @@ pub fn pending_xp_delta(settings: &SettingsState, user_id: &str) -> Result<i64, 
 
 /// Flush pending changes to the PC. Returns the number of changes acknowledged.
 /// Safe to call repeatedly; failed items stay queued.
-pub async fn writeback_flush_inner(settings: &SettingsState) -> Result<usize, String> {
+pub async fn writeback_flush_inner(
+    settings: &SettingsState,
+    cluster: &Option<super::ClusterInfo>,
+) -> Result<usize, String> {
     let base = pc_base(settings);
     if base.is_empty() {
         return Ok(0);
     }
-    // The website hub has no `POST /sync/changes` journal (dev guide §6):
-    // entries stay queued for a LAN hub instead of failing every round.
-    if super::hub_kind(&base) == super::HubKind::Website {
+    // Capability gate (INV-20): only push to a host that advertises the app
+    // journal. A host that served no `/cluster` page default-denies (today's
+    // website), and a LAN hub too old for `/cluster` falls back to the protocol
+    // probe — so entries stay queued for a hub that can take them instead of
+    // failing every round. The held count is surfaced by the round, not here.
+    let protocol = match cluster.as_ref() {
+        Some(c) => Some(c.protocol_version),
+        None => hub_protocol_version(settings).await,
+    };
+    if !app_journal_advertised(cluster, &base, protocol) {
+        let held = pending_writeback_count(settings);
+        if held > 0 {
+            log::warn!(
+                "[sync] connected host does not advertise app_journal — {held} change(s) held \
+                 locally; will retry against a hub that does (INV-20)"
+            );
+        }
         return Ok(0);
     }
     let client = reqwest::Client::new();
@@ -859,7 +876,8 @@ pub async fn dataset_sync_snapshot(
     }
 
     // 2. Always flush local changes before replacing the dataset dir.
-    let _ = writeback_flush_inner(&settings).await;
+    let cluster = fetch_cluster(&settings).await;
+    let _ = writeback_flush_inner(&settings, &cluster).await;
 
     // 3. Prepare temp paths under <datasets>/<type>.
     let root = type_root(&settings, &dataset_type);
@@ -985,7 +1003,8 @@ pub async fn dataset_sync_snapshot(
 /// Upload all pending writeback changes to the PC.
 #[tauri::command]
 pub async fn writeback_flush(settings: State<'_, SettingsState>) -> Result<usize, String> {
-    writeback_flush_inner(&settings).await
+    let cluster = fetch_cluster(&settings).await;
+    writeback_flush_inner(&settings, &cluster).await
 }
 
 /// Per-dataset local sync state, for the phone's dataset list.
@@ -2127,6 +2146,82 @@ async fn hub_protocol_version(settings: &SettingsState) -> Option<u32> {
     v.get("protocol_version").and_then(|p| p.as_u64()).map(|p| p as u32)
 }
 
+/// Read the connected host's `GET /api/v1/cluster` capability page (sync-v2.md
+/// §7). `None` when the host is unreachable, predates the route, or serves a
+/// malformed payload — all of which mean "advertises nothing", so every
+/// capability gate default-denies and the round degrades to today's behavior
+/// instead of failing (INV-20). The website has no `/cluster` route yet, so it
+/// resolves to `None` and the app-data plane stays skipped exactly as before.
+async fn fetch_cluster(settings: &SettingsState) -> Option<super::ClusterInfo> {
+    let base = pc_base(settings);
+    if base.is_empty() {
+        return None;
+    }
+    let client = crate::auth::hub_client_builder()
+        .connect_timeout(Duration::from_secs(6))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let api_path = "/api/v1/cluster";
+    let req = hub_request(
+        client.get(format!("{base}{api_path}")),
+        settings,
+        "GET",
+        api_path,
+        "",
+        b"",
+    )
+    .ok()?;
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json::<super::ClusterInfo>().await.ok()
+}
+
+/// Whether `cluster` advertises `feature`. A host that served no `/cluster` page
+/// (`None`) advertises nothing — default-deny (INV-20).
+fn advertises(cluster: &Option<super::ClusterInfo>, feature: &str) -> bool {
+    cluster
+        .as_ref()
+        .map(|c| c.features.iter().any(|f| f == feature))
+        .unwrap_or(false)
+}
+
+/// Whether the app-data plane (`@app` push / pull / history backfill) may run
+/// against the connected host. Capability-first: true when `/cluster` advertises
+/// `app_journal`. Falls back to the pre-`/cluster` protocol gate for a LAN hub
+/// too old to serve the route, so a mixed-version cluster keeps working during
+/// rollout. A website — which serves neither `/cluster` nor `/status` — is
+/// false, i.e. today's skip, unchanged (INV-20).
+fn app_journal_advertised(
+    cluster: &Option<super::ClusterInfo>,
+    base: &str,
+    protocol: Option<u32>,
+) -> bool {
+    if advertises(cluster, "app_journal") {
+        return true;
+    }
+    // No `/cluster` page: only a LAN hub that predates the route keeps the old
+    // protocol-version behavior. The website never runs the app plane here.
+    cluster.is_none()
+        && super::hub_kind(base) == super::HubKind::LanPc
+        && matches!(protocol, Some(p) if p >= APP_SCOPE_PROTOCOL)
+}
+
+/// Number of changes waiting in the writeback queue, for the INV-20 "held"
+/// report when the connected host does not advertise the app journal.
+fn pending_writeback_count(settings: &SettingsState) -> i64 {
+    let Ok(conn) = datasets::dictation::open_app_db(settings) else {
+        return 0;
+    };
+    if ensure_sync_tables(&conn).is_err() {
+        return 0;
+    }
+    conn.query_row("SELECT COUNT(*) FROM writeback_queue", [], |r| r.get::<_, i64>(0))
+        .unwrap_or(0)
+}
+
 /// Pull the app-wide journal scope (`sync_log` rows logged under
 /// [`crate::sync::change_log::APP_SCOPE`]): per-user `dictation` progress and `xp`
 /// awards. Those tables live in the app DB, so they are never part of a dataset
@@ -2140,29 +2235,19 @@ async fn hub_protocol_version(settings: &SettingsState) -> Option<u32> {
 /// (restart from 0, jump to the prune mark) safe without a snapshot fallback.
 async fn pull_app_scope(
     settings: &State<'_, SettingsState>,
+    cluster: &Option<super::ClusterInfo>,
+    hub_protocol: Option<u32>,
     errors: &mut Vec<Value>,
 ) -> Result<AppPull, String> {
     let scope = crate::sync::change_log::APP_SCOPE;
-    // Feature-detect first (T3): the website hub serves no app journal, and
-    // probing it every round would log a 404 storm where the honest answer is
-    // "this hub cannot deliver app-scope deltas" (dev guide §6).
-    if super::hub_kind(&pc_base(settings.inner())) == super::HubKind::Website {
-        log::info!("[sync] website hub has no /app/changes — skipping app-data pull");
-        return Ok(AppPull { applied: 0, needs_history: false, hub_protocol: None });
-    }
-    let hub_protocol = hub_protocol_version(settings.inner()).await;
-    match hub_protocol {
-        Some(p) if p >= APP_SCOPE_PROTOCOL => {}
-        // Skipping silently is deliberate: against a v2 hub this is the expected
-        // state, not a fault, and the hub still receives this device's pushes.
-        Some(p) => {
-            log::info!("[sync] hub protocol v{p} has no /app/changes — skipping app-data pull");
-            return Ok(AppPull { applied: 0, needs_history: false, hub_protocol });
-        }
-        None => {
-            log::info!("[sync] hub /status unreadable — skipping app-data pull");
-            return Ok(AppPull { applied: 0, needs_history: false, hub_protocol });
-        }
+    // Capability negotiation (INV-20): run the app plane only against a host
+    // that advertises `app_journal` (or a pre-`/cluster` LAN hub new enough by
+    // protocol). Replaces the old website-only origin test. The website serves
+    // neither `/cluster` nor `/status`, so `hub_protocol` is `None` for it and
+    // this skips exactly as before — no 404 storm, no probe (dev guide §6).
+    if !app_journal_advertised(cluster, &pc_base(settings.inner()), hub_protocol) {
+        log::info!("[sync] host advertises no app_journal — skipping app-data pull");
+        return Ok(AppPull { applied: 0, needs_history: false, hub_protocol });
     }
 
     let (cursor, stamped) = {
@@ -2303,12 +2388,20 @@ async fn pull_app_scope(
 /// is what the user sees.
 async fn backfill_app_history(
     settings: &SettingsState,
+    cluster: &Option<super::ClusterInfo>,
     hub_protocol: Option<u32>,
     force: bool,
 ) -> Result<Option<Value>, String> {
     let scope = crate::sync::change_log::APP_SCOPE;
-    if super::hub_kind(&pc_base(settings)) == super::HubKind::Website {
-        log::info!("[sync] website hub has no /app/state — history backfill not available");
+    let proto = match hub_protocol.or_else(|| cluster.as_ref().map(|c| c.protocol_version)) {
+        Some(p) => Some(p),
+        None => hub_protocol_version(settings).await,
+    };
+    // Capability gate (INV-20): only a host that advertises the app journal can
+    // serve `/app/state`. Replaces the old website-only origin test; the website
+    // (no `/cluster`, no `/status`) resolves to `None` and skips as before.
+    if !app_journal_advertised(cluster, &pc_base(settings), proto) {
+        log::info!("[sync] host advertises no app_journal — history backfill not available");
         return Ok(None);
     }
     let conn = datasets::dictation::open_app_db(settings)?;
@@ -2316,10 +2409,6 @@ async fn backfill_app_history(
     if !force && app_history_backfilled(&conn).is_some() {
         return Ok(None);
     }
-    let proto = match hub_protocol {
-        Some(p) => Some(p),
-        None => hub_protocol_version(settings).await,
-    };
     if !matches!(proto, Some(p) if p >= HISTORY_PROTOCOL) {
         log::info!("[sync] hub has no /app/state (protocol {proto:?}) — history backfill skipped");
         return Ok(None);
@@ -2461,7 +2550,8 @@ pub async fn sync_backfill_history(
         "reason": "the hub does not serve /app/state (predates sync protocol v4)",
         "next": "update the PC app, run a sync round, then retry",
     });
-    Ok(backfill_app_history(&settings, None, true)
+    let cluster = fetch_cluster(&settings).await;
+    Ok(backfill_app_history(&settings, &cluster, None, true)
         .await?
         .unwrap_or(unavailable))
 }
@@ -2514,11 +2604,39 @@ pub async fn sync_round_inner(
     let mut history: Option<Value> = None;
     let mut cards: Vec<Value> = Vec::new();
 
+    // Capability negotiation (sync-v2.md §7, INV-12): read the host's `/cluster`
+    // page once per round. `None` (today's website, or an old/unreachable hub)
+    // advertises nothing, so every app-plane gate below default-denies and the
+    // round degrades to file-level + card sync — unchanged behavior. `app_ok`
+    // drives the INV-20 "held" report; each plane call re-checks for itself.
+    let cluster = fetch_cluster(&settings).await;
+    let cluster_protocol = match cluster.as_ref() {
+        Some(c) => Some(c.protocol_version),
+        None => hub_protocol_version(&settings).await,
+    };
+    let app_ok = app_journal_advertised(&cluster, &base, cluster_protocol);
+
     // 1. Push local edits first so the hub holds our changes before we pull.
-    let pushed = writeback_flush_inner(&settings).await.unwrap_or_else(|e| {
+    let pushed = writeback_flush_inner(&settings, &cluster).await.unwrap_or_else(|e| {
         errors.push(json!({ "stage": "push", "error": e }));
         0
     });
+    // INV-20: a non-empty queue against a host that does not advertise the app
+    // journal is no longer silent — report it as held so the status surface can
+    // show "N changes waiting for a hub that accepts them" instead of nothing.
+    let held = if app_ok {
+        0i64
+    } else {
+        let n = pending_writeback_count(&settings);
+        if n > 0 {
+            errors.push(json!({
+                "stage": "push",
+                "scope": "@app",
+                "error": format!("host does not advertise app_journal; {n} change(s) held locally"),
+            }));
+        }
+        n
+    };
 
     // 2. Refresh the hub catalog (uuid -> type) with the cheap `lite` list.
     let mut catalog_ok = true;
@@ -2722,16 +2840,15 @@ pub async fn sync_round_inner(
 
     // 5. Per-user app data (`dictation` progress + `xp` awards) journals under its
     //    own scope, so it is pulled once per round regardless of which datasets
-    //    this device subscribes to (see [`pull_app_scope`]). Website hubs serve no
-    //    journal — steps 5/6 are LAN-only (T3 guard, dev guide §6).
-    let app = if is_website {
-        AppPull { applied: 0, needs_history: false, hub_protocol: None }
-    } else {
-        pull_app_scope(&settings, &mut errors).await.unwrap_or_else(|e| {
+    //    this device subscribes to (see [`pull_app_scope`]). The plane runs only
+    //    against a host that advertises `app_journal` (INV-20); `pull_app_scope`
+    //    re-checks and skips cleanly when the host does not.
+    let app = pull_app_scope(&settings, &cluster, cluster_protocol, &mut errors)
+        .await
+        .unwrap_or_else(|e| {
             errors.push(json!({ "scope": "@app", "stage": "app_changes", "error": e }));
             AppPull { applied: 0, needs_history: false, hub_protocol: None }
-        })
-    };
+        });
     applied += app.applied;
 
     // 6. History backfill (§3.6): the journal is forward-only and pruned, so a
@@ -2740,7 +2857,7 @@ pub async fn sync_round_inner(
     //    succeeds, then the stamp in `app_sync_state` keeps it out of every
     //    following round.
     if app.needs_history {
-        match backfill_app_history(settings.inner(), app.hub_protocol, false).await {
+        match backfill_app_history(settings.inner(), &cluster, app.hub_protocol, false).await {
             Ok(Some(v)) => history = Some(v),
             // `Ok(None)` = hub predates the endpoint, already stamped. Expected,
             // not a fault — `pull_app_scope` logged the reason at info level.
@@ -2753,6 +2870,7 @@ pub async fn sync_round_inner(
         "status": if errors.is_empty() { "ok" } else { "partial" },
         "hub_kind": if is_website { "website" } else { "lan" },
         "pushed": pushed,
+        "held": held,
         "applied": applied,
         "resynced": resynced,
         "pruned": pruned,
@@ -3353,5 +3471,87 @@ mod tests {
         let err = card_sync_target(&settings, uuid).unwrap_err();
         assert!(err.contains("INV-19"), "error should name INV-19: {err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- phase-2 capability negotiation (sync-v2.md §7, INV-12 / INV-20) -----
+
+    fn cluster_with(features: &[&str], protocol: u32) -> crate::sync::ClusterInfo {
+        crate::sync::ClusterInfo {
+            authority_kind: "desktop_hub".to_string(),
+            cluster_id: "c1".to_string(),
+            epoch: 0,
+            protocol_version: protocol,
+            features: features.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn advertises_default_denies_a_host_with_no_cluster_page() {
+        // INV-20: no `/cluster` page means the host advertises nothing.
+        assert!(!advertises(&None, "app_journal"));
+        assert!(!advertises(&None, "dataset_journal"));
+    }
+
+    #[test]
+    fn advertises_reads_the_feature_list() {
+        let c = Some(cluster_with(&["dataset_journal", "app_journal"], 5));
+        assert!(advertises(&c, "app_journal"));
+        assert!(advertises(&c, "dataset_journal"));
+        assert!(!advertises(&c, "registry_reads"), "an unlisted feature is not advertised");
+    }
+
+    #[test]
+    fn app_journal_advertised_is_capability_first() {
+        let lan = "http://192.168.1.50:8756";
+        // A `/cluster` page that lists app_journal → run, whatever the protocol.
+        let yes = Some(cluster_with(&["app_journal"], 5));
+        assert!(app_journal_advertised(&yes, lan, Some(5)));
+        // A `/cluster` page that omits it → refuse. The protocol fallback only
+        // applies when there is no page at all, so a host that served one and
+        // did not list the scope is taken at its word.
+        let no = Some(cluster_with(&["dataset_journal"], 5));
+        assert!(!app_journal_advertised(&no, lan, Some(5)));
+    }
+
+    #[test]
+    fn app_journal_advertised_lan_falls_back_to_protocol() {
+        let lan = "http://192.168.1.50:8756";
+        // No `/cluster` (a hub that predates the route) + LAN + new-enough
+        // protocol → run, preserving today's behavior during rollout.
+        assert!(app_journal_advertised(&None, lan, Some(APP_SCOPE_PROTOCOL)));
+        // Same host, protocol too old → skip.
+        assert!(!app_journal_advertised(&None, lan, Some(APP_SCOPE_PROTOCOL - 1)));
+        // Protocol unknown → skip.
+        assert!(!app_journal_advertised(&None, lan, None));
+    }
+
+    #[test]
+    fn app_journal_advertised_denies_the_website_until_it_advertises() {
+        let website = crate::auth::base_url();
+        // Today's website: no `/cluster`, no `/status` → skip (unchanged).
+        assert!(!app_journal_advertised(&None, website.as_str(), None));
+        // The protocol fallback is LAN-only, so a high version never turns the
+        // website on by itself.
+        assert!(!app_journal_advertised(&None, website.as_str(), Some(APP_SCOPE_PROTOCOL)));
+        // Phase 7a: once the website advertises app_journal, the same gate runs.
+        let cloud = Some(cluster_with(&["app_journal"], 5));
+        assert!(app_journal_advertised(&cloud, website.as_str(), Some(5)));
+    }
+
+    #[test]
+    fn cluster_info_json_round_trips() {
+        let c = cluster_with(&["dataset_journal", "app_journal"], 5);
+        let json = serde_json::to_value(&c).unwrap();
+        for k in ["authority_kind", "cluster_id", "epoch", "protocol_version", "features"] {
+            assert!(json.get(k).is_some(), "payload is missing {k}");
+        }
+        let back: crate::sync::ClusterInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(back.authority_kind, "desktop_hub");
+        assert_eq!(back.epoch, 0, "epoch is the phase-2 placeholder");
+        assert_eq!(back.protocol_version, 5);
+        assert_eq!(
+            back.features,
+            vec!["dataset_journal".to_string(), "app_journal".to_string()]
+        );
     }
 }
