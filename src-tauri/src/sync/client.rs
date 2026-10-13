@@ -409,11 +409,16 @@ fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
            table is keyed by real dataset uuids and the round prunes rows whose
            dataset vanished from the hub catalog, which would delete this.
            `backfilled_at` records that the state-based history read (§3.6) has
-           run once, so the round does not re-download a whole ledger every round. */
+           run once, so the round does not re-download a whole ledger every round.
+           `events_backfilled_at` is the same stamp for the practice-event half
+           (reviews + attempts, added at protocol v6): kept separate so a device
+           whose dictation/xp already settled can still recover practice history
+           once its hub upgrades past v6, without re-pulling the whole ledger. */
         CREATE TABLE IF NOT EXISTS app_sync_state (
             id            INTEGER PRIMARY KEY CHECK (id = 1),
             cursor_seq    INTEGER,
             backfilled_at TEXT,
+            events_backfilled_at TEXT,
             updated_at    TEXT NOT NULL
         );",
     )
@@ -463,6 +468,10 @@ fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
         conn.execute("ALTER TABLE app_sync_state ADD COLUMN backfilled_at TEXT", [])
             .map_err(|e| e.to_string())?;
     }
+    // Migration (protocol v6): the practice-event half of the backfill gets its own
+    // stamp, added nullable so a device that already folded dictation/xp reads it as
+    // "events never backfilled" — the truth, and what re-triggers the event half.
+    ensure_column(conn, "app_sync_state", "events_backfilled_at", "TEXT")?;
     // Migration (sync-v2.md §6.1, phase 1): provenance columns. A cursor is only
     // meaningful against the seq space of the host that minted it, so every row
     // records which host that was. `upstream_kind` defaults to `desktop_hub` for
@@ -615,6 +624,32 @@ fn set_app_history_backfilled(conn: &Connection) -> Result<(), String> {
         "INSERT INTO app_sync_state (id, backfilled_at, updated_at) \
          VALUES (1, datetime('now'), datetime('now')) \
          ON CONFLICT(id) DO UPDATE SET backfilled_at = excluded.backfilled_at, updated_at = excluded.updated_at",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// When this device last folded the hub's *whole* practice-event history
+/// (reviews + attempts) into its own (`None` = never, or the hub predated v6).
+/// See [`backfill_app_history`].
+fn app_events_history_backfilled(conn: &Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT events_backfilled_at FROM app_sync_state WHERE id = 1",
+        [],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .unwrap_or(None)
+}
+
+/// Stamp the practice-event backfill as done, separately from the dictation/xp
+/// stamp so a hub that only grew the event streams at v6 re-triggers exactly that
+/// half (not the ledger) once it upgrades.
+fn set_app_events_history_backfilled(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO app_sync_state (id, events_backfilled_at, updated_at) \
+         VALUES (1, datetime('now'), datetime('now')) \
+         ON CONFLICT(id) DO UPDATE SET events_backfilled_at = excluded.events_backfilled_at, updated_at = excluded.updated_at",
         [],
     )
     .map_err(|e| e.to_string())?;
@@ -2234,6 +2269,14 @@ const APP_SCOPE_PROTOCOL: u32 = 3;
 /// "this hub cannot backfill your history".
 const HISTORY_PROTOCOL: u32 = 4;
 
+/// Wire protocol version at which `GET /api/v1/app/state` grew the per-user
+/// practice-event streams (`card_review_event` + `read_attempt_event`). A v6
+/// follower that talks to an older hub must not stamp the practice backfill
+/// complete while silently missing reviews/attempts (sync-v2.md §17.6 / INV-21),
+/// so the event half is requested and applied only against a hub that advertises
+/// at least this version.
+const EVENTS_PROTOCOL: u32 = 6;
+
 /// Upper bound on `/app/state` pages one backfill fetches (the hub caps each page at
 /// 20k rows per table, so 50 pages is far past any real history). A cursor that
 /// never settles means a bug on one side; stopping here marks the import explicitly
@@ -2537,11 +2580,18 @@ async fn backfill_app_history(
     }
     let conn = datasets::dictation::open_app_db(settings)?;
     ensure_sync_tables(&conn)?;
-    if !force && app_history_backfilled(&conn).is_some() {
-        return Ok(None);
-    }
     if !matches!(proto, Some(p) if p >= HISTORY_PROTOCOL) {
         log::info!("[sync] hub has no /app/state (protocol {proto:?}) — history backfill skipped");
+        return Ok(None);
+    }
+    // Do the dictation/xp half unless already settled; do the practice-event half
+    // only against a v6 hub whose events haven't yet been folded (`want_events`). A
+    // device whose ledger already backfilled still runs when the event half is owed,
+    // so a hub upgrading past v6 recovers practice history (INV-21) — and against an
+    // older hub `want_events` stays false, so nothing re-runs and nothing is stamped.
+    let want_events =
+        matches!(proto, Some(p) if p >= EVENTS_PROTOCOL) && app_events_history_backfilled(&conn).is_none();
+    if !force && app_history_backfilled(&conn).is_some() && !want_events {
         return Ok(None);
     }
 
@@ -2552,11 +2602,17 @@ async fn backfill_app_history(
     // because the lists differ in length and end on different pages.
     let mut after_dictation = 0i64;
     let mut after_xp = 0i64;
+    let mut after_reviews = 0i64;
+    let mut after_attempts = 0i64;
     let mut pages = 0i64;
     let mut progress_rows = 0i64;
     let mut xp_row_count = 0i64;
     let mut progress_applied = 0i64;
     let mut xp_applied = 0i64;
+    let mut review_rows = 0i64;
+    let mut attempt_rows = 0i64;
+    let mut reviews_applied = 0i64;
+    let mut attempts_applied = 0i64;
     let mut skipped = 0i64;
     let mut hub_total: Option<i64> = None;
     let mut unfinished = false;
@@ -2564,16 +2620,17 @@ async fn backfill_app_history(
     let _guard = crate::sync::change_log::ApplyGuard::new();
     loop {
         pages += 1;
-        let page = match pc_get_json(
-            settings,
-            "/api/v1/app/state",
-            &[
-                ("user_key", user_key.clone()),
-                ("after_dictation", after_dictation.to_string()),
-                ("after_xp", after_xp.to_string()),
-            ],
-        )
-        .await
+        let mut params = vec![
+            ("user_key", user_key.clone()),
+            ("after_dictation", after_dictation.to_string()),
+            ("after_xp", after_xp.to_string()),
+        ];
+        if want_events {
+            params.push(("after_reviews", after_reviews.to_string()));
+            params.push(("after_attempts", after_attempts.to_string()));
+        }
+        let page = match pc_get_json(settings, "/api/v1/app/state", &params)
+            .await
         {
             Ok(p) => p,
             Err(e) => {
@@ -2622,9 +2679,38 @@ async fn backfill_app_history(
                 Err(e) => failures.push(format!("xp {source}/{reference}: {e}")),
             }
         }
+        if want_events {
+            let reviews = page["reviews"].as_array().cloned().unwrap_or_default();
+            let attempts = page["attempts"].as_array().cloned().unwrap_or_default();
+            review_rows += reviews.len() as i64;
+            attempt_rows += attempts.len() as i64;
+            // No pending-edit guard on either stream: replay is INSERT OR IGNORE by
+            // event uuid (INV-23), so a locally-authored-but-unpushed event and the
+            // hub's copy converge to one row — the same reason the xp half skips it.
+            for row in &reviews {
+                match datasets::cards::review::apply_remote(settings, "", row, &user_key) {
+                    Ok(true) => reviews_applied += 1,
+                    Ok(false) => skipped += 1,
+                    Err(e) => failures.push(format!("review: {e}")),
+                }
+            }
+            for row in &attempts {
+                match datasets::read_aloud::apply_remote_save(settings, "", row, &user_key) {
+                    Ok(true) => attempts_applied += 1,
+                    Ok(false) => skipped += 1,
+                    Err(e) => failures.push(format!("attempt: {e}")),
+                }
+            }
+        }
         let next_dictation = page["next_dictation_after"].as_i64();
         let next_xp = page["next_xp_after"].as_i64();
-        if next_dictation.is_none() && next_xp.is_none() {
+        let next_reviews = if want_events { page["next_reviews_after"].as_i64() } else { None };
+        let next_attempts = if want_events { page["next_attempts_after"].as_i64() } else { None };
+        if next_dictation.is_none()
+            && next_xp.is_none()
+            && next_reviews.is_none()
+            && next_attempts.is_none()
+        {
             break;
         }
         if pages >= HISTORY_PAGE_BUDGET {
@@ -2634,6 +2720,8 @@ async fn backfill_app_history(
         }
         after_dictation = next_dictation.unwrap_or(after_dictation);
         after_xp = next_xp.unwrap_or(after_xp);
+        after_reviews = next_reviews.unwrap_or(after_reviews);
+        after_attempts = next_attempts.unwrap_or(after_attempts);
     }
     // The ledger is now the union of local and imported awards, so read the total
     // back off it. Falls back to the hub's figure if the local recompute failed —
@@ -2647,6 +2735,9 @@ async fn backfill_app_history(
     let complete = failures.is_empty() && !unfinished;
     if complete {
         set_app_history_backfilled(&conn)?;
+        if want_events {
+            set_app_events_history_backfilled(&conn)?;
+        }
     }
 
     let result = json!({
@@ -2655,11 +2746,17 @@ async fn backfill_app_history(
         "progress_applied": progress_applied,
         "xp_rows": xp_row_count,
         "xp_applied": xp_applied,
+        "review_rows": review_rows,
+        "reviews_applied": reviews_applied,
+        "attempt_rows": attempt_rows,
+        "attempts_applied": attempts_applied,
         "skipped": skipped,
         "pages": pages,
         "lifetime_xp": lifetime_xp,
         "hub_lifetime_xp": hub_total,
         "complete": complete,
+        "events_available": matches!(proto, Some(p) if p >= EVENTS_PROTOCOL),
+        "events_backfilled": app_events_history_backfilled(&conn).is_some(),
         "failures": failures.iter().take(5).cloned().collect::<Vec<_>>(),
     });
     log::info!("[sync] app history backfill: {result}");
@@ -2987,7 +3084,21 @@ pub async fn sync_round_inner(
     //    still missing everything older than its cursor. One extra GET until it
     //    succeeds, then the stamp in `app_sync_state` keeps it out of every
     //    following round.
-    if app.needs_history {
+    //
+    //    A hub that grew the practice-event streams (v6) but whose events this
+    //    device has not yet folded is a *separate* reason to backfill: a phone whose
+    //    dictation/xp already settled still owes reviews/attempts once its PC
+    //    upgrades. `backfill_app_history` re-checks the protocol and the stamp
+    //    internally, so this only decides whether to make the call.
+    let hub_proto = app.hub_protocol.or_else(|| cluster.as_ref().map(|c| c.protocol_version));
+    let events_owed = matches!(hub_proto, Some(p) if p >= EVENTS_PROTOCOL)
+        && datasets::dictation::open_app_db(settings.inner())
+            .map(|conn| {
+                let _ = ensure_sync_tables(&conn);
+                app_events_history_backfilled(&conn).is_none()
+            })
+            .unwrap_or(false);
+    if app.needs_history || events_owed {
         match backfill_app_history(settings.inner(), &cluster, app.hub_protocol, false).await {
             Ok(Some(v)) => history = Some(v),
             // `Ok(None)` = hub predates the endpoint, already stamped. Expected,

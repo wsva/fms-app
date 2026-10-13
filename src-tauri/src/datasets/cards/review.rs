@@ -338,6 +338,60 @@ pub(crate) fn payload(ev: &ReviewEvent) -> Value {
     })
 }
 
+/// Hub-side read behind the practice-history backfill (`GET /api/v1/app/state`,
+/// sync-v2.md §17.6 / INV-21): page one identity's review events oldest-first so
+/// a device that subscribes after the journal was pruned can still recover its
+/// schedules. Paginated by `rowid` (at most `limit` rows after cursor `after`,
+/// `0` = start); the next cursor is `Some` only when the page was full, exactly
+/// like [`crate::datasets::dictation::dictation_rows_for_user`]. Page-stable
+/// because an event is insert-once — its rowid never moves. Rows carry the
+/// [`payload`] shape so the follower feeds them straight to [`apply_remote`].
+// Hub-side read: only `sync::rest` calls it, so the mobile build has no caller.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) fn rows_for_user(
+    settings: &SettingsState,
+    user_id: &str,
+    after: i64,
+    limit: i64,
+) -> Result<(Vec<Value>, Option<i64>), String> {
+    let conn = crate::datasets::dictation::open_app_db(settings)?;
+    ensure_review_schema(&conn)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT rowid, uuid, user_id, dataset_uuid, card_uuid, quality, reviewed_at, \
+             familiarity, interval_days, ease_factor, repetitions, next_review_at \
+             FROM card_review_event WHERE user_id = ?1 AND rowid > ?2 ORDER BY rowid ASC LIMIT ?3",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![user_id, after, limit], |row| {
+            let rowid = row.get::<_, i64>(0)?;
+            let value = json!({
+                "event_uuid": row.get::<_, String>(1)?,
+                "user_id": row.get::<_, String>(2)?,
+                "dataset_uuid": row.get::<_, String>(3)?,
+                "card_uuid": row.get::<_, String>(4)?,
+                "quality": row.get::<_, Option<i32>>(5)?,
+                "reviewed_at": row.get::<_, String>(6)?,
+                "familiarity": row.get::<_, i32>(7)?,
+                "interval_days": row.get::<_, i32>(8)?,
+                "ease_factor": row.get::<_, i32>(9)?,
+                "repetitions": row.get::<_, i32>(10)?,
+                "next_review_at": row.get::<_, Option<String>>(11)?,
+            });
+            Ok((rowid, value))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out: Vec<Value> = Vec::new();
+    let mut last_id = after;
+    for r in rows.filter_map(|r| r.ok()) {
+        last_id = r.0;
+        out.push(r.1);
+    }
+    let next = if out.len() as i64 >= limit { Some(last_id) } else { None };
+    Ok((out, next))
+}
+
 /// Replay one journaled `card_review` entry: store the event it describes, or —
 /// for a payload that predates this shape — fold the rating it carries.
 ///
@@ -433,5 +487,103 @@ fn canonical_or_now(value: Option<&str>) -> String {
     match value {
         Some(raw) if !raw.is_empty() => crate::datasets::canonical_stamp(raw),
         _ => now_row_stamp(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_settings(tag: &str) -> (SettingsState, PathBuf) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fms-review-test-{tag}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = SettingsState::new();
+        settings.set_workspace_dir(Some(dir.clone()));
+        (settings, dir)
+    }
+
+    fn app_conn(settings: &SettingsState) -> Connection {
+        let conn = crate::datasets::dictation::open_app_db(settings).unwrap();
+        ensure_review_schema(&conn).unwrap();
+        conn
+    }
+
+    fn ev(uuid: &str, user: &str, day: &str) -> ReviewEvent {
+        ReviewEvent {
+            uuid: uuid.to_string(),
+            user_id: user.to_string(),
+            dataset_uuid: "ds".to_string(),
+            card_uuid: format!("card-{uuid}"),
+            quality: Some(4),
+            reviewed_at: format!("2026-01-{day}T00:00:00Z"),
+            familiarity: 5,
+            interval_days: 3,
+            ease_factor: 250,
+            repetitions: 1,
+            next_review_at: Some(format!("2026-01-{day}T00:00:00Z")),
+        }
+    }
+
+    /// Seed one event straight into the app DB (as an author or a replay would).
+    fn seed_event(conn: &Connection, e: &ReviewEvent) {
+        conn.execute(
+            "INSERT INTO card_review_event \
+             (uuid, user_id, dataset_uuid, card_uuid, quality, reviewed_at, \
+              familiarity, interval_days, ease_factor, repetitions, next_review_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                e.uuid, e.user_id, e.dataset_uuid, e.card_uuid, e.quality, e.reviewed_at,
+                e.familiarity, e.interval_days, e.ease_factor, e.repetitions, e.next_review_at
+            ],
+        )
+        .unwrap();
+    }
+
+    // -- the hub-side state read behind the practice backfill (§17.6 / INV-21) ----
+
+    #[test]
+    fn rows_for_user_pages_only_my_events() {
+        let (settings, _dir) = temp_settings("rows");
+        {
+            let conn = app_conn(&settings);
+            for e in [ev("a", "local", "01"), ev("b", "local", "02"), ev("c", "local", "03"), ev("z", "other", "04")] {
+                seed_event(&conn, &e);
+            }
+        }
+        // A page larger than the set is the whole owner set, and `next` is None.
+        let (all, next) = rows_for_user(&settings, "local", 0, 10).unwrap();
+        assert_eq!(all.len(), 3, "only my events, never another user's");
+        assert!(next.is_none(), "a short page means the history is exhausted");
+        let ids: Vec<&str> = all.iter().map(|r| r["event_uuid"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"], "ordered by rowid (insertion order)");
+
+        // A page exactly the size of a chunk reports a next cursor and continues.
+        let (p1, n1) = rows_for_user(&settings, "local", 0, 2).unwrap();
+        assert_eq!(p1.len(), 2);
+        let c1 = n1.expect("a full page carries a next cursor");
+        let (p2, n2) = rows_for_user(&settings, "local", c1, 2).unwrap();
+        assert_eq!(p2[0]["event_uuid"].as_str(), Some("c"));
+        assert!(n2.is_none());
+    }
+
+    #[test]
+    fn rows_for_user_rows_carry_the_apply_remote_payload_shape() {
+        let (settings, _dir) = temp_settings("shape");
+        let src = ev("a", "local", "01");
+        {
+            let conn = app_conn(&settings);
+            seed_event(&conn, &src);
+        }
+        let (rows, _) = rows_for_user(&settings, "local", 0, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        // The page row must be exactly what `apply_remote` consumes: the same field
+        // set `payload()` emits for a locally-authored event. Proving byte-identity
+        // here is the round-trip guarantee, without needing a full deck on disk.
+        assert_eq!(rows[0], payload(&src), "a page row is identical to the journal payload");
     }
 }

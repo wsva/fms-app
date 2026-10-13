@@ -145,6 +145,13 @@ pub(crate) const WEBSITE_CONTRACT_VERSION: u32 = 1;
 ///   loses `name`/`type`, and a v5 follower reading a pre-migration file loses the
 ///   same fields under the typed parser — both mis-parse silently, so the bump
 ///   exists to make a mixed-version cluster refuse each other instead.
+/// * `6`: `GET /api/v1/app/state` grows per-user **review** (`card_review_event`)
+///   and **attempt** (`read_attempt_event`) pages, so a reinstalled or late-paired
+///   device recovers its practice history past journal retention (sync-v2.md §17.6,
+///   INV-21). The response is wire-compatible with v4/v5 — an older client ignores
+///   the extra fields — so the bump exists purely so a follower can tell the event
+///   streams are present and refuse to stamp the practice backfill complete against
+///   a host that omits them (rather than silently reporting zero events).
 ///
 /// Versions 1-4 degrade safely in both directions: a v3 follower only pulls
 /// `/app/changes` when the hub's `/status` reports `protocol_version >= 3`, and a
@@ -155,7 +162,7 @@ pub(crate) const WEBSITE_CONTRACT_VERSION: u32 = 1;
 /// on-disk descriptor format, not a route, is what changed, so no `>=` guard can
 /// express it — migrate every dataset before running a v5 binary. Everyone
 /// converges once the whole cluster is on the same version.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Hostname of this machine, as advertised in the discovery beacon and
 /// `/api/v1/status` so a scanned list can say *which* PC it found rather than

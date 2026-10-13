@@ -420,6 +420,58 @@ fn attempt_payload(ev: &AttemptEvent) -> Value {
     })
 }
 
+/// Hub-side read behind the practice-history backfill (`GET /api/v1/app/state`,
+/// sync-v2.md §17.6 / INV-21): page one identity's attempt events oldest-first so
+/// a device that subscribes after the journal was pruned can still recover its
+/// takes. Paginated by `rowid` (at most `limit` rows after cursor `after`, `0` =
+/// start); the next cursor is `Some` only when the page was full, exactly like
+/// [`crate::datasets::dictation::dictation_rows_for_user`]. Page-stable because an
+/// event is insert-once — its rowid never moves. Rows carry the [`attempt_payload`]
+/// shape so the follower feeds them straight to [`apply_remote_save`]. The
+/// `audio_path` stays device-local (a bare file name or a legacy dataset-relative
+/// path): the row backfills, the WAV bytes do not — as any synced attempt already
+/// behaves.
+// Hub-side read: only `sync::rest` calls it, so the mobile build has no caller.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) fn rows_for_user(
+    settings: &SettingsState,
+    user_id: &str,
+    after: i64,
+    limit: i64,
+) -> Result<(Vec<Value>, Option<i64>), String> {
+    let conn = open_app_attempts(settings)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT rowid, uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, created_at \
+             FROM read_attempt_event WHERE user_id = ?1 AND rowid > ?2 ORDER BY rowid ASC LIMIT ?3",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![user_id, after, limit], |row| {
+            let rowid = row.get::<_, i64>(0)?;
+            let value = json!({
+                "uuid": row.get::<_, String>(1)?,
+                "user_id": row.get::<_, String>(2)?,
+                "dataset_uuid": row.get::<_, String>(3)?,
+                "text_uuid": row.get::<_, String>(4)?,
+                "audio_path": row.get::<_, Option<String>>(5)?,
+                "recognized": row.get::<_, String>(6)?,
+                "score": row.get::<_, f64>(7)?,
+                "created_at": row.get::<_, String>(8)?,
+            });
+            Ok((rowid, value))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out: Vec<Value> = Vec::new();
+    let mut last_id = after;
+    for r in rows.filter_map(|r| r.ok()) {
+        last_id = r.0;
+        out.push(r.1);
+    }
+    let next = if out.len() as i64 >= limit { Some(last_id) } else { None };
+    Ok((out, next))
+}
+
 /// Keep a stored stamp in the one fixed-width UTC shape ordering depends on.
 fn canonical_or_now(value: Option<&str>) -> String {
     match value {
@@ -1351,5 +1403,71 @@ mod tests {
         let again = apply_remote_save(&settings, "", &payload, "alice").unwrap();
         assert!(!again, "replay is INSERT OR IGNORE by event uuid");
         assert_eq!(event_count(&settings), 1);
+    }
+
+    // -- the hub-side state read behind the practice backfill (§17.6 / INV-21) ----
+
+    #[test]
+    fn rows_for_user_pages_only_my_attempts() {
+        let (settings, _dir) = temp_settings("rows");
+        let conn = open_app_attempts(&settings).unwrap();
+        for (u, user, day) in [("a", "local", "01"), ("b", "local", "02"), ("c", "local", "03"), ("z", "other", "04")] {
+            conn.execute(
+                "INSERT INTO read_attempt_event \
+                 (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, created_at) \
+                 VALUES (?1, ?2, 'ds-rows', 't', NULL, 'hello world', 90, ?3)",
+                params![u, user, format!("2026-01-{day}T00:00:00Z")],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        // A page larger than the set is the whole owner set, and `next` is None.
+        let (all, next) = rows_for_user(&settings, "local", 0, 10).unwrap();
+        assert_eq!(all.len(), 3, "only my events, never another user's");
+        assert!(next.is_none(), "a short page means the history is exhausted");
+        let uuids: Vec<&str> = all.iter().map(|r| r["uuid"].as_str().unwrap()).collect();
+        assert_eq!(uuids, vec!["a", "b", "c"], "ordered by rowid (insertion order)");
+
+        // A page exactly the size of a chunk reports a next cursor and continues.
+        let (p1, n1) = rows_for_user(&settings, "local", 0, 2).unwrap();
+        assert_eq!(p1.len(), 2);
+        let c1 = n1.expect("a full page carries a next cursor");
+        let (p2, n2) = rows_for_user(&settings, "local", c1, 2).unwrap();
+        assert_eq!(p2.len(), 1);
+        assert_eq!(p2[0]["uuid"].as_str(), Some("c"));
+        assert!(n2.is_none());
+    }
+
+    #[test]
+    fn rows_for_user_rows_round_trip_through_apply_remote_save() {
+        let (settings, _dir) = temp_settings("rows-trip");
+        let conn = open_app_attempts(&settings).unwrap();
+        conn.execute(
+            "INSERT INTO read_attempt_event \
+             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, created_at) \
+             VALUES ('a', 'local', 'ds-trip', 't', NULL, 'hello world', 88, '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let (rows, _) = rows_for_user(&settings, "local", 0, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+
+        // A follower feeds a page row straight to `apply_remote_save` — the `@app`
+        // state read carries no dataset, so `dataset_uuid` travels in the payload.
+        let (fresh, _fdir) = temp_settings("rows-trip-fresh");
+        let applied = apply_remote_save(&fresh, "", &rows[0], "carol").unwrap();
+        assert!(applied, "a page row is a valid replay payload");
+        let conn = open_app_attempts(&fresh).unwrap();
+        let owner: String = conn
+            .query_row("SELECT user_id FROM read_attempt_event WHERE uuid = 'a'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(owner, "carol", "replay attributes to the hub's bound identity");
+        drop(conn);
+        // Idempotent: re-running the page stores nothing new (INV-23).
+        let again = apply_remote_save(&fresh, "", &rows[0], "carol").unwrap();
+        assert!(!again);
+        assert_eq!(event_count(&fresh), 1);
     }
 }

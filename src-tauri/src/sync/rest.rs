@@ -730,6 +730,12 @@ struct AppStateQuery {
     /// because the two lists have different lengths and different page ends.
     after_dictation: Option<i64>,
     after_xp: Option<i64>,
+    /// Rowid cursors for the per-user practice-event tables (sync-v2.md §17.6 /
+    /// INV-21), same meaning as above. Only a v6 hub serves them; an older client
+    /// omits them and gets none. The server always answers (cheap, additive) — the
+    /// *client* decides whether to request/parse them from the advertised protocol.
+    after_reviews: Option<i64>,
+    after_attempts: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -741,10 +747,19 @@ struct AppStateResp {
     dictation: Vec<ListenDictation>,
     /// XP deltas oldest-first, replayable through the ordinary award path.
     xp: Vec<xp::XpHistoryRow>,
+    /// This identity's card-review events (`card_review_event`), oldest-first,
+    /// in the `review::payload` shape `apply_remote` accepts (protocol v6+).
+    reviews: Vec<serde_json::Value>,
+    /// This identity's read-aloud attempt events (`read_attempt_event`),
+    /// oldest-first, in the `attempt_payload` shape `apply_remote_save` accepts
+    /// (protocol v6+). `audio_path` is device-local — the row syncs, the WAV does not.
+    attempts: Vec<serde_json::Value>,
     /// Next rowid cursors, `Some` only when that page was full. `None` for both
     /// means the follower has the whole history.
     next_dictation_after: Option<i64>,
     next_xp_after: Option<i64>,
+    next_reviews_after: Option<i64>,
+    next_attempts_after: Option<i64>,
     /// The hub's stored total, so a follower can compare it after recomputing and
     /// notice a divergence instead of reporting a clean backfill.
     lifetime_xp: i64,
@@ -809,6 +824,26 @@ async fn app_state(
         Ok(page) => page,
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
+    // Per-user practice events (protocol v6): the two append-only planes, paged the
+    // same way. Always served — an older client simply ignores the extra fields.
+    let (reviews, next_reviews_after) = match datasets::cards::review::rows_for_user(
+        &settings,
+        &user_key,
+        q.after_reviews.unwrap_or(0),
+        HISTORY_ROW_LIMIT,
+    ) {
+        Ok(page) => page,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let (attempts, next_attempts_after) = match datasets::read_aloud::rows_for_user(
+        &settings,
+        &user_key,
+        q.after_attempts.unwrap_or(0),
+        HISTORY_ROW_LIMIT,
+    ) {
+        Ok(page) => page,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
     // Best-effort: this number is a cross-check for the follower's log, so a read
     // failure must not fail the backfill.
     let hub_total = xp::user_total(&settings, &user_key).unwrap_or(0);
@@ -817,8 +852,12 @@ async fn app_state(
         lifetime_xp: hub_total,
         dictation,
         xp: xp_rows,
+        reviews,
+        attempts,
         next_dictation_after,
         next_xp_after,
+        next_reviews_after,
+        next_attempts_after,
         generated_at: chrono::Utc::now().to_rfc3339(),
     };
     (StatusCode::OK, Json(resp)).into_response()
