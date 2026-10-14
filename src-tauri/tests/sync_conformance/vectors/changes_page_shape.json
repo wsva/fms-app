@@ -3,7 +3,7 @@
   "invariant": "sync-v2.md §7 — journal page shape",
   "check": "page_shape",
   "scope": "dataset",
-  "notes": "Phase 1 pins the shape the desktop hub emits today: the page carries `hub_seq`. §7 names the phase-2 target `host_seq`; the rename is a deliberate wire change in a later phase, at which point this vector updates with it. `after = 0` is a real start cursor ('everything after seq 0'); the NULL sentinel `-1` always forces a resync and is covered by cursor_null_triggers_resync.",
+  "notes": "Phase 1 pins the shape the desktop hub emits today: the page carries `hub_seq`. §7 names the phase-2 target `host_seq`; the rename is a deliberate wire change in a later phase, at which point this vector updates with it. `after = 0` is a real start cursor ('everything after seq 0'); the NULL sentinel `-1` always forces a resync and is covered by cursor_null_triggers_resync. Phase 7b adds `epoch` — the per-scope authority handover epoch (INV-13) — which the desktop hub emits from its `sync_scope_epoch` table (always `0` until a `sync_handover_epoch` bump). The website host emits the same key once it lands the field in its own repo; until then the two suites' vectors legitimately differ on this one key.",
   "seed": [
     {
       "object_id": "cue:1",
@@ -15,7 +15,7 @@
   ],
   "after": 0,
   "expect": {
-    "keys": ["dataset_uuid", "entries", "pruned_up_to", "hub_seq", "resync_required"],
+    "keys": ["dataset_uuid", "entries", "pruned_up_to", "hub_seq", "epoch", "resync_required"],
     "entry_keys": ["seq", "object_id", "kind", "op", "edit_time", "user_key", "payload"],
     "resync_required": false,
     "entry_count": 1

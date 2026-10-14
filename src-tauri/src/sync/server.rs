@@ -255,6 +255,36 @@ pub async fn web_service_start(
     state.start_inner(app, config).await
 }
 
+/// Manual authority handover for one journal scope (sync-v2.md §9 flow 8 / INV-13).
+/// Raises the scope's `sync_scope_epoch` by one in this hub's app DB and returns the
+/// new epoch. Every writer still presenting the old epoch is refused by `sync_changes`
+/// until it re-pulls and learns the bump; the next `/changes` page carries the new
+/// value. **Never automatic** — INV-13 forbids failover, so this is an explicit
+/// operator action (the `sync_handover_epoch` MCP tool drives the same path). Only a
+/// hub owns an authority to hand over, so a follower calling this is refused.
+#[tauri::command]
+pub fn sync_handover_epoch(
+    settings: tauri::State<'_, crate::settings::SettingsState>,
+    scope: String,
+) -> Result<i64, String> {
+    if settings.role() != "hub" {
+        return Err("only a hub holds journal authority to hand a scope over".to_string());
+    }
+    let scope = scope.trim().to_string();
+    if scope.is_empty() {
+        return Err("scope is required (a dataset uuid, or `@app`)".to_string());
+    }
+    let conn = crate::datasets::dictation::open_app_db(settings.inner())?;
+    crate::sync::change_log::ensure_hub_tables(&conn)?;
+    let new_epoch = crate::sync::change_log::bump_scope_epoch(&conn, &scope)?;
+    log::warn!(
+        "[sync] manual handover: scope '{}' now at authority epoch {}",
+        scope,
+        new_epoch
+    );
+    Ok(new_epoch)
+}
+
 #[tauri::command]
 pub async fn web_service_stop(
     state: tauri::State<'_, WebServiceState>,

@@ -277,10 +277,16 @@ async fn flush_scope(
             break;
         }
 
-        // 2. POST the batch.
+        // 2. POST the batch. Each change carries the authority epoch this device
+        // recorded for its scope (INV-13), so the hub can refuse a write made after
+        // a handover it has not yet pulled. `0` until the scope has been handed over,
+        // which the hub also treats as current — the guard is a no-op then.
+        let epoch_conn = datasets::dictation::open_app_db(settings)?;
+        ensure_sync_tables(&epoch_conn)?;
         let changes: Vec<Value> = batch
             .iter()
             .map(|(id, kind, ds, payload, queued_at, edit_time)| {
+                let scope = crate::sync::change_log::scope_for(kind, ds);
                 json!({
                     "id": id,
                     "kind": kind,
@@ -290,6 +296,7 @@ async fn flush_scope(
                     // as "arrived now" (§3.4 clamp). Otherwise the device stamp.
                     "edit_time": edit_time,
                     "queued_at": queued_at,
+                    "epoch": recorded_epoch(&epoch_conn, scope),
                 })
             })
             .collect();

@@ -21,8 +21,8 @@ use super::*;
 
 use crate::sync::client::sync_state::{
     app_cursor, app_events_history_backfilled, app_history_backfilled, ensure_sync_tables,
-    reset_cursors_without_provenance, set_app_cursor, set_app_events_history_backfilled,
-    set_app_history_backfilled, set_last_round, set_resync_reason, stamp_app_provenance, upstream_of,
+    reset_cursors_without_provenance, set_app_cursor, set_app_epoch, set_app_events_history_backfilled,
+    set_app_history_backfilled, set_dataset_epoch, set_last_round, set_resync_reason, stamp_app_provenance, upstream_of,
 };
 use crate::sync::client::cluster::{
     app_journal_advertised, advertises, dataset_journal_advertised, fetch_cluster, HISTORY_PROTOCOL,
@@ -402,6 +402,10 @@ pub(crate) async fn pull_app_scope(
     let conn = datasets::dictation::open_app_db(settings.inner())?;
     ensure_sync_tables(&conn)?;
     let _ = set_app_cursor(&conn, hub_seq.max(after));
+    // Record the scope's authority epoch from every accepted page (INV-13) — even
+    // one with no entries, which is how a follower learns of a handover that pruned
+    // or reset its scope without shipping new rows to replay.
+    let _ = set_app_epoch(&conn, page["epoch"].as_i64().unwrap_or(0));
     // Stamp the `@app` upstream from the connected host (sync-v2.md §6.1). Only
     // fills an empty origin — see [`stamp_app_provenance`].
     let (k, o) = upstream_of(&pc_base(settings.inner()));
@@ -715,6 +719,15 @@ async fn pull_and_apply_dataset_journal(
             Err(e) => errors.push(json!({ "uuid": uuid, "stage": "resync", "error": e })),
         }
         return true;
+    }
+
+    // Record the scope's authority epoch from every accepted page (INV-13), before
+    // the entries gate — an empty page after a handover must still advance what the
+    // follower presents on its next push, or its queued edits stay refused.
+    if let Ok(conn) = datasets::dictation::open_app_db(&settings) {
+        if ensure_sync_tables(&conn).is_ok() {
+            let _ = set_dataset_epoch(&conn, &uuid, page["epoch"].as_i64().unwrap_or(0));
+        }
     }
 
     let entries = page["entries"].as_array().cloned().unwrap_or_default();

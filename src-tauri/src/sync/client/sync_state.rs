@@ -131,6 +131,13 @@ pub(crate) fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
     // A successful `dataset_sync_snapshot` clears it: its INSERT OR REPLACE does
     // not list this column, so the re-inserted row defaults it back to NULL.
     ensure_column(conn, "dataset_sync_state", "resync_reason", "TEXT")?;
+    // Migration (sync-v2.md §9 flow 8 / INV-13): the authority epoch each scope's
+    // last `/changes` page carried. A follower replays it on its next push so the
+    // hub can refuse a write made against a superseded authority; `0` (the default)
+    // means it has never seen a handover for that scope. Kept per-scope: `@app` on
+    // the single-row table, a dataset keyed by uuid alongside the cursor.
+    ensure_column(conn, "dataset_sync_state", "epoch", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "app_sync_state", "epoch", "INTEGER NOT NULL DEFAULT 0")?;
     Ok(())
 }
 
@@ -249,6 +256,56 @@ pub(crate) fn app_provenance(conn: &Connection) -> Option<(String, String)> {
     .filter(|(_, origin)| !origin.is_empty())
 }
 
+/// Stamp the `@app` authority epoch the last pulled page carried (INV-13). Kept
+/// separate from [`set_app_cursor`]: the cursor advances only on a page that
+/// applied rows, whereas the epoch must be recorded on *every* successful pull —
+/// including an empty one, which is exactly how a follower learns of a handover
+/// that pruned or reset its scope without shipping new rows.
+pub(crate) fn set_app_epoch(conn: &Connection, epoch: i64) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO app_sync_state (id, epoch, updated_at) VALUES (1, ?1, datetime('now')) \
+         ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch, updated_at = excluded.updated_at",
+        params![epoch],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Record the authority epoch a dataset-scope page carried. A no-op when the row
+/// does not exist yet (the snapshot path creates it, defaulting epoch to 0).
+pub(crate) fn set_dataset_epoch(conn: &Connection, uuid: &str, epoch: i64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE dataset_sync_state SET epoch = ?2 WHERE dataset_uuid = ?1",
+        params![uuid, epoch],
+    )
+    .map_err(|e| e.to_string())
+    .map(|_| ())
+}
+
+/// The epoch this device last recorded for one scope — the value it presents on
+/// write so the hub can run its INV-13 stale check. Resolves the scope against the
+/// right table (`@app` → the single-row state, otherwise the dataset row); a scope
+/// never pulled reads as `0`.
+pub(crate) fn recorded_epoch(conn: &Connection, scope: &str) -> i64 {
+    if scope == crate::sync::change_log::APP_SCOPE {
+        conn.query_row(
+            "SELECT epoch FROM app_sync_state WHERE id = 1",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+    } else {
+        conn.query_row(
+            "SELECT epoch FROM dataset_sync_state WHERE dataset_uuid = ?1",
+            params![scope],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 /// When this device last folded the hub's *whole* app-data history into its own
 /// (`None` = never). See [`backfill_app_history`].
 pub(crate) fn app_history_backfilled(conn: &Connection) -> Option<String> {
@@ -358,6 +415,10 @@ pub struct SyncStateEntry {
     /// cursor with no recorded reason is surfaced as `"no_cursor"` by
     /// [`classify_resync_reason`].
     pub resync_reason: Option<String>,
+    /// The authority epoch the last pulled page carried (INV-13). `0` = never seen
+    /// a handover for this scope. Surfaced so the status page can show a follower
+    /// lagging its authority.
+    pub epoch: i64,
 }
 
 /// Read every `dataset_sync_state` row, including the phase-1/3 provenance
@@ -367,7 +428,7 @@ pub(crate) fn local_sync_entries(conn: &Connection) -> Result<Vec<SyncStateEntry
     let mut stmt = conn
         .prepare(
             "SELECT dataset_uuid, overall_hash, synced_at, bytes, file_count, \"cursor\", \
-                    upstream_kind, upstream_origin, availability, published_version, resync_reason \
+                    upstream_kind, upstream_origin, availability, published_version, resync_reason, epoch \
              FROM dataset_sync_state",
         )
         .map_err(|e| e.to_string())?;
@@ -385,6 +446,7 @@ pub(crate) fn local_sync_entries(conn: &Connection) -> Result<Vec<SyncStateEntry
                 availability: r.get(8)?,
                 published_version: r.get(9)?,
                 resync_reason: r.get(10)?,
+                epoch: r.get(11)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -415,5 +477,40 @@ pub(crate) fn classify_resync_reason(state: &str, stored: Option<String>) -> Opt
         return None;
     }
     Some(stored.unwrap_or_else(|| "no_cursor".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The follower side of INV-13: what a pull records (`set_*_epoch`) is exactly
+    // what the next push presents (`recorded_epoch`), per scope, defaulting to `0`
+    // for anything never pulled. `recorded_epoch` resolves `@app` to the single-row
+    // table and a dataset uuid to its row, so the two halves never cross wires.
+    #[test]
+    fn epoch_is_recorded_per_scope_and_read_back_for_presentation() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_sync_tables(&conn).unwrap();
+        let app_scope = crate::sync::change_log::APP_SCOPE;
+
+        // `@app`: 0 before any pull, then the stamped value reads back.
+        assert_eq!(recorded_epoch(&conn, app_scope), 0);
+        set_app_epoch(&conn, 3).unwrap();
+        assert_eq!(recorded_epoch(&conn, app_scope), 3);
+
+        // A dataset row must exist before `set_dataset_epoch` (it is an UPDATE).
+        conn.execute(
+            "INSERT INTO dataset_sync_state (dataset_uuid, overall_hash, synced_at) VALUES ('ds', 'h', 'now')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(recorded_epoch(&conn, "ds"), 0);
+        set_dataset_epoch(&conn, "ds", 5).unwrap();
+        assert_eq!(recorded_epoch(&conn, "ds"), 5);
+
+        // Scopes stay independent, and a never-pulled dataset reads the no-op `0`.
+        assert_eq!(recorded_epoch(&conn, app_scope), 3);
+        assert_eq!(recorded_epoch(&conn, "other"), 0);
+    }
 }
 

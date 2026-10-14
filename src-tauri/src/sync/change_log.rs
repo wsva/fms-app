@@ -87,6 +87,17 @@ pub fn ensure_hub_tables(conn: &Connection) -> Result<(), String> {
             pruned_up_to  INTEGER NOT NULL DEFAULT 0
         );
 
+        /* Per-scope authority handover epoch (sync-v2.md INV-13, phase 7b). One row
+           per journal scope (a dataset uuid, or `@app`); absent row == epoch 0 (never
+           handed over). A follower records the epoch a page carried, replays it on its
+           next write, and the hub refuses a write presenting a lower epoch than it now
+           holds — that is the split-brain guard. Bumped only by an explicit handover
+           (`sync_handover_epoch`), never automatically (INV-13 forbids failover). */
+        CREATE TABLE IF NOT EXISTS sync_scope_epoch (
+            scope  TEXT PRIMARY KEY,
+            epoch  INTEGER NOT NULL DEFAULT 0
+        );
+
         /* Replay dedup ledger (§3.6): a lost ack response makes the follower
            re-send the same change_id; the hub must apply it once. Pruned by
            `applied_at` (hub wall time), never by `edit_time`. */
@@ -108,6 +119,35 @@ pub fn ensure_hub_tables(conn: &Connection) -> Result<(), String> {
         );",
     )
     .map_err(|e| e.to_string())
+}
+
+/// This hub's current authority epoch for one journal scope (INV-13). `0` when the
+/// scope has never been handed over (no row) — the common case, and what every host
+/// and the conformance harness see until a `sync_handover_epoch` bump lands. Reads
+/// through `ensure_hub_tables`' table, so a missing table is not possible here, but
+/// the query is defensive regardless.
+pub fn scope_epoch(conn: &Connection, scope: &str) -> i64 {
+    conn.query_row(
+        "SELECT epoch FROM sync_scope_epoch WHERE scope = ?1",
+        params![scope],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+}
+
+/// Raise one scope's authority epoch by one and return the new value (the manual
+/// handover of sync-v2.md §9 flow 8 / INV-13). The next `/changes` page carries it,
+/// and any writer still presenting the old epoch is refused until it re-pulls. Idempotent
+/// per call (one bump, one increment); creates the row on first handover.
+pub fn bump_scope_epoch(conn: &Connection, scope: &str) -> Result<i64, String> {
+    ensure_hub_tables(conn)?;
+    conn.execute(
+        "INSERT INTO sync_scope_epoch (scope, epoch) VALUES (?1, 1) \
+         ON CONFLICT(scope) DO UPDATE SET epoch = epoch + 1",
+        params![scope],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(scope_epoch(conn, scope))
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +386,10 @@ pub struct ChangesPage {
     pub pruned_up_to: i64,
     /// The hub's current `seq` at the moment this page was built.
     pub hub_seq: i64,
+    /// This scope's authority handover epoch (INV-13). A follower records it and
+    /// replays it on its next write; a writer presenting a lower epoch than the hub
+    /// now holds is refused. `0` until a handover bumps the scope.
+    pub epoch: i64,
     pub resync_required: bool,
 }
 
@@ -371,6 +415,9 @@ pub fn read_changes(conn: &Connection, dataset_uuid: &str, after: i64) -> Result
     // negative cursor (`after < 0`) is the follower's NULL/unknown-cursor
     // sentinel (§3.2 upgrade migration) and always forces one resync.
     let resync_required = after < pruned_up_to;
+    // The scope's current authority epoch rides every page so a follower can learn
+    // a handover without a dedicated round trip (INV-13/INV-20 re-read semantics).
+    let epoch = scope_epoch(conn, dataset_uuid);
 
     let mut entries = Vec::new();
     if !resync_required {
@@ -406,6 +453,7 @@ pub fn read_changes(conn: &Connection, dataset_uuid: &str, after: i64) -> Result
         entries,
         pruned_up_to,
         hub_seq,
+        epoch,
         resync_required,
     })
 }
@@ -848,5 +896,31 @@ mod tests {
     fn attempt_events_map_to_their_table() {
         assert_eq!(table_for_kind("read_attempt_save"), "read_attempt_event");
         assert_eq!(table_for_kind("read_attempt_delete"), "read_attempt_event");
+    }
+
+    // INV-13 handover store: the hub keeps a per-scope authority epoch, advertises
+    // it on every `/changes` page, and a manual bump raises it so the next page (and
+    // hence the next `sync_changes` stale check) sees the new value. Scopes are
+    // independent, and a never-handed-over scope reads `0` — the no-op default.
+    #[test]
+    fn scope_epoch_defaults_zero_and_bump_advertises_through_pages() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_hub_tables(&conn).unwrap();
+
+        assert_eq!(scope_epoch(&conn, "ds"), 0);
+        append(&conn, "ds", "cue:1", "cue_save", "2026-01-01T00:00:00Z", "u1", "{\"text\":\"hi\"}").unwrap();
+        assert_eq!(read_changes(&conn, "ds", 0).unwrap().epoch, 0);
+
+        // One handover bumps to 1, the next to 2; the page carries the current epoch.
+        assert_eq!(bump_scope_epoch(&conn, "ds").unwrap(), 1);
+        assert_eq!(scope_epoch(&conn, "ds"), 1);
+        assert_eq!(bump_scope_epoch(&conn, "ds").unwrap(), 2);
+        assert_eq!(read_changes(&conn, "ds", 0).unwrap().epoch, 2);
+
+        // The guard's predicate: a follower presenting the pre-handover epoch is now
+        // strictly below authority, so `sync_changes` refuses it until it re-pulls.
+        assert!(0 < scope_epoch(&conn, "ds"));
+        // `@app` is its own scope — untouched by the dataset's bump.
+        assert_eq!(scope_epoch(&conn, APP_SCOPE), 0);
     }
 }

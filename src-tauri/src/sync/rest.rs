@@ -965,6 +965,13 @@ struct Change {
     #[serde(default)]
     #[allow(dead_code)]
     queued_at: String,
+    /// The authority epoch this device recorded for the change's scope when it
+    /// queued the edit (INV-13). The hub refuses the write if it is below the
+    /// scope's current epoch — the scope was handed over since this device last
+    /// pulled, so a naive apply would resurrect a superseded authority's edit.
+    /// Defaults to `0` (a pre-handover client, or the never-handed-over case).
+    #[serde(default)]
+    epoch: i64,
 }
 
 #[derive(Serialize)]
@@ -1101,6 +1108,34 @@ async fn sync_changes(
     let mut results = Vec::with_capacity(req.changes.len());
     let hub_now = chrono::Utc::now();
     for ch in req.changes {
+        // INV-13 split-brain guard, before anything is touched: a writer whose
+        // recorded epoch for this scope is below the hub's current epoch lost the
+        // handover and must not apply. Left `ok = false` so the change stays
+        // queued — the follower's next `/changes` pull records the new epoch, and
+        // the retry then succeeds. This is a no-op while every scope sits at its
+        // minted epoch 0 (no handover has run), so a bump is the only way to hit it.
+        {
+            let ch_scope = crate::sync::change_log::scope_for(
+                &ch.kind,
+                ch.dataset_uuid.as_deref().unwrap_or(""),
+            );
+            let hub_epoch = crate::sync::change_log::scope_epoch(&ledger, ch_scope);
+            if ch.epoch < hub_epoch {
+                log::warn!(
+                    "[rest] writeback {} ({}) refused: stale epoch {} < authority {} for scope {}",
+                    ch.id, ch.kind, ch.epoch, hub_epoch, ch_scope
+                );
+                results.push(ChangeResult::failed(
+                    ch.id,
+                    format!(
+                        "stale_epoch: presented {} < authority {} for scope '{}'; re-pull this scope to learn the new epoch, then retry (INV-13/INV-20)",
+                        ch.epoch, hub_epoch, ch_scope
+                    ),
+                ));
+                continue;
+            }
+        }
+
         // Skip anything already applied (idempotent by change id).
         if crate::sync::change_log::already_applied(&ledger, &ch.id) {
             results.push(ChangeResult::applied(ch.id));

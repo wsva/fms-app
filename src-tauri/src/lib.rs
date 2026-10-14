@@ -295,6 +295,7 @@ pub fn run() {
             sync::server::web_service_get_status,
             sync::server::web_service_start,
             sync::server::web_service_stop,
+            sync::server::sync_handover_epoch,
             ocr::ocr_recognize,
             ocr::ocr_list_languages,
             models::model_download_hf,

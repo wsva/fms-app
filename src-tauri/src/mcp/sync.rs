@@ -34,6 +34,13 @@ struct PairingDeviceParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct SyncHandoverParam {
+    /// Journal scope to hand over: a dataset uuid, or `"@app"` for the app-wide
+    /// per-user scope. Raises this hub's authority epoch for that scope by one.
+    scope: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct PcScanParam {
     /// Discovery budget in milliseconds (0 = the default 2500).
     #[serde(default)]
@@ -122,6 +129,14 @@ impl DatasetMcpServer {
         let state = self.app.state::<WebServiceState>();
         let status = sync::server::web_service_stop(state).await?;
         Ok(serde_json::to_string_pretty(&status).unwrap_or_default())
+    }
+
+    #[tool(name = "sync_handover_epoch", description = "Manually hand one journal scope over to a new authority (sync-v2.md INV-13): raise this hub's authority epoch for the scope by one and return it. Every follower still presenting the old epoch is refused on write until it re-pulls and learns the bump. This is the split-brain guard, and it is NEVER automatic — call it only when you intentionally reset/reassign authority for the scope (`scope` = a dataset uuid or `@app`). Hub-only.")]
+    async fn sync_handover_epoch(&self, Parameters(param): Parameters<SyncHandoverParam>) -> Result<String, String> {
+        log::info!("[MCP] sync_handover_epoch: scope={}", param.scope);
+        let settings = self.app.state::<SettingsState>();
+        let new_epoch = sync::server::sync_handover_epoch(settings, param.scope.clone())?;
+        Ok(serde_json::json!({ "scope": param.scope, "epoch": new_epoch }).to_string())
     }
 
     #[tool(name = "pairing_list_devices", description = "List devices paired with this PC's web service (device_id, name, approved/denied status, created/last-seen times). Requests from localhost and Tailscale always bypass pairing.")]
