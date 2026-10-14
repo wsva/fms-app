@@ -256,11 +256,21 @@ fn ensure_upload_table(conn: &Connection) -> Result<(), String> {
             version       INTEGER NOT NULL,
             archive_sha256 TEXT NOT NULL,
             archive_size  TEXT NOT NULL,
-            uploaded_at   TEXT NOT NULL
+            uploaded_at   TEXT NOT NULL,
+            current_version INTEGER,
+            published_at  TEXT
         )",
         [],
     )
     .map_err(|e| e.to_string())?;
+    // The cloud publish pin, echoed by the upload route's catalog row and by every
+    // publish (`dataset.current_version` is null until the first publish). No REST
+    // route serves the version list to the app, so the pin exists only here — the
+    // owner surface probes its live availability against the registry instead of
+    // trusting this column (a publish made from the website UI after our last
+    // echo is invisible here; the probe keeps the shown state honest).
+    crate::sync::client::ensure_column(conn, "dataset_upload_state", "current_version", "INTEGER")?;
+    crate::sync::client::ensure_column(conn, "dataset_upload_state", "published_at", "TEXT")?;
     Ok(())
 }
 
@@ -277,6 +287,34 @@ pub(crate) fn upload_state_uuids(conn: &Connection) -> Result<Vec<String>, Strin
         .query_map([], |r| r.get::<_, String>(0))
         .map_err(|e| e.to_string())?;
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// The cloud publish pin + last uploaded version this device recorded for one
+/// dataset. `(0, 0)` when it never uploaded from here.
+pub(crate) fn upload_publish_pin(conn: &Connection, uuid: &str) -> (i64, i64) {
+    if ensure_upload_table(conn).is_err() {
+        return (0, 0);
+    }
+    conn.query_row(
+        "SELECT COALESCE(current_version, 0), COALESCE(version, 0) FROM dataset_upload_state WHERE dataset_uuid = ?1",
+        params![uuid],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .unwrap_or((0, 0))
+}
+
+/// Stamp the publish echo (the website's `current_version`) into the upload row.
+/// A no-op when this device never uploaded that dataset — you can only publish
+/// what you uploaded from somewhere, and an unknown uuid must not gain a
+/// half-populated state row.
+pub(crate) fn record_publish_echo(conn: &Connection, uuid: &str, current_version: i64) {
+    if ensure_upload_table(conn).is_err() {
+        return;
+    }
+    let _ = conn.execute(
+        "UPDATE dataset_upload_state SET current_version = ?2, published_at = datetime('now') WHERE dataset_uuid = ?1",
+        params![uuid, current_version],
+    );
 }
 
 /// Map a failed upload response per the T7 error table, tagging a 409 with
@@ -379,13 +417,16 @@ async fn send_archive(
 
     // Record success (version + archive identity) in the app DB.
     let version = body["version"].as_i64().unwrap_or(0);
+    // The upload route answers with the owner's catalog row, whose `current_version`
+    // is the cloud publish pin (null until the first publish) — stamp it so the
+    // owner surface knows which version to probe. An absent field (older host)
+    // must not erase a pin we learned earlier, hence the COALESCE-guarded write.
+    let pin = body["dataset"]["current_version"].as_i64();
     let conn = datasets::dictation::open_app_db(settings)?;
     ensure_upload_table(&conn)?;
     conn.execute(
-        "INSERT OR REPLACE INTO dataset_upload_state \
-         (dataset_uuid, version, archive_sha256, archive_size, uploaded_at) \
-         VALUES (?1, ?2, ?3, ?4, datetime('now'))",
-        params![uuid, version, sha, size.to_string()],
+        "INSERT INTO dataset_upload_state (dataset_uuid, version, archive_sha256, archive_size, uploaded_at, current_version, published_at) VALUES (?1, ?2, ?3, ?4, datetime('now'), ?5, CASE WHEN ?5 IS NULL THEN NULL ELSE datetime('now') END) ON CONFLICT(dataset_uuid) DO UPDATE SET version = excluded.version, archive_sha256 = excluded.archive_sha256, archive_size = excluded.archive_size, uploaded_at = excluded.uploaded_at, current_version = COALESCE(excluded.current_version, dataset_upload_state.current_version), published_at = COALESCE(excluded.published_at, dataset_upload_state.published_at)",
+        params![uuid, version, sha, size.to_string(), pin],
     )
     .map_err(|e| e.to_string())?;
 
@@ -464,8 +505,8 @@ pub async fn dataset_upload_state(
     ensure_upload_table(&conn)?;
     let mut stmt = conn
         .prepare(
-            "SELECT dataset_uuid, version, archive_sha256, archive_size, uploaded_at \
-             FROM dataset_upload_state",
+            "SELECT dataset_uuid, version, archive_sha256, archive_size, uploaded_at, current_version, published_at \
+             FROM dataset_upload_state ORDER BY dataset_uuid",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -476,6 +517,8 @@ pub async fn dataset_upload_state(
                 "archive_sha256": r.get::<_, String>(2)?,
                 "archive_size": r.get::<_, String>(3)?,
                 "uploaded_at": r.get::<_, String>(4)?,
+                "current_version": r.get::<_, Option<i64>>(5)?,
+                "published_at": r.get::<_, Option<String>>(6)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -605,12 +648,12 @@ mod tests {
         // Fresh device: the table is created on demand and reads back empty.
         assert!(upload_state_uuids(&conn).unwrap().is_empty());
         conn.execute(
-            "INSERT INTO dataset_upload_state VALUES (?1, 1, 'sha', '10', 'now')",
+            "INSERT INTO dataset_upload_state (dataset_uuid, version, archive_sha256, archive_size, uploaded_at) VALUES (?1, 1, 'sha', '10', 'now')",
             params!["ds-b"],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO dataset_upload_state VALUES (?1, 1, 'sha', '10', 'now')",
+            "INSERT INTO dataset_upload_state (dataset_uuid, version, archive_sha256, archive_size, uploaded_at) VALUES (?1, 1, 'sha', '10', 'now')",
             params!["ds-a"],
         )
         .unwrap();
@@ -618,5 +661,31 @@ mod tests {
             upload_state_uuids(&conn).unwrap(),
             vec!["ds-a".to_string(), "ds-b".to_string()]
         );
+    }
+
+    #[test]
+    fn publish_pin_survives_old_schema_and_echoes_update_it() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Simulate a pre-upgrade install: the table WITHOUT the two new columns.
+        conn.execute(
+            "CREATE TABLE dataset_upload_state (dataset_uuid TEXT PRIMARY KEY, version INTEGER NOT NULL, archive_sha256 TEXT NOT NULL, archive_size TEXT NOT NULL, uploaded_at TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO dataset_upload_state VALUES ('ds', 3, 'sha', '10', 'now')",
+            [],
+        )
+        .unwrap();
+        // ensure_upload_table grows the old schema idempotently.
+        ensure_upload_table(&conn).unwrap();
+        ensure_upload_table(&conn).unwrap();
+        // No pin recorded yet, but the last upload is known.
+        assert_eq!(upload_publish_pin(&conn, "ds"), (0, 3));
+        record_publish_echo(&conn, "ds", 3);
+        assert_eq!(upload_publish_pin(&conn, "ds"), (3, 3));
+        // An unknown uuid never gains a half-populated row.
+        record_publish_echo(&conn, "ghost", 9);
+        assert_eq!(upload_publish_pin(&conn, "ghost"), (0, 0));
     }
 }

@@ -141,6 +141,12 @@ struct AvailabilityParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct PublishStateParam {
+    /// Local dataset uuid whose cloud publish state to read back.
+    dataset_uuid: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct PushFilesParam {
     /// Local dataset uuid whose live file tree to re-push (must already exist on
     /// the website — bootstrap with hub_upload first).
@@ -538,6 +544,17 @@ impl DatasetMcpServer {
             param.uuid,
             param.version,
             param.available,
+        )
+        .await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "dataset_publish_state", description = "Read back one dataset's cloud publish state for the owner surface — the mirror of the website's per-card Publish/Withdraw/Restore (sync-v2 §8.4/§11.5). Owner-only, account Bearer, cross-platform. The publish pin is observable only through the upload/publish echoes this device recorded (no REST route serves the version list), so this reads the stored pin and probes its LIVE availability with GET /api/v1/registry/{uuid}/manifest?version=PIN. Returns { uuid, state, version, uploaded_version }: state is 'not_published' (no pin, or the pin references a missing row — 404), 'live' (200), 'withdrawn' (410, taken down but bytes kept), or 'unknown' (unreachable/other — never guessed, with the error surfaced). Withdraw/restore act on the returned `version`. Pass dataset_uuid.")]
+    async fn dataset_publish_state(&self, Parameters(param): Parameters<PublishStateParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_publish_state: uuid={}", param.dataset_uuid);
+        let v = sync::publish::dataset_publish_state(
+            self.app.state::<SettingsState>(),
+            param.dataset_uuid,
         )
         .await?;
         Ok(v.to_string())

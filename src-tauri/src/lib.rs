@@ -403,6 +403,8 @@ pub fn run() {
             // Owner-facing registry writes (sync-v2 §8.4 / §11.5): publish + withdraw/re-list.
             sync::publish::sync_publish_dataset_version,
             sync::publish::sync_set_dataset_availability,
+            // Owner publish-state read-back for the publish/withdraw UI (§14 phase 3 mirror).
+            sync::publish::dataset_publish_state,
             // Owner-facing changed-file transport (sync-v2 §7): incremental blob-store push.
             sync::blobpush::dataset_push_changed_files,
             // Desktop-hub → website mirror push (sync-v2 phase 4).
@@ -782,6 +784,8 @@ macro_rules! mobile_invoke_handler {
             // Owner-facing registry writes (sync-v2 §8.4 / §11.5): publish + withdraw/re-list.
             sync::publish::sync_publish_dataset_version,
             sync::publish::sync_set_dataset_availability,
+            // Owner publish-state read-back for the publish/withdraw UI (§14 phase 3 mirror).
+            sync::publish::dataset_publish_state,
             // Owner-facing changed-file transport (sync-v2 §7): incremental blob-store push.
             sync::blobpush::dataset_push_changed_files,
             sync::client::sync_hub_kind,

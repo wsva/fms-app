@@ -24,13 +24,16 @@
 //!
 //! Compiled on **all platforms** (reqwest + rusqlite only, like `upload.rs`) — a
 //! mobile client may publish what it uploaded. Pure addition: nothing here is reached
-//! by the round, writeback, pull, upload, or availability-consumption paths.
+//! by the round, writeback, pull, or availability-consumption paths; the owner
+//! publish-state read below deliberately *reads* the upload-state table `upload.rs`
+//! owns (its helpers), never the upload path itself.
 
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::State;
 
+use crate::datasets;
 use crate::settings::SettingsState;
 
 /// Website route that promotes a version to `current_version` (§8.4).
@@ -183,6 +186,13 @@ pub async fn sync_publish_dataset_version(
     }
     let body = publish_body(&uuid, version, visibility.as_deref(), tag_uuids.as_deref());
     let rj = post_website_json(&settings, PUBLISH_PATH, body).await?;
+    // The echo's `current_version` is the authoritative pin; stamp it into this
+    // device's upload row (the only pin record — no REST route serves it back).
+    if let Some(cv) = rj["current_version"].as_i64() {
+        if let Ok(conn) = datasets::dictation::open_app_db(&settings) {
+            super::upload::record_publish_echo(&conn, &uuid, cv);
+        }
+    }
     log::info!(
         "[sync] published dataset '{uuid}' to version {}",
         rj["current_version"].as_i64().unwrap_or(0)
@@ -214,6 +224,66 @@ pub async fn sync_set_dataset_availability(
         if available { "available" } else { "withdrawn" }
     );
     Ok(rj)
+}
+
+/// Map the explicit-version registry manifest read's status onto the owner view:
+/// 200 = live and served, 410 = taken down (bytes kept, §11.5), anything else is
+/// `unknown` — never guessed (house rule of the availability consumer's mapping).
+fn publish_state_of(status: u16) -> &'static str {
+    match status {
+        200 => "live",
+        410 => "withdrawn",
+        _ => "unknown",
+    }
+}
+
+/// Read back one dataset's cloud publish state for the owner surface — the mirror
+/// of the website's per-card Publish/Withdraw/Restore. The pin itself is only
+/// observable through the upload/publish echoes (`upload.rs`'s `dataset_upload_state`
+/// table), so this reads the stored pin and probes its *live* availability with the
+/// same explicit-version registry read the consumption half uses: 200 → `live`,
+/// 410 → `withdrawn`, 404 → `not_published` (pin references a missing row), other
+/// → `unknown` with the error surfaced. A dataset never published (no pin) answers
+/// without touching the network. Read-only; needs the logged-in account (the pin
+/// list is the owner's own state, so a missing token is a hard, actionable error).
+#[tauri::command]
+pub async fn dataset_publish_state(
+    settings: State<'_, SettingsState>,
+    dataset_uuid: String,
+) -> Result<Value, String> {
+    let uuid = check_uuid(&dataset_uuid)?;
+    let token = crate::auth::get_access_token(&settings)?;
+    let (pin, uploaded) = {
+        let conn = datasets::dictation::open_app_db(&settings)?;
+        super::upload::upload_publish_pin(&conn, &uuid)
+    };
+    if pin < 1 {
+        return Ok(json!({ "uuid": uuid, "state": "not_published", "version": Value::Null, "uploaded_version": uploaded }));
+    }
+    let url = format!(
+        "{}/api/v1/registry/{}/manifest?version={}",
+        crate::auth::base_url(),
+        super::client::qenc(&uuid),
+        pin
+    );
+    let client = crate::auth::hub_client_builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let status = match client.get(&url).bearer_auth(&token).send().await {
+        Ok(resp) => resp.status().as_u16(),
+        Err(e) => {
+            return Ok(json!({ "uuid": uuid, "state": "unknown", "version": pin, "uploaded_version": uploaded, "error": format!("cannot reach the registry: {e}") }));
+        }
+    };
+    let state = if status == 404 { "not_published" } else { publish_state_of(status) };
+    Ok(json!({
+        "uuid": uuid,
+        "state": state,
+        "version": if state == "not_published" { Value::Null } else { json!(pin) },
+        "uploaded_version": uploaded,
+        "http_status": status,
+    }))
 }
 
 #[cfg(test)]
@@ -270,5 +340,15 @@ mod tests {
         assert!(check_version(1).is_ok());
         assert!(check_version(0).is_err());
         assert!(check_version(-2).is_err());
+    }
+
+    #[test]
+    fn publish_state_of_maps_only_200_and_410() {
+        assert_eq!(publish_state_of(200), "live");
+        assert_eq!(publish_state_of(410), "withdrawn");
+        // A transient/auth/server status is never guessed into a settled state.
+        assert_eq!(publish_state_of(401), "unknown");
+        assert_eq!(publish_state_of(404), "unknown");
+        assert_eq!(publish_state_of(500), "unknown");
     }
 }

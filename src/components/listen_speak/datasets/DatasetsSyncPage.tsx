@@ -176,6 +176,15 @@ interface UploadStateEntry {
   archive_sha256: string;
   archive_size: string;
   uploaded_at: string;
+  current_version?: number | null;
+  published_at?: string;
+}
+
+/** One dataset's cloud publish state, read back by `dataset_publish_state`. */
+interface PublishStateEntry {
+  state: string; // not_published | live | withdrawn | unknown
+  version?: number | null;
+  error?: string;
 }
 
 // Subset of the global settings this page needs (mirrors settings.rs).
@@ -233,6 +242,12 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   const [uploadTarget, setUploadTarget] = useState<LocalDataset | null>(null);
   const [uploadVisibility, setUploadVisibility] = useState<string>("private");
   const [needsSignIn, setNeedsSignIn] = useState(false);
+
+  // Owner publish/withdraw surface (§8.4/§11.5 mirror). `publishState` holds each
+  // uploaded dataset's live cloud state (probed read-back), `publishBusy` the uuid
+  // with an in-flight publish/withdraw/restore. Only shown on the website hub.
+  const [publishState, setPublishState] = useState<Record<string, PublishStateEntry>>({});
+  const [publishBusy, setPublishBusy] = useState<string>("");
 
   // Aggregate sync status (§3.5) — the single source for role, cluster, hub
   // reachability, per-dataset state, and queued/pending counts. Read-only; the
@@ -294,6 +309,27 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   // Load the website-upload surface: every local dataset (candidate) plus what
   // this device has already pushed. Cheap and read-only; harmless on LAN (the
   // Upload UI itself is gated on `isWebsite`).
+  // Probe `dataset_publish_state` for the given uploaded datasets and merge the
+  // results into `publishState`. Best-effort: a per-dataset failure (e.g. a
+  // logged-out account) records an `unknown` entry rather than throwing.
+  const loadPublishStates = useCallback(async (uuids: string[]) => {
+    if (!isTauri() || uuids.length === 0) return;
+    const next: Record<string, PublishStateEntry> = {};
+    await Promise.all(
+      uuids.map(async (uuid) => {
+        try {
+          const r = await invoke<PublishStateEntry & { uuid: string }>("dataset_publish_state", {
+            datasetUuid: uuid,
+          });
+          next[uuid] = { state: r.state, version: r.version, error: r.error };
+        } catch (e) {
+          next[uuid] = { state: "unknown", error: String(e) };
+        }
+      }),
+    );
+    setPublishState((prev) => ({ ...prev, ...next }));
+  }, []);
+
   const loadUploadSurface = useCallback(async () => {
     if (!isTauri()) return;
     try {
@@ -305,10 +341,13 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       const map: Record<string, UploadStateEntry> = {};
       for (const s of states) map[s.dataset_uuid] = s;
       setUploadState(map);
+      // Refresh the cloud publish state of every dataset this device has ever
+      // uploaded, in parallel (cheap Bearer GETs).
+      loadPublishStates(Object.keys(map));
     } catch (e) {
       logError(`Failed to load upload surface: ${String(e)}`, "datasets");
     }
-  }, []);
+  }, [loadPublishStates]);
 
   const fetchPcDatasets = useCallback(async () => {
     if (!pcUrl) {
@@ -594,6 +633,62 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       }
     } finally {
       finish();
+    }
+  }
+
+  // ---- Owner publish / withdraw / restore (§8.4 / §11.5) ----------------
+
+  // Promote the newest uploaded version to the live pin (POST /api/v1/publish,
+  // version omitted = newest uploaded). Additive, so no confirm gate.
+  async function handlePublish(ds: LocalDataset) {
+    setPublishBusy(ds.uuid);
+    setMessage("");
+    try {
+      const res = await invoke<{ current_version?: number }>("sync_publish_dataset_version", {
+        uuid: ds.uuid,
+      });
+      setMessage(`Published “${ds.name}” v${res?.current_version ?? "?"}.`);
+    } catch (e) {
+      setMessage(`Publish failed: ${String(e)}`);
+    } finally {
+      setPublishBusy("");
+      await loadPublishStates([ds.uuid]);
+      loadUploadSurface();
+    }
+  }
+
+  // Take the pinned version down (POST /api/v1/publish/available=false) — a
+  // §11.5 takedown: fresh reads 410 without deleting bytes. Confirm-gated (it is
+  // destructive to subscribers' next check).
+  async function handleWithdraw(ds: LocalDataset, version: number) {
+    if (!confirm(`Withdraw v${version} of “${ds.name}” from the cloud? Its downloads will report it withdrawn (the stored bytes are kept).`)) return;
+    setPublishBusy(ds.uuid);
+    setMessage("");
+    try {
+      await invoke("sync_set_dataset_availability", { uuid: ds.uuid, version, available: false });
+      setMessage(`Withdrew “${ds.name}” v${version}.`);
+    } catch (e) {
+      setMessage(`Withdraw failed: ${String(e)}`);
+    } finally {
+      setPublishBusy("");
+      await loadPublishStates([ds.uuid]);
+      loadUploadSurface();
+    }
+  }
+
+  // Restore a withdrawn version (available=true). Additive, no confirm.
+  async function handleRestore(ds: LocalDataset, version: number) {
+    setPublishBusy(ds.uuid);
+    setMessage("");
+    try {
+      await invoke("sync_set_dataset_availability", { uuid: ds.uuid, version, available: true });
+      setMessage(`Restored “${ds.name}” v${version}.`);
+    } catch (e) {
+      setMessage(`Restore failed: ${String(e)}`);
+    } finally {
+      setPublishBusy("");
+      await loadPublishStates([ds.uuid]);
+      loadUploadSurface();
     }
   }
 
@@ -1163,6 +1258,49 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
                             </span>
                           </div>
                         )}
+                        {done && (() => {
+                          const ps = publishState[ds.uuid];
+                          const busy = publishBusy === ds.uuid;
+                          const state = ps?.state ?? "not_published";
+                          const ver = ps?.version ?? null;
+                          return (
+                            <div className="flex items-center justify-between gap-2 pt-2 mt-1 border-t border-border-default">
+                              {state === "live" ? (
+                                <span className="text-xs text-green-600 dark:text-green-400 truncate">Live v{ver}</span>
+                              ) : state === "withdrawn" ? (
+                                <span className="text-xs text-red-500 truncate" title={ps?.error}>v{ver} taken down</span>
+                              ) : state === "unknown" ? (
+                                <span className="text-xs text-text-tertiary truncate" title={ps?.error}>Cloud state unknown</span>
+                              ) : (
+                                <span className="text-xs text-text-tertiary truncate">Not published</span>
+                              )}
+                              <div className="flex items-center gap-2 shrink-0">
+                                {(state === "live" || state === "withdrawn") && (
+                                  <button
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md border border-border-default hover:bg-bg-hover disabled:opacity-50"
+                                    onClick={() => (state === "live" ? handleWithdraw(ds, ver as number) : handleRestore(ds, ver as number))}
+                                    disabled={busy || ver == null}
+                                    title={state === "live" ? "Take this version down (bytes kept)" : "Restore this version"}
+                                  >
+                                    {busy ? <Loader2 size={12} className="animate-spin" /> : null}
+                                    {busy ? "Working…" : state === "live" ? "Withdraw" : "Restore"}
+                                  </button>
+                                )}
+                                {(state === "not_published" || state === "unknown") && (
+                                  <button
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50"
+                                    onClick={() => handlePublish(ds)}
+                                    disabled={busy}
+                                    title="Publish the newest uploaded version to the cloud"
+                                  >
+                                    {busy ? <Loader2 size={12} className="animate-spin" /> : null}
+                                    {busy ? "Publishing…" : "Publish"}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     );
                   })
