@@ -53,15 +53,16 @@ pub(crate) async fn fetch_catalog(settings: &SettingsState) -> Result<Vec<Value>
     Ok(v.as_array().cloned().unwrap_or_default())
 }
 
-/// `GET /datasets/{uuid}/manifest` — the hub's current non-DB `overall_hash`.
-pub(crate) async fn fetch_manifest_hash(settings: &SettingsState, uuid: &str) -> Result<String, String> {
-    let v = signed_get_json(
-        settings,
-        &format!("/api/v1/datasets/{uuid}/manifest"),
-        "",
-    )
-    .await?;
-    Ok(v["overall_hash"].as_str().unwrap_or("").to_string())
+/// `GET /datasets/{uuid}/manifest` — the *whole* live manifest, not just the hash.
+/// The incremental file refresh reads `files: { rel_path -> sha256 }` out of this
+/// (both hubs mint the identical per-file map alongside `overall_hash`; a registry
+/// read returns `files: {}`, which the caller treats as "cannot diff — snapshot").
+/// Live route only: this is never used to refresh a pinned registry copy (INV-8).
+pub(crate) async fn fetch_manifest_full(
+    settings: &SettingsState,
+    uuid: &str,
+) -> Result<Value, String> {
+    signed_get_json(settings, &format!("/api/v1/datasets/{uuid}/manifest"), "").await
 }
 
 /// Apply one pulled `sync_log` entry to the local dataset DB by dispatching to
@@ -794,26 +795,149 @@ async fn pull_and_apply_dataset_journal(
 }
 
 /// Non-DB file drift for one dataset (media/vtt/etc. change the manifest hash,
-/// which the row log does not cover): fall back to one snapshot re-pull
-/// (§4.1). Shared by the LAN and cloud-hub branches after the journal pull.
+/// which the row log does not cover): refresh only the files that actually
+/// changed (sync-v2 §7 consumption) rather than re-pulling the whole archive,
+/// falling back to a snapshot when incremental is not applicable or fails. Shared
+/// by the LAN and cloud-hub branches after the journal pull.
+///
+/// Incremental applies to a *live*, writable copy — a LAN mirror or a website
+/// `cloud_hub` authority. A read-only `registry` adoption keeps the versioned
+/// whole-archive snapshot (a live-tree refresh would break the INV-8 pin, and the
+/// registry manifest carries no per-file map anyway). Any per-file failure falls
+/// back to the snapshot, so a copy always converges. The dataset DB is never
+/// touched here: `overall_hash` and the per-file map both exclude it, and the row
+/// journal owns DB content.
 async fn check_file_drift(
     app: AppHandle,
     settings: State<'_, SettingsState>,
     uuid: String,
     stored_hash: &str,
+    upstream_kind: &str,
     resynced: &mut Vec<String>,
     errors: &mut Vec<Value>,
 ) {
-    match fetch_manifest_hash(&settings, &uuid).await {
-        Ok(h) if !h.is_empty() && h != stored_hash => {
-            match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
-                Ok(_) => resynced.push(uuid),
-                Err(e) => errors.push(json!({ "uuid": uuid, "stage": "files", "error": e })),
+    let manifest = match fetch_manifest_full(&settings, &uuid).await {
+        Ok(m) => m,
+        Err(e) => {
+            errors.push(json!({ "uuid": uuid, "stage": "manifest", "error": e }));
+            return;
+        }
+    };
+    let hash = manifest["overall_hash"].as_str().unwrap_or("").to_string();
+    if hash.is_empty() || hash == stored_hash {
+        return; // no drift (or an unreadable hash — leave the copy as is)
+    }
+
+    // Live, writable copy carrying a per-file map: move only the changed bytes.
+    if upstream_kind != "registry" {
+        let hub_files = super::filediff::parse_files(&manifest["files"]);
+        if !hub_files.is_empty() {
+            match incremental_refresh(&app, settings.clone(), &uuid, &hub_files).await {
+                Ok(true) => {
+                    // Reconciled file-by-file: adopt the hub's new content hash so
+                    // the next round sees no drift. Reopen the DB after all awaits.
+                    if let Ok(conn) = datasets::dictation::open_app_db(&settings) {
+                        let _ = ensure_sync_tables(&conn);
+                        let _ = conn.execute(
+                            "UPDATE dataset_sync_state SET overall_hash = ?1, \
+                                synced_at = datetime('now') WHERE dataset_uuid = ?2",
+                            params![&hash, &uuid],
+                        );
+                    }
+                    resynced.push(uuid);
+                    return;
+                }
+                // Ok(false): nothing to apply though the hash differed; Err: a
+                // per-file failure. Both fall through to the whole-archive path.
+                Ok(false) => {}
+                Err(e) => log::warn!(
+                    "[sync] incremental file refresh failed for {uuid} ({e}); \
+                     falling back to a full snapshot"
+                ),
             }
         }
-        Err(e) => errors.push(json!({ "uuid": uuid, "stage": "manifest", "error": e })),
-        _ => {}
     }
+
+    // Fallback: whole-archive snapshot (registry, empty per-file map, or error).
+    match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
+        Ok(_) => resynced.push(uuid),
+        Err(e) => errors.push(json!({ "uuid": uuid, "stage": "files", "error": e })),
+    }
+}
+
+/// Bring one local dataset's non-DB live tree in line with the hub's per-file
+/// hashes: delete files gone upstream, then fetch + verify + atomically replace
+/// the ones that changed, leaving the rest untouched. Each write is atomic
+/// (tmp + rename), so no file is ever left half-written; the whole step is
+/// idempotent by hash, so a re-run after a partial failure converges. Returns
+/// `Ok(true)` when it fully reconciled, `Ok(false)` when there was nothing to do
+/// (the caller may still snapshot), and `Err` on the first failure — the caller
+/// then falls back to a whole-archive snapshot. Fetched bytes are trusted only
+/// after their `sha256` is recomputed and matched against the manifest hash.
+async fn incremental_refresh(
+    app: &AppHandle,
+    settings: State<'_, SettingsState>,
+    uuid: &str,
+    hub_files: &std::collections::BTreeMap<String, String>,
+) -> Result<bool, String> {
+    let (dir, _ty) = datasets::find_dataset_dir_typed(settings.inner(), uuid)?;
+    if datasets::is_under_download_root(settings.inner(), &dir) {
+        return Err("copy is under the read-only download root".to_string());
+    }
+    let local = crate::sync::blobpush::content_tree_hashes(&dir)?;
+    let plan = super::filediff::plan(&local, hub_files);
+    if plan.is_empty() {
+        return Ok(false);
+    }
+
+    // A `/`-separated rel path becomes a native path under `dir` (component-push,
+    // so Windows gets backslashes and a traversal-free join).
+    let to_abs = |rel: &str| {
+        let mut p = dir.clone();
+        for seg in rel.split('/') {
+            p.push(seg);
+        }
+        p
+    };
+
+    // Removals first: a path the hub no longer lists is gone from the live tree.
+    for rel in &plan.delete {
+        let _ = std::fs::remove_file(to_abs(rel)); // best-effort: ignore already-gone
+    }
+
+    // Fetch the changed set. Per-file: one failed fetch or a hash mismatch aborts
+    // the whole step (Err) so the caller re-syncs the full archive — a half-updated
+    // tree is always finished off by the snapshot path.
+    for rel in &plan.fetch {
+        let want = &hub_files[rel];
+        let bytes = pc_fetch_file(settings.clone(), uuid.to_string(), rel.clone(), None)
+            .await
+            .map_err(|e| format!("fetch '{rel}': {e}"))?;
+        if crate::sync::blobpush::sha256_of_bytes(&bytes) != *want {
+            return Err(format!("sha mismatch for '{rel}'"));
+        }
+        let abs = to_abs(rel);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir '{rel}': {e}"))?;
+        }
+        let mut tmp_os = abs.clone().into_os_string();
+        tmp_os.push(format!(".sync-tmp-{}", std::process::id()));
+        let tmp = std::path::PathBuf::from(tmp_os);
+        if let Err(e) = std::fs::write(&tmp, &bytes) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("write '{rel}': {e}"));
+        }
+        if let Err(e) = std::fs::rename(&tmp, &abs) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("rename '{rel}': {e}"));
+        }
+    }
+
+    let _ = app.emit(
+        "dataset-sync-progress",
+        json!({ "uuid": uuid, "phase": "files", "fetched": plan.fetch.len(), "deleted": plan.delete.len() }),
+    );
+    Ok(true)
 }
 
 /// The counts of one manual, single-deck journal sync (the card-sync surface).
@@ -1118,6 +1242,7 @@ pub async fn sync_round_inner(
                         settings.clone(),
                         uuid.clone(),
                         &stored_hash,
+                        &upstream_kind,
                         &mut resynced,
                         &mut errors,
                     )
@@ -1127,30 +1252,28 @@ pub async fn sync_round_inner(
             }
 
             // File drift only (mirror-only account, or a non-cloud-hub upstream):
-            // the website's manifest hash covers the same frozen non-DB recipe
-            // (§4.1). DB rows for a cloud-hub deck went through the journal above;
-            // a desktop-hub deck's rows go through the LAN journal in its own round.
+            // the website's manifest covers the same frozen non-DB recipe (§4.1),
+            // so `check_file_drift` diffs the per-file map and moves only changed
+            // bytes — falling back to a whole-archive snapshot for a `registry`
+            // copy (INV-8) or when a fetch fails. DB rows for a cloud-hub deck went
+            // through the journal above; a desktop-hub deck's rows go through the
+            // LAN journal in its own round. No usable cursor/hash → full snapshot.
             if !cursor_is_hash {
                 match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
                     Ok(_) => resynced.push(uuid.clone()),
                     Err(e) => errors.push(json!({ "uuid": uuid, "stage": "snapshot", "error": e })),
                 }
             } else {
-                match fetch_manifest_hash(&settings, &uuid).await {
-                    Ok(h) if !h.is_empty() && h != stored_hash => {
-                        match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await
-                        {
-                            Ok(_) => resynced.push(uuid.clone()),
-                            Err(e) => {
-                                errors.push(json!({ "uuid": uuid, "stage": "snapshot", "error": e }))
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        errors.push(json!({ "uuid": uuid, "stage": "manifest", "error": e }))
-                    }
-                    _ => {}
-                }
+                check_file_drift(
+                    app.clone(),
+                    settings.clone(),
+                    uuid.clone(),
+                    &stored_hash,
+                    &upstream_kind,
+                    &mut resynced,
+                    &mut errors,
+                )
+                .await;
             }
             // Catalog rows absent locally are left to the explicit per-dataset
             // Download — a round never auto-pulls media the user hasn't adopted.
@@ -1173,12 +1296,14 @@ pub async fn sync_round_inner(
         .await;
         if !consumed {
             // 4. Non-DB file drift (media/vtt/etc. change the manifest hash, which
-            //    the row log does not cover): fall back to one snapshot re-pull.
+            //    the row log does not cover): move only the changed bytes, falling
+            //    back to one snapshot re-pull when incremental cannot apply.
             check_file_drift(
                 app.clone(),
                 settings.clone(),
                 uuid.clone(),
                 &stored_hash,
+                &upstream_kind,
                 &mut resynced,
                 &mut errors,
             )

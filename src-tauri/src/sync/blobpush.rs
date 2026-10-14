@@ -34,6 +34,7 @@
 //! by the round, writeback, pull, upload, or availability-consumption paths.
 //! Compiled on **all platforms** (reqwest + sha2 + serde_json only, like `upload.rs`).
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -122,6 +123,29 @@ fn build_refs(dir: &Path) -> Result<Vec<Ref>, String> {
         refs.push(Ref { path: rel, sha, size, abs });
     }
     Ok(refs)
+}
+
+/// The live tree as `{ rel_path -> sha256 }` — the pull side's view of the same
+/// content [`build_refs`] hands the push side. Shares this module's `collect_tree`
+/// walk, `is_db_file` exclusion, and `hash_and_size` recipe, so a follower's local
+/// diff and a producer's push can never disagree on what "content" means, and both
+/// match the hub manifest's byte-equal hash (§13). Used by the round's incremental
+/// file refresh (`sync/client/round.rs`).
+pub(crate) fn content_tree_hashes(dir: &Path) -> Result<BTreeMap<String, String>, String> {
+    let mut map = BTreeMap::new();
+    for (rel, abs) in collect_tree(dir) {
+        let (sha, _size) = hash_and_size(&abs)?;
+        map.insert(rel, sha);
+    }
+    Ok(map)
+}
+
+/// Hex sha256 of in-memory bytes — the trust-but-verify check on a freshly
+/// fetched file, identical to what [`hash_and_size`] produces for on-disk ones.
+pub(crate) fn sha256_of_bytes(bytes: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    format!("{:x}", h.finalize())
 }
 
 /// The tree as `[{path, sha256, size}]` — the phase-1 `files` array and the

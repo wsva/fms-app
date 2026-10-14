@@ -102,6 +102,7 @@ pub(crate) fn resolve_pc_url(settings: &SettingsState, override_url: Option<&str
 pub(crate) mod auth;
 pub(crate) mod availability;
 pub(crate) mod cluster;
+pub(crate) mod filediff;
 pub(crate) mod sync_state;
 pub(crate) mod writeback;
 pub(crate) mod snapshot;
