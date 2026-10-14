@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
+import { useAuth } from "@/hooks/useAuth";
 import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog, Upload, LogIn, Archive } from "lucide-react";
 import { logError } from "@/lib/logger";
 
@@ -264,6 +265,17 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   // The website hub is the only origin that accepts dataset uploads and speaks
   // OAuth (no pairing/cluster/app-data). Defaults false while status loads.
   const isWebsite = status?.hub_kind === "website";
+
+  // Publishing to the cloud is an OWNER-SIDE operation orthogonal to the
+  // workspace's LAN role and its `pc_url` (which describes an upstream to sync
+  // FROM, not a destination to publish TO). The backend `send_archive`,
+  // `sync_mirror_push`, `sync_publish_dataset_version`, and
+  // `dataset_push_changed_files` all target `auth::base_url()` directly, so
+  // the UI gate is "is there a logged-in account?" — not `isWebsite`. That
+  // lets a Hub with no upstream (LAN-only or none) still publish its own
+  // datasets through the Datasets Sync page.
+  const { authUser } = useAuth();
+  const canPublish = authUser != null;
 
   // ---- Loaders ----------------------------------------------------------
 
@@ -887,18 +899,25 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       <div className="flex items-center gap-3 shrink-0 flex-wrap">
         <h1 className="text-[1.3em] font-bold">Datasets Sync</h1>
         <div className="ml-auto flex items-center gap-2 flex-wrap">
-          {/* One round moves everything it can in both directions (push queue +
-              pull deltas), replacing the old per-dataset Pull / Upload buttons.
-              Follower-only — a hub serves data, it doesn't pull. */}
-          {!isHub && (
+          {/* One round moves everything it can in both directions (writeback
+              push + pull deltas + step-7 mirror/file drain), replacing the old
+              per-dataset Pull / Upload buttons. Shown for followers always
+              (disabled until a hub is configured), and for any Hub that has
+              either a pc_url to talk to OR a logged-in account — a Hub with
+              only auth triggers the cloud-only branch of `sync_round_inner`,
+              which runs the mirror + changed-file + inbox legs against
+              `auth::base_url()`. A pure-LAN hub with no upstream AND no
+              sign-in is the one case where a round is meaningless, so we
+              hide it rather than show a dead button. */}
+          {(!isHub || pcUrl || canPublish) && (
             <button
               className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50"
               onClick={handleSyncNow}
-              disabled={syncing || !pcUrl}
-              title="Run one incremental sync round (push + pull)"
+              disabled={syncing || (!isHub && !pcUrl)}
+              title={isHub ? "Run a sync round: drain this hub's journal + changed files to the cloud" : "Run one incremental sync round (push + pull)"}
             >
               {syncing ? <Loader2 size={14} className="animate-spin" /> : <ArrowUpDown size={14} />}
-              {syncing ? "Syncing…" : "Sync now"}
+              {syncing ? "Syncing…" : isHub ? "Push to cloud" : "Sync now"}
             </button>
           )}
           <button
@@ -1047,18 +1066,25 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
         </div>
       )}
 
+      {/* One outer scroll column so hub notice, follower pull content, and the
+          owner-facing website-upload section coexist vertically. `isHub` (this
+          workspace's role — serves LAN followers) and `isWebsite` (the upstream
+          is the cloud) are ORTHOGONAL: a Hub that also has the website as its
+          upstream can publish its own local datasets, so hiding the whole page
+          body for a Hub was wrong. */}
+      <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4">
       {isHub ? (
-        /* Hub workspace: it serves datasets, it doesn't pull — hide the whole
-           follower surface and point the user at Devices & Hub. */
-        <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
-          <ServerCog size={40} className="text-text-tertiary" />
+        <div className="shrink-0 flex flex-col items-center justify-center gap-2 p-4 text-center rounded-lg border border-border-default bg-bg-card">
+          <ServerCog size={28} className="text-text-tertiary" />
           <p className="text-text-secondary max-w-md">
             This workspace is the sync <span className="font-semibold">hub</span>. It serves
-            datasets to follower devices — only followers can use this page to pull data.
+            datasets to follower devices — the pull controls below are hidden (only
+            followers pull).
           </p>
           <p className="text-sm text-text-tertiary max-w-md">
-            To sync datasets into this machine, designate it as a follower on the Devices &amp; Hub
-            page first. Manage paired devices and the hub role there too.
+            To sync datasets <em>into</em> this machine, designate it as a follower on the
+            Devices &amp; Hub page first. Publishing to your cloud account (below, when
+            you're signed in) works either way —{canPublish ? " and 'Push to cloud' above drains this hub's local edits directly to it." : " sign in via Settings › Account to enable that."}
           </p>
           {onNavigate && (
             <button
@@ -1121,7 +1147,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
             </div>
           )}
 
-          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4">
+          <div className="flex flex-col gap-4">
             {pcDatasets.length === 0 && !loadingList && (
               <p className="text-sm text-text-tertiary">No datasets available on the source PC.</p>
             )}
@@ -1199,119 +1225,127 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
               </div>
             )}
 
-            {/* Website-hub upload (T2). Local datasets across every type are the
-                upload candidates — including copies the hub catalog doesn't list
-                yet. Gated to the website origin; a LAN hub never accepts uploads. */}
-            {isWebsite && (
-              <div className="flex flex-col gap-2">
-                <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
-                  Upload to website hub
-                </p>
-                <p className="text-xs text-text-tertiary">
-                  Subscribing to a shared dataset is browser-only on the website, so a shared
-                  dataset shows up in your catalog here only after you subscribe to it on the
-                  website market page.
-                </p>
-                {localDatasets.length === 0 ? (
-                  <p className="text-sm text-text-tertiary px-1">No local datasets to upload.</p>
-                ) : (
-                  localDatasets.map((ds) => {
-                    const up = uploadProgress[ds.uuid];
-                    const done = uploadState[ds.uuid];
-                    const pct =
-                      up && up.phase === "upload" && up.total
-                        ? Math.min(100, Math.round((up.sent / up.total) * 100))
-                        : 0;
-                    return (
-                      <div
-                        key={ds.uuid}
-                        className="flex flex-col gap-2 p-3 rounded-lg border border-border-default bg-bg-card"
-                      >
-                        <div className="flex items-center gap-3">
-                          <div className="flex flex-col min-w-0 flex-1">
-                            <span className="font-medium truncate">{ds.name}</span>
-                            <span className="text-xs text-text-tertiary">
-                              {ds.dataset_type}
-                              {done ? ` · uploaded v${done.version} (${done.uploaded_at})` : ""}
-                            </span>
-                          </div>
-                          <button
-                            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
-                            onClick={() => openUploadDialog(ds)}
-                            disabled={!!uploadingUuid}
-                            title="Pack this local dataset and upload it to the website hub"
-                          >
-                            <Upload size={14} />
-                            {uploadingUuid === ds.uuid ? "Uploading…" : done ? "Re-upload" : "Upload"}
-                          </button>
-                        </div>
-                        {up && up.phase !== "done" && (
-                          <div className="flex flex-col gap-1">
-                            <div className="h-1.5 w-full rounded bg-bg-hover overflow-hidden">
-                              <div
-                                className="h-full bg-accent-bg transition-[width]"
-                                style={{ width: up.phase === "pack" ? "40%" : `${pct}%` }}
-                              />
-                            </div>
-                            <span className="text-xs text-text-tertiary">
-                              {up.phase === "pack" ? "Packing…" : `Uploading… ${pct}%`}
-                            </span>
-                          </div>
-                        )}
-                        {done && (() => {
-                          const ps = publishState[ds.uuid];
-                          const busy = publishBusy === ds.uuid;
-                          const state = ps?.state ?? "not_published";
-                          const ver = ps?.version ?? null;
-                          return (
-                            <div className="flex items-center justify-between gap-2 pt-2 mt-1 border-t border-border-default">
-                              {state === "live" ? (
-                                <span className="text-xs text-green-600 dark:text-green-400 truncate">Live v{ver}</span>
-                              ) : state === "withdrawn" ? (
-                                <span className="text-xs text-red-500 truncate" title={ps?.error}>v{ver} taken down</span>
-                              ) : state === "unknown" ? (
-                                <span className="text-xs text-text-tertiary truncate" title={ps?.error}>Cloud state unknown</span>
-                              ) : (
-                                <span className="text-xs text-text-tertiary truncate">Not published</span>
-                              )}
-                              <div className="flex items-center gap-2 shrink-0">
-                                {(state === "live" || state === "withdrawn") && (
-                                  <button
-                                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md border border-border-default hover:bg-bg-hover disabled:opacity-50"
-                                    onClick={() => (state === "live" ? handleWithdraw(ds, ver as number) : handleRestore(ds, ver as number))}
-                                    disabled={busy || ver == null}
-                                    title={state === "live" ? "Take this version down (bytes kept)" : "Restore this version"}
-                                  >
-                                    {busy ? <Loader2 size={12} className="animate-spin" /> : null}
-                                    {busy ? "Working…" : state === "live" ? "Withdraw" : "Restore"}
-                                  </button>
-                                )}
-                                {(state === "not_published" || state === "unknown") && (
-                                  <button
-                                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50"
-                                    onClick={() => handlePublish(ds)}
-                                    disabled={busy}
-                                    title="Publish the newest uploaded version to the cloud"
-                                  >
-                                    {busy ? <Loader2 size={12} className="animate-spin" /> : null}
-                                    {busy ? "Publishing…" : "Publish"}
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })()}
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            )}
           </div>
         </>
       )}
         </>
       )}
+
+      {/* Owner-side cloud publish. Local datasets across every type are the
+          upload candidates — including copies the hub catalog doesn't list
+          yet. Gated on **`canPublish`** (a logged-in account), not `isWebsite`:
+          `dataset_export_upload`, `sync_publish_dataset_version`, and
+          `sync_set_dataset_availability` all target `auth::base_url()` directly,
+          so any workspace with a signed-in user can push its own datasets to
+          its cloud account, whether follower or hub, whether or not a `pc_url`
+          is configured. Renders as a top-level sibling of the hub/follower
+          branch: publishing to the cloud is orthogonal to the sync role. */}
+      {canPublish && (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
+            Publish to cloud
+          </p>
+          <p className="text-xs text-text-tertiary">
+            Subscribing to a shared dataset is browser-only on the website, so a shared
+            dataset shows up in your catalog here only after you subscribe to it on the
+            website market page.
+          </p>
+          {localDatasets.length === 0 ? (
+            <p className="text-sm text-text-tertiary px-1">No local datasets to upload.</p>
+          ) : (
+            localDatasets.map((ds) => {
+              const up = uploadProgress[ds.uuid];
+              const done = uploadState[ds.uuid];
+              const pct =
+                up && up.phase === "upload" && up.total
+                  ? Math.min(100, Math.round((up.sent / up.total) * 100))
+                  : 0;
+              return (
+                <div
+                  key={ds.uuid}
+                  className="flex flex-col gap-2 p-3 rounded-lg border border-border-default bg-bg-card"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="flex flex-col min-w-0 flex-1">
+                      <span className="font-medium truncate">{ds.name}</span>
+                      <span className="text-xs text-text-tertiary">
+                        {ds.dataset_type}
+                        {done ? ` · uploaded v${done.version} (${done.uploaded_at})` : ""}
+                      </span>
+                    </div>
+                    <button
+                      className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
+                      onClick={() => openUploadDialog(ds)}
+                      disabled={!!uploadingUuid}
+                      title="Pack this local dataset and upload it to the website hub"
+                    >
+                      <Upload size={14} />
+                      {uploadingUuid === ds.uuid ? "Uploading…" : done ? "Re-upload" : "Upload"}
+                    </button>
+                  </div>
+                  {up && up.phase !== "done" && (
+                    <div className="flex flex-col gap-1">
+                      <div className="h-1.5 w-full rounded bg-bg-hover overflow-hidden">
+                        <div
+                          className="h-full bg-accent-bg transition-[width]"
+                          style={{ width: up.phase === "pack" ? "40%" : `${pct}%` }}
+                        />
+                      </div>
+                      <span className="text-xs text-text-tertiary">
+                        {up.phase === "pack" ? "Packing…" : `Uploading… ${pct}%`}
+                      </span>
+                    </div>
+                  )}
+                  {done && (() => {
+                    const ps = publishState[ds.uuid];
+                    const busy = publishBusy === ds.uuid;
+                    const state = ps?.state ?? "not_published";
+                    const ver = ps?.version ?? null;
+                    return (
+                      <div className="flex items-center justify-between gap-2 pt-2 mt-1 border-t border-border-default">
+                        {state === "live" ? (
+                          <span className="text-xs text-green-600 dark:text-green-400 truncate">Live v{ver}</span>
+                        ) : state === "withdrawn" ? (
+                          <span className="text-xs text-red-500 truncate" title={ps?.error}>v{ver} taken down</span>
+                        ) : state === "unknown" ? (
+                          <span className="text-xs text-text-tertiary truncate" title={ps?.error}>Cloud state unknown</span>
+                        ) : (
+                          <span className="text-xs text-text-tertiary truncate">Not published</span>
+                        )}
+                        <div className="flex items-center gap-2 shrink-0">
+                          {(state === "live" || state === "withdrawn") && (
+                            <button
+                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md border border-border-default hover:bg-bg-hover disabled:opacity-50"
+                              onClick={() => (state === "live" ? handleWithdraw(ds, ver as number) : handleRestore(ds, ver as number))}
+                              disabled={busy || ver == null}
+                              title={state === "live" ? "Take this version down (bytes kept)" : "Restore this version"}
+                            >
+                              {busy ? <Loader2 size={12} className="animate-spin" /> : null}
+                              {busy ? "Working…" : state === "live" ? "Withdraw" : "Restore"}
+                            </button>
+                          )}
+                          {(state === "not_published" || state === "unknown") && (
+                            <button
+                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50"
+                              onClick={() => handlePublish(ds)}
+                              disabled={busy}
+                              title="Publish the newest uploaded version to the cloud"
+                            >
+                              {busy ? <Loader2 size={12} className="animate-spin" /> : null}
+                              {busy ? "Publishing…" : "Publish"}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+      </div>
 
       {/* Upload dialog: pick a visibility, then pack + stream. Blocks closing
           while an upload is in flight so the running task is never orphaned. */}

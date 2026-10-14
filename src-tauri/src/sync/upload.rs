@@ -351,14 +351,14 @@ async fn send_archive(
     visibility: Option<&str>,
     tag_uuids: &[String],
 ) -> Result<Value, String> {
-    let base = pc_base(settings);
-    if base.is_empty() {
-        return Err("No hub configured. Set the PC address (or the website origin).".into());
-    }
-    if super::hub_kind(&base) != super::HubKind::Website {
-        return Err(format!("{base} does not serve dataset upload (website-hub only)"));
-    }
-    // One token store: a missing token is a hard error for a *write*.
+    // Target is the **account website** (`crate::auth::base_url()`), the same
+    // origin `sync_mirror_push`, `sync_publish_dataset_version`, and
+    // `dataset_push_changed_files` already use. Publishing to the cloud is an
+    // owner-side operation, orthogonal to the workspace's LAN `role` and its
+    // `pc_url` (which describes an upstream to sync FROM, not a destination
+    // to publish TO). This lets a Hub with no upstream still upload its own
+    // datasets. A missing OAuth token is a hard, actionable error (a write).
+    let base = crate::auth::base_url();
     let token = crate::auth::get_access_token(settings)?;
 
     let archive_bytes = std::fs::read(archive_path).map_err(|e| e.to_string())?;

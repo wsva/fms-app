@@ -1073,7 +1073,23 @@ pub async fn sync_round_inner(
     settings: State<'_, SettingsState>,
 ) -> Result<Value, String> {
     if pc_base(&settings).is_empty() {
-        return Err("No PC configured. Use Discover PC or set the PC address.".into());
+        // A Hub with no upstream and a logged-in account can still publish to
+        // the cloud — mirror/file/inbox legs all target `auth::base_url()`, not
+        // `pc_url`. That's the "cloud-only round" branch below. Anything else
+        // (follower with no upstream, or a hub with no token) has literally
+        // nothing to talk to, so error out with an actionable message.
+        let role_hub = settings.role() == "hub";
+        let has_token = crate::auth::get_access_token(&settings).is_ok();
+        if !(role_hub && has_token) {
+            return Err(if role_hub {
+                "Signed in required to sync a hub with no upstream — log in via Settings › Account, \
+                 or configure a PC address to sync through a LAN hub."
+                    .to_string()
+            } else {
+                "No PC configured. Use Discover PC or set the PC address.".to_string()
+            });
+        }
+        return run_cloud_only_round(&settings).await;
     }
     // Website hub (T4): it serves no row journal (`/changes`, `/app/changes`,
     // `/app/state` — dev guide §6), so one round is file-level only: catalog ->
@@ -1496,6 +1512,141 @@ pub async fn sync_round_inner(
     }
     // Persist for the status surface (§19.2): a failure to record must not fail
     // the round, so log at most and still return the result.
+    if let Ok(conn) = datasets::dictation::open_app_db(settings.inner()) {
+        let _ = ensure_sync_tables(&conn);
+        if let Err(e) = set_last_round(&conn, &result) {
+            log::warn!("[sync] could not persist last-round result: {e}");
+        }
+    }
+    Ok(result)
+}
+
+/// Round for a Hub with **no upstream PC configured** but a logged-in account:
+/// the pure "publish to cloud" path. Runs the same three legs step 7 of a
+/// normal round does (mirror + changed-files + inbox drain) — each already
+/// targets `crate::auth::base_url()`, not `pc_url` — but skips every LAN branch
+/// (no catalog fetch, no journal pull, no snapshot resync, no `@app` pull, no
+/// writeback push), because there is no LAN hub to talk to. Same output shape
+/// as a normal round so the status surface renders it uniformly; `hub_kind:
+/// "cloud_only"` and the pull/push counters stay at zero.
+async fn run_cloud_only_round(
+    settings: &State<'_, SettingsState>,
+) -> Result<Value, String> {
+    let mut errors: Vec<Value> = Vec::new();
+
+    // Whitelist for the file leg: only datasets we've ever uploaded (the blob
+    // route refuses an unknown uuid). The mirror + inbox legs read local state
+    // (`sync_log`, remote inbox) directly and need no such filter.
+    let owned_uuids: Vec<String> = datasets::dictation::open_app_db(settings.inner())
+        .and_then(|conn| {
+            let _ = ensure_sync_tables(&conn);
+            crate::sync::upload::upload_state_uuids(&conn)
+        })
+        .unwrap_or_default();
+
+    // Mirror leg (desktop-only: only a hub desktop journals dataset scopes).
+    #[cfg(feature = "desktop")]
+    let mut mirror_summary: Option<Value> = None;
+    #[cfg(feature = "desktop")]
+    {
+        match crate::sync::mirror::mirror_push_inner(settings.inner(), None, "hub").await {
+            Ok(v) => {
+                for e in v["errors"].as_array().cloned().unwrap_or_default() {
+                    errors.push(json!({
+                        "stage": "mirror_push",
+                        "scope": e["scope"],
+                        "error": e["error"],
+                    }));
+                }
+                let t = &v["totals"];
+                mirror_summary = Some(json!({
+                    "scopes": v["scopes"].as_array().map(|a| a.len()).unwrap_or(0),
+                    "pushed": t["pushed"].as_i64().unwrap_or(0),
+                    "deduped": t["deduped"].as_i64().unwrap_or(0),
+                    "refused": t["refused"].as_i64().unwrap_or(0),
+                }));
+            }
+            Err(e) => errors.push(json!({ "stage": "mirror_push", "error": e })),
+        }
+    }
+
+    // Changed-file leg: serial, each entry reconciles the live tree even at
+    // zero needed bytes (renames/deletions). `Connection` is !Send — the uuid
+    // list above was collected before any await.
+    let mut files_summary: Vec<Value> = Vec::new();
+    for uuid in &owned_uuids {
+        match crate::sync::blobpush::push_changed_files_inner(settings.inner(), uuid.clone()).await {
+            Ok(v) => files_summary.push(json!({
+                "uuid": uuid,
+                "total": v["total"],
+                "need": v["need"],
+                "uploaded": v["uploaded"],
+            })),
+            Err(e) => {
+                errors.push(json!({ "stage": "file_push", "uuid": uuid, "error": e }));
+            }
+        }
+    }
+
+    // Inbox drain leg (desktop-only): proposals the website parked for this hub
+    // (browser edits on a mirror dataset). Applies each through the same
+    // kernel the LAN writeback uses.
+    #[cfg(feature = "desktop")]
+    let mut inbox_summary: Option<Value> = None;
+    #[cfg(feature = "desktop")]
+    {
+        match crate::sync::inbox::drain_inner(settings, None).await {
+            Ok(v) => {
+                for e in v["errors"].as_array().cloned().unwrap_or_default() {
+                    errors.push(json!({
+                        "stage": "inbox_drain",
+                        "scope": e["scope"],
+                        "error": e["error"],
+                    }));
+                }
+                let t = &v["totals"];
+                inbox_summary = Some(json!({
+                    "scopes": v["scopes"].as_array().map(|a| a.len()).unwrap_or(0),
+                    "drained": t["drained"].as_i64().unwrap_or(0),
+                    "accepted": t["accepted"].as_i64().unwrap_or(0),
+                    "rejected": t["rejected"].as_i64().unwrap_or(0),
+                    "pending": t["pending"].as_i64().unwrap_or(0),
+                }));
+            }
+            Err(e) => errors.push(json!({ "stage": "inbox_drain", "error": e })),
+        }
+    }
+
+    let mut result = json!({
+        "status": if errors.is_empty() { "ok" } else { "partial" },
+        "hub_kind": "cloud_only",
+        "pushed": 0,
+        "held": 0,
+        "applied": 0,
+        "dropped_pending": 0,
+        "resynced": 0,
+        "pruned": 0,
+        "cards": null,
+        "history": null,
+        "errors": errors,
+    });
+    #[cfg(feature = "desktop")]
+    if let Some(s) = mirror_summary {
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("mirror_push".into(), s);
+        }
+    }
+    if !owned_uuids.is_empty() {
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("files_push".into(), json!(files_summary));
+        }
+    }
+    #[cfg(feature = "desktop")]
+    if let Some(s) = inbox_summary {
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("inbox_drain".into(), s);
+        }
+    }
     if let Ok(conn) = datasets::dictation::open_app_db(settings.inner()) {
         let _ = ensure_sync_tables(&conn);
         if let Err(e) = set_last_round(&conn, &result) {
