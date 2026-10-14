@@ -522,25 +522,27 @@ pub async fn sync_hub_kind(
 }
 
 /// `GET /api/v1/datasets/{uuid}/changes?after=S` — one incremental change-log
-/// page from the hub (§3.2/§3.3). The query string is signed verbatim (v2
-/// hardening). Returns the hub's `{ entries, pruned_up_to, hub_seq,
-/// resync_required }` JSON. A follower refuses this against a hub reporting an
-/// older `protocol_version` — enforced by the caller (Phase 4 round).
+/// page from the hub (§3.2/§3.3). Returns the hub's `{ entries, pruned_up_to,
+/// hub_seq, resync_required }` JSON.
 ///
 /// Passing [`crate::sync::change_log::APP_SCOPE`] as the uuid pulls the app-wide
 /// per-user journal from `GET /api/v1/app/changes` instead — same page shape, no
 /// dataset to resolve.
+///
+/// Auth is origin-selected by [`hub_get_json`] (`hub_request`): device-HMAC for a
+/// LAN hub (byte-identical to the old in-line signing) and Bearer for a website
+/// origin. Against a website this path exists only when the host advertises
+/// `dataset_journal` for the caller's account (phase 7b) — the round gates the
+/// call on [`dataset_journal_advertised`] and never asks for a mirror-only scope;
+/// an explicit MCP pull against an unhosted scope simply surfaces the host's
+/// 404/401 as an actionable error. A dataset-scope resync alarm (`hub_seq` below
+/// our cursor) is enforced by the caller (Phase 4 round).
 pub async fn pc_changes_since(
     settings: State<'_, SettingsState>,
     uuid: String,
     after: i64,
 ) -> Result<Value, String> {
     let base = pc_base(&settings);
-    // No row journal on the website hub — the caller's round must not even ask
-    // (dev guide §6); file level converges by manifest hash instead.
-    if super::hub_kind(&base) == super::HubKind::Website {
-        return Err("the website hub serves no row journal (/changes)".to_string());
-    }
     if base.is_empty() {
         return Err("pc_url is not set — use Settings › Discover PC".to_string());
     }
@@ -550,33 +552,7 @@ pub async fn pc_changes_since(
         format!("/api/v1/datasets/{uuid}/changes")
     };
     let qs = build_query(&[("after", after.to_string())]);
-    let client = crate::auth::hub_client_builder()
-        .connect_timeout(Duration::from_secs(8))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let req = with_device_auth(
-        client.get(format!("{base}{api_path}?{qs}")),
-        &settings,
-        "GET",
-        &api_path,
-        &qs,
-        b"",
-    )?;
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("Cannot reach PC at {base}: {e}"))?;
-    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        let body: Value = resp.json().await.unwrap_or(Value::Null);
-        let msg = body["error"].as_str().unwrap_or("device not paired");
-        return Err(format!("{msg} (http://{base})"));
-    }
-    resp.error_for_status()
-        .map_err(|e| format!("/changes request failed: {e}"))?
-        .json::<Value>()
-        .await
-        .map_err(|e| format!("Unexpected /changes response from PC: {e}"))
+    hub_get_json(settings.inner(), &api_path, &qs).await
 }
 
 /// `GET /api/v1/file?dataset=D&path=P` — fetch one non-DB file from the hub
@@ -1623,6 +1599,31 @@ mod tests {
         // Phase 7a: once the website advertises app_journal, the same gate runs.
         let cloud = Some(cluster_with(&["app_journal"], 5));
         assert!(app_journal_advertised(&cloud, website.as_str(), Some(5)));
+    }
+
+    #[test]
+    fn dataset_journal_advertised_always_true_for_a_lan_hub() {
+        // A LAN hub has always served `/api/v1/datasets/{uuid}/changes`, so the
+        // dataset journal is on regardless of the `/cluster` page or features.
+        let lan = "http://192.168.1.50:8756";
+        assert!(dataset_journal_advertised(&None, lan));
+        assert!(dataset_journal_advertised(
+            &Some(cluster_with(&["app_journal"], 5)),
+            lan
+        ));
+    }
+
+    #[test]
+    fn dataset_journal_advertised_gated_on_website_feature() {
+        let website = crate::auth::base_url();
+        // Today's website (no `/cluster`) advertises nothing → deny (INV-20).
+        assert!(!dataset_journal_advertised(&None, website.as_str()));
+        // A mirror-only account: app_journal but no dataset_journal → dataset denied.
+        let mirror = Some(cluster_with(&["app_journal"], 6));
+        assert!(!dataset_journal_advertised(&mirror, website.as_str()));
+        // Phase 7b: once the account hosts an authority scope, it turns on.
+        let auth = Some(cluster_with(&["app_journal", "dataset_journal"], 6));
+        assert!(dataset_journal_advertised(&auth, website.as_str()));
     }
 
     #[test]

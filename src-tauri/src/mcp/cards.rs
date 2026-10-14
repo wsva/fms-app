@@ -362,11 +362,11 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"tags": items, "count": items.len()}).to_string())
     }
 
-    #[tool(name = "card_sync", description = "Perform a full bidirectional sync for a card dataset with the online server. Pulls remote changes and pushes local changes. Only works for datasets owned by the current user, and never for a read-only shared copy under the download root.")]
+    #[tool(name = "card_sync", description = "Sync one card dataset through the dataset-scope row journal: pushes this deck's pending edits and applies the hub's pulled rows (card rows are journal kinds since sync-v2 phase 7b — no bespoke card endpoint). Only for decks upstreamed by the cloud hub and owned by the current user; never a read-only shared copy under the download root. A deck that is not journal-synced here returns zeros.")]
     async fn card_sync(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::info!("[MCP] card_sync: dataset={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
-        let result = datasets::cards::sync::card_sync_full(settings, param.uuid).await?;
+        let result = datasets::cards::sync::card_sync_full(self.app.clone(), settings, param.uuid).await?;
         Ok(serde_json::json!({"status": "ok", "result": {
             "pulled": result.pulled,
             "pushed": result.pushed,
@@ -375,11 +375,11 @@ impl DatasetMcpServer {
         }}).to_string())
     }
 
-    #[tool(name = "card_sync_all", description = "Sync all owned card datasets with the online server. Returns results for each dataset synced.")]
+    #[tool(name = "card_sync_all", description = "Sync every owned, cloud-hub-upstreamed card dataset through the dataset-scope journal. Returns per-dataset pulled/pushed/conflict counts.")]
     async fn card_sync_all(&self) -> Result<String, String> {
         log::info!("[MCP] card_sync_all");
         let settings = self.app.state::<SettingsState>();
-        let results = datasets::cards::sync::card_sync_all(settings).await?;
+        let results = datasets::cards::sync::card_sync_all(self.app.clone(), settings).await?;
         let items: Vec<serde_json::Value> = results.iter().map(|(uuid, result)| {
             match result {
                 Ok(r) => serde_json::json!({

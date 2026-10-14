@@ -25,7 +25,8 @@ use crate::sync::client::sync_state::{
     set_app_history_backfilled, set_last_round, set_resync_reason, stamp_app_provenance, upstream_of,
 };
 use crate::sync::client::cluster::{
-    app_journal_advertised, advertises, fetch_cluster, HISTORY_PROTOCOL, APP_SCOPE_PROTOCOL,
+    app_journal_advertised, advertises, dataset_journal_advertised, fetch_cluster, HISTORY_PROTOCOL,
+    APP_SCOPE_PROTOCOL,
 };
 use crate::sync::client::writeback::{
     drop_pending_local_edit, has_pending_local_edit, lww_outcome, pending_local_edit, LwwOutcome,
@@ -633,6 +634,301 @@ pub(crate) async fn backfill_app_history(
 
 
 
+/// Pull and apply one dataset-scope **row journal** from the connected hub
+/// (sync-v2.md §3.2/§3.5, phase 7b). This is the single journal client shared by
+/// the LAN branch and — now that phase 7b made the website a dataset-scope journal
+/// authority — the cloud-hub branch of [`sync_round_inner`]. The body is identical
+/// to the in-line LAN code it was extracted from: incremental `pc_changes_since`,
+/// the `hub_seq`-below-cursor regression alarm, a `resync_required` snapshot, the
+/// `apply_change` loop under `ApplyGuard` with the INV-14 last-write-wins
+/// pending-edit guard, then the cursor advance and first-time provenance stamp.
+///
+/// Returns `true` when the copy was resolved with a full snapshot (regression or
+/// `resync_required`) or otherwise consumed, so the caller must skip the non-DB
+/// file-drift check — mirroring the `continue`s this replaced. Accumulators are
+/// passed by `&mut` so both hub branches merge into one round result.
+async fn pull_and_apply_dataset_journal(
+    app: AppHandle,
+    settings: State<'_, SettingsState>,
+    uuid: String,
+    cursor_opt: Option<i64>,
+    connected_kind: &str,
+    connected_origin: &str,
+    applied: &mut i64,
+    dropped_pending: &mut i64,
+    resynced: &mut Vec<String>,
+    errors: &mut Vec<Value>,
+) -> bool {
+    let after = cursor_opt.unwrap_or(-1);
+    let page = match pc_changes_since(settings.clone(), uuid.clone(), after).await {
+        Ok(p) => p,
+        Err(e) => {
+            errors.push(json!({ "uuid": uuid, "stage": "changes", "error": e }));
+            return true;
+        }
+    };
+    let resync_required = page["resync_required"].as_bool().unwrap_or(true);
+    let hub_seq = page["hub_seq"].as_i64().unwrap_or(after);
+    // Safety alarm (§3.5): a hub seq *below* our cursor means its journal
+    // regressed (a reset / re-install / different cluster answering the same
+    // address). Its deltas can no longer be trusted to be the continuation
+    // of what we already applied, so resync rather than advance backwards.
+    if let Some(c) = cursor_opt {
+        if hub_seq < c {
+            log::error!(
+                "[sync] {uuid}: hub_seq {hub_seq} < local cursor {c} — journal regressed, forcing resync"
+            );
+            errors.push(json!({ "uuid": &uuid, "stage": "alarm", "error": format!("hub seq {hub_seq} regressed below cursor {c}") }));
+            // Record why this copy is about to be re-pulled (§19.2); a
+            // successful snapshot below clears it again.
+            if let Ok(conn) = datasets::dictation::open_app_db(&settings) {
+                if ensure_sync_tables(&conn).is_ok() {
+                    let _ = set_resync_reason(&conn, &uuid, "journal_regressed");
+                }
+            }
+            match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
+                Ok(r) => {
+                    if r.updated {
+                        resynced.push(uuid);
+                    }
+                }
+                Err(e) => errors.push(json!({ "uuid": uuid, "stage": "resync", "error": e })),
+            }
+            return true;
+        }
+    }
+    if resync_required {
+        // NULL/gap cursor: take one fresh snapshot (sets cursor + hash). The
+        // hub raised `resync_required` because our cursor sits below its
+        // prune watermark — record that cause (§19.2) before healing it.
+        if let Ok(conn) = datasets::dictation::open_app_db(&settings) {
+            if ensure_sync_tables(&conn).is_ok() {
+                let _ = set_resync_reason(&conn, &uuid, "retention_gap");
+            }
+        }
+        match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
+            Ok(r) => {
+                if r.updated {
+                    resynced.push(uuid);
+                }
+            }
+            Err(e) => errors.push(json!({ "uuid": uuid, "stage": "resync", "error": e })),
+        }
+        return true;
+    }
+
+    let entries = page["entries"].as_array().cloned().unwrap_or_default();
+    if !entries.is_empty() {
+        let _guard = crate::sync::change_log::ApplyGuard::new();
+        let conn = match datasets::dictation::open_app_db(&settings) {
+            Ok(c) => c,
+            Err(e) => {
+                errors.push(json!({ "uuid": uuid, "stage": "changes", "error": e }));
+                return true;
+            }
+        };
+        if let Err(e) = ensure_sync_tables(&conn) {
+            errors.push(json!({ "uuid": uuid, "stage": "changes", "error": e }));
+            return true;
+        }
+        for ent in &entries {
+            let kind = ent["kind"].as_str().unwrap_or("");
+            let object_id = ent["object_id"].as_str().unwrap_or("");
+            let user_key = ent["user_key"].as_str().unwrap_or("");
+            let payload = ent["payload"].clone();
+            // INV-14: an un-pushed local edit to the same row wins unless the
+            // pulled entry is provably newer, in which case the pending edit
+            // is dropped (LWW) and the loss counted + surfaced (§19.2).
+            if let Some(pe) = pending_local_edit(&conn, &uuid, kind, object_id) {
+                if lww_outcome(ent["edit_time"].as_str(), pe.as_deref()) == LwwOutcome::Skip {
+                    continue; // local edit is newer/equal (or unstamped) — protect it
+                }
+                let _ = drop_pending_local_edit(&conn, &uuid, kind, object_id);
+                *dropped_pending += 1;
+            }
+            match apply_change(&settings, &uuid, kind, &payload, user_key).await {
+                Ok(true) => *applied += 1,
+                Ok(false) => {}
+                Err(e) => errors.push(json!({ "uuid": uuid, "kind": kind, "error": e })),
+            }
+        }
+        drop(_guard);
+        // Advance the row cursor to the hub's high-water mark, and stamp
+        // provenance if the row does not yet have it (a pre-migration copy
+        // reaching its first incremental round against a real host). We do
+        // *not* overwrite provenance on a partial round — only a snapshot
+        // re-establishes a copy from scratch (INV-7).
+        let conn = match datasets::dictation::open_app_db(&settings) {
+            Ok(c) => c,
+            Err(e) => {
+                errors.push(json!({ "uuid": uuid, "stage": "changes", "error": e }));
+                return true;
+            }
+        };
+        let _ = ensure_sync_tables(&conn);
+        let _ = conn.execute(
+            "UPDATE dataset_sync_state SET \"cursor\" = ?2 WHERE dataset_uuid = ?1",
+            params![uuid, hub_seq],
+        );
+        let _ = conn.execute(
+            "UPDATE dataset_sync_state \
+             SET upstream_kind = ?2, upstream_origin = ?3 \
+             WHERE dataset_uuid = ?1 AND (upstream_origin IS NULL OR upstream_origin = '')",
+            params![uuid, connected_kind, connected_origin],
+        );
+    }
+    false
+}
+
+/// Non-DB file drift for one dataset (media/vtt/etc. change the manifest hash,
+/// which the row log does not cover): fall back to one snapshot re-pull
+/// (§4.1). Shared by the LAN and cloud-hub branches after the journal pull.
+async fn check_file_drift(
+    app: AppHandle,
+    settings: State<'_, SettingsState>,
+    uuid: String,
+    stored_hash: &str,
+    resynced: &mut Vec<String>,
+    errors: &mut Vec<Value>,
+) {
+    match fetch_manifest_hash(&settings, &uuid).await {
+        Ok(h) if !h.is_empty() && h != stored_hash => {
+            match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
+                Ok(_) => resynced.push(uuid),
+                Err(e) => errors.push(json!({ "uuid": uuid, "stage": "files", "error": e })),
+            }
+        }
+        Err(e) => errors.push(json!({ "uuid": uuid, "stage": "manifest", "error": e })),
+        _ => {}
+    }
+}
+
+/// The counts of one manual, single-deck journal sync (the card-sync surface).
+/// Mirrors the old bespoke `SyncResult`: `pulled` = rows applied from the hub,
+/// `pushed` = this deck's writeback rows acknowledged, `conflicts` = pending local
+/// edits dropped by the INV-14 last-write-wins guard.
+pub(crate) struct DeckJournalSync {
+    pub pulled: i64,
+    pub pushed: i64,
+    pub conflicts: i64,
+}
+
+/// One manual dataset-scope journal round for a single cloud-hub deck: push its
+/// pending writeback rows, then pull + apply its row journal, and report the
+/// counts. The card-sync command and MCP tools ride this now that card rows travel
+/// through the journal (sync-v2.md §8.3, phase 7b) — the bespoke `/api/card/sync/*`
+/// round trip and its second conflict engine are gone.
+///
+/// Returns `Ok(None)` when this deck is *not* journal-synced against the connected
+/// host — the host does not advertise `dataset_journal`, or the deck's recorded
+/// upstream is a desktop hub (its rows belong to the LAN journal) — matching the
+/// old skip path. `Err` only on a real provenance conflict (`card_sync_target`,
+/// INV-19) or a transport failure on the pull.
+pub(crate) async fn sync_one_deck_journal(
+    app: AppHandle,
+    settings: State<'_, SettingsState>,
+    dataset_uuid: &str,
+) -> Result<Option<DeckJournalSync>, String> {
+    let base = pc_base(&settings);
+    if base.is_empty() {
+        return Err("no hub configured; card sync needs an upstream".to_string());
+    }
+    // Provenance gate (INV-19): route by the deck's recorded upstream, refusing a
+    // disagreement with the connected host rather than silently switching targets.
+    match crate::sync::client::card_sync_target(settings.inner(), dataset_uuid)? {
+        crate::sync::client::CardSyncTarget::Skip { reason } => {
+            log::info!("[CardSync] skipping {dataset_uuid}: {reason}");
+            return Ok(None);
+        }
+        crate::sync::client::CardSyncTarget::Website { .. } => {}
+    }
+    // The connected host must actually serve the dataset journal for this account
+    // (a mirror-only website does not; `dataset_journal_advertised` default-denies).
+    let cluster = fetch_cluster(&settings).await;
+    if !dataset_journal_advertised(&cluster, &base) {
+        return Ok(None);
+    }
+    let (connected_kind, connected_origin) = upstream_of(&base);
+
+    // The deck's cursor drives the incremental pull; count its queued writeback
+    // rows before and after the push so `pushed` reflects this deck's acks (the
+    // flush is queue-wide — it carries every scope the host accepts).
+    let (cursor_opt, before) = {
+        let conn = datasets::dictation::open_app_db(&settings)?;
+        ensure_sync_tables(&conn)?;
+        let cursor = conn
+            .query_row(
+                "SELECT \"cursor\" FROM dataset_sync_state WHERE dataset_uuid = ?1",
+                params![dataset_uuid],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .ok()
+            .flatten();
+        (cursor, pending_dataset_rows(&conn, dataset_uuid))
+    };
+
+    // 1. Push this deck's pending rows (and any other scope the host takes).
+    let _ = writeback_flush_inner(&settings, &cluster).await.unwrap_or_else(|e| {
+        log::warn!("[CardSync] writeback flush failed for {dataset_uuid}: {e}");
+        0usize
+    });
+    let after = {
+        let conn = datasets::dictation::open_app_db(&settings)?;
+        ensure_sync_tables(&conn)?;
+        pending_dataset_rows(&conn, dataset_uuid)
+    };
+    let pushed = before.saturating_sub(after);
+
+    // 2. Pull + apply this deck's row journal (the shared 7b client).
+    let mut applied = 0i64;
+    let mut dropped = 0i64;
+    let mut resynced: Vec<String> = Vec::new();
+    let mut errs: Vec<Value> = Vec::new();
+    pull_and_apply_dataset_journal(
+        app,
+        settings.clone(),
+        dataset_uuid.to_string(),
+        cursor_opt,
+        connected_kind,
+        connected_origin.as_str(),
+        &mut applied,
+        &mut dropped,
+        &mut resynced,
+        &mut errs,
+    )
+    .await;
+    // A transport/resync failure is a real error the caller must see; a per-kind
+    // apply failure (`"kind"`) is tolerable — the row simply reconciles next round.
+    if let Some(e) = errs
+        .iter()
+        .find(|e| e["stage"].as_str().map(|s| !s.is_empty()).unwrap_or(false))
+    {
+        return Err(
+            e["error"]
+                .as_str()
+                .unwrap_or("dataset journal sync failed")
+                .to_string(),
+        );
+    }
+    let _ = resynced;
+    Ok(Some(DeckJournalSync {
+        pulled: applied,
+        pushed,
+        conflicts: dropped,
+    }))
+}
+
+/// Count this device's still-queued writeback rows for one dataset scope (the
+/// dataset-scope rows carry the deck uuid in `dataset_uuid`; `@app` rows do not).
+fn pending_dataset_rows(conn: &Connection, dataset_uuid: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM writeback_queue WHERE dataset_uuid = ?1",
+        params![dataset_uuid],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+}
+
 /// Run one full incremental sync round against the connected hub. Triggers:
 /// app start, after a local write, a timer, or a network change (§3.3).
 pub async fn sync_round_inner(
@@ -680,7 +976,10 @@ pub async fn sync_round_inner(
     let mut applied = 0i64;
     let mut dropped_pending = 0i64;
     let mut history: Option<Value> = None;
-    let mut cards: Vec<Value> = Vec::new();
+    // Card rows now arrive through the dataset-scope journal (folded into
+    // `applied`/`resynced`), so the bespoke per-deck card round trip is gone. The
+    // field is kept in the result shape (always empty) for status-surface compat.
+    let cards: Vec<Value> = Vec::new();
 
     // Capability negotiation (sync-v2.md §7, INV-12): read the host's `/cluster`
     // page once per round. `None` (today's website, or an old/unreachable hub)
@@ -693,6 +992,10 @@ pub async fn sync_round_inner(
         None => hub_protocol_version(&settings).await,
     };
     let app_ok = app_journal_advertised(&cluster, &base, cluster_protocol);
+    // Phase-7b dataset-scope journal gate: a LAN hub always serves it, a website
+    // only when the account advertises `dataset_journal`. Decides whether a
+    // cloud-hub dataset rides the row journal or keeps the file-drift-only path.
+    let ds_ok = dataset_journal_advertised(&cluster, &base);
 
     // 1. Push local edits first so the hub holds our changes before we pull.
     let pushed = writeback_flush_inner(&settings, &cluster).await.unwrap_or_else(|e| {
@@ -724,23 +1027,23 @@ pub async fn sync_round_inner(
         Vec::new()
     });
     let mut catalog_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut catalog_type: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for d in &catalog {
         let u = d["uuid"].as_str().unwrap_or("").to_string();
         let t = d["dataset_type"].as_str().unwrap_or("").to_string();
         if !u.is_empty() {
-            catalog_map.insert(u.clone(), t.clone());
-            catalog_type.insert(u, t);
+            catalog_map.insert(u, t);
         }
     }
 
     // 3. Per already-synced dataset: incremental apply, or a full resync when
     //    the cursor is unknown / a prune gap is reported / files drifted.
-    let local: Vec<(String, Option<i64>, String)> = {
+    let local: Vec<(String, Option<i64>, String, String)> = {
         let conn = datasets::dictation::open_app_db(&settings)?;
         ensure_sync_tables(&conn)?;
         let mut stmt = conn
-            .prepare("SELECT dataset_uuid, \"cursor\", overall_hash FROM dataset_sync_state")
+            .prepare(
+                "SELECT dataset_uuid, \"cursor\", overall_hash, COALESCE(upstream_kind, '') \n                 FROM dataset_sync_state",
+            )
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -748,13 +1051,14 @@ pub async fn sync_round_inner(
                     r.get::<_, String>(0)?,
                     r.get::<_, Option<i64>>(1)?,
                     r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
         rows.filter_map(|x| x.ok()).collect()
     };
 
-    for (uuid, cursor_opt, stored_hash) in local {
+    for (uuid, cursor_opt, stored_hash, upstream_kind) in local {
         if !catalog_map.contains_key(&uuid) {
             if catalog_ok {
                 let conn = datasets::dictation::open_app_db(&settings)?;
@@ -773,8 +1077,46 @@ pub async fn sync_round_inner(
 
         let cursor_is_hash = cursor_opt.is_some() && !stored_hash.is_empty();
         if is_website {
-            // File drift only: the website's manifest hash covers the same
-            // frozen non-DB recipe (§4.1); DB rows travel through card sync.
+            // Phase 7b: a dataset this cloud hub is the *authority* over syncs its
+            // rows through the dataset-scope journal exactly like a LAN hub, so it
+            // runs the shared pull+apply client then the non-DB file-drift check.
+            // Provenance decides (INV-19): `cloud_hub`, or unstamped (`''`, which
+            // the pull adopts and stamps). A deck upstreamed by a *desktop* hub
+            // keeps its rows on the LAN journal and must not be pulled from here.
+            let journal_synced =
+                ds_ok && (upstream_kind == "cloud_hub" || upstream_kind.is_empty());
+            if journal_synced {
+                let consumed = pull_and_apply_dataset_journal(
+                    app.clone(),
+                    settings.clone(),
+                    uuid.clone(),
+                    cursor_opt,
+                    connected_kind,
+                    connected_origin.as_str(),
+                    &mut applied,
+                    &mut dropped_pending,
+                    &mut resynced,
+                    &mut errors,
+                )
+                .await;
+                if !consumed {
+                    check_file_drift(
+                        app.clone(),
+                        settings.clone(),
+                        uuid.clone(),
+                        &stored_hash,
+                        &mut resynced,
+                        &mut errors,
+                    )
+                    .await;
+                }
+                continue;
+            }
+
+            // File drift only (mirror-only account, or a non-cloud-hub upstream):
+            // the website's manifest hash covers the same frozen non-DB recipe
+            // (§4.1). DB rows for a cloud-hub deck went through the journal above;
+            // a desktop-hub deck's rows go through the LAN journal in its own round.
             if !cursor_is_hash {
                 match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
                     Ok(_) => resynced.push(uuid.clone()),
@@ -799,141 +1141,35 @@ pub async fn sync_round_inner(
             }
             // Catalog rows absent locally are left to the explicit per-dataset
             // Download — a round never auto-pulls media the user hasn't adopted.
-            if catalog_type.get(&uuid).map(String::as_str) == Some("card") {
-                let local_copy = type_root(&settings, "card").join(&uuid).exists();
-                if local_copy {
-                    match crate::datasets::cards::sync::card_sync_full(settings.clone(), uuid.clone()).await
-                    {
-                        Ok(r) => cards.push(json!({
-                            "uuid": uuid,
-                            "pulled": r.pulled,
-                            "pushed": r.pushed,
-                            "conflicts": r.conflicts,
-                        })),
-                        Err(e) => {
-                            errors.push(json!({ "uuid": uuid, "stage": "card_sync", "error": e }))
-                        }
-                    }
-                }
-            }
             continue;
         }
 
-        let after = cursor_opt.unwrap_or(-1);
-        let page = match pc_changes_since(settings.clone(), uuid.clone(), after).await {
-            Ok(p) => p,
-            Err(e) => {
-                errors.push(json!({ "uuid": uuid, "stage": "changes", "error": e }));
-                continue;
-            }
-        };
-        let resync_required = page["resync_required"].as_bool().unwrap_or(true);
-        let hub_seq = page["hub_seq"].as_i64().unwrap_or(after);
-        // Safety alarm (§3.5): a hub seq *below* our cursor means its journal
-        // regressed (a reset / re-install / different cluster answering the same
-        // address). Its deltas can no longer be trusted to be the continuation
-        // of what we already applied, so resync rather than advance backwards.
-        if let Some(c) = cursor_opt {
-            if hub_seq < c {
-                log::error!(
-                    "[sync] {uuid}: hub_seq {hub_seq} < local cursor {c} — journal regressed, forcing resync"
-                );
-                errors.push(json!({ "uuid": &uuid, "stage": "alarm", "error": format!("hub seq {hub_seq} regressed below cursor {c}") }));
-                // Record why this copy is about to be re-pulled (§19.2); a
-                // successful snapshot below clears it again.
-                if let Ok(conn) = datasets::dictation::open_app_db(&settings) {
-                    if ensure_sync_tables(&conn).is_ok() {
-                        let _ = set_resync_reason(&conn, &uuid, "journal_regressed");
-                    }
-                }
-                match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
-                    Ok(r) => {
-                        if r.updated {
-                            resynced.push(uuid);
-                        }
-                    }
-                    Err(e) => errors.push(json!({ "uuid": uuid, "stage": "resync", "error": e })),
-                }
-                continue;
-            }
-        }
-        if resync_required {
-            // NULL/gap cursor: take one fresh snapshot (sets cursor + hash). The
-            // hub raised `resync_required` because our cursor sits below its
-            // prune watermark — record that cause (§19.2) before healing it.
-            if let Ok(conn) = datasets::dictation::open_app_db(&settings) {
-                if ensure_sync_tables(&conn).is_ok() {
-                    let _ = set_resync_reason(&conn, &uuid, "retention_gap");
-                }
-            }
-            match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
-                Ok(r) => {
-                    if r.updated {
-                        resynced.push(uuid);
-                    }
-                }
-                Err(e) => errors.push(json!({ "uuid": uuid, "stage": "resync", "error": e })),
-            }
-            continue;
-        }
-
-        let entries = page["entries"].as_array().cloned().unwrap_or_default();
-        if !entries.is_empty() {
-            let _guard = crate::sync::change_log::ApplyGuard::new();
-            let conn = datasets::dictation::open_app_db(&settings)?;
-            ensure_sync_tables(&conn)?;
-            for ent in &entries {
-                let kind = ent["kind"].as_str().unwrap_or("");
-                let object_id = ent["object_id"].as_str().unwrap_or("");
-                let user_key = ent["user_key"].as_str().unwrap_or("");
-                let payload = ent["payload"].clone();
-                // INV-14: an un-pushed local edit to the same row wins unless the
-                // pulled entry is provably newer, in which case the pending edit
-                // is dropped (LWW) and the loss counted + surfaced (§19.2).
-                if let Some(pe) = pending_local_edit(&conn, &uuid, kind, object_id) {
-                    if lww_outcome(ent["edit_time"].as_str(), pe.as_deref()) == LwwOutcome::Skip {
-                        continue; // local edit is newer/equal (or unstamped) — protect it
-                    }
-                    let _ = drop_pending_local_edit(&conn, &uuid, kind, object_id);
-                    dropped_pending += 1;
-                }
-                match apply_change(&settings, &uuid, kind, &payload, user_key).await {
-                    Ok(true) => applied += 1,
-                    Ok(false) => {}
-                    Err(e) => errors.push(json!({ "uuid": uuid, "kind": kind, "error": e })),
-                }
-            }
-            drop(_guard);
-            // Advance the row cursor to the hub's high-water mark, and stamp
-            // provenance if the row does not yet have it (a pre-migration copy
-            // reaching its first incremental round against a real host). We do
-            // *not* overwrite provenance on a partial round — only a snapshot
-            // re-establishes a copy from scratch (INV-7).
-            let conn = datasets::dictation::open_app_db(&settings)?;
-            ensure_sync_tables(&conn)?;
-            let _ = conn.execute(
-                "UPDATE dataset_sync_state SET \"cursor\" = ?2 WHERE dataset_uuid = ?1",
-                params![uuid, hub_seq],
-            );
-            let _ = conn.execute(
-                "UPDATE dataset_sync_state \
-                 SET upstream_kind = ?2, upstream_origin = ?3 \
-                 WHERE dataset_uuid = ?1 AND (upstream_origin IS NULL OR upstream_origin = '')",
-                params![uuid, connected_kind, connected_origin],
-            );
-        }
-
-        // 4. Non-DB file drift (media/vtt/etc. change the manifest hash, which
-        //    the row log does not cover): fall back to one snapshot re-pull.
-        match fetch_manifest_hash(&settings, &uuid).await {
-            Ok(h) if !h.is_empty() && h != stored_hash => {
-                match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {
-                    Ok(_) => resynced.push(uuid),
-                    Err(e) => errors.push(json!({ "uuid": uuid, "stage": "files", "error": e })),
-                }
-            }
-            Err(e) => errors.push(json!({ "uuid": uuid, "stage": "manifest", "error": e })),
-            _ => {}
+        // LAN hub: pull the dataset-scope row journal, then the file-drift check.
+        let consumed = pull_and_apply_dataset_journal(
+            app.clone(),
+            settings.clone(),
+            uuid.clone(),
+            cursor_opt,
+            connected_kind,
+            connected_origin.as_str(),
+            &mut applied,
+            &mut dropped_pending,
+            &mut resynced,
+            &mut errors,
+        )
+        .await;
+        if !consumed {
+            // 4. Non-DB file drift (media/vtt/etc. change the manifest hash, which
+            //    the row log does not cover): fall back to one snapshot re-pull.
+            check_file_drift(
+                app.clone(),
+                settings.clone(),
+                uuid.clone(),
+                &stored_hash,
+                &mut resynced,
+                &mut errors,
+            )
+            .await;
         }
     }
 

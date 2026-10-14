@@ -42,7 +42,7 @@ use crate::models::ModelState;
 // every dataset type and by the sync layer.
 pub(crate) use info::{
     assert_uuid_free, canonical_stamp, is_derived_index, now_row_stamp, now_stamp, read_info,
-    read_info_opt, row_stamp_at, stamps_cmp, touch_info, write_info, DatasetInfo,
+    read_info_opt, row_stamp_at, touch_info, write_info, DatasetInfo,
     FAVORITES_DATASET_UUID, FORMAT_BOOK, FORMAT_CARD, FORMAT_DICTATION, FORMAT_READ_ALOUD,
     FORMAT_WIKI, INFO_FILE, LAYER_ROLE_FLAT, LAYER_ROLE_OVERLAY, LayerBlock,
 };

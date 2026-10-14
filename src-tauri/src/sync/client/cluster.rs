@@ -127,4 +127,24 @@ pub(crate) fn app_journal_advertised(
         && matches!(protocol, Some(p) if p >= APP_SCOPE_PROTOCOL)
 }
 
+/// Whether the dataset-scope row journal may be read/written against the
+/// connected host (sync-v2.md §7, phase 7b). A LAN hub always serves the dataset
+/// journal (`/api/v1/datasets/{uuid}/changes` is the original round path), so this
+/// is `true` for [`crate::sync::HubKind::LanPc`] and preserves today's behavior
+/// exactly. The website hosts a dataset-scope journal only for scopes it is the
+/// authority over, so `dataset_journal` is advertised **per-account** over
+/// `/cluster`: gate purely on that capability, default-denied (INV-20). There is
+/// deliberately no protocol-version fallback here — a pre-`/cluster` website
+/// advertised nothing and had no dataset journal, so the only honest signal for
+/// "the cloud hosts my scopes" is the feature string itself.
+pub(crate) fn dataset_journal_advertised(
+    cluster: &Option<crate::sync::ClusterInfo>,
+    base: &str,
+) -> bool {
+    match crate::sync::hub_kind(base) {
+        crate::sync::HubKind::LanPc => true,
+        crate::sync::HubKind::Website => advertises(cluster, "dataset_journal"),
+    }
+}
+
 

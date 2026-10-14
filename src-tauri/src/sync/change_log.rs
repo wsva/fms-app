@@ -186,6 +186,18 @@ impl ChangeClass {
 /// subtitle uuids are globally unique and the app-DB row is keyed by them).
 pub const APP_SCOPE: &str = "@app";
 
+/// The kinds that mutate per-user app data and therefore journal under
+/// [`APP_SCOPE`]. Single source of truth for [`is_app_scope_kind`] **and** for the
+/// writeback flush's per-scope SQL split (`sync/client/writeback.rs` filters the
+/// queue by `kind IN (...)`), so the two can never drift apart.
+pub const APP_SCOPE_KINDS: &[&str] = &[
+    "dictation",
+    "xp",
+    "card_review",
+    "read_attempt_save",
+    "read_attempt_delete",
+];
+
 /// Whether `kind` mutates per-user app data and therefore journals under
 /// [`APP_SCOPE`] instead of under a dataset uuid.
 ///
@@ -200,7 +212,7 @@ pub const APP_SCOPE: &str = "@app";
 /// app DB and journaled here rather than written into the shared dataset (which
 /// used to fork an adopted base and ship one user's scores to every subscriber).
 pub fn is_app_scope_kind(kind: &str) -> bool {
-    matches!(kind, "dictation" | "xp" | "card_review" | "read_attempt_save" | "read_attempt_delete")
+    APP_SCOPE_KINDS.contains(&kind)
 }
 
 /// The journal scope a change of `kind` belongs to: [`APP_SCOPE`] for per-user
