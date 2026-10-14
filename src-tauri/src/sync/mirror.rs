@@ -23,9 +23,10 @@
 //!   re-push and app restart, and aligned with the website's own
 //!   `(cluster, scope, seq)` uniqueness.
 //!
-//! Pure addition: nothing here is reached by the round, writeback, pull, or
-//! upload paths. Desktop-only (a hub is desktop-only), so the `mod` declaration
-//! in `sync/mod.rs` carries the `desktop` gate.
+//! Pure addition: nothing here is reached by the writeback, pull, or upload
+//! paths — the round's step-7 auto-cadence drain is the one caller besides the
+//! command/MCP entry points. Desktop-only (a hub is desktop-only), so the `mod`
+//! declaration in `sync/mod.rs` carries the `desktop` gate.
 
 use std::time::Duration;
 
@@ -430,14 +431,31 @@ async fn push_scope(
 /// logged-in account. Meaningful on a `role = "hub"` desktop — that is the only
 /// node that appends dataset-scope rows — so other roles normally report zero
 /// scopes (surfaced in `note`, not an error).
+/// `auto: true` marks the round's cadence drain: with no logged-in account it
+/// skips silently instead of erroring, because a sync round must not fail over
+/// an optional pusher leg.
 #[tauri::command]
 pub async fn sync_mirror_push(
     settings: State<'_, SettingsState>,
     scope: Option<String>,
+    auto: Option<bool>,
+) -> Result<Value, String> {
+    if auto == Some(true) && crate::auth::get_access_token(&settings).is_err() {
+        return Ok(json!({ "skipped": "not_logged_in" }));
+    }
+    mirror_push_inner(settings.inner(), scope.as_deref(), &settings.role()).await
+}
+
+/// The command body, reachable from the sync round (step 7) without a `State`
+/// wrapper. All callees already take `&SettingsState`.
+pub(crate) async fn mirror_push_inner(
+    settings: &SettingsState,
+    scope: Option<&str>,
+    role: &str,
 ) -> Result<Value, String> {
     let base = crate::auth::base_url();
     // A missing token is a hard, actionable error for a write.
-    let token = crate::auth::get_access_token(&settings)?;
+    let token = crate::auth::get_access_token(settings)?;
     let url = format!("{base}{MIRROR_PATH}");
     let client = crate::auth::hub_client_builder()
         .timeout(Duration::from_secs(60))
@@ -445,7 +463,7 @@ pub async fn sync_mirror_push(
         .map_err(|e| e.to_string())?;
 
     let scopes = {
-        let conn = datasets::dictation::open_app_db(&settings)?;
+        let conn = datasets::dictation::open_app_db(settings)?;
         ensure_mirror_table(&conn)?;
         change_log::ensure_hub_tables(&conn)?;
         match scope.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -454,13 +472,13 @@ pub async fn sync_mirror_push(
         }
     };
 
-    let role = settings.role();
+    let role = role.to_string();
     let mut scope_results: Vec<Value> = Vec::new();
     let mut errors: Vec<Value> = Vec::new();
     let (mut total_pushed, mut total_deduped, mut total_refused) = (0i64, 0i64, 0i64);
 
     for sc in &scopes {
-        match push_scope(&settings, &client, &url, &token, sc).await {
+        match push_scope(settings, &client, &url, &token, sc).await {
             Ok(v) => {
                 total_pushed += v["pushed"].as_i64().unwrap_or(0);
                 total_deduped += v["deduped"].as_i64().unwrap_or(0);

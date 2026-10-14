@@ -258,16 +258,32 @@ async fn check_ok(resp: reqwest::Response, settings: &SettingsState, uuid: &str)
 /// rename/deletion syncs even with no new content). `max_files` is a client-side
 /// guard against the hub's per-tree cap. Returns `{ uuid, total, need, applied,
 /// stored, deduped }`.
+/// `auto: true` marks the round's cadence drain: with no logged-in account it
+/// skips silently instead of erroring, because a sync round must not fail over
+/// an optional pusher leg.
 #[tauri::command]
 pub async fn dataset_push_changed_files(
     settings: State<'_, SettingsState>,
     dataset_uuid: String,
+    auto: Option<bool>,
 ) -> Result<Value, String> {
     let uuid = dataset_uuid.trim().to_string();
     if uuid.is_empty() {
         return Err("dataset_uuid is required (the local dataset to push)".to_string());
     }
-    let (dir, _ty) = datasets::find_dataset_dir_typed(&settings, &uuid)?;
+    if auto == Some(true) && crate::auth::get_access_token(&settings).is_err() {
+        return Ok(json!({ "uuid": uuid, "skipped": "not_logged_in" }));
+    }
+    push_changed_files_inner(settings.inner(), uuid).await
+}
+
+/// The command body after the uuid guard, reachable from the sync round (step 7)
+/// without a `State` wrapper. All callees already take `&SettingsState`.
+pub(crate) async fn push_changed_files_inner(
+    settings: &SettingsState,
+    uuid: String,
+) -> Result<Value, String> {
+    let (dir, _ty) = datasets::find_dataset_dir_typed(settings, &uuid)?;
 
     // Enumerate + hash the whole tree before touching the network (no borrowed
     // state or open handle crosses an await).
@@ -279,7 +295,7 @@ pub async fn dataset_push_changed_files(
     }
     let tree = refs_json(&refs);
 
-    let (client, base, token) = website_write(&settings).await?;
+    let (client, base, token) = website_write(settings).await?;
     let url = format!("{base}/api/v1/datasets/{}/objects", super::client::qenc(&uuid));
 
     // Phase 1 — read-only diff: which hashes does the store not hold?
@@ -290,7 +306,7 @@ pub async fn dataset_push_changed_files(
         .send()
         .await
         .map_err(|e| format!("cannot reach the website at {url}: {e}"))?;
-    let diff = check_ok(resp, &settings, &uuid).await?;
+    let diff = check_ok(resp, settings, &uuid).await?;
     let need = need_shas(&diff["need"]);
     let need_set: std::collections::HashSet<&str> = need.iter().map(|s| s.as_str()).collect();
 
@@ -318,7 +334,7 @@ pub async fn dataset_push_changed_files(
         .send()
         .await
         .map_err(|e| format!("changed-file upload for '{uuid}' failed: {e}"))?;
-    let body = check_ok(resp, &settings, &uuid).await?;
+    let body = check_ok(resp, settings, &uuid).await?;
 
     log::info!(
         "[blob] {uuid}: tree of {} files, needed {}, uploaded {} blobs -> applied {} stored {} deduped {}",

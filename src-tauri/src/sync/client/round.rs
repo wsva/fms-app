@@ -1364,7 +1364,72 @@ pub async fn sync_round_inner(
         }
     }
 
-    let result = json!({
+    // 7. Auto-cadence drain of the two pushers (§14 phase 4 / §7) once the sync
+    //    halves are done. Same event set §8.3 grants the inbox drain (app start,
+    //    timer, Sync now, network restore all trigger rounds). Best-effort by
+    //    construction: a pusher failure lands in `errors`, never aborts the round
+    //    or changes pushed/held/applied. Only a logged-in hub has an account
+    //    website to drain toward, and only a hub owns journal/file state worth
+    //    mirroring — anything else skips both legs (keys stay absent, so the
+    //    status surface can tell "skipped" from "drained, nothing to do").
+    let auto_on = settings.role() == "hub"
+        && crate::auth::get_access_token(settings.inner()).is_ok();
+    let owned_uuids: Vec<String> = if auto_on {
+        datasets::dictation::open_app_db(settings.inner())
+            .and_then(|conn| crate::sync::upload::upload_state_uuids(&conn))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // Mirror leg (desktop-only: only a hub desktop journals dataset scopes).
+    #[cfg(feature = "desktop")]
+    let mut mirror_summary: Option<Value> = None;
+    #[cfg(feature = "desktop")]
+    if auto_on {
+        match crate::sync::mirror::mirror_push_inner(settings.inner(), None, "hub").await {
+            Ok(v) => {
+                for e in v["errors"].as_array().cloned().unwrap_or_default() {
+                    errors.push(json!({
+                        "stage": "mirror_push",
+                        "scope": e["scope"],
+                        "error": e["error"],
+                    }));
+                }
+                let t = &v["totals"];
+                mirror_summary = Some(json!({
+                    "scopes": v["scopes"].as_array().map(|a| a.len()).unwrap_or(0),
+                    "pushed": t["pushed"].as_i64().unwrap_or(0),
+                    "deduped": t["deduped"].as_i64().unwrap_or(0),
+                    "refused": t["refused"].as_i64().unwrap_or(0),
+                }));
+            }
+            Err(e) => errors.push(json!({ "stage": "mirror_push", "error": e })),
+        }
+    }
+
+    // Changed-file leg: only datasets ever uploaded to the website (the blob
+    // route refuses an unknown uuid); serial, each entry reconciles the live
+    // tree even at zero needed bytes (renames/deletions). `Connection` is
+    // !Send — the uuid list above was collected before any await.
+    let mut files_summary: Vec<Value> = Vec::new();
+    if auto_on {
+        for uuid in &owned_uuids {
+            match crate::sync::blobpush::push_changed_files_inner(settings.inner(), uuid.clone()).await {
+                Ok(v) => files_summary.push(json!({
+                    "uuid": uuid,
+                    "total": v["total"],
+                    "need": v["need"],
+                    "uploaded": v["uploaded"],
+                })),
+                Err(e) => {
+                    errors.push(json!({ "stage": "file_push", "uuid": uuid, "error": e }));
+                }
+            }
+        }
+    }
+
+    let mut result = json!({
         "status": if errors.is_empty() { "ok" } else { "partial" },
         "hub_kind": if is_website { "website" } else { "lan" },
         "pushed": pushed,
@@ -1377,6 +1442,17 @@ pub async fn sync_round_inner(
         "history": history,
         "errors": errors,
     });
+    #[cfg(feature = "desktop")]
+    if let Some(s) = mirror_summary {
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("mirror_push".into(), s);
+        }
+    }
+    if auto_on && !owned_uuids.is_empty() {
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("files_push".into(), json!(files_summary));
+        }
+    }
     // Persist for the status surface (§19.2): a failure to record must not fail
     // the round, so log at most and still return the result.
     if let Ok(conn) = datasets::dictation::open_app_db(settings.inner()) {

@@ -107,6 +107,10 @@ struct MirrorPushParam {
     /// with journal rows.
     #[serde(default)]
     scope: Option<String>,
+    /// Marks an auto-cadence call: skip silently when no account is logged in
+    /// instead of erroring. Omitted/false = a normal manual push.
+    #[serde(default)]
+    auto: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -141,6 +145,10 @@ struct PushFilesParam {
     /// Local dataset uuid whose live file tree to re-push (must already exist on
     /// the website — bootstrap with hub_upload first).
     dataset_uuid: String,
+    /// Marks an auto-cadence call: skip silently when no account is logged in
+    /// instead of erroring. Omitted/false = a normal manual push.
+    #[serde(default)]
+    auto: Option<bool>,
 }
 
 #[tool_router(router = sync_router, vis = "pub(crate)")]
@@ -494,10 +502,10 @@ impl DatasetMcpServer {
         Ok(v.to_string())
     }
 
-    #[tool(name = "sync_mirror_push", description = "Push this desktop hub's dataset-scope change journal up to the account website's mirror (POST /api/v1/changes, sync-v2 phase 4). The website keeps a read-only mirror of the hub's journal so it can render the owner's real state; this is the app-side pusher that feeds it. Incremental (a per-scope cursor is stored in the app DB) and idempotent (the website dedups on change_id), so re-running is safe. Pass an optional scope (a dataset uuid) to push just one; omitted, it mirrors every dataset scope with journal rows. Target is always the account website (not the LAN pc_url) and needs the user signed in. Meaningful on a role=hub desktop — only a hub journals dataset-scope changes, so other roles normally report zero scopes (surfaced in `note`, not an error). The @app scope is not mirrored here (that is the cloud-authority writeback leg). Returns { target, role, scopes:[{scope, cursor_before, cursor_after, pushed, deduped, refused, gap_skipped, errors[]}], totals, errors[], note }.")]
+    #[tool(name = "sync_mirror_push", description = "Push this desktop hub's dataset-scope change journal up to the account website's mirror (POST /api/v1/changes, sync-v2 phase 4). The website keeps a read-only mirror of the hub's journal so it can render the owner's real state; this is the app-side pusher that feeds it. Incremental (a per-scope cursor is stored in the app DB) and idempotent (the website dedups on change_id), so re-running is safe. Pass an optional scope (a dataset uuid) to push just one; omitted, it mirrors every dataset scope with journal rows. Target is always the account website (not the LAN pc_url) and needs the user signed in. Meaningful on a role=hub desktop — only a hub journals dataset-scope changes, so other roles normally report zero scopes (surfaced in `note`, not an error). Normally drained automatically at the end of every sync round on a logged-in hub; call manually to force one push or to scope a single dataset. The @app scope is not mirrored here (that is the cloud-authority writeback leg). Returns { target, role, scopes:[{scope, cursor_before, cursor_after, pushed, deduped, refused, gap_skipped, errors[]}], totals, errors[], note }.")]
     async fn sync_mirror_push(&self, Parameters(param): Parameters<MirrorPushParam>) -> Result<String, String> {
         log::info!("[MCP] sync_mirror_push: scope={:?}", param.scope);
-        let v = sync::mirror::sync_mirror_push(self.app.state::<SettingsState>(), param.scope).await?;
+        let v = sync::mirror::sync_mirror_push(self.app.state::<SettingsState>(), param.scope, param.auto).await?;
         Ok(v.to_string())
     }
 
@@ -535,12 +543,13 @@ impl DatasetMcpServer {
         Ok(v.to_string())
     }
 
-    #[tool(name = "hub_dataset_push_files", description = "Re-push one dataset's live file tree to the website's content-addressed blob store, moving ONLY the bytes that changed (sync-v2 §7 — the changed-file transport, now with an app client). Owner-only, account Bearer, POST /api/v1/datasets/{uuid}/objects against the account website. Phase 1 sends the tree's per-file sha256s and the store replies which hashes it lacks; phase 2 uploads just those blobs and the website atomically swaps the dataset's live tree and refcounts. The dataset must already exist there (bootstrap via hub_upload / the whole-archive path). An unchanged tree uploads zero bytes yet still reconciles it, so a local rename or deletion syncs without re-sending content. DB files are excluded (they ride the row-log plane, not blobs). Pass dataset_uuid. Returns { uuid, total, need, uploaded, applied, stored, deduped }. A 409 comes back tagged owned-by-other — remint via hub_remint_uuid.")]
+    #[tool(name = "hub_dataset_push_files", description = "Re-push one dataset's live file tree to the website's content-addressed blob store, moving ONLY the bytes that changed (sync-v2 §7 — the changed-file transport, now with an app client). Owner-only, account Bearer, POST /api/v1/datasets/{uuid}/objects against the account website. Phase 1 sends the tree's per-file sha256s and the store replies which hashes it lacks; phase 2 uploads just those blobs and the website atomically swaps the dataset's live tree and refcounts. The dataset must already exist there (bootstrap via hub_upload / the whole-archive path). An unchanged tree uploads zero bytes yet still reconciles it, so a local rename or deletion syncs without re-sending content. DB files are excluded (they ride the row-log plane, not blobs). Pass dataset_uuid. Normally drained automatically at the end of every sync round for each dataset this device has uploaded, on a logged-in hub; call manually to force one dataset. Returns { uuid, total, need, uploaded, applied, stored, deduped }. A 409 comes back tagged owned-by-other — remint via hub_remint_uuid.")]
     async fn hub_dataset_push_files(&self, Parameters(param): Parameters<PushFilesParam>) -> Result<String, String> {
         log::info!("[MCP] hub_dataset_push_files: uuid={}", param.dataset_uuid);
         let v = sync::blobpush::dataset_push_changed_files(
             self.app.state::<SettingsState>(),
             param.dataset_uuid,
+            param.auto,
         )
         .await?;
         Ok(v.to_string())

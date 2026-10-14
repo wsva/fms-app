@@ -264,6 +264,21 @@ fn ensure_upload_table(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// The dataset uuids this device has ever uploaded to the website, sorted.
+/// The round's step-7 auto-cadence drains exactly these through the
+/// changed-file diff (the blob route refuses a tree for an unknown uuid, so a
+/// dataset that was never uploaded has nothing to reconcile).
+pub(crate) fn upload_state_uuids(conn: &Connection) -> Result<Vec<String>, String> {
+    ensure_upload_table(conn)?;
+    let mut stmt = conn
+        .prepare("SELECT dataset_uuid FROM dataset_upload_state ORDER BY dataset_uuid")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 /// Map a failed upload response per the T7 error table, tagging a 409 with
 /// `owned-by-other` so the UI can offer the save-as-new-copy recovery (never
 /// silently overwrite another account's uuid).
@@ -578,4 +593,30 @@ pub async fn dataset_remint_uuid(
     .await?;
     log::info!("[upload] reminted {dataset_uuid} -> {new_uuid} and uploaded");
     Ok(json!({ "old_uuid": dataset_uuid, "new_uuid": new_uuid, "upload": body }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_state_uuids_creates_table_and_sorts() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Fresh device: the table is created on demand and reads back empty.
+        assert!(upload_state_uuids(&conn).unwrap().is_empty());
+        conn.execute(
+            "INSERT INTO dataset_upload_state VALUES (?1, 1, 'sha', '10', 'now')",
+            params!["ds-b"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO dataset_upload_state VALUES (?1, 1, 'sha', '10', 'now')",
+            params!["ds-a"],
+        )
+        .unwrap();
+        assert_eq!(
+            upload_state_uuids(&conn).unwrap(),
+            vec!["ds-a".to_string(), "ds-b".to_string()]
+        );
+    }
 }
