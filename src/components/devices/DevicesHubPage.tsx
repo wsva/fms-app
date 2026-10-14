@@ -65,13 +65,28 @@ interface QueueDiagnosis {
   action?: string;
 }
 
+/** One dataset's sync state (§3.5) — only the identity fields plus the journal
+ * authority surface (finish 7b) are rendered here; every field is optional so a
+ * stale backend still parses. */
+interface DatasetStatus {
+  dataset_uuid: string;
+  name?: string;
+  /** "authority" = the cloud hosts this scope's journal, "mirror" = this hub
+   * holds it; absent = never handed over (epoch 0). */
+  journal_role?: string | null;
+  /** The epoch this hub presents/refuses against for the scope (INV-13). */
+  journal_epoch?: number | null;
+  /** Actionable message from the last failed handover attempt, if any. */
+  journal_last_error?: string | null;
+}
+
 interface SyncStatusDetail {
   role: string;
   cluster_id: string;
   protocol_version: number;
   device_id: string;
   hub: HubStatus;
-  datasets: unknown[];
+  datasets: DatasetStatus[];
   queued_count: number;
   chat_pending: number;
   devices: PairedDevice[];
@@ -176,8 +191,8 @@ function StatusRow({ label, value, explanation }: { label: string; value: ReactN
  *   3. Devices paired to me — the hub-side registry of trusted devices.
  *
  * Moved out of Settings (Sync Role, Device Pairing) and Datasets Sync (status
- * overview, scan/connect/pair). No new backend commands — every invoke already
- * exists for those pages.
+ * overview, scan/connect/pair). Aside from the desktop-only handover toggle
+ * (`sync_handover_to_cloud`), every invoke already exists for those pages.
  */
 export default function DevicesHubPage() {
   const [mounted, setMounted] = useState(false);
@@ -213,6 +228,10 @@ export default function DevicesHubPage() {
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [pairError, setPairError] = useState("");
 
+  // Journal authority (finish 7b): the desktop-only hub's per-scope handover
+  // toggle, driving `sync_handover_to_cloud` (never automatic, INV-13).
+  const [handoverBusy, setHandoverBusy] = useState("");
+
   // Hub kind of the address being viewed ("website" | "lan" | ""), resolved by
   // the backend's `hub_kind` so the compile-time website origin stays the single
   // source of truth. Pairing is a LAN concept — the flow hides for "website".
@@ -226,6 +245,11 @@ export default function DevicesHubPage() {
   // workspace setting (status is null before it loads on a hub, etc.).
   const role = status?.role || workspaceSettings?.role || "follower";
   const isHub = role === "hub";
+
+  // Scopes with a recorded handover state (finish 7b) — the Journal Authority
+  // section's rows. Never-handed-over scopes (epoch 0) carry no role and stay
+  // out, so the surface only shows scopes an authority flip has actually moved.
+  const journalRows = (status?.datasets ?? []).filter((d) => d.journal_role);
 
   // ---- Loaders ----------------------------------------------------------
 
@@ -485,6 +509,46 @@ export default function DevicesHubPage() {
       setMessage("Forgot the hub. Scan or enter an address to re-pair.");
     } catch (e) {
       setMessage(`Failed to forget hub: ${String(e)}`);
+    }
+  }
+
+  // ---- Journal authority (hub side, desktop only, finish 7b) -----------
+
+  // Hand one dataset scope's journal authority between this hub and the cloud —
+  // the UI surface for the `sync_handover_to_cloud` export half (the website's
+  // manage list grew the matching per-card toggle). Confirm-gated like the
+  // website: a flip moves who accepts follower writes for the scope, and the
+  // backend refuses a "to cloud" whose journal has not fully mirrored (INV-1).
+  async function handleHandover(uuid: string, name: string, targetRole: string) {
+    if (handoverBusy) return;
+    const toCloud = targetRole === "authority";
+    const prompt = toCloud
+      ? `Hand the journal authority for “${name}” to the cloud? The website becomes the authority followers write to, and this hub stops accepting the scope's writes until you hand it back. Its journal must have fully mirrored first.`
+      : `Hand the journal authority for “${name}” back to this hub? Followers write to this machine again; the cloud keeps a read-only mirror.`;
+    if (!confirm(prompt)) return;
+    setHandoverBusy(uuid);
+    setMessage("");
+    try {
+      const res = await invoke<{
+        changed?: boolean;
+        journal_role?: string;
+        journal_epoch?: number;
+        export?: { pushed?: number };
+      }>("sync_handover_to_cloud", { uuid, role: targetRole });
+      const roleLabel = res.journal_role === "authority" ? "cloud authority" : "hub authority";
+      setMessage(
+        res.changed === false
+          ? `“${name}” is already the ${roleLabel} — nothing to do (INV-13 same-role no-op).`
+          : `“${name}” → ${roleLabel} · epoch ${res.journal_epoch ?? 0}` +
+            (toCloud ? ` (export pushed ${res.export?.pushed ?? 0} row(s))` : ""),
+      );
+    } catch (e) {
+      // Backend messages are already actionable ("run sync_mirror_push until the
+      // scope drains", "publish it before handing over") — surface verbatim.
+      setMessage(`Handover failed: ${String(e)}`);
+    } finally {
+      setHandoverBusy("");
+      loadStatus();
     }
   }
 
@@ -1009,6 +1073,78 @@ export default function DevicesHubPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        </section>
+      )}
+
+      {/* ── 4. Journal authority (hub side, desktop only, finish 7b) ─── */}
+      {isHub && !mobile && mounted && journalRows.length > 0 && (
+        <section className="shrink-0 flex flex-col gap-3 p-4 rounded-lg border border-border-default bg-bg-card">
+          <h2 className="text-base font-semibold flex items-center gap-2">
+            <ShieldCheck size={16} />
+            Journal Authority
+          </h2>
+          <p className="text-text-secondary text-sm">
+            A handed-over dataset writes its journal in the cloud or on this hub — exactly one at a
+            time (INV-13). <span className="font-medium">Cloud authority</span> means followers send
+            this dataset&apos;s changes to the website; <span className="font-medium">Hub authority</span>{" "}
+            means they send them here. Handing over is always deliberate: to the cloud, the scope&apos;s
+            journal must have fully mirrored first (INV-1).
+          </p>
+
+          {message && <p className="text-sm text-text-primary">{message}</p>}
+
+          <div className="flex flex-col gap-2">
+            {journalRows.map((d) => {
+              const toCloud = d.journal_role !== "authority";
+              const label = d.name || d.dataset_uuid;
+              return (
+                <div
+                  key={d.dataset_uuid}
+                  className="flex items-center gap-3 flex-wrap text-sm"
+                >
+                  <div className="flex flex-col min-w-0 flex-1">
+                    <span className="font-medium truncate">{label}</span>
+                    <span className="text-xs text-text-tertiary font-mono truncate">
+                      {d.dataset_uuid}
+                    </span>
+                    {d.journal_last_error && (
+                      <span className="text-xs text-red-600 dark:text-red-400">
+                        last attempt: {d.journal_last_error}
+                      </span>
+                    )}
+                  </div>
+                  <span
+                    className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${
+                      toCloud
+                        ? "bg-bg-hover text-text-secondary"
+                        : "bg-blue-500/15 text-blue-600 dark:text-blue-400"
+                    }`}
+                  >
+                    {toCloud ? "Hub authority" : "Cloud authority"}
+                  </span>
+                  {d.journal_epoch != null && (
+                    <span className="text-xs text-text-tertiary shrink-0">epoch {d.journal_epoch}</span>
+                  )}
+                  <button
+                    className="px-3 py-1 text-xs rounded-md border border-border-light hover:bg-bg-hover disabled:opacity-50 cursor-pointer shrink-0"
+                    onClick={() => handleHandover(d.dataset_uuid, label, toCloud ? "authority" : "mirror")}
+                    disabled={!!handoverBusy}
+                    title={
+                      toCloud
+                        ? "Make the cloud the journal authority for this dataset"
+                        : "Return journal authority for this dataset to this hub"
+                    }
+                  >
+                    {handoverBusy === d.dataset_uuid
+                      ? "Handing…"
+                      : toCloud
+                      ? "Hand to cloud"
+                      : "Hand back to hub"}
+                  </button>
+                </div>
+              );
+            })}
           </div>
         </section>
       )}

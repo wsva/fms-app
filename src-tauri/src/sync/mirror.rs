@@ -138,6 +138,33 @@ fn set_handover_state(conn: &Connection, scope: &str, epoch: i64, role: &str, er
     );
 }
 
+/// Every recorded handover state `(scope, role, epoch, last_error)` for the
+/// status surface (sync-v2 finish 7b). `journal_handover_state` is a write-only
+/// table until now — this is its reader. Sorted by scope so the UI order is
+/// stable, and `ensure`d first so a hub that never handed anything over reads
+/// an empty vec instead of tripping over the missing table.
+pub(crate) fn handover_states(
+    conn: &Connection,
+) -> Result<Vec<(String, Option<String>, i64, Option<String>)>, String> {
+    ensure_handover_table(conn)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT scope, journal_role, journal_epoch, last_error FROM journal_handover_state ORDER BY scope",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 /// Persist a failed handover attempt for `scope` without clobbering the last
 /// known-good epoch/role (only the error note moves).
 fn record_handover_error(settings: &SettingsState, scope: &str, err: &str) {
@@ -760,5 +787,30 @@ mod tests {
         // A re-handover updates epoch/role in place.
         set_handover_state(&conn, "ds", 5, "mirror", None);
         assert_eq!(read(&conn), Some((5, Some("mirror".to_string()), None)));
+    }
+
+    // The status read seam (finish 7b): every row back, scope-sorted, NULL role
+    // preserved for a recorded failure, and a never-handed-over hub reads empty
+    // instead of faulting on the missing table.
+    #[test]
+    fn handover_states_reads_every_row_sorted_and_tolerates_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(handover_states(&conn).unwrap().is_empty());
+
+        set_handover_state(&conn, "ds-b", 3, "authority", None);
+        let err = "journal has not fully mirrored to the cloud; handover blocked (INV-1)";
+        conn.execute(
+            "INSERT INTO journal_handover_state (scope, journal_epoch, journal_role, handed_over_at, last_error) VALUES ('ds-a', 0, NULL, datetime('now'), ?1)",
+            params![err],
+        )
+        .unwrap();
+
+        assert_eq!(
+            handover_states(&conn).unwrap(),
+            vec![
+                ("ds-a".to_string(), None, 0, Some(err.to_string())),
+                ("ds-b".to_string(), Some("authority".to_string()), 3, None),
+            ]
+        );
     }
 }

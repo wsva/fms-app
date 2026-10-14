@@ -64,6 +64,17 @@ pub struct DatasetStatus {
     /// "needs_resync"`: `"retention_gap"` | `"journal_regressed"` |
     /// `"provenance_reset"` | `"no_cursor"`. `None` in every other state.
     pub resync_reason: Option<String>,
+    /// The cloud role this hub last recorded for the scope (finish 7b):
+    /// `"authority"` = the cloud hosts the journal, `"mirror"` = this hub holds
+    /// it. `None` = never handed over (epoch 0; the desktop-only
+    /// `journal_handover_state` table has no row, and Android never writes one).
+    pub journal_role: Option<String>,
+    /// The authority epoch this hub presents/refuses against for the scope
+    /// (INV-13) — `max` of the recorded handover echo and `sync_scope_epoch`, so
+    /// a local `sync_handover_epoch` bump is never hidden by a stale echo.
+    pub journal_epoch: Option<i64>,
+    /// The failed handover attempt's actionable message, if the last one errored.
+    pub journal_last_error: Option<String>,
 }
 
 /// Live view of the connected hub from its unauthenticated `/status`.
@@ -280,6 +291,54 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
 
     let conn = datasets::dictation::open_app_db(settings)?;
     ensure_sync_tables(&conn)?;
+    // The hub tables (`sync_scope_epoch`) may never have been created on this
+    // device — ensure defensively so the journal-authority read below never
+    // trips over a missing table (same defensive read as `scope_epoch`).
+    let _ = crate::sync::change_log::ensure_hub_tables(&conn);
+
+    // Journal authority (finish 7b): the recorded handover states, desktop-only
+    // (the write side lives in `sync/mirror.rs`, gated with its table), plus
+    // every scope's current authority epoch from `sync_scope_epoch` — read as one
+    // map so per-dataset rows cost no query each. A failure just leaves the
+    // surface without authority info, exactly like a never-handed-over hub.
+    let handover_map: std::collections::HashMap<String, (Option<String>, i64, Option<String>)> = {
+        #[cfg(feature = "desktop")]
+        {
+            crate::sync::mirror::handover_states(&conn)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(scope, role, epoch, err)| (scope, (role, epoch, err)))
+                .collect()
+        }
+        #[cfg(not(feature = "desktop"))]
+        {
+            Default::default()
+        }
+    };
+    let scope_epochs: std::collections::HashMap<String, i64> = conn
+        .prepare("SELECT scope, epoch FROM sync_scope_epoch")
+        .and_then(|mut s| {
+            s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    // Attach the recorded handover state to one status row: the role/error from
+    // the state table (None = never handed over), the epoch as the max of the
+    // cloud echo and what this hub now presents (INV-13).
+    let journal_of = |uuid: &str| -> (Option<String>, Option<i64>, Option<String>) {
+        let state = handover_map.get(uuid);
+        let echo = state.map(|s| s.1).unwrap_or(0);
+        let present = scope_epochs.get(uuid).copied().unwrap_or(0);
+        // `sync_scope_epoch` is always at least the recorded echo (the handover
+        // writes both), so the max is the live presented epoch (INV-13) — and a
+        // scope at 0 has never been handed over: no epoch to show.
+        let epoch = echo.max(present);
+        (
+            state.and_then(|s| s.0.clone()),
+            if epoch > 0 { Some(epoch) } else { None },
+            state.and_then(|s| s.2.clone()),
+        )
+    };
 
     let mut local: Vec<SyncStateEntry> = local_sync_entries(&conn)?;
     // Mark datasets the hub pruned past our cursor (a resync is forced on the
@@ -380,6 +439,7 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
             (Some(_), None) => true,
             _ => false,
         };
+        let journal = journal_of(&uuid);
         datasets.push(DatasetStatus {
             dataset_uuid: uuid,
             dataset_type: c["dataset_type"].as_str().unwrap_or("").to_string(),
@@ -395,12 +455,16 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
             availability: entry.map(|e| e.availability.clone()).unwrap_or_default(),
             published_version: entry.and_then(|e| e.published_version),
             resync_reason: classify_resync_reason(state, entry.and_then(|e| e.resync_reason.clone())),
+            journal_role: journal.0,
+            journal_epoch: journal.1,
+            journal_last_error: journal.2,
         });
     }
     for e in &local {
         if seen.contains(&e.dataset_uuid) {
             continue;
         }
+        let journal = journal_of(&e.dataset_uuid);
         datasets.push(DatasetStatus {
             dataset_uuid: e.dataset_uuid.clone(),
             dataset_type: String::new(),
@@ -419,6 +483,9 @@ pub(crate) async fn sync_status_detail(settings: &SettingsState) -> Result<SyncS
                 if hub.reachable { "removed_on_hub" } else { "needs_resync" },
                 e.resync_reason.clone(),
             ),
+            journal_role: journal.0,
+            journal_epoch: journal.1,
+            journal_last_error: journal.2,
         });
     }
 
