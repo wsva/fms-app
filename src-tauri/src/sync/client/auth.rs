@@ -242,6 +242,11 @@ pub(crate) async fn hub_http_error(resp: reqwest::Response, api_path: &str) -> S
         404 => format!("'{api_path}' is not on this hub (404){}",
             if server_msg.is_empty() { String::new() } else { format!(" — {server_msg}") }),
         409 => format!("ownership/type conflict with the hub's catalog (409): {server_msg}"),
+        410 => format!(
+            "the publisher took this version down (410) — your installed copy stays and \
+             remains practicable (INV-22){}",
+            if server_msg.is_empty() { String::new() } else { format!(" — {server_msg}") }
+        ),
         413 => format!("too large for the hub's limits (413): {server_msg}"),
         c => format!("hub request '{api_path}' failed (HTTP {c}): {server_msg}"),
     }

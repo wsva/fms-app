@@ -467,6 +467,20 @@ pub(crate) fn set_resync_reason(conn: &Connection, uuid: &str, reason: &str) -> 
     .map(|_| ())
 }
 
+/// Record a registry copy's availability (`"listed"` | `"withdrawn"`, sync-v2.md
+/// §11.5 / INV-22) — the producer the `availability` column was waiting on. A
+/// `withdrawn` copy is kept and stays practicable; the prune path already refuses
+/// to delete one (`prune_never_deletes_withdrawn`). A no-op when the row does not
+/// exist yet (only registry-adopted copies have one, and adoption writes it).
+pub(crate) fn set_availability(conn: &Connection, uuid: &str, availability: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE dataset_sync_state SET availability = ?2 WHERE dataset_uuid = ?1",
+        params![uuid, availability],
+    )
+    .map_err(|e| e.to_string())
+    .map(|_| ())
+}
+
 /// Decide what `DatasetStatus.resync_reason` should read for a dataset in `state`
 /// (§19.2). Pure so the mapping is unit-testable with no DB. Only a `needs_resync`
 /// copy carries a reason: the stored one when the round recorded it, else
@@ -511,6 +525,36 @@ mod tests {
         // Scopes stay independent, and a never-pulled dataset reads the no-op `0`.
         assert_eq!(recorded_epoch(&conn, app_scope), 3);
         assert_eq!(recorded_epoch(&conn, "other"), 0);
+    }
+
+    // INV-22 producer: `set_availability` flips a copy 'listed' -> 'withdrawn' and
+    // it reads back through the entry the Status surface renders. A no-op on a
+    // missing row (never creates one) keeps it scoped to genuinely-adopted copies.
+    #[test]
+    fn set_availability_flips_listed_to_withdrawn_and_is_row_scoped() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_sync_tables(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO dataset_sync_state (dataset_uuid, overall_hash, synced_at, upstream_kind) \
+             VALUES ('ds', 'h', 'now', 'registry')",
+            [],
+        )
+        .unwrap();
+        let avail = |conn: &Connection| {
+            local_sync_entries(conn)
+                .unwrap()
+                .into_iter()
+                .find(|e| e.dataset_uuid == "ds")
+                .map(|e| e.availability)
+                .unwrap_or_default()
+        };
+        // The column default is 'listed'.
+        assert_eq!(avail(&conn), "listed");
+        set_availability(&conn, "ds", "withdrawn").unwrap();
+        assert_eq!(avail(&conn), "withdrawn");
+        // A missing row is a no-op (does not create one, does not error).
+        set_availability(&conn, "ghost", "withdrawn").unwrap();
+        assert!(local_sync_entries(&conn).unwrap().iter().all(|e| e.dataset_uuid != "ghost"));
     }
 }
 

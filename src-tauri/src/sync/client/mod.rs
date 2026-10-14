@@ -100,6 +100,7 @@ pub(crate) fn resolve_pc_url(settings: &SettingsState, override_url: Option<&str
 // ---------------------------------------------------------------------------
 
 pub(crate) mod auth;
+pub(crate) mod availability;
 pub(crate) mod cluster;
 pub(crate) mod sync_state;
 pub(crate) mod writeback;
@@ -109,6 +110,7 @@ pub(crate) mod pairing;
 pub(crate) mod round;
 
 pub(crate) use auth::*;
+pub(crate) use availability::*;
 pub(crate) use cluster::*;
 pub(crate) use sync_state::*;
 pub(crate) use writeback::*;

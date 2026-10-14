@@ -466,4 +466,11 @@ impl DatasetMcpServer {
         let v = sync::mirror::sync_mirror_push(self.app.state::<SettingsState>(), param.scope).await?;
         Ok(v.to_string())
     }
+
+    #[tool(name = "sync_check_availability", description = "Check whether each registry-adopted dataset is still available where it was adopted from (sync-v2 §11.5 / INV-22 takedown). For every copy that pinned a version, re-reads its EXACT version manifest (`GET {upstream_origin}/api/v1/registry/{uuid}/manifest?version=N`) — a 200 marks it 'listed', a 410 Gone (the publisher took that version down) marks it 'withdrawn'. A withdrawn copy is KEPT and stays fully practicable (files + progress); only fresh re-reads are refused. Any other status or an unreachable origin leaves the last value untouched and is reported as 'unknown' rather than guessed. Finds no rows on a LAN-only device (registry reads are a website-host feature). Returns { checked, withdrawn, results:[{uuid, version, http_status?, availability, error?|note?}] }.")]
+    async fn sync_check_availability(&self) -> Result<String, String> {
+        log::info!("[MCP] sync_check_availability");
+        let v = sync::client::sync_check_availability(self.app.state::<SettingsState>()).await?;
+        Ok(v.to_string())
+    }
 }
