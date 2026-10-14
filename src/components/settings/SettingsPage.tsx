@@ -591,12 +591,6 @@ export default function SettingsPage() {
             description="Where audio recordings are stored."
             value={workspaceSettings?.recordings_dir ?? ""}
           />
-
-          <DirField
-            label="Books Directory"
-            description="Default: <workspace>/datasets/book. Additional locations can be linked from the Read a Book > Manage page."
-            value={workspaceSettings?.books_dir ?? ""}
-          />
         </section>
 
         {/* ── Microphone section ─────────────────────────────── */}
