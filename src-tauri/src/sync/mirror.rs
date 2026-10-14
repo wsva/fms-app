@@ -40,6 +40,12 @@ use crate::sync::change_log;
 /// Website route that ingests mirrored journal entries (§7).
 const MIRROR_PATH: &str = "/api/v1/changes";
 
+/// Website route that flips a scope's journal role between this hub and the cloud
+/// authority (`learning/fms/src/app/api/v1/handover/route.ts`, sync-v2.md §9 flow 8,
+/// INV-13/INV-15). Body `{ uuid, role }` under the OAuth Bearer, owner-only; echoes
+/// `{ uuid, changed, journal_role, journal_epoch }`.
+const HANDOVER_PATH: &str = "/api/v1/handover";
+
 /// Entries per POST. Well under the website's `MAX_MIRROR_PUSH_ROWS` (20000) so
 /// a batch bounds memory and the cursor advances incrementally; a 413 still
 /// halves it and retries once (see [`push_scope`]).
@@ -95,6 +101,54 @@ fn persist_cursor(settings: &SettingsState, scope: &str, seq: i64, err: Option<&
     if let Ok(conn) = datasets::dictation::open_app_db(settings) {
         let _ = ensure_mirror_table(&conn);
         set_pushed_seq(&conn, scope, seq, err);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handover state (desktop-only app-DB table)
+// ---------------------------------------------------------------------------
+
+/// Create the handover state table idempotently — the status surface for the
+/// desktop→cloud authority handover, kept alongside (and out of) the mirror
+/// cursor for the same desktop-only reason `mirror_push_state` is.
+fn ensure_handover_table(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS journal_handover_state (
+            scope          TEXT PRIMARY KEY,
+            journal_epoch  INTEGER NOT NULL DEFAULT 0,
+            journal_role   TEXT,
+            handed_over_at TEXT,
+            last_error     TEXT
+        )",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Record the cloud's post-handover role/epoch for `scope`, clearing any prior
+/// error. Best-effort (a write failure only costs a stale status read).
+fn set_handover_state(conn: &Connection, scope: &str, epoch: i64, role: &str, err: Option<&str>) {
+    let _ = conn.execute(
+        "INSERT INTO journal_handover_state (scope, journal_epoch, journal_role, handed_over_at, last_error) \
+         VALUES (?1, ?2, ?3, datetime('now'), ?4) \
+         ON CONFLICT(scope) DO UPDATE SET \
+             journal_epoch = ?2, journal_role = ?3, handed_over_at = datetime('now'), last_error = ?4",
+        params![scope, epoch, role, err],
+    );
+}
+
+/// Persist a failed handover attempt for `scope` without clobbering the last
+/// known-good epoch/role (only the error note moves).
+fn record_handover_error(settings: &SettingsState, scope: &str, err: &str) {
+    if let Ok(conn) = datasets::dictation::open_app_db(settings) {
+        let _ = ensure_handover_table(&conn);
+        let _ = conn.execute(
+            "INSERT INTO journal_handover_state (scope, journal_epoch, journal_role, handed_over_at, last_error) \
+             VALUES (?1, 0, NULL, datetime('now'), ?2) \
+             ON CONFLICT(scope) DO UPDATE SET last_error = ?2",
+            params![scope, err],
+        );
     }
 }
 
@@ -420,6 +474,158 @@ pub async fn sync_mirror_push(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Authority handover (desktop hub -> cloud, sync-v2.md §9 flow 8 / INV-13)
+// ---------------------------------------------------------------------------
+
+/// Normalize and validate the requested handover role. The website requires an
+/// explicit `authority`|`mirror` member and never defaults it, so a malformed
+/// request must fail here rather than silently hand a scope to the cloud (§15 q4:
+/// the operation stays deliberate). Absent/empty means the common desktop→cloud case.
+fn normalize_handover_role(role: Option<&str>) -> Result<&'static str, String> {
+    match role.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("authority") {
+        "authority" => Ok("authority"),
+        "mirror" => Ok("mirror"),
+        other => Err(format!("role must be 'authority' or 'mirror' (got '{other}')")),
+    }
+}
+
+/// True when a mirror export fully drained the scope: no refusals and no transport
+/// errors. A not-drained export must block a desktop→cloud **authority** handover —
+/// INV-1 continuity: the cloud self-seeds its seq space above the journal it already
+/// holds, so handing over before every row lands would leave the new authority
+/// missing rows. A `mirror` (cloud→desktop) handover returns authority to this hub and
+/// does not depend on the export having drained, so the caller only gates on this for
+/// `authority`.
+fn export_is_complete(export: &Value) -> bool {
+    let refused = export["refused"].as_i64().unwrap_or(0);
+    let errors_empty = export["errors"].as_array().map(|a| a.is_empty()).unwrap_or(true);
+    refused == 0 && errors_empty
+}
+
+/// Map a failed handover response to an actionable message, house style of
+/// [`mirror_http_error`] (the route's 4xx set is owner/auth-shaped, not batch-shaped).
+async fn handover_http_error(resp: reqwest::Response) -> String {
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    let msg = body["error"].as_str().unwrap_or("");
+    let suffix = |s: &str| if s.is_empty() { String::new() } else { format!(" — {s}") };
+    match status {
+        401 => "sign in again — the website rejected or did not receive your access token (401)".to_string(),
+        403 => format!("the website rejected this handover; the credential is read-only (403){}", suffix(msg)),
+        404 => "the website has no catalog row for this dataset uuid — publish it before handing its journal over (404)".to_string(),
+        409 => format!("you do not own this dataset uuid on the website (409){}", suffix(msg)),
+        c if c >= 500 => format!("the website is failing right now (HTTP {c}) — retryable{}", suffix(msg)),
+        c => format!("handover failed (HTTP {c}): {msg}"),
+    }
+}
+
+/// Hand one dataset scope's journal authority between this desktop hub and the cloud
+/// (sync-v2.md §9 flow 8 / INV-13) — the **export half** of the website's already-shipped
+/// `POST /api/v1/handover`. `role = "authority"` (the default) hands the scope TO the
+/// cloud; `"mirror"` hands it back to this hub.
+///
+/// The sequence is what makes it safe, not just the flip:
+/// 1. Fully **export** the scope's journal to the cloud mirror via the existing
+///    [`push_scope`] so every row is present BEFORE the role moves. For an `authority`
+///    handover a not-drained export is refused here (INV-1).
+/// 2. `POST /api/v1/handover { uuid, role }` under the OAuth Bearer, owner-only.
+/// 3. **Record** the epoch the cloud echoes back into this hub's `sync_scope_epoch`
+///    (so we stop presenting/refusing against a stale number) and into
+///    `journal_handover_state` for the status surface.
+///
+/// Never automatic (INV-13 forbids failover) and hub-only (a follower has no authority
+/// to hand over) — the same guards as `sync_handover_epoch`. Website target, needs a
+/// logged-in account.
+#[tauri::command]
+pub async fn sync_handover_to_cloud(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+    role: Option<String>,
+) -> Result<Value, String> {
+    if settings.role() != "hub" {
+        return Err("only a hub holds journal authority to hand a scope over".to_string());
+    }
+    let uuid = uuid.trim().to_string();
+    if uuid.is_empty() {
+        return Err("uuid is required (the dataset scope to hand over)".to_string());
+    }
+    let role = normalize_handover_role(role.as_deref())?;
+
+    let base = crate::auth::base_url();
+    let token = crate::auth::get_access_token(&settings)?;
+    let client = crate::auth::hub_client_builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // 1. Export: fully drain this scope's journal to the cloud mirror before the flip.
+    let mirror_url = format!("{base}{MIRROR_PATH}");
+    let export = push_scope(&settings, &client, &mirror_url, &token, &uuid).await?;
+    if role == "authority" && !export_is_complete(&export) {
+        let note = "journal has not fully mirrored to the cloud; handover blocked (INV-1)".to_string();
+        record_handover_error(&settings, &uuid, &note);
+        return Err(format!(
+            "cannot hand scope '{uuid}' to the cloud yet: its journal has not fully mirrored \
+             (refused={}). Resolve the reported rows, run sync_mirror_push until the scope \
+             drains, then retry the handover.",
+            export["refused"].as_i64().unwrap_or(0)
+        ));
+    }
+
+    // 2. Flip the role on the cloud.
+    let handover_url = format!("{base}{HANDOVER_PATH}");
+    let body = json!({ "uuid": uuid, "role": role });
+    let resp = client
+        .post(&handover_url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("cannot reach the website at {handover_url}: {e}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        crate::auth::token_rejected(&settings);
+    }
+    if !status.is_success() {
+        let msg = handover_http_error(resp).await;
+        record_handover_error(&settings, &uuid, &msg);
+        return Err(msg);
+    }
+    let rj: Value = resp.json().await.map_err(|e| format!("unexpected handover response: {e}"))?;
+
+    let changed = rj["changed"].as_bool().unwrap_or(false);
+    let journal_role = rj["journal_role"].as_str().unwrap_or(role).to_string();
+    let journal_epoch = rj["journal_epoch"].as_i64().unwrap_or(0);
+
+    // 3. Record the epoch the cloud now holds, and the handover state for status.
+    if let Ok(conn) = datasets::dictation::open_app_db(&settings) {
+        let _ = ensure_handover_table(&conn);
+        let _ = change_log::set_scope_epoch(&conn, &uuid, journal_epoch);
+        set_handover_state(&conn, &uuid, journal_epoch, &journal_role, None);
+    }
+
+    log::warn!(
+        "[sync] handover to cloud: scope '{uuid}' role='{journal_role}' epoch={journal_epoch} changed={changed} (export pushed={})",
+        export["pushed"].as_i64().unwrap_or(0)
+    );
+
+    Ok(json!({
+        "uuid": uuid,
+        "target": base,
+        "role_requested": role,
+        "changed": changed,
+        "journal_role": journal_role,
+        "journal_epoch": journal_epoch,
+        "export": {
+            "pushed": export["pushed"],
+            "deduped": export["deduped"],
+            "refused": export["refused"],
+            "cursor_after": export["cursor_after"],
+        },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,5 +717,48 @@ mod tests {
         assert_eq!(pushed_seq(&conn, "dataset-a"), 57);
         // Another scope is independent.
         assert_eq!(pushed_seq(&conn, "dataset-b"), 0);
+    }
+
+    // The role the website insists on being explicit: absent defaults to the
+    // desktop→cloud case, `mirror` hands back, anything else is refused (never
+    // silently defaulted so a typo can't accidentally hand a scope over).
+    #[test]
+    fn normalize_handover_role_defaults_and_rejects_unknown() {
+        assert_eq!(normalize_handover_role(None).unwrap(), "authority");
+        assert_eq!(normalize_handover_role(Some("")).unwrap(), "authority");
+        assert_eq!(normalize_handover_role(Some("  mirror ")).unwrap(), "mirror");
+        assert_eq!(normalize_handover_role(Some("authority")).unwrap(), "authority");
+        assert!(normalize_handover_role(Some("leader")).is_err());
+    }
+
+    // A not-drained export blocks an authority handover (INV-1: the cloud can't
+    // self-seed above a journal with holes). Refusals or transport errors both trip it.
+    #[test]
+    fn export_is_complete_requires_no_refusals_and_no_errors() {
+        assert!(export_is_complete(&json!({ "refused": 0, "errors": [] })));
+        // Missing fields default safe-ways: absent errors = complete.
+        assert!(export_is_complete(&json!({})));
+        assert!(!export_is_complete(&json!({ "refused": 2, "errors": [] })));
+        assert!(!export_is_complete(&json!({ "refused": 0, "errors": ["boom"] })));
+    }
+
+    #[test]
+    fn handover_state_round_trips_and_records_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_handover_table(&conn).unwrap();
+        let read = |conn: &Connection| {
+            conn.query_row(
+                "SELECT journal_epoch, journal_role, last_error FROM journal_handover_state WHERE scope = 'ds'",
+                [],
+                |r| Ok::<(i64, Option<String>, Option<String>), rusqlite::Error>((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok()
+        };
+        assert!(read(&conn).is_none());
+        set_handover_state(&conn, "ds", 4, "authority", None);
+        assert_eq!(read(&conn), Some((4, Some("authority".to_string()), None)));
+        // A re-handover updates epoch/role in place.
+        set_handover_state(&conn, "ds", 5, "mirror", None);
+        assert_eq!(read(&conn), Some((5, Some("mirror".to_string()), None)));
     }
 }

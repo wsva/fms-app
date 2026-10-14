@@ -150,6 +150,24 @@ pub fn bump_scope_epoch(conn: &Connection, scope: &str) -> Result<i64, String> {
     Ok(scope_epoch(conn, scope))
 }
 
+/// Pin one scope's authority epoch to an **exact** value learned out-of-band (the
+/// cloud's `POST /api/v1/handover` response after a desktop→cloud authority handover,
+/// sync-v2.md §9 flow 8). Unlike [`bump_scope_epoch`] (the local, increment-only
+/// operator handover), this records the epoch a *remote* authority now holds so this
+/// hub stops presenting (and refusing against) a stale number. Refuses a regress:
+/// never moves an epoch backwards, so a replayed/late response cannot resurrect a
+/// dead authority window. Returns the resulting stored epoch.
+pub fn set_scope_epoch(conn: &Connection, scope: &str, epoch: i64) -> Result<i64, String> {
+    ensure_hub_tables(conn)?;
+    conn.execute(
+        "INSERT INTO sync_scope_epoch (scope, epoch) VALUES (?1, ?2) \
+         ON CONFLICT(scope) DO UPDATE SET epoch = MAX(epoch, ?2)",
+        params![scope, epoch],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(scope_epoch(conn, scope))
+}
+
 // ---------------------------------------------------------------------------
 // Change classification (§3.6)
 // ---------------------------------------------------------------------------
@@ -921,6 +939,25 @@ mod tests {
         // strictly below authority, so `sync_changes` refuses it until it re-pulls.
         assert!(0 < scope_epoch(&conn, "ds"));
         // `@app` is its own scope — untouched by the dataset's bump.
+        assert_eq!(scope_epoch(&conn, APP_SCOPE), 0);
+    }
+
+    // The cloud-handover seam: `set_scope_epoch` pins the exact epoch a remote
+    // authority reported, never regressing below what this hub already holds.
+    #[test]
+    fn set_scope_epoch_pins_exact_value_and_never_regresses() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_hub_tables(&conn).unwrap();
+
+        // First learn adopts the remote value outright.
+        assert_eq!(set_scope_epoch(&conn, "ds", 3).unwrap(), 3);
+        assert_eq!(scope_epoch(&conn, "ds"), 3);
+        // A higher learn moves forward.
+        assert_eq!(set_scope_epoch(&conn, "ds", 5).unwrap(), 5);
+        // A stale/replayed lower response is refused: the epoch stays forward.
+        assert_eq!(set_scope_epoch(&conn, "ds", 2).unwrap(), 5);
+        assert_eq!(scope_epoch(&conn, "ds"), 5);
+        // Scopes stay independent; `@app` untouched.
         assert_eq!(scope_epoch(&conn, APP_SCOPE), 0);
     }
 }

@@ -41,6 +41,17 @@ struct SyncHandoverParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct SyncHandoverCloudParam {
+    /// Dataset uuid (the scope) to hand between this desktop hub and the cloud.
+    uuid: String,
+    /// Target role on the cloud: `"authority"` (default) hands the scope TO the cloud;
+    /// `"mirror"` hands it back to this hub. Required-explicit on the website, so an
+    /// unknown value is refused rather than defaulted.
+    #[serde(default)]
+    role: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct PcScanParam {
     /// Discovery budget in milliseconds (0 = the default 2500).
     #[serde(default)]
@@ -137,6 +148,18 @@ impl DatasetMcpServer {
         let settings = self.app.state::<SettingsState>();
         let new_epoch = sync::server::sync_handover_epoch(settings, param.scope.clone())?;
         Ok(serde_json::json!({ "scope": param.scope, "epoch": new_epoch }).to_string())
+    }
+
+    #[tool(name = "sync_handover_to_cloud", description = "Hand one dataset scope's journal authority between this desktop hub and the cloud (sync-v2.md §9 flow 8 / INV-13) — the export half of the website's POST /api/v1/handover. `role='authority'` (default) hands the scope TO the cloud; `'mirror'` hands it back. It FIRST fully mirrors the scope's journal to the cloud (aborting an `authority` handover if rows are still refused/unpushed — INV-1 continuity), THEN flips the role, THEN records the epoch the cloud echoes back. NEVER automatic (INV-13 forbids failover) and hub-only; needs a logged-in account. Returns { changed, journal_role, journal_epoch, export }.")]
+    async fn sync_handover_to_cloud(&self, Parameters(param): Parameters<SyncHandoverCloudParam>) -> Result<String, String> {
+        log::info!("[MCP] sync_handover_to_cloud: uuid={}, role={:?}", param.uuid, param.role);
+        let v = sync::mirror::sync_handover_to_cloud(
+            self.app.state::<SettingsState>(),
+            param.uuid,
+            param.role,
+        )
+        .await?;
+        Ok(v.to_string())
     }
 
     #[tool(name = "pairing_list_devices", description = "List devices paired with this PC's web service (device_id, name, approved/denied status, created/last-seen times). Requests from localhost and Tailscale always bypass pairing.")]
