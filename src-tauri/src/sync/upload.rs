@@ -451,10 +451,19 @@ async fn pack_and_send(
     let archive = tmp_root.join(format!("{uuid}.tar.gz"));
     let _ = std::fs::remove_file(&archive);
 
+    log::info!("[upload] {uuid}: packing archive from {}", dir.display());
     let size = pack_archive(app, dir, &archive)?;
     let result = send_archive(app, settings, uuid, &archive, visibility, tag_uuids).await;
     let _ = std::fs::remove_file(&archive);
-    let body = result?;
+    let body = match result {
+        Ok(body) => body,
+        Err(e) => {
+            // Without this the failure only lives in the returned string — the
+            // app log would show a pack line and then nothing.
+            log::error!("[upload] {uuid}: failed after packing {size} bytes: {e}");
+            return Err(e);
+        }
+    };
     log::info!("[upload] {uuid}: packed {size} bytes, hub answered {body}");
     Ok(body)
 }
@@ -476,8 +485,16 @@ pub async fn dataset_export_upload(
     visibility: Option<String>,
     tag_uuids: Option<Vec<String>>,
 ) -> Result<Value, String> {
+    log::info!(
+        "[upload] dataset_export_upload: uuid={dataset_uuid} visibility={visibility:?} tag_uuids={tag_uuids:?}"
+    );
     let (dir, _ty) = datasets::find_dataset_dir_typed(&settings, &dataset_uuid)?;
     if !dir.join(datasets::INFO_FILE).exists() {
+        log::error!(
+            "[upload] {dataset_uuid}: directory {} has no {} — not uploadable",
+            dir.display(),
+            datasets::INFO_FILE
+        );
         return Err(format!(
             "'{}' has no {} — not an uploadable dataset directory",
             dir.display(),

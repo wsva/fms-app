@@ -5,8 +5,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
 import { useAuth } from "@/hooks/useAuth";
+import { message as showDialog } from "@tauri-apps/plugin-dialog";
 import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog, Upload, LogIn, Archive } from "lucide-react";
-import { logError } from "@/lib/logger";
+import { logError, logInfo } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
 // Types (mirror the PC REST API + sync commands)
@@ -602,6 +603,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   async function runUpload(ds: LocalDataset, visibility: string) {
     setUploadingUuid(ds.uuid);
     setMessage("");
+    logInfo(`upload: starting "${ds.name}" (${ds.uuid}) type=${ds.dataset_type} visibility=${visibility}`, "datasets");
     const finish = () => {
       setUploadingUuid("");
       setUploadProgress((prev) => {
@@ -623,6 +625,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       setUploadTarget(null);
     } catch (e) {
       const text = String(e);
+      logError(`upload: "${ds.name}" (${ds.uuid}) failed: ${text}`, "datasets");
       if (text.includes("owned-by-other")) {
         if (
           confirm(
@@ -637,11 +640,17 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
             setMessage(`Saved as a new copy and uploaded v${res?.version ?? "?"}.`);
             setUploadTarget(null);
           } catch (e2) {
-            setMessage(`Upload failed: ${String(e2)}`);
+            const text2 = String(e2);
+            logError(`upload: remint "${ds.name}" (${ds.uuid}) failed: ${text2}`, "datasets");
+            setMessage(`Upload failed: ${text2}`);
+            if (isTauri()) void showDialog(text2, { title: "Upload failed", kind: "error" });
           }
         }
       } else {
         setMessage(`Upload failed: ${text}`);
+        // The inline message is transient (and hidden in hub mode) — the dialog
+        // guarantees the failure reason is actually seen.
+        if (isTauri()) void showDialog(text, { title: "Upload failed", kind: "error" });
       }
     } finally {
       finish();
