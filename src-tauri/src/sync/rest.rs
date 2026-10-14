@@ -990,16 +990,31 @@ pub(crate) struct ChangeResult {
     pub(crate) winner_seq: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) winner_payload: Option<serde_json::Value>,
+    /// The journal kind of the row that won the LWW contest. Present when a
+    /// newer live entry beat this push (INV-4 traceability); absent when the
+    /// rejection is a tombstone-only drop, since the winning delete's kind was
+    /// not looked up (there is no live row to disambiguate against). Needed by
+    /// the inbox producer's rollback path: `object_id_for` maps both
+    /// `card_save` and `card_set_tags` to `card_uuid`, so without `winner_kind`
+    /// the producer would have to shape-detect the winner payload to decide
+    /// whether to re-apply the full card or the whole tag set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) winner_kind: Option<String>,
 }
 
 impl ChangeResult {
     pub(crate) fn applied(id: String) -> Self {
-        ChangeResult { id, ok: true, error: None, rejected: None, winner_seq: None, winner_payload: None }
+        ChangeResult { id, ok: true, error: None, rejected: None, winner_seq: None, winner_payload: None, winner_kind: None }
     }
     pub(crate) fn failed(id: String, error: String) -> Self {
-        ChangeResult { id, ok: false, error: Some(error), rejected: None, winner_seq: None, winner_payload: None }
+        ChangeResult { id, ok: false, error: Some(error), rejected: None, winner_seq: None, winner_payload: None, winner_kind: None }
     }
-    pub(crate) fn losing(id: String, winner_seq: i64, winner_payload: serde_json::Value) -> Self {
+    pub(crate) fn losing(
+        id: String,
+        winner_seq: i64,
+        winner_payload: serde_json::Value,
+        winner_kind: Option<String>,
+    ) -> Self {
         ChangeResult {
             id,
             ok: true,
@@ -1007,6 +1022,7 @@ impl ChangeResult {
             rejected: Some(true),
             winner_seq: Some(winner_seq),
             winner_payload: Some(winner_payload),
+            winner_kind,
         }
     }
 }
@@ -1181,16 +1197,21 @@ pub(crate) async fn apply_one_change(
             let latest = crate::sync::change_log::latest_for_object(ledger, &scope, &object_id)
                 .ok()
                 .flatten();
-            if let Some((winner_seq, winner_edit, _op, winner_payload)) = latest {
+            if let Some((winner_seq, winner_edit, _op, winner_kind, winner_payload)) = latest {
                 // A missing/unparseable stored time is treated as oldest so
                 // the fresh push wins rather than being wrongly rejected.
                 let existing = parse_log_time(&winner_edit).unwrap_or(hub_now);
                 if existing >= incoming {
                     log::info!(
-                        "[rest] writeback {} ({}) lost to hub seq {} (edit_time {} >= incoming {})",
-                        ch.id, ch.kind, winner_seq, winner_edit, incoming.to_rfc3339()
+                        "[rest] writeback {} ({}) lost to hub seq {} kind={} (edit_time {} >= incoming {})",
+                        ch.id, ch.kind, winner_seq, winner_kind, winner_edit, incoming.to_rfc3339()
                     );
-                    return ChangeResult::losing(ch.id.clone(), winner_seq, winner_payload);
+                    return ChangeResult::losing(
+                        ch.id.clone(),
+                        winner_seq,
+                        winner_payload,
+                        Some(winner_kind),
+                    );
                 }
             } else if crate::sync::change_log::op_for(&ch.kind) == "upsert"
                 && !crate::sync::change_log::is_app_scope_kind(&ch.kind)
@@ -1204,12 +1225,15 @@ pub(crate) async fn apply_one_change(
                 // No log entry, but a recorded tombstone at/after this edit:
                 // the row was deleted before incremental sync existed, so an
                 // offline edit resurrecting it is dropped against the delete
-                // (§3.4) rather than re-creating a dead row.
+                // (§3.4) rather than re-creating a dead row. `winner_kind` is
+                // `None` here — the tombstone's originating kind was not
+                // looked up, and a producer rolling back a delete has nothing
+                // to disambiguate against (the row is gone).
                 log::info!(
                     "[rest] writeback {} ({}) dropped: tombstone >= incoming edit_time",
                     ch.id, ch.kind
                 );
-                return ChangeResult::losing(ch.id.clone(), 0, serde_json::Value::Null);
+                return ChangeResult::losing(ch.id.clone(), 0, serde_json::Value::Null, None);
             }
         }
     }

@@ -572,32 +572,40 @@ pub fn maybe_prune(conn: &Connection) {
 /// mirrors the live row's `updated_at`, and a latest `op = "delete"` mirrors a
 /// tombstone — so this one query is a faithful, dataset-agnostic stand-in for
 /// "compare against the live row / tombstone" without reaching into each table.
+///
+/// Return shape is `(seq, edit_time, op, kind, payload)`. `kind` is carried
+/// because one `object_id` may be shared across kinds — `object_id_for` maps
+/// both `card_save` (a full-card upsert) and `card_set_tags` (a whole-tag-set
+/// rewrite) to `payload.card_uuid`, so a rejected proposal needs to know
+/// which kind won to disambiguate its rollback (INV-4 traceability, §8.3).
+/// Callers that only care about the winner's identity ignore the field.
 pub fn latest_for_object(
     conn: &Connection,
     dataset_uuid: &str,
     object_id: &str,
-) -> Result<Option<(i64, String, String, Value)>, String> {
+) -> Result<Option<(i64, String, String, String, Value)>, String> {
     ensure_hub_tables(conn)?;
     let mut stmt = conn
         .prepare_cached(
-            "SELECT seq, edit_time, op, payload FROM sync_log \
+            "SELECT seq, edit_time, op, kind, payload FROM sync_log \
              WHERE dataset_uuid = ?1 AND object_id = ?2 \
              ORDER BY seq DESC LIMIT 1",
         )
         .map_err(|e| e.to_string())?;
     let row = stmt
         .query_row(params![dataset_uuid, object_id], |r| {
-            let payload: String = r.get(3)?;
+            let payload: String = r.get(4)?;
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
                 payload,
             ))
         })
         .ok();
-    Ok(row.map(|(seq, edit_time, op, p)| {
-        (seq, edit_time, op, serde_json::from_str(&p).unwrap_or(Value::Null))
+    Ok(row.map(|(seq, edit_time, op, kind, p)| {
+        (seq, edit_time, op, kind, serde_json::from_str(&p).unwrap_or(Value::Null))
     }))
 }
 

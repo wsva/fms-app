@@ -21,9 +21,14 @@
 //!   step 1 is deliberately proposal-only until this drainer fires), so the
 //!   hub's apply IS the write of record.
 //! * **Ack** is `{ accepted: [{change_id, seq?}], rejected: [{change_id,
-//!   winner_seq, winner_payload}] }` → `{ accepted, rejected, unknown[] }`.
-//!   A proposal we do NOT ack (a `replay` failure) stays `pending` on the
-//!   host; the next drain re-reads it. So the cursor must never advance
+//!   winner_seq, winner_payload, winner_kind?}] }` → `{ accepted, rejected,
+//!   unknown[] }`. `winner_kind` is additive on the wire (a producer ignoring
+//!   unknown fields still works); it disambiguates `card_save` vs
+//!   `card_set_tags` (both keyed to `card_uuid` by `object_id_for`) so the
+//!   producer's rollback consumer does not have to shape-detect the winner
+//!   payload. Absent for a tombstone-only drop, where there is no live row to
+//!   name. A proposal we do NOT ack (a `replay` failure) stays `pending` on
+//!   the host; the next drain re-reads it. So the cursor must never advance
 //!   past a failed `proposal_seq` — see [`next_cursor`].
 //! * Dedup is on `(cluster, change_id)`: `already_applied` short-circuits
 //!   an already-drained proposal (INV-3 mirrors this on the host side).
@@ -190,8 +195,18 @@ pub(crate) struct DrainPlan {
 
 /// Split the per-entry verdicts into the two ack arrays. Applied entries carry
 /// the newly-minted journal `seq` (traceability only, INV-4); losing entries
-/// carry the winner the hub already had; failed entries are omitted from both
-/// so the proposal stays pending on the host and the next drain retries it.
+/// carry the winner the hub already had (`winner_seq`, `winner_payload`, and
+/// `winner_kind` when the winner was a live journal row rather than a
+/// tombstone-only drop); failed entries are omitted from both so the proposal
+/// stays pending on the host and the next drain retries it.
+///
+/// `winner_kind` is the disambiguator the producer's rollback path needs:
+/// `object_id_for` maps both `card_save` and `card_set_tags` to `card_uuid`,
+/// so without a kind the producer would have to shape-detect the winner
+/// payload. Additive on the wire — a host ignoring unknown ack fields still
+/// works; a host reading `winner_kind` gets an unambiguous rollback. Absent
+/// (not serialized) when the losing ChangeResult came from the tombstone-only
+/// branch, since the winning delete's kind was not looked up.
 pub(crate) fn partition_verdicts(
     results: Vec<(InboxEntry, ChangeResult, Option<i64>)>,
 ) -> DrainPlan {
@@ -207,11 +222,15 @@ pub(crate) fn partition_verdicts(
             continue;
         }
         if r.rejected == Some(true) {
-            rejected.push(json!({
+            let mut v = json!({
                 "change_id": entry.change_id,
                 "winner_seq": r.winner_seq,
                 "winner_payload": r.winner_payload,
-            }));
+            });
+            if let Some(k) = r.winner_kind {
+                v["winner_kind"] = json!(k);
+            }
+            rejected.push(v);
         } else {
             let mut v = json!({ "change_id": entry.change_id });
             if let Some(s) = seq {
@@ -332,7 +351,7 @@ async fn drain_scope(
             change_log::latest_for_object(ledger, sc, &oid)
                 .ok()
                 .flatten()
-                .map(|(s, _, _, _)| s)
+                .map(|(s, _, _, _, _)| s)
         } else {
             None
         };
@@ -403,15 +422,15 @@ async fn drain_scope(
 /// (sync-v2.md §8.3 step 2 / §14 phase 5). For each scope: `GET /api/v1/inbox
 /// ?scope&after=<cursor>` → apply each proposal through the SAME
 /// `apply_one_change` kernel the LAN writeback uses (INV-18) → `POST
-/// /api/v1/inbox/ack` with `{accepted:[{change_id,seq}], rejected:[{change_id,
-/// winner_seq,winner_payload}]}` → advance the per-scope cursor in
-/// `inbox_drain_state`. A proposal whose `replay` errored is NOT acked and the
-/// cursor refuses to advance past its `proposal_seq`, so the next drain
-/// retries it. `already_applied` short-circuits a re-drain (INV-3 idempotency).
-/// Hub-only (a follower has no authority to apply locally); needs a logged-in
-/// account. `auto: true` marks the round's cadence drain: with no logged-in
-/// account it skips silently, because a sync round must not fail over an
-/// optional leg.
+/// /api/v1/inbox/ack` with `{accepted:[{change_id,seq?}], rejected:[{change_id,
+/// winner_seq, winner_payload, winner_kind?}]}` → advance the per-scope
+/// cursor in `inbox_drain_state`. A proposal whose `replay` errored is NOT
+/// acked and the cursor refuses to advance past its `proposal_seq`, so the
+/// next drain retries it. `already_applied` short-circuits a re-drain (INV-3
+/// idempotency). Hub-only (a follower has no authority to apply locally);
+/// needs a logged-in account. `auto: true` marks the round's cadence drain:
+/// with no logged-in account it skips silently, because a sync round must not
+/// fail over an optional leg.
 #[tauri::command]
 pub async fn sync_inbox_drain(
     settings: State<'_, SettingsState>,
@@ -530,13 +549,19 @@ mod tests {
 
     #[test]
     fn partition_verdicts_splits_accepted_losing_failed() {
-        // Applied -> accepted (with `seq`); losing -> rejected (with winner);
-        // failed -> NOT acked at all (stays pending on the host).
+        // Applied -> accepted (with `seq`); losing -> rejected (with winner +
+        // kind when known); failed -> NOT acked at all (stays pending on the
+        // host).
         let results = vec![
             (entry("c-1", 1), ChangeResult::applied("c-1".into()), Some(11)),
             (
                 entry("c-2", 2),
-                ChangeResult::losing("c-2".into(), 9, json!({ "v": 1 })),
+                ChangeResult::losing(
+                    "c-2".into(),
+                    9,
+                    json!({ "v": 1 }),
+                    Some("card_save".to_string()),
+                ),
                 None,
             ),
             (
@@ -552,7 +577,27 @@ mod tests {
         assert_eq!(plan.rejected.len(), 1);
         assert_eq!(plan.rejected[0]["change_id"], "c-2");
         assert_eq!(plan.rejected[0]["winner_seq"], 9);
+        assert_eq!(plan.rejected[0]["winner_kind"], "card_save");
         assert_eq!(plan.failed_seqs, vec![3]);
+    }
+
+    #[test]
+    fn partition_verdicts_omits_winner_kind_for_tombstone_rejection() {
+        // The tombstone-only drop path in `apply_one_change` reports
+        // `winner_kind = None` (there is no live row to disambiguate against).
+        // The ack body must NOT serialize `winner_kind` at all in that case —
+        // a `null` field would trip a strict producer reading `.kind` off the
+        // wire. `winner_seq = 0` + `winner_payload = null` are the tombstone
+        // signature and stay.
+        let results = vec![(
+            entry("c-1", 1),
+            ChangeResult::losing("c-1".into(), 0, serde_json::Value::Null, None),
+            None,
+        )];
+        let plan = partition_verdicts(results);
+        assert_eq!(plan.rejected.len(), 1);
+        assert_eq!(plan.rejected[0]["winner_seq"], 0);
+        assert!(plan.rejected[0].get("winner_kind").is_none());
     }
 
     #[test]
