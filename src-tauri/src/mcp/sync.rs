@@ -136,6 +136,13 @@ struct AvailabilityParam {
     available: bool,
 }
 
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct PushFilesParam {
+    /// Local dataset uuid whose live file tree to re-push (must already exist on
+    /// the website — bootstrap with hub_upload first).
+    dataset_uuid: String,
+}
+
 #[tool_router(router = sync_router, vis = "pub(crate)")]
 impl DatasetMcpServer {
     #[tool(name = "web_service_get_status", description = "Get the web service status: whether it's running, port, enabled features, and URLs.")]
@@ -523,6 +530,17 @@ impl DatasetMcpServer {
             param.uuid,
             param.version,
             param.available,
+        )
+        .await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "hub_dataset_push_files", description = "Re-push one dataset's live file tree to the website's content-addressed blob store, moving ONLY the bytes that changed (sync-v2 §7 — the changed-file transport, now with an app client). Owner-only, account Bearer, POST /api/v1/datasets/{uuid}/objects against the account website. Phase 1 sends the tree's per-file sha256s and the store replies which hashes it lacks; phase 2 uploads just those blobs and the website atomically swaps the dataset's live tree and refcounts. The dataset must already exist there (bootstrap via hub_upload / the whole-archive path). An unchanged tree uploads zero bytes yet still reconciles it, so a local rename or deletion syncs without re-sending content. DB files are excluded (they ride the row-log plane, not blobs). Pass dataset_uuid. Returns { uuid, total, need, uploaded, applied, stored, deduped }. A 409 comes back tagged owned-by-other — remint via hub_remint_uuid.")]
+    async fn hub_dataset_push_files(&self, Parameters(param): Parameters<PushFilesParam>) -> Result<String, String> {
+        log::info!("[MCP] hub_dataset_push_files: uuid={}", param.dataset_uuid);
+        let v = sync::blobpush::dataset_push_changed_files(
+            self.app.state::<SettingsState>(),
+            param.dataset_uuid,
         )
         .await?;
         Ok(v.to_string())

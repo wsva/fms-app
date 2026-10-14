@@ -31,6 +31,7 @@ pub(crate) mod client;
 pub(crate) mod discover;
 pub(crate) mod publish;
 pub(crate) mod upload;
+pub(crate) mod blobpush;
 
 // ---------------------------------------------------------------------------
 // Hub kind — which of the two hub implementations a base URL points at
