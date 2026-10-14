@@ -114,6 +114,18 @@ struct MirrorPushParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct InboxDrainParam {
+    /// One dataset uuid to drain; omitted (or empty) drains every dataset scope
+    /// the hub has journaled for (the same set the mirror pusher iterates).
+    #[serde(default)]
+    scope: Option<String>,
+    /// Marks an auto-cadence call: skip silently when no account is logged in
+    /// instead of erroring. Omitted/false = a normal manual drain.
+    #[serde(default)]
+    auto: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct PublishParam {
     /// Local dataset uuid already uploaded to the website.
     uuid: String,
@@ -512,6 +524,13 @@ impl DatasetMcpServer {
     async fn sync_mirror_push(&self, Parameters(param): Parameters<MirrorPushParam>) -> Result<String, String> {
         log::info!("[MCP] sync_mirror_push: scope={:?}", param.scope);
         let v = sync::mirror::sync_mirror_push(self.app.state::<SettingsState>(), param.scope, param.auto).await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "sync_inbox_drain", description = "Drain this desktop hub's website inbox (sync-v2 §8.3 step 2 / phase 5). The website is the HOST of a per-cluster inbox; a browser edit on a `mirror` dataset proposes the change (`POST /api/v1/inbox`) instead of writing the shared journal directly (INV-2). This command pulls one page per scope (`GET /api/v1/inbox?scope&after=<cursor>`), applies every proposal through the SAME per-change kernel the LAN writeback uses (`apply_one_change`: LWW, tombstones, dedup on change_id, INV-13 epoch guard, journal append), acks the verdict (`POST /api/v1/inbox/ack` with `{accepted:[{change_id,seq?}], rejected:[{change_id, winner_seq, winner_payload}]}`), and advances a per-scope cursor in `inbox_drain_state`. A proposal whose replay errored is NOT acked and the cursor refuses to advance past its `proposal_seq`, so the next drain retries it; `already_applied` short-circuits a re-drain. Hub-only (a follower must forward via writeback instead); needs a logged-in account. Normally drained automatically at the end of every sync round on a logged-in hub. Pass an optional scope (a dataset uuid) to drain just one; omitted, drains every dataset scope with journal rows. Returns { target, role, scopes:[{scope, drained, accepted, rejected, pending, cursor_before, cursor_after, note?}], totals:{drained,accepted,rejected,pending}, errors[] }.")]
+    async fn sync_inbox_drain(&self, Parameters(param): Parameters<InboxDrainParam>) -> Result<String, String> {
+        log::info!("[MCP] sync_inbox_drain: scope={:?}", param.scope);
+        let v = sync::inbox::sync_inbox_drain(self.app.state::<SettingsState>(), param.scope, param.auto).await?;
         Ok(v.to_string())
     }
 

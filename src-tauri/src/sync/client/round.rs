@@ -1429,6 +1429,41 @@ pub async fn sync_round_inner(
         }
     }
 
+    // Inbox drain leg (desktop-only, hub-only): a browser edit on a `mirror`
+    // dataset cannot write the shared journal directly (INV-2), so the website
+    // producer (`9339b79`) *proposes* the change and this hub drains it — apply
+    // every proposal through `apply_one_change` (INV-18: the SAME kernel the
+    // LAN writeback uses), ack the verdict, advance the per-scope cursor.
+    // Best-effort: a failure lands in `errors`, never aborts the round or
+    // changes pushed/held/applied. Skipped when the round is not a hub+logged
+    // in — the key stays absent so the status surface distinguishes "skipped"
+    // from "drained, nothing to do".
+    #[cfg(feature = "desktop")]
+    let mut inbox_summary: Option<Value> = None;
+    #[cfg(feature = "desktop")]
+    if auto_on {
+        match crate::sync::inbox::drain_inner(&settings, None).await {
+            Ok(v) => {
+                for e in v["errors"].as_array().cloned().unwrap_or_default() {
+                    errors.push(json!({
+                        "stage": "inbox_drain",
+                        "scope": e["scope"],
+                        "error": e["error"],
+                    }));
+                }
+                let t = &v["totals"];
+                inbox_summary = Some(json!({
+                    "scopes": v["scopes"].as_array().map(|a| a.len()).unwrap_or(0),
+                    "drained": t["drained"].as_i64().unwrap_or(0),
+                    "accepted": t["accepted"].as_i64().unwrap_or(0),
+                    "rejected": t["rejected"].as_i64().unwrap_or(0),
+                    "pending": t["pending"].as_i64().unwrap_or(0),
+                }));
+            }
+            Err(e) => errors.push(json!({ "stage": "inbox_drain", "error": e })),
+        }
+    }
+
     let mut result = json!({
         "status": if errors.is_empty() { "ok" } else { "partial" },
         "hub_kind": if is_website { "website" } else { "lan" },
@@ -1451,6 +1486,12 @@ pub async fn sync_round_inner(
     if auto_on && !owned_uuids.is_empty() {
         if let Some(obj) = result.as_object_mut() {
             obj.insert("files_push".into(), json!(files_summary));
+        }
+    }
+    #[cfg(feature = "desktop")]
+    if let Some(s) = inbox_summary {
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("inbox_drain".into(), s);
         }
     }
     // Persist for the status surface (§19.2): a failure to record must not fail

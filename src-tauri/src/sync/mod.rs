@@ -22,6 +22,8 @@ pub(crate) mod pairing;
 #[cfg(feature = "desktop")]
 pub(crate) mod mirror;
 #[cfg(feature = "desktop")]
+pub(crate) mod inbox;
+#[cfg(feature = "desktop")]
 pub(crate) mod rest;
 #[cfg(feature = "desktop")]
 pub(crate) mod server;

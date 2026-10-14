@@ -411,6 +411,8 @@ pub fn run() {
             sync::mirror::sync_mirror_push,
             // Desktop-hub → cloud authority handover export (sync-v2 phase 7b / INV-13).
             sync::mirror::sync_handover_to_cloud,
+            // Desktop-hub → website inbox drain (sync-v2 §8.3 step 2 / phase 5).
+            sync::inbox::sync_inbox_drain,
             sync::client::sync_hub_kind,
             sync::discover::pc_discover,
             // Read-only hub wiki browse (works from any follower role/platform).

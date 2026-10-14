@@ -950,56 +950,56 @@ struct SyncChangesReq {
 }
 
 #[derive(Deserialize)]
-struct Change {
-    id: String,
-    kind: String,
+pub(crate) struct Change {
+    pub(crate) id: String,
+    pub(crate) kind: String,
     #[serde(default)]
-    dataset_uuid: Option<String>,
-    payload: serde_json::Value,
+    pub(crate) dataset_uuid: Option<String>,
+    pub(crate) payload: serde_json::Value,
     /// Device-local ISO timestamp of the user action (§3.3 / §3.6). Drives
     /// later-`edit_time`-wins conflicts and, once the apply path is built
     /// (Phase 4), the applied row's `updated_at`. Carried here so the hub has
     /// it available for the log entry and comparison.
     #[serde(default)]
-    edit_time: String,
+    pub(crate) edit_time: String,
     #[serde(default)]
     #[allow(dead_code)]
-    queued_at: String,
+    pub(crate) queued_at: String,
     /// The authority epoch this device recorded for the change's scope when it
     /// queued the edit (INV-13). The hub refuses the write if it is below the
     /// scope's current epoch — the scope was handed over since this device last
     /// pulled, so a naive apply would resurrect a superseded authority's edit.
     /// Defaults to `0` (a pre-handover client, or the never-handed-over case).
     #[serde(default)]
-    epoch: i64,
+    pub(crate) epoch: i64,
 }
 
 #[derive(Serialize)]
-struct ChangeResult {
-    id: String,
-    ok: bool,
+pub(crate) struct ChangeResult {
+    pub(crate) id: String,
+    pub(crate) ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     /// §3.4 conflict: a losing push is still acknowledged (`ok = true`, so the
     /// follower stops resending it) but flagged `rejected`, carrying the hub's
     /// winning entry. The follower drops its stale queued change; the winner
     /// re-converges it on the next `/changes` pull (no seq is rewritten here).
     #[serde(skip_serializing_if = "Option::is_none")]
-    rejected: Option<bool>,
+    pub(crate) rejected: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    winner_seq: Option<i64>,
+    pub(crate) winner_seq: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    winner_payload: Option<serde_json::Value>,
+    pub(crate) winner_payload: Option<serde_json::Value>,
 }
 
 impl ChangeResult {
-    fn applied(id: String) -> Self {
+    pub(crate) fn applied(id: String) -> Self {
         ChangeResult { id, ok: true, error: None, rejected: None, winner_seq: None, winner_payload: None }
     }
-    fn failed(id: String, error: String) -> Self {
+    pub(crate) fn failed(id: String, error: String) -> Self {
         ChangeResult { id, ok: false, error: Some(error), rejected: None, winner_seq: None, winner_payload: None }
     }
-    fn losing(id: String, winner_seq: i64, winner_payload: serde_json::Value) -> Self {
+    pub(crate) fn losing(id: String, winner_seq: i64, winner_payload: serde_json::Value) -> Self {
         ChangeResult {
             id,
             ok: true,
@@ -1095,7 +1095,7 @@ async fn sync_changes(
     // Idempotency ledger + hub sync tables live in the app-level DB (survive
     // dataset swaps). `ensure_hub_tables` creates `applied_changes` alongside
     // `sync_log`, so the hub's own writes and follower replays share one journal.
-    let ledger = match datasets::dictation::open_app_db(&settings) {
+    let mut ledger = match datasets::dictation::open_app_db(&settings) {
         Ok(conn) => {
             if let Err(e) = crate::sync::change_log::ensure_hub_tables(&conn) {
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
@@ -1108,107 +1108,122 @@ async fn sync_changes(
     let mut results = Vec::with_capacity(req.changes.len());
     let hub_now = chrono::Utc::now();
     for ch in req.changes {
-        // INV-13 split-brain guard, before anything is touched: a writer whose
-        // recorded epoch for this scope is below the hub's current epoch lost the
-        // handover and must not apply. Left `ok = false` so the change stays
-        // queued — the follower's next `/changes` pull records the new epoch, and
-        // the retry then succeeds. This is a no-op while every scope sits at its
-        // minted epoch 0 (no handover has run), so a bump is the only way to hit it.
-        {
-            let ch_scope = crate::sync::change_log::scope_for(
-                &ch.kind,
-                ch.dataset_uuid.as_deref().unwrap_or(""),
+        results.push(apply_one_change(&mut ledger, &settings, &write_identity, hub_now, &ch).await);
+    }
+
+    (StatusCode::OK, Json(results)).into_response()
+}
+
+/// The single per-change apply kernel shared by the HTTP writeback handler and
+/// the hub-side inbox drainer (sync-v2 §8.3 / INV-18: a drained proposal must
+/// ride the SAME command path a follower's writeback does, so LWW, tombstones,
+/// dedup, epoch guard and the append choke point behave identically).
+///
+/// The extracted body is byte-identical to the loop that used to sit inside
+/// `sync_changes` — `continue` becomes `return`, and `ch.id` is cloned at each
+/// construction site because the shared fn takes the change by reference (the
+/// drainer needs to keep the entry around for the ack).
+pub(crate) async fn apply_one_change(
+    ledger: &mut rusqlite::Connection,
+    settings: &tauri::State<'_, SettingsState>,
+    write_identity: &str,
+    hub_now: chrono::DateTime<chrono::Utc>,
+    ch: &Change,
+) -> ChangeResult {
+    // INV-13 split-brain guard, before anything is touched: a writer whose
+    // recorded epoch for this scope is below the hub's current epoch lost the
+    // handover and must not apply. Left `ok = false` so the change stays
+    // queued — the follower's next `/changes` pull records the new epoch, and
+    // the retry then succeeds. This is a no-op while every scope sits at its
+    // minted epoch 0 (no handover has run), so a bump is the only way to hit it.
+    {
+        let ch_scope = crate::sync::change_log::scope_for(
+            &ch.kind,
+            ch.dataset_uuid.as_deref().unwrap_or(""),
+        );
+        let hub_epoch = crate::sync::change_log::scope_epoch(ledger, ch_scope);
+        if ch.epoch < hub_epoch {
+            log::warn!(
+                "[rest] writeback {} ({}) refused: stale epoch {} < authority {} for scope {}",
+                ch.id, ch.kind, ch.epoch, hub_epoch, ch_scope
             );
-            let hub_epoch = crate::sync::change_log::scope_epoch(&ledger, ch_scope);
-            if ch.epoch < hub_epoch {
-                log::warn!(
-                    "[rest] writeback {} ({}) refused: stale epoch {} < authority {} for scope {}",
-                    ch.id, ch.kind, ch.epoch, hub_epoch, ch_scope
-                );
-                results.push(ChangeResult::failed(
-                    ch.id,
-                    format!(
-                        "stale_epoch: presented {} < authority {} for scope '{}'; re-pull this scope to learn the new epoch, then retry (INV-13/INV-20)",
-                        ch.epoch, hub_epoch, ch_scope
-                    ),
-                ));
-                continue;
-            }
+            return ChangeResult::failed(
+                ch.id.clone(),
+                format!(
+                    "stale_epoch: presented {} < authority {} for scope '{}'; re-pull this scope to learn the new epoch, then retry (INV-13/INV-20)",
+                    ch.epoch, hub_epoch, ch_scope
+                ),
+            );
         }
+    }
 
-        // Skip anything already applied (idempotent by change id).
-        if crate::sync::change_log::already_applied(&ledger, &ch.id) {
-            results.push(ChangeResult::applied(ch.id));
-            continue;
-        }
+    // Skip anything already applied (idempotent by change id).
+    if crate::sync::change_log::already_applied(ledger, &ch.id) {
+        return ChangeResult::applied(ch.id.clone());
+    }
 
-        // Later-`edit_time`-wins conflict resolution (§3.4) for mutable *state*
-        // rows. The hub's newest `sync_log` entry for the same object mirrors the
-        // live row (`updated_at`) and any tombstone (its `op`), so a push that
-        // loses on time is rejected without a new seq being written — the follower
-        // drops it and re-converges from the winner on its next `/changes` pull.
-        if crate::sync::change_log::ChangeClass::of(&ch.kind).coalescible() {
-            let dataset_uuid = ch.dataset_uuid.clone().unwrap_or_default();
-            // Compare keys the way both sides write them: the journal scope
-            // (per-user app data lives under `@app`, not the dataset) plus the
-            // per-user object id resolved against *this* batch's enforced
-            // identity — otherwise one user's push can lose a later-wins contest
-            // against another user's row.
-            let scope = crate::sync::change_log::scope_for(&ch.kind, &dataset_uuid).to_string();
-            let object_id = crate::sync::change_log::object_id_for(&ch.kind, &ch.payload, &write_identity);
-            if !object_id.is_empty() {
-                let incoming = normalize_edit_time(&ch.edit_time, hub_now);
-                let latest = crate::sync::change_log::latest_for_object(&ledger, &scope, &object_id)
-                    .ok()
-                    .flatten();
-                if let Some((winner_seq, winner_edit, _op, winner_payload)) = latest {
-                    // A missing/unparseable stored time is treated as oldest so
-                    // the fresh push wins rather than being wrongly rejected.
-                    let existing = parse_log_time(&winner_edit).unwrap_or(hub_now);
-                    if existing >= incoming {
-                        log::info!(
-                            "[rest] writeback {} ({}) lost to hub seq {} (edit_time {} >= incoming {})",
-                            ch.id, ch.kind, winner_seq, winner_edit, incoming.to_rfc3339()
-                        );
-                        results.push(ChangeResult::losing(ch.id, winner_seq, winner_payload));
-                        continue;
-                    }
-                } else if crate::sync::change_log::op_for(&ch.kind) == "upsert"
-                    && !crate::sync::change_log::is_app_scope_kind(&ch.kind)
-                    && crate::sync::change_log::is_tombstoned_at_least(
-                        settings.inner(),
-                        &dataset_uuid,
-                        &object_id,
-                        &incoming.to_rfc3339(),
-                    )
-                {
-                    // No log entry, but a recorded tombstone at/after this edit:
-                    // the row was deleted before incremental sync existed, so an
-                    // offline edit resurrecting it is dropped against the delete
-                    // (§3.4) rather than re-creating a dead row.
+    // Later-`edit_time`-wins conflict resolution (§3.4) for mutable *state*
+    // rows. The hub's newest `sync_log` entry for the same object mirrors the
+    // live row (`updated_at`) and any tombstone (its `op`), so a push that
+    // loses on time is rejected without a new seq being written — the follower
+    // drops it and re-converges from the winner on its next `/changes` pull.
+    if crate::sync::change_log::ChangeClass::of(&ch.kind).coalescible() {
+        let dataset_uuid = ch.dataset_uuid.clone().unwrap_or_default();
+        // Compare keys the way both sides write them: the journal scope
+        // (per-user app data lives under `@app`, not the dataset) plus the
+        // per-user object id resolved against *this* batch's enforced
+        // identity — otherwise one user's push can lose a later-wins contest
+        // against another user's row.
+        let scope = crate::sync::change_log::scope_for(&ch.kind, &dataset_uuid).to_string();
+        let object_id = crate::sync::change_log::object_id_for(&ch.kind, &ch.payload, write_identity);
+        if !object_id.is_empty() {
+            let incoming = normalize_edit_time(&ch.edit_time, hub_now);
+            let latest = crate::sync::change_log::latest_for_object(ledger, &scope, &object_id)
+                .ok()
+                .flatten();
+            if let Some((winner_seq, winner_edit, _op, winner_payload)) = latest {
+                // A missing/unparseable stored time is treated as oldest so
+                // the fresh push wins rather than being wrongly rejected.
+                let existing = parse_log_time(&winner_edit).unwrap_or(hub_now);
+                if existing >= incoming {
                     log::info!(
-                        "[rest] writeback {} ({}) dropped: tombstone >= incoming edit_time",
-                        ch.id, ch.kind
+                        "[rest] writeback {} ({}) lost to hub seq {} (edit_time {} >= incoming {})",
+                        ch.id, ch.kind, winner_seq, winner_edit, incoming.to_rfc3339()
                     );
-                    results.push(ChangeResult::losing(ch.id, 0, serde_json::Value::Null));
-                    continue;
+                    return ChangeResult::losing(ch.id.clone(), winner_seq, winner_payload);
                 }
-            }
-        }
-
-        match replay(&settings, &write_identity, &ch).await {
-            Ok(()) => {
-                crate::sync::change_log::mark_applied(&ledger, &ch.id);
-                results.push(ChangeResult::applied(ch.id));
-            }
-            Err(e) => {
-                log::warn!("[rest] writeback {} ({}) failed: {}", ch.id, ch.kind, e);
-                results.push(ChangeResult::failed(ch.id, e));
+            } else if crate::sync::change_log::op_for(&ch.kind) == "upsert"
+                && !crate::sync::change_log::is_app_scope_kind(&ch.kind)
+                && crate::sync::change_log::is_tombstoned_at_least(
+                    settings.inner(),
+                    &dataset_uuid,
+                    &object_id,
+                    &incoming.to_rfc3339(),
+                )
+            {
+                // No log entry, but a recorded tombstone at/after this edit:
+                // the row was deleted before incremental sync existed, so an
+                // offline edit resurrecting it is dropped against the delete
+                // (§3.4) rather than re-creating a dead row.
+                log::info!(
+                    "[rest] writeback {} ({}) dropped: tombstone >= incoming edit_time",
+                    ch.id, ch.kind
+                );
+                return ChangeResult::losing(ch.id.clone(), 0, serde_json::Value::Null);
             }
         }
     }
 
-    (StatusCode::OK, Json(results)).into_response()
+    match replay(settings, write_identity, ch).await {
+        Ok(()) => {
+            crate::sync::change_log::mark_applied(ledger, &ch.id);
+            ChangeResult::applied(ch.id.clone())
+        }
+        Err(e) => {
+            log::warn!("[rest] writeback {} ({}) failed: {}", ch.id, ch.kind, e);
+            ChangeResult::failed(ch.id.clone(), e)
+        }
+    }
 }
 
 async fn replay(
