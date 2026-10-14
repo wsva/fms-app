@@ -400,6 +400,9 @@ pub fn run() {
             sync::upload::dataset_upload_state,
             sync::upload::dataset_remint_uuid,
             sync::upload::sync_local_datasets,
+            // Owner-facing registry writes (sync-v2 §8.4 / §11.5): publish + withdraw/re-list.
+            sync::publish::sync_publish_dataset_version,
+            sync::publish::sync_set_dataset_availability,
             // Desktop-hub → website mirror push (sync-v2 phase 4).
             sync::mirror::sync_mirror_push,
             // Desktop-hub → cloud authority handover export (sync-v2 phase 7b / INV-13).
@@ -774,6 +777,9 @@ macro_rules! mobile_invoke_handler {
             sync::upload::dataset_upload_state,
             sync::upload::dataset_remint_uuid,
             sync::upload::sync_local_datasets,
+            // Owner-facing registry writes (sync-v2 §8.4 / §11.5): publish + withdraw/re-list.
+            sync::publish::sync_publish_dataset_version,
+            sync::publish::sync_set_dataset_availability,
             sync::client::sync_hub_kind,
             sync::discover::pc_discover,
             // Read-only hub wiki browse (works from any follower role/platform).

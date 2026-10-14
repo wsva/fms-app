@@ -109,6 +109,33 @@ struct MirrorPushParam {
     scope: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct PublishParam {
+    /// Local dataset uuid already uploaded to the website.
+    uuid: String,
+    /// Which uploaded version to pin (positive integer). Omitted = the newest
+    /// uploaded one.
+    #[serde(default)]
+    version: Option<i64>,
+    /// `private|shared|public` — applied in the same publish. Omitted = unchanged.
+    #[serde(default)]
+    visibility: Option<String>,
+    /// Tag uuids to attach (website-side tags). Omitted/empty = unchanged.
+    #[serde(default)]
+    tag_uuids: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct AvailabilityParam {
+    /// Dataset uuid whose published version to mark.
+    uuid: String,
+    /// The published version to take down or restore (positive integer).
+    version: i64,
+    /// `false` = withdraw (§11.5 takedown: fresh reads of this version then 410,
+    /// bytes kept); `true` = re-list. Required-explicit, never defaulted.
+    available: bool,
+}
+
 #[tool_router(router = sync_router, vis = "pub(crate)")]
 impl DatasetMcpServer {
     #[tool(name = "web_service_get_status", description = "Get the web service status: whether it's running, port, enabled features, and URLs.")]
@@ -471,6 +498,33 @@ impl DatasetMcpServer {
     async fn sync_check_availability(&self) -> Result<String, String> {
         log::info!("[MCP] sync_check_availability");
         let v = sync::client::sync_check_availability(self.app.state::<SettingsState>()).await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "sync_publish_dataset_version", description = "Promote one of a dataset's already-uploaded immutable versions to its live pin — the explicit act that crosses the publish boundary (sync-v2 §8.4 / INV-17). Owner-only, account Bearer, POST /api/v1/publish against the account website; carries NO bytes (run hub_upload first). Pass `uuid`; optionally `version` (which uploaded version to pin — omitted = the newest uploaded) and/or `visibility` (private|shared|public) and `tag_uuids`, applied in the same transaction. Returns the website's { dataset, current_version }. A 409 means the uuid belongs to another account — remint via hub_remint_uuid and publish that instead.")]
+    async fn sync_publish_dataset_version(&self, Parameters(param): Parameters<PublishParam>) -> Result<String, String> {
+        log::info!("[MCP] sync_publish_dataset_version: uuid={}", param.uuid);
+        let v = sync::publish::sync_publish_dataset_version(
+            self.app.state::<SettingsState>(),
+            param.uuid,
+            param.version,
+            param.visibility,
+            param.tag_uuids,
+        )
+        .await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "sync_set_dataset_availability", description = "Take a published dataset version down, or restore it (sync-v2 §11.5 / INV-8/INV-17/INV-22). Owner-only, account Bearer, POST /api/v1/publish/availability against the account website. `available=false` marks the version unavailable — a fresh read of that exact version then returns 410 Gone, WITHOUT deleting its bytes; `available=true` restores it. Metadata-only: it never moves `current_version` (INV-17) and subscribers keep their installed copies (INV-22); the downstream effect is that an adopter's next sync_check_availability records it 'withdrawn'. Pass `uuid`, `version` (positive integer), and `available` (an explicit boolean — required, never defaulted, so an accidental takedown is impossible). Returns { uuid, version, available }.")]
+    async fn sync_set_dataset_availability(&self, Parameters(param): Parameters<AvailabilityParam>) -> Result<String, String> {
+        log::info!("[MCP] sync_set_dataset_availability: uuid={} v={} available={}", param.uuid, param.version, param.available);
+        let v = sync::publish::sync_set_dataset_availability(
+            self.app.state::<SettingsState>(),
+            param.uuid,
+            param.version,
+            param.available,
+        )
+        .await?;
         Ok(v.to_string())
     }
 }

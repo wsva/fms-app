@@ -29,6 +29,7 @@ pub(crate) mod server;
 pub(crate) mod change_log;
 pub(crate) mod client;
 pub(crate) mod discover;
+pub(crate) mod publish;
 pub(crate) mod upload;
 
 // ---------------------------------------------------------------------------
