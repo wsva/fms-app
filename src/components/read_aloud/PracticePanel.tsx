@@ -2,8 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { Square, Play, Trash2, Loader2, RotateCcw } from "lucide-react";
-import { MicGlyph } from "@/components/voice/MicGlyph";
+import { Play, Trash2, RotateCcw } from "lucide-react";
 import type { ReadAttempt, ReadAloudSubmitResult, ReadText } from "@/lib/read_aloud/types";
 import { GOOD_SCORE, PASS_SCORE, scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { useRecorder } from "@/components/read_book/useRecorder";
@@ -14,11 +13,18 @@ import { logError, logInfo } from "@/lib/logger";
 
 const LOG_MODULE = "read-aloud";
 
+/** Recorder control surfaced to the page so the Record button can live in the
+ *  toolbar while the recording/submit logic stays here. */
+export type RecorderCtl = { toggle: () => void; recording: boolean; busy: boolean };
+
 type Props = {
   datasetUuid: string;
   text: ReadText;
   /** Called after a submission so the caller can refresh best score / counts. */
   onScored: () => void;
+  /** Publishes recorder status/toggle upward so the toolbar can render the
+   *  Record button; called with null on unmount. */
+  onRecorder?: (ctl: RecorderCtl | null) => void;
 };
 
 function playUrl(url?: string | null) {
@@ -30,7 +36,7 @@ function playUrl(url?: string | null) {
  * Practice panel for a single text: record yourself reading it, transcribe via
  * STT, score against the reference, and review past attempts.
  */
-export default function PracticePanel({ datasetUuid, text, onScored }: Props) {
+export default function PracticePanel({ datasetUuid, text, onScored, onRecorder }: Props) {
   const [attempts, setAttempts] = useState<ReadAttempt[]>([]);
   const [result, setResult] = useState<ReadAloudSubmitResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -110,6 +116,14 @@ export default function PracticePanel({ datasetUuid, text, onScored }: Props) {
   const busy = recorder.processing || submitting;
   const score = result?.score ?? null;
 
+  // Surface the recorder to the page toolbar: publish the latest toggle/status
+  // whenever they change, and clear it on unmount so the Record button disables.
+  useEffect(() => {
+    onRecorder?.({ toggle: recorder.toggle, recording: recorder.recording, busy });
+  }, [onRecorder, recorder.toggle, recorder.recording, busy]);
+
+  useEffect(() => () => onRecorder?.(null), [onRecorder]);
+
   return (
     <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 flex flex-col gap-4 min-w-0">
       {/* Reference text */}
@@ -123,36 +137,16 @@ export default function PracticePanel({ datasetUuid, text, onScored }: Props) {
         </div>
       </section>
 
-      {/* Recorder */}
-      <section className="flex flex-col items-center gap-3">
-        <button
-          onClick={recorder.toggle}
-          disabled={busy}
-          title={recorder.recording ? "Stop recording" : "Record yourself reading"}
-          className={`flex items-center justify-center gap-2 rounded-full w-20 h-20 shrink-0 transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-60 ${
-            recorder.recording
-              ? "bg-red-500 text-white animate-pulse"
-              : "bg-accent-bg text-white hover:bg-accent-bg-hover"
-          }`}
-        >
-          {busy ? (
-            <Loader2 size={28} className="animate-spin" />
-          ) : recorder.recording ? (
-            <Square size={26} />
-          ) : (
-            <MicGlyph size={30} />
-          )}
-        </button>
-        <p className="text-xs text-text-tertiary text-center">
-          {recorder.recording
-            ? "Reading… tap to stop"
-            : recorder.processing
-            ? "Transcribing…"
-            : submitting
-            ? "Scoring…"
-            : "Tap the mic and read the text aloud"}
-        </p>
-      </section>
+      {/* Recorder status — the Record button itself lives in the page toolbar. */}
+      <p className="text-xs text-text-tertiary text-center">
+        {recorder.recording
+          ? "Reading… tap Stop in the toolbar when done"
+          : recorder.processing
+          ? "Transcribing…"
+          : submitting
+          ? "Scoring…"
+          : "Tap Record in the toolbar and read the text aloud"}
+      </p>
 
       {error && (
         <div className="p-3 rounded-lg bg-error-bg text-error-text text-sm break-words">{error}</div>
