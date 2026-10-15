@@ -2,12 +2,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { Play, Trash2, History, ChevronRight } from "lucide-react";
+import { Play, Trash2, History, ChevronRight, Loader2 } from "lucide-react";
 import type { ReadAttempt, ReadText } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 import { highlightDifferences } from "@/components/read_book/diff";
+import { lcs } from "@/lib/listen/lcs";
 import { isTauri } from "@/lib/tauri";
+import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
 
 const LOG_MODULE = "read-aloud";
@@ -51,43 +53,239 @@ function splitSentences(text: string): string[] {
   return (parts ?? [cleaned]).map((s) => s.trim()).filter(Boolean);
 }
 
+// Leading/trailing punctuation stripped before comparing words, so `word` and
+// `word,` tokenize alike. Only ASCII + common typographic marks are removed —
+// letters (including accented ones, e.g. German umlauts) are preserved.
+const LEAD_PUNCT = /^[.,!?;:"'“”„«»(\[…—–-]+/;
+const TRAIL_PUNCT = /[.,!?;:"'“”„«»)\]…—–-]+$/;
+
+/** Lowercased word tokens of a sentence, for the similarity metric. */
+function wordsOf(sentence: string): string[] {
+  return sentence
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(LEAD_PUNCT, "").replace(TRAIL_PUNCT, ""))
+    .filter((w) => w.length > 0);
+}
+
+/** Dice-style similarity in [0,1] from the longest common subsequence of words. */
+function sentenceSim(a: string[], b: string[]): number {
+  if (a.length === 0 && b.length === 0) return 1;
+  if (a.length === 0 || b.length === 0) return 0;
+  return (2 * lcs(a, b).length) / (a.length + b.length);
+}
+
+// Cost of leaving a sentence unmatched. With similarity in [0,1], a 0.5 penalty
+// means a gap is only introduced when the counts differ (Needleman–Wunsch then
+// places it to maximize total similarity); equal-count sequences pair up
+// monotonically rather than gapping a merely-dissimilar pair.
+const GAP_PENALTY = 0.5;
+
+type AlignRow = { ref: string | null; rec: string | null };
+
+/**
+ * Align two sentence sequences with a Needleman–Wunsch global alignment scored by
+ * sentence similarity. An inserted / dropped sentence becomes a gap instead of
+ * shifting every following pair (the flaw of index pairing). The alignment is
+ * monotonic — sentence order is preserved, no crossings.
+ */
+function alignSentences(refSents: string[], recSents: string[]): AlignRow[] {
+  const n = refSents.length;
+  const m = recSents.length;
+  if (n === 0) return recSents.map((rec) => ({ ref: null, rec }));
+  if (m === 0) return refSents.map((ref) => ({ ref, rec: null }));
+
+  const ra = refSents.map(wordsOf);
+  const rb = recSents.map(wordsOf);
+
+  // F[i][j] = best score aligning the first i reference and first j recognized
+  // sentences; P records the move (0 = diagonal, 1 = up → gap in recognized,
+  // 2 = left → gap in reference).
+  const F: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  const P: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = 1; i <= n; i++) {
+    F[i][0] = F[i - 1][0] - GAP_PENALTY;
+    P[i][0] = 1;
+  }
+  for (let j = 1; j <= m; j++) {
+    F[0][j] = F[0][j - 1] - GAP_PENALTY;
+    P[0][j] = 2;
+  }
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      const diag = F[i - 1][j - 1] + sentenceSim(ra[i - 1], rb[j - 1]);
+      const up = F[i - 1][j] - GAP_PENALTY;
+      const left = F[i][j - 1] - GAP_PENALTY;
+      let best = diag;
+      let move = 0;
+      if (up > best) {
+        best = up;
+        move = 1;
+      }
+      if (left > best) {
+        best = left;
+        move = 2;
+      }
+      F[i][j] = best;
+      P[i][j] = move;
+    }
+  }
+
+  const rows: AlignRow[] = [];
+  let i = n;
+  let j = m;
+  while (i > 0 || j > 0) {
+    const move = P[i][j];
+    if (i > 0 && j > 0 && move === 0) {
+      rows.push({ ref: refSents[i - 1], rec: recSents[j - 1] });
+      i--;
+      j--;
+    } else if (i > 0 && (move === 1 || j === 0)) {
+      rows.push({ ref: refSents[i - 1], rec: null });
+      i--;
+    } else {
+      rows.push({ ref: null, rec: recSents[j - 1] });
+      j--;
+    }
+  }
+  rows.reverse();
+  return rows;
+}
+
+type SplitMethod = "punct" | "sat";
+
+// The catalog's reference SaT model — the same one the Split Book stage and the
+// Split Text page default to (textsplit::DEFAULT_MODEL_ID on the backend).
+const SAT_MODEL_ID = "segment-any-text/sat-3l-sm";
+
+const segActive = "px-2 py-0.5 text-xs rounded-md bg-accent text-white cursor-pointer";
+const segIdle = "px-2 py-0.5 text-xs rounded-md text-text-secondary hover:bg-bg-hover cursor-pointer";
+const segDisabled = "px-2 py-0.5 text-xs rounded-md text-text-tertiary opacity-50 cursor-not-allowed";
+
 /**
  * Sentence-by-sentence comparison of the reference text against the recognized
- * transcript. Sentence i of each is paired on a row; the recognized side carries
- * the same red diff highlighting the read-a-book sentence drawer uses. Side by
- * side on a wide screen (PC), stacked on narrow ones.
+ * transcript. The user picks how sentences are segmented: a fast punctuation
+ * heuristic, or the SaT-3L-sm model (desktop only, needs the model downloaded).
+ * The two sequences are then fuzzy-aligned (see alignSentences) rather than
+ * paired by index; the recognized side carries the same red diff highlighting
+ * the read-a-book sentence drawer uses. Side by side on a wide screen (PC),
+ * stacked on narrow ones.
  */
 function SentenceCompare({ reference, recognized }: { reference: string; recognized: string }) {
-  const refSentences = splitSentences(reference);
-  const recSentences = splitSentences(recognized);
-  const count = Math.max(refSentences.length, recSentences.length);
-  if (count === 0) {
-    return <p className="text-xs text-text-tertiary">Nothing to compare.</p>;
-  }
-  const rows = Array.from({ length: count }, (_, i) => ({
-    ref: refSentences[i] ?? "",
-    rec: recSentences[i] ?? "",
-  }));
+  const [method, setMethod] = useState<SplitMethod>("punct");
+  // SaT splits are fetched lazily and cached for the current text pair.
+  const [satRef, setSatRef] = useState<string[] | null>(null);
+  const [satRec, setSatRec] = useState<string[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // `text_split` only exists in the desktop binary; hide the SaT choice elsewhere.
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => setMobile(isMobileApp()), []);
+
+  // A different attempt / text invalidates any cached SaT split.
+  useEffect(() => {
+    setSatRef(null);
+    setSatRec(null);
+    setError(null);
+  }, [reference, recognized]);
+
+  // Fetch the SaT split the first time that method is chosen for this text pair.
+  useEffect(() => {
+    if (method !== "sat" || (satRef && satRec)) return;
+    if (!isTauri()) {
+      setError("SaT splitting needs the desktop app.");
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    (async () => {
+      try {
+        const [r, s] = await Promise.all([
+          invoke<string[]>("text_split", { text: reference, model: SAT_MODEL_ID }),
+          invoke<string[]>("text_split", { text: recognized, model: SAT_MODEL_ID }),
+        ]);
+        if (cancelled) return;
+        setSatRef(r.filter((x) => x.trim().length > 0));
+        setSatRec(s.filter((x) => x.trim().length > 0));
+      } catch (e) {
+        if (!cancelled) setError(String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [method, reference, recognized, satRef, satRec]);
+
+  // Prefer the SaT split once loaded; otherwise (punctuation method, still
+  // loading, or errored) fall back to the heuristic so the view always renders.
+  const useSat = method === "sat" && satRef != null && satRec != null;
+  const refSentences = useSat ? satRef! : splitSentences(reference);
+  const recSentences = useSat ? satRec! : splitSentences(recognized);
+  const rows =
+    refSentences.length === 0 && recSentences.length === 0
+      ? []
+      : alignSentences(refSentences, recSentences);
+
   return (
     <div className="flex flex-col gap-2 min-w-0">
-      <div className="hidden lg:grid lg:grid-cols-2 gap-2 min-w-0">
-        <h3 className="text-xs font-medium text-text-secondary">Text</h3>
-        <h3 className="text-xs font-medium text-text-secondary">Recognized</h3>
+      {/* Segmenter choice */}
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className="text-xs text-text-tertiary">Split by</span>
+        <button
+          type="button"
+          className={method === "punct" ? segActive : segIdle}
+          onClick={() => setMethod("punct")}
+          title="Fast punctuation heuristic"
+        >
+          Punctuation
+        </button>
+        <button
+          type="button"
+          className={mobile ? segDisabled : method === "sat" ? segActive : segIdle}
+          onClick={() => !mobile && setMethod("sat")}
+          disabled={mobile}
+          title={mobile ? "Desktop only" : "SaT-3L-sm model (download it on the Models page)"}
+        >
+          SaT model
+        </button>
+        {loading && (
+          <span className="flex items-center gap-1 text-xs text-text-tertiary">
+            <Loader2 size={12} className="animate-spin" /> Splitting…
+          </span>
+        )}
       </div>
-      {rows.map((row, i) => (
-        <div key={i} className="grid grid-cols-1 lg:grid-cols-2 gap-2 min-w-0">
-          <div className="p-3 rounded-lg bg-bg-muted text-text-primary text-base leading-relaxed whitespace-pre-wrap break-words">
-            {row.ref || <span className="text-text-tertiary">—</span>}
+
+      {error && (
+        <div className="p-2 rounded-lg bg-error-bg text-error-text text-xs break-words">{error}</div>
+      )}
+
+      {rows.length === 0 ? (
+        <p className="text-xs text-text-tertiary">Nothing to compare.</p>
+      ) : (
+        <>
+          <div className="hidden lg:grid lg:grid-cols-2 gap-2 min-w-0">
+            <h3 className="text-xs font-medium text-text-secondary">Text</h3>
+            <h3 className="text-xs font-medium text-text-secondary">Recognized</h3>
           </div>
-          <div className="p-3 rounded-lg bg-bg-muted text-text-primary text-base leading-relaxed break-words">
-            {row.rec ? (
-              highlightDifferences(row.ref, row.rec)
-            ) : (
-              <span className="text-text-tertiary">—</span>
-            )}
-          </div>
-        </div>
-      ))}
+          {rows.map((row, i) => (
+            <div key={i} className="grid grid-cols-1 lg:grid-cols-2 gap-2 min-w-0">
+              <div className="p-3 rounded-lg bg-bg-muted text-text-primary text-base leading-relaxed whitespace-pre-wrap break-words">
+                {row.ref || <span className="text-text-tertiary">—</span>}
+              </div>
+              <div className="p-3 rounded-lg bg-bg-muted text-text-primary text-base leading-relaxed break-words">
+                {row.rec != null ? (
+                  highlightDifferences(row.ref ?? "", row.rec)
+                ) : (
+                  <span className="text-text-tertiary">—</span>
+                )}
+              </div>
+            </div>
+          ))}
+        </>
+      )}
     </div>
   );
 }
