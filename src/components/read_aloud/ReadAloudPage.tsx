@@ -612,6 +612,7 @@ export default function ReadAloudPage() {
               onChange={setContent}
               spellCheck={false}
               shortcutsOpen={false}
+              textareaBgClass="bg-bg-muted"
             />
           </div>
 
@@ -633,6 +634,7 @@ export default function ReadAloudPage() {
               onChange={setNormalizedDraft}
               spellCheck={false}
               shortcutsOpen={false}
+              textareaBgClass="bg-bg-muted"
             />
           </div>
           {error && (

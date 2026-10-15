@@ -18,6 +18,10 @@ type Props = {
     fullscreen?: boolean;
     spellCheck: boolean;
     shortcutsOpen: boolean;
+    // Background utility for the textarea, so an embedder can match sibling
+    // inputs (e.g. the read-aloud form's `bg-bg-muted` title field). Defaults to
+    // the wiki editor's own `bg-bg-input`.
+    textareaBgClass?: string;
 };
 
 const shortcutList = [
@@ -43,7 +47,7 @@ function scrollParent(el: HTMLElement): HTMLElement | null {
     return null;
 }
 
-const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, fullscreen = false, spellCheck, shortcutsOpen }, forwardedRef) => {
+const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, fullscreen = false, spellCheck, shortcutsOpen, textareaBgClass = "bg-bg-input" }, forwardedRef) => {
     const innerRef = useRef<HTMLTextAreaElement | null>(null);
 
     const wordCount = value.trim() ? value.trim().split(/\s+/).length : 0;
@@ -207,7 +211,7 @@ const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, full
             {/* TextArea */}
             <textarea
                 className={[
-                    "w-full text-lg leading-relaxed p-1.5 outline-none resize-none overflow-hidden bg-bg-input border border-border-default rounded-md text-text-primary",
+                    `w-full text-lg leading-relaxed p-1.5 outline-none resize-none overflow-hidden ${textareaBgClass} border border-border-default rounded-md text-text-primary`,
                     fullscreen ? "flex-1 min-h-0" : "min-h-40",
                 ].join(" ")}
                 value={value}
