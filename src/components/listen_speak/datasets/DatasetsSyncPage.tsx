@@ -218,7 +218,7 @@ interface GlobalSettings {
  * cloud account) and Status (connection detail + diagnostics). A designated
  * hub is the authority that *serves* data, so in the Pull zone it sees a
  * notice instead of pull controls; cluster identity, the hub role, and pairing
- * all live on the Devices & Hub page, reachable from the toolbar's hub label.
+ * all live on the Devices & Hub page, reachable from the Status zone.
  */
 export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: string) => void }) {
   const [mounted, setMounted] = useState(false);
@@ -227,6 +227,8 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   // Dataset + sync state.
   const [pcDatasets, setPcDatasets] = useState<PcDataset[]>([]);
   const [syncState, setSyncState] = useState<Record<string, SyncStateEntry>>({});
+  // Local writeback queue depth (`writeback_pending_count`), the client-side
+  // counterpart of the hub's `status.queued_count` journal total.
   const [queued, setQueued] = useState(0);
   const [loadingList, setLoadingList] = useState(false);
   const [listError, setListError] = useState<string>("");
@@ -928,7 +930,9 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   // Zone-switcher pills: a count on Pull when catalog copies are owed, an
   // accent dot on Publish while an upload is in flight (so a running upload is
   // visible from other zones), an amber dot on Status when the diagnostics
-  // actually say something. All additive — they degrade to nothing.
+  // actually say something - including changes still queued, the one signal the
+  // toolbar used to spell out before the compact hub status moved into Status.
+  // All additive — they degrade to nothing.
   const pullPill = (status?.datasets ?? []).filter(
     (d) => d.state === "not_downloaded" || d.state === "needs_resync"
   ).length;
@@ -938,6 +942,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     ((!!status.queue_diagnosis?.cause && status.queue_diagnosis.cause !== "idle") ||
       !!status.history_gap ||
       !!status.events_gap ||
+      (!isHub && Math.max(status.queued_count, queued) > 0) ||
       lastRoundErrors > 0 ||
       num(lastRound?.dropped_pending) > 0);
 
@@ -1390,9 +1395,9 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   return (
     <div className="flex flex-col w-full h-full min-h-0 bg-bg-body">
       {/* Toolbar row: the segmented zone switcher (mode, not dataset-type — the
-          underline section tabs below keep that dimension), the compact hub
-          status, and the page-level actions. Replaces the old h1 header, the
-          always-on status strip, and the inline diagnostics block. */}
+          underline section tabs below keep that dimension) and the page-level
+          actions. Replaces the old h1 header, the always-on status strip, and
+          the inline diagnostics block; connection detail lives in Status. */}
       <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card overflow-x-auto">
         <div className="flex items-center gap-1 shrink-0">
           <button type="button" className={tbToggle(activeZone === "pull")} onClick={() => setActiveZone("pull")}>
@@ -1417,33 +1422,6 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
             {statusPill && <span className="ml-0.5 w-2 h-2 rounded-full bg-amber-500" />}
           </button>
         </div>
-
-        {/* Compact connection status. Clicking the hub label jumps to Devices &
-            Hub — the jump the old strip link and the repeated banners made. */}
-        {status && (
-          <span className="flex items-center gap-2 min-w-0 text-xs shrink-0 sm:shrink">
-            <span
-              className={`inline-block w-2 h-2 rounded-full shrink-0 ${
-                isHub ? "bg-blue-500" : status.hub.reachable ? "bg-emerald-500" : "bg-red-500"
-              }`}
-            />
-            <button
-              className="font-mono truncate max-w-[220px] text-text-secondary hover:text-text-primary hover:underline"
-              onClick={() => onNavigate?.("devices-hub")}
-              title="Open Devices & Hub"
-            >
-              {isWebsite && !isHub ? "Website Hub" : "hub"} {status.hub.address || "not connected"}
-            </button>
-            <span className="text-text-tertiary shrink-0">
-              {isHub ? "· serving" : status.hub.reachable ? "· reachable" : "· unreachable"}
-            </span>
-            {!isHub && (status.queued_count > 0 || queued > 0) && (
-              <span className="text-amber-600 dark:text-amber-400 shrink-0">
-                {Math.max(status.queued_count, queued)} change(s) queued
-              </span>
-            )}
-          </span>
-        )}
 
         <div className="ml-auto flex items-center gap-1 shrink-0">
           <button
