@@ -12,9 +12,13 @@
  *
  * Visual style deliberately mirrors the website's `/oauth2/login` page
  * (gradient badge, white card, purple focus rings) for a consistent look.
+ *
+ * Identities that signed in successfully on this device are remembered as
+ * quick-pick chips (see `RECENT_KEY`), so a multi-account user doesn't retype
+ * them after every logout.
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isTauri } from "@/lib/tauri";
@@ -22,6 +26,46 @@ import { logInfo, logError } from "@/lib/logger";
 
 const SITE_BASE = "https://lusworkshop.site";
 const GRADIENT = "linear-gradient(135deg, #667eea, #764ba2)";
+
+// Recently signed-in identities in most-recently-used order. "identity" rather
+// than "email": the site's signin matches nickname OR email, so this field is
+// not necessarily an address.
+//
+// Device-local UI scratch state, so it lives in localStorage like the mic pick
+// and `dictation.collapsed` - not in settings.json, whose `settings_set_global`
+// writes the whole object: a Settings page snapshot loaded before a login would
+// then wipe the identity that login just remembered.
+const RECENT_KEY = "login.recentEmails";
+const RECENT_MAX = 5;
+
+// Reads are wrapped because a convenience must never be able to fail the login
+// flow: private mode, quota, or a hand-edited value all fall back to no chips.
+function readRecent(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((s): s is string => typeof s === "string" && s.trim() !== "")
+      .slice(0, RECENT_MAX);
+  } catch {
+    return [];
+  }
+}
+
+function writeRecent(list: string[]) {
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list));
+  } catch {
+    /* best-effort only */
+  }
+}
+
+/** Drop `email` (case-insensitive) from the list and persist the result. */
+function removeRecent(list: string[], email: string): string[] {
+  const next = list.filter((e) => e.toLowerCase() !== email.toLowerCase());
+  writeRecent(next);
+  return next;
+}
 
 export default function LoginModal({
   open,
@@ -35,17 +79,61 @@ export default function LoginModal({
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [recent, setRecent] = useState<string[]>([]);
+  const passwordRef = useRef<HTMLInputElement>(null);
 
-  // Reset transient state each time the modal is opened.
+  // Reset transient state each time the modal is opened. Prefill only when a
+  // single identity is remembered: with several, pre-filling the most recent
+  // makes the wrong account the default and forces a correction, while the chip
+  // row already offers any of them in one tap.
   useEffect(() => {
     if (open) {
       setError("");
       setLoading(false);
       setPassword("");
+      const remembered = readRecent();
+      setRecent(remembered);
+      setIdentity(remembered.length === 1 ? remembered[0] : "");
     }
   }, [open]);
 
   if (!open) return null;
+
+  // Remember only after a successful login - storing it on submit would keep
+  // typos and never-registered addresses. Re-reads the store rather than
+  // trusting this render's `recent`, so two logins in one open session can't
+  // clobber each other.
+  function recordRecent(email: string) {
+    const trimmed = email.trim();
+    if (!trimmed) return;
+    const next = [
+      trimmed,
+      ...readRecent().filter((e) => e.toLowerCase() !== trimmed.toLowerCase()),
+    ].slice(0, RECENT_MAX);
+    writeRecent(next);
+    setRecent(next);
+  }
+
+  function pickEmail(email: string) {
+    setIdentity(email);
+    passwordRef.current?.focus();
+  }
+
+  function forgetEmail(email: string) {
+    // Same re-read as recordRecent, so the write-back can't persist a list that
+    // is behind whatever a login recorded a moment ago.
+    setRecent(removeRecent(readRecent(), email));
+    // If the forgotten identity is what's in the field, clear it too, so the
+    // form doesn't keep submitting something the user just asked to forget.
+    if (identity.toLowerCase() === email.toLowerCase()) setIdentity("");
+  }
+
+  function forgetAll() {
+    // Clears only the store, not the field: the user may be mid-edit on an
+    // identity they still want to use.
+    writeRecent([]);
+    setRecent([]);
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -56,6 +144,7 @@ export default function LoginModal({
     try {
       await invoke("auth_login_password", { email: identity, password });
       logInfo(`Login succeeded for "${identity}"`, "auth");
+      recordRecent(identity);
       setPassword("");
       onClose();
     } catch (err) {
@@ -140,6 +229,46 @@ export default function LoginModal({
                 <polyline points="22,6 12,13 2,6" />
               </svg>
             </div>
+
+            {/* Quick-pick chips for identities already signed in on this
+                device. A <datalist> was the cheaper option but WebView2 gives
+                no per-item delete, and "forget this account" is what makes a
+                remembered list acceptable on a shared PC. */}
+            {recent.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                {recent.map((email) => (
+                  <span
+                    key={email}
+                    className="inline-flex items-center rounded-lg text-xs bg-gray-100 text-gray-600 border border-gray-200 pl-2.5 pr-1 max-w-full"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => pickEmail(email)}
+                      className="py-1 max-w-[10rem] truncate hover:text-[#667eea] transition-colors cursor-pointer"
+                    >
+                      {email}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => forgetEmail(email)}
+                      aria-label={`Forget ${email}`}
+                      className="py-1 px-1 text-gray-400 hover:text-red-500 transition-colors cursor-pointer"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+                {recent.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={forgetAll}
+                    className="ml-auto py-1 text-xs text-gray-400 hover:text-[#667eea] transition-colors cursor-pointer"
+                  >
+                    Forget all
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Password field */}
@@ -149,6 +278,7 @@ export default function LoginModal({
             </label>
             <div className="relative">
               <input
+                ref={passwordRef}
                 type={showPw ? "text" : "password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
