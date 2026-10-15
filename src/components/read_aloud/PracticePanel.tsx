@@ -110,16 +110,17 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
         </div>
       </section>
 
-      {/* Recorder status — the Record button itself lives in the page toolbar. */}
-      <p className="text-xs text-text-tertiary text-center">
-        {recorder.recording
-          ? "Reading… tap Stop in the toolbar when done"
-          : recorder.processing
-          ? "Transcribing…"
-          : submitting
-          ? "Scoring…"
-          : "Tap Record in the toolbar and read the text aloud"}
-      </p>
+      {/* Recorder status — the Record button itself lives in the page toolbar.
+          Silent when idle; only surfaces an in-progress state. */}
+      {(recorder.recording || recorder.processing || submitting) && (
+        <p className="text-xs text-text-tertiary text-center">
+          {recorder.recording
+            ? "Reading… tap Stop in the toolbar when done"
+            : recorder.processing
+            ? "Transcribing…"
+            : "Scoring…"}
+        </p>
+      )}
 
       {error && (
         <div className="p-3 rounded-lg bg-error-bg text-error-text text-sm break-words">{error}</div>

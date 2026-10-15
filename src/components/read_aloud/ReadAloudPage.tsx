@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import {
   Plus,
   Pencil,
@@ -16,16 +16,16 @@ import {
   MoreVertical,
   Check,
   History,
-  ArrowLeft,
+  Play,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import MdEditor from "@/components/wiki/MdEditor";
-import type { ReadAloudMeta, ReadText } from "@/lib/read_aloud/types";
+import type { ReadAloudMeta, ReadAttempt, ReadText } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
-import { tbGhost, tbToggle, tbIconToggleSoft } from "@/lib/ui/toolbar";
+import { tbGhost, tbToggle, tbIconToggleSoft, tbDanger } from "@/lib/ui/toolbar";
 import PracticePanel, { type RecorderCtl } from "./PracticePanel";
 import AttemptsPanel from "./AttemptsPanel";
 import DatasetDialog from "./DatasetDialog";
@@ -46,6 +46,17 @@ function getUUID(): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/** Format an ISO timestamp as `yyyy-mm-dd hh24:mi:ss` (local time) — the label
+ *  used for an attempt's breadcrumb crumb. */
+function formatStamp(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(
+    d.getHours()
+  )}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 export default function ReadAloudPage() {
@@ -85,8 +96,62 @@ export default function ReadAloudPage() {
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   // The attempt history lives on its own page, opened from the practice view's
-  // overflow menu ("Show Attempts").
+  // toolbar ("Attempts").
   const [attemptsView, setAttemptsView] = useState(false);
+  // The attempt opened in the detail panel is lifted here so the breadcrumb can
+  // show it as a level. `selectedAttempt` is reported up by AttemptsPanel and is
+  // used only to label the crumb.
+  const [selectedAttemptUuid, setSelectedAttemptUuid] = useState<string | null>(null);
+  const [selectedAttempt, setSelectedAttempt] = useState<ReadAttempt | null>(null);
+  const handleSelectAttempt = useCallback((a: ReadAttempt | null) => setSelectedAttempt(a), []);
+  // Bumped after the toolbar deletes the open attempt so AttemptsPanel reloads.
+  const [attemptsRefreshKey, setAttemptsRefreshKey] = useState(0);
+
+  // Playback of the open attempt's recording, driven by the toolbar Play/Stop
+  // button. The element is kept in a ref so playback can be stopped — on toggle,
+  // when navigating away from the attempt, and on unmount — instead of running
+  // fire-and-forget.
+  const attemptAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [playingAttempt, setPlayingAttempt] = useState(false);
+
+  const stopAttemptAudio = useCallback(() => {
+    const el = attemptAudioRef.current;
+    if (el) {
+      el.onended = null;
+      el.pause();
+      el.currentTime = 0;
+      attemptAudioRef.current = null;
+    }
+    setPlayingAttempt(false);
+  }, []);
+
+  const toggleAttemptPlay = useCallback(
+    (url?: string | null) => {
+      // Already playing → stop (toggle off), regardless of which attempt.
+      if (attemptAudioRef.current) {
+        stopAttemptAudio();
+        return;
+      }
+      if (!url) return;
+      const el = new Audio(convertFileSrc(url));
+      attemptAudioRef.current = el;
+      el.onended = () => {
+        attemptAudioRef.current = null;
+        setPlayingAttempt(false);
+      };
+      setPlayingAttempt(true);
+      el.play().catch(() => {
+        attemptAudioRef.current = null;
+        setPlayingAttempt(false);
+      });
+    },
+    [stopAttemptAudio]
+  );
+
+  // Stop playback when the open attempt changes or is cleared, and on unmount.
+  useEffect(() => {
+    return () => stopAttemptAudio();
+  }, [selectedAttemptUuid, stopAttemptAudio]);
 
   // The Record button lives in the toolbar, but the recorder + submit logic stay
   // in PracticePanel; it publishes its control here (and clears it on unmount).
@@ -151,7 +216,16 @@ export default function ReadAloudPage() {
   useEffect(() => {
     setEditingNormalized(false);
     setAttemptsView(false);
+    setSelectedAttemptUuid(null);
   }, [selectedText]);
+
+  // Leaving the attempts page clears any open attempt detail.
+  useEffect(() => {
+    if (!attemptsView) {
+      setSelectedAttemptUuid(null);
+      setSelectedAttempt(null);
+    }
+  }, [attemptsView]);
 
   const activeText = texts.find((t) => t.uuid === selectedText) ?? null;
   const activeDataset = datasets.find((d) => d.uuid === selectedDataset) ?? null;
@@ -295,6 +369,28 @@ export default function ReadAloudPage() {
     });
   };
 
+  // Delete the attempt currently open in the detail panel. The button lives in
+  // the toolbar; AttemptsPanel reloads via the bumped `attemptsRefreshKey`.
+  const deleteSelectedAttempt = () => {
+    if (!selectedAttempt || !selectedDataset) return;
+    const a = selectedAttempt;
+    setConfirm({
+      title: "Delete attempt",
+      message: "Delete this recording and its score? This cannot be undone.",
+      confirmLabel: "Delete",
+      onConfirm: async () => {
+        try {
+          await invoke("read_aloud_delete_attempt", { datasetUuid: selectedDataset, uuid: a.uuid });
+          setSelectedAttemptUuid(null);
+          setAttemptsRefreshKey((k) => k + 1);
+          await loadTexts(selectedDataset);
+        } catch (e) {
+          logError(`delete attempt failed: ${String(e)}`, LOG_MODULE);
+        }
+      },
+    });
+  };
+
   const deleteDataset = (meta: ReadAloudMeta) => {
     setConfirm({
       title: "Delete dataset",
@@ -396,7 +492,24 @@ export default function ReadAloudPage() {
               {attemptsView && (
                 <>
                   <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-                  <span className="text-text-primary font-medium shrink-0">Attempts</span>
+                  {selectedAttempt ? (
+                    <button
+                      className="cursor-pointer hover:underline text-accent shrink-0"
+                      onClick={() => setSelectedAttemptUuid(null)}
+                    >
+                      Attempts
+                    </button>
+                  ) : (
+                    <span className="text-text-primary font-medium shrink-0">Attempts</span>
+                  )}
+                  {selectedAttempt && (
+                    <>
+                      <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                      <span className="text-text-primary font-medium shrink-0 tabular-nums">
+                        {formatStamp(selectedAttempt.created_at)}
+                      </span>
+                    </>
+                  )}
                 </>
               )}
             </>
@@ -465,17 +578,6 @@ export default function ReadAloudPage() {
               </>
             )}
 
-            {viewMode === "practice" && activeText && attemptsView && (
-              <button
-                type="button"
-                className={tbGhost}
-                title="Back to practice"
-                onClick={() => setAttemptsView(false)}
-              >
-                <ArrowLeft size={14} />{!mobile && " Back"}
-              </button>
-            )}
-
             {viewMode === "practice" && activeText && !attemptsView && (
               <>
                 <button
@@ -508,12 +610,40 @@ export default function ReadAloudPage() {
                 </button>
               </>
             )}
+
+            {/* Attempt detail — its Play / Delete actions live here rather than
+                inside the panel, mirroring how Record lives in the toolbar. */}
+            {viewMode === "practice" && activeText && attemptsView && selectedAttempt && (
+              <>
+                {selectedAttempt.audio_url && (
+                  <button
+                    type="button"
+                    className={tbGhost}
+                    title={playingAttempt ? "Stop playback" : "Play recording"}
+                    onClick={() => toggleAttemptPlay(selectedAttempt.audio_url)}
+                  >
+                    {playingAttempt ? <Square size={14} /> : <Play size={14} />}
+                    {!mobile && (playingAttempt ? " Stop" : " Play")}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={tbDanger}
+                  title="Delete attempt"
+                  onClick={deleteSelectedAttempt}
+                >
+                  <Trash2 size={14} />{!mobile && " Delete"}
+                </button>
+              </>
+            )}
           </>
         )}
 
         {/* Overflow menu — Delete and the Normalized view toggle live here to
-            keep the toolbar compact. Items are contextual to the current view. */}
-        {!inEditor && (viewMode === "texts" || viewMode === "practice") && (
+            keep the toolbar compact. Items are contextual to the current view;
+            the attempts view has no overflow actions (its Play / Delete are in
+            the toolbar above), so the menu is hidden there. */}
+        {!inEditor && (viewMode === "texts" || (viewMode === "practice" && !attemptsView)) && (
           <div className="relative shrink-0">
             <button
               type="button"
@@ -544,25 +674,21 @@ export default function ReadAloudPage() {
                 )}
                 {viewMode === "practice" && activeText && (
                   <>
-                    {!attemptsView && (
-                      <>
-                        <button
-                          type="button"
-                          className={menuItem}
-                          onClick={() => startEdit(activeText)}
-                        >
-                          <Pencil size={15} /> Edit text
-                        </button>
-                        <button
-                          type="button"
-                          className={menuItem}
-                          onClick={startNormalizeEdit}
-                        >
-                          <Wand2 size={15} /> Normalized text
-                          {activeText.normalized_content && <Check size={14} className="ml-auto" />}
-                        </button>
-                      </>
-                    )}
+                    <button
+                      type="button"
+                      className={menuItem}
+                      onClick={() => startEdit(activeText)}
+                    >
+                      <Pencil size={15} /> Edit text
+                    </button>
+                    <button
+                      type="button"
+                      className={menuItem}
+                      onClick={startNormalizeEdit}
+                    >
+                      <Wand2 size={15} /> Normalized text
+                      {activeText.normalized_content && <Check size={14} className="ml-auto" />}
+                    </button>
                     <button
                       type="button"
                       className={menuItemDanger}
@@ -646,6 +772,10 @@ export default function ReadAloudPage() {
           datasetUuid={activeDataset.uuid}
           text={activeText}
           onChanged={() => loadTexts(selectedDataset)}
+          selectedUuid={selectedAttemptUuid}
+          onSelectUuid={setSelectedAttemptUuid}
+          onSelectAttempt={handleSelectAttempt}
+          refreshKey={attemptsRefreshKey}
         />
       ) : viewMode === "practice" && activeDataset && activeText ? (
         <PracticePanel
