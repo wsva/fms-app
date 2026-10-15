@@ -402,6 +402,23 @@ pub async fn text_split_status(state: State<'_, TextSplitState>) -> Result<TextS
     Ok(TextSplitStatus { downloaded, loaded, model_id, models })
 }
 
+/// Drop the cached SaT session to free memory without deleting the files. The
+/// model stays downloaded and auto-loads again on the next `text_split` call.
+/// A no-op when nothing is loaded. Held under `split_lock` so it can never race
+/// an in-flight inference (the same guard `split_text` and `text_split_delete` take).
+#[tauri::command]
+pub async fn text_split_unload(state: State<'_, TextSplitState>) -> Result<()> {
+    let _split_guard = state.shared.split_lock.lock().unwrap();
+    let mut inner = state.shared.inner.lock().unwrap();
+    let was_loaded = inner.loaded_id.take();
+    inner.sat = None;
+    match was_loaded {
+        Some(id) => log::info!("[textsplit] Unloaded SaT model '{}' to free memory", id),
+        None => log::info!("[textsplit] Unload requested; no model was loaded"),
+    }
+    Ok(())
+}
+
 /// Delete a downloaded text-split model and drop any cached session for it, so
 /// the Models page can fully manage it (download / delete) alongside STT models.
 #[tauri::command]

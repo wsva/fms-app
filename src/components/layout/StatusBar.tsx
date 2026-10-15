@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronUp, X, Mic, Scissors, Play, Square } from "lucide-react";
+import { ChevronDown, ChevronUp, X, Mic, Scissors, Play, Square, Eject } from "lucide-react";
 import { useLoadedModels, type LoadedModel, type LoadedModelState } from "@/hooks/useLoadedModels";
 
 /** Dot color per normalized model state — shared by the chips and the drawer. */
@@ -27,8 +27,23 @@ function TypeIcon({ type, className }: { type: string; className?: string }) {
   return <Mic className={className} />;
 }
 
+/**
+ * The drawer action for a model in its current state, or null when there is
+ * nothing to offer. STT toggles load/stop; text-split can only be unloaded
+ * (it auto-loads on demand), and only while it is resident.
+ */
+function actionFor(m: LoadedModel): { label: string; Icon: typeof Play } | null {
+  if (m.type === "stt") {
+    return m.state === "loaded" ? { label: "Stop", Icon: Square } : { label: "Load", Icon: Play };
+  }
+  if (m.type === "textsplit") {
+    return m.state === "loaded" ? { label: "Unload", Icon: Eject } : null;
+  }
+  return null;
+}
+
 export default function StatusBar() {
-  const { models, active, idleCount, toggleStt } = useLoadedModels();
+  const { models, active, idleCount, runAction } = useLoadedModels();
   const [open, setOpen] = useState(false);
 
   const nothingToShow = models.length === 0 || (active.length === 0 && idleCount === 0);
@@ -50,7 +65,7 @@ export default function StatusBar() {
           </div>
           <div className="flex flex-col gap-1">
             {models.map((m) => (
-              <DrawerRow key={m.type} model={m} onToggleStt={toggleStt} />
+              <DrawerRow key={m.type} model={m} onAction={runAction} />
             ))}
             {models.length === 0 && (
               <span className="text-text-tertiary">No model information available.</span>
@@ -108,7 +123,8 @@ export default function StatusBar() {
   );
 }
 
-function DrawerRow({ model, onToggleStt }: { model: LoadedModel; onToggleStt: () => void }) {
+function DrawerRow({ model, onAction }: { model: LoadedModel; onAction: (type: string) => void }) {
+  const action = actionFor(model);
   return (
     <div className="flex items-center gap-2">
       <span className={`w-2 h-2 rounded-full shrink-0 ${dotClass(model.state)}`} />
@@ -117,13 +133,13 @@ function DrawerRow({ model, onToggleStt }: { model: LoadedModel; onToggleStt: ()
       <span className="font-medium text-text-primary truncate">{model.id ?? "—"}</span>
       <span className="text-text-tertiary truncate">{model.caption}</span>
       <span className="ml-auto shrink-0">
-        {model.actionable ? (
+        {action ? (
           <button
             className="flex items-center gap-1 px-2 py-0.5 rounded border border-border-default text-text-secondary hover:bg-bg-hover cursor-pointer"
-            onClick={onToggleStt}
+            onClick={() => onAction(model.type)}
           >
-            {model.state === "loaded" ? <Square size={11} /> : <Play size={11} />}
-            {model.state === "loaded" ? "Stop" : "Load"}
+            <action.Icon size={11} />
+            {action.label}
           </button>
         ) : (
           <span className="px-2 py-0.5 rounded bg-bg-muted text-text-tertiary">{model.stateText}</span>

@@ -301,6 +301,7 @@ pub fn run() {
             models::model_download_hf,
             textsplit::text_split_status,
             textsplit::text_split,
+            textsplit::text_split_unload,
             textsplit::text_split_delete,
             xp::xp_get_user,
             xp::xp_get_history,

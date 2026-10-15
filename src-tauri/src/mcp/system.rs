@@ -161,6 +161,15 @@ impl DatasetMcpServer {
         .to_string())
     }
 
+    #[cfg(feature = "textsplit")]
+    #[tool(name = "text_split_unload", description = "Unload the cached SaT text-split model to free memory. The model stays downloaded and auto-loads again on the next text_split call, so this is safe to call any time. A no-op when nothing is loaded.")]
+    async fn text_split_unload(&self) -> Result<String, String> {
+        log::info!("[MCP] text_split_unload");
+        let state = self.app.state::<TextSplitState>();
+        textsplit::text_split_unload(state).await?;
+        Ok(serde_json::json!({"status": "ok", "message": "Text-split model unloaded"}).to_string())
+    }
+
     #[tool(name = "capture_screenshot", description = "Minimize the app window and capture a screenshot using the native snipping tool (Windows) or full-screen capture (other platforms). Returns a data:image/png;base64 URL.")]
     async fn capture_screenshot(&self) -> Result<String, String> {
         log::info!("[MCP] capture_screenshot");

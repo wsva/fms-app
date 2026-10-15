@@ -34,8 +34,6 @@ export interface LoadedModel {
   state: LoadedModelState;
   /** Human word for the drawer: "Loaded", "Loading…", "Available", "Not loaded", "Error". */
   stateText: string;
-  /** Whether the drawer offers a Load/Stop action (text-split auto-loads, so no). */
-  actionable: boolean;
   /** Caption shown under the name in the drawer. */
   caption: string;
 }
@@ -91,7 +89,6 @@ function mapStt(res: SttStatus): LoadedModel {
     id: res.active_version ?? null,
     state: state_,
     stateText,
-    actionable: true,
     caption: res.active_version ? "Loaded in memory" : id ? "Downloaded, not loaded" : "No model downloaded",
   };
 }
@@ -107,7 +104,6 @@ function mapTextSplit(res: TextSplitStatus): LoadedModel {
     id: res.loaded || res.downloaded ? res.model_id : null,
     state: state_,
     stateText,
-    actionable: false,
     caption: res.loaded
       ? "Resident in memory"
       : res.downloaded
@@ -180,20 +176,34 @@ export function useLoadedModels() {
   /** Downloaded-but-idle models, summarized as "+N" in the bar. */
   const idleCount = models.filter((m) => m.state === "available").length;
 
-  const toggleStt = async () => {
+  /**
+   * Run the drawer action for a family: STT toggles load/stop; text-split
+   * unloads its cached session to free memory (it auto-loads again on demand,
+   * so there is nothing to do when it is not loaded).
+   */
+  const runAction = async (type: string) => {
     if (!isTauri()) return;
-    const stt = models.find((m) => m.type === "stt");
+    const m = models.find((x) => x.type === type);
+    if (!m) return;
     try {
-      if (stt?.state === "loaded") {
-        await invoke("model_stop");
-      } else {
-        await invoke("model_start");
+      if (type === "stt") {
+        if (m.state === "loaded") {
+          await invoke("model_stop");
+        } else {
+          await invoke("model_start");
+        }
+      } else if (type === "textsplit") {
+        if (m.state === "loaded") {
+          await invoke("text_split_unload");
+        } else {
+          return; // loads on first use — no manual action
+        }
       }
       await fetchStatus();
     } catch (e) {
-      logError(`useLoadedModels: STT toggle failed: ${String(e)}`, "models");
+      logError(`useLoadedModels: action for '${type}' failed: ${String(e)}`, "models");
     }
   };
 
-  return { models, active, idleCount, toggleStt, refresh: fetchStatus };
+  return { models, active, idleCount, runAction, refresh: fetchStatus };
 }
