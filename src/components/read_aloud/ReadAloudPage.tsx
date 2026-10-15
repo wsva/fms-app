@@ -13,6 +13,8 @@ import {
   X,
   Square,
   Loader2,
+  MoreVertical,
+  Check,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import MdEditor from "@/components/wiki/MdEditor";
@@ -21,7 +23,7 @@ import { scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
-import { tbGhost, tbDanger, tbToggle, tbToggleSoft } from "@/lib/ui/toolbar";
+import { tbGhost, tbToggle, tbIconToggleSoft } from "@/lib/ui/toolbar";
 import PracticePanel, { type RecorderCtl } from "./PracticePanel";
 import DatasetDialog from "./DatasetDialog";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
@@ -66,14 +68,19 @@ export default function ReadAloudPage() {
   const [note, setNote] = useState("");
   const [content, setContent] = useState("");
   const [normalized, setNormalized] = useState("");
-  // Which field the MdEditor shows while editing: the text to read, or the
-  // LLM-normalized scoring reference (toggled from the sub-toolbar).
-  const [showNormalized, setShowNormalized] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // A dedicated inline editor for the LLM-normalized scoring reference, opened
+  // from the practice view's overflow menu (mirrors the main edit mode). Its
+  // draft is separate from `normalized` (used by the main text editor) so the
+  // two flows never interfere.
+  const [editingNormalized, setEditingNormalized] = useState(false);
+  const [normalizedDraft, setNormalizedDraft] = useState("");
+
   const [datasetDialog, setDatasetDialog] = useState<DatasetDialogState>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   // The Record button lives in the toolbar, but the recorder + submit logic stay
   // in PracticePanel; it publishes its control here (and clears it on unmount).
@@ -133,6 +140,12 @@ export default function ReadAloudPage() {
     loadTexts(selectedDataset);
   }, [selectedDataset, loadTexts]);
 
+  // The normalized editor is a per-text concern; close it whenever the selected
+  // text changes so a draft never leaks across texts.
+  useEffect(() => {
+    setEditingNormalized(false);
+  }, [selectedText]);
+
   const activeText = texts.find((t) => t.uuid === selectedText) ?? null;
   const activeDataset = datasets.find((d) => d.uuid === selectedDataset) ?? null;
 
@@ -151,16 +164,6 @@ export default function ReadAloudPage() {
     content !== (editText?.content ?? "") ||
     normalized !== (editText?.normalized_content ?? "");
 
-  const toolbarLabel = editing
-    ? editText
-      ? "Edit text"
-      : "New text"
-    : viewMode === "datasets"
-      ? `${datasets.length} dataset${datasets.length === 1 ? "" : "s"}`
-      : viewMode === "texts"
-        ? `${texts.length} text${texts.length === 1 ? "" : "s"}`
-        : activeText?.title || "Untitled";
-
   const goDatasets = () => {
     setSelectedDataset("");
     setSelectedText(null);
@@ -174,7 +177,7 @@ export default function ReadAloudPage() {
     setNote(t?.note ?? "");
     setContent(t?.content ?? "");
     setNormalized(t?.normalized_content ?? "");
-    setShowNormalized(false);
+    setMenuOpen(false);
     setError(null);
     setEditing(true);
   };
@@ -228,6 +231,46 @@ export default function ReadAloudPage() {
     }
   };
 
+  // ── Normalized-reference editor lifecycle ──────────────────────────
+  const startNormalizeEdit = () => {
+    if (!activeText) return;
+    setNormalizedDraft(activeText.normalized_content ?? "");
+    setMenuOpen(false);
+    setError(null);
+    setEditingNormalized(true);
+  };
+
+  const cancelNormalizeEdit = () => {
+    setEditingNormalized(false);
+    setError(null);
+  };
+
+  const saveNormalized = async () => {
+    if (!isTauri() || !selectedDataset || !activeText) return;
+    setSaving(true);
+    setError(null);
+    const t = activeText;
+    // Only the normalized reference changes here; content is passed through
+    // untouched so the backend staleness rule keeps the value we set.
+    const payload: ReadText = {
+      ...t,
+      normalized_content: normalizedDraft.trim() || null,
+      updated_at: nowIso(),
+    };
+    try {
+      await invoke("read_aloud_save_text", { datasetUuid: selectedDataset, text: payload });
+      setEditingNormalized(false);
+      await loadTexts(selectedDataset);
+      setSelectedText(t.uuid);
+    } catch (e) {
+      const msg = String(e);
+      logError(`save normalized failed: ${msg}`, LOG_MODULE);
+      setError(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const deleteText = (t: ReadText) => {
     setConfirm({
       title: "Delete text",
@@ -265,6 +308,17 @@ export default function ReadAloudPage() {
   const fieldCls =
     "w-full p-2 rounded-md bg-bg-muted border border-border-default text-text-primary text-sm focus:outline-none focus:border-accent-bg";
   const labelCls = "text-xs font-medium text-text-secondary mb-1 block";
+  const menuItem =
+    "w-full text-left px-3 py-2 text-sm hover:bg-bg-hover cursor-pointer flex items-center gap-2 text-text-primary disabled:opacity-50 disabled:cursor-not-allowed";
+  const menuItemDanger =
+    "w-full text-left px-3 py-2 text-sm hover:bg-bg-hover cursor-pointer flex items-center gap-2 text-error-text disabled:opacity-50 disabled:cursor-not-allowed";
+
+  // Either inline editor (the main text form or the normalized-reference form)
+  // swaps the content column and the sub-toolbar into Save / Cancel.
+  const inEditor = editing || editingNormalized;
+  const editorDirty = editing
+    ? dirty
+    : normalizedDraft !== (activeText?.normalized_content ?? "");
 
   return (
     <main className="flex-1 flex flex-col h-full min-h-0 min-w-0 bg-bg-body">
@@ -272,7 +326,7 @@ export default function ReadAloudPage() {
           page's edge-to-edge trail. Crumbs are inert while editing so a stray
           click can't discard the draft. */}
       <nav className="shrink-0 flex items-center justify-start gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
-        {editing ? (
+        {inEditor ? (
           <span className="shrink-0 text-accent">Read Aloud</span>
         ) : (
           <button
@@ -287,7 +341,7 @@ export default function ReadAloudPage() {
         {activeDataset && (
           <>
             <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-            {editing ? (
+            {inEditor ? (
               <span className="truncate min-w-0 max-w-[240px] text-accent" title={activeDataset.name}>
                 {activeDataset.name}
               </span>
@@ -328,36 +382,29 @@ export default function ReadAloudPage() {
       </nav>
 
       {/* Sub-toolbar: contextual actions for the current view — the same stacked
-          bar treatment the wiki page uses. While editing it hosts the editor
-          controls (Save / Cancel / ABC / Help) instead. */}
+          bar treatment the wiki page uses. While an inline editor is open it hosts
+          the Save / Cancel controls instead. */}
       <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card">
-        <div className="text-xs text-text-tertiary truncate flex-1 min-w-0">{toolbarLabel}</div>
+        <div className="flex-1 min-w-0" />
 
-        {editing ? (
+        {inEditor ? (
           <>
             <button
               type="button"
-              className={tbToggle(dirty)}
-              onClick={() => void saveText()}
-              disabled={saving || !dirty}
-              title="Save this text"
+              className={tbToggle(editorDirty)}
+              onClick={() => void (editing ? saveText() : saveNormalized())}
+              disabled={saving || !editorDirty}
+              title="Save"
             >
               <Save size={14} /> {saving ? "Saving…" : "Save"}
             </button>
-            <button type="button" className={tbGhost} onClick={cancelEdit} title="Cancel editing">
-              <X size={14} />{!mobile && " Cancel"}
-            </button>
             <button
               type="button"
-              className={tbToggleSoft(showNormalized)}
-              onClick={() => setShowNormalized((v) => !v)}
-              title={
-                showNormalized
-                  ? "Edit the text to read"
-                  : "Edit the LLM-normalized text used for scoring"
-              }
+              className={tbGhost}
+              onClick={editing ? cancelEdit : cancelNormalizeEdit}
+              title="Cancel editing"
             >
-              <Wand2 size={14} />{!mobile && " Normalized"}
+              <X size={14} />{!mobile && " Cancel"}
             </button>
           </>
         ) : (
@@ -392,15 +439,6 @@ export default function ReadAloudPage() {
                 >
                   <Pencil size={14} />{!mobile && " Edit"}
                 </button>
-                <button
-                  type="button"
-                  className={tbDanger}
-                  title="Delete dataset"
-                  disabled={!activeDataset}
-                  onClick={() => activeDataset && deleteDataset(activeDataset)}
-                >
-                  <Trash2 size={14} />{!mobile && " Delete"}
-                </button>
               </>
             )}
 
@@ -434,17 +472,67 @@ export default function ReadAloudPage() {
                 >
                   <Pencil size={14} />{!mobile && " Edit"}
                 </button>
-                <button
-                  type="button"
-                  className={tbDanger}
-                  title="Delete text"
-                  onClick={() => deleteText(activeText)}
-                >
-                  <Trash2 size={14} />{!mobile && " Delete"}
-                </button>
               </>
             )}
           </>
+        )}
+
+        {/* Overflow menu — Delete and the Normalized view toggle live here to
+            keep the toolbar compact. Items are contextual to the current view. */}
+        {!inEditor && (viewMode === "texts" || viewMode === "practice") && (
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              className={tbIconToggleSoft(menuOpen)}
+              title="More actions"
+              aria-label="More actions"
+              onClick={() => setMenuOpen((v) => !v)}
+            >
+              <MoreVertical size={16} />
+            </button>
+            {menuOpen && (
+              <div
+                className="absolute right-0 top-full mt-1 w-56 rounded-lg border border-border-default bg-bg-card shadow-xl z-20 py-1"
+                onMouseLeave={() => setMenuOpen(false)}
+              >
+                {viewMode === "texts" && (
+                  <button
+                    type="button"
+                    className={menuItemDanger}
+                    disabled={!activeDataset}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      if (activeDataset) deleteDataset(activeDataset);
+                    }}
+                  >
+                    <Trash2 size={15} /> Delete dataset
+                  </button>
+                )}
+                {viewMode === "practice" && activeText && (
+                  <>
+                    <button
+                      type="button"
+                      className={menuItem}
+                      onClick={startNormalizeEdit}
+                    >
+                      <Wand2 size={15} /> Normalized text
+                      {activeText.normalized_content && <Check size={14} className="ml-auto" />}
+                    </button>
+                    <button
+                      type="button"
+                      className={menuItemDanger}
+                      onClick={() => {
+                        setMenuOpen(false);
+                        deleteText(activeText);
+                      }}
+                    >
+                      <Trash2 size={15} /> Delete text
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
 
@@ -473,23 +561,35 @@ export default function ReadAloudPage() {
           </div>
 
           <div className="flex flex-col min-h-0">
-            <label className={labelCls}>
-              {showNormalized ? "Normalized text for scoring (optional)" : "Text to read"}
-            </label>
-            {showNormalized && (
-              <p className="text-[11px] text-text-tertiary mb-1">
-                LLM-normalized reference — numbers and abbreviations spelled out so they match the
-                transcription. Scoring uses this when set; editing the text to read clears it.
-              </p>
-            )}
+            <label className={labelCls}>Text to read</label>
             <MdEditor
-              value={showNormalized ? normalized : content}
-              onChange={showNormalized ? setNormalized : setContent}
+              value={content}
+              onChange={setContent}
               spellCheck={false}
               shortcutsOpen={false}
             />
           </div>
 
+          {error && (
+            <div className="p-2 rounded-md bg-error-bg text-error-text text-xs break-words">{error}</div>
+          )}
+        </div>
+      ) : editingNormalized && activeText ? (
+        <div className="flex-1 overflow-y-auto min-h-0 min-w-0 p-4 flex flex-col gap-3">
+          <div className="flex flex-col min-h-0">
+            <label className={labelCls}>Normalized text for scoring</label>
+            <p className="text-[11px] text-text-tertiary mb-1">
+              LLM-normalized reference — numbers and abbreviations spelled out so they match the
+              transcription. Scoring uses this when set; leave it empty to score against the text to
+              read.
+            </p>
+            <MdEditor
+              value={normalizedDraft}
+              onChange={setNormalizedDraft}
+              spellCheck={false}
+              shortcutsOpen={false}
+            />
+          </div>
           {error && (
             <div className="p-2 rounded-md bg-error-bg text-error-text text-xs break-words">{error}</div>
           )}

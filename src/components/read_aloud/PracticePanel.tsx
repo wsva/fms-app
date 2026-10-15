@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { Play, Trash2, RotateCcw } from "lucide-react";
+import { Play, Trash2, RotateCcw, Wand2 } from "lucide-react";
 import type { ReadAttempt, ReadAloudSubmitResult, ReadText } from "@/lib/read_aloud/types";
 import { GOOD_SCORE, PASS_SCORE, scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { useRecorder } from "@/components/read_book/useRecorder";
@@ -20,6 +20,9 @@ export type RecorderCtl = { toggle: () => void; recording: boolean; busy: boolea
 type Props = {
   datasetUuid: string;
   text: ReadText;
+  /** Show the LLM-normalized reference instead of the raw text (view toggle
+   *  driven from the page toolbar's overflow menu). */
+  showNormalized?: boolean;
   /** Called after a submission so the caller can refresh best score / counts. */
   onScored: () => void;
   /** Publishes recorder status/toggle upward so the toolbar can render the
@@ -36,7 +39,7 @@ function playUrl(url?: string | null) {
  * Practice panel for a single text: record yourself reading it, transcribe via
  * STT, score against the reference, and review past attempts.
  */
-export default function PracticePanel({ datasetUuid, text, onScored, onRecorder }: Props) {
+export default function PracticePanel({ datasetUuid, text, showNormalized = false, onScored, onRecorder }: Props) {
   const [attempts, setAttempts] = useState<ReadAttempt[]>([]);
   const [result, setResult] = useState<ReadAloudSubmitResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -132,8 +135,14 @@ export default function PracticePanel({ datasetUuid, text, onScored, onRecorder 
         {text.note && (
           <p className="text-xs text-text-tertiary break-words">{text.note}</p>
         )}
+        {showNormalized && text.normalized_content && (
+          <p className="text-[11px] text-text-tertiary flex items-center gap-1">
+            <Wand2 size={12} className="text-accent-bg" /> Showing the normalized reference used for
+            scoring
+          </p>
+        )}
         <div className="mt-2 p-4 rounded-xl bg-bg-muted text-text-primary text-lg leading-relaxed whitespace-pre-wrap break-words">
-          {text.content}
+          {showNormalized && text.normalized_content ? text.normalized_content : text.content}
         </div>
       </section>
 
