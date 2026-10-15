@@ -7,6 +7,7 @@ import { isTauri } from "@/lib/tauri";
 import { useAuth } from "@/hooks/useAuth";
 import { message as showDialog } from "@tauri-apps/plugin-dialog";
 import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog, Upload, LogIn, Archive } from "lucide-react";
+import { tbGhost, tbSolid, tbToggle } from "@/lib/ui/toolbar";
 import { logError, logInfo } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
@@ -212,11 +213,12 @@ interface GlobalSettings {
  * and a desktop syncs with another desktop (the remote side just needs its web
  * service enabled in Settings — see `web_service`).
  *
- * The whole surface is follower-side: it selects a source hub and pulls from it.
- * A workspace designated the hub is the authority that *serves* data, so when
- * `role === "hub"` we hide every pull control and point the user at the
- * Devices & Hub page to demote or manage paired devices. Cluster identity, the
- * hub role, and pairing all live there now.
+ * The surface is split into three zones behind one toolbar-row switcher —
+ * Pull (browse/download the hub catalog), Publish (upload local datasets to the
+ * cloud account) and Status (connection detail + diagnostics). A designated
+ * hub is the authority that *serves* data, so in the Pull zone it sees a
+ * notice instead of pull controls; cluster identity, the hub role, and pairing
+ * all live on the Devices & Hub page, reachable from the toolbar's hub label.
  */
 export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: string) => void }) {
   const [mounted, setMounted] = useState(false);
@@ -260,6 +262,11 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   // as tabs instead of stacked vertically, which keeps the narrow Android screen
   // and the desktop page alike from turning into an endless scroll.
   const [activeSection, setActiveSection] = useState<string>("dictation");
+
+  // Which zone the toolbar switcher shows. "publish" only exists once an
+  // account is signed in; "status" carries the connection + diagnostics that
+  // used to sit permanently above the lists.
+  const [activeZone, setActiveZone] = useState<"pull" | "publish" | "status">("pull");
 
   const pcUrl = (global?.pc_url ?? "").trim();
 
@@ -810,7 +817,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
                 local copy is absent or awaiting a resync, never silently applied. */}
             {(state === "not_downloaded" || state === "needs_resync") && (
               <button
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
+                className={tbSolid + " shrink-0"}
                 onClick={() => handleAdopt(ds.uuid, ds.name)}
                 disabled={!!busyUuid}
                 title="Pull the hub's full copy (overwrites local)"
@@ -826,7 +833,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
                 writable and is deleted from the Datasets page instead. */}
             {state === "downloaded" && isWebsite && (
               <button
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50 shrink-0"
+                className={tbGhost + " shrink-0"}
                 onClick={() => handleEvict(ds.uuid, ds.name)}
                 disabled={!!busyUuid}
                 title="Free disk space — keeps it re-downloadable, progress untouched"
@@ -894,6 +901,8 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   // caught by the Dictation bucket and rendered with its removed-on-hub badge.
   // Wiki datasets are syncable markdown trees — the hub serves them in the same
   // catalog, so they need a bucket of their own rather than a new transport.
+  // The same keys drive the Publish zone's local-dataset filter, so the section
+  // tabs mean one thing across both zones.
   const sections: { key: string; label: string; items: PcDataset[] }[] = [
     { key: "dictation", label: "Dictation", items: pcDatasets.filter((d) => d.dataset_type === "dictation" || d.dataset_type === "") },
     { key: "card", label: "Cards", items: pcDatasets.filter((d) => d.dataset_type === "card") },
@@ -902,35 +911,544 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     { key: "wiki", label: "Wiki", items: pcDatasets.filter((d) => d.dataset_type === "wiki") },
   ];
 
-  return (
-    <div className="flex flex-col w-full h-full min-h-0 p-4 gap-3">
-      {/* Header */}
-      <div className="flex items-center gap-3 shrink-0 flex-wrap">
-        <h1 className="text-[1.3em] font-bold">Datasets Sync</h1>
-        <div className="ml-auto flex items-center gap-2 flex-wrap">
-          {/* One round moves everything it can in both directions (writeback
-              push + pull deltas + step-7 mirror/file drain), replacing the old
-              per-dataset Pull / Upload buttons. Shown for followers always
-              (disabled until a hub is configured), and for any Hub that has
-              either a pc_url to talk to OR a logged-in account — a Hub with
-              only auth triggers the cloud-only branch of `sync_round_inner`,
-              which runs the mirror + changed-file + inbox legs against
-              `auth::base_url()`. A pure-LAN hub with no upstream AND no
-              sign-in is the one case where a round is meaningless, so we
-              hide it rather than show a dead button. */}
-          {(!isHub || pcUrl || canPublish) && (
+  // Local datasets bucketed by type, mirroring the hub catalog. The dictation
+  // bucket also catches "" for symmetry with the Pull sections.
+  const typeMatches = (t: string, key: string) =>
+    key === "dictation" ? t === "dictation" || t === "" : t === key;
+  const activeSectionLabel =
+    sections.find((s) => s.key === activeSection)?.label ?? sections[0].label;
+  const publishLabel: Record<string, string> = {
+    dictation: "dictation",
+    card: "card",
+    book: "book",
+    read_aloud: "read-aloud",
+    wiki: "wiki",
+  };
+
+  // Zone-switcher pills: a count on Pull when catalog copies are owed, an
+  // accent dot on Publish while an upload is in flight (so a running upload is
+  // visible from other zones), an amber dot on Status when the diagnostics
+  // actually say something. All additive — they degrade to nothing.
+  const pullPill = (status?.datasets ?? []).filter(
+    (d) => d.state === "not_downloaded" || d.state === "needs_resync"
+  ).length;
+  const publishPill = !!uploadingUuid || Object.keys(uploadProgress).length > 0;
+  const statusPill =
+    !!status &&
+    ((!!status.queue_diagnosis?.cause && status.queue_diagnosis.cause !== "idle") ||
+      !!status.history_gap ||
+      !!status.events_gap ||
+      lastRoundErrors > 0 ||
+      num(lastRound?.dropped_pending) > 0);
+
+  // The underline section tabs shared by the Pull and Publish zones — the
+  // dataset-type dimension, deliberately styled apart from the toolbar's
+  // segmented zone switcher above it.
+  function renderSectionTabs() {
+    return (
+      <div className="flex gap-1 border-b border-border-default">
+        {sections.map((section) => (
+          <button
+            key={section.key}
+            onClick={() => setActiveSection(section.key)}
+            className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+              activeSection === section.key
+                ? "border-accent-bg text-text-primary"
+                : "border-transparent text-text-tertiary hover:text-text-secondary"
+            }`}
+          >
+            {section.label}
+            {section.items.length > 0 && (
+              <span className="ml-1 text-xs opacity-70">{section.items.length}</span>
+            )}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  // One label/value line of the Status zone's connection grid.
+  function statusRow(label: string, value: React.ReactNode) {
+    return (
+      <div key={label} className="flex items-start gap-3">
+        <span className="w-40 shrink-0 text-text-tertiary">{label}</span>
+        <span className="min-w-0 break-words">{value}</span>
+      </div>
+    );
+  }
+
+  // Status zone: the connection detail + §19.2/§19.4 diagnostics that used to
+  // sit permanently above the lists. Everything reads off the read-only
+  // SyncStatusDetail; each line degrades to nothing when a stale backend
+  // omits the field.
+  function renderStatusZone() {
+    if (!status) {
+      return <p className="text-sm text-text-tertiary">Loading sync status…</p>;
+    }
+    const rows: React.ReactNode[] = [
+      statusRow(
+        "Hub",
+        <span className="flex items-center gap-2 flex-wrap">
+          <span
+            className={`inline-block w-2 h-2 rounded-full ${
+              status.hub.reachable ? "bg-emerald-500" : "bg-red-500"
+            }`}
+          />
+          <span className="font-mono">{status.hub.address || "not configured"}</span>
+          <span>{status.hub.reachable ? "reachable" : "unreachable"}</span>
+        </span>
+      ),
+      statusRow("Hub kind", <span className="font-mono">{status.hub_kind || "—"}</span>),
+      statusRow("Role", <span className="font-mono">{status.role}</span>),
+      statusRow("Cluster", <span className="font-mono">{status.cluster_id || "—"}</span>),
+      statusRow("Protocol", <span>{status.protocol_version}</span>),
+      statusRow("Device ID", <span className="font-mono break-all">{status.device_id}</span>),
+      statusRow(
+        "Serves",
+        <span>
+          {status.hub.dataset_count != null ? `${status.hub.dataset_count} dataset(s)` : "—"}
+          {" · "}
+          {status.devices.length} paired device(s)
+        </span>
+      ),
+    ];
+    if (status.hub.error) {
+      rows.push(statusRow("Last error", <span className="text-red-600 dark:text-red-400">{status.hub.error}</span>));
+    }
+    if (!isHub) {
+      // Per-user practice data (dictation progress, XP) travels in its own
+      // journal scope, not in a dataset snapshot — so it converges even when
+      // nothing is subscribed. `null` = no app-data pull has landed yet.
+      rows.push(
+        statusRow(
+          "App data",
+          <>
+            {status.app_cursor == null ? "not pulled yet" : `cursor ${status.app_cursor}`}
+            {" · "}
+            history {status.history_backfilled_at ? `imported ${status.history_backfilled_at}` : "not imported"}
+          </>
+        )
+      );
+    }
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="p-3 rounded-lg border border-border-default bg-bg-card text-xs flex flex-col gap-1.5">
+          {rows}
+          {onNavigate && (
             <button
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50"
-              onClick={handleSyncNow}
-              disabled={syncing || (!isHub && !pcUrl)}
-              title={isHub ? "Run a sync round: drain this hub's journal + changed files to the cloud" : "Run one incremental sync round (push + pull)"}
+              className="self-start mt-1 text-text-secondary hover:text-text-primary underline"
+              onClick={() => onNavigate("devices-hub")}
             >
-              {syncing ? <Loader2 size={14} className="animate-spin" /> : <ArrowUpDown size={14} />}
-              {syncing ? "Syncing…" : isHub ? "Push to cloud" : "Sync now"}
+              Devices &amp; Hub →
             </button>
           )}
+        </div>
+
+        {/* Follower-only diagnostics — a hub serves, it does not pull. */}
+        {!isHub && (
+          <div className="flex flex-col gap-1.5 p-3 rounded-lg border border-border-default bg-bg-card text-xs">
+            {status.queue_diagnosis && status.queue_diagnosis.cause !== "idle" && (
+              <div className={`flex items-center gap-2 flex-wrap ${diagClass(status.queue_diagnosis.severity)}`}>
+                <span className="font-medium">{status.queue_diagnosis.detail}</span>
+                {status.queue_diagnosis.action && (
+                  <span className="text-text-tertiary">→ {status.queue_diagnosis.action}</span>
+                )}
+              </div>
+            )}
+            {status.authority_kind && (
+              <div className="flex items-center gap-2 flex-wrap text-text-secondary">
+                <span>
+                  authority <span className="font-mono">{status.authority_kind}</span>
+                  {status.epoch != null && <> · epoch {status.epoch}</>}
+                </span>
+                {(status.features ?? []).map((f) => (
+                  <span key={f} className="px-1.5 py-0.5 rounded bg-bg-hover text-text-tertiary font-mono">
+                    {f}
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center gap-2 flex-wrap text-text-tertiary">
+              <span>
+                queue @app {status.queue_app?.depth ?? 0} / dataset {status.queue_dataset?.depth ?? 0}
+              </span>
+              {(status.queue_app?.depth ?? 0) > 0 && status.queue_app?.oldest_edit_time && (
+                <span className="text-amber-600 dark:text-amber-400">
+                  oldest app {status.queue_app.oldest_edit_time}
+                </span>
+              )}
+              {(status.queue_dataset?.depth ?? 0) > 0 && status.queue_dataset?.oldest_edit_time && (
+                <span className="text-amber-600 dark:text-amber-400">
+                  oldest dataset {status.queue_dataset.oldest_edit_time}
+                </span>
+              )}
+            </div>
+            {status.history_gap && (
+              <span className="text-amber-600 dark:text-amber-400">
+                history not imported — run a round, or force it with sync_history_backfill
+              </span>
+            )}
+            {status.events_gap && (
+              <span className="text-amber-600 dark:text-amber-400">
+                practice events not imported — a hub upgrade may be owed, then a round
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* The last completed round's persisted result (§19.2) — shown for hubs
+            too, whose "Push to cloud" rounds produce it. */}
+        {lastRound && (
+          <div className="flex items-center gap-2 flex-wrap text-xs text-text-tertiary">
+            <span>
+              last round <span className="font-mono">{String(lastRound.status ?? "?")}</span>
+            </span>
+            <span>
+              pushed {num(lastRound.pushed)} · applied {num(lastRound.applied)} · held{" "}
+              {num(lastRound.held)}
+            </span>
+            {/* INV-14 LWW loss: a nonzero count means un-pushed local edits were
+                overwritten by a newer hub entry this round — a red flag of silent
+                loss, not a routine statistic, so it only renders when > 0. */}
+            {num(lastRound.dropped_pending) > 0 && (
+              <span className="text-red-600 dark:text-red-400">
+                {num(lastRound.dropped_pending)} local edit(s) overwritten (INV-14)
+              </span>
+            )}
+            {lastRoundErrors > 0 && (
+              <span className="text-red-600 dark:text-red-400">{lastRoundErrors} error(s)</span>
+            )}
+            {status.last_round_at && <span>{status.last_round_at}</span>}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Publish zone: local datasets of the active section are the upload
+  // candidates. Gated on canPublish (a logged-in account), not `isWebsite` —
+  // the backend upload/publish commands all target `auth::base_url()`
+  // directly, so any signed-in workspace (follower or hub) can push its own
+  // datasets to its cloud account.
+  function renderPublishZone() {
+    const items = localDatasets.filter((ds) => typeMatches(ds.dataset_type, activeSection));
+    return (
+      <div className="flex flex-col gap-4">
+        <p className="text-xs text-text-tertiary">
+          Subscribing to a shared dataset is browser-only on the website, so a shared
+          dataset shows up in your catalog here only after you subscribe to it on the
+          website market page.
+        </p>
+        {renderSectionTabs()}
+        {items.length === 0 ? (
+          <p className="text-sm text-text-tertiary px-1">
+            No {publishLabel[activeSection] ?? activeSectionLabel.toLowerCase()} datasets on this machine.
+          </p>
+        ) : (
+          items.map((ds) => {
+            const up = uploadProgress[ds.uuid];
+            const done = uploadState[ds.uuid];
+            const pct =
+              up && up.phase === "upload" && up.total
+                ? Math.min(100, Math.round((up.sent / up.total) * 100))
+                : 0;
+            return (
+              <div
+                key={ds.uuid}
+                className="flex flex-col gap-2 p-3 rounded-lg border border-border-default bg-bg-card"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="flex flex-col min-w-0 flex-1">
+                    <span className="font-medium truncate">{ds.name}</span>
+                    <span className="text-xs text-text-tertiary">
+                      {ds.dataset_type}
+                      {done ? ` · uploaded v${done.version} (${done.uploaded_at})` : ""}
+                    </span>
+                  </div>
+                  <button
+                    className={tbSolid + " shrink-0"}
+                    onClick={() => openUploadDialog(ds)}
+                    disabled={!!uploadingUuid}
+                    title="Pack this local dataset and upload it to the website hub"
+                  >
+                    <Upload size={14} />
+                    {uploadingUuid === ds.uuid ? "Uploading…" : done ? "Re-upload" : "Upload"}
+                  </button>
+                </div>
+                {up && up.phase !== "done" && (
+                  <div className="flex flex-col gap-1">
+                    <div className="h-1.5 w-full rounded bg-bg-hover overflow-hidden">
+                      <div
+                        className="h-full bg-accent-bg transition-[width]"
+                        style={{ width: up.phase === "pack" ? "40%" : `${pct}%` }}
+                      />
+                    </div>
+                    <span className="text-xs text-text-tertiary">
+                      {up.phase === "pack" ? "Packing…" : `Uploading… ${pct}%`}
+                    </span>
+                  </div>
+                )}
+                {done && (() => {
+                  const ps = publishState[ds.uuid];
+                  const busy = publishBusy === ds.uuid;
+                  const state = ps?.state ?? "not_published";
+                  const ver = ps?.version ?? null;
+                  return (
+                    <div className="flex items-center justify-between gap-2 pt-2 mt-1 border-t border-border-default">
+                      {state === "live" ? (
+                        <span className="text-xs text-green-600 dark:text-green-400 truncate">Live v{ver}</span>
+                      ) : state === "withdrawn" ? (
+                        <span className="text-xs text-red-500 truncate" title={ps?.error}>v{ver} taken down</span>
+                      ) : state === "unknown" ? (
+                        <span className="text-xs text-text-tertiary truncate" title={ps?.error}>Cloud state unknown</span>
+                      ) : (
+                        <span className="text-xs text-text-tertiary truncate">Not published</span>
+                      )}
+                      <div className="flex items-center gap-2 shrink-0">
+                        {(state === "live" || state === "withdrawn") && (
+                          <button
+                            className={tbGhost}
+                            onClick={() => (state === "live" ? handleWithdraw(ds, ver as number) : handleRestore(ds, ver as number))}
+                            disabled={busy || ver == null}
+                            title={state === "live" ? "Take this version down (bytes kept)" : "Restore this version"}
+                          >
+                            {busy ? <Loader2 size={12} className="animate-spin" /> : null}
+                            {busy ? "Working…" : state === "live" ? "Withdraw" : "Restore"}
+                          </button>
+                        )}
+                        {(state === "not_published" || state === "unknown") && (
+                          <button
+                            className={tbSolid}
+                            onClick={() => handlePublish(ds)}
+                            disabled={busy}
+                            title="Publish the newest uploaded version to the cloud"
+                          >
+                            {busy ? <Loader2 size={12} className="animate-spin" /> : null}
+                            {busy ? "Publishing…" : "Publish"}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            );
+          })
+        )}
+      </div>
+    );
+  }
+
+  // Pull zone: hub catalog browsing for followers; a hub (which serves LAN
+  // followers and never pulls) sees the notice instead. isHub (this
+  // workspace's role) and isWebsite (the upstream is the cloud) are
+  // ORTHOGONAL — publishing lives in its own zone now, so the old "hide the
+  // whole body for a hub" trap is gone.
+  function renderPullZone() {
+    if (isHub) {
+      return (
+        <div className="flex flex-col items-center justify-center gap-2 p-4 text-center rounded-lg border border-border-default bg-bg-card">
+          <ServerCog size={28} className="text-text-tertiary" />
+          <p className="text-text-secondary max-w-md">
+            This workspace is the sync <span className="font-semibold">hub</span>. It serves
+            datasets to follower devices — the pull controls are hidden (only
+            followers pull).
+          </p>
+          <p className="text-sm text-text-tertiary max-w-md">
+            To sync datasets <em>into</em> this machine, designate it as a follower on the
+            Devices &amp; Hub page first. Publishing to your cloud account (in the Publish
+            zone, when you're signed in) works either way —{canPublish ? " and 'Push to cloud' in the toolbar drains this hub's local edits directly to it." : " sign in via Settings › Account to enable that."}
+          </p>
+          {onNavigate && (
+            <button
+              className={tbSolid + " mt-1"}
+              onClick={() => onNavigate("devices-hub")}
+            >
+              Open Devices &amp; Hub
+            </button>
+          )}
+        </div>
+      );
+    }
+    if (!mounted) return null;
+    if (!isTauri()) {
+      return <p className="text-text-secondary">Datasets Sync is only available in the app.</p>;
+    }
+    if (!pcUrl) {
+      return (
+        <div className="flex flex-col items-center gap-2 py-12 text-text-secondary">
+          <CloudOff size={32} />
+          <p>Not connected to a hub.</p>
+          <p className="text-sm">Connect and pair with a hub on the Devices &amp; Hub page. On the other machine, enable the web service in Settings so it can be found.</p>
+          {onNavigate && (
+            <button
+              className={tbSolid + " mt-1"}
+              onClick={() => onNavigate("devices-hub")}
+            >
+              Open Devices &amp; Hub
+            </button>
+          )}
+        </div>
+      );
+    }
+    return (
+      <div className="flex flex-col gap-4">
+        {listError && (
+          <div className="px-3 py-2 text-sm rounded-md bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300">
+            {listError}
+            {/* Website: a token problem is fixed by signing in, never by pairing
+                (pairing is a LAN concept). LAN unpaired: point at Devices & Hub. */}
+            {needsSignIn && (
+              <button
+                className="ml-2 inline-flex items-center gap-1 underline font-medium"
+                onClick={() => invoke("auth_open_login").catch((err) => setMessage(`Sign-in failed: ${String(err)}`))}
+              >
+                <LogIn size={14} />
+                Sign in
+              </button>
+            )}
+            {unpaired && !isWebsite && onNavigate && (
+              <button
+                className="ml-2 underline font-medium"
+                onClick={() => onNavigate("devices-hub")}
+              >
+                Pair in Devices &amp; Hub
+              </button>
+            )}
+          </div>
+        )}
+        {pcDatasets.length === 0 && !loadingList && (
+          <p className="text-sm text-text-tertiary">No datasets available on the source PC.</p>
+        )}
+        {pcDatasets.length > 0 && (
+          <>
+            {/* Section tabs: Dictation / Cards / Books / Read / Wiki. Only the
+                active section's datasets are listed. */}
+            {renderSectionTabs()}
+            {(() => {
+              const section =
+                sections.find((s) => s.key === activeSection) ?? sections[0];
+              return section.items.length === 0 ? (
+                <p className="text-sm text-text-tertiary px-1">None on PC.</p>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {section.items.map((ds, i) => renderDatasetCard(ds, i))}
+                </div>
+              );
+            })()}
+          </>
+        )}
+
+        {/* Local copies the hub no longer offers. Kept out of the section
+            list (they have no hub catalog entry) and surfaced here with an
+            explicit remove action (§7 prune-by-absence follow-up). */}
+        {removedLocal.length > 0 && (
+          <div className="flex flex-col gap-2">
+            <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
+              Removed on hub
+            </p>
+            {removedLocal.map((d) => (
+              <div
+                key={d.dataset_uuid}
+                className="flex items-center gap-3 p-3 rounded-lg border border-border-default bg-bg-card"
+              >
+                <div className="flex flex-col min-w-0 flex-1">
+                  <span className="font-medium truncate">
+                    {d.name || d.dataset_uuid}
+                  </span>
+                  <span className="text-xs text-text-tertiary">
+                    no longer on the hub · {d.file_count} file(s)
+                  </span>
+                </div>
+                <span className="text-xs px-2 py-0.5 rounded-full shrink-0 bg-red-500/15 text-red-600 dark:text-red-400">
+                  Removed on hub
+                </span>
+                <button
+                  className={tbGhost + " shrink-0"}
+                  onClick={() => handleForgetDataset(d.dataset_uuid, d.name)}
+                  title="Remove this local copy"
+                >
+                  <Trash2 size={14} />
+                  Remove local copy
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Zone dispatch. Publish only exists with a signed-in account — if auth
+  // drops away while it is open, fall back to Pull rather than an empty page.
+  function renderZone() {
+    if (activeZone === "status") return renderStatusZone();
+    if (activeZone === "publish" && canPublish) return renderPublishZone();
+    return renderPullZone();
+  }
+
+  return (
+    <div className="flex flex-col w-full h-full min-h-0 bg-bg-body">
+      {/* Toolbar row: the segmented zone switcher (mode, not dataset-type — the
+          underline section tabs below keep that dimension), the compact hub
+          status, and the page-level actions. Replaces the old h1 header, the
+          always-on status strip, and the inline diagnostics block. */}
+      <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card overflow-x-auto">
+        <div className="flex items-center gap-1 shrink-0">
+          <button type="button" className={tbToggle(activeZone === "pull")} onClick={() => setActiveZone("pull")}>
+            <Download size={14} />
+            <span>Pull</span>
+            {pullPill > 0 && (
+              <span className="ml-0.5 px-1.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 text-xs">
+                {pullPill}
+              </span>
+            )}
+          </button>
+          {canPublish && (
+            <button type="button" className={tbToggle(activeZone === "publish")} onClick={() => setActiveZone("publish")}>
+              <Upload size={14} />
+              <span>Publish</span>
+              {publishPill && <span className="ml-0.5 w-2 h-2 rounded-full bg-white" />}
+            </button>
+          )}
+          <button type="button" className={tbToggle(activeZone === "status")} onClick={() => setActiveZone("status")}>
+            <ServerCog size={14} />
+            <span>Status</span>
+            {statusPill && <span className="ml-0.5 w-2 h-2 rounded-full bg-amber-500" />}
+          </button>
+        </div>
+
+        {/* Compact connection status. Clicking the hub label jumps to Devices &
+            Hub — the jump the old strip link and the repeated banners made. */}
+        {status && (
+          <span className="flex items-center gap-2 min-w-0 text-xs shrink-0 sm:shrink">
+            <span
+              className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+                isHub ? "bg-blue-500" : status.hub.reachable ? "bg-emerald-500" : "bg-red-500"
+              }`}
+            />
+            <button
+              className="font-mono truncate max-w-[220px] text-text-secondary hover:text-text-primary hover:underline"
+              onClick={() => onNavigate?.("devices-hub")}
+              title="Open Devices & Hub"
+            >
+              {isWebsite && !isHub ? "Website Hub" : "hub"} {status.hub.address || "not connected"}
+            </button>
+            <span className="text-text-tertiary shrink-0">
+              {isHub ? "· serving" : status.hub.reachable ? "· reachable" : "· unreachable"}
+            </span>
+            {!isHub && (status.queued_count > 0 || queued > 0) && (
+              <span className="text-amber-600 dark:text-amber-400 shrink-0">
+                {Math.max(status.queued_count, queued)} change(s) queued
+              </span>
+            )}
+          </span>
+        )}
+
+        <div className="ml-auto flex items-center gap-1 shrink-0">
           <button
-            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover disabled:opacity-50"
+            type="button"
+            className={tbGhost}
             onClick={() => {
               loadSettings();
               loadLocalState();
@@ -943,419 +1461,40 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
             <RefreshCw size={14} className={loadingList ? "animate-spin" : undefined} />
             Refresh
           </button>
+          {/* One round moves everything it can in both directions (writeback
+              push + pull deltas + step-7 mirror/file drain). Shown for followers
+              always (disabled until a hub is configured), and for any Hub with a
+              pc_url OR a logged-in account — an auth-only Hub triggers the
+              cloud-only branch of sync_round_inner against auth::base_url(). A
+              pure-LAN hub with no upstream and no sign-in is the one case a
+              round is meaningless, so we hide it rather than show a dead button. */}
+          {(!isHub || pcUrl || canPublish) && (
+            <button
+              type="button"
+              className={tbSolid}
+              onClick={handleSyncNow}
+              disabled={syncing || (!isHub && !pcUrl)}
+              title={isHub ? "Run a sync round: drain this hub's journal + changed files to the cloud" : "Run one incremental sync round (push + pull)"}
+            >
+              {syncing ? <Loader2 size={14} className="animate-spin" /> : <ArrowUpDown size={14} />}
+              {syncing ? "Syncing…" : isHub ? "Push to cloud" : "Sync now"}
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Compact connection status strip. Full cluster identity, the hub role,
-          and pairing all live on the Devices & Hub page now — this only
-          summarizes the link and jumps there. */}
-      {status && (
-        <div className="shrink-0 flex items-center gap-2 flex-wrap p-2.5 rounded-lg border border-border-default bg-bg-card text-xs">
-          <span
-            className={`inline-block w-2 h-2 rounded-full ${
-              isHub ? "bg-blue-500" : status.hub.reachable ? "bg-emerald-500" : "bg-red-500"
-            }`}
-          />
-          <span className="text-text-secondary">
-            {isHub ? (
-              "hub · serving datasets to paired devices"
-            ) : isWebsite ? (
-              <>
-                Website Hub <span className="font-mono">{status.hub.address || "not configured"}</span>
-                {status.hub.reachable ? " · reachable" : " · unreachable"}
-              </>
-            ) : (
-              <>
-                hub <span className="font-mono">{status.hub.address || "not configured"}</span>
-                {status.hub.reachable ? " · reachable" : " · unreachable"}
-              </>
-            )}
-          </span>
-          {!isHub && (status.queued_count > 0 || queued > 0) && (
-            <span className="text-amber-600 dark:text-amber-400">
-              {Math.max(status.queued_count, queued)} change(s) queued
-            </span>
-          )}
-          {/* Per-user practice data (dictation progress, XP) travels in its own
-              journal scope, not in a dataset snapshot — so it converges even when
-              nothing is subscribed. `null` = no app-data pull has landed yet. */}
-          {!isHub && !isWebsite && (
-            <span className="text-text-tertiary">
-              app data {status.app_cursor == null ? "not pulled yet" : `cursor ${status.app_cursor}`}
-              {" · "}
-              history {status.history_backfilled_at ? `imported ${status.history_backfilled_at}` : "not imported"}
-            </span>
-          )}
-          {onNavigate && (
-            <button
-              className="ml-auto inline-flex items-center gap-1 text-text-secondary hover:text-text-primary underline"
-              onClick={() => onNavigate("devices-hub")}
-            >
-              Devices &amp; Hub →
-            </button>
-          )}
+      {/* Transient round/action result — one full-width notice line so it stays
+          visible whichever zone is open. */}
+      {message && (
+        <div className="shrink-0 px-4 py-1.5 text-xs border-b border-border-default bg-bg-card truncate" title={message}>
+          {message}
         </div>
       )}
 
-      {/* §19.2 diagnostics (follower only — a hub serves, it does not pull):
-          authority + advertised scopes, per-scope queue depth, backfill gaps,
-          and what the last round actually did. All additive, degrades to nothing
-          when a stale backend omits the fields. */}
-      {status && !isHub && (
-        <div className="shrink-0 flex flex-col gap-1.5 p-2.5 rounded-lg border border-border-default bg-bg-card text-xs">
-          {status.queue_diagnosis && status.queue_diagnosis.cause !== "idle" && (
-            <div className={`flex items-center gap-2 flex-wrap ${diagClass(status.queue_diagnosis.severity)}`}>
-              <span className="font-medium">{status.queue_diagnosis.detail}</span>
-              {status.queue_diagnosis.action && (
-                <span className="text-text-tertiary">→ {status.queue_diagnosis.action}</span>
-              )}
-            </div>
-          )}
-          {status.authority_kind && (
-            <div className="flex items-center gap-2 flex-wrap text-text-secondary">
-              <span>
-                authority <span className="font-mono">{status.authority_kind}</span>
-                {status.epoch != null && <> · epoch {status.epoch}</>}
-              </span>
-              {(status.features ?? []).map((f) => (
-                <span key={f} className="px-1.5 py-0.5 rounded bg-bg-hover text-text-tertiary font-mono">
-                  {f}
-                </span>
-              ))}
-            </div>
-          )}
-          <div className="flex items-center gap-2 flex-wrap text-text-tertiary">
-            <span>
-              queue @app {status.queue_app?.depth ?? 0} / dataset {status.queue_dataset?.depth ?? 0}
-            </span>
-            {(status.queue_app?.depth ?? 0) > 0 && status.queue_app?.oldest_edit_time && (
-              <span className="text-amber-600 dark:text-amber-400">
-                oldest app {status.queue_app.oldest_edit_time}
-              </span>
-            )}
-            {(status.queue_dataset?.depth ?? 0) > 0 && status.queue_dataset?.oldest_edit_time && (
-              <span className="text-amber-600 dark:text-amber-400">
-                oldest dataset {status.queue_dataset.oldest_edit_time}
-              </span>
-            )}
-          </div>
-          {status.history_gap && (
-            <span className="text-amber-600 dark:text-amber-400">
-              history not imported — run a round, or force it with sync_history_backfill
-            </span>
-          )}
-          {status.events_gap && (
-            <span className="text-amber-600 dark:text-amber-400">
-              practice events not imported — a hub upgrade may be owed, then a round
-            </span>
-          )}
-          {lastRound && (
-            <div className="flex items-center gap-2 flex-wrap text-text-tertiary">
-              <span>
-                last round <span className="font-mono">{String(lastRound.status ?? "?")}</span>
-              </span>
-              <span>
-                pushed {num(lastRound.pushed)} · applied {num(lastRound.applied)} · held{" "}
-                {num(lastRound.held)}
-              </span>
-              {/* INV-14 LWW loss: a nonzero count means un-pushed local edits were
-                  overwritten by a newer hub entry this round — a red flag of silent
-                  loss, not a routine statistic, so it only renders when > 0. */}
-              {num(lastRound.dropped_pending) > 0 && (
-                <span className="text-red-600 dark:text-red-400">
-                  {num(lastRound.dropped_pending)} local edit(s) overwritten (INV-14)
-                </span>
-              )}
-              {lastRoundErrors > 0 && (
-                <span className="text-red-600 dark:text-red-400">{lastRoundErrors} error(s)</span>
-              )}
-              {status.last_round_at && <span>{status.last_round_at}</span>}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* One outer scroll column so hub notice, follower pull content, and the
-          owner-facing website-upload section coexist vertically. `isHub` (this
-          workspace's role — serves LAN followers) and `isWebsite` (the upstream
-          is the cloud) are ORTHOGONAL: a Hub that also has the website as its
-          upstream can publish its own local datasets, so hiding the whole page
-          body for a Hub was wrong. */}
-      <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4">
-      {isHub ? (
-        <div className="shrink-0 flex flex-col items-center justify-center gap-2 p-4 text-center rounded-lg border border-border-default bg-bg-card">
-          <ServerCog size={28} className="text-text-tertiary" />
-          <p className="text-text-secondary max-w-md">
-            This workspace is the sync <span className="font-semibold">hub</span>. It serves
-            datasets to follower devices — the pull controls below are hidden (only
-            followers pull).
-          </p>
-          <p className="text-sm text-text-tertiary max-w-md">
-            To sync datasets <em>into</em> this machine, designate it as a follower on the
-            Devices &amp; Hub page first. Publishing to your cloud account (below, when
-            you're signed in) works either way —{canPublish ? " and 'Push to cloud' above drains this hub's local edits directly to it." : " sign in via Settings › Account to enable that."}
-          </p>
-          {onNavigate && (
-            <button
-              className="mt-1 inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover"
-              onClick={() => onNavigate("devices-hub")}
-            >
-              Open Devices &amp; Hub
-            </button>
-          )}
-        </div>
-      ) : (
-        <>
-      {/* The source-PC selector, scan, connect, and pairing all live on the
-          Devices & Hub page now — this page only lists and syncs datasets. */}
-      {!mounted ? null : !isTauri() ? (
-        <p className="text-text-secondary">Datasets Sync is only available in the app.</p>
-      ) : !pcUrl ? (
-        <div className="flex flex-col items-center gap-2 py-12 text-text-secondary">
-          <CloudOff size={32} />
-          <p>Not connected to a hub.</p>
-          <p className="text-sm">Connect and pair with a hub on the Devices &amp; Hub page. On the other machine, enable the web service in Settings so it can be found.</p>
-          {onNavigate && (
-            <button
-              className="mt-1 inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover"
-              onClick={() => onNavigate("devices-hub")}
-            >
-              Open Devices &amp; Hub
-            </button>
-          )}
-        </div>
-      ) : (
-        <>
-          {listError && (
-            <div className="px-3 py-2 text-sm rounded-md bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300">
-              {listError}
-              {/* Website: a token problem is fixed by signing in, never by pairing
-                  (pairing is a LAN concept). LAN unpaired: point at Devices & Hub. */}
-              {needsSignIn && (
-                <button
-                  className="ml-2 inline-flex items-center gap-1 underline font-medium"
-                  onClick={() => invoke("auth_open_login").catch((err) => setMessage(`Sign-in failed: ${String(err)}`))}
-                >
-                  <LogIn size={14} />
-                  Sign in
-                </button>
-              )}
-              {unpaired && !isWebsite && onNavigate && (
-                <button
-                  className="ml-2 underline font-medium"
-                  onClick={() => onNavigate("devices-hub")}
-                >
-                  Pair in Devices &amp; Hub
-                </button>
-              )}
-            </div>
-          )}
-          {message && (
-            <div className="px-3 py-2 text-sm rounded-md bg-bg-hover text-text-primary">
-              {message}
-            </div>
-          )}
-
-          <div className="flex flex-col gap-4">
-            {pcDatasets.length === 0 && !loadingList && (
-              <p className="text-sm text-text-tertiary">No datasets available on the source PC.</p>
-            )}
-            {pcDatasets.length > 0 && (
-              <>
-                {/* Section tabs: Dictation / Cards / Books / Read / Wiki. Only the
-                    active section's datasets are listed. */}
-                <div className="shrink-0 flex gap-1 border-b border-border-default">
-                  {sections.map((section) => (
-                    <button
-                      key={section.key}
-                      onClick={() => setActiveSection(section.key)}
-                      className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
-                        activeSection === section.key
-                          ? "border-accent-bg text-text-primary"
-                          : "border-transparent text-text-tertiary hover:text-text-secondary"
-                      }`}
-                    >
-                      {section.label}
-                      {section.items.length > 0 && (
-                        <span className="ml-1 text-xs opacity-70">{section.items.length}</span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-
-                {(() => {
-                  const section =
-                    sections.find((s) => s.key === activeSection) ?? sections[0];
-                  return section.items.length === 0 ? (
-                    <p className="text-sm text-text-tertiary px-1">None on PC.</p>
-                  ) : (
-                    <div className="flex flex-col gap-2">
-                      {section.items.map((ds, i) => renderDatasetCard(ds, i))}
-                    </div>
-                  );
-                })()}
-              </>
-            )}
-
-            {/* Local copies the hub no longer offers. Kept out of the section
-                list (they have no hub catalog entry) and surfaced here with an
-                explicit remove action (§7 prune-by-absence follow-up). */}
-            {removedLocal.length > 0 && (
-              <div className="flex flex-col gap-2">
-                <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
-                  Removed on hub
-                </p>
-                {removedLocal.map((d) => (
-                  <div
-                    key={d.dataset_uuid}
-                    className="flex items-center gap-3 p-3 rounded-lg border border-border-default bg-bg-card"
-                  >
-                    <div className="flex flex-col min-w-0 flex-1">
-                      <span className="font-medium truncate">
-                        {d.name || d.dataset_uuid}
-                      </span>
-                      <span className="text-xs text-text-tertiary">
-                        no longer on the hub · {d.file_count} file(s)
-                      </span>
-                    </div>
-                    <span className="text-xs px-2 py-0.5 rounded-full shrink-0 bg-red-500/15 text-red-600 dark:text-red-400">
-                      Removed on hub
-                    </span>
-                    <button
-                      className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-bg-body border border-border-light hover:bg-bg-hover shrink-0"
-                      onClick={() => handleForgetDataset(d.dataset_uuid, d.name)}
-                      title="Remove this local copy"
-                    >
-                      <Trash2 size={14} />
-                      Remove local copy
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-          </div>
-        </>
-      )}
-        </>
-      )}
-
-      {/* Owner-side cloud publish. Local datasets across every type are the
-          upload candidates — including copies the hub catalog doesn't list
-          yet. Gated on **`canPublish`** (a logged-in account), not `isWebsite`:
-          `dataset_export_upload`, `sync_publish_dataset_version`, and
-          `sync_set_dataset_availability` all target `auth::base_url()` directly,
-          so any workspace with a signed-in user can push its own datasets to
-          its cloud account, whether follower or hub, whether or not a `pc_url`
-          is configured. Renders as a top-level sibling of the hub/follower
-          branch: publishing to the cloud is orthogonal to the sync role. */}
-      {canPublish && (
-        <div className="flex flex-col gap-2">
-          <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
-            Publish to cloud
-          </p>
-          <p className="text-xs text-text-tertiary">
-            Subscribing to a shared dataset is browser-only on the website, so a shared
-            dataset shows up in your catalog here only after you subscribe to it on the
-            website market page.
-          </p>
-          {localDatasets.length === 0 ? (
-            <p className="text-sm text-text-tertiary px-1">No local datasets to upload.</p>
-          ) : (
-            localDatasets.map((ds) => {
-              const up = uploadProgress[ds.uuid];
-              const done = uploadState[ds.uuid];
-              const pct =
-                up && up.phase === "upload" && up.total
-                  ? Math.min(100, Math.round((up.sent / up.total) * 100))
-                  : 0;
-              return (
-                <div
-                  key={ds.uuid}
-                  className="flex flex-col gap-2 p-3 rounded-lg border border-border-default bg-bg-card"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="flex flex-col min-w-0 flex-1">
-                      <span className="font-medium truncate">{ds.name}</span>
-                      <span className="text-xs text-text-tertiary">
-                        {ds.dataset_type}
-                        {done ? ` · uploaded v${done.version} (${done.uploaded_at})` : ""}
-                      </span>
-                    </div>
-                    <button
-                      className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
-                      onClick={() => openUploadDialog(ds)}
-                      disabled={!!uploadingUuid}
-                      title="Pack this local dataset and upload it to the website hub"
-                    >
-                      <Upload size={14} />
-                      {uploadingUuid === ds.uuid ? "Uploading…" : done ? "Re-upload" : "Upload"}
-                    </button>
-                  </div>
-                  {up && up.phase !== "done" && (
-                    <div className="flex flex-col gap-1">
-                      <div className="h-1.5 w-full rounded bg-bg-hover overflow-hidden">
-                        <div
-                          className="h-full bg-accent-bg transition-[width]"
-                          style={{ width: up.phase === "pack" ? "40%" : `${pct}%` }}
-                        />
-                      </div>
-                      <span className="text-xs text-text-tertiary">
-                        {up.phase === "pack" ? "Packing…" : `Uploading… ${pct}%`}
-                      </span>
-                    </div>
-                  )}
-                  {done && (() => {
-                    const ps = publishState[ds.uuid];
-                    const busy = publishBusy === ds.uuid;
-                    const state = ps?.state ?? "not_published";
-                    const ver = ps?.version ?? null;
-                    return (
-                      <div className="flex items-center justify-between gap-2 pt-2 mt-1 border-t border-border-default">
-                        {state === "live" ? (
-                          <span className="text-xs text-green-600 dark:text-green-400 truncate">Live v{ver}</span>
-                        ) : state === "withdrawn" ? (
-                          <span className="text-xs text-red-500 truncate" title={ps?.error}>v{ver} taken down</span>
-                        ) : state === "unknown" ? (
-                          <span className="text-xs text-text-tertiary truncate" title={ps?.error}>Cloud state unknown</span>
-                        ) : (
-                          <span className="text-xs text-text-tertiary truncate">Not published</span>
-                        )}
-                        <div className="flex items-center gap-2 shrink-0">
-                          {(state === "live" || state === "withdrawn") && (
-                            <button
-                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md border border-border-default hover:bg-bg-hover disabled:opacity-50"
-                              onClick={() => (state === "live" ? handleWithdraw(ds, ver as number) : handleRestore(ds, ver as number))}
-                              disabled={busy || ver == null}
-                              title={state === "live" ? "Take this version down (bytes kept)" : "Restore this version"}
-                            >
-                              {busy ? <Loader2 size={12} className="animate-spin" /> : null}
-                              {busy ? "Working…" : state === "live" ? "Withdraw" : "Restore"}
-                            </button>
-                          )}
-                          {(state === "not_published" || state === "unknown") && (
-                            <button
-                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50"
-                              onClick={() => handlePublish(ds)}
-                              disabled={busy}
-                              title="Publish the newest uploaded version to the cloud"
-                            >
-                              {busy ? <Loader2 size={12} className="animate-spin" /> : null}
-                              {busy ? "Publishing…" : "Publish"}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })()}
-                </div>
-              );
-            })
-          )}
-        </div>
-      )}
+      {/* The active zone's body in one padded scroll area. */}
+      <div className="flex-1 min-h-0 overflow-y-auto p-4">
+        {renderZone()}
       </div>
-
       {/* Upload dialog: pick a visibility, then pack + stream. Blocks closing
           while an upload is in flight so the running task is never orphaned. */}
       {uploadTarget && (
