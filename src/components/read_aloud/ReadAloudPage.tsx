@@ -15,6 +15,8 @@ import {
   Loader2,
   MoreVertical,
   Check,
+  History,
+  ArrowLeft,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import MdEditor from "@/components/wiki/MdEditor";
@@ -25,6 +27,7 @@ import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
 import { tbGhost, tbToggle, tbIconToggleSoft } from "@/lib/ui/toolbar";
 import PracticePanel, { type RecorderCtl } from "./PracticePanel";
+import AttemptsPanel from "./AttemptsPanel";
 import DatasetDialog from "./DatasetDialog";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 
@@ -60,8 +63,8 @@ export default function ReadAloudPage() {
 
   // ── Inline text editor (edit/view mode, mirroring the wiki page) ──
   // `editing` swaps the content column for the text form and the sub-toolbar for
-  // Save / Cancel / ABC / Help. `editText` is the text being edited, or null for
-  // a brand-new one.
+  // Save / Cancel. `editText` is the text being edited, or null for a brand-new
+  // one.
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState<ReadText | null>(null);
   const [title, setTitle] = useState("");
@@ -81,6 +84,9 @@ export default function ReadAloudPage() {
   const [datasetDialog, setDatasetDialog] = useState<DatasetDialogState>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  // The attempt history lives on its own page, opened from the practice view's
+  // overflow menu ("Show Attempts").
+  const [attemptsView, setAttemptsView] = useState(false);
 
   // The Record button lives in the toolbar, but the recorder + submit logic stay
   // in PracticePanel; it publishes its control here (and clears it on unmount).
@@ -140,10 +146,11 @@ export default function ReadAloudPage() {
     loadTexts(selectedDataset);
   }, [selectedDataset, loadTexts]);
 
-  // The normalized editor is a per-text concern; close it whenever the selected
-  // text changes so a draft never leaks across texts.
+  // The normalized editor and the attempts page are per-text concerns; close
+  // them whenever the selected text changes so they never leak across texts.
   useEffect(() => {
     setEditingNormalized(false);
+    setAttemptsView(false);
   }, [selectedText]);
 
   const activeText = texts.find((t) => t.uuid === selectedText) ?? null;
@@ -370,12 +377,28 @@ export default function ReadAloudPage() {
           activeText && (
             <>
               <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-              <span
-                className="text-text-primary font-medium truncate min-w-0 max-w-[320px]"
-                title={activeText.title || "Untitled"}
-              >
-                {activeText.title || "Untitled"}
-              </span>
+              {attemptsView ? (
+                <button
+                  className="cursor-pointer hover:underline text-accent truncate min-w-0 max-w-[320px]"
+                  title={activeText.title || "Untitled"}
+                  onClick={() => setAttemptsView(false)}
+                >
+                  {activeText.title || "Untitled"}
+                </button>
+              ) : (
+                <span
+                  className="text-text-primary font-medium truncate min-w-0 max-w-[320px]"
+                  title={activeText.title || "Untitled"}
+                >
+                  {activeText.title || "Untitled"}
+                </span>
+              )}
+              {attemptsView && (
+                <>
+                  <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                  <span className="text-text-primary font-medium shrink-0">Attempts</span>
+                </>
+              )}
             </>
           )
         )}
@@ -442,7 +465,18 @@ export default function ReadAloudPage() {
               </>
             )}
 
-            {viewMode === "practice" && activeText && (
+            {viewMode === "practice" && activeText && attemptsView && (
+              <button
+                type="button"
+                className={tbGhost}
+                title="Back to practice"
+                onClick={() => setAttemptsView(false)}
+              >
+                <ArrowLeft size={14} />{!mobile && " Back"}
+              </button>
+            )}
+
+            {viewMode === "practice" && activeText && !attemptsView && (
               <>
                 <button
                   type="button"
@@ -467,10 +501,10 @@ export default function ReadAloudPage() {
                 <button
                   type="button"
                   className={tbGhost}
-                  title="Edit text"
-                  onClick={() => startEdit(activeText)}
+                  title="Show attempts"
+                  onClick={() => setAttemptsView(true)}
                 >
-                  <Pencil size={14} />{!mobile && " Edit"}
+                  <History size={14} />{!mobile && " Attempts"}
                 </button>
               </>
             )}
@@ -510,14 +544,25 @@ export default function ReadAloudPage() {
                 )}
                 {viewMode === "practice" && activeText && (
                   <>
-                    <button
-                      type="button"
-                      className={menuItem}
-                      onClick={startNormalizeEdit}
-                    >
-                      <Wand2 size={15} /> Normalized text
-                      {activeText.normalized_content && <Check size={14} className="ml-auto" />}
-                    </button>
+                    {!attemptsView && (
+                      <>
+                        <button
+                          type="button"
+                          className={menuItem}
+                          onClick={() => startEdit(activeText)}
+                        >
+                          <Pencil size={15} /> Edit text
+                        </button>
+                        <button
+                          type="button"
+                          className={menuItem}
+                          onClick={startNormalizeEdit}
+                        >
+                          <Wand2 size={15} /> Normalized text
+                          {activeText.normalized_content && <Check size={14} className="ml-auto" />}
+                        </button>
+                      </>
+                    )}
                     <button
                       type="button"
                       className={menuItemDanger}
@@ -594,6 +639,12 @@ export default function ReadAloudPage() {
             <div className="p-2 rounded-md bg-error-bg text-error-text text-xs break-words">{error}</div>
           )}
         </div>
+      ) : attemptsView && activeDataset && activeText ? (
+        <AttemptsPanel
+          datasetUuid={activeDataset.uuid}
+          text={activeText}
+          onChanged={() => loadTexts(selectedDataset)}
+        />
       ) : viewMode === "practice" && activeDataset && activeText ? (
         <PracticePanel
           datasetUuid={activeDataset.uuid}

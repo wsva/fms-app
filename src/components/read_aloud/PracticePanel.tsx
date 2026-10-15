@@ -2,12 +2,11 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { Play, Trash2, RotateCcw, Wand2 } from "lucide-react";
-import type { ReadAttempt, ReadAloudSubmitResult, ReadText } from "@/lib/read_aloud/types";
+import { Play, RotateCcw, Wand2 } from "lucide-react";
+import type { ReadAloudSubmitResult, ReadText } from "@/lib/read_aloud/types";
 import { GOOD_SCORE, PASS_SCORE, scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { useRecorder } from "@/components/read_book/useRecorder";
 import AsrDiff from "@/components/read_aloud/AsrDiff";
-import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 import { isTauri } from "@/lib/tauri";
 import { logError, logInfo } from "@/lib/logger";
 
@@ -40,31 +39,15 @@ function playUrl(url?: string | null) {
  * STT, score against the reference, and review past attempts.
  */
 export default function PracticePanel({ datasetUuid, text, showNormalized = false, onScored, onRecorder }: Props) {
-  const [attempts, setAttempts] = useState<ReadAttempt[]>([]);
   const [result, setResult] = useState<ReadAloudSubmitResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
 
-  const loadAttempts = useCallback(async () => {
-    if (!isTauri()) return;
-    try {
-      const rows = await invoke<ReadAttempt[]>("read_aloud_list_attempts", {
-        datasetUuid,
-        textUuid: text.uuid,
-      });
-      setAttempts(rows);
-    } catch (e) {
-      logError(`list attempts failed: ${String(e)}`, LOG_MODULE);
-    }
-  }, [datasetUuid, text.uuid]);
-
-  // Reset transient state and reload history whenever the selected text changes.
+  // Reset transient state whenever the selected text changes.
   useEffect(() => {
     setResult(null);
     setError(null);
-    loadAttempts();
-  }, [loadAttempts]);
+  }, [text.uuid]);
 
   const handleResult = useCallback(
     async ({ wavBase64, text: recognized }: { wavBase64: string; text: string }) => {
@@ -83,7 +66,6 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
           LOG_MODULE
         );
         setResult(res);
-        await loadAttempts();
         onScored();
       } catch (e) {
         const msg = String(e);
@@ -93,28 +75,10 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
         setSubmitting(false);
       }
     },
-    [datasetUuid, text.uuid, loadAttempts, onScored]
+    [datasetUuid, text.uuid, onScored]
   );
 
   const recorder = useRecorder(handleResult, (msg) => setError(msg));
-
-  const deleteAttempt = (a: ReadAttempt) => {
-    setConfirm({
-      title: "Delete attempt",
-      message: "Delete this recording and its score? This cannot be undone.",
-      confirmLabel: "Delete",
-      onConfirm: async () => {
-        try {
-          await invoke("read_aloud_delete_attempt", { datasetUuid, uuid: a.uuid });
-          setResult((prev) => (prev && prev.attempt.uuid === a.uuid ? null : prev));
-          await loadAttempts();
-          onScored();
-        } catch (e) {
-          setError(String(e));
-        }
-      },
-    });
-  };
 
   const busy = recorder.processing || submitting;
   const score = result?.score ?? null;
@@ -205,47 +169,8 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
         </section>
       )}
 
-      {/* Attempt history */}
-      <section className="flex flex-col gap-2 min-w-0">
-        <h3 className="text-sm font-medium text-text-secondary">
-          Attempts ({attempts.length})
-        </h3>
-        {attempts.length === 0 ? (
-          <p className="text-xs text-text-tertiary">No attempts yet.</p>
-        ) : (
-          <ul className="flex flex-col gap-1.5">
-            {attempts.map((a) => (
-              <li
-                key={a.uuid}
-                className="flex items-center gap-2 p-2 rounded-lg border border-border-default bg-bg-card"
-              >
-                <span className={scoreBadgeClasses(a.score)}>{Math.round(a.score)}%</span>
-                <span className="text-xs text-text-secondary truncate flex-1 min-w-0" title={a.recognized}>
-                  {a.recognized || "(no speech recognized)"}
-                </span>
-                {a.audio_url && (
-                  <button
-                    onClick={() => playUrl(a.audio_url)}
-                    title="Play recording"
-                    className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover cursor-pointer shrink-0"
-                  >
-                    <Play size={15} />
-                  </button>
-                )}
-                <button
-                  onClick={() => deleteAttempt(a)}
-                  title="Delete attempt"
-                  className="p-1 rounded text-text-tertiary hover:text-error-text hover:bg-bg-hover cursor-pointer shrink-0"
-                >
-                  <Trash2 size={15} />
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
+      {/* Attempt history lives on its own page now — reached from the toolbar's
+          overflow menu ("Show Attempts"). */}
     </div>
   );
 }
