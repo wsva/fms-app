@@ -17,6 +17,7 @@ import {
   Check,
   History,
   Play,
+  Columns,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import MdEditor from "@/components/wiki/MdEditor";
@@ -106,6 +107,9 @@ export default function ReadAloudPage() {
   const handleSelectAttempt = useCallback((a: ReadAttempt | null) => setSelectedAttempt(a), []);
   // Bumped after the toolbar deletes the open attempt so AttemptsPanel reloads.
   const [attemptsRefreshKey, setAttemptsRefreshKey] = useState(0);
+  // Toggled by the toolbar's "Compare" button: the attempt detail then shows the
+  // text and the recognized transcript side by side, sentence by sentence.
+  const [compareView, setCompareView] = useState(false);
 
   // Playback of the open attempt's recording, driven by the toolbar Play/Stop
   // button. The element is kept in a ref so playback can be stopped — on toggle,
@@ -152,6 +156,12 @@ export default function ReadAloudPage() {
   useEffect(() => {
     return () => stopAttemptAudio();
   }, [selectedAttemptUuid, stopAttemptAudio]);
+
+  // Compare is per-attempt; leave it whenever a different attempt is opened (or
+  // the detail is closed) so it never leaks across attempts.
+  useEffect(() => {
+    setCompareView(false);
+  }, [selectedAttemptUuid]);
 
   // The Record button lives in the toolbar, but the recorder + submit logic stay
   // in PracticePanel; it publishes its control here (and clears it on unmount).
@@ -615,6 +625,14 @@ export default function ReadAloudPage() {
                 inside the panel, mirroring how Record lives in the toolbar. */}
             {viewMode === "practice" && activeText && attemptsView && selectedAttempt && (
               <>
+                <button
+                  type="button"
+                  className={tbToggle(compareView)}
+                  title="Compare the text and the transcript sentence by sentence"
+                  onClick={() => setCompareView((v) => !v)}
+                >
+                  <Columns size={14} />{!mobile && " Compare"}
+                </button>
                 {selectedAttempt.audio_url && (
                   <button
                     type="button"
@@ -776,6 +794,7 @@ export default function ReadAloudPage() {
           onSelectUuid={setSelectedAttemptUuid}
           onSelectAttempt={handleSelectAttempt}
           refreshKey={attemptsRefreshKey}
+          compare={compareView}
         />
       ) : viewMode === "practice" && activeDataset && activeText ? (
         <PracticePanel

@@ -6,6 +6,7 @@ import { Play, Trash2, History, ChevronRight } from "lucide-react";
 import type { ReadAttempt, ReadText } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
+import { highlightDifferences } from "@/components/read_book/diff";
 import { isTauri } from "@/lib/tauri";
 import { logError } from "@/lib/logger";
 
@@ -26,6 +27,10 @@ type Props = {
   /** Bumped by the page after it deletes the open attempt (the toolbar owns
    *  that action) so the list reloads. */
   refreshKey?: number;
+  /** When true, the detail view compares the text and the recognized transcript
+   *  sentence by sentence instead of showing the transcript alone. Toggled by
+   *  the page toolbar's "Compare" button. */
+  compare?: boolean;
 };
 
 function playUrl(url?: string | null) {
@@ -36,6 +41,55 @@ function playUrl(url?: string | null) {
 function formatWhen(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+/** Split text into sentences, keeping terminal punctuation with its sentence. */
+function splitSentences(text: string): string[] {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (!cleaned) return [];
+  const parts = cleaned.match(/[^.!?…]+[.!?…]+["'”)\]]*|[^.!?…]+$/g);
+  return (parts ?? [cleaned]).map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Sentence-by-sentence comparison of the reference text against the recognized
+ * transcript. Sentence i of each is paired on a row; the recognized side carries
+ * the same red diff highlighting the read-a-book sentence drawer uses. Side by
+ * side on a wide screen (PC), stacked on narrow ones.
+ */
+function SentenceCompare({ reference, recognized }: { reference: string; recognized: string }) {
+  const refSentences = splitSentences(reference);
+  const recSentences = splitSentences(recognized);
+  const count = Math.max(refSentences.length, recSentences.length);
+  if (count === 0) {
+    return <p className="text-xs text-text-tertiary">Nothing to compare.</p>;
+  }
+  const rows = Array.from({ length: count }, (_, i) => ({
+    ref: refSentences[i] ?? "",
+    rec: recSentences[i] ?? "",
+  }));
+  return (
+    <div className="flex flex-col gap-2 min-w-0">
+      <div className="hidden lg:grid lg:grid-cols-2 gap-2 min-w-0">
+        <h3 className="text-xs font-medium text-text-secondary">Text</h3>
+        <h3 className="text-xs font-medium text-text-secondary">Recognized</h3>
+      </div>
+      {rows.map((row, i) => (
+        <div key={i} className="grid grid-cols-1 lg:grid-cols-2 gap-2 min-w-0">
+          <div className="p-3 rounded-lg bg-bg-muted text-text-primary text-base leading-relaxed whitespace-pre-wrap break-words">
+            {row.ref || <span className="text-text-tertiary">—</span>}
+          </div>
+          <div className="p-3 rounded-lg bg-bg-muted text-text-primary text-base leading-relaxed break-words">
+            {row.rec ? (
+              highlightDifferences(row.ref, row.rec)
+            ) : (
+              <span className="text-text-tertiary">—</span>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 /**
@@ -51,6 +105,7 @@ export default function AttemptsPanel({
   onSelectUuid,
   onSelectAttempt,
   refreshKey,
+  compare,
 }: Props) {
   const [attempts, setAttempts] = useState<ReadAttempt[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -94,6 +149,9 @@ export default function AttemptsPanel({
   };
 
   const selectedAttempt = attempts.find((a) => a.uuid === selectedUuid) ?? null;
+  // Scoring — and the diff below — uses the normalized reference when set, else
+  // the text to read. Mirror that so the highlighting matches the score.
+  const reference = text.normalized_content?.trim() ? text.normalized_content : text.content;
 
   // Keep the page's breadcrumb crumb in sync with the resolved attempt.
   useEffect(() => {
@@ -118,12 +176,18 @@ export default function AttemptsPanel({
             </span>
           </div>
 
-          <section className="flex flex-col gap-1 min-w-0">
-            <h3 className="text-xs font-medium text-text-secondary">Recognized text</h3>
-            <div className="p-4 rounded-xl bg-bg-muted text-text-primary text-base leading-relaxed whitespace-pre-wrap break-words">
-              {selectedAttempt.recognized || "(no speech recognized)"}
-            </div>
-          </section>
+          {/* Compare mode (toolbar "Compare") pairs the texts sentence by
+              sentence; otherwise just show the recognized transcript. */}
+          {compare ? (
+            <SentenceCompare reference={reference} recognized={selectedAttempt.recognized} />
+          ) : (
+            <section className="flex flex-col gap-1 min-w-0">
+              <h3 className="text-xs font-medium text-text-secondary">Recognized text</h3>
+              <div className="p-4 rounded-xl bg-bg-muted text-text-primary text-base leading-relaxed whitespace-pre-wrap break-words">
+                {selectedAttempt.recognized || "(no speech recognized)"}
+              </div>
+            </section>
+          )}
         </>
       ) : (
         <>
