@@ -571,7 +571,19 @@ pub async fn sync_local_datasets(
                     Some(i) => i,
                     None => continue,
                 };
-                if info.dataset_type != ty || !seen.insert(info.uuid.clone()) {
+                if info.dataset_type != ty {
+                    continue;
+                }
+                if !seen.insert(info.uuid.clone()) {
+                    // A uuid is a dataset's global primary key — the catalog, snapshots
+                    // and `dataset_sync_state` all resolve by it, so the first scanned
+                    // copy wins and the other vanishes from every uuid-keyed surface.
+                    // Keep that dedupe, but never let it be silent.
+                    log::warn!(
+                        "[sync] duplicate dataset uuid {}: {} is shadowed by an earlier scan — re-mint one of them",
+                        info.uuid,
+                        path.display()
+                    );
                     continue;
                 }
                 out.push(json!({
