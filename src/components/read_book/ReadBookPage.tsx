@@ -1,6 +1,6 @@
 "use client";
 
-import { AlignJustify, AlignLeft, Library, Settings2, Zap } from "lucide-react";
+import { AlignJustify, AlignLeft, Settings2, Zap } from "lucide-react";
 import { useBookData } from "@/hooks/useBookData";
 import { tbToggle, tbToggleSoft, tbSolid } from "@/lib/ui/toolbar";
 import ReadingView from "./ReadingView";
@@ -21,60 +21,45 @@ export default function ReadBookPage() {
       <div className="flex-1 flex flex-col min-h-0 min-w-0">
         {/* Breadcrumb navigation — wiki/dictation-style full-width bar sitting
             above the toolbar. Always shown (including mobile) so the trail stays
-            reachable. Shape depends on the active mode. */}
+            reachable. The root crumb is always "Books"; it gains the selected book
+            (and, in Read, the chapter) as you drill in — regardless of mode. */}
         <nav className="shrink-0 flex items-center justify-start gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
-          {b.view === "read" ? (
+          {/* Root crumb is always "Books", in every mode. */}
+          <button
+            className={`shrink-0 cursor-pointer hover:underline text-left ${b.bookUUID ? "text-accent" : "text-text-primary font-medium"}`}
+            onClick={() => {
+              b.setBookUUID("");
+              // Advanced is book-scoped; leaving the book returns to Read so the
+              // toolbar and content stay coherent at the books level.
+              if (b.view === "advanced") b.setView("read");
+            }}
+          >
+            Books
+          </button>
+          {b.selectedBook && (
             <>
-              <button
-                className={`shrink-0 cursor-pointer hover:underline text-left ${b.bookUUID ? "text-accent" : "text-text-primary font-medium"}`}
-                onClick={() => b.setBookUUID("")}
-              >
-                Books
-              </button>
-              {b.selectedBook && (
-                <>
-                  <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-                  {b.chapterUUID ? (
-                    <button
-                      className={crumbLink}
-                      onClick={() => b.setChapterUUID("")}
-                      title={b.selectedBook.name}
-                    >
-                      {b.selectedBook.name}
-                    </button>
-                  ) : (
-                    <span className={crumbCurrent} title={b.selectedBook.name}>
-                      {b.selectedBook.name}
-                    </span>
-                  )}
-                </>
-              )}
-              {b.selectedBook && b.currentChapter && (
-                <>
-                  <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-                  <span className={crumbCurrent} title={b.currentChapter.title}>
-                    {b.currentChapter.title}
-                  </span>
-                </>
+              <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+              {b.view === "read" && b.chapterUUID ? (
+                <button
+                  className={crumbLink}
+                  onClick={() => b.setChapterUUID("")}
+                  title={b.selectedBook.name}
+                >
+                  {b.selectedBook.name}
+                </button>
+              ) : (
+                <span className={crumbCurrent} title={b.selectedBook.name}>
+                  {b.selectedBook.name}
+                </span>
               )}
             </>
-          ) : (
+          )}
+          {b.view === "read" && b.selectedBook && b.currentChapter && (
             <>
-              <span className="shrink-0 text-text-primary font-medium">
-                {b.view === "manage" ? "Manage" : "Advanced"}
+              <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+              <span className={crumbCurrent} title={b.currentChapter.title}>
+                {b.currentChapter.title}
               </span>
-              {b.selectedBook && (
-                <>
-                  <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-                  <button
-                    className={crumbCurrent.replace("font-medium", "font-medium hover:underline cursor-pointer")}
-                    onClick={() => b.setBookUUID("")}
-                    title={b.selectedBook.name}
-                  >
-                    {b.selectedBook.name}
-                  </button>
-                </>
-              )}
             </>
           )}
         </nav>
@@ -83,15 +68,34 @@ export default function ReadBookPage() {
             right. Wiki-style full-width bar under the breadcrumb. */}
         <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card">
           <div className="flex items-center gap-1 shrink-0">
-            <button type="button" className={tbToggle(b.view === "read")} title="Read" aria-label="Read" onClick={() => b.setView("read")}>
-              <Library size={16} />{!mobile && " Read"}
+            {/* Read is the base view (no toggle active). Manage and Advanced are
+                toggles that return to Read when clicked while active. Manage keeps
+                the current book but does a level-specific job, so its label differs:
+                at the books level it is "Manage Books" (Locations + book
+                add/edit/delete); on a book page it is "Manage Chapters" (edit that
+                book's chapters). */}
+            <button
+              type="button"
+              className={tbToggle(b.view === "manage")}
+              title={b.bookUUID ? "Manage Chapters" : "Manage Books"}
+              aria-label={b.bookUUID ? "Manage Chapters" : "Manage Books"}
+              onClick={() => b.setView(b.view === "manage" ? "read" : "manage")}
+            >
+              <Settings2 size={16} />{!mobile && (b.bookUUID ? " Manage Chapters" : " Manage Books")}
             </button>
-            <button type="button" className={tbToggle(b.view === "manage")} title="Manage" aria-label="Manage" onClick={() => b.setView("manage")}>
-              <Settings2 size={16} />{!mobile && " Manage"}
-            </button>
-            <button type="button" className={tbToggle(b.view === "advanced")} title="Advanced" aria-label="Advanced" onClick={() => b.setView("advanced")}>
-              <Zap size={16} />{!mobile && " Advanced"}
-            </button>
+            {/* Advanced is book-scoped — shown only on a book page, not at the
+                books-list level. */}
+            {b.bookUUID && (
+              <button
+                type="button"
+                className={tbToggle(b.view === "advanced")}
+                title="Advanced"
+                aria-label="Advanced"
+                onClick={() => b.setView(b.view === "advanced" ? "read" : "advanced")}
+              >
+                <Zap size={16} />{!mobile && " Advanced"}
+              </button>
+            )}
           </div>
 
           <div className="flex-1 min-w-0" />

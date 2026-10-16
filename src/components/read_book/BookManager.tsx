@@ -490,6 +490,10 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
 
   return (
     <div className="flex flex-col gap-4 min-w-0 max-w-full overflow-x-hidden">
+      {/* Books level (no book selected): Locations + book CRUD overview. When a
+          book is selected, Manage switches to editing that book's chapters. */}
+      {!selectedBook && (
+      <>
       {/* Locations */}
       <section>
         <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
@@ -719,10 +723,12 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
           <div className="text-center text-text-tertiary py-8">No books yet.</div>
         )}
       </div>
+      </>
+      )}
 
-      {/* Chapters */}
+      {/* Chapters (book level) — edit the selected book's chapters */}
       {selectedBook && (
-        <div className="border-t border-border-default pt-4">
+        <div className="flex flex-col gap-4">
           <div className="flex flex-row flex-wrap items-center justify-between gap-2 mb-3">
             <h3 className="text-base font-semibold text-text-primary">
               Chapters — <span className="font-normal text-text-secondary">{selectedBook.name}</span>
