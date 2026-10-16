@@ -21,9 +21,7 @@ import {
   Check,
   X,
   Tag,
-  ExternalLink,
   Settings,
-  RefreshCcw,
   Trash2,
   FolderOpen,
   FolderPlus,
@@ -36,12 +34,11 @@ import type {
   CardTag,
   CardTestStats,
 } from "@/lib/types";
-import { CARD_BASE_URL, CARD_LINKS, openCardUrl } from "@/lib/cards";
 import { isMobileApp } from "@/lib/platform";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import { useCardEditor } from "./CardEditorContext";
 
-type TabId = "cards" | "search" | "review" | "tags" | "online" | "advanced";
+type TabId = "cards" | "search" | "review" | "tags" | "advanced";
 
 export default function CardsPage() {
   // Dataset state
@@ -81,7 +78,7 @@ export default function CardsPage() {
   const [searchMode, setSearchMode] = useState<"question" | "fulltext">("fulltext");
   const [rebuildingIndex, setRebuildingIndex] = useState(false);
 
-  // Online links
+  // Error display
   const [error, setError] = useState<string | null>(null);
 
   // Load datasets on mount
@@ -236,16 +233,6 @@ export default function CardsPage() {
     }
   }
 
-  // Open online card link
-  async function handleOpenOnline(path: string) {
-    setError(null);
-    try {
-      await openCardUrl(path);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }
-
   // Global FTS search across all datasets
   async function handleGlobalSearch() {
     if (!globalSearchQuery.trim()) {
@@ -351,7 +338,7 @@ export default function CardsPage() {
 
         {/* Tabs */}
         <div className="flex gap-0.5 mt-3 overflow-x-auto sm:gap-1">
-          {(["cards", "search", "review", "tags", "online", "advanced"] as TabId[]).map((tab) => (
+          {(["cards", "search", "review", "tags", "advanced"] as TabId[]).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -365,7 +352,6 @@ export default function CardsPage() {
               {tab === "search" && "Search"}
               {tab === "review" && "Review"}
               {tab === "tags" && "Tags"}
-              {tab === "online" && "Online"}
               {tab === "advanced" && "Advanced"}
             </button>
           ))}
@@ -817,39 +803,6 @@ export default function CardsPage() {
           </div>
         )}
 
-        {/* Online tab */}
-        {activeTab === "online" && (
-          <div className="p-3 overflow-y-auto h-full sm:p-6">
-            <h2 className="text-lg font-semibold mb-2">Online Card System</h2>
-            <p className="text-text-secondary text-sm mb-4">
-              Access your cards online at{" "}
-              <span className="font-medium">{CARD_BASE_URL}</span>.
-            </p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {CARD_LINKS.map((link) => (
-                <button
-                  key={link.key}
-                  onClick={() => handleOpenOnline(link.path)}
-                  className="text-left p-4 rounded-xl border border-border-default bg-bg-card hover:bg-mid-gray/20 transition-colors cursor-pointer flex flex-col gap-1"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold text-text-primary">
-                      {link.label}
-                    </span>
-                    <ExternalLink
-                      size={16}
-                      className="text-text-tertiary shrink-0"
-                    />
-                  </div>
-                  <span className="text-sm text-text-secondary">
-                    {link.description}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
         {/* Advanced tab */}
         {activeTab === "advanced" && (
           <AdvancedTab
@@ -1087,7 +1040,6 @@ function AdvancedTab({
                   if (!confirmed) return;
                   await onDeleteDataset(ds.info.uuid);
                 }}
-                onError={onError}
               />
             ))}
           </div>
@@ -1103,50 +1055,12 @@ function DatasetCard({
   dataset,
   isSelected,
   onDelete,
-  onError,
 }: {
   dataset: CardDatasetSummary;
   isSelected: boolean;
   onDelete: () => Promise<void>;
-  onError: (msg: string) => void;
 }) {
-  const [syncing, setSyncing] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<{
-    last_synced_at: string | null;
-    pending_push: number;
-  } | null>(null);
   const [deleting, setDeleting] = useState(false);
-
-  // Load sync status on mount
-  useEffect(() => {
-    invoke<{ last_synced_at: string | null; pending_push: number } | null>(
-      "card_sync_status",
-      { datasetUuid: dataset.info.uuid }
-    )
-      .then((status) => setSyncStatus(status))
-      .catch(() => {});
-  }, [dataset.info.uuid]);
-
-  async function handleSync() {
-    setSyncing(true);
-    try {
-      const result = await invoke<{ pulled: number; pushed: number; conflicts: number; server_time: string }>(
-        "card_sync_full",
-        { datasetUuid: dataset.info.uuid }
-      );
-      alert(`Sync complete!\nPulled: ${result.pulled}\nPushed: ${result.pushed}\nConflicts: ${result.conflicts}`);
-      // Refresh sync status
-      const status = await invoke<{ last_synced_at: string | null; pending_push: number } | null>(
-        "card_sync_status",
-        { datasetUuid: dataset.info.uuid }
-      );
-      setSyncStatus(status);
-    } catch (e) {
-      onError(`Sync failed: ${e}`);
-    } finally {
-      setSyncing(false);
-    }
-  }
 
   async function handleDelete() {
     setDeleting(true);
@@ -1209,32 +1123,8 @@ function DatasetCard({
         <span className="font-mono text-[10px]">{dataset.info.uuid.slice(0, 8)}…</span>
       </div>
 
-      {/* Sync section — the hub is the login origin (auth::BASE_URL), not a
-          per-dataset URL, so there is nothing to configure per dataset here. */}
-      <div className="flex items-center flex-wrap gap-x-4 gap-y-1 text-xs mb-3">
-        <span className="text-text-secondary">
-          Last synced:{" "}
-          {syncStatus?.last_synced_at
-            ? new Date(syncStatus.last_synced_at).toLocaleString()
-            : "Never"}
-        </span>
-        {(syncStatus?.pending_push ?? 0) > 0 && (
-          <span className="text-amber-500">
-            {syncStatus!.pending_push} pending
-          </span>
-        )}
-      </div>
-
       {/* Action buttons */}
       <div className="flex items-center gap-2">
-        <button
-          onClick={handleSync}
-          disabled={syncing}
-          className="px-3 py-1 rounded border border-border-default text-xs hover:bg-mid-gray/20 disabled:opacity-50 flex items-center gap-1"
-        >
-          <RefreshCcw size={12} className={syncing ? "animate-spin" : ""} />
-          {syncing ? "Syncing..." : "Sync"}
-        </button>
         <button
           onClick={handleDelete}
           disabled={deleting}
