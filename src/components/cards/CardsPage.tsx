@@ -77,7 +77,7 @@ export default function CardsPage() {
   const [showManage, setShowManage] = useState(false);
 
   // Use global card editor
-  const { openCardEditor } = useCardEditor();
+  const { openCardEditor, isOpen: editorOpen } = useCardEditor();
 
   // Review state
   const [reviewCard, setReviewCard] = useState<Card | null>(null);
@@ -271,24 +271,60 @@ export default function CardsPage() {
   }, []);
 
   // Submit review
-  async function submitReview(quality: number) {
-    // The deck to rate against: the open deck, or the source deck of a
-    // cross-deck draw.
-    const deckUuid = selectedDatasetUuid || reviewDeckUuid;
-    if (!reviewCard || !deckUuid) return;
-    try {
-      const result = await invoke<CardReview>("card_test_submit", {
-        datasetUuid: deckUuid,
-        cardUuid: reviewCard.uuid,
-        quality,
-      });
-      setReviewResult(result);
-      // Load next card after a short delay
-      setTimeout(() => loadNextReview(), 800);
-    } catch (e) {
-      setError(`Failed to submit review: ${e}`);
+  const submitReview = useCallback(
+    async (quality: number) => {
+      // The deck to rate against: the open deck, or the source deck of a
+      // cross-deck draw.
+      const deckUuid = selectedDatasetUuid || reviewDeckUuid;
+      if (!reviewCard || !deckUuid) return;
+      try {
+        const result = await invoke<CardReview>("card_test_submit", {
+          datasetUuid: deckUuid,
+          cardUuid: reviewCard.uuid,
+          quality,
+        });
+        setReviewResult(result);
+        // Load next card after a short delay
+        setTimeout(() => loadNextReview(), 800);
+      } catch (e) {
+        setError(`Failed to submit review: ${e}`);
+      }
+    },
+    [reviewCard, selectedDatasetUuid, reviewDeckUuid, loadNextReview]
+  );
+
+  // Keyboard shortcuts for the review flow (Anki-style): Space/Enter flips the
+  // card, 1–5 grade it, S skips. Live only while the review panel owns the
+  // content, a card is drawn, and the card editor overlay is closed. `e.key`
+  // (not `e.code`) so the digit row and numpad map to the same grade, and any
+  // keystroke while typing in a field is left alone.
+  useEffect(() => {
+    if (activeTab !== "review" || !reviewCard || editorOpen) return;
+    function onKey(e: KeyboardEvent) {
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === " " || e.key === "Enter") {
+        e.preventDefault();
+        setReviewFlipped((v) => !v);
+      } else if (e.key === "s" || e.key === "S") {
+        e.preventDefault();
+        loadNextReview();
+      } else if (e.key >= "1" && e.key <= "5") {
+        e.preventDefault();
+        submitReview(Number(e.key));
+      }
     }
-  }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeTab, reviewCard, editorOpen, loadNextReview, submitReview]);
 
   // Create dataset
   async function createDataset() {
@@ -352,16 +388,18 @@ export default function CardsPage() {
   const searchActive = searchOpen && !showManage;
   const showAllResults = searchActive && effScope === "all";
 
-  // Familiarity color
+  // Familiarity color — theme-aware ramp (see --fam-* in globals.css), so the
+  // row tint tracks the active Light/Dark/Solarized/Gruvbox theme instead of a
+  // fixed light pastel. Literal class names keep Tailwind's scanner happy.
   function familiarityColor(f: number) {
     const colors = [
-      "bg-slate-200",    // 0 - new
-      "bg-red-200",      // 1 - strange
-      "bg-orange-200",   // 2 - known
-      "bg-amber-200",    // 3 - familiar
-      "bg-cyan-200",     // 4 - skilled
-      "bg-green-200",    // 5 - practiced
-      "bg-lime-200",     // 6 - easy
+      "bg-fam-0",    // 0 - new
+      "bg-fam-1",    // 1 - strange
+      "bg-fam-2",    // 2 - known
+      "bg-fam-3",    // 3 - familiar
+      "bg-fam-4",    // 4 - skilled
+      "bg-fam-5",    // 5 - practiced
+      "bg-fam-6",    // 6 - easy
     ];
     return colors[Math.min(f, 6)] || colors[0];
   }
@@ -424,20 +462,34 @@ export default function CardsPage() {
           </button>
         )}
         {!showManage && (selectedDatasetUuid ? (
-          <div className="flex items-center gap-1 shrink-0">
-            {TABS.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                className={tbToggle(activeTab === t.id)}
-                title={t.label}
-                aria-label={t.label}
-                onClick={() => setActiveTab(t.id)}
-              >
-                {t.icon}{!mobile && ` ${t.label}`}
-              </button>
-            ))}
-          </div>
+          <>
+            <div className="flex items-center gap-1 shrink-0">
+              {TABS.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  className={tbToggle(activeTab === t.id)}
+                  title={t.label}
+                  aria-label={t.label}
+                  onClick={() => setActiveTab(t.id)}
+                >
+                  {t.icon}{!mobile && ` ${t.label}`}
+                </button>
+              ))}
+            </div>
+            {/* Add Card lives on the deck toolbar so it is always reachable —
+                it used to hide inside the search row, which meant opening
+                search just to create a card. */}
+            <button
+              type="button"
+              className={tbGhost}
+              title="Add a new card"
+              aria-label="Add card"
+              onClick={() => openCardEditor(selectedDatasetUuid, null, () => loadCards())}
+            >
+              <Plus size={14} />{!mobile && " Add Card"}
+            </button>
+          </>
         ) : (
           <>
             {/* Cross-deck review — reachable from the deck list with no deck open.
@@ -548,15 +600,6 @@ export default function CardsPage() {
                 <option value="easy">Easy (familiarity = 6)</option>
                 <option value="incomplete">Incomplete</option>
               </select>
-              <button
-                onClick={() => {
-                  openCardEditor(selectedDatasetUuid, null, () => loadCards());
-                }}
-                className="ml-auto px-3 py-1 rounded border border-border-default text-sm hover:bg-mid-gray/20"
-              >
-                <Plus size={14} className="inline mr-1" />
-                Add Card
-              </button>
             </>
           ) : (
             <>
@@ -756,7 +799,9 @@ export default function CardsPage() {
             <div className="flex-1 overflow-y-auto px-2 py-2 sm:px-6">
               {cards.length === 0 ? (
                 <p className="text-text-secondary text-center py-8">
-                  No cards found. Open search to add one.
+                  {keyword || filter !== "all"
+                    ? "No cards match your search."
+                    : 'No cards yet. Use "Add Card" to create one.'}
                 </p>
               ) : (
                 <div className="space-y-1">
@@ -855,7 +900,7 @@ export default function CardsPage() {
                       <button
                         key={btn.q}
                         onClick={() => submitReview(btn.q)}
-                        title={btn.label}
+                        title={`${btn.label} (${btn.q})`}
                         aria-label={btn.label}
                         className={`flex items-center gap-1.5 px-4 py-2 min-h-11 sm:min-h-0 rounded-lg border border-border-default ${btn.color} text-sm hover:opacity-90`}
                       >
@@ -868,7 +913,7 @@ export default function CardsPage() {
                   <div className="order-1 flex items-center justify-end gap-2 sm:order-3">
                     <button
                       onClick={() => setReviewFlipped(!reviewFlipped)}
-                      title={reviewFlipped ? "Show question" : "Show answer"}
+                      title={reviewFlipped ? "Show question (Space)" : "Show answer (Space)"}
                       aria-label={reviewFlipped ? "Show question" : "Show answer"}
                       className="flex items-center gap-1.5 px-4 py-2 min-h-11 sm:min-h-0 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20"
                     >
@@ -877,7 +922,7 @@ export default function CardsPage() {
                     </button>
                     <button
                       onClick={loadNextReview}
-                      title="Skip this card"
+                      title="Skip this card (S)"
                       aria-label="Skip this card"
                       className="flex items-center gap-1.5 px-4 py-2 min-h-11 sm:min-h-0 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20"
                     >

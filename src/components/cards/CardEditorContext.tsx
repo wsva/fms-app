@@ -312,6 +312,7 @@ export type CardEditorState = {
 };
 
 export type CardEditorContextType = {
+  isOpen: boolean;
   openCardEditor: (
     datasetUuid: string,
     card?: Card | null,
@@ -464,7 +465,7 @@ export function CardEditorProvider({
   }
 
   return (
-    <CardEditorContext.Provider value={{ openCardEditor, closeCardEditor }}>
+    <CardEditorContext.Provider value={{ isOpen: state.isOpen, openCardEditor, closeCardEditor }}>
       {children}
       {state.isOpen && (
         <CardEditModal

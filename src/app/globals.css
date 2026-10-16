@@ -28,6 +28,14 @@
   --color-info-text: var(--info-text);
   --color-warning-bg: var(--warning-bg);
   --color-warning-text: var(--warning-text);
+  /* Familiarity ramp used to tint card-list rows: 0 (new) → 6 (mastered) */
+  --color-fam-0: var(--fam-0);
+  --color-fam-1: var(--fam-1);
+  --color-fam-2: var(--fam-2);
+  --color-fam-3: var(--fam-3);
+  --color-fam-4: var(--fam-4);
+  --color-fam-5: var(--fam-5);
+  --color-fam-6: var(--fam-6);
 }
 
 @layer base {
@@ -72,6 +80,14 @@
     --warning-bg: #fff3e0;
     --warning-text: #b26a00;
     --brand-pink: #0EA89A;
+    /* Familiarity ramp — light pastels, dark text reads on top */
+    --fam-0: #e2e8f0;
+    --fam-1: #fecaca;
+    --fam-2: #fed7aa;
+    --fam-3: #fde68a;
+    --fam-4: #a5f3fc;
+    --fam-5: #bbf7d0;
+    --fam-6: #d9f99d;
   }
 
   /* ── Dark ──────────────────────────────────────────────── */
@@ -103,6 +119,14 @@
     --warning-text: #e6a23c;
     --brand-pink: #f28cbb;
     --gray-mid: #666666;
+    /* Familiarity ramp — muted dark tints, light text reads on top */
+    --fam-0: #343a40;
+    --fam-1: #4d2a2a;
+    --fam-2: #4d3724;
+    --fam-3: #4a4022;
+    --fam-4: #23434d;
+    --fam-5: #234830;
+    --fam-6: #3a4a1f;
   }
 
   /* ── Solarized ─────────────────────────────────────────── */
@@ -134,6 +158,14 @@
     --warning-text: #b58900;
     --brand-pink: #2aa198;
     --gray-mid: #839496;
+    /* Familiarity ramp — soft tints on the solarized paper base */
+    --fam-0: #e4dfcf;
+    --fam-1: #f0d5c6;
+    --fam-2: #f3e0c3;
+    --fam-3: #efe6bd;
+    --fam-4: #cfe7e4;
+    --fam-5: #dcebcc;
+    --fam-6: #e5eec6;
   }
 
   /* ── Gruvbox ───────────────────────────────────────────── */
@@ -165,6 +197,14 @@
     --warning-text: #fe8019;
     --brand-pink: #8ec07c;
     --gray-mid: #928374;
+    /* Familiarity ramp — muted dark tints from the gruvbox palette */
+    --fam-0: #3c3836;
+    --fam-1: #4d2b28;
+    --fam-2: #4d3824;
+    --fam-3: #4d4222;
+    --fam-4: #2b4247;
+    --fam-5: #37421f;
+    --fam-6: #3f4a22;
   }
 
   /* Thicker caret for input elements */
