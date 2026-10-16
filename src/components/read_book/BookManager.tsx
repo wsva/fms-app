@@ -327,11 +327,11 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
   };
 
   return (
-    <div className="flex flex-col gap-4 min-w-0 max-w-full overflow-x-hidden">
+    <div className="flex flex-col gap-4 min-w-0 max-w-full h-full min-h-0 overflow-x-hidden">
       {/* Books level (no book selected): Locations + book CRUD overview. When a
           book is selected, Manage switches to editing that book's chapters. */}
       {!selectedBook && (
-      <>
+      <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4 min-w-0">
       {/* Locations */}
       <section>
         <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
@@ -560,39 +560,41 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
           <div className="text-center text-text-tertiary py-8">No books yet.</div>
         )}
       </div>
-      </>
+      </div>
       )}
 
-      {/* Chapters (book level) — the Markdown structure editor is shown directly. */}
+      {/* Chapters (book level) — the Markdown structure editor fills the height. */}
       {selectedBook && (
-        <div className="flex flex-col gap-4">
-          <h3 className="text-base font-semibold text-text-primary mb-3">
+        <div className="flex flex-col gap-4 min-h-0 flex-1 min-w-0">
+          <h3 className="text-base font-semibold text-text-primary shrink-0">
             Chapters — <span className="font-normal text-text-secondary">{selectedBook.name}</span>
           </h3>
 
           {chaptersLoading ? (
             <div className="text-center text-text-tertiary py-4">Loading…</div>
           ) : (
-            <div className="p-3 rounded-lg border border-border-default bg-bg-card space-y-3">
-              <p className="text-xs text-text-secondary leading-relaxed">
+            <div className="flex flex-col gap-3 p-3 rounded-lg border border-border-default bg-bg-card min-h-0 flex-1">
+              <p className="text-xs text-text-secondary leading-relaxed shrink-0">
                 One heading line per chapter, nested by <code className="px-1 rounded bg-bg-muted">#</code> depth. Keep a
                 line&rsquo;s trailing <code className="px-1 rounded bg-bg-muted">{"{#uuid}"}</code> to preserve its sentences
                 and completion; a line without one is a new chapter. Remove a line to delete that chapter (and its whole
                 subtree). Preview before Apply to see exactly what changes.
               </p>
-              <HighlightedChapterInput
-                className="w-full h-[360px] rounded-md bg-bg-input border border-border-default focus-within:border-accent"
-                value={mdText}
-                errorLines={mdErrorLines}
-                disabled={mdBusy}
-                onChange={(v) => {
-                  setMdText(v);
-                  setMdPreview(null);
-                }}
-              />
+
+              <div className="flex gap-2 flex-wrap shrink-0 justify-end">
+                <button className={btnGhost} disabled={mdBusy} onClick={handleMdPreview}>
+                  <Eye size={14} className="inline mr-1" /> Preview
+                </button>
+                <button className={btnPrimary} disabled={mdBusy} onClick={handleMdApply}>
+                  Apply
+                </button>
+                <button className={btnGhost} disabled={mdBusy} onClick={handleMdReload} title="Discard edits and reload from the current chapters">
+                  <RefreshCw size={14} className="inline mr-1" /> Reload
+                </button>
+              </div>
 
               {mdErrors.length > 0 && (
-                <div className="p-2 rounded-md bg-red-500/10 text-red-500 text-xs space-y-1">
+                <div className="p-2 rounded-md bg-red-500/10 text-red-500 text-xs space-y-1 shrink-0">
                   {mdErrors.map((err, i) => (
                     <div key={i}>{err}</div>
                   ))}
@@ -600,7 +602,7 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
               )}
 
               {mdPreview && (
-                <div className="p-2 rounded-md bg-bg-muted text-xs space-y-2">
+                <div className="p-2 rounded-md bg-bg-muted text-xs space-y-2 shrink-0 max-h-48 overflow-y-auto">
                   <div className="font-medium text-text-primary">Preview</div>
                   <div className="flex flex-wrap gap-x-3 gap-y-1 text-text-secondary">
                     <span>Created: {mdPreview.summary.created}</span>
@@ -636,17 +638,16 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
                 </div>
               )}
 
-              <div className="flex gap-2 flex-wrap">
-                <button className={btnGhost} disabled={mdBusy} onClick={handleMdPreview}>
-                  <Eye size={14} className="inline mr-1" /> Preview
-                </button>
-                <button className={btnPrimary} disabled={mdBusy} onClick={handleMdApply}>
-                  Apply
-                </button>
-                <button className={btnGhost} disabled={mdBusy} onClick={handleMdReload} title="Discard edits and reload from the current chapters">
-                  <RefreshCw size={14} className="inline mr-1" /> Reload
-                </button>
-              </div>
+              <HighlightedChapterInput
+                className="w-full flex-1 min-h-0 rounded-md bg-bg-input border border-border-default focus-within:border-accent"
+                value={mdText}
+                errorLines={mdErrorLines}
+                disabled={mdBusy}
+                onChange={(v) => {
+                  setMdText(v);
+                  setMdPreview(null);
+                }}
+              />
             </div>
           )}
         </div>

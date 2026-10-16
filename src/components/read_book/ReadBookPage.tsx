@@ -158,7 +158,7 @@ export default function ReadBookPage() {
           <div style={{ display: b.view === "read" ? "flex" : "none" }} className="flex-1 min-h-0 overflow-hidden min-w-0">
             <ReadingView b={b} />
           </div>
-          <div style={{ display: b.view === "manage" ? "block" : "none" }} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 min-w-0">
+          <div style={{ display: b.view === "manage" ? "flex" : "none" }} className="flex-1 min-h-0 overflow-hidden p-4 min-w-0 flex flex-col">
             <BookManager books={b.books} bookUUID={b.bookUUID} setBookUUID={b.setBookUUID} onBooksChanged={b.loadBooks} />
           </div>
           <div style={{ display: b.view === "advanced" ? "block" : "none" }} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 min-w-0">
