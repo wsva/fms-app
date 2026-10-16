@@ -63,9 +63,18 @@ export interface SyncResult {
 const HEADING_RE = /^(#{1,6})\s+(.*)$/;
 /** Trailing `{#token}` attribute — only taken when it *is* a full uuid. */
 const ATTR_RE = /\s*\{#([^{}]+)\}\s*$/;
+// A chapter id is a full uuid in either of the two shapes the database can hold:
+// the canonical dashed form (crypto.randomUUID) or a bare 32-hex form (older /
+// sidecar-authored books). Both are valid identities and must round-trip.
 const UUID_STRICT_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+const UUID_BARE_RE = /^[0-9a-f]{32}$/i;
 /** A `{#...}` token that looks like a (possibly truncated) uuid. */
 const UUID_LIKE_RE = /^[0-9a-f-]{32,}$/i;
+
+/** True when the token is a complete uuid in an accepted shape. */
+function isFullUuid(token: string): boolean {
+  return UUID_STRICT_RE.test(token) || UUID_BARE_RE.test(token);
+}
 
 /** Serialize the chapter forest to Markdown, depth-first in display order. */
 export function chaptersToMarkdown(chapters: BookChapter[]): string {
@@ -115,7 +124,7 @@ export function parseChaptersMarkdown(md: string): {
     const am = text.match(ATTR_RE);
     if (am) {
       const token = am[1].trim();
-      if (UUID_STRICT_RE.test(token)) {
+      if (isFullUuid(token)) {
         uuid = token.toLowerCase();
         text = text.slice(0, am.index).trimEnd();
       } else if (UUID_LIKE_RE.test(token)) {
