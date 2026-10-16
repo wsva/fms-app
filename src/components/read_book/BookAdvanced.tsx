@@ -38,10 +38,14 @@ type LogEntry = {
 // Component
 // ---------------------------------------------------------------------------
 
-type Props = { books: BookMeta[] };
+type Props = {
+  books: BookMeta[];
+  /** Shared selected book (owned by useBookData so the breadcrumb reflects it). */
+  bookUUID: string;
+  setBookUUID: (uuid: string) => void;
+};
 
-export default function BookAdvanced({ books }: Props) {
-  const [bookUUID, setBookUUID] = useState("");
+export default function BookAdvanced({ books, bookUUID, setBookUUID }: Props) {
 
   // Word generation settings (synced from WordGenSettings component)
   const [wordGenSettings, setWordGenSettings] = useState<WordGenSettingsType>(loadWordGenSettings());

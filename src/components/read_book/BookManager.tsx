@@ -41,10 +41,13 @@ const inputCls =
 
 type Props = {
   books: BookMeta[];
+  /** Shared selected book (owned by useBookData so the breadcrumb reflects it). */
+  bookUUID: string;
+  setBookUUID: (uuid: string) => void;
   onBooksChanged: () => void;
 };
 
-export default function BookManager({ books, onBooksChanged }: Props) {
+export default function BookManager({ books, bookUUID, setBookUUID, onBooksChanged }: Props) {
   const [saving, setSaving] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [addTitle, setAddTitle] = useState("");
@@ -123,7 +126,6 @@ export default function BookManager({ books, onBooksChanged }: Props) {
     }
   };
 
-  const [bookUUID, setBookUUID] = useState("");
   const [flat, setFlat] = useState<BookChapter[]>([]);
   const [chaptersLoading, setChaptersLoading] = useState(false);
   const [editChapterUUID, setEditChapterUUID] = useState<string | null>(null);
