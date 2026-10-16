@@ -4,9 +4,6 @@ import { useEffect, useMemo, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
-  ChevronDown,
-  ChevronRight,
-  Pencil,
   BookOpen,
   FolderOpen,
   FolderPlus,
@@ -28,15 +25,6 @@ import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import HighlightedChapterInput from "./HighlightedChapterInput";
 import ConfirmDialog, { type ConfirmRequest } from "./ConfirmDialog";
-
-type ChapterNode = BookChapter & { children: ChapterNode[] };
-
-function buildTree(flat: BookChapter[], parentUuid: string | null = null): ChapterNode[] {
-  return flat
-    .filter((c) => (c.parent_uuid ?? null) === parentUuid)
-    .sort((a, b) => (a.order_num ?? 0) - (b.order_num ?? 0))
-    .map((c) => ({ ...c, children: buildTree(flat, c.uuid) }));
-}
 
 const btnGhost =
   "px-3 py-1.5 rounded-md text-sm text-text-secondary hover:bg-bg-hover border border-border-default cursor-pointer disabled:opacity-50";
@@ -136,24 +124,24 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
   const [chaptersLoading, setChaptersLoading] = useState(false);
   const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
 
-  // Round-trip Markdown structure editor state.
-  const [mdOpen, setMdOpen] = useState(false);
+  // Round-trip Markdown structure editor state. In the Manage view the editor is
+  // shown directly for the selected book (no intermediate tree browser).
   const [mdText, setMdText] = useState("");
   const [mdErrors, setMdErrors] = useState<string[]>([]);
   const [mdPreview, setMdPreview] = useState<SyncResult | null>(null);
   const [mdBusy, setMdBusy] = useState(false);
 
-  const tree = useMemo(() => buildTree(flat), [flat]);
   const selectedBook = books.find((b) => b.uuid === bookUUID);
 
   // Live per-line validation for the structure editor (red flags offending lines
   // as you type, before an explicit Preview/Apply).
   const mdErrorLines = useMemo(
-    () => (mdOpen ? parseChaptersMarkdown(mdText).errorLines : []),
-    [mdOpen, mdText]
+    () => parseChaptersMarkdown(mdText).errorLines,
+    [mdText]
   );
 
-  // Load chapters when a book is selected.
+  // Load chapters when a book is selected and seed the Markdown editor with them
+  // (the editor is the Manage view itself, so it opens directly on selection).
   useEffect(() => {
     if (!bookUUID || !isTauri()) return;
     const load = async () => {
@@ -161,9 +149,13 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
       try {
         const data = await invoke<BookChapter[]>("book_list_chapters", { bookUuid: bookUUID });
         setFlat(data);
+        setMdText(chaptersToMarkdown(data));
       } catch {
         setFlat([]);
+        setMdText("");
       }
+      setMdErrors([]);
+      setMdPreview(null);
       setChaptersLoading(false);
     };
     load();
@@ -222,20 +214,6 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
   };
 
   // ── Structure editor (round-trip Markdown) ─────────────────────
-  const openMdEditor = () => {
-    setMdText(chaptersToMarkdown(flat));
-    setMdErrors([]);
-    setMdPreview(null);
-    setMdOpen(true);
-  };
-
-  const closeMdEditor = () => {
-    setMdOpen(false);
-    setMdText("");
-    setMdErrors([]);
-    setMdPreview(null);
-  };
-
   const handleMdReload = () => {
     setMdText(chaptersToMarkdown(flat));
     setMdErrors([]);
@@ -289,7 +267,9 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
         dryRun: false,
       });
       setFlat(result.chapters);
-      closeMdEditor();
+      setMdText(chaptersToMarkdown(result.chapters));
+      setMdErrors([]);
+      setMdPreview(null);
       onBooksChanged();
     } catch (e) {
       setMdErrors([String(e)]);
@@ -344,44 +324,6 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
       return;
     }
     await runApply(nodes);
-  };
-
-  // ── Chapter tree item (read-only browser) ──────────────────────
-  // Structure is edited in Markdown; the tree only browses it. Completion is
-  // toggled on the chapter page ("Mark Completed"), not here.
-  const ChapterItem = ({ node, depth }: { node: ChapterNode; depth: number }) => {
-    const [open, setOpen] = useState(true);
-    const completed = node.status === "completed";
-
-    return (
-      <div>
-        <div
-          className={`flex flex-row items-center gap-2 rounded-lg px-2 py-1 ${
-            completed ? "bg-green-500/15" : "bg-bg-muted"
-          }`}
-          style={{ marginLeft: depth * 20 }}
-        >
-          <button
-            className="p-0.5 text-text-tertiary cursor-pointer shrink-0"
-            onClick={() => setOpen((v) => !v)}
-          >
-            {node.children.length > 0 ? (
-              open ? <ChevronDown size={16} /> : <ChevronRight size={16} />
-            ) : (
-              <span className="inline-block w-4" />
-            )}
-          </button>
-          <div className="flex-1 min-w-0 font-medium text-text-primary truncate">
-            {node.title}
-          </div>
-        </div>
-
-        {open &&
-          node.children.map((child) => (
-            <ChapterItem key={child.uuid} node={child} depth={depth + 1} />
-          ))}
-      </div>
-    );
   };
 
   return (
@@ -559,10 +501,9 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
               if (bookUUID === item.uuid) {
                 setBookUUID("");
                 setFlat([]);
-                closeMdEditor();
+                setMdText("");
               } else {
                 setBookUUID(item.uuid);
-                closeMdEditor();
               }
             }}
           >
@@ -622,25 +563,16 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
       </>
       )}
 
-      {/* Chapters (book level) — browse structure; edit it in Markdown */}
+      {/* Chapters (book level) — the Markdown structure editor is shown directly. */}
       {selectedBook && (
         <div className="flex flex-col gap-4">
-          <div className="flex flex-row flex-wrap items-center justify-between gap-2 mb-3">
-            <h3 className="text-base font-semibold text-text-primary">
-              Chapters — <span className="font-normal text-text-secondary">{selectedBook.name}</span>
-            </h3>
-            {mdOpen ? (
-              <button className={btnGhost} onClick={closeMdEditor}>
-                <X size={14} className="inline mr-1" /> Close
-              </button>
-            ) : (
-              <button className={btnPrimary} onClick={openMdEditor}>
-                <Pencil size={14} className="inline mr-1" /> Edit Structure (Markdown)
-              </button>
-            )}
-          </div>
+          <h3 className="text-base font-semibold text-text-primary mb-3">
+            Chapters — <span className="font-normal text-text-secondary">{selectedBook.name}</span>
+          </h3>
 
-          {mdOpen && (
+          {chaptersLoading ? (
+            <div className="text-center text-text-tertiary py-4">Loading…</div>
+          ) : (
             <div className="p-3 rounded-lg border border-border-default bg-bg-card space-y-3">
               <p className="text-xs text-text-secondary leading-relaxed">
                 One heading line per chapter, nested by <code className="px-1 rounded bg-bg-muted">#</code> depth. Keep a
@@ -711,38 +643,11 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
                 <button className={btnPrimary} disabled={mdBusy} onClick={handleMdApply}>
                   Apply
                 </button>
-                <button className={btnGhost} disabled={mdBusy} onClick={handleMdReload}>
-                  <RefreshCw size={14} className="inline mr-1" /> Reload from tree
-                </button>
-                <button className={btnGhost} disabled={mdBusy} onClick={closeMdEditor}>
-                  Cancel
+                <button className={btnGhost} disabled={mdBusy} onClick={handleMdReload} title="Discard edits and reload from the current chapters">
+                  <RefreshCw size={14} className="inline mr-1" /> Reload
                 </button>
               </div>
             </div>
-          )}
-
-          {!mdOpen && (
-            <>
-              {chaptersLoading && (
-                <div className="text-center text-text-tertiary py-4">Loading…</div>
-              )}
-
-              {!chaptersLoading && (
-                <>
-                  {flat.length === 0 && (
-                    <div className="text-center text-text-tertiary py-4">
-                      No chapters yet. Use &ldquo;Edit Structure (Markdown)&rdquo; to add some.
-                    </div>
-                  )}
-
-                  <div className="flex flex-col gap-0.5">
-                    {tree.map((node) => (
-                      <ChapterItem key={node.uuid} node={node} depth={0} />
-                    ))}
-                  </div>
-                </>
-              )}
-            </>
           )}
         </div>
       )}
