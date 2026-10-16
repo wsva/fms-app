@@ -31,6 +31,18 @@ const ATTR_RE = /\s*\{#([^{}]+)\}\s*$/;
 // disables wrapping so a long line overflows into the horizontal scrollbar.
 const TEXT_METRICS = "font-mono text-sm leading-6 px-3 py-2 whitespace-pre";
 
+// One hue per heading depth, so # / ## / ### ... are visually distinguishable.
+// Mid-light shades read well on the default dark theme and stay legible enough
+// as small decorative markers in light themes too.
+const LEVEL_COLORS = [
+  "text-sky-400", // #
+  "text-emerald-400", // ##
+  "text-amber-400", // ###
+  "text-violet-400", // ####
+  "text-rose-400", // #####
+  "text-cyan-400", // ######
+];
+
 type Props = {
   value: string;
   onChange: (value: string) => void;
@@ -65,9 +77,11 @@ function renderLine(text: string): ReactNode {
     title = rest.slice(0, am.index ?? rest.length);
   }
 
+  const hashColor = LEVEL_COLORS[Math.min(hashes.length, 6) - 1] ?? "text-text-tertiary";
+
   return (
     <>
-      <span className="text-text-tertiary">{hashes}</span>
+      <span className={`${hashColor} font-medium`}>{hashes}</span>
       <span>{gap}</span>
       <span className="text-text-primary font-medium">{title}</span>
       {attr && <span className="italic opacity-60 text-text-tertiary">{attr}</span>}
