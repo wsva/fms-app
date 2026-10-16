@@ -26,7 +26,7 @@ import {
 } from "@/lib/read/chapterMarkdown";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
-import { nowIso } from "./utils";
+import HighlightedChapterInput from "./HighlightedChapterInput";
 import ConfirmDialog, { type ConfirmRequest } from "./ConfirmDialog";
 
 type ChapterNode = BookChapter & { children: ChapterNode[] };
@@ -142,10 +142,16 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
   const [mdErrors, setMdErrors] = useState<string[]>([]);
   const [mdPreview, setMdPreview] = useState<SyncResult | null>(null);
   const [mdBusy, setMdBusy] = useState(false);
-  const [treeError, setTreeError] = useState<string | null>(null);
 
   const tree = useMemo(() => buildTree(flat), [flat]);
   const selectedBook = books.find((b) => b.uuid === bookUUID);
+
+  // Live per-line validation for the structure editor (red flags offending lines
+  // as you type, before an explicit Preview/Apply).
+  const mdErrorLines = useMemo(
+    () => (mdOpen ? parseChaptersMarkdown(mdText).errorLines : []),
+    [mdOpen, mdText]
+  );
 
   // Load chapters when a book is selected.
   useEffect(() => {
@@ -211,22 +217,6 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
       onBooksChanged();
     } catch (e) {
       console.error(e);
-    }
-    setSaving(false);
-  };
-
-  // ── Chapter handlers ───────────────────────────────────────────
-  const handleToggleStatus = async (item: BookChapter) => {
-    if (!isTauri()) return;
-    const newStatus = item.status === "completed" ? null : "completed";
-    const updated: BookChapter = { ...item, status: newStatus, updated_at: nowIso() };
-    setSaving(true);
-    setTreeError(null);
-    try {
-      await invoke("book_save_chapter", { bookUuid: bookUUID, chapter: updated });
-      setFlat((prev) => prev.map((c) => (c.uuid === item.uuid ? updated : c)));
-    } catch (e) {
-      setTreeError(String(e));
     }
     setSaving(false);
   };
@@ -357,8 +347,8 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
   };
 
   // ── Chapter tree item (read-only browser) ──────────────────────
-  // Structure is edited in Markdown; the tree only browses it and owns the
-  // per-chapter completion checkbox (the sole row control).
+  // Structure is edited in Markdown; the tree only browses it. Completion is
+  // toggled on the chapter page ("Mark Completed"), not here.
   const ChapterItem = ({ node, depth }: { node: ChapterNode; depth: number }) => {
     const [open, setOpen] = useState(true);
     const completed = node.status === "completed";
@@ -381,15 +371,6 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
               <span className="inline-block w-4" />
             )}
           </button>
-          <label className="flex items-center shrink-0 cursor-pointer" title={completed ? "Mark incomplete" : "Mark completed"}>
-            <input
-              type="checkbox"
-              className="h-4 w-4 accent-green-500 cursor-pointer"
-              checked={completed}
-              disabled={saving}
-              onChange={() => handleToggleStatus(node)}
-            />
-          </label>
           <div className="flex-1 min-w-0 font-medium text-text-primary truncate">
             {node.title}
           </div>
@@ -659,10 +640,6 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
             )}
           </div>
 
-          {treeError && (
-            <div className="p-3 bg-red-500/10 text-red-500 rounded-md text-sm">{treeError}</div>
-          )}
-
           {mdOpen && (
             <div className="p-3 rounded-lg border border-border-default bg-bg-card space-y-3">
               <p className="text-xs text-text-secondary leading-relaxed">
@@ -671,12 +648,13 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
                 and completion; a line without one is a new chapter. Remove a line to delete that chapter (and its whole
                 subtree). Preview before Apply to see exactly what changes.
               </p>
-              <textarea
-                className="w-full px-3 py-2 rounded-md bg-bg-input border border-border-default text-sm text-text-primary font-mono focus:outline-none focus:border-accent min-h-[300px]"
-                spellCheck={false}
+              <HighlightedChapterInput
+                className="w-full rounded-md bg-bg-input border border-border-default focus-within:border-accent min-h-[300px]"
                 value={mdText}
-                onChange={(e) => {
-                  setMdText(e.target.value);
+                errorLines={mdErrorLines}
+                disabled={mdBusy}
+                onChange={(v) => {
+                  setMdText(v);
                   setMdPreview(null);
                 }}
               />

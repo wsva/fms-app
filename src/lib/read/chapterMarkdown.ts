@@ -77,14 +77,27 @@ export function chaptersToMarkdown(chapters: BookChapter[]): string {
 /**
  * Parse Markdown into heading nodes, validating structure: levels may only
  * deepen one step at a time, titles must be non-empty, uuids must be full and
- * unique. Returns per-line `errors` (empty = safe to build/apply).
+ * unique. Returns per-line `errors` (empty = safe to build/apply) plus the
+ * 1-based `errorLines` that produced them (so the editor can highlight offending
+ * lines live, as the user types).
  */
-export function parseChaptersMarkdown(md: string): { nodes: ParsedNode[]; errors: string[] } {
+export function parseChaptersMarkdown(md: string): {
+  nodes: ParsedNode[];
+  errors: string[];
+  errorLines: number[];
+} {
   const nodes: ParsedNode[] = [];
   const errors: string[] = [];
+  const errorLines: number[] = [];
   const lines = md.split(/\r?\n/);
   const seenUuids = new Set<string>();
   let prevLevel = 0;
+
+  // Record an error message and the (1-based) line it belongs to.
+  const addErr = (lineNum: number, msg: string) => {
+    errors.push(`Line ${lineNum}: ${msg}`);
+    errorLines.push(lineNum);
+  };
 
   lines.forEach((raw, i) => {
     const line = raw.trimEnd();
@@ -92,7 +105,7 @@ export function parseChaptersMarkdown(md: string): { nodes: ParsedNode[]; errors
 
     const m = line.match(HEADING_RE);
     if (!m) {
-      errors.push(`Line ${i + 1}: expected "# Title {#uuid}"`);
+      addErr(i + 1, `expected "# Title {#uuid}"`);
       return;
     }
     let level = m[1].length;
@@ -106,23 +119,23 @@ export function parseChaptersMarkdown(md: string): { nodes: ParsedNode[]; errors
         uuid = token.toLowerCase();
         text = text.slice(0, am.index).trimEnd();
       } else if (UUID_LIKE_RE.test(token)) {
-        errors.push(`Line ${i + 1}: malformed chapter id "{#${token}}" — restore the full {#uuid} or remove it`);
+        addErr(i + 1, `malformed chapter id "{#${token}}" — restore the full {#uuid} or remove it`);
         text = text.slice(0, am.index).trimEnd();
       }
       // otherwise: a `{#note}` that is not uuid-like stays part of the title
     }
 
     if (!text) {
-      errors.push(`Line ${i + 1}: empty chapter title`);
+      addErr(i + 1, `empty chapter title`);
       return;
     }
     if (level > prevLevel + 1) {
-      errors.push(`Line ${i + 1}: "${text}" skips a level (${prevLevel || "root"} → ${level}) — nest directly under the previous chapter`);
+      addErr(i + 1, `"${text}" skips a level (${prevLevel || "root"} → ${level}) — nest directly under the previous chapter`);
       // Clamp so later lines still get a sane parent instead of failing cascade-wide.
       level = prevLevel + 1;
     }
     if (uuid) {
-      if (seenUuids.has(uuid)) errors.push(`Line ${i + 1}: duplicate chapter id {#${uuid}}`);
+      if (seenUuids.has(uuid)) addErr(i + 1, `duplicate chapter id {#${uuid}}`);
       seenUuids.add(uuid);
     }
 
@@ -130,7 +143,7 @@ export function parseChaptersMarkdown(md: string): { nodes: ParsedNode[]; errors
     nodes.push({ level, title: text, uuid });
   });
 
-  return { nodes, errors };
+  return { nodes, errors, errorLines };
 }
 
 /**
