@@ -40,6 +40,14 @@ struct BookDeleteChapterParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookSyncChaptersParam {
+    book_uuid: String,
+    /// Full desired chapter forest as JSON nodes `{uuid, parent_uuid, order_num, title}`.
+    nodes: Vec<JsonValue>,
+    dry_run: bool,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct BookSentenceParam {
     book_uuid: String,
     sentence: JsonValue,
@@ -196,6 +204,15 @@ impl DatasetMcpServer {
         let settings = self.app.state::<SettingsState>();
         datasets::book::book_delete_chapter(settings, param.book_uuid, param.uuid).await?;
         Ok(serde_json::json!({"status": "ok", "message": "Chapter deleted"}).to_string())
+    }
+
+    #[tool(name = "book_sync_chapters", description = "Reconcile a book's chapter tree from an ordered list of {uuid, parent_uuid, order_num, title} nodes; embedded uuids preserve chapters and their sentences. Pass dry_run=true to preview without writing. Returns a change summary (created/updated/moved/reordered + itemized deletions with sentence counts) and the resulting tree.")]
+    async fn book_sync_chapters(&self, Parameters(param): Parameters<BookSyncChaptersParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let nodes: Vec<datasets::book::SyncNode> = serde_json::from_value(param.nodes.into())
+            .map_err(|e| format!("Invalid nodes JSON: {}", e))?;
+        let result = datasets::book::sync_chapters(&settings, &param.book_uuid, nodes, param.dry_run)?;
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
     #[tool(name = "book_list_sentences", description = "List all sentences for a chapter, ordered, with resolved audio URLs.")]

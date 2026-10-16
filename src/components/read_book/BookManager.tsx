@@ -6,21 +6,27 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   ChevronDown,
   ChevronRight,
-  Plus,
   Pencil,
-  Trash2,
-  Copy,
-  Check,
   BookOpen,
   FolderOpen,
   FolderPlus,
   MapPin,
   X,
+  AlertTriangle,
+  Eye,
+  RefreshCw,
 } from "lucide-react";
 import type { BookMeta, BookChapter } from "@/lib/read/types";
+import {
+  chaptersToMarkdown,
+  parseChaptersMarkdown,
+  buildSyncNodes,
+  type SyncNode,
+  type SyncResult,
+} from "@/lib/read/chapterMarkdown";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
-import { getUUID, nowIso } from "./utils";
+import { nowIso } from "./utils";
 import ConfirmDialog, { type ConfirmRequest } from "./ConfirmDialog";
 
 type ChapterNode = BookChapter & { children: ChapterNode[] };
@@ -128,13 +134,15 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
 
   const [flat, setFlat] = useState<BookChapter[]>([]);
   const [chaptersLoading, setChaptersLoading] = useState(false);
-  const [editChapterUUID, setEditChapterUUID] = useState<string | null>(null);
-  const [editChapterTitle, setEditChapterTitle] = useState("");
-  const [addingUnder, setAddingUnder] = useState<string | null | undefined>(undefined);
-  const [addChapterTitle, setAddChapterTitle] = useState("");
   const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
-  const [showMdImport, setShowMdImport] = useState(false);
-  const [mdImportContent, setMdImportContent] = useState("");
+
+  // Round-trip Markdown structure editor state.
+  const [mdOpen, setMdOpen] = useState(false);
+  const [mdText, setMdText] = useState("");
+  const [mdErrors, setMdErrors] = useState<string[]>([]);
+  const [mdPreview, setMdPreview] = useState<SyncResult | null>(null);
+  const [mdBusy, setMdBusy] = useState(false);
+  const [treeError, setTreeError] = useState<string | null>(null);
 
   const tree = useMemo(() => buildTree(flat), [flat]);
   const selectedBook = books.find((b) => b.uuid === bookUUID);
@@ -208,277 +216,184 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
   };
 
   // ── Chapter handlers ───────────────────────────────────────────
-  const handleAddChapter = async (parentUuid: string | null) => {
-    if (!addChapterTitle.trim() || !bookUUID || !isTauri()) return;
-    const siblings = flat.filter((c) => (c.parent_uuid ?? null) === parentUuid);
-    const now = nowIso();
-    const chapter: BookChapter = {
-      uuid: getUUID(),
-      book_uuid: bookUUID,
-      parent_uuid: parentUuid,
-      order_num: siblings.length + 1,
-      title: addChapterTitle.trim(),
-      status: null,
-      created_at: now,
-      updated_at: now,
-    };
-    setSaving(true);
-    try {
-      await invoke("book_save_chapter", { bookUuid: bookUUID, chapter });
-      setAddChapterTitle("");
-      setAddingUnder(undefined);
-      setFlat((prev) => [...prev, chapter]);
-    } catch (e) {
-      console.error(e);
-    }
-    setSaving(false);
-  };
-
-  const handleSaveEditChapter = async (item: BookChapter) => {
-    if (!isTauri()) return;
-    const updated: BookChapter = {
-      ...item,
-      title: editChapterTitle.trim() || item.title,
-      updated_at: nowIso(),
-    };
-    setSaving(true);
-    try {
-      await invoke("book_save_chapter", { bookUuid: bookUUID, chapter: updated });
-      setEditChapterUUID(null);
-      setFlat((prev) => prev.map((c) => (c.uuid === item.uuid ? updated : c)));
-    } catch (e) {
-      console.error(e);
-    }
-    setSaving(false);
-  };
-
   const handleToggleStatus = async (item: BookChapter) => {
     if (!isTauri()) return;
     const newStatus = item.status === "completed" ? null : "completed";
     const updated: BookChapter = { ...item, status: newStatus, updated_at: nowIso() };
     setSaving(true);
+    setTreeError(null);
     try {
       await invoke("book_save_chapter", { bookUuid: bookUUID, chapter: updated });
       setFlat((prev) => prev.map((c) => (c.uuid === item.uuid ? updated : c)));
     } catch (e) {
-      console.error(e);
+      setTreeError(String(e));
     }
     setSaving(false);
   };
 
-  const handleDeleteChapter = (item: BookChapter) => {
-    const hasChildren = flat.some((c) => c.parent_uuid === item.uuid);
-    if (hasChildren) {
-      setConfirmReq({ message: "Remove child chapters first." });
+  // ── Structure editor (round-trip Markdown) ─────────────────────
+  const openMdEditor = () => {
+    setMdText(chaptersToMarkdown(flat));
+    setMdErrors([]);
+    setMdPreview(null);
+    setMdOpen(true);
+  };
+
+  const closeMdEditor = () => {
+    setMdOpen(false);
+    setMdText("");
+    setMdErrors([]);
+    setMdPreview(null);
+  };
+
+  const handleMdReload = () => {
+    setMdText(chaptersToMarkdown(flat));
+    setMdErrors([]);
+    setMdPreview(null);
+  };
+
+  // Parse the editor text into backend nodes, surfacing any validation error.
+  // Returns null (with `mdErrors` populated) when the text is not sendable.
+  const buildFromMd = (): SyncNode[] | null => {
+    const { nodes, errors } = parseChaptersMarkdown(mdText);
+    if (errors.length) {
+      setMdErrors(errors);
+      setMdPreview(null);
+      return null;
+    }
+    const built = buildSyncNodes(nodes);
+    if (built.errors.length) {
+      setMdErrors(built.errors);
+      setMdPreview(null);
+      return null;
+    }
+    setMdErrors([]);
+    return built.syncNodes;
+  };
+
+  const handleMdPreview = async () => {
+    if (!bookUUID || !isTauri()) return;
+    const nodes = buildFromMd();
+    if (!nodes) return;
+    setMdBusy(true);
+    try {
+      const result = await invoke<SyncResult>("book_sync_chapters", {
+        bookUuid: bookUUID,
+        nodes,
+        dryRun: true,
+      });
+      setMdPreview(result);
+    } catch (e) {
+      setMdErrors([String(e)]);
+      setMdPreview(null);
+    }
+    setMdBusy(false);
+  };
+
+  const runApply = async (nodes: SyncNode[]) => {
+    setMdBusy(true);
+    try {
+      const result = await invoke<SyncResult>("book_sync_chapters", {
+        bookUuid: bookUUID,
+        nodes,
+        dryRun: false,
+      });
+      setFlat(result.chapters);
+      closeMdEditor();
+      onBooksChanged();
+    } catch (e) {
+      setMdErrors([String(e)]);
+    }
+    setMdBusy(false);
+  };
+
+  const handleMdApply = async () => {
+    if (!bookUUID || !isTauri()) return;
+    const nodes = buildFromMd();
+    if (!nodes) return;
+    setMdBusy(true);
+    let preview: SyncResult;
+    try {
+      preview = await invoke<SyncResult>("book_sync_chapters", {
+        bookUuid: bookUUID,
+        nodes,
+        dryRun: true,
+      });
+    } catch (e) {
+      setMdErrors([String(e)]);
+      setMdBusy(false);
       return;
     }
-    setConfirmReq({
-      message: `Delete "${item.title}"?`,
-      confirmLabel: "Delete",
-      onConfirm: () => doDeleteChapter(item),
-    });
-  };
-
-  const doDeleteChapter = async (item: BookChapter) => {
-    if (!isTauri()) return;
-    setSaving(true);
-    try {
-      await invoke("book_delete_chapter", { bookUuid: bookUUID, uuid: item.uuid });
-      setFlat((prev) => prev.filter((c) => c.uuid !== item.uuid));
-    } catch (e) {
-      console.error(e);
+    setMdBusy(false);
+    setMdPreview(preview);
+    // Deletions that still carry sentences need an explicit, itemized OK.
+    const risky = preview.summary.deletions.filter((d) => d.sentences > 0);
+    if (risky.length) {
+      const totalSentences = risky.reduce((s, d) => s + d.sentences, 0);
+      setConfirmReq({
+        title: "Chapters hold recorded content",
+        message: (
+          <div className="flex flex-col gap-2">
+            <p>
+              Applying deletes {risky.length} chapter(s) that still contain {totalSentences} sentence(s):
+            </p>
+            <ul className="list-disc pl-5 max-h-40 overflow-y-auto">
+              {risky.map((d) => (
+                <li key={d.uuid} className="text-xs">
+                  {d.title} — {d.chapters} chapter{d.chapters !== 1 ? "s" : ""}, {d.sentences} sentence
+                  {d.sentences !== 1 ? "s" : ""}
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-text-tertiary">This cannot be undone here — recover from a backup if needed.</p>
+          </div>
+        ),
+        confirmLabel: "Delete & Apply",
+        onConfirm: () => runApply(nodes),
+      });
+      return;
     }
-    setSaving(false);
+    await runApply(nodes);
   };
 
-  // ── Import chapters from markdown ──────────────────────────────
-  const handleImportMarkdown = async () => {
-    if (!mdImportContent.trim() || !bookUUID || !isTauri()) return;
-    setSaving(true);
-    try {
-      const lines = mdImportContent.split("\n");
-      const now = nowIso();
-      let rootOrder = flat.filter((c) => !c.parent_uuid).length;
-      let childOrder = 0;
-      let lastRootUuid: string | null = null;
-      const created: BookChapter[] = [];
-
-      for (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line.startsWith("#")) continue;
-
-        const isChild = line.startsWith("## ");
-        const isRoot = !isChild && line.startsWith("# ");
-        if (!isRoot && !isChild) continue;
-
-        const title = line.replace(/^#+\s*/, "").trim();
-        if (!title) continue;
-
-        if (isRoot) {
-          rootOrder++;
-          const chapter: BookChapter = {
-            uuid: getUUID(),
-            book_uuid: bookUUID,
-            parent_uuid: null,
-            order_num: rootOrder,
-            title,
-            status: null,
-            created_at: now,
-            updated_at: now,
-          };
-          await invoke("book_save_chapter", { bookUuid: bookUUID, chapter });
-          created.push(chapter);
-          lastRootUuid = chapter.uuid;
-          childOrder = 0;
-        } else if (isChild && lastRootUuid) {
-          childOrder++;
-          const chapter: BookChapter = {
-            uuid: getUUID(),
-            book_uuid: bookUUID,
-            parent_uuid: lastRootUuid,
-            order_num: childOrder,
-            title,
-            status: null,
-            created_at: now,
-            updated_at: now,
-          };
-          await invoke("book_save_chapter", { bookUuid: bookUUID, chapter });
-          created.push(chapter);
-        }
-      }
-
-      setFlat((prev) => [...prev, ...created]);
-      setMdImportContent("");
-      setShowMdImport(false);
-    } catch (e) {
-      console.error(e);
-    }
-    setSaving(false);
-  };
-
-  // ── Chapter tree item ──────────────────────────────────────────
+  // ── Chapter tree item (read-only browser) ──────────────────────
+  // Structure is edited in Markdown; the tree only browses it and owns the
+  // per-chapter completion checkbox (the sole row control).
   const ChapterItem = ({ node, depth }: { node: ChapterNode; depth: number }) => {
     const [open, setOpen] = useState(true);
-    const isEditing = editChapterUUID === node.uuid;
-    const isAddingChild = addingUnder === node.uuid;
     const completed = node.status === "completed";
 
     return (
       <div>
         <div
-          className={`flex flex-row items-center gap-1 rounded-lg px-2 py-1 group ${
-            completed ? "bg-green-500/15" : "bg-bg-muted hover:bg-bg-hover"
+          className={`flex flex-row items-center gap-2 rounded-lg px-2 py-1 ${
+            completed ? "bg-green-500/15" : "bg-bg-muted"
           }`}
           style={{ marginLeft: depth * 20 }}
         >
-          {isEditing ? (
-            <div className="flex flex-row gap-2 flex-1 py-1">
-              <input
-                autoFocus
-                className={inputCls}
-                value={editChapterTitle}
-                onChange={(e) => setEditChapterTitle(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleSaveEditChapter(node);
-                  if (e.key === "Escape") setEditChapterUUID(null);
-                }}
-              />
-              <button className={btnPrimary} disabled={saving} onClick={() => handleSaveEditChapter(node)}>
-                Save
-              </button>
-              <button className={btnGhost} onClick={() => setEditChapterUUID(null)}>
-                Cancel
-              </button>
-            </div>
-          ) : (
-            <>
-              <button
-                className="p-0.5 text-text-tertiary cursor-pointer shrink-0"
-                onClick={() => setOpen((v) => !v)}
-              >
-                {node.children.length > 0 ? (
-                  open ? <ChevronDown size={16} /> : <ChevronRight size={16} />
-                ) : (
-                  <span className="inline-block w-4" />
-                )}
-              </button>
-              <div className="flex-1 min-w-0 font-medium text-text-primary truncate">
-                {node.title}
-              </div>
-              <div className={`flex flex-row gap-0.5 shrink-0 transition-opacity ${mobile ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
-                <button
-                  title={completed ? "Mark incomplete" : "Mark completed"}
-                  className={`p-1 rounded cursor-pointer ${
-                    completed ? "text-accent" : "hover:bg-bg-card text-text-secondary"
-                  }`}
-                  disabled={saving}
-                  onClick={() => handleToggleStatus(node)}
-                >
-                  <Check size={15} />
-                </button>
-                <button
-                  title="Copy UUID"
-                  className="p-1 rounded hover:bg-bg-card text-text-secondary cursor-pointer"
-                  onClick={() => navigator.clipboard.writeText(node.uuid)}
-                >
-                  <Copy size={15} />
-                </button>
-                <button
-                  title="Add child chapter"
-                  className="p-1 rounded hover:bg-bg-card text-text-secondary cursor-pointer"
-                  onClick={() => {
-                    setEditChapterUUID(null);
-                    setAddingUnder((prev) => (prev === node.uuid ? undefined : node.uuid));
-                    setAddChapterTitle("");
-                  }}
-                >
-                  <Plus size={15} />
-                </button>
-                <button
-                  title="Edit"
-                  className="p-1 rounded hover:bg-bg-card text-text-secondary cursor-pointer"
-                  onClick={() => {
-                    setAddingUnder(undefined);
-                    setEditChapterUUID(node.uuid);
-                    setEditChapterTitle(node.title ?? "");
-                  }}
-                >
-                  <Pencil size={15} />
-                </button>
-                <button
-                  title="Delete"
-                  className="p-1 rounded hover:bg-bg-card text-red-500 cursor-pointer"
-                  disabled={saving}
-                  onClick={() => handleDeleteChapter(node)}
-                >
-                  <Trash2 size={15} />
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-
-        {isAddingChild && (
-          <div className="flex flex-row gap-2 py-1" style={{ marginLeft: (depth + 1) * 20 }}>
+          <button
+            className="p-0.5 text-text-tertiary cursor-pointer shrink-0"
+            onClick={() => setOpen((v) => !v)}
+          >
+            {node.children.length > 0 ? (
+              open ? <ChevronDown size={16} /> : <ChevronRight size={16} />
+            ) : (
+              <span className="inline-block w-4" />
+            )}
+          </button>
+          <label className="flex items-center shrink-0 cursor-pointer" title={completed ? "Mark incomplete" : "Mark completed"}>
             <input
-              autoFocus
-              className={inputCls}
-              placeholder="Child chapter title"
-              value={addChapterTitle}
-              onChange={(e) => setAddChapterTitle(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleAddChapter(node.uuid);
-                if (e.key === "Escape") setAddingUnder(undefined);
-              }}
+              type="checkbox"
+              className="h-4 w-4 accent-green-500 cursor-pointer"
+              checked={completed}
+              disabled={saving}
+              onChange={() => handleToggleStatus(node)}
             />
-            <button className={btnPrimary} disabled={saving} onClick={() => handleAddChapter(node.uuid)}>
-              Add
-            </button>
-            <button className={btnGhost} onClick={() => setAddingUnder(undefined)}>
-              Cancel
-            </button>
+          </label>
+          <div className="flex-1 min-w-0 font-medium text-text-primary truncate">
+            {node.title}
           </div>
-        )}
+        </div>
 
         {open &&
           node.children.map((child) => (
@@ -663,10 +578,10 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
               if (bookUUID === item.uuid) {
                 setBookUUID("");
                 setFlat([]);
+                closeMdEditor();
               } else {
                 setBookUUID(item.uuid);
-                setEditChapterUUID(null);
-                setAddingUnder(undefined);
+                closeMdEditor();
               }
             }}
           >
@@ -726,105 +641,129 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
       </>
       )}
 
-      {/* Chapters (book level) — edit the selected book's chapters */}
+      {/* Chapters (book level) — browse structure; edit it in Markdown */}
       {selectedBook && (
         <div className="flex flex-col gap-4">
           <div className="flex flex-row flex-wrap items-center justify-between gap-2 mb-3">
             <h3 className="text-base font-semibold text-text-primary">
               Chapters — <span className="font-normal text-text-secondary">{selectedBook.name}</span>
             </h3>
-            <div className="flex gap-2 flex-wrap">
-              <button
-                className={btnGhost}
-                onClick={() => {
-                  setShowMdImport((v) => !v);
-                  setMdImportContent("");
-                }}
-              >
-                {showMdImport ? "Cancel" : "Import Markdown"}
+            {mdOpen ? (
+              <button className={btnGhost} onClick={closeMdEditor}>
+                <X size={14} className="inline mr-1" /> Close
               </button>
-              <button
-                className={btnPrimary}
-                onClick={() => {
-                  setEditChapterUUID(null);
-                  setAddingUnder((prev) => (prev === null ? undefined : null));
-                  setAddChapterTitle("");
-                }}
-              >
-                {addingUnder === null ? "Cancel" : "+ Root Chapter"}
+            ) : (
+              <button className={btnPrimary} onClick={openMdEditor}>
+                <Pencil size={14} className="inline mr-1" /> Edit Structure (Markdown)
               </button>
-            </div>
+            )}
           </div>
 
-          {showMdImport && (
-            <div className="mb-3 p-3 rounded-lg border border-border-default bg-bg-card space-y-2">
-              <p className="text-xs text-text-secondary">
-                Paste markdown content. <code className="px-1 rounded bg-bg-muted"># Title</code> creates a root chapter, <code className="px-1 rounded bg-bg-muted">## Title</code> creates a sub-chapter under the preceding root chapter.
+          {treeError && (
+            <div className="p-3 bg-red-500/10 text-red-500 rounded-md text-sm">{treeError}</div>
+          )}
+
+          {mdOpen && (
+            <div className="p-3 rounded-lg border border-border-default bg-bg-card space-y-3">
+              <p className="text-xs text-text-secondary leading-relaxed">
+                One heading line per chapter, nested by <code className="px-1 rounded bg-bg-muted">#</code> depth. Keep a
+                line&rsquo;s trailing <code className="px-1 rounded bg-bg-muted">{"{#uuid}"}</code> to preserve its sentences
+                and completion; a line without one is a new chapter. Remove a line to delete that chapter (and its whole
+                subtree). Preview before Apply to see exactly what changes.
               </p>
               <textarea
-                className="w-full px-3 py-2 rounded-md bg-bg-input border border-border-default text-sm text-text-primary font-mono focus:outline-none focus:border-accent min-h-[200px]"
-                placeholder="# Chapter Title&#10;## Sub-chapter Title&#10;## Another Sub-chapter&#10;&#10;# Next Chapter&#10;## Sub-chapter"
-                value={mdImportContent}
-                onChange={(e) => setMdImportContent(e.target.value)}
+                className="w-full px-3 py-2 rounded-md bg-bg-input border border-border-default text-sm text-text-primary font-mono focus:outline-none focus:border-accent min-h-[300px]"
+                spellCheck={false}
+                value={mdText}
+                onChange={(e) => {
+                  setMdText(e.target.value);
+                  setMdPreview(null);
+                }}
               />
-              <div className="flex gap-2">
-                <button
-                  className={btnPrimary}
-                  disabled={saving || !mdImportContent.trim()}
-                  onClick={handleImportMarkdown}
-                >
-                  Import
+
+              {mdErrors.length > 0 && (
+                <div className="p-2 rounded-md bg-red-500/10 text-red-500 text-xs space-y-1">
+                  {mdErrors.map((err, i) => (
+                    <div key={i}>{err}</div>
+                  ))}
+                </div>
+              )}
+
+              {mdPreview && (
+                <div className="p-2 rounded-md bg-bg-muted text-xs space-y-2">
+                  <div className="font-medium text-text-primary">Preview</div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 text-text-secondary">
+                    <span>Created: {mdPreview.summary.created}</span>
+                    <span>Renamed: {mdPreview.summary.updated}</span>
+                    <span>Moved: {mdPreview.summary.moved}</span>
+                    <span>Reordered: {mdPreview.summary.reordered}</span>
+                    <span>Deleted: {mdPreview.summary.deleted}</span>
+                  </div>
+                  {mdPreview.summary.deletions.length > 0 && (
+                    <div className="flex items-start gap-1.5 text-red-500">
+                      <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                      <div className="space-y-1">
+                        <div>Removing {mdPreview.summary.deletions.length} chapter tree(s):</div>
+                        <ul className="list-disc pl-4">
+                          {mdPreview.summary.deletions.map((d) => (
+                            <li key={d.uuid}>
+                              {d.title} — {d.chapters} chapter{d.chapters !== 1 ? "s" : ""}, {d.sentences} sentence
+                              {d.sentences !== 1 ? "s" : ""}
+                              {d.sentences > 0 ? " (contains recorded content)" : ""}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  )}
+                  {mdPreview.summary.created === 0 &&
+                    mdPreview.summary.updated === 0 &&
+                    mdPreview.summary.moved === 0 &&
+                    mdPreview.summary.reordered === 0 &&
+                    mdPreview.summary.deleted === 0 && (
+                      <div className="text-text-tertiary">No changes.</div>
+                    )}
+                </div>
+              )}
+
+              <div className="flex gap-2 flex-wrap">
+                <button className={btnGhost} disabled={mdBusy} onClick={handleMdPreview}>
+                  <Eye size={14} className="inline mr-1" /> Preview
                 </button>
-                <button
-                  className={btnGhost}
-                  onClick={() => {
-                    setShowMdImport(false);
-                    setMdImportContent("");
-                  }}
-                >
+                <button className={btnPrimary} disabled={mdBusy} onClick={handleMdApply}>
+                  Apply
+                </button>
+                <button className={btnGhost} disabled={mdBusy} onClick={handleMdReload}>
+                  <RefreshCw size={14} className="inline mr-1" /> Reload from tree
+                </button>
+                <button className={btnGhost} disabled={mdBusy} onClick={closeMdEditor}>
                   Cancel
                 </button>
               </div>
             </div>
           )}
 
-          {chaptersLoading && (
-            <div className="text-center text-text-tertiary py-4">Loading…</div>
-          )}
-
-          {!chaptersLoading && (
+          {!mdOpen && (
             <>
-              {addingUnder === null && (
-                <div className="flex flex-row gap-2 py-1 mb-2">
-                  <input
-                    autoFocus
-                    className={inputCls}
-                    placeholder="Chapter title"
-                    value={addChapterTitle}
-                    onChange={(e) => setAddChapterTitle(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") handleAddChapter(null);
-                      if (e.key === "Escape") setAddingUnder(undefined);
-                    }}
-                  />
-                  <button className={btnPrimary} disabled={saving} onClick={() => handleAddChapter(null)}>
-                    Add
-                  </button>
-                  <button className={btnGhost} onClick={() => setAddingUnder(undefined)}>
-                    Cancel
-                  </button>
-                </div>
+              {chaptersLoading && (
+                <div className="text-center text-text-tertiary py-4">Loading…</div>
               )}
 
-              {flat.length === 0 && addingUnder !== null && (
-                <div className="text-center text-text-tertiary py-4">No chapters yet.</div>
-              )}
+              {!chaptersLoading && (
+                <>
+                  {flat.length === 0 && (
+                    <div className="text-center text-text-tertiary py-4">
+                      No chapters yet. Use &ldquo;Edit Structure (Markdown)&rdquo; to add some.
+                    </div>
+                  )}
 
-              <div className="flex flex-col gap-0.5">
-                {tree.map((node) => (
-                  <ChapterItem key={node.uuid} node={node} depth={0} />
-                ))}
-              </div>
+                  <div className="flex flex-col gap-0.5">
+                    {tree.map((node) => (
+                      <ChapterItem key={node.uuid} node={node} depth={0} />
+                    ))}
+                  </div>
+                </>
+              )}
             </>
           )}
         </div>

@@ -30,7 +30,7 @@ pub struct BookMeta {
     pub updated_at: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BookChapter {
     pub uuid: String,
     pub book_uuid: String,
@@ -359,6 +359,34 @@ pub(crate) fn list_chapters(
     Ok(items)
 }
 
+/// Read all chapter rows of an open book db (shared by the list command and
+/// the sync, which needs the pre-image to preserve status/created_at).
+pub(crate) fn query_chapters(conn: &Connection) -> Result<Vec<BookChapter>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT uuid, book_uuid, parent_uuid, order_num, title, status, created_at, updated_at \
+             FROM book_chapter ORDER BY order_num",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(BookChapter {
+                uuid: row.get(0)?,
+                book_uuid: row.get(1)?,
+                parent_uuid: row.get(2)?,
+                order_num: row.get(3)?,
+                title: row.get(4)?,
+                status: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 /// Insert or update a chapter.
 #[tauri::command]
 pub async fn book_save_chapter(
@@ -427,6 +455,313 @@ pub async fn book_delete_chapter(
         );
     }
     Ok(())
+}
+
+// ============================================================
+// Chapter structure sync (round-trip Markdown editor)
+// ============================================================
+
+/// One chapter line coming from the Markdown editor. Carries no timestamps or
+/// status: the sync preserves `status`/`created_at` per existing UUID, so text
+/// edits can never clobber completion state or row provenance.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SyncNode {
+    pub uuid: String,
+    pub parent_uuid: Option<String>,
+    pub order_num: i64,
+    pub title: String,
+}
+
+/// A deletion root and the size of the subtree it takes with it.
+#[derive(Clone, Debug, Serialize)]
+pub struct DeleteImpact {
+    pub uuid: String,
+    pub title: String,
+    /// Chapters removed in total (including the root itself).
+    pub chapters: usize,
+    /// Sentences removed with them.
+    pub sentences: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ChapterSyncSummary {
+    pub created: usize,
+    pub updated: usize,
+    pub moved: usize,
+    pub reordered: usize,
+    pub deleted: usize,
+    pub deletions: Vec<DeleteImpact>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SyncResult {
+    pub dry_run: bool,
+    pub summary: ChapterSyncSummary,
+    /// Current tree on dry-run; the reconciled tree after a real apply.
+    pub chapters: Vec<BookChapter>,
+}
+
+/// Recursively delete a chapter subtree (words → sentences → chapter), leaves
+/// first. Used inside the sync transaction; change-log rows are written by the
+/// caller once the transaction commits.
+fn delete_chapter_subtree_tx(tx: &Connection, uuid: &str) -> Result<Vec<String>, String> {
+    let children: Vec<String> = tx
+        .prepare("SELECT uuid FROM book_chapter WHERE parent_uuid = ?1")
+        .map_err(|e| e.to_string())?
+        .query_map([uuid], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    let mut removed = Vec::new();
+    for child in children {
+        removed.extend(delete_chapter_subtree_tx(tx, &child)?);
+    }
+    removed.push(uuid.to_string());
+    tx.execute(
+        "DELETE FROM book_sentence_word WHERE sentence_uuid IN \
+         (SELECT uuid FROM book_sentence WHERE chapter_uuid = ?1)",
+        [uuid],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM book_sentence WHERE chapter_uuid = ?1", [uuid])
+        .map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM book_chapter WHERE uuid = ?1", [uuid])
+        .map_err(|e| e.to_string())?;
+    Ok(removed)
+}
+
+/// Reconcile a book's chapter tree against `nodes` (the full desired forest,
+/// in document order). Embedded UUIDs are identity: a node matching an existing
+/// chapter updates it in place (uuid, status and created_at survive), a node
+/// with an unknown uuid is created, and an existing chapter whose uuid is
+/// absent is deleted together with its whole subtree and its sentences.
+/// With `dry_run` nothing is written and the summary describes what *would*
+/// happen — this is what the editor's Preview calls.
+pub(crate) fn sync_chapters(
+    settings: &SettingsState,
+    book_uuid: &str,
+    nodes: Vec<SyncNode>,
+    dry_run: bool,
+) -> Result<SyncResult, String> {
+    let dir = find_book_dir_write(settings, book_uuid)?;
+    let mut conn = open_book_db(&dir)?;
+
+    let existing: Vec<BookChapter> = query_chapters(&conn)?;
+    let existing_map: std::collections::HashMap<String, &BookChapter> =
+        existing.iter().map(|c| (c.uuid.clone(), c)).collect();
+    let incoming_uuids: std::collections::HashSet<String> =
+        nodes.iter().map(|n| n.uuid.clone()).collect();
+
+    // Validate: unique uuids, and every parent reference resolves inside the
+    // batch (chapters being deleted cannot parent anything).
+    let mut seen = std::collections::HashSet::new();
+    for n in &nodes {
+        if !seen.insert(n.uuid.as_str()) {
+            return Err(format!("duplicate chapter uuid in submission: {}", n.uuid));
+        }
+        if let Some(p) = &n.parent_uuid {
+            if !incoming_uuids.contains(p) {
+                return Err(format!("chapter \"{}\" references unknown parent", n.title));
+            }
+        }
+    }
+
+    // Deletion roots: existing rows whose uuid was dropped from the document.
+    // children_of only needs edges from dropped parents — a child of a kept
+    // parent is itself kept (it was in the batch) or belongs to a dropped
+    // subtree and is reached through its own ancestor chain.
+    let mut children_of: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for c in &existing {
+        if let Some(p) = &c.parent_uuid {
+            if !incoming_uuids.contains(p) {
+                children_of.entry(p.clone()).or_default().push(c.uuid.clone());
+            }
+        }
+    }
+    let mut roots: Vec<String> = existing
+        .iter()
+        .filter(|c| !incoming_uuids.contains(&c.uuid))
+        .map(|c| c.uuid.clone())
+        .collect();
+    let in_roots: std::collections::HashSet<String> = roots.iter().cloned().collect();
+    for c in &existing {
+        if incoming_uuids.contains(&c.uuid) {
+            if let Some(p) = &c.parent_uuid {
+                if in_roots.contains(p) {
+                    return Err(format!(
+                        "chapter \"{}\" is kept but its parent is being deleted",
+                        c.title
+                    ));
+                }
+            }
+        }
+    }
+    // Expand each deletion root's subtree, excluding descendants that are
+    // themselves deletion roots (they are listed separately).
+    let sentence_count = |uuid: &str, conn: &Connection| -> Result<usize, String> {
+        conn.query_row(
+            "SELECT COUNT(*) FROM book_sentence WHERE chapter_uuid = ?1",
+            [uuid],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|v| v as usize)
+        .map_err(|e| e.to_string())
+    };
+    let mut deletions: Vec<DeleteImpact> = Vec::new();
+    for root in &roots {
+        let mut stack = vec![root.clone()];
+        let mut all: Vec<String> = Vec::new();
+        while let Some(u) = stack.pop() {
+            all.push(u.clone());
+            for ch in children_of.get(&u).cloned().unwrap_or_default() {
+                stack.push(ch);
+            }
+        }
+        let own: Vec<String> = all
+            .iter()
+            .filter(|u| *u != root && !in_roots.contains(u.as_str()))
+            .cloned()
+            .collect();
+        let mut sentences = sentence_count(root, &conn)?;
+        for u in &own {
+            sentences += sentence_count(u, &conn)?;
+        }
+        let title = existing_map
+            .get(root)
+            .map(|c| c.title.clone())
+            .unwrap_or_default();
+        deletions.push(DeleteImpact {
+            uuid: root.clone(),
+            title,
+            chapters: own.len() + 1,
+            sentences,
+        });
+    }
+    // Drop non-minimal roots: a root whose ancestor chain contains another root
+    // would double-count; keep only the topmost root per branch.
+    {
+        let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for d in &deletions {
+            let mut stack = vec![d.uuid.clone()];
+            while let Some(u) = stack.pop() {
+                for ch in children_of.get(&u).cloned().unwrap_or_default() {
+                    if ch != d.uuid {
+                        covered.insert(ch.clone());
+                        stack.push(ch);
+                    }
+                }
+            }
+        }
+        deletions.retain(|d| !covered.contains(&d.uuid));
+        roots.retain(|r| !covered.contains(r));
+        deletions.sort_by_key(|d| d.title.clone());
+    }
+    let deleted = roots.len();
+
+    // Classify incoming nodes.
+    let mut summary = ChapterSyncSummary {
+        created: 0,
+        updated: 0,
+        moved: 0,
+        reordered: 0,
+        deleted,
+        deletions,
+    };
+    for n in &nodes {
+        match existing_map.get(&n.uuid) {
+            None => summary.created += 1,
+            Some(c) => {
+                if c.title != n.title {
+                    summary.updated += 1;
+                }
+                let parent_changed = c.parent_uuid.as_deref().unwrap_or("")
+                    != n.parent_uuid.as_deref().unwrap_or("");
+                if parent_changed {
+                    summary.moved += 1;
+                } else if c.order_num != n.order_num {
+                    summary.reordered += 1;
+                }
+            }
+        }
+    }
+
+    if dry_run {
+        return Ok(SyncResult {
+            dry_run: true,
+            summary,
+            chapters: existing,
+        });
+    }
+
+    let deleted_uuids: Vec<String>;
+    {
+        let mut tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut deleted: Vec<String> = Vec::new();
+        for root in &roots {
+            deleted.extend(delete_chapter_subtree_tx(&tx, root)?);
+        }
+        let now = now_stamp();
+        for n in &nodes {
+            let (status, created_at) = match existing_map.get(&n.uuid) {
+                Some(c) => (c.status.clone(), c.created_at.clone()),
+                None => (None, now.clone()),
+            };
+            tx.execute(
+                "INSERT OR REPLACE INTO book_chapter \
+                 (uuid, book_uuid, parent_uuid, order_num, title, status, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    n.uuid,
+                    book_uuid,
+                    n.parent_uuid,
+                    n.order_num,
+                    n.title,
+                    status,
+                    created_at,
+                    now
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        deleted_uuids = deleted;
+    }
+    for uuid in &deleted_uuids {
+        let _ = crate::sync::change_log::commit_change(
+            settings,
+            "book_chapter_delete",
+            book_uuid,
+            &serde_json::json!({ "uuid": uuid }),
+        );
+    }
+    for n in &nodes {
+        let _ = crate::sync::change_log::commit_change(
+            settings,
+            "book_chapter_save",
+            book_uuid,
+            &serde_json::to_value(n).unwrap_or_default(),
+        );
+    }
+
+    let chapters = query_chapters(&conn)?;
+    Ok(SyncResult {
+        dry_run: false,
+        summary,
+        chapters,
+    })
+}
+
+/// Reconcile the whole chapter tree of a book in one atomic pass (the
+/// round-trip Markdown editor's Apply/Preview backend).
+#[tauri::command]
+pub async fn book_sync_chapters(
+    settings: State<'_, SettingsState>,
+    book_uuid: String,
+    nodes: Vec<SyncNode>,
+    dry_run: bool,
+) -> Result<SyncResult, String> {
+    sync_chapters(&settings, &book_uuid, nodes, dry_run)
 }
 
 // ============================================================
