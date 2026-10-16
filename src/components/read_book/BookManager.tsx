@@ -649,7 +649,7 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
                 subtree). Preview before Apply to see exactly what changes.
               </p>
               <HighlightedChapterInput
-                className="w-full rounded-md bg-bg-input border border-border-default focus-within:border-accent min-h-[300px]"
+                className="w-full h-[360px] rounded-md bg-bg-input border border-border-default focus-within:border-accent"
                 value={mdText}
                 errorLines={mdErrorLines}
                 disabled={mdBusy}

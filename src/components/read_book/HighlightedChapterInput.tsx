@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { Fragment, useMemo, type ReactNode } from "react";
 
 /**
  * A plain-text chapter-structure editor that shows syntax highlighting without
@@ -8,15 +8,17 @@ import { useMemo } from "react";
  *
  * How it works: the real `<textarea>` stays the single source of truth (so
  * caret, selection, typing, paste, undo and IME all behave exactly like plain
- * text), but its own glyphs are made `color: transparent`. A read-only overlay
- * painted *behind* it renders the same string with per-token colors. The caret
- * stays visible because `caret-color` is independent of text color (globals.css
- * already themes it with `--accent`).
+ * text), but its own glyphs are made transparent. A read-only overlay painted
+ * behind it renders the same string with per-token colors, and the caret stays
+ * visible via `caret-color` (themed `--accent` in globals.css).
  *
- * The overlay is laid out in normal flow so it defines the box height and lets
- * the control grow with content; the textarea is absolutely positioned to fill
- * the identical box. Both share byte-for-byte the same font metrics, padding
- * and wrapping rules, which is what keeps the two layers pixel-aligned.
+ * Lines never wrap, so each chapter is one row and an over-long line scrolls
+ * horizontally. Critically, the app applies global CSS `zoom` on `<html>`, which
+ * makes two independently-scrolled layers drift out of alignment (the classic
+ * "caret unstable when zoomed" bug). So there is NO per-layer scroll sync here:
+ * the overlay and the textarea share ONE horizontally-scrollable box, both sized
+ * to the content width, and the overlay is a single `whitespace-pre` text block
+ * whose line layout matches the textarea's — one coordinate space, no drift.
  */
 
 // Keep in sync with the parser's grammar (chapterMarkdown.ts) so what is
@@ -24,10 +26,10 @@ import { useMemo } from "react";
 const HEADING_RE = /^(#{1,6})(\s+)(.*)$/;
 const ATTR_RE = /\s*\{#([^{}]+)\}\s*$/;
 
-// Shared box metrics for BOTH the overlay and the textarea. Any difference here
-// desyncs the two layers, so keep them literally the same string.
-const TEXT_METRICS =
-  "font-mono text-sm leading-6 px-3 py-2 whitespace-pre-wrap break-words";
+// Shared metrics for BOTH the overlay and the textarea. Any difference here
+// desyncs the two layers, so keep them literally the same string. `whitespace-pre`
+// disables wrapping so a long line overflows into the horizontal scrollbar.
+const TEXT_METRICS = "font-mono text-sm leading-6 px-3 py-2 whitespace-pre";
 
 type Props = {
   value: string;
@@ -42,7 +44,7 @@ type Props = {
 };
 
 /** Split one source line into colored token spans: `#` / title / `{#uuid}`. */
-function renderLine(text: string) {
+function renderLine(text: string): ReactNode {
   if (!text) return <span>{"\u200b"}</span>; // keep empty lines one row tall
 
   const m = text.match(HEADING_RE);
@@ -82,41 +84,48 @@ export default function HighlightedChapterInput({
   placeholder,
   className = "",
 }: Props) {
-  const errorSet = useMemo(
-    () => new Set(errorLines ?? []),
-    [errorLines]
-  );
-
+  const errorSet = useMemo(() => new Set(errorLines ?? []), [errorLines]);
   const lines = value.split("\n");
 
   return (
-    <div className={`relative ${className}`}>
-      {/* Highlight overlay: in normal flow, so it sizes the box. */}
-      <div aria-hidden className={`pointer-events-none ${TEXT_METRICS}`}>
-        {lines.map((line, i) => (
-          <div
-            key={i}
-            className={errorSet.has(i + 1) ? "rounded-sm bg-red-500/10" : undefined}
-          >
-            {renderLine(line)}
-          </div>
-        ))}
-      </div>
+    <div className={`relative overflow-auto ${className}`}>
+      {/* One content-sized box shared by both layers: width = longest line and
+          height = line count, so a single scrollport moves the highlight and the
+          caret together on both axes. */}
+      <div className="relative w-max min-w-full">
+        {/* Overlay: a single preformatted text block (same line layout as the
+            textarea) so vertical alignment survives CSS zoom. */}
+        <div aria-hidden className={`block ${TEXT_METRICS}`}>
+          {lines.map((line, i) => {
+            const tinted = errorSet.has(i + 1);
+            return (
+              <Fragment key={i}>
+                {tinted ? (
+                  <span className="rounded-sm bg-red-500/10">{renderLine(line)}</span>
+                ) : (
+                  renderLine(line)
+                )}
+                {i < lines.length - 1 && "\n"}
+              </Fragment>
+            );
+          })}
+        </div>
 
-      {/* Real editor: transparent text so only the overlay shows through. */}
-      <textarea
-        className={`absolute inset-0 h-full w-full resize-none border-0 bg-transparent outline-none text-transparent placeholder:text-text-tertiary ${TEXT_METRICS} ${
-          disabled ? "cursor-not-allowed" : ""
-        }`}
-        style={{ caretColor: "var(--accent)" }}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        autoFocus={autoFocus}
-        placeholder={placeholder}
-        spellCheck={false}
-        wrap="soft"
-      />
+        {/* Real editor: transparent text so only the overlay shows through. */}
+        <textarea
+          wrap="off"
+          className={`absolute inset-0 block resize-none overflow-hidden border-0 bg-transparent outline-none text-transparent placeholder:text-text-tertiary ${TEXT_METRICS} ${
+            disabled ? "cursor-not-allowed" : ""
+          }`}
+          style={{ caretColor: "var(--accent)" }}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          autoFocus={autoFocus}
+          placeholder={placeholder}
+          spellCheck={false}
+        />
+      </div>
     </div>
   );
 }
