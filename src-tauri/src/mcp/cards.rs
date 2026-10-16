@@ -302,6 +302,41 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&stats).unwrap_or_default())
     }
 
+    #[tool(name = "card_test_next_all", description = "Get the next card due for review across EVERY card dataset (a cross-deck session, no single deck open). Same due-first priority as card_test_next but global: an overdue card in any deck outranks a fresh one elsewhere. Returns the card, its review state, and the dataset_uuid + dataset_name it came from (submit the rating with card_test_submit using that dataset_uuid), or null if nothing is due anywhere.")]
+    async fn card_test_next_all(&self) -> Result<String, String> {
+        log::info!("[MCP] card_test_next_all");
+        let settings = self.app.state::<SettingsState>();
+        match datasets::cards::card_test_get_all(settings).await? {
+            Some(x) => Ok(serde_json::json!({
+                "dataset_uuid": x.dataset_uuid,
+                "dataset_name": x.dataset_name,
+                "card": {
+                    "uuid": x.card.uuid,
+                    "question": x.card.question,
+                    "answer": x.card.answer,
+                    "note": x.card.note,
+                    "familiarity": x.card.familiarity,
+                },
+                "review": x.review.map(|r| serde_json::json!({
+                    "familiarity": r.familiarity,
+                    "interval_days": r.interval_days,
+                    "ease_factor": r.ease_factor,
+                    "repetitions": r.repetitions,
+                    "next_review_at": r.next_review_at,
+                }))
+            }).to_string()),
+            None => Ok(serde_json::json!({"card": null, "message": "No cards due for review in any dataset"}).to_string()),
+        }
+    }
+
+    #[tool(name = "card_test_stats_all", description = "Count the review queue across EVERY card dataset *for the current user*, summed: due, fresh, mature, incomplete, total, and serving = which pool the next cross-deck draw comes from. The aggregate counterpart of card_test_stats.")]
+    async fn card_test_stats_all(&self) -> Result<String, String> {
+        log::info!("[MCP] card_test_stats_all");
+        let settings = self.app.state::<SettingsState>();
+        let stats = datasets::cards::card_test_stats_all(settings).await?;
+        Ok(serde_json::to_string_pretty(&stats).unwrap_or_default())
+    }
+
     #[tool(name = "card_tag_list", description = "List all tags in a card dataset. Returns UUID, name, and color for each tag.")]
     async fn card_tag_list(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::info!("[MCP] card_tag_list: dataset={}", param.uuid);

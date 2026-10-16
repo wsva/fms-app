@@ -140,6 +140,15 @@ export type CardTestStats = {
   serving: "due" | "fresh" | "none";
 };
 
+/** A card drawn from a cross-deck review session, tagged with the deck it came
+ *  from so the UI can name the source and `card_test_submit` can target it. */
+export type CrossDeckCard = {
+  dataset_uuid: string;
+  dataset_name: string;
+  card: Card;
+  review: CardReview | null;
+};
+
 export type CardTag = {
   uuid: string;
   name: string;

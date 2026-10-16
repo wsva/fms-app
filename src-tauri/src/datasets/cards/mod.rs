@@ -103,6 +103,17 @@ pub struct CardTestStats {
     pub serving: String,
 }
 
+/// One card drawn from a cross-deck review session: the card plus the identity
+/// of the deck it came from, so the UI can name the source and the submit call
+/// can target the right deck (`card_test_submit` is per-deck).
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct CrossDeckCard {
+    pub dataset_uuid: String,
+    pub dataset_name: String,
+    pub card: Card,
+    pub review: Option<CardReview>,
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Tag {
     pub uuid: String,
@@ -1504,16 +1515,11 @@ fn review_eligible() -> String {
 /// text order mean instant order again.
 const REVIEW_DUE: &str = "cr.next_review_at IS NOT NULL AND cr.next_review_at <= ?2";
 
-/// Get the next card for review (SM-2 spaced repetition).
-#[tauri::command]
-pub async fn card_test_get(
-    settings: State<'_, SettingsState>,
-    dataset_uuid: String,
-) -> Result<Option<(Card, Option<CardReview>)>, String> {
-    // Read resolution on purpose: drawing a card is practice, not an edit, so it
-    // must not fork a read-only base into an overlay ([`review`] module docs).
-    let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
-    let ctx = review::open(settings.inner(), &path, &dataset_uuid)?;
+/// Draw one card from an opened deck: due cards first, then never-reviewed ones.
+/// The third tuple element says whether the card came from the due pool, so a
+/// cross-deck session can keep the same due-first priority across every deck
+/// (an overdue card in any deck outranks a fresh one elsewhere).
+fn draw_one(ctx: &review::ReviewCtx) -> Option<(Card, Option<CardReview>, bool)> {
     let conn = &ctx.conn;
     // The acting user is `?1` in every review query (see [`review::LATEST_JOIN`]).
     let me = ctx.me.as_str();
@@ -1553,8 +1559,8 @@ pub async fn card_test_get(
         },
     );
 
-    if let Ok(result) = due_result {
-        return Ok(Some(result));
+    if let Ok((card, review)) = due_result {
+        return Some((card, review, true));
     }
 
     // No due reviews — pick from cards I have never rated
@@ -1569,29 +1575,34 @@ pub async fn card_test_get(
         review::UNRATED,
         review::FAMILIARITY
     );
-    let new_result = conn.query_row(&new_sql, rusqlite::params![me], |row| {
+    conn.query_row(&new_sql, rusqlite::params![me], |row| {
         Ok((read_card(row, Some(12))?, None))
-    });
-
-    match new_result {
-        Ok(result) => Ok(Some(result)),
-        Err(_) => Ok(None),
-    }
+    })
+    .ok()
+    .map(|(card, review)| (card, review, false))
 }
 
-/// Count what the review queue holds for this dataset.
-///
-/// The pool is split the way `card_test_get` splits it: overdue cards are served
-/// before never-reviewed ones, so `fresh` is not lost, it is waiting. `serving` says
-/// which pool the next draw resolves to.
+/// Get the next card for review (SM-2 spaced repetition).
 #[tauri::command]
-pub async fn card_test_stats(
+pub async fn card_test_get(
     settings: State<'_, SettingsState>,
     dataset_uuid: String,
-) -> Result<CardTestStats, String> {
+) -> Result<Option<(Card, Option<CardReview>)>, String> {
+    // Read resolution on purpose: drawing a card is practice, not an edit, so it
+    // must not fork a read-only base into an overlay ([`review`] module docs).
     let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
     let ctx = review::open(settings.inner(), &path, &dataset_uuid)?;
+    Ok(draw_one(&ctx).map(|(card, review, _)| (card, review)))
+}
 
+/// Count what an opened deck's review queue holds.
+///
+/// The pool is split the way `draw_one` splits it: overdue cards are served
+/// before never-reviewed ones, so `fresh` is not lost, it is waiting. `serving`
+/// says which pool the next draw resolves to. Shared by `card_test_stats` (one
+/// deck) and `card_test_stats_all` (summed across every deck), so the numbers
+/// always describe the queue that actually serves cards.
+fn stats_for_ctx(ctx: &review::ReviewCtx) -> Result<CardTestStats, String> {
     let due_now = now_row_stamp();
     // Every number below is *mine*: the same join the draw uses, so the badge
     // counts the queue that would actually serve me (memory: stats and selector
@@ -1647,6 +1658,109 @@ pub async fn card_test_stats(
         total,
         serving: serving.to_string(),
     })
+}
+
+/// Count what the review queue holds for this dataset.
+#[tauri::command]
+pub async fn card_test_stats(
+    settings: State<'_, SettingsState>,
+    dataset_uuid: String,
+) -> Result<CardTestStats, String> {
+    let path = find_card_dataset_dir(&settings, &dataset_uuid)?;
+    let ctx = review::open(settings.inner(), &path, &dataset_uuid)?;
+    stats_for_ctx(&ctx)
+}
+
+/// Pick a uniformly random index in `0..len` without a rand dependency: a v4
+/// UUID is already a CSPRNG draw, so its first 8 bytes are the source.
+fn rand_index(len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let b = *Uuid::new_v4().as_bytes();
+    let n = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+    (n % len as u64) as usize
+}
+
+/// Get the next card for review across **every** deck — the root-level session
+/// used when no single deck is open. Draws one candidate per deck, then keeps
+/// the same due-first priority globally: if any deck has a due card, one of
+/// those wins; otherwise a never-reviewed card is served. Each card carries its
+/// deck identity so the UI can name the source and `card_test_submit` (per-deck)
+/// can target the right deck.
+#[tauri::command]
+pub async fn card_test_get_all(
+    settings: State<'_, SettingsState>,
+) -> Result<Option<CrossDeckCard>, String> {
+    let datasets = list_card_datasets(&settings);
+    let mut due_pool: Vec<CrossDeckCard> = Vec::new();
+    let mut fresh_pool: Vec<CrossDeckCard> = Vec::new();
+    for ds in &datasets {
+        // Best-effort: a deck that will not open (missing/corrupt DB) is skipped
+        // rather than failing the whole cross-deck session.
+        let ctx = match review::open(settings.inner(), Path::new(&ds.path), &ds.info.uuid) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if let Some((card, review, was_due)) = draw_one(&ctx) {
+            let item = CrossDeckCard {
+                dataset_uuid: ds.info.uuid.clone(),
+                dataset_name: ds.info.name.clone(),
+                card,
+                review,
+            };
+            if was_due {
+                due_pool.push(item);
+            } else {
+                fresh_pool.push(item);
+            }
+        }
+    }
+    // Due cards outrank fresh ones across decks, mirroring `draw_one`'s priority.
+    let mut pool = if !due_pool.is_empty() { due_pool } else { fresh_pool };
+    if pool.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(pool.remove(rand_index(pool.len()))))
+}
+
+/// Aggregate the review-queue counts across every deck, mirroring how
+/// `card_test_get_all` draws: `due` is summed first, so `serving` reports
+/// `"due"` whenever any deck holds an overdue card.
+#[tauri::command]
+pub async fn card_test_stats_all(
+    settings: State<'_, SettingsState>,
+) -> Result<CardTestStats, String> {
+    let datasets = list_card_datasets(&settings);
+    let mut agg = CardTestStats {
+        due: 0,
+        fresh: 0,
+        mature: 0,
+        incomplete: 0,
+        total: 0,
+        serving: "none".to_string(),
+    };
+    for ds in &datasets {
+        let ctx = match review::open(settings.inner(), Path::new(&ds.path), &ds.info.uuid) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if let Ok(s) = stats_for_ctx(&ctx) {
+            agg.due += s.due;
+            agg.fresh += s.fresh;
+            agg.mature += s.mature;
+            agg.incomplete += s.incomplete;
+            agg.total += s.total;
+        }
+    }
+    agg.serving = if agg.due > 0 {
+        "due".to_string()
+    } else if agg.fresh > 0 {
+        "fresh".to_string()
+    } else {
+        "none".to_string()
+    };
+    Ok(agg)
 }
 
 /// Submit a review result: append the resulting event, change nothing else.

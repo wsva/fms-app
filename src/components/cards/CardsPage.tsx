@@ -36,19 +36,21 @@ import type {
   CardReview,
   CardTag,
   CardTestStats,
+  CrossDeckCard,
 } from "@/lib/types";
 import { isMobileApp } from "@/lib/platform";
-import { tbGhost, tbToggle } from "@/lib/ui/toolbar";
+import { tbGhost, tbToggle, tbIconToggleSoft } from "@/lib/ui/toolbar";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import { useCardEditor } from "./CardEditorContext";
 
-type TabId = "cards" | "search" | "review" | "tags";
+type TabId = "cards" | "review" | "tags";
 
 // Detail-view toolbar modes, rendered as toggle buttons on the toolbar right
 // (active = solid accent), mirroring ReadBook's Manage/Advanced mode group.
+// The former "Search" tab is gone: searching is unified into the Cards view's
+// search box, whose This-deck/All-decks scope toggle switches engines in place.
 const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: "cards", label: "Cards", icon: <Layers size={16} /> },
-  { id: "search", label: "Search", icon: <Search size={16} /> },
   { id: "review", label: "Review", icon: <GraduationCap size={16} /> },
   { id: "tags", label: "Tags", icon: <Tag size={16} /> },
 ];
@@ -82,6 +84,11 @@ export default function CardsPage() {
   const [reviewFlipped, setReviewFlipped] = useState(false);
   const [reviewResult, setReviewResult] = useState<CardReview | null>(null);
   const [reviewStats, setReviewStats] = useState<CardTestStats | null>(null);
+  // Cross-deck review: which deck the current card came from. Empty in a
+  // single-deck session, where selectedDatasetUuid is the source and the submit
+  // targets it directly.
+  const [reviewDeckUuid, setReviewDeckUuid] = useState<string>("");
+  const [reviewDeckName, setReviewDeckName] = useState<string>("");
 
   // Tags
   const [tags, setTags] = useState<CardTag[]>([]);
@@ -94,6 +101,37 @@ export default function CardsPage() {
   const [searching, setSearching] = useState(false);
   const [searchMode, setSearchMode] = useState<"question" | "fulltext">("fulltext");
   const [rebuildingIndex, setRebuildingIndex] = useState(false);
+
+  // Unified search scope within the Cards view: "deck" filters the open deck
+  // live via card_list; "all" runs a cross-deck FTS5 query via card_search.
+  const [searchScope, setSearchScope] = useState<"deck" | "all">("deck");
+
+  // Search sub-toolbar visibility: toggled by the toolbar's search button and
+  // hidden by default (the wiki page's idiom). Hiding also resets the view to
+  // the unfiltered deck list, so a live filter can't stay applied invisibly.
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  function toggleSearch() {
+    if (searchOpen) {
+      setSearchOpen(false);
+      setSearchScope("deck");
+      setKeyword("");
+      setPage(0);
+    } else {
+      // The search row lives in the Cards view, so opening it from Review/Tags
+      // jumps there first. At the deck-list root there is no current deck, so
+      // search is inherently cross-deck — force the "all decks" scope.
+      setActiveTab("cards");
+      if (!selectedDatasetUuid) setSearchScope("all");
+      setSearchOpen(true);
+    }
+  }
+
+  // The search row lives only in the Cards view, so leaving that view closes
+  // it — keeping the toolbar button's active state honest.
+  useEffect(() => {
+    if (activeTab !== "cards") setSearchOpen(false);
+  }, [activeTab]);
 
   // Error display
   const [error, setError] = useState<string | null>(null);
@@ -165,13 +203,17 @@ export default function CardsPage() {
   }, [selectedDatasetUuid, activeTab, loadTags]);
 
   // Queue counts for the Review tab. Refreshed with every draw so the numbers
-  // describe the same pool card_test_get just picked from.
+  // describe the same pool the draw just picked from: one deck's queue inside a
+  // deck, the aggregate across every deck in a root-level cross-deck session.
   const loadReviewStats = useCallback(async () => {
-    if (!selectedDatasetUuid) return;
     try {
-      setReviewStats(await invoke<CardTestStats>("card_test_stats", {
-        datasetUuid: selectedDatasetUuid,
-      }));
+      setReviewStats(
+        selectedDatasetUuid
+          ? await invoke<CardTestStats>("card_test_stats", {
+              datasetUuid: selectedDatasetUuid,
+            })
+          : await invoke<CardTestStats>("card_test_stats_all")
+      );
     } catch {
       // Informational only, so a failure just hides the bar.
       setReviewStats(null);
@@ -180,15 +222,22 @@ export default function CardsPage() {
 
   // Get next review card
   const loadNextReview = useCallback(async () => {
-    if (!selectedDatasetUuid) return;
     try {
-      const result = await invoke<[Card, CardReview] | null>("card_test_get", {
-        datasetUuid: selectedDatasetUuid,
-      });
-      if (result) {
-        setReviewCard(result[0]);
+      if (selectedDatasetUuid) {
+        // Single-deck session: the source deck is the open one.
+        const result = await invoke<[Card, CardReview] | null>("card_test_get", {
+          datasetUuid: selectedDatasetUuid,
+        });
+        setReviewCard(result ? result[0] : null);
+        setReviewDeckUuid("");
+        setReviewDeckName("");
       } else {
-        setReviewCard(null);
+        // Cross-deck session: the drawn card names its own source deck, which
+        // submitReview must target.
+        const result = await invoke<CrossDeckCard | null>("card_test_get_all");
+        setReviewCard(result ? result.card : null);
+        setReviewDeckUuid(result ? result.dataset_uuid : "");
+        setReviewDeckName(result ? result.dataset_name : "");
       }
       setReviewFlipped(false);
       setReviewResult(null);
@@ -200,7 +249,9 @@ export default function CardsPage() {
   }, [selectedDatasetUuid, loadReviewStats]);
 
   useEffect(() => {
-    if (selectedDatasetUuid && activeTab === "review") {
+    // Review now works at the deck-list root too (cross-deck), so it no longer
+    // requires an open deck — just the review mode.
+    if (activeTab === "review") {
       loadNextReview();
     }
   }, [selectedDatasetUuid, activeTab, loadNextReview]);
@@ -221,10 +272,13 @@ export default function CardsPage() {
 
   // Submit review
   async function submitReview(quality: number) {
-    if (!reviewCard || !selectedDatasetUuid) return;
+    // The deck to rate against: the open deck, or the source deck of a
+    // cross-deck draw.
+    const deckUuid = selectedDatasetUuid || reviewDeckUuid;
+    if (!reviewCard || !deckUuid) return;
     try {
       const result = await invoke<CardReview>("card_test_submit", {
-        datasetUuid: selectedDatasetUuid,
+        datasetUuid: deckUuid,
         cardUuid: reviewCard.uuid,
         quality,
       });
@@ -288,6 +342,16 @@ export default function CardsPage() {
   const selectedDataset = datasets.find((d) => d.info.uuid === selectedDatasetUuid);
   const totalPages = Math.ceil(totalCards / pageSize);
 
+  // Search is a page-level concern (works from the deck-list root and from a
+  // deck's Cards view): the row shows while toggled on and not in Manage; the
+  // cross-deck results replace the normal content when scope is "all".
+  const deckOpen = !!selectedDatasetUuid;
+  // With no deck open there is nothing to filter in-place, so search is
+  // inherently cross-deck — effScope pins to "all" regardless of the toggle.
+  const effScope = deckOpen ? searchScope : "all";
+  const searchActive = searchOpen && !showManage;
+  const showAllResults = searchActive && effScope === "all";
+
   // Familiarity color
   function familiarityColor(f: number) {
     const colors = [
@@ -318,7 +382,7 @@ export default function CardsPage() {
       <nav className="shrink-0 flex items-center justify-start gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
         <button
           className={`shrink-0 text-left ${selectedDatasetUuid ? "cursor-pointer hover:underline text-accent" : "text-text-primary font-medium"}`}
-          onClick={() => { setSelectedDatasetUuid(""); setShowManage(false); }}
+          onClick={() => { setSelectedDatasetUuid(""); setShowManage(false); setSearchScope("deck"); setActiveTab("cards"); }}
         >
           Cards
         </button>
@@ -345,17 +409,20 @@ export default function CardsPage() {
             : `${datasets.length} deck${datasets.length !== 1 ? "s" : ""}`}
         </span>
         <div className="flex-1 min-w-0" />
-        {/* Manage datasets toggle — global (locations + deck list), shown at both
-            the deck-list and deck-detail levels. Active hides the contextual group. */}
-        <button
-          type="button"
-          className={tbToggle(showManage)}
-          title="Manage datasets"
-          aria-label="Manage datasets"
-          onClick={() => setShowManage((v) => !v)}
-        >
-          <FolderCog size={16} />{!mobile && " Manage"}
-        </button>
+        {/* Manage datasets toggle — a root-level concern (locations + deck
+            delete), so it only shows on the deck list, not inside a deck.
+            Active hides the deck-list actions. */}
+        {!selectedDatasetUuid && (
+          <button
+            type="button"
+            className={tbToggle(showManage)}
+            title="Manage datasets"
+            aria-label="Manage datasets"
+            onClick={() => setShowManage((v) => !v)}
+          >
+            <FolderCog size={16} />{!mobile && " Manage"}
+          </button>
+        )}
         {!showManage && (selectedDatasetUuid ? (
           <div className="flex items-center gap-1 shrink-0">
             {TABS.map((t) => (
@@ -373,6 +440,25 @@ export default function CardsPage() {
           </div>
         ) : (
           <>
+            {/* Cross-deck review — reachable from the deck list with no deck open.
+                Toggles back to the deck grid; opening it closes search so the
+                review panel (not the search results) owns the content area. */}
+            <button
+              type="button"
+              className={tbToggle(activeTab === "review")}
+              title="Review cards across all decks"
+              aria-label="Review across all decks"
+              onClick={() => {
+                if (activeTab === "review") {
+                  setActiveTab("cards");
+                } else {
+                  setSearchOpen(false);
+                  setActiveTab("review");
+                }
+              }}
+            >
+              <GraduationCap size={16} />{!mobile && " Review"}
+            </button>
             <button type="button" className={tbGhost} onClick={createDataset} title="Create new dataset">
               <Plus size={14} />{!mobile && " New Deck"}
             </button>
@@ -381,6 +467,21 @@ export default function CardsPage() {
             </button>
           </>
         ))}
+        {/* Search button — present at every level, on the far right: inside a deck
+            it toggles the This-deck / All-decks row, from the deck list it opens a
+            cross-deck search directly. Hidden while Manage owns the content area,
+            so its active state always matches a visible row. */}
+        {!showManage && (
+          <button
+            type="button"
+            className={tbIconToggleSoft(searchOpen)}
+            title={searchOpen ? "Hide search" : "Show search"}
+            aria-label="Toggle search"
+            onClick={toggleSearch}
+          >
+            <Search size={16} />
+          </button>
+        )}
       </div>
 
       {error && (
@@ -389,6 +490,119 @@ export default function CardsPage() {
           <button onClick={() => setError(null)} className="ml-2 underline">
             dismiss
           </button>
+        </div>
+      )}
+
+      {/* Search row — page-level, toggled by the toolbar Search button, so it
+          works both from the deck-list root (always "All decks") and from a
+          deck's Cards view ("This deck" live filter vs cross-deck FTS5). */}
+      {searchActive && (
+        <div className="shrink-0 px-2 py-2 flex flex-wrap items-center gap-2 border-b border-border-default sm:px-6">
+          {deckOpen && (
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                type="button"
+                className={tbToggle(searchScope === "deck")}
+                onClick={() => setSearchScope("deck")}
+              >
+                This deck
+              </button>
+              <button
+                type="button"
+                className={tbToggle(searchScope === "all")}
+                onClick={() => setSearchScope("all")}
+              >
+                All decks
+              </button>
+            </div>
+          )}
+          {effScope === "deck" ? (
+            <>
+              <div className="relative flex-1 max-w-xs">
+                <Search
+                  size={14}
+                  className="absolute left-2 top-1/2 -translate-y-1/2 text-text-tertiary"
+                />
+                <input
+                  type="text"
+                  placeholder="Search this deck..."
+                  value={keyword}
+                  onChange={(e) => {
+                    setKeyword(e.target.value);
+                    setPage(0);
+                  }}
+                  className="w-full pl-7 pr-2 py-1 rounded border border-border-default bg-bg-card text-sm"
+                  autoFocus
+                />
+              </div>
+              <select
+                value={filter}
+                onChange={(e) => {
+                  setFilter(e.target.value as typeof filter);
+                  setPage(0);
+                }}
+                className="px-2 py-1 rounded border border-border-default bg-bg-card text-sm"
+              >
+                <option value="all">All</option>
+                <option value="normal">Normal (familiarity &lt; 6)</option>
+                <option value="easy">Easy (familiarity = 6)</option>
+                <option value="incomplete">Incomplete</option>
+              </select>
+              <button
+                onClick={() => {
+                  openCardEditor(selectedDatasetUuid, null, () => loadCards());
+                }}
+                className="ml-auto px-3 py-1 rounded border border-border-default text-sm hover:bg-mid-gray/20"
+              >
+                <Plus size={14} className="inline mr-1" />
+                Add Card
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="relative flex-1 max-w-md">
+                <Search
+                  size={16}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary"
+                />
+                <input
+                  type="text"
+                  placeholder="Search all datasets... (FTS5)"
+                  value={globalSearchQuery}
+                  onChange={(e) => setGlobalSearchQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleGlobalSearch();
+                  }}
+                  className="w-full pl-9 pr-3 py-2 rounded-lg border border-border-default bg-bg-card text-sm"
+                  autoFocus
+                />
+              </div>
+              <select
+                value={searchMode}
+                onChange={(e) => setSearchMode(e.target.value as "question" | "fulltext")}
+                className="px-3 py-2 rounded-lg border border-border-default bg-bg-card text-sm"
+                title="Search mode"
+              >
+                <option value="fulltext">Full text</option>
+                <option value="question">Questions only</option>
+              </select>
+              <button
+                onClick={handleGlobalSearch}
+                disabled={searching}
+                className="px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 disabled:opacity-50"
+              >
+                {searching ? "Searching..." : "Search"}
+              </button>
+              <button
+                onClick={handleRebuildIndex}
+                disabled={rebuildingIndex}
+                className="px-3 py-2 rounded-lg border border-border-default text-xs hover:bg-mid-gray/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                title={rebuildingIndex ? "Rebuilding index..." : "Rebuild search index"}
+              >
+                <RefreshCw size={14} className={rebuildingIndex ? "animate-spin" : ""} />
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -416,7 +630,76 @@ export default function CardsPage() {
             onError={setError}
           />
         </div>
-      ) : !selectedDatasetUuid ? (
+      ) : showAllResults ? (
+        <div className="flex-1 min-h-0 overflow-y-auto px-2 py-3 sm:px-6">
+          {globalSearchResults.length === 0 ? (
+            <div className="text-center py-12">
+              <Search size={32} className="mx-auto text-text-tertiary mb-3" />
+              <p className="text-text-secondary">
+                {globalSearchQuery ? "No results found." : "Enter a search term to find cards across all datasets."}
+              </p>
+              <p className="text-xs text-text-tertiary mt-2">
+                Supports FTS5 syntax: "word1 word2" (AND), "word1 OR word2" (OR)
+              </p>
+              <button
+                onClick={handleRebuildIndex}
+                disabled={rebuildingIndex}
+                className="mt-4 px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {rebuildingIndex ? "Rebuilding..." : "Rebuild Search Index"}
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xs text-text-tertiary mb-2">
+                {globalSearchResults.length} result{globalSearchResults.length !== 1 ? "s" : ""}
+              </p>
+              {globalSearchResults.map((result) => (
+                <div
+                  key={`${result.dataset_uuid}-${result.card_uuid}`}
+                  className="p-3 rounded-lg border border-border-default bg-bg-card hover:bg-mid-gray/10 cursor-pointer"
+                  onClick={() => {
+                    // Jump into the deck (back to This-deck scope) and open the card
+                    setSelectedDatasetUuid(result.dataset_uuid);
+                    setSearchScope("deck");
+                    invoke<Card>("card_get", {
+                      datasetUuid: result.dataset_uuid,
+                      cardUuid: result.card_uuid,
+                    })
+                      .then((card) => {
+                        openCardEditor(result.dataset_uuid, card, () => {
+                          handleGlobalSearch();
+                        }, undefined, result.dataset_name);
+                      })
+                      .catch((e) => setError(`Failed to load card: ${e}`));
+                  }}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-lg font-medium truncate">
+                        {result.question || "(empty question)"}
+                      </p>
+                      {result.answer && (
+                        <p className="text-sm text-text-secondary truncate mt-1">
+                          {result.answer}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 mt-2 text-xs text-text-tertiary">
+                    <span className="font-medium text-text-secondary">
+                      {result.dataset_name}
+                    </span>
+                    <span className="font-mono text-[10px]">
+                      {result.card_uuid.slice(0, 8)}…
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (!selectedDatasetUuid && activeTab !== "review") ? (
         <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
           {datasets.length === 0 ? (
             <p className="text-text-secondary">No card datasets found. Use "New Deck" to create one.</p>
@@ -430,6 +713,8 @@ export default function CardsPage() {
                     setActiveTab("cards");
                     setPage(0);
                     setShowManage(false);
+                    setKeyword("");
+                    setSearchScope("deck");
                   }}
                   className="text-left p-4 rounded-xl border border-border-default bg-bg-card hover:border-accent-blue/40 transition-colors cursor-pointer flex flex-col gap-1"
                 >
@@ -465,53 +750,13 @@ export default function CardsPage() {
         {/* Cards tab */}
         {activeTab === "cards" && (
           <div className="flex flex-col h-full">
-            {/* Toolbar */}
-            <div className="px-2 py-2 flex flex-wrap items-center gap-2 border-b border-border-default sm:px-6">
-              <div className="relative flex-1 max-w-xs">
-                <Search
-                  size={14}
-                  className="absolute left-2 top-1/2 -translate-y-1/2 text-text-tertiary"
-                />
-                <input
-                  type="text"
-                  placeholder="Search cards..."
-                  value={keyword}
-                  onChange={(e) => {
-                    setKeyword(e.target.value);
-                    setPage(0);
-                  }}
-                  className="w-full pl-7 pr-2 py-1 rounded border border-border-default bg-bg-card text-sm"
-                />
-              </div>
-              <select
-                value={filter}
-                onChange={(e) => {
-                  setFilter(e.target.value as typeof filter);
-                  setPage(0);
-                }}
-                className="px-2 py-1 rounded border border-border-default bg-bg-card text-sm"
-              >
-                <option value="all">All</option>
-                <option value="normal">Normal (familiarity &lt; 6)</option>
-                <option value="easy">Easy (familiarity = 6)</option>
-                <option value="incomplete">Incomplete</option>
-              </select>
-              <button
-                onClick={() => {
-                  openCardEditor(selectedDatasetUuid, null, () => loadCards());
-                }}
-                className="ml-auto px-3 py-1 rounded border border-border-default text-sm hover:bg-mid-gray/20"
-              >
-                <Plus size={14} className="inline mr-1" />
-                Add Card
-              </button>
-            </div>
-
-            {/* Card list */}
+            {/* Card list — the deck's own cards. The page-level search row above
+                drives a live keyword filter over these (This deck) or swaps the
+                content for cross-deck results (All decks). */}
             <div className="flex-1 overflow-y-auto px-2 py-2 sm:px-6">
               {cards.length === 0 ? (
                 <p className="text-text-secondary text-center py-8">
-                  No cards found. Click "Add Card" to create one.
+                  No cards found. Open search to add one.
                 </p>
               ) : (
                 <div className="space-y-1">
@@ -565,127 +810,6 @@ export default function CardsPage() {
                 </div>
               </div>
             )}
-          </div>
-        )}
-
-        {/* Search tab - FTS5 global search */}
-        {activeTab === "search" && (
-          <div className="flex flex-col h-full">
-            {/* Search bar */}
-            <div className="px-2 py-3 flex flex-wrap items-center gap-2 border-b border-border-default sm:px-6">
-              <div className="relative flex-1 max-w-md">
-                <Search
-                  size={16}
-                  className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary"
-                />
-                <input
-                  type="text"
-                  placeholder="Search across all datasets... (FTS5)"
-                  value={globalSearchQuery}
-                  onChange={(e) => setGlobalSearchQuery(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") handleGlobalSearch();
-                  }}
-                  className="w-full pl-9 pr-3 py-2 rounded-lg border border-border-default bg-bg-card text-sm"
-                />
-              </div>
-              <select
-                value={searchMode}
-                onChange={(e) => setSearchMode(e.target.value as "question" | "fulltext")}
-                className="px-3 py-2 rounded-lg border border-border-default bg-bg-card text-sm"
-                title="Search mode"
-              >
-                <option value="fulltext">Full text</option>
-                <option value="question">Questions only</option>
-              </select>
-              <button
-                onClick={handleGlobalSearch}
-                disabled={searching}
-                className="px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 disabled:opacity-50"
-              >
-                {searching ? "Searching..." : "Search"}
-              </button>
-              <button
-                onClick={handleRebuildIndex}
-                disabled={rebuildingIndex}
-                className="px-3 py-2 rounded-lg border border-border-default text-xs hover:bg-mid-gray/20 disabled:opacity-50 disabled:cursor-not-allowed"
-                title={rebuildingIndex ? "Rebuilding index..." : "Rebuild search index"}
-              >
-                <RefreshCw size={14} className={rebuildingIndex ? "animate-spin" : ""} />
-              </button>
-            </div>
-
-            {/* Search results */}
-            <div className="flex-1 overflow-y-auto px-2 py-3 sm:px-6">
-              {globalSearchResults.length === 0 ? (
-                <div className="text-center py-12">
-                  <Search size={32} className="mx-auto text-text-tertiary mb-3" />
-                  <p className="text-text-secondary">
-                    {globalSearchQuery ? "No results found." : "Enter a search term to find cards across all datasets."}
-                  </p>
-                  <p className="text-xs text-text-tertiary mt-2">
-                    Supports FTS5 syntax: "word1 word2" (AND), "word1 OR word2" (OR)
-                  </p>
-                  <button
-                    onClick={handleRebuildIndex}
-                    disabled={rebuildingIndex}
-                    className="mt-4 px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {rebuildingIndex ? "Rebuilding..." : "Rebuild Search Index"}
-                  </button>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <p className="text-xs text-text-tertiary mb-2">
-                    {globalSearchResults.length} result{globalSearchResults.length !== 1 ? "s" : ""}
-                  </p>
-                  {globalSearchResults.map((result) => (
-                    <div
-                      key={`${result.dataset_uuid}-${result.card_uuid}`}
-                      className="p-3 rounded-lg border border-border-default bg-bg-card hover:bg-mid-gray/10 cursor-pointer"
-                      onClick={() => {
-                        // Switch to the dataset and open the card editor
-                        setSelectedDatasetUuid(result.dataset_uuid);
-                        setActiveTab("cards");
-                        // Load the card and open editor
-                        invoke<Card>("card_get", {
-                          datasetUuid: result.dataset_uuid,
-                          cardUuid: result.card_uuid,
-                        })
-                          .then((card) => {
-                            openCardEditor(result.dataset_uuid, card, () => {
-                              // Refresh search after edit
-                              handleGlobalSearch();
-                            }, undefined, result.dataset_name);
-                          })
-                          .catch((e) => setError(`Failed to load card: ${e}`));
-                      }}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex-1 min-w-0">
-                          <p className="text-lg font-medium truncate">
-                            {result.question || "(empty question)"}
-                          </p>
-                          {result.answer && (
-                            <p className="text-sm text-text-secondary truncate mt-1">
-                              {result.answer}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-3 mt-2 text-xs text-text-tertiary">
-                        <span className="font-medium text-text-secondary">
-                          {result.dataset_name}
-                        </span>
-                        <span className="font-mono text-[10px]">
-                          {result.card_uuid.slice(0, 8)}…
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
           </div>
         )}
 
@@ -763,6 +887,16 @@ export default function CardsPage() {
                   </div>
                 </div>
 
+                {/* In a cross-deck session (no single deck open) name the source
+                    deck, so it is clear where this card came from and where the
+                    rating is recorded. */}
+                {!selectedDatasetUuid && reviewDeckName && (
+                  <div className="mb-2 flex items-center gap-1.5 text-xs text-text-tertiary">
+                    <Layers size={12} className="shrink-0" />
+                    <span className="truncate">{reviewDeckName}</span>
+                  </div>
+                )}
+
                 {/* Card display. Deliberately not clickable: dragging to select part of
                     a question or answer must not flip the card over, so the side switch
                     lives on the buttons above. No `max-h`/`overflow-y-auto` here — the
@@ -810,11 +944,11 @@ export default function CardsPage() {
                   </div>
                 )}
 
-                <ReviewQueueBar stats={reviewStats} />
+                <ReviewQueueBar stats={reviewStats} allDecks={!selectedDatasetUuid} />
               </div>
             ) : (
               <div className="text-center">
-                <ReviewQueueBar stats={reviewStats} />
+                <ReviewQueueBar stats={reviewStats} allDecks={!selectedDatasetUuid} />
                 <p className="text-text-secondary text-lg mb-4">
                   No cards to review!
                 </p>
@@ -1233,16 +1367,19 @@ function IconLabel({ children }: { children: ReactNode }) {
  * count beside a small "due" count is not missing data — it is a queue that needs the
  * overdue cards answered first. Saying so here keeps that from looking like a bug.
  */
-function ReviewQueueBar({ stats }: { stats: CardTestStats | null }) {
+function ReviewQueueBar({ stats, allDecks }: { stats: CardTestStats | null; allDecks?: boolean }) {
   if (!stats) return null;
 
+  // The counts describe one deck's queue inside a deck, or the aggregate across
+  // every deck in a root-level cross-deck session — the hint wording follows.
+  const where = allDecks ? "across all your decks" : "in this dataset";
   let hint: string | null = null;
   if (stats.due > 0 && stats.fresh > 0) {
-    hint = `${stats.fresh} ${plural(stats.fresh, "card is", "cards are")} waiting to learn in this dataset, but the ${stats.due} overdue ${plural(stats.due, "card goes", "cards go")} first — rate this one to bring the next forward.`;
+    hint = `${stats.fresh} ${plural(stats.fresh, "card is", "cards are")} waiting to learn ${where}, but the ${stats.due} overdue ${plural(stats.due, "card goes", "cards go")} first — rate this one to bring the next forward.`;
   } else if (stats.fresh > 0) {
-    hint = `${stats.fresh} ${plural(stats.fresh, "card is", "cards are")} waiting to learn in this dataset — answer this one to get the next.`;
+    hint = `${stats.fresh} ${plural(stats.fresh, "card is", "cards are")} waiting to learn ${where} — answer this one to get the next.`;
   } else if (stats.due > 0) {
-    hint = `No new cards left here — only the ${stats.due} overdue ${plural(stats.due, "one remains", "ones remain")}.`;
+    hint = `No new cards left ${allDecks ? "anywhere" : "here"} — only the ${stats.due} overdue ${plural(stats.due, "one remains", "ones remain")}.`;
   }
 
   return (

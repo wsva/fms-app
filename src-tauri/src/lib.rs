@@ -364,6 +364,8 @@ pub fn run() {
             // Card review (SM-2)
             datasets::cards::card_test_get,
             datasets::cards::card_test_stats,
+            datasets::cards::card_test_get_all,
+            datasets::cards::card_test_stats_all,
             datasets::cards::card_test_submit,
             // Card sync
             datasets::cards::card_sync_status,
@@ -752,6 +754,8 @@ macro_rules! mobile_invoke_handler {
             datasets::cards::card_get_tags,
             datasets::cards::card_test_get,
             datasets::cards::card_test_stats,
+            datasets::cards::card_test_get_all,
+            datasets::cards::card_test_stats_all,
             datasets::cards::card_test_submit,
             datasets::cards::card_sync_status,
             datasets::cards::card_sync_get_changes,
