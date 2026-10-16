@@ -26,6 +26,9 @@ import {
   FolderOpen,
   FolderPlus,
   MapPin,
+  Layers,
+  GraduationCap,
+  FolderCog,
 } from "lucide-react";
 import type {
   CardDatasetSummary,
@@ -35,10 +38,20 @@ import type {
   CardTestStats,
 } from "@/lib/types";
 import { isMobileApp } from "@/lib/platform";
+import { tbGhost, tbToggle } from "@/lib/ui/toolbar";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import { useCardEditor } from "./CardEditorContext";
 
-type TabId = "cards" | "search" | "review" | "tags" | "advanced";
+type TabId = "cards" | "search" | "review" | "tags";
+
+// Detail-view toolbar modes, rendered as toggle buttons on the toolbar right
+// (active = solid accent), mirroring ReadBook's Manage/Advanced mode group.
+const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
+  { id: "cards", label: "Cards", icon: <Layers size={16} /> },
+  { id: "search", label: "Search", icon: <Search size={16} /> },
+  { id: "review", label: "Review", icon: <GraduationCap size={16} /> },
+  { id: "tags", label: "Tags", icon: <Tag size={16} /> },
+];
 
 export default function CardsPage() {
   // Dataset state
@@ -56,6 +69,10 @@ export default function CardsPage() {
 
   // Active tab
   const [activeTab, setActiveTab] = useState<TabId>("cards");
+
+  // Toolbar "Manage" mode: shows dataset + location management (the former
+  // Advanced view) as an overlay, reachable from both the deck list and a deck.
+  const [showManage, setShowManage] = useState(false);
 
   // Use global card editor
   const { openCardEditor } = useCardEditor();
@@ -81,21 +98,24 @@ export default function CardsPage() {
   // Error display
   const [error, setError] = useState<string | null>(null);
 
+  // Deferred platform flag (SSR-safe) for collapsing toolbar button labels on mobile.
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    setMobile(isMobileApp());
+  }, []);
+
   // Load datasets on mount
   const loadDatasets = useCallback(async () => {
     try {
       setLoading(true);
       const result = await invoke<CardDatasetSummary[]>("card_dataset_list");
       setDatasets(result);
-      if (result.length > 0 && !selectedDatasetUuid) {
-        setSelectedDatasetUuid(result[0].info.uuid);
-      }
     } catch (e) {
       setError(`Failed to load datasets: ${e}`);
     } finally {
       setLoading(false);
     }
-  }, [selectedDatasetUuid]);
+  }, []);
 
   useEffect(() => {
     loadDatasets();
@@ -291,71 +311,76 @@ export default function CardsPage() {
   }
 
   return (
-    <main className="flex-1 flex flex-col min-h-0 min-w-0">
-      {/* Header */}
-      <div className="px-2 pt-3 pb-2 border-b border-border-default sm:px-6 sm:pt-4">
-        <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-4">
-          <h1 className="text-[1.5em] font-bold">Cards</h1>
-          <div className="flex items-center gap-2">
-            <select
-              value={selectedDatasetUuid}
-              onChange={(e) => {
-                setSelectedDatasetUuid(e.target.value);
-                setPage(0);
-              }}
-              className="max-w-[50vw] truncate px-3 py-1.5 rounded-lg border border-border-default bg-bg-card text-sm"
-            >
-              {datasets.map((ds) => (
-                <option key={ds.info.uuid} value={ds.info.uuid}>
-                  {ds.info.name} ({ds.card_count})
-                </option>
-              ))}
-            </select>
-            <button
-              onClick={createDataset}
-              className="p-1.5 rounded-lg border border-border-default hover:bg-mid-gray/20"
-              title="Create new dataset"
-            >
-              <Plus size={16} />
-            </button>
-            <button
-              onClick={loadDatasets}
-              className="p-1.5 rounded-lg border border-border-default hover:bg-mid-gray/20"
-              title="Refresh datasets"
-            >
-              <RefreshCw size={16} />
-            </button>
-          </div>
-        </div>
-
-        {/* Dataset info */}
+    <main className="flex-1 flex flex-col min-h-0 min-w-0 bg-bg-body">
+      {/* Breadcrumb navigation — wiki/dictation-style full-width bar above the
+          toolbar: Cards › <deck> trail. The root "Cards" crumb is the dataset list;
+          it becomes a link back to the list once a deck is open. */}
+      <nav className="shrink-0 flex items-center justify-start gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
+        <button
+          className={`shrink-0 text-left ${selectedDatasetUuid ? "cursor-pointer hover:underline text-accent" : "text-text-primary font-medium"}`}
+          onClick={() => { setSelectedDatasetUuid(""); setShowManage(false); }}
+        >
+          Cards
+        </button>
         {selectedDataset && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-xs text-text-secondary">
-            <span>{selectedDataset.info.sharing.visibility}</span>
-            <span>{selectedDataset.card_count} cards</span>
-          </div>
-        )}
-
-        {/* Tabs */}
-        <div className="flex gap-0.5 mt-3 overflow-x-auto sm:gap-1">
-          {(["cards", "search", "review", "tags", "advanced"] as TabId[]).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`shrink-0 whitespace-nowrap px-2.5 py-1 rounded-t-lg text-xs transition-colors sm:px-4 sm:py-1.5 sm:text-sm ${
-                activeTab === tab
-                  ? "bg-bg-card text-text-primary border-b-2 border-accent-blue"
-                  : "text-text-secondary hover:text-text-primary"
-              }`}
+          <>
+            <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+            <span
+              className="text-text-primary font-medium truncate min-w-0 flex-1 text-left"
+              title={selectedDataset.info.name}
             >
-              {tab === "cards" && "Cards"}
-              {tab === "search" && "Search"}
-              {tab === "review" && "Review"}
-              {tab === "tags" && "Tags"}
-              {tab === "advanced" && "Advanced"}
+              {selectedDataset.info.name}
+            </span>
+          </>
+        )}
+      </nav>
+
+      {/* Toolbar — deck-level info on the left, actions on the right (Wiki-style
+          full-width bar under the breadcrumb): the Manage toggle plus either the
+          mode toggles (in a deck) or the deck-list actions. */}
+      <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card">
+        <span className="text-xs text-text-secondary truncate min-w-0">
+          {selectedDataset
+            ? `${selectedDataset.info.sharing.visibility} · ${selectedDataset.card_count} cards`
+            : `${datasets.length} deck${datasets.length !== 1 ? "s" : ""}`}
+        </span>
+        <div className="flex-1 min-w-0" />
+        {/* Manage datasets toggle — global (locations + deck list), shown at both
+            the deck-list and deck-detail levels. Active hides the contextual group. */}
+        <button
+          type="button"
+          className={tbToggle(showManage)}
+          title="Manage datasets"
+          aria-label="Manage datasets"
+          onClick={() => setShowManage((v) => !v)}
+        >
+          <FolderCog size={16} />{!mobile && " Manage"}
+        </button>
+        {!showManage && (selectedDatasetUuid ? (
+          <div className="flex items-center gap-1 shrink-0">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                className={tbToggle(activeTab === t.id)}
+                title={t.label}
+                aria-label={t.label}
+                onClick={() => setActiveTab(t.id)}
+              >
+                {t.icon}{!mobile && ` ${t.label}`}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <>
+            <button type="button" className={tbGhost} onClick={createDataset} title="Create new dataset">
+              <Plus size={14} />{!mobile && " New Deck"}
             </button>
-          ))}
-        </div>
+            <button type="button" className={tbGhost} onClick={loadDatasets} title="Refresh datasets">
+              <RefreshCw size={14} />{!mobile && " Refresh"}
+            </button>
+          </>
+        ))}
       </div>
 
       {error && (
@@ -367,8 +392,76 @@ export default function CardsPage() {
         </div>
       )}
 
-      {/* Tab content */}
-      <div className="flex-1 min-h-0 overflow-hidden">
+      {/* Manage overlay (dataset + location management, the former Advanced view)
+          when the toolbar Manage toggle is on; otherwise the dataset list (no deck
+          selected) or the deck detail. */}
+      {showManage ? (
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <ManageView
+            dataset={selectedDataset}
+            selectedDatasetUuid={selectedDatasetUuid}
+            allDatasets={datasets}
+            onDeleteDataset={async (uuid: string) => {
+              try {
+                await invoke("card_dataset_delete", { uuid });
+                setDatasets((prev) => prev.filter((d) => d.info.uuid !== uuid));
+                if (uuid === selectedDatasetUuid) {
+                  setSelectedDatasetUuid("");
+                }
+              } catch (e) {
+                setError(`Failed to delete dataset: ${e}`);
+              }
+            }}
+            onRefresh={loadDatasets}
+            onError={setError}
+          />
+        </div>
+      ) : !selectedDatasetUuid ? (
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
+          {datasets.length === 0 ? (
+            <p className="text-text-secondary">No card datasets found. Use "New Deck" to create one.</p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {datasets.map((ds) => (
+                <button
+                  key={ds.info.uuid}
+                  onClick={() => {
+                    setSelectedDatasetUuid(ds.info.uuid);
+                    setActiveTab("cards");
+                    setPage(0);
+                    setShowManage(false);
+                  }}
+                  className="text-left p-4 rounded-xl border border-border-default bg-bg-card hover:border-accent-blue/40 transition-colors cursor-pointer flex flex-col gap-1"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold truncate">{ds.info.name}</span>
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${
+                        ds.info.sharing.visibility === "public"
+                          ? "bg-green-500/10 text-green-600"
+                          : ds.info.sharing.visibility === "shared"
+                            ? "bg-amber-500/10 text-amber-600"
+                            : "bg-mid-gray/20 text-text-tertiary"
+                      }`}
+                    >
+                      {ds.info.sharing.visibility}
+                    </span>
+                  </div>
+                  {ds.info.description && (
+                    <p className="text-xs text-text-secondary line-clamp-2">{ds.info.description}</p>
+                  )}
+                  <span className="text-xs text-text-tertiary">
+                    {ds.card_count} card{ds.card_count !== 1 ? "s" : ""}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          {/* Tab content */}
+          <div className="flex-1 min-h-0 overflow-hidden">
         {/* Cards tab */}
         {activeTab === "cards" && (
           <div className="flex flex-col h-full">
@@ -803,35 +896,16 @@ export default function CardsPage() {
           </div>
         )}
 
-        {/* Advanced tab */}
-        {activeTab === "advanced" && (
-          <AdvancedTab
-            dataset={selectedDataset}
-            selectedDatasetUuid={selectedDatasetUuid}
-            allDatasets={datasets}
-            onDeleteDataset={async (uuid: string) => {
-              try {
-                await invoke("card_dataset_delete", { uuid });
-                setDatasets((prev) => prev.filter((d) => d.info.uuid !== uuid));
-                if (uuid === selectedDatasetUuid) {
-                  setSelectedDatasetUuid("");
-                }
-              } catch (e) {
-                setError(`Failed to delete dataset: ${e}`);
-              }
-            }}
-            onRefresh={loadDatasets}
-            onError={setError}
-          />
-        )}
-      </div>
+          </div>
+        </>
+      )}
     </main>
   );
 }
 
-// ── Advanced Tab ────────────────────────────────────────────────────────────
+// ── Manage View (dataset + location management) ─────────────────────────────
 
-function AdvancedTab({
+function ManageView({
   dataset,
   selectedDatasetUuid,
   allDatasets,
@@ -1049,7 +1123,7 @@ function AdvancedTab({
   );
 }
 
-// ── Dataset Card (for Advanced tab) ──────────────────────────────────────────
+// ── Dataset Card (for Manage view) ─────────────────────────────────────────
 
 function DatasetCard({
   dataset,
