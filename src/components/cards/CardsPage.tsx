@@ -471,7 +471,32 @@ export default function CardsPage() {
             : `${datasets.length} deck${datasets.length !== 1 ? "s" : ""}`}
         </span>
         <div className="flex-1 min-w-0" />
-        {!showManage && (selectedDatasetUuid ? (
+        {!showManage && (activeTab === "review" ? (
+          <>
+            {/* The review page's card-level actions live here. Its own mode toggles
+                and deck-list actions are hidden while it owns the screen, so the
+                grade scale in the panel below is the only decision left in view. */}
+            <button
+              type="button"
+              className={tbGhost}
+              disabled={!reviewCard}
+              onClick={() => setReviewFlipped((v) => !v)}
+              title={reviewFlipped ? "Show question (Space)" : "Show answer (Space)"}
+              aria-label={reviewFlipped ? "Show question" : "Show answer"}
+            >
+              <FlipHorizontal size={14} />{!mobile && ` ${reviewFlipped ? "Question" : "Answer"}`}
+            </button>
+            <button
+              type="button"
+              className={tbGhost}
+              onClick={loadNextReview}
+              title="Skip this card (S)"
+              aria-label="Skip this card"
+            >
+              <SkipForward size={14} />{!mobile && " Skip"}
+            </button>
+          </>
+        ) : selectedDatasetUuid ? (
           <>
             <div className="flex items-center gap-1 shrink-0">
               {TABS.map((t) => (
@@ -508,23 +533,19 @@ export default function CardsPage() {
         ) : (
           <>
             {/* Cross-deck review — reachable from the deck list with no deck open.
-                Toggles back to the deck grid; opening it closes search so the
-                review panel (not the search results) owns the content area. */}
+                Shown only while the review page does NOT own the screen (the
+                review toolbar carries Answer/Skip alone); the breadcrumb's Cards
+                crumb is the way back. Opening it closes search so the review
+                panel (not the search results) owns the content area. */}
             <button
               type="button"
-              className={tbToggle(activeTab === "review")}
+              className={tbGhost}
               title="Review cards across all decks"
               aria-label="Review across all decks"
               onClick={() => {
-                if (activeTab === "review") {
-                  setActiveTab("cards");
-                } else {
-                  // This button means "review across all decks", so it starts the
-                  // session unscoped rather than keeping a previous deck filter.
-                  setSearchOpen(false);
-                  setReviewScope("");
-                  setActiveTab("review");
-                }
+                setSearchOpen(false);
+                setReviewScope("");
+                setActiveTab("review");
               }}
             >
               <GraduationCap size={16} />{!mobile && " Review"}
@@ -537,12 +558,13 @@ export default function CardsPage() {
             </button>
           </>
         ))}
-        {/* Search button — present at every level, on the far right (just before
-            the overflow menu): inside a deck it toggles the This-deck / All-decks
-            row, from the deck list it opens a cross-deck search directly. Hidden
-            while the Locations overlay owns the content area, so its active state
-            always matches a visible row. */}
-        {!showManage && (
+        {/* Search button — present at every level but Review, on the far right
+            (just before the overflow menu): inside a deck it toggles the
+            This-deck / All-decks row, from the deck list it opens a cross-deck
+            search directly. Hidden while the Locations overlay or the review page
+            owns the content area — the review toolbar shows only Answer/Skip — so
+            its active state always matches a visible row. */}
+        {!showManage && activeTab !== "review" && (
           <button
             type="button"
             className={tbIconToggleSoft(searchOpen)}
@@ -555,9 +577,10 @@ export default function CardsPage() {
         )}
         {/* Overflow menu — the three-dot home for occasional actions. Locations
             (the former Manage toggle) lives here: it is a root-level concern, so
-            the menu is shown on the deck list only, same as the button it
-            replaced. Active state marks the overlay it is currently owning. */}
-        {!selectedDatasetUuid && (
+            the menu is shown on the deck list only — never inside a deck, nor on
+            the review page, which keeps its toolbar to card actions alone. Active
+            state marks the overlay it is currently owning. */}
+        {!selectedDatasetUuid && activeTab !== "review" && (
           <div className="relative shrink-0">
             <button
               type="button"
@@ -911,97 +934,68 @@ export default function CardsPage() {
             down every time the answer is revealed or a longer card is drawn. */}
         {activeTab === "review" && (
           <div className="h-full overflow-y-auto p-3 sm:p-6">
-            {/* Scope selector — the deck this session draws from, "All decks" by
-                default. A filter on the session rather than navigation, so picking
-                a deck here does not open it. It sits above the grading toolbar in
-                both the card and the empty branch, so it is always the first thing
-                on the review page. */}
-            <div className="mb-3 flex items-center gap-2">
-              <Layers size={14} className="shrink-0 text-text-tertiary" />
-              <label htmlFor="review-scope" className="sr-only">
-                Review dataset
-              </label>
-              <select
-                id="review-scope"
-                value={reviewScope}
-                onChange={(e) => setReviewScope(e.target.value)}
-                className="min-w-0 max-w-xs rounded-lg border border-border-default bg-bg-card px-2 py-1.5 text-sm hover:bg-mid-gray/20"
-              >
-                <option value="">All decks</option>
-                {datasets.map((ds) => (
-                  <option key={ds.info.uuid} value={ds.info.uuid}>
-                    {ds.info.name}
-                  </option>
-                ))}
-              </select>
+            {/* One sticky block tops the review page: the scope selector, then the
+                grade scale while a card is drawn. Sticky so the grade buttons stay
+                reachable while a long answer scrolls (the same `sticky top-0 z-10
+                bg-bg-body` idiom the dictation toolbar uses). The negative margins
+                pull the block over the panel's own padding and its padding puts that
+                space back, so the opaque background covers the gutters and the top
+                edge too and no text peeks around it. */}
+            <div className="sticky top-0 z-10 -mx-3 -mt-3 bg-bg-body px-3 pb-4 pt-3 sm:-mx-6 sm:-mt-6 sm:px-6 sm:pt-6">
+              {/* Scope selector — the deck this session draws from, "All decks" by
+                  default. A filter on the session rather than navigation, so picking
+                  a deck here does not open it. */}
+              <div className="mb-3 flex items-center gap-2">
+                <Layers size={14} className="shrink-0 text-text-tertiary" />
+                <label htmlFor="review-scope" className="sr-only">
+                  Review dataset
+                </label>
+                <select
+                  id="review-scope"
+                  value={reviewScope}
+                  onChange={(e) => setReviewScope(e.target.value)}
+                  className="min-w-0 max-w-xs rounded-lg border border-border-default bg-bg-card px-2 py-1.5 text-sm hover:bg-mid-gray/20"
+                >
+                  <option value="">All decks</option>
+                  {datasets.map((ds) => (
+                    <option key={ds.info.uuid} value={ds.info.uuid}>
+                      {ds.info.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {/* The grade scale alone, dead-centre on its row. Ratings are always on
+                  screen, so a card can be graded from its question and nothing shifts
+                  when the answer appears. Answer and Skip moved up into the page
+                  toolbar, so nothing else shares this row. */}
+              {reviewCard && (
+                <div className="flex flex-wrap justify-center gap-2">
+                  {/* Icon + label on desktop, icon only below `sm` (see `IconLabel`),
+                      so the scale still fits a phone. The tint and left-to-right order
+                      carry the progression; the face on top names it. */}
+                  {[
+                    { q: 1, label: "Forgot", color: "bg-red-500", Icon: CircleHelp },
+                    { q: 2, label: "Hard", color: "bg-orange-500", Icon: Frown },
+                    { q: 3, label: "Okay", color: "bg-amber-500", Icon: Meh },
+                    { q: 4, label: "Good", color: "bg-cyan-500", Icon: Smile },
+                    { q: 5, label: "Easy", color: "bg-green-500", Icon: Laugh },
+                  ].map((btn) => (
+                    <button
+                      key={btn.q}
+                      onClick={() => submitReview(btn.q)}
+                      title={`${btn.label} (${btn.q})`}
+                      aria-label={btn.label}
+                      className={`flex items-center gap-1.5 px-4 py-2 min-h-11 sm:min-h-0 rounded-lg border border-border-default ${btn.color} text-sm hover:opacity-90`}
+                    >
+                      <btn.Icon size={14} />
+                      <IconLabel>{btn.label}</IconLabel>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             {reviewCard ? (
               <div className="w-full">
-                {/* Desktop: one toolbar row, the grade scale dead-centre, the card-level
-                    actions pinned to the far end. The empty flank keeps the scale centred on the
-                    row rather than centred in whatever the actions leave over. Ratings are
-                    always on screen, so a card can be graded from its question and nothing
-                    shifts when the answer appears.
-                    Below `sm` the cells stack full width and `order` puts the actions on the
-                    first line, flush right, with the grade scale centred under them — card
-                    level controls above the grading decision, which is the order a thumb
-                    reaches for them on a phone. `items-start` keeps both groups on their top
-                    edge, so a wrapped scale cannot push the actions up and down.
-                    Sticky, so the grade buttons stay reachable while a long answer scrolls
-                    (the same `sticky top-0 z-10 bg-bg-body` idiom the dictation toolbar
-                    uses). The negative horizontal margins pull the bar over the panel's own
-                    padding and its padding puts that space back, so the opaque background
-                    covers the gutters too and no text peeks around the edges. */}
-                <div className="sticky top-0 z-10 -mx-3 grid grid-cols-1 items-start gap-2 bg-bg-body px-3 pb-4 pt-3 sm:-mx-6 sm:grid-cols-[1fr_auto_1fr] sm:gap-4 sm:px-6 sm:pt-6">
-                  {/* Left flank exists only to balance the 3-column grid on desktop. Hidden
-                      below `sm`, where it would take up a stacked line. */}
-                  <div className="hidden sm:order-1 sm:block" />
-
-                  <div className="order-2 flex flex-wrap justify-center gap-2">
-                    {/* Icon + label on desktop, icon only below `sm` (see `IconLabel`),
-                        so the scale still fits a phone. The tint and left-to-right order
-                        carry the progression; the face on top names it. */}
-                    {[
-                      { q: 1, label: "Forgot", color: "bg-red-500", Icon: CircleHelp },
-                      { q: 2, label: "Hard", color: "bg-orange-500", Icon: Frown },
-                      { q: 3, label: "Okay", color: "bg-amber-500", Icon: Meh },
-                      { q: 4, label: "Good", color: "bg-cyan-500", Icon: Smile },
-                      { q: 5, label: "Easy", color: "bg-green-500", Icon: Laugh },
-                    ].map((btn) => (
-                      <button
-                        key={btn.q}
-                        onClick={() => submitReview(btn.q)}
-                        title={`${btn.label} (${btn.q})`}
-                        aria-label={btn.label}
-                        className={`flex items-center gap-1.5 px-4 py-2 min-h-11 sm:min-h-0 rounded-lg border border-border-default ${btn.color} text-sm hover:opacity-90`}
-                      >
-                        <btn.Icon size={14} />
-                        <IconLabel>{btn.label}</IconLabel>
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="order-1 flex items-center justify-end gap-2 sm:order-3">
-                    <button
-                      onClick={() => setReviewFlipped(!reviewFlipped)}
-                      title={reviewFlipped ? "Show question (Space)" : "Show answer (Space)"}
-                      aria-label={reviewFlipped ? "Show question" : "Show answer"}
-                      className="flex items-center gap-1.5 px-4 py-2 min-h-11 sm:min-h-0 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20"
-                    >
-                      <FlipHorizontal size={14} />
-                      <IconLabel>{reviewFlipped ? "Question" : "Answer"}</IconLabel>
-                    </button>
-                    <button
-                      onClick={loadNextReview}
-                      title="Skip this card (S)"
-                      aria-label="Skip this card"
-                      className="flex items-center gap-1.5 px-4 py-2 min-h-11 sm:min-h-0 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20"
-                    >
-                      <SkipForward size={14} />
-                      <IconLabel>Skip</IconLabel>
-                    </button>
-                  </div>
-                </div>
 
                 {/* In an all-decks session (no single deck scoped) name the source
                     deck, so it is clear where this card came from and where the
