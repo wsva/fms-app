@@ -15,7 +15,12 @@ import { insertAround, insertAtLineStart } from "./mdEditorInserts";
 import MarkdownViewer from "./markdown/markdown";
 import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
-import { tbGhost, tbDanger, tbSolid, tbToggle, tbToggleSoft, tbIcon, tbIconToggleSoft } from "@/lib/ui/toolbar";
+import {
+  Toolbar,
+  Breadcrumb,
+  ToolbarButton,
+  ToolbarIconButton,
+} from "@/components/ui/toolbar";
 import {
   WikiDatasetSummary, HubWikiList, Selection, WikiSource, WikiFileEntry,
   WikiFileContent, selectionKey,
@@ -822,7 +827,7 @@ export default function WikiPage() {
           <div className="flex-1 flex flex-col min-h-0 min-w-0">
             {/* Breadcrumb navigation — mirrors the dictation page's
                 Wiki › dataset › directory › file trail. */}
-            <nav className="shrink-0 flex items-center gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
+            <Breadcrumb>
               <button
                 className={`shrink-0 cursor-pointer hover:underline ${viewMode === "datasets" ? "text-text-primary font-medium" : "text-accent"}`}
                 onClick={goDatasets}
@@ -831,7 +836,7 @@ export default function WikiPage() {
               </button>
               {activeDatasetUuid && (
                 <>
-                  <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                  <Breadcrumb.Sep />
                   <button
                     className={`cursor-pointer hover:underline truncate min-w-0 max-w-[240px] ${viewMode === "file" || currentDirSegments.length > 0 ? "text-accent" : "text-text-primary font-medium"}`}
                     onClick={() => goToDatasetDir(activeDatasetUuid, "")}
@@ -846,7 +851,7 @@ export default function WikiPage() {
                 const path = currentDirSegments.slice(0, i + 1).join("/");
                 return (
                   <span key={path} className="flex items-center gap-2 min-w-0 shrink-0">
-                    <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                    <Breadcrumb.Sep />
                     {isLastDir ? (
                       <span className="text-text-primary font-medium truncate max-w-[240px]" title={seg}>{seg}</span>
                     ) : (
@@ -863,211 +868,208 @@ export default function WikiPage() {
               })}
               {viewMode === "file" && (
                 <>
-                  <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                  <Breadcrumb.Sep />
                   <span className="text-text-primary font-medium truncate min-w-0 max-w-[320px]" title={headerLabel}>
                     {headerLabel}
                   </span>
                 </>
               )}
-            </nav>
+            </Breadcrumb>
 
             {/* Shared sub-toolbar: always shown under the breadcrumb, whether
                 viewing the dataset list, a dataset's directory, or a file.
                 Left side carries the old top-bar controls (Back / Forward /
                 Search toggle / Hub browse); right side keeps the contextual
                 file/dataset actions. */}
-            <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card">
+            <Toolbar mobile={mobile}>
               <div className="flex items-center gap-1 shrink-0">
-                <button
+                <ToolbarIconButton
+                  icon={ArrowLeft}
                   onClick={goBack}
                   disabled={historyIndex <= 0 || editing}
-                  className={tbIcon}
                   title="Back (Alt+Left)"
-                >
-                  <ArrowLeft size={16} />
-                </button>
-                <button
+                  ariaLabel="Back"
+                />
+                <ToolbarIconButton
+                  icon={ArrowRight}
                   onClick={goForward}
                   disabled={historyIndex >= history.length - 1 || editing}
-                  className={tbIcon}
                   title="Forward (Alt+Right)"
-                >
-                  <ArrowRight size={16} />
-                </button>
-                <button
+                  ariaLabel="Forward"
+                />
+                <ToolbarIconButton
+                  icon={Search}
+                  variant="toggleSoft"
+                  active={searchOpen}
                   onClick={() => setSearchOpen((v) => !v)}
-                  className={tbIconToggleSoft(searchOpen)}
                   title={searchOpen ? "Hide search" : "Show search"}
-                >
-                  <Search size={16} />
-                </button>
+                  ariaLabel="Search"
+                />
               </div>
 
               {/* Hub browse toggle — read-only view of the paired hub's wiki.
                   Hidden for the hub itself (it already sees everything locally). */}
               {!isHub && (
-                <button
+                <ToolbarButton
+                  variant="toggle"
+                  active={hubMode}
+                  icon={Cloud}
+                  label={hubMode ? "Local" : "Hub"}
+                  className="shrink-0"
                   onClick={toggleHubMode}
-                  className={`${tbToggle(hubMode)} shrink-0`}
                   title={hubMode ? "Leave hub browse" : "Browse the hub's wiki (read-only)"}
-                >
-                  <Cloud size={14} />
-                  <span>{hubMode ? "Local" : "Hub"}</span>
-                </button>
+                />
               )}
 
               <div className="text-xs text-text-tertiary truncate flex-1 min-w-0">{toolbarLabel}</div>
 
               {viewMode === "file" && hubSrc && (
-                <button
+                <ToolbarButton
+                  variant="solid"
+                  icon={Download}
+                  label="Download"
                   onClick={() => handleDownload(hubSrc.uuid, hubSrc.rel)}
                   disabled={isLoading}
-                  className={tbSolid}
                   title="Download this dataset to edit locally"
-                >
-                  <Download size={14} /> Download
-                </button>
+                />
               )}
 
               {viewMode === "file" && canEdit && !editing && (
-                <button
+                <ToolbarButton
+                  icon={Pencil}
+                  label="Edit"
                   onClick={startEdit}
-                  className={tbGhost}
                   title="Edit this file"
-                >
-                  <Pencil size={14} /> Edit
-                </button>
+                />
               )}
 
               {viewMode === "file" && canEdit && !editing && (
-                <button
+                <ToolbarButton
+                  variant="danger"
+                  icon={Trash2}
+                  label="Delete"
                   onClick={handleDeleteCurrentFile}
-                  className={tbDanger}
                   title="Delete this file (moves to trash)"
-                >
-                  <Trash2 size={14} /> Delete
-                </button>
+                />
               )}
 
               {viewMode === "file" && canEdit && editing && (
                 <>
-                  <button
+                  <ToolbarButton
+                    variant="toggle"
+                    active={mdDirty}
+                    icon={Save}
+                    label={saving ? "Saving..." : "Save"}
                     onClick={() => void handleSave()}
                     disabled={saving || !mdDirty}
-                    className={tbToggle(mdDirty)}
                     title="Save this file (Ctrl+S)"
-                  >
-                    <Save size={14} /> {saving ? "Saving..." : "Save"}
-                  </button>
+                  />
                   {draftRestored && (
                     <span className="flex items-center gap-2 text-xs text-warning-text select-none">
                       Restored unsaved draft
-                      <button
+                      <ToolbarButton
+                        variant="ghost"
+                        label="Revert to saved"
                         onClick={discardDraft}
-                        className="px-2 py-0.5 rounded-md border border-border-default text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
                         title="Discard the draft and edit the saved file instead"
-                      >
-                        Revert to saved
-                      </button>
+                      />
                     </span>
                   )}
-                  <button
+                  <ToolbarButton
+                    variant="toggleSoft"
+                    active={mdToolsOpen}
+                    label="Tools"
                     onClick={() => setMdToolsOpen((v) => !v)}
-                    className={tbToggleSoft(mdToolsOpen)}
                     title="Toggle symbols/format toolbar"
-                  >
-                    Tools
-                  </button>
-                  <button
+                  />
+                  <ToolbarButton
+                    variant="toggleSoft"
+                    active={mdSpellCheck}
+                    label="ABC"
                     onClick={() => setMdSpellCheck((v) => !v)}
-                    className={tbToggleSoft(mdSpellCheck)}
                     title={mdSpellCheck ? "Disable spell check" : "Enable spell check"}
-                  >
-                    ABC
-                  </button>
-                  <button
+                  />
+                  <ToolbarButton
+                    variant="toggleSoft"
+                    active={mdShortcutsOpen}
+                    icon={CircleHelp}
                     onClick={() => setMdShortcutsOpen((v) => !v)}
-                    className={tbToggleSoft(mdShortcutsOpen)}
                     title="Keyboard shortcuts"
-                  >
-                    <CircleHelp size={14} />
-                  </button>
-                  <button
+                    ariaLabel="Keyboard shortcuts"
+                  />
+                  <ToolbarButton
                     // One View button replaces the old Preview toggle: with unsaved
                     // changes it renders the live draft (staying in edit mode), and
                     // when the draft matches the file it just leaves editing —
                     // nothing would be lost, so there is nothing to preview.
+                    variant="toggleSoft"
+                    active={mdView}
+                    icon={Eye}
+                    label={mdView ? "Editor" : "View"}
                     onClick={() => (mdDirty ? setMdView((v) => !v) : setEditing(false))}
-                    className={tbToggleSoft(mdView)}
                     title={mdView ? "Return to the editor" : mdDirty ? "View your unsaved changes rendered" : "Return to view"}
-                  >
-                    <Eye size={14} /> {mdView ? "Editor" : "View"}
-                  </button>
+                  />
                 </>
               )}
 
               {viewMode === "browse" && hubMode && (
-                <button
+                <ToolbarButton
+                  variant="solid"
+                  icon={Download}
+                  label="Download"
                   onClick={handleDownloadDataset}
                   disabled={isLoading}
-                  className={tbSolid}
                   title="Download this dataset to edit locally"
-                >
-                  <Download size={14} /> Download
-                </button>
+                />
               )}
 
               {viewMode === "browse" && !hubMode && (
                 <>
-                  <button
+                  <ToolbarButton
+                    icon={FilePlus}
+                    label="New File"
                     onClick={handleCreateFile}
-                    className={tbGhost}
                     title="New file in this folder"
-                  >
-                    <FilePlus size={14} /> New File
-                  </button>
-                  <button
+                  />
+                  <ToolbarButton
+                    icon={FolderPlus}
+                    label="New Folder"
                     onClick={handleCreateDir}
-                    className={tbGhost}
                     title="New folder in this folder"
-                  >
-                    <FolderPlus size={14} /> New Folder
-                  </button>
+                  />
                 </>
               )}
 
               {viewMode === "browse" && canMutateRoots && !hubMode && (
-                <button
+                <ToolbarButton
+                  variant="danger"
+                  icon={Trash2}
+                  label="Delete Dataset"
                   onClick={handleDeleteDataset}
-                  className={tbDanger}
                   title="Delete this dataset (moves to trash)"
-                >
-                  <Trash2 size={14} /> Delete Dataset
-                </button>
+                />
               )}
 
               {viewMode === "datasets" && canMutateRoots && !hubMode && (
-                <button
+                <ToolbarButton
+                  icon={Plus}
+                  label="New Dataset"
                   onClick={handleCreateDataset}
-                  className={tbGhost}
                   title="New wiki dataset"
-                >
-                  <Plus size={14} /> New Dataset
-                </button>
+                />
               )}
 
               {viewMode !== "file" && (
-                <button
+                <ToolbarButton
+                  icon={RefreshCw}
+                  iconProps={{ className: (viewMode === "browse" ? browseLoading : isLoading) ? "animate-spin" : "" }}
+                  label="Refresh"
                   onClick={viewMode === "browse" ? refreshBrowse : loadLocalDatasets}
                   disabled={viewMode === "browse" ? browseLoading : isLoading}
-                  className={tbGhost}
                   title="Refresh"
-                >
-                  <RefreshCw size={14} className={(viewMode === "browse" ? browseLoading : isLoading) ? "animate-spin" : ""} />
-                  <span>Refresh</span>
-                </button>
+                />
               )}
-            </div>
+            </Toolbar>
 
             {/* Tools row: revealed by the sub-toolbar's Tools button while
                 editing. Mirrors the search-row pattern — a compact strip

@@ -12,9 +12,6 @@ import {
   Save,
   X,
   Square,
-  Loader2,
-  MoreVertical,
-  Check,
   History,
   Play,
   Columns,
@@ -26,7 +23,14 @@ import { scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
-import { tbGhost, tbToggle, tbIconToggleSoft, tbDanger } from "@/lib/ui/toolbar";
+import {
+  Toolbar,
+  Breadcrumb,
+  ToolbarButton,
+  ToolbarOverflow,
+  ToolbarMenuItem,
+  RecordButton,
+} from "@/components/ui/toolbar";
 import PracticePanel, { type RecorderCtl } from "./PracticePanel";
 import AttemptsPanel from "./AttemptsPanel";
 import DatasetDialog from "./DatasetDialog";
@@ -421,10 +425,6 @@ export default function ReadAloudPage() {
   const fieldCls =
     "w-full p-2 rounded-md bg-bg-muted border border-border-default text-text-primary text-sm focus:outline-none focus:border-accent-bg";
   const labelCls = "text-xs font-medium text-text-secondary mb-1 block";
-  const menuItem =
-    "w-full text-left px-3 py-2 text-sm hover:bg-bg-hover cursor-pointer flex items-center gap-2 text-text-primary disabled:opacity-50 disabled:cursor-not-allowed";
-  const menuItemDanger =
-    "w-full text-left px-3 py-2 text-sm hover:bg-bg-hover cursor-pointer flex items-center gap-2 text-error-text disabled:opacity-50 disabled:cursor-not-allowed";
 
   // Either inline editor (the main text form or the normalized-reference form)
   // swaps the content column and the sub-toolbar into Save / Cancel.
@@ -438,42 +438,36 @@ export default function ReadAloudPage() {
       {/* Breadcrumb navigation — Read Aloud › dataset › text, mirroring the wiki
           page's edge-to-edge trail. Crumbs are inert while editing so a stray
           click can't discard the draft. */}
-      <nav className="shrink-0 flex items-center justify-start gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
+      <Breadcrumb>
         {inEditor ? (
           <span className="shrink-0 text-accent">Read Aloud</span>
+        ) : viewMode === "datasets" ? (
+          <Breadcrumb.Current grow={false}>Read Aloud</Breadcrumb.Current>
         ) : (
-          <button
-            className={`shrink-0 cursor-pointer hover:underline ${
-              viewMode === "datasets" ? "text-text-primary font-medium" : "text-accent"
-            }`}
-            onClick={goDatasets}
-          >
-            Read Aloud
-          </button>
+          <Breadcrumb.Link onClick={goDatasets}>Read Aloud</Breadcrumb.Link>
         )}
         {activeDataset && (
           <>
-            <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+            <Breadcrumb.Sep />
             {inEditor ? (
               <span className="truncate min-w-0 max-w-[240px] text-accent" title={activeDataset.name}>
                 {activeDataset.name}
               </span>
             ) : (
-              <button
-                className={`cursor-pointer hover:underline truncate min-w-0 max-w-[240px] ${
-                  viewMode === "practice" ? "text-accent" : "text-text-primary font-medium"
-                }`}
+              <Breadcrumb.Link
+                variant={viewMode === "practice" ? "link" : "current"}
+                truncate={viewMode === "practice"}
                 title={activeDataset.name}
                 onClick={goTexts}
               >
                 {activeDataset.name}
-              </button>
+              </Breadcrumb.Link>
             )}
           </>
         )}
         {editing ? (
           <>
-            <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+            <Breadcrumb.Sep />
             <span className="text-text-primary font-medium truncate min-w-0 max-w-[320px]">
               {editText ? editText.title || "Untitled" : "New text"}
             </span>
@@ -482,39 +476,33 @@ export default function ReadAloudPage() {
           viewMode === "practice" &&
           activeText && (
             <>
-              <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+              <Breadcrumb.Sep />
               {attemptsView ? (
-                <button
-                  className="cursor-pointer hover:underline text-accent truncate min-w-0 max-w-[320px]"
+                <Breadcrumb.Link
+                  truncate
                   title={activeText.title || "Untitled"}
                   onClick={() => setAttemptsView(false)}
                 >
                   {activeText.title || "Untitled"}
-                </button>
+                </Breadcrumb.Link>
               ) : (
-                <span
-                  className="text-text-primary font-medium truncate min-w-0 max-w-[320px]"
-                  title={activeText.title || "Untitled"}
-                >
+                <Breadcrumb.Current title={activeText.title || "Untitled"}>
                   {activeText.title || "Untitled"}
-                </span>
+                </Breadcrumb.Current>
               )}
               {attemptsView && (
                 <>
-                  <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                  <Breadcrumb.Sep />
                   {selectedAttempt ? (
-                    <button
-                      className="cursor-pointer hover:underline text-accent shrink-0"
-                      onClick={() => setSelectedAttemptUuid(null)}
-                    >
+                    <Breadcrumb.Link onClick={() => setSelectedAttemptUuid(null)}>
                       Attempts
-                    </button>
+                    </Breadcrumb.Link>
                   ) : (
                     <span className="text-text-primary font-medium shrink-0">Attempts</span>
                   )}
                   {selectedAttempt && (
                     <>
-                      <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
+                      <Breadcrumb.Sep />
                       <span className="text-text-primary font-medium shrink-0 tabular-nums">
                         {formatStamp(selectedAttempt.created_at)}
                       </span>
@@ -525,99 +513,75 @@ export default function ReadAloudPage() {
             </>
           )
         )}
-      </nav>
+      </Breadcrumb>
 
       {/* Sub-toolbar: contextual actions for the current view — the same stacked
           bar treatment the wiki page uses. While an inline editor is open it hosts
           the Save / Cancel controls instead. */}
-      <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card">
+      <Toolbar mobile={mobile}>
         <div className="flex-1 min-w-0" />
 
         {inEditor ? (
           <>
-            <button
-              type="button"
-              className={tbToggle(editorDirty)}
-              onClick={() => void (editing ? saveText() : saveNormalized())}
-              disabled={saving || !editorDirty}
+            <ToolbarButton
+              variant="toggle"
+              active={editorDirty}
+              icon={Save}
+              label={saving ? "Saving…" : "Save"}
               title="Save"
-            >
-              <Save size={14} /> {saving ? "Saving…" : "Save"}
-            </button>
-            <button
-              type="button"
-              className={tbGhost}
-              onClick={editing ? cancelEdit : cancelNormalizeEdit}
+              disabled={saving || !editorDirty}
+              onClick={() => void (editing ? saveText() : saveNormalized())}
+            />
+            <ToolbarButton
+              icon={X}
+              label="Cancel"
               title="Cancel editing"
-            >
-              <X size={14} />{!mobile && " Cancel"}
-            </button>
+              onClick={editing ? cancelEdit : cancelNormalizeEdit}
+            />
           </>
         ) : (
           <>
             {viewMode === "datasets" && (
-              <button
-                type="button"
-                className={tbGhost}
+              <ToolbarButton
+                icon={Plus}
+                label="New Dataset"
                 title="New dataset"
                 onClick={() => setDatasetDialog({ mode: "create" })}
-              >
-                <Plus size={14} />{!mobile && " New Dataset"}
-              </button>
+              />
             )}
 
             {viewMode === "texts" && (
               <>
-                <button
-                  type="button"
-                  className={tbGhost}
+                <ToolbarButton
+                  icon={FilePlus}
+                  label="New Text"
                   title="Add text"
                   onClick={() => startEdit(null)}
-                >
-                  <FilePlus size={14} />{!mobile && " New Text"}
-                </button>
-                <button
-                  type="button"
-                  className={tbGhost}
+                />
+                <ToolbarButton
+                  icon={Pencil}
+                  label="Edit"
                   title="Edit dataset"
                   disabled={!activeDataset}
                   onClick={() => activeDataset && setDatasetDialog({ mode: "edit", meta: activeDataset })}
-                >
-                  <Pencil size={14} />{!mobile && " Edit"}
-                </button>
+                />
               </>
             )}
 
             {viewMode === "practice" && activeText && !attemptsView && (
               <>
-                <button
-                  type="button"
-                  onClick={() => recToggleRef.current()}
+                <RecordButton
+                  recording={rec.recording}
+                  busy={rec.busy}
                   disabled={!rec.ready || rec.busy}
-                  title={rec.recording ? "Stop recording" : "Record yourself reading"}
-                  className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                    rec.recording
-                      ? "bg-red-500 text-white animate-pulse"
-                      : "bg-accent text-white hover:bg-accent/90"
-                  }`}
-                >
-                  {rec.busy ? (
-                    <Loader2 size={14} className="animate-spin" />
-                  ) : rec.recording ? (
-                    <Square size={14} />
-                  ) : (
-                    <MicGlyph size={14} />
-                  )}
-                  {!mobile && (rec.recording ? " Stop" : rec.busy ? " Working…" : " Record")}
-                </button>
-                <button
-                  type="button"
-                  className={tbGhost}
+                  onClick={() => recToggleRef.current()}
+                />
+                <ToolbarButton
+                  icon={History}
+                  label="Attempts"
                   title="Show attempts"
                   onClick={() => setAttemptsView(true)}
-                >
-                  <History size={14} />{!mobile && " Attempts"}
-                </button>
+                />
               </>
             )}
 
@@ -625,33 +589,29 @@ export default function ReadAloudPage() {
                 inside the panel, mirroring how Record lives in the toolbar. */}
             {viewMode === "practice" && activeText && attemptsView && selectedAttempt && (
               <>
-                <button
-                  type="button"
-                  className={tbToggle(compareView)}
+                <ToolbarButton
+                  variant="toggle"
+                  active={compareView}
+                  icon={Columns}
+                  label="Compare"
                   title="Compare the text and the transcript sentence by sentence"
                   onClick={() => setCompareView((v) => !v)}
-                >
-                  <Columns size={14} />{!mobile && " Compare"}
-                </button>
+                />
                 {selectedAttempt.audio_url && (
-                  <button
-                    type="button"
-                    className={tbGhost}
+                  <ToolbarButton
+                    icon={playingAttempt ? Square : Play}
+                    label={playingAttempt ? "Stop" : "Play"}
                     title={playingAttempt ? "Stop playback" : "Play recording"}
                     onClick={() => toggleAttemptPlay(selectedAttempt.audio_url)}
-                  >
-                    {playingAttempt ? <Square size={14} /> : <Play size={14} />}
-                    {!mobile && (playingAttempt ? " Stop" : " Play")}
-                  </button>
+                  />
                 )}
-                <button
-                  type="button"
-                  className={tbDanger}
+                <ToolbarButton
+                  variant="danger"
+                  icon={Trash2}
+                  label="Delete"
                   title="Delete attempt"
                   onClick={deleteSelectedAttempt}
-                >
-                  <Trash2 size={14} />{!mobile && " Delete"}
-                </button>
+                />
               </>
             )}
           </>
@@ -662,68 +622,39 @@ export default function ReadAloudPage() {
             the attempts view has no overflow actions (its Play / Delete are in
             the toolbar above), so the menu is hidden there. */}
         {!inEditor && (viewMode === "texts" || (viewMode === "practice" && !attemptsView)) && (
-          <div className="relative shrink-0">
-            <button
-              type="button"
-              className={tbIconToggleSoft(menuOpen)}
-              title="More actions"
-              aria-label="More actions"
-              onClick={() => setMenuOpen((v) => !v)}
-            >
-              <MoreVertical size={16} />
-            </button>
-            {menuOpen && (
-              <div
-                className="absolute right-0 top-full mt-1 w-56 rounded-lg border border-border-default bg-bg-card shadow-xl z-20 py-1"
-                onMouseLeave={() => setMenuOpen(false)}
+          <ToolbarOverflow open={menuOpen} onOpenChange={setMenuOpen}>
+            {viewMode === "texts" && (
+              <ToolbarMenuItem
+                icon={Trash2}
+                danger
+                disabled={!activeDataset}
+                onClick={() => {
+                  if (activeDataset) deleteDataset(activeDataset);
+                }}
               >
-                {viewMode === "texts" && (
-                  <button
-                    type="button"
-                    className={menuItemDanger}
-                    disabled={!activeDataset}
-                    onClick={() => {
-                      setMenuOpen(false);
-                      if (activeDataset) deleteDataset(activeDataset);
-                    }}
-                  >
-                    <Trash2 size={15} /> Delete dataset
-                  </button>
-                )}
-                {viewMode === "practice" && activeText && (
-                  <>
-                    <button
-                      type="button"
-                      className={menuItem}
-                      onClick={() => startEdit(activeText)}
-                    >
-                      <Pencil size={15} /> Edit text
-                    </button>
-                    <button
-                      type="button"
-                      className={menuItem}
-                      onClick={startNormalizeEdit}
-                    >
-                      <Wand2 size={15} /> Normalized text
-                      {activeText.normalized_content && <Check size={14} className="ml-auto" />}
-                    </button>
-                    <button
-                      type="button"
-                      className={menuItemDanger}
-                      onClick={() => {
-                        setMenuOpen(false);
-                        deleteText(activeText);
-                      }}
-                    >
-                      <Trash2 size={15} /> Delete text
-                    </button>
-                  </>
-                )}
-              </div>
+                Delete dataset
+              </ToolbarMenuItem>
             )}
-          </div>
+            {viewMode === "practice" && activeText && (
+              <>
+                <ToolbarMenuItem icon={Pencil} onClick={() => startEdit(activeText)}>
+                  Edit text
+                </ToolbarMenuItem>
+                <ToolbarMenuItem
+                  icon={Wand2}
+                  checked={!!activeText.normalized_content}
+                  onClick={startNormalizeEdit}
+                >
+                  Normalized text
+                </ToolbarMenuItem>
+                <ToolbarMenuItem icon={Trash2} danger onClick={() => deleteText(activeText)}>
+                  Delete text
+                </ToolbarMenuItem>
+              </>
+            )}
+          </ToolbarOverflow>
         )}
-      </div>
+      </Toolbar>
 
       {/* Content — while editing this is the inline text form; otherwise the
           practice pane (own scroll) or the dataset/text lists. */}

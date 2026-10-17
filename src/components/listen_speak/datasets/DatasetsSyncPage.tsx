@@ -8,6 +8,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { message as showDialog } from "@tauri-apps/plugin-dialog";
 import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog, Upload, LogIn, Archive } from "lucide-react";
 import { tbGhost, tbSolid, tbToggle } from "@/lib/ui/toolbar";
+import { ToolbarButton } from "@/components/ui/toolbar";
 import { logError, logInfo } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
@@ -818,15 +819,16 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
             {/* "Adopt hub copy" overwrites the local dataset — shown only when a
                 local copy is absent or awaiting a resync, never silently applied. */}
             {(state === "not_downloaded" || state === "needs_resync") && (
-              <button
-                className={tbSolid + " shrink-0"}
+              <ToolbarButton
+                variant="solid"
+                icon={Download}
+                className="shrink-0"
+                collapseOnMobile={false}
                 onClick={() => handleAdopt(ds.uuid, ds.name)}
                 disabled={!!busyUuid}
                 title="Pull the hub's full copy (overwrites local)"
-              >
-                <Download size={14} />
-                {busyUuid === ds.uuid ? "Downloading…" : "Download"}
-              </button>
+                label={busyUuid === ds.uuid ? "Downloading…" : "Download"}
+              />
             )}
             {/* Evict frees the disk space of an adopted website copy (read-only
                 base under download/) without unsubscribing — it flips to "Not
@@ -834,15 +836,16 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
                 website origin adopts into the download root; a LAN mirror stays
                 writable and is deleted from the Datasets page instead. */}
             {state === "downloaded" && isWebsite && (
-              <button
-                className={tbGhost + " shrink-0"}
+              <ToolbarButton
+                variant="ghost"
+                icon={Archive}
+                className="shrink-0"
+                collapseOnMobile={false}
                 onClick={() => handleEvict(ds.uuid, ds.name)}
                 disabled={!!busyUuid}
                 title="Free disk space — keeps it re-downloadable, progress untouched"
-              >
-                <Archive size={14} />
-                {busyUuid === ds.uuid ? "Evicting…" : "Evict"}
-              </button>
+                label={busyUuid === ds.uuid ? "Evicting…" : "Evict"}
+              />
             )}
           </div>
         </div>
@@ -1170,15 +1173,16 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
                       {done ? ` · uploaded v${done.version} (${done.uploaded_at})` : ""}
                     </span>
                   </div>
-                  <button
-                    className={tbSolid + " shrink-0"}
+                  <ToolbarButton
+                    variant="solid"
+                    icon={Upload}
+                    className="shrink-0"
+                    collapseOnMobile={false}
                     onClick={() => openUploadDialog(ds)}
                     disabled={!!uploadingUuid}
                     title="Pack this local dataset and upload it to the website hub"
-                  >
-                    <Upload size={14} />
-                    {uploadingUuid === ds.uuid ? "Uploading…" : done ? "Re-upload" : "Upload"}
-                  </button>
+                    label={uploadingUuid === ds.uuid ? "Uploading…" : done ? "Re-upload" : "Upload"}
+                  />
                 </div>
                 {up && up.phase !== "done" && (
                   <div className="flex flex-col gap-1">
@@ -1368,14 +1372,15 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
                 <span className="text-xs px-2 py-0.5 rounded-full shrink-0 bg-red-500/15 text-red-600 dark:text-red-400">
                   Removed on hub
                 </span>
-                <button
-                  className={tbGhost + " shrink-0"}
+                <ToolbarButton
+                  variant="ghost"
+                  icon={Trash2}
+                  className="shrink-0"
+                  collapseOnMobile={false}
                   onClick={() => handleForgetDataset(d.dataset_uuid, d.name)}
                   title="Remove this local copy"
-                >
-                  <Trash2 size={14} />
-                  Remove local copy
-                </button>
+                  label="Remove local copy"
+                />
               </div>
             ))}
           </div>

@@ -27,7 +27,7 @@ import {
   Layers,
   GraduationCap,
   FolderCog,
-  MoreVertical,
+  type LucideIcon,
 } from "lucide-react";
 import type {
   CardDatasetSummary,
@@ -38,7 +38,14 @@ import type {
   CrossDeckCard,
 } from "@/lib/types";
 import { isMobileApp } from "@/lib/platform";
-import { tbGhost, tbToggle, tbIconToggleSoft } from "@/lib/ui/toolbar";
+import {
+  Toolbar,
+  Breadcrumb,
+  ToolbarButton,
+  ToolbarIconButton,
+  ToolbarOverflow,
+  ToolbarMenuItem,
+} from "@/components/ui/toolbar";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import { useCardEditor } from "./CardEditorContext";
 
@@ -50,10 +57,10 @@ type TabId = "cards" | "review" | "tags";
 // search box, whose This-deck/All-decks scope toggle switches engines in place.
 // "Cards" itself is not rendered as a toggle either: it is the deck's default
 // view, and the breadcrumb's Cards crumb is the way back to it from Review/Tags.
-const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
-  { id: "cards", label: "Cards", icon: <Layers size={16} /> },
-  { id: "review", label: "Review", icon: <GraduationCap size={16} /> },
-  { id: "tags", label: "Tags", icon: <Tag size={16} /> },
+const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
+  { id: "cards", label: "Cards", icon: Layers },
+  { id: "review", label: "Review", icon: GraduationCap },
+  { id: "tags", label: "Tags", icon: Tag },
 ];
 
 export default function CardsPage() {
@@ -443,40 +450,38 @@ export default function CardsPage() {
           toolbar: the Cards › <deck> trail, or Cards › Locations / Cards › Review
           for the root-level sub-views. The root "Cards" crumb is the dataset list;
           it becomes a link back to it whenever a deck or a sub-view owns the page. */}
-      <nav className="shrink-0 flex items-center justify-start gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
-        <button
-          className={`shrink-0 text-left ${crumbTail ? "cursor-pointer hover:underline text-accent" : "text-text-primary font-medium"}`}
-          onClick={() => {
-            // Inside a deck, "back to Cards" means the deck's card list — stay in
-            // the deck and only leave the Review/Tags mode (also unseeding the
-            // deck-scoped session). From any other level it goes to the deck grid.
-            if (selectedDatasetUuid && activeTab !== "cards") {
-              setReviewScope("");
-              setActiveTab("cards");
-              return;
-            }
-            setSelectedDatasetUuid(""); setShowManage(false); setMenuOpen(false); setSearchScope("deck"); setReviewScope(""); setActiveTab("cards");
-          }}
-        >
-          Cards
-        </button>
+      <Breadcrumb>
+        {crumbTail ? (
+          <Breadcrumb.Link
+            onClick={() => {
+              // Inside a deck, "back to Cards" means the deck's card list — stay in
+              // the deck and only leave the Review/Tags mode (also unseeding the
+              // deck-scoped session). From any other level it goes to the deck grid.
+              if (selectedDatasetUuid && activeTab !== "cards") {
+                setReviewScope("");
+                setActiveTab("cards");
+                return;
+              }
+              setSelectedDatasetUuid(""); setShowManage(false); setMenuOpen(false); setSearchScope("deck"); setReviewScope(""); setActiveTab("cards");
+            }}
+          >
+            Cards
+          </Breadcrumb.Link>
+        ) : (
+          <Breadcrumb.Current grow={false}>Cards</Breadcrumb.Current>
+        )}
         {crumbTail && (
           <>
-            <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-            <span
-              className="text-text-primary font-medium truncate min-w-0 flex-1 text-left"
-              title={crumbTail}
-            >
-              {crumbTail}
-            </span>
+            <Breadcrumb.Sep />
+            <Breadcrumb.Current title={crumbTail}>{crumbTail}</Breadcrumb.Current>
           </>
         )}
-      </nav>
+      </Breadcrumb>
 
       {/* Toolbar — deck-level info on the left, actions on the right (Wiki-style
           full-width bar under the breadcrumb): the mode toggles (in a deck) or the
           deck-list actions, then search, then the overflow menu. */}
-      <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card">
+      <Toolbar mobile={mobile}>
         <span className="text-xs text-text-secondary truncate min-w-0">
           {selectedDataset
             ? `${selectedDataset.info.sharing.visibility} · ${selectedDataset.card_count} cards`
@@ -488,25 +493,21 @@ export default function CardsPage() {
             {/* The review page's card-level actions live here. Its own mode toggles
                 and deck-list actions are hidden while it owns the screen, so the
                 grade scale in the panel below is the only decision left in view. */}
-            <button
-              type="button"
-              className={tbGhost}
+            <ToolbarButton
+              icon={FlipHorizontal}
+              label={reviewFlipped ? "Question" : "Answer"}
+              title={reviewFlipped ? "Show question (Space)" : "Show answer (Space)"}
+              ariaLabel={reviewFlipped ? "Show question" : "Show answer"}
               disabled={!reviewCard}
               onClick={() => setReviewFlipped((v) => !v)}
-              title={reviewFlipped ? "Show question (Space)" : "Show answer (Space)"}
-              aria-label={reviewFlipped ? "Show question" : "Show answer"}
-            >
-              <FlipHorizontal size={14} />{!mobile && ` ${reviewFlipped ? "Question" : "Answer"}`}
-            </button>
-            <button
-              type="button"
-              className={tbGhost}
-              onClick={loadNextReview}
+            />
+            <ToolbarButton
+              icon={SkipForward}
+              label="Skip"
               title="Skip this card (S)"
-              aria-label="Skip this card"
-            >
-              <SkipForward size={14} />{!mobile && " Skip"}
-            </button>
+              ariaLabel="Skip this card"
+              onClick={loadNextReview}
+            />
           </>
         ) : selectedDatasetUuid ? (
           <>
@@ -515,38 +516,34 @@ export default function CardsPage() {
                   mode you toggle to; the breadcrumb's Cards crumb returns to it. */}
               {TABS.map((t) =>
                 t.id === "cards" ? null : (
-                <button
-                  key={t.id}
-                  type="button"
-                  className={tbToggle(activeTab === t.id)}
-                  title={t.label}
-                  aria-label={t.label}
-                  onClick={() => {
-                    // Entering Review from inside a deck keeps that deck as the
-                    // session scope; the selector can still widen it to all decks.
-                    // Exiting Review back to the card list is the breadcrumb's
-                    // Cards crumb — the list has no toolbar toggle any more.
-                    if (t.id === "review") setReviewScope(selectedDatasetUuid);
-                    setActiveTab(t.id);
-                  }}
-                >
-                  {t.icon}{!mobile && ` ${t.label}`}
-                </button>
+                  <ToolbarButton
+                    key={t.id}
+                    variant="toggle"
+                    active={activeTab === t.id}
+                    icon={t.icon}
+                    label={t.label}
+                    onClick={() => {
+                      // Entering Review from inside a deck keeps that deck as the
+                      // session scope; the selector can still widen it to all decks.
+                      // Exiting Review back to the card list is the breadcrumb's
+                      // Cards crumb — the list has no toolbar toggle any more.
+                      if (t.id === "review") setReviewScope(selectedDatasetUuid);
+                      setActiveTab(t.id);
+                    }}
+                  />
                 ),
               )}
             </div>
             {/* Add Card lives on the deck toolbar so it is always reachable —
                 it used to hide inside the search row, which meant opening
                 search just to create a card. */}
-            <button
-              type="button"
-              className={tbGhost}
+            <ToolbarButton
+              icon={Plus}
+              label="Add Card"
               title="Add a new card"
-              aria-label="Add card"
+              ariaLabel="Add card"
               onClick={() => openCardEditor(selectedDatasetUuid, null, () => loadCards())}
-            >
-              <Plus size={14} />{!mobile && " Add Card"}
-            </button>
+            />
           </>
         ) : (
           <>
@@ -555,25 +552,19 @@ export default function CardsPage() {
                 review toolbar carries Answer/Skip alone); the breadcrumb's Cards
                 crumb is the way back. Opening it closes search so the review
                 panel (not the search results) owns the content area. */}
-            <button
-              type="button"
-              className={tbGhost}
+            <ToolbarButton
+              icon={GraduationCap}
+              label="Review"
               title="Review cards across all decks"
-              aria-label="Review across all decks"
+              ariaLabel="Review across all decks"
               onClick={() => {
                 setSearchOpen(false);
                 setReviewScope("");
                 setActiveTab("review");
               }}
-            >
-              <GraduationCap size={16} />{!mobile && " Review"}
-            </button>
-            <button type="button" className={tbGhost} onClick={createDataset} title="Create new dataset">
-              <Plus size={14} />{!mobile && " New Deck"}
-            </button>
-            <button type="button" className={tbGhost} onClick={loadDatasets} title="Refresh datasets">
-              <RefreshCw size={14} />{!mobile && " Refresh"}
-            </button>
+            />
+            <ToolbarButton icon={Plus} label="New Deck" title="Create new dataset" onClick={createDataset} />
+            <ToolbarButton icon={RefreshCw} label="Refresh" title="Refresh datasets" onClick={loadDatasets} />
           </>
         ))}
         {/* Search button — present at every level but Review, on the far right
@@ -583,15 +574,14 @@ export default function CardsPage() {
             owns the content area — the review toolbar shows only Answer/Skip — so
             its active state always matches a visible row. */}
         {!showManage && activeTab !== "review" && (
-          <button
-            type="button"
-            className={tbIconToggleSoft(searchOpen)}
+          <ToolbarIconButton
+            icon={Search}
+            variant="toggleSoft"
+            active={searchOpen}
             title={searchOpen ? "Hide search" : "Show search"}
-            aria-label="Toggle search"
+            ariaLabel="Toggle search"
             onClick={toggleSearch}
-          >
-            <Search size={16} />
-          </button>
+          />
         )}
         {/* Overflow menu — the three-dot home for occasional actions. Locations
             (the former Manage toggle) lives here: it is a root-level concern, so
@@ -599,44 +589,17 @@ export default function CardsPage() {
             the review page, which keeps its toolbar to card actions alone. Active
             state marks the overlay it is currently owning. */}
         {!selectedDatasetUuid && activeTab !== "review" && (
-          <div className="relative shrink-0">
-            <button
-              type="button"
-              className={tbIconToggleSoft(menuOpen)}
-              title="More actions"
-              aria-label="More actions"
-              onClick={() => setMenuOpen((v) => !v)}
+          <ToolbarOverflow open={menuOpen} onOpenChange={setMenuOpen}>
+            <ToolbarMenuItem
+              icon={FolderCog}
+              checked={showManage}
+              onClick={() => setShowManage((v) => !v)}
             >
-              <MoreVertical size={16} />
-            </button>
-            {menuOpen && (
-              <>
-                {/* Tap-away layer: mobile WebViews fire no mouseleave, so the panel
-                    needs an explicit backdrop to dismiss on (wiki search idiom). */}
-                <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
-                <div
-                  className="absolute right-0 top-full mt-1 z-50 w-56 rounded-lg border border-border-default bg-bg-card shadow-xl py-1"
-                  onMouseLeave={() => setMenuOpen(false)}
-                >
-                  <button
-                    type="button"
-                    className={`w-full text-left px-3 py-2 text-sm hover:bg-bg-hover cursor-pointer flex items-center gap-2 disabled:opacity-50 ${
-                      showManage ? "text-accent" : "text-text-primary"
-                    }`}
-                    onClick={() => {
-                      setMenuOpen(false);
-                      setShowManage((v) => !v);
-                    }}
-                  >
-                    <FolderCog size={15} /> Locations
-                    {showManage && <Check size={14} className="ml-auto" />}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
+              Locations
+            </ToolbarMenuItem>
+          </ToolbarOverflow>
         )}
-      </div>
+      </Toolbar>
 
       {error && (
         <div className="mx-2 mt-2 p-2 rounded bg-red-500/10 text-red-500 text-sm sm:mx-6">
@@ -654,20 +617,18 @@ export default function CardsPage() {
         <div className="shrink-0 px-2 py-2 flex flex-wrap items-center gap-2 border-b border-border-default sm:px-6">
           {deckOpen && (
             <div className="flex items-center gap-1 shrink-0">
-              <button
-                type="button"
-                className={tbToggle(searchScope === "deck")}
+              <ToolbarButton
+                variant="toggle"
+                active={searchScope === "deck"}
+                label="This deck"
                 onClick={() => setSearchScope("deck")}
-              >
-                This deck
-              </button>
-              <button
-                type="button"
-                className={tbToggle(searchScope === "all")}
+              />
+              <ToolbarButton
+                variant="toggle"
+                active={searchScope === "all"}
+                label="All decks"
                 onClick={() => setSearchScope("all")}
-              >
-                All decks
-              </button>
+              />
             </div>
           )}
           {effScope === "deck" ? (

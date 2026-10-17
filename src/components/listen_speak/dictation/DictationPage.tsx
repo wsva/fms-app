@@ -16,7 +16,13 @@ import { FAVORITES_DATASET_UUID, type Cue } from "@/lib/types";
 import { useDictationData } from "@/hooks/useDictationData";
 import { isAudio } from "@/lib/listen/utils";
 import { datasetStatusLabel, datasetStatusBadgeClasses, type DatasetStatus } from "@/lib/datasets/types";
-import { tbGhost, tbToggle, tbIcon, tbIconToggle } from "@/lib/ui/toolbar";
+import { tbGhost } from "@/lib/ui/toolbar";
+import {
+    Toolbar,
+    Breadcrumb,
+    ToolbarButton,
+    ToolbarIconButton,
+} from "@/components/ui/toolbar";
 import { subscribe, getVoiceError, clearVoiceError } from "@/lib/voice-input";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
@@ -290,64 +296,59 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
             {/* Breadcrumb navigation — wiki-style full-width bar sitting above the
                 toolbar: Datasets › dataset › media › subtitle trail. Always shown,
                 including mobile "cues only" mode, so the navigation trail stays reachable. */}
-            <nav className="shrink-0 flex items-center justify-start gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
-                <button
-                    className={`shrink-0 cursor-pointer hover:underline text-left ${d.selectedDatasetUuid ? "text-accent" : "text-text-primary font-medium"}`}
-                    onClick={() => d.setSelectedDatasetUuid("")}
-                >
-                    Datasets
-                </button>
+            <Breadcrumb>
+                {d.selectedDatasetUuid ? (
+                    <Breadcrumb.Link onClick={() => d.setSelectedDatasetUuid("")}>Datasets</Breadcrumb.Link>
+                ) : (
+                    <Breadcrumb.Current grow={false}>Datasets</Breadcrumb.Current>
+                )}
                 {d.selectedDataset && (
                     <>
-                        <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-                        <button
-                            className={`cursor-pointer hover:underline truncate min-w-0 text-left ${d.stateMediaUUID ? "max-w-[240px] text-accent" : "flex-1 text-text-primary font-medium"}`}
+                        <Breadcrumb.Sep />
+                        <Breadcrumb.Link
+                            variant={d.stateMediaUUID ? "link" : "current"}
+                            truncate={!!d.stateMediaUUID}
                             onClick={() => { d.setStateMediaUUID(""); d.handleReload(); }}
                             title={d.selectedDataset.info.name}
                         >
                             {d.selectedDataset.info.name}
-                        </button>
+                        </Breadcrumb.Link>
                     </>
                 )}
                 {d.selectedDataset && d.stateMediaUUID && (
                     <>
-                        <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
-                        {d.stateSubtitle ? (
-                            <span
-                                className="text-text-primary font-medium truncate min-w-0 flex-1"
-                                title={`${selectedMediaLabel} — ${d.stateSubtitle.name || d.stateSubtitle.uuid}`}
-                            >
-                                {selectedMediaLabel} <span className="text-text-tertiary font-normal">&rsaquo;</span> {d.stateSubtitle.name || d.stateSubtitle.uuid}
-                            </span>
-                        ) : (
-                            <span
-                                className="text-text-primary font-medium truncate min-w-0 flex-1"
-                                title={selectedMediaLabel}
-                            >
-                                {selectedMediaLabel}
-                            </span>
-                        )}
+                        <Breadcrumb.Sep />
+                        <Breadcrumb.Current
+                            title={d.stateSubtitle ? `${selectedMediaLabel} — ${d.stateSubtitle.name || d.stateSubtitle.uuid}` : selectedMediaLabel}
+                        >
+                            {selectedMediaLabel}
+                            {d.stateSubtitle && (
+                                <> <span className="text-text-tertiary font-normal">&rsaquo;</span> {d.stateSubtitle.name || d.stateSubtitle.uuid}</>
+                            )}
+                        </Breadcrumb.Current>
                     </>
                 )}
                 {d.stateLoading && <ProgressCircle size="sm" aria-label="Loading" />}
-            </nav>
+            </Breadcrumb>
             {/* Toolbar — sections are mutually exclusive: Location on the datasets view,
                 Dataset on the media-list view, Dictation on the cue view. Wiki-style
                 full-width bar sitting under the breadcrumb. */}
-            <div className="@container shrink-0 flex flex-row items-center gap-3 px-4 py-2 border-b border-border-default bg-bg-card">
+            <Toolbar mobile={mobile} className="@container">
+                {/* Alignment matches the other four dataset pages: a flexible
+                    spacer on the left pushes whichever contextual section group
+                    is visible to the right edge (ReadBook / Cards / ReadAloud /
+                    Wiki all right-align their toolbar actions the same way). */}
+                <div className="flex-1 min-w-0" />
+
                 {/* ── Location section (datasets view) ── */}
                 {!d.selectedDatasetUuid && (
                     <div className="flex items-center gap-1">
-                        <button type="button" className={tbGhost} aria-label="Refresh locations" disabled={d.stateLoading} title="Refresh" onClick={d.loadLocations}>
-                            <RefreshCw size={14} /> Refresh
-                        </button>
+                        <ToolbarButton icon={RefreshCw} label="Refresh" ariaLabel="Refresh locations" title="Refresh" disabled={d.stateLoading} onClick={d.loadLocations} />
                         {/* Adding a location needs a native folder picker (rfd), which
                             does not exist on mobile — there the dataset roots live in
                             app-private storage and are filled by the PC sync flow. */}
                         {!mobile && (
-                            <button type="button" className={tbGhost} aria-label="Add location" disabled={d.stateLoading} title="Add location" onClick={d.handleAddLocation}>
-                                <FolderPlus size={14} /> Add Location
-                            </button>
+                            <ToolbarButton icon={FolderPlus} label="Add Location" ariaLabel="Add location" title="Add location" disabled={d.stateLoading} onClick={d.handleAddLocation} />
                         )}
                     </div>
                 )}
@@ -355,12 +356,8 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 {/* ── Dataset section (media list view) ── */}
                 {d.selectedDatasetUuid && !d.stateMediaUUID && (
                     <div className="flex items-center gap-1">
-                        <button type="button" className={tbGhost} aria-label="Reload database" disabled={!d.selectedDatasetUuid || d.stateLoading} title="Reload database" onClick={d.handleReload}>
-                            <Database size={14} /> Reload
-                        </button>
-                        <button type="button" className={tbToggle(mediaEditMode)} aria-label="Toggle edit mode" disabled={!d.selectedDatasetUuid} title={mediaEditMode ? "View" : "Edit"} onClick={() => setMediaEditMode((v) => !v)}>
-                            <Pencil size={14} /> {mediaEditMode ? "View" : "Edit"}
-                        </button>
+                        <ToolbarButton icon={Database} label="Reload" ariaLabel="Reload database" title="Reload database" disabled={!d.selectedDatasetUuid || d.stateLoading} onClick={d.handleReload} />
+                        <ToolbarButton variant="toggle" active={mediaEditMode} icon={Pencil} label={mediaEditMode ? "View" : "Edit"} ariaLabel="Toggle edit mode" title={mediaEditMode ? "View" : "Edit"} disabled={!d.selectedDatasetUuid} onClick={() => setMediaEditMode((v) => !v)} />
                     </div>
                 )}
 
@@ -370,25 +367,31 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                         {/* Large mode is desktop-only: on a phone the focused cue already auto-enlarges
                             to medium, and text-4xl would eat too much vertical space. */}
                         {!mobile && (
-                            <button type="button" className={tbToggle(d.stateDictMode === "large")} aria-label="Toggle large mode" disabled={d.stateCues.length === 0} title="Large" onClick={() => {
-                                if (d.stateDictMode === "large") { d.setStateDictMode("full"); }
-                                else {
-                                    // Jump focus to the first incomplete cue when entering large mode.
-                                    const cueList = d.stateCues.filter((cue) => !d.stateDictSuccessSet.has(cue.uuid));
-                                    if (cueList.length > 0) d.setStateFocusedCueUUID(cueList[0].uuid);
-                                    d.setStateDictMode("large");
-                                }
-                            }}>
-                                <Target size={14} /> Large
-                            </button>
+                            <ToolbarButton
+                                variant="toggle"
+                                active={d.stateDictMode === "large"}
+                                icon={Target}
+                                label="Large"
+                                ariaLabel="Toggle large mode"
+                                title="Large"
+                                disabled={d.stateCues.length === 0}
+                                onClick={() => {
+                                    if (d.stateDictMode === "large") { d.setStateDictMode("full"); }
+                                    else {
+                                        // Jump focus to the first incomplete cue when entering large mode.
+                                        const cueList = d.stateCues.filter((cue) => !d.stateDictSuccessSet.has(cue.uuid));
+                                        if (cueList.length > 0) d.setStateFocusedCueUUID(cueList[0].uuid);
+                                        d.setStateDictMode("large");
+                                    }
+                                }}
+                            />
                         )}
-                        <button type="button" className={tbToggle(d.stateDictStatus === "complete")} aria-label="Mark complete" disabled={d.stateCues.length === 0} title="Complete" onClick={d.handleDictStatusToggle}>
-                            <CheckCircle size={14} /> Complete
-                        </button>
+                        <ToolbarButton variant="toggle" active={d.stateDictStatus === "complete"} icon={CheckCircle} label="Complete" ariaLabel="Mark complete" title="Complete" disabled={d.stateCues.length === 0} onClick={d.handleDictStatusToggle} />
                         {/* Keyboard-shortcut help is desktop-only: the Ctrl+ combos need a
                             hardware keyboard, and the touch equivalents (Clear / Show answer
                             buttons next to the field, Play and Mic in the cue sidebar) are
-                            already visible on the phone. */}
+                            already visible on the phone. Kept as a plain tbGhost button so it
+                            can anchor the HeroUI Tooltip. */}
                         {!mobile && (
                             <Tooltip isOpen={helpOpen} onOpenChange={setHelpOpen}>
                                 <Tooltip.Trigger>
@@ -412,31 +415,26 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 )}
 
                 {/* ── Cue stepping + collapse toggle (cue view, mobile only) ── */}
-                {/* Right-aligned group. Desktop keeps room for the player, steps
-                    through cues with Ctrl+↑/↓ and uses Large mode instead of
+                {/* Sits right after the section group — the leading spacer already
+                    right-aligns the whole bar. Desktop keeps room for the player,
+                    steps through cues with Ctrl+↑/↓ and uses Large mode instead of
                     collapsing, so neither button is offered there. */}
                 {mobile && !!d.stateMediaUUID && (
-                    <div className="ml-auto flex shrink-0 items-center gap-1">
+                    <div className="flex shrink-0 items-center gap-1">
                         {/* Thick stroke: at 20px a default-weight arrow reads as a
                             hairline on a phone and is easy to miss as a touch target. */}
-                        <button type="button" className={tbIcon} aria-label="Previous cue" disabled={d.stateCues.length === 0} title="Previous cue" onClick={() => navigateCue(-1)}>
-                            <ArrowUp size={20} strokeWidth={3} />
-                        </button>
-                        <button type="button" className={tbIcon} aria-label="Next cue" disabled={d.stateCues.length === 0} title="Next cue" onClick={() => navigateCue(1)}>
-                            <ArrowDown size={20} strokeWidth={3} />
-                        </button>
-                        <button
-                            type="button"
-                            className={tbIconToggle(collapsed)}
-                            aria-label={collapsed ? "Show player and waveform" : "Hide everything except the cues"}
-                            aria-pressed={collapsed}
+                        <ToolbarIconButton icon={ArrowUp} iconProps={{ strokeWidth: 3 }} size={20} ariaLabel="Previous cue" title="Previous cue" disabled={d.stateCues.length === 0} onClick={() => navigateCue(-1)} />
+                        <ToolbarIconButton icon={ArrowDown} iconProps={{ strokeWidth: 3 }} size={20} ariaLabel="Next cue" title="Next cue" disabled={d.stateCues.length === 0} onClick={() => navigateCue(1)} />
+                        <ToolbarIconButton
+                            icon={collapsed ? ChevronsUpDown : ChevronsDownUp}
+                            variant="toggle"
+                            active={collapsed}
+                            ariaLabel={collapsed ? "Show player and waveform" : "Hide everything except the cues"}
                             onClick={handleToggleCollapsed}
-                        >
-                            {collapsed ? <ChevronsUpDown size={16} /> : <ChevronsDownUp size={16} />}
-                        </button>
+                        />
                     </div>
                 )}
-            </div>
+            </Toolbar>
 
             {/* Content area — padded below the wiki-style header bars. The three
                 mutually exclusive views (datasets / media list / dictation) render here. */}
