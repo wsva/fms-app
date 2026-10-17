@@ -21,14 +21,13 @@ import {
   Check,
   X,
   Tag,
-  Settings,
-  Trash2,
   FolderOpen,
   FolderPlus,
   MapPin,
   Layers,
   GraduationCap,
   FolderCog,
+  MoreVertical,
 } from "lucide-react";
 import type {
   CardDatasetSummary,
@@ -72,9 +71,12 @@ export default function CardsPage() {
   // Active tab
   const [activeTab, setActiveTab] = useState<TabId>("cards");
 
-  // Toolbar "Manage" mode: shows dataset + location management (the former
-  // Advanced view) as an overlay, reachable from both the deck list and a deck.
+  // Toolbar "Locations" mode: shows the location management view as an overlay,
+  // reached from the overflow menu on the deck list.
   const [showManage, setShowManage] = useState(false);
+
+  // Overflow (three-dot) menu visibility — Locations currently lives in there.
+  const [menuOpen, setMenuOpen] = useState(false);
 
   // Use global card editor
   const { openCardEditor, isOpen: editorOpen } = useCardEditor();
@@ -438,8 +440,8 @@ export default function CardsPage() {
       </nav>
 
       {/* Toolbar — deck-level info on the left, actions on the right (Wiki-style
-          full-width bar under the breadcrumb): the Manage toggle plus either the
-          mode toggles (in a deck) or the deck-list actions. */}
+          full-width bar under the breadcrumb): the mode toggles (in a deck) or the
+          deck-list actions, then search, then the overflow menu. */}
       <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card">
         <span className="text-xs text-text-secondary truncate min-w-0">
           {selectedDataset
@@ -447,20 +449,6 @@ export default function CardsPage() {
             : `${datasets.length} deck${datasets.length !== 1 ? "s" : ""}`}
         </span>
         <div className="flex-1 min-w-0" />
-        {/* Manage datasets toggle — a root-level concern (locations + deck
-            delete), so it only shows on the deck list, not inside a deck.
-            Active hides the deck-list actions. */}
-        {!selectedDatasetUuid && (
-          <button
-            type="button"
-            className={tbToggle(showManage)}
-            title="Manage datasets"
-            aria-label="Manage datasets"
-            onClick={() => setShowManage((v) => !v)}
-          >
-            <FolderCog size={16} />{!mobile && " Manage"}
-          </button>
-        )}
         {!showManage && (selectedDatasetUuid ? (
           <>
             <div className="flex items-center gap-1 shrink-0">
@@ -519,10 +507,11 @@ export default function CardsPage() {
             </button>
           </>
         ))}
-        {/* Search button — present at every level, on the far right: inside a deck
-            it toggles the This-deck / All-decks row, from the deck list it opens a
-            cross-deck search directly. Hidden while Manage owns the content area,
-            so its active state always matches a visible row. */}
+        {/* Search button — present at every level, on the far right (just before
+            the overflow menu): inside a deck it toggles the This-deck / All-decks
+            row, from the deck list it opens a cross-deck search directly. Hidden
+            while the Locations overlay owns the content area, so its active state
+            always matches a visible row. */}
         {!showManage && (
           <button
             type="button"
@@ -533,6 +522,48 @@ export default function CardsPage() {
           >
             <Search size={16} />
           </button>
+        )}
+        {/* Overflow menu — the three-dot home for occasional actions. Locations
+            (the former Manage toggle) lives here: it is a root-level concern, so
+            the menu is shown on the deck list only, same as the button it
+            replaced. Active state marks the overlay it is currently owning. */}
+        {!selectedDatasetUuid && (
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              className={tbIconToggleSoft(menuOpen)}
+              title="More actions"
+              aria-label="More actions"
+              onClick={() => setMenuOpen((v) => !v)}
+            >
+              <MoreVertical size={16} />
+            </button>
+            {menuOpen && (
+              <>
+                {/* Tap-away layer: mobile WebViews fire no mouseleave, so the panel
+                    needs an explicit backdrop to dismiss on (wiki search idiom). */}
+                <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+                <div
+                  className="absolute right-0 top-full mt-1 z-50 w-56 rounded-lg border border-border-default bg-bg-card shadow-xl py-1"
+                  onMouseLeave={() => setMenuOpen(false)}
+                >
+                  <button
+                    type="button"
+                    className={`w-full text-left px-3 py-2 text-sm hover:bg-bg-hover cursor-pointer flex items-center gap-2 disabled:opacity-50 ${
+                      showManage ? "text-accent" : "text-text-primary"
+                    }`}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setShowManage((v) => !v);
+                    }}
+                  >
+                    <FolderCog size={15} /> Locations
+                    {showManage && <Check size={14} className="ml-auto" />}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         )}
       </div>
 
@@ -649,26 +680,12 @@ export default function CardsPage() {
         </div>
       )}
 
-      {/* Manage overlay (dataset + location management, the former Advanced view)
-          when the toolbar Manage toggle is on; otherwise the dataset list (no deck
-          selected) or the deck detail. */}
+      {/* Manage overlay (location management) when the toolbar Manage toggle is
+          on; otherwise the dataset list (no deck selected) or the deck detail. */}
       {showManage ? (
         <div className="flex-1 min-h-0 overflow-hidden">
           <ManageView
-            dataset={selectedDataset}
-            selectedDatasetUuid={selectedDatasetUuid}
             allDatasets={datasets}
-            onDeleteDataset={async (uuid: string) => {
-              try {
-                await invoke("card_dataset_delete", { uuid });
-                setDatasets((prev) => prev.filter((d) => d.info.uuid !== uuid));
-                if (uuid === selectedDatasetUuid) {
-                  setSelectedDatasetUuid("");
-                }
-              } catch (e) {
-                setError(`Failed to delete dataset: ${e}`);
-              }
-            }}
             onRefresh={loadDatasets}
             onError={setError}
           />
@@ -1082,20 +1099,14 @@ export default function CardsPage() {
   );
 }
 
-// ── Manage View (dataset + location management) ─────────────────────────────
+// ── Manage View (location management) ───────────────────────────────────────
 
 function ManageView({
-  dataset,
-  selectedDatasetUuid,
   allDatasets,
-  onDeleteDataset,
   onRefresh,
   onError,
 }: {
-  dataset: CardDatasetSummary | undefined;
-  selectedDatasetUuid: string;
   allDatasets: CardDatasetSummary[];
-  onDeleteDataset: (uuid: string) => Promise<void>;
   onRefresh: () => void;
   onError: (msg: string) => void;
 }) {
@@ -1272,121 +1283,6 @@ function ManageView({
           </button>
         )}
       </section>
-
-      {/* Datasets - card list */}
-      <section>
-        <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
-          <Settings size={18} />
-          Datasets
-        </h2>
-        {allDatasets.length === 0 ? (
-          <p className="text-sm text-text-secondary">No card datasets found.</p>
-        ) : (
-          <div className="space-y-3">
-            {allDatasets.map((ds) => (
-              <DatasetCard
-                key={ds.info.uuid}
-                dataset={ds}
-                isSelected={ds.info.uuid === selectedDatasetUuid}
-                onDelete={async () => {
-                  const confirmed = await ask(`Delete dataset "${ds.info.name}"?\n\nThe folder is moved to trash, not permanently deleted.`, { title: "Delete Dataset" });
-                  if (!confirmed) return;
-                  await onDeleteDataset(ds.info.uuid);
-                }}
-              />
-            ))}
-          </div>
-        )}
-      </section>
-    </div>
-  );
-}
-
-// ── Dataset Card (for Manage view) ─────────────────────────────────────────
-
-function DatasetCard({
-  dataset,
-  isSelected,
-  onDelete,
-}: {
-  dataset: CardDatasetSummary;
-  isSelected: boolean;
-  onDelete: () => Promise<void>;
-}) {
-  const [deleting, setDeleting] = useState(false);
-
-  async function handleDelete() {
-    setDeleting(true);
-    try {
-      await onDelete();
-    } finally {
-      setDeleting(false);
-    }
-  }
-
-  const dirName = dataset.location;
-
-  return (
-    <div
-      className={`p-4 rounded-xl border bg-bg-card transition-colors ${
-        isSelected
-          ? "border-accent-blue/40 ring-1 ring-accent-blue/20"
-          : "border-border-default hover:border-border-default/80"
-      }`}
-    >
-      {/* Header: name + visibility badge */}
-      <div className="flex items-start justify-between gap-3 mb-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <h3 className="text-sm font-semibold truncate">{dataset.info.name}</h3>
-          <span
-            className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${
-              dataset.info.sharing.visibility === "public"
-                ? "bg-green-500/10 text-green-600"
-                : dataset.info.sharing.visibility === "shared"
-                  ? "bg-amber-500/10 text-amber-600"
-                  : "bg-mid-gray/20 text-text-tertiary"
-            }`}
-          >
-            {dataset.info.sharing.visibility}
-          </span>
-          {isSelected && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-blue/10 text-accent-blue shrink-0">
-              active
-            </span>
-          )}
-        </div>
-        <span className="text-xs text-text-tertiary shrink-0">
-          {dataset.card_count} card{dataset.card_count !== 1 ? "s" : ""}
-        </span>
-      </div>
-
-      {/* Description */}
-      {dataset.info.description && (
-        <p className="text-xs text-text-secondary mb-3 line-clamp-2">
-          {dataset.info.description}
-        </p>
-      )}
-
-      {/* Meta row: location + UUID */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-tertiary mb-3">
-        <span className="flex items-center gap-1">
-          <MapPin size={11} />
-          {dirName}
-        </span>
-        <span className="font-mono text-[10px]">{dataset.info.uuid.slice(0, 8)}…</span>
-      </div>
-
-      {/* Action buttons */}
-      <div className="flex items-center gap-2">
-        <button
-          onClick={handleDelete}
-          disabled={deleting}
-          className="ml-auto px-3 py-1 rounded bg-red-500/10 border border-red-500/20 text-red-500 text-xs hover:bg-red-500/20 disabled:opacity-50 flex items-center gap-1"
-        >
-          <Trash2 size={12} />
-          {deleting ? "Deleting..." : "Remove"}
-        </button>
-      </div>
     </div>
   );
 }
