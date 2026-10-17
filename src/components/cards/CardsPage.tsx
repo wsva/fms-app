@@ -86,11 +86,16 @@ export default function CardsPage() {
   const [reviewFlipped, setReviewFlipped] = useState(false);
   const [reviewResult, setReviewResult] = useState<CardReview | null>(null);
   const [reviewStats, setReviewStats] = useState<CardTestStats | null>(null);
-  // Cross-deck review: which deck the current card came from. Empty in a
-  // single-deck session, where selectedDatasetUuid is the source and the submit
-  // targets it directly.
+  // All-decks review: which deck the drawn card came from, so the panel can name
+  // it and submitReview can rate it in the right place. Empty in a deck-scoped
+  // session, where reviewScope is the source and the submit targets it directly.
   const [reviewDeckUuid, setReviewDeckUuid] = useState<string>("");
   const [reviewDeckName, setReviewDeckName] = useState<string>("");
+  // Which deck the review session draws from: "" = all decks (the default),
+  // otherwise a dataset uuid picked in the review page's own selector. This is
+  // a filter on the session, not navigation — selecting a deck here does not
+  // open it, so the review page stays a page of its own.
+  const [reviewScope, setReviewScope] = useState<string>("");
 
   // Tags
   const [tags, setTags] = useState<CardTag[]>([]);
@@ -205,14 +210,14 @@ export default function CardsPage() {
   }, [selectedDatasetUuid, activeTab, loadTags]);
 
   // Queue counts for the Review tab. Refreshed with every draw so the numbers
-  // describe the same pool the draw just picked from: one deck's queue inside a
-  // deck, the aggregate across every deck in a root-level cross-deck session.
+  // describe the same pool the draw just picked from: one deck's queue when a
+  // deck is selected, the aggregate over every deck in an all-decks session.
   const loadReviewStats = useCallback(async () => {
     try {
       setReviewStats(
-        selectedDatasetUuid
+        reviewScope
           ? await invoke<CardTestStats>("card_test_stats", {
-              datasetUuid: selectedDatasetUuid,
+              datasetUuid: reviewScope,
             })
           : await invoke<CardTestStats>("card_test_stats_all")
       );
@@ -220,21 +225,21 @@ export default function CardsPage() {
       // Informational only, so a failure just hides the bar.
       setReviewStats(null);
     }
-  }, [selectedDatasetUuid]);
+  }, [reviewScope]);
 
   // Get next review card
   const loadNextReview = useCallback(async () => {
     try {
-      if (selectedDatasetUuid) {
-        // Single-deck session: the source deck is the open one.
+      if (reviewScope) {
+        // Deck-scoped session: the source deck is the one selected above.
         const result = await invoke<[Card, CardReview] | null>("card_test_get", {
-          datasetUuid: selectedDatasetUuid,
+          datasetUuid: reviewScope,
         });
         setReviewCard(result ? result[0] : null);
         setReviewDeckUuid("");
         setReviewDeckName("");
       } else {
-        // Cross-deck session: the drawn card names its own source deck, which
+        // All-decks session: the drawn card names its own source deck, which
         // submitReview must target.
         const result = await invoke<CrossDeckCard | null>("card_test_get_all");
         setReviewCard(result ? result.card : null);
@@ -248,15 +253,16 @@ export default function CardsPage() {
     } finally {
       void loadReviewStats();
     }
-  }, [selectedDatasetUuid, loadReviewStats]);
+  }, [reviewScope, loadReviewStats]);
 
   useEffect(() => {
-    // Review now works at the deck-list root too (cross-deck), so it no longer
-    // requires an open deck — just the review mode.
+    // Review works at the deck-list root too (all decks), so it never required
+    // an open deck — just the review mode. Changing the scope rebuilds
+    // loadNextReview, which is what re-draws from the new pool.
     if (activeTab === "review") {
       loadNextReview();
     }
-  }, [selectedDatasetUuid, activeTab, loadNextReview]);
+  }, [activeTab, loadNextReview]);
 
   // Agent control: `app_open_review` puts this page into review/quiz mode,
   // optionally preselecting a card dataset. The review-load effect above picks
@@ -264,6 +270,9 @@ export default function CardsPage() {
   useEffect(() => {
     const unlisten = listen<{ dataset_uuid: string | null }>("agent-open-review", (event) => {
       const uuid = event.payload?.dataset_uuid;
+      // Scope the session to the requested deck, or to every deck when none was
+      // named. Also open that deck, so the breadcrumb shows where the review is.
+      setReviewScope(uuid ?? "");
       if (uuid) setSelectedDatasetUuid(uuid);
       setActiveTab("review");
     });
@@ -275,9 +284,9 @@ export default function CardsPage() {
   // Submit review
   const submitReview = useCallback(
     async (quality: number) => {
-      // The deck to rate against: the open deck, or the source deck of a
-      // cross-deck draw.
-      const deckUuid = selectedDatasetUuid || reviewDeckUuid;
+      // The deck to rate against: the scoped deck, or the source deck of a draw
+      // that came out of the all-decks pool.
+      const deckUuid = reviewScope || reviewDeckUuid;
       if (!reviewCard || !deckUuid) return;
       try {
         const result = await invoke<CardReview>("card_test_submit", {
@@ -292,7 +301,7 @@ export default function CardsPage() {
         setError(`Failed to submit review: ${e}`);
       }
     },
-    [reviewCard, selectedDatasetUuid, reviewDeckUuid, loadNextReview]
+    [reviewCard, reviewScope, reviewDeckUuid, loadNextReview]
   );
 
   // Keyboard shortcuts for the review flow (Anki-style): Space/Enter flips the
@@ -390,6 +399,18 @@ export default function CardsPage() {
   const searchActive = searchOpen && !showManage;
   const showAllResults = searchActive && effScope === "all";
 
+  // Root-level sub-views that own the content area, named in the breadcrumb so
+  // the trail reads Cards › Locations / Cards › Review instead of a bare "Cards".
+  // Inside a deck the trail stays Cards › <deck>.
+  const rootSubView = deckOpen
+    ? null
+    : showManage
+      ? "Locations"
+      : activeTab === "review"
+        ? "Review"
+        : null;
+  const crumbTail = selectedDataset ? selectedDataset.info.name : rootSubView;
+
   // Familiarity color — theme-aware ramp (see --fam-* in globals.css), so the
   // row tint tracks the active Light/Dark/Solarized/Gruvbox theme instead of a
   // fixed light pastel. Literal class names keep Tailwind's scanner happy.
@@ -417,23 +438,24 @@ export default function CardsPage() {
   return (
     <main className="flex-1 flex flex-col min-h-0 min-w-0 bg-bg-body">
       {/* Breadcrumb navigation — wiki/dictation-style full-width bar above the
-          toolbar: Cards › <deck> trail. The root "Cards" crumb is the dataset list;
-          it becomes a link back to the list once a deck is open. */}
+          toolbar: the Cards › <deck> trail, or Cards › Locations / Cards › Review
+          for the root-level sub-views. The root "Cards" crumb is the dataset list;
+          it becomes a link back to it whenever a deck or a sub-view owns the page. */}
       <nav className="shrink-0 flex items-center justify-start gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
         <button
-          className={`shrink-0 text-left ${selectedDatasetUuid ? "cursor-pointer hover:underline text-accent" : "text-text-primary font-medium"}`}
-          onClick={() => { setSelectedDatasetUuid(""); setShowManage(false); setSearchScope("deck"); setActiveTab("cards"); }}
+          className={`shrink-0 text-left ${crumbTail ? "cursor-pointer hover:underline text-accent" : "text-text-primary font-medium"}`}
+          onClick={() => { setSelectedDatasetUuid(""); setShowManage(false); setMenuOpen(false); setSearchScope("deck"); setReviewScope(""); setActiveTab("cards"); }}
         >
           Cards
         </button>
-        {selectedDataset && (
+        {crumbTail && (
           <>
             <span className="shrink-0 text-text-tertiary">&rsaquo;</span>
             <span
               className="text-text-primary font-medium truncate min-w-0 flex-1 text-left"
-              title={selectedDataset.info.name}
+              title={crumbTail}
             >
-              {selectedDataset.info.name}
+              {crumbTail}
             </span>
           </>
         )}
@@ -459,7 +481,12 @@ export default function CardsPage() {
                   className={tbToggle(activeTab === t.id)}
                   title={t.label}
                   aria-label={t.label}
-                  onClick={() => setActiveTab(t.id)}
+                  onClick={() => {
+                    // Entering Review from inside a deck keeps that deck as the
+                    // session scope; the selector can still widen it to all decks.
+                    if (t.id === "review") setReviewScope(selectedDatasetUuid);
+                    setActiveTab(t.id);
+                  }}
                 >
                   {t.icon}{!mobile && ` ${t.label}`}
                 </button>
@@ -492,7 +519,10 @@ export default function CardsPage() {
                 if (activeTab === "review") {
                   setActiveTab("cards");
                 } else {
+                  // This button means "review across all decks", so it starts the
+                  // session unscoped rather than keeping a previous deck filter.
                   setSearchOpen(false);
+                  setReviewScope("");
                   setActiveTab("review");
                 }
               }}
@@ -880,7 +910,31 @@ export default function CardsPage() {
             Content is top-aligned on purpose: centring it would move the toolbar up and
             down every time the answer is revealed or a longer card is drawn. */}
         {activeTab === "review" && (
-          <div className="flex h-full overflow-y-auto p-3 sm:p-6">
+          <div className="h-full overflow-y-auto p-3 sm:p-6">
+            {/* Scope selector — the deck this session draws from, "All decks" by
+                default. A filter on the session rather than navigation, so picking
+                a deck here does not open it. It sits above the grading toolbar in
+                both the card and the empty branch, so it is always the first thing
+                on the review page. */}
+            <div className="mb-3 flex items-center gap-2">
+              <Layers size={14} className="shrink-0 text-text-tertiary" />
+              <label htmlFor="review-scope" className="sr-only">
+                Review dataset
+              </label>
+              <select
+                id="review-scope"
+                value={reviewScope}
+                onChange={(e) => setReviewScope(e.target.value)}
+                className="min-w-0 max-w-xs rounded-lg border border-border-default bg-bg-card px-2 py-1.5 text-sm hover:bg-mid-gray/20"
+              >
+                <option value="">All decks</option>
+                {datasets.map((ds) => (
+                  <option key={ds.info.uuid} value={ds.info.uuid}>
+                    {ds.info.name}
+                  </option>
+                ))}
+              </select>
+            </div>
             {reviewCard ? (
               <div className="w-full">
                 {/* Desktop: one toolbar row, the grade scale dead-centre, the card-level
@@ -895,10 +949,10 @@ export default function CardsPage() {
                     edge, so a wrapped scale cannot push the actions up and down.
                     Sticky, so the grade buttons stay reachable while a long answer scrolls
                     (the same `sticky top-0 z-10 bg-bg-body` idiom the dictation toolbar
-                    uses). The negative margins pull the bar up over the panel's own padding
-                    and its padding puts that space back, so the opaque background covers the
-                    gutters too and no text peeks around the edges. */}
-                <div className="sticky top-0 z-10 -mx-3 -mt-3 grid grid-cols-1 items-start gap-2 bg-bg-body px-3 pb-4 pt-3 sm:-mx-6 sm:-mt-6 sm:grid-cols-[1fr_auto_1fr] sm:gap-4 sm:px-6 sm:pt-6">
+                    uses). The negative horizontal margins pull the bar over the panel's own
+                    padding and its padding puts that space back, so the opaque background
+                    covers the gutters too and no text peeks around the edges. */}
+                <div className="sticky top-0 z-10 -mx-3 grid grid-cols-1 items-start gap-2 bg-bg-body px-3 pb-4 pt-3 sm:-mx-6 sm:grid-cols-[1fr_auto_1fr] sm:gap-4 sm:px-6 sm:pt-6">
                   {/* Left flank exists only to balance the 3-column grid on desktop. Hidden
                       below `sm`, where it would take up a stacked line. */}
                   <div className="hidden sm:order-1 sm:block" />
@@ -949,10 +1003,10 @@ export default function CardsPage() {
                   </div>
                 </div>
 
-                {/* In a cross-deck session (no single deck open) name the source
+                {/* In an all-decks session (no single deck scoped) name the source
                     deck, so it is clear where this card came from and where the
                     rating is recorded. */}
-                {!selectedDatasetUuid && reviewDeckName && (
+                {!reviewScope && reviewDeckName && (
                   <div className="mb-2 flex items-center gap-1.5 text-xs text-text-tertiary">
                     <Layers size={12} className="shrink-0" />
                     <span className="truncate">{reviewDeckName}</span>
@@ -1006,11 +1060,11 @@ export default function CardsPage() {
                   </div>
                 )}
 
-                <ReviewQueueBar stats={reviewStats} allDecks={!selectedDatasetUuid} />
+                <ReviewQueueBar stats={reviewStats} allDecks={!reviewScope} />
               </div>
             ) : (
               <div className="text-center">
-                <ReviewQueueBar stats={reviewStats} allDecks={!selectedDatasetUuid} />
+                <ReviewQueueBar stats={reviewStats} allDecks={!reviewScope} />
                 <p className="text-text-secondary text-lg mb-4">
                   No cards to review!
                 </p>
@@ -1311,8 +1365,8 @@ function IconLabel({ children }: { children: ReactNode }) {
 function ReviewQueueBar({ stats, allDecks }: { stats: CardTestStats | null; allDecks?: boolean }) {
   if (!stats) return null;
 
-  // The counts describe one deck's queue inside a deck, or the aggregate across
-  // every deck in a root-level cross-deck session — the hint wording follows.
+  // The counts describe one deck's queue when a deck is scoped, or the aggregate
+  // across every deck in an all-decks session — the hint wording follows.
   const where = allDecks ? "across all your decks" : "in this dataset";
   let hint: string | null = null;
   if (stats.due > 0 && stats.fresh > 0) {
