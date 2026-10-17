@@ -8,7 +8,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore, useLayoutEffect } from "react";
 
 import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui/react";
-import { RefreshCw, Trash2, Database, Target, CheckCircle, FolderPlus, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown, Captions } from "lucide-react";
+import { RefreshCw, Trash2, Database, Target, CheckCircle, FolderOpen, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown, Captions } from "lucide-react";
 import CueEditor from "./components/CueEditor";
 import WaveformCanvas from "./components/WaveformCanvas";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
@@ -22,7 +22,10 @@ import {
     Breadcrumb,
     ToolbarButton,
     ToolbarIconButton,
+    ToolbarOverflow,
+    ToolbarMenuItem,
 } from "@/components/ui/toolbar";
+import { LocationsManager } from "@/components/ui/LocationsManager";
 import { subscribe, getVoiceError, clearVoiceError } from "@/lib/voice-input";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
@@ -71,6 +74,10 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
     }, [focusNonce]);
     // Media-list view/edit mode toggle (view mode hides players, edit mode shows source/note fields).
     const [mediaEditMode, setMediaEditMode] = useState(false);
+    // Locations overlay (shared manager) — opened from the toolbar overflow menu,
+    // replacing the dataset browser the same way the Cards page does.
+    const [showLocations, setShowLocations] = useState(false);
+    const [locError, setLocError] = useState<string | null>(null);
     // Keyboard-shortcut help tip: shown on hover, and also on click (controlled).
     const [helpOpen, setHelpOpen] = useState(false);
     const voiceError = useSyncExternalStore(subscribe, getVoiceError, getVoiceError);
@@ -297,10 +304,16 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 toolbar: Datasets › dataset › media › subtitle trail. Always shown,
                 including mobile "cues only" mode, so the navigation trail stays reachable. */}
             <Breadcrumb>
-                {d.selectedDatasetUuid ? (
-                    <Breadcrumb.Link onClick={() => d.setSelectedDatasetUuid("")}>Datasets</Breadcrumb.Link>
+                {d.selectedDatasetUuid || showLocations ? (
+                    <Breadcrumb.Link onClick={() => { d.setSelectedDatasetUuid(""); setShowLocations(false); }}>Datasets</Breadcrumb.Link>
                 ) : (
                     <Breadcrumb.Current grow={false}>Datasets</Breadcrumb.Current>
+                )}
+                {showLocations && (
+                    <>
+                        <Breadcrumb.Sep />
+                        <Breadcrumb.Current grow={false}>Locations</Breadcrumb.Current>
+                    </>
                 )}
                 {d.selectedDataset && (
                     <>
@@ -340,19 +353,6 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                     Wiki all right-align their toolbar actions the same way). */}
                 <div className="flex-1 min-w-0" />
 
-                {/* ── Location section (datasets view) ── */}
-                {!d.selectedDatasetUuid && (
-                    <div className="flex items-center gap-1">
-                        <ToolbarButton icon={RefreshCw} label="Refresh" ariaLabel="Refresh locations" title="Refresh" disabled={d.stateLoading} onClick={d.loadLocations} />
-                        {/* Adding a location needs a native folder picker (rfd), which
-                            does not exist on mobile — there the dataset roots live in
-                            app-private storage and are filled by the PC sync flow. */}
-                        {!mobile && (
-                            <ToolbarButton icon={FolderPlus} label="Add Location" ariaLabel="Add location" title="Add location" disabled={d.stateLoading} onClick={d.handleAddLocation} />
-                        )}
-                    </div>
-                )}
-
                 {/* ── Dataset section (media list view) ── */}
                 {d.selectedDatasetUuid && !d.stateMediaUUID && (
                     <div className="flex items-center gap-1">
@@ -386,7 +386,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                                 }}
                             />
                         )}
-                        <ToolbarButton variant="toggle" active={d.stateDictStatus === "complete"} icon={CheckCircle} label="Complete" ariaLabel="Mark complete" title="Complete" disabled={d.stateCues.length === 0} onClick={d.handleDictStatusToggle} />
+                        <ToolbarButton variant="toggle" active={d.stateDictStatus === "complete"} icon={CheckCircle} label={d.stateDictStatus === "complete" ? "Completed" : "Mark Completed"} title="Toggle completed" disabled={d.stateCues.length === 0} onClick={d.handleDictStatusToggle} />
                         {/* Keyboard-shortcut help is desktop-only: the Ctrl+ combos need a
                             hardware keyboard, and the touch equivalents (Clear / Show answer
                             buttons next to the field, Play and Mic in the cue sidebar) are
@@ -414,6 +414,19 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                     </div>
                 )}
 
+                {/* Refresh — always available at every level (locations, media
+                    list, cue view); reloads the location list and the
+                    dataset/media lists from disk. */}
+                <ToolbarButton icon={RefreshCw} label="Refresh" ariaLabel="Refresh" title="Refresh" disabled={d.stateLoading} onClick={() => { d.loadLocations(); d.loadDatasets(); }} />
+
+                {/* Locations management (datasets view) — opens the shared manager
+                    as a full-content overlay, matching the Cards page pattern. */}
+                {!d.selectedDatasetUuid && (
+                    <ToolbarOverflow>
+                        <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
+                    </ToolbarOverflow>
+                )}
+
                 {/* ── Cue stepping + collapse toggle (cue view, mobile only) ── */}
                 {/* Sits right after the section group — the leading spacer already
                     right-aligns the whole bar. Desktop keeps room for the player,
@@ -438,7 +451,25 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
 
             {/* Content area — padded below the wiki-style header bars. The three
                 mutually exclusive views (datasets / media list / dictation) render here. */}
-            <div className="flex-1 flex flex-col min-h-0 overflow-hidden p-4 gap-4">
+            {/* Locations overlay — replaces the dataset browser while open, the
+                same full-content overlay the Cards page uses. */}
+            {showLocations && (
+                <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                    {locError && (
+                        <div className="mx-3 mt-3 p-3 bg-error-bg text-error-text rounded-md text-sm">{locError}</div>
+                    )}
+                    <div className="flex-1 min-h-0">
+                        <LocationsManager
+                            datasetType="dictation"
+                            description="Dictation datasets are stored across dataset directories. Add linked directories to store datasets on external drives or other locations."
+                            onError={setLocError}
+                            onChanged={() => { d.loadLocations(); d.loadDatasets(); }}
+                            countFor={(path) => (datasetsByLocation.get(path) ?? []).length}
+                        />
+                    </div>
+                </div>
+            )}
+            <div className={`${showLocations ? "hidden" : ""} flex-1 flex flex-col min-h-0 overflow-hidden p-4 gap-4`}>
             {/* Datasets view (initial) — grouped by location */}
             {!d.selectedDatasetUuid && (
                 <div className="flex flex-col gap-4 flex-1 min-h-0 overflow-y-auto">
@@ -476,22 +507,6 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                                             )}
                                             <span className="text-xs text-text-tertiary truncate flex-1" title={loc.path}>{loc.path}</span>
                                             <span className="text-xs text-text-tertiary shrink-0">{items.length}</span>
-                                            {loc.is_linked && (
-                                                <Button
-                                                    variant="ghost"
-                                                    size="sm"
-                                                    aria-label="Delete location"
-                                                    className="text-text-tertiary hover:text-error-text"
-                                                    onPress={() => setConfirmReq({
-                                                        title: "Delete location",
-                                                        message: `Delete "${loc.name}" from dataset locations? Its datasets will no longer be listed here, but files on disk are untouched.`,
-                                                        confirmLabel: "Delete",
-                                                        onConfirm: () => d.handleRemoveLocation(loc.path),
-                                                    })}
-                                                >
-                                                    <Trash2 size={14} /> Delete Location
-                                                </Button>
-                                            )}
                                         </div>
                                         {/* Datasets under this location */}
                                         {items.length === 0 ? (

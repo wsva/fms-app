@@ -1,8 +1,10 @@
 "use client";
 
-import { AlignJustify, AlignLeft, Settings2, Zap } from "lucide-react";
+import { useState } from "react";
+import { AlignJustify, AlignLeft, Settings2, Zap, RefreshCw, FolderOpen } from "lucide-react";
 import { useBookData } from "@/hooks/useBookData";
-import { Toolbar, Breadcrumb, ToolbarButton } from "@/components/ui/toolbar";
+import { Toolbar, Breadcrumb, ToolbarButton, ToolbarOverflow, ToolbarMenuItem } from "@/components/ui/toolbar";
+import { LocationsManager } from "@/components/ui/LocationsManager";
 import ReadingView from "./ReadingView";
 import BookManager from "./BookManager";
 import BookAdvanced from "./BookAdvanced";
@@ -10,6 +12,11 @@ import BookAdvanced from "./BookAdvanced";
 export default function ReadBookPage() {
   const b = useBookData();
   const mobile = b.mobile;
+
+  // Locations overlay (shared manager) — opened from the toolbar overflow menu at
+  // the books level, replacing the content area the same way the Cards page does.
+  const [showLocations, setShowLocations] = useState(false);
+  const [locError, setLocError] = useState<string | null>(null);
 
   // On a chapter page you are reading a chapter, so the book-level mode toggles
   // (Manage Chapters / Advanced) do not apply and are hidden; only the contextual
@@ -19,7 +26,7 @@ export default function ReadBookPage() {
   // The root "Books" crumb is plain text only while you are on the books library
   // in Read mode (nothing to go back to). Everywhere else — a book is open, or
   // you are in Manage/Advanced — it is a link back to the library.
-  const booksIsCurrent = !b.bookUUID && b.view === "read";
+  const booksIsCurrent = !b.bookUUID && b.view === "read" && !showLocations;
 
   return (
     <div className="flex h-full w-full bg-bg-body min-w-0">
@@ -41,10 +48,17 @@ export default function ReadBookPage() {
                 // Return to the Read library from any mode so the link is
                 // meaningful when clicked from Manage/Advanced.
                 b.setView("read");
+                setShowLocations(false);
               }}
             >
               Books
             </Breadcrumb.Link>
+          )}
+          {showLocations && (
+            <>
+              <Breadcrumb.Sep />
+              <Breadcrumb.Current grow={false}>Locations</Breadcrumb.Current>
+            </>
           )}
           {b.selectedBook && (
             <>
@@ -144,10 +158,48 @@ export default function ReadBookPage() {
               />
             </div>
           )}
+
+          {/* Refresh — always available at the far right; reloads the current
+              view (books / chapters / open chapter) from disk. */}
+          <ToolbarButton
+            icon={RefreshCw}
+            label="Refresh"
+            title="Refresh"
+            ariaLabel="Refresh"
+            disabled={b.loading}
+            onClick={b.refresh}
+          />
+
+          {/* Locations management (books level) — opens the shared manager as a
+              full-content overlay, matching the Cards page pattern. */}
+          {!b.bookUUID && (
+            <ToolbarOverflow>
+              <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
+            </ToolbarOverflow>
+          )}
         </Toolbar>
 
+        {/* Locations overlay — replaces the three views while open, the same
+            full-content overlay the Cards page uses. */}
+        {showLocations && (
+          <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+            {locError && (
+              <div className="mx-3 mt-3 p-3 bg-error-bg text-error-text rounded-md text-sm">{locError}</div>
+            )}
+            <div className="flex-1 min-h-0">
+              <LocationsManager
+                datasetType="book"
+                description="Books are stored across book directories. Add linked directories to store books on external drives or other locations."
+                onError={setLocError}
+                onChanged={b.loadBooks}
+                countFor={(path) => b.books.filter((bk) => bk.path.startsWith(path)).length}
+              />
+            </div>
+          </div>
+        )}
+
         {/* Content — all three views stay mounted to preserve state. */}
-        <div className="flex-1 flex flex-col min-h-0 overflow-hidden min-w-0">
+        <div className={`${showLocations ? "hidden" : ""} flex-1 flex flex-col min-h-0 overflow-hidden min-w-0`}>
           <div style={{ display: b.view === "read" ? "flex" : "none" }} className="flex-1 min-h-0 overflow-hidden min-w-0">
             <ReadingView b={b} />
           </div>

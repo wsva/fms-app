@@ -673,10 +673,44 @@ export function useBookData() {
   const selectedBook = books.find((b) => b.uuid === bookUUID) ?? null;
   const currentChapter = chaptersFlat.find((c) => c.uuid === chapterUUID);
 
+  // Reload the current view from disk without disturbing navigation: the book
+  // list always, the open book's chapters, and — only when no reorder is
+  // pending — the open chapter's sentences (so Refresh never discards unsaved
+  // "Save Order" edits). Powers the toolbar Refresh button.
+  const refresh = useCallback(async () => {
+    await loadBooks();
+    if (!isTauri()) return;
+    if (bookUUID) {
+      try {
+        const ch = await invoke<BookChapter[]>("book_list_chapters", { bookUuid: bookUUID });
+        setChaptersFlat(ch);
+      } catch {
+        /* ignore — keep the chapters currently shown */
+      }
+    }
+    if (bookUUID && chapterUUID && !needSave) {
+      setLoading(true);
+      try {
+        const rows = await invoke<BookSentence[]>("book_list_sentences", {
+          bookUuid: bookUUID,
+          chapterUuid: chapterUUID,
+        });
+        updateData((d) => {
+          d.length = 0;
+          rows.forEach((s) => d.push({ ...s, modified: false, hasLocalAudio: false }));
+        });
+      } catch (e) {
+        setError(String(e));
+      }
+      setLoading(false);
+    }
+  }, [loadBooks, bookUUID, chapterUUID, needSave, updateData]);
+
   return {
     // navigation
     books,
     loadBooks,
+    refresh,
     view,
     setView,
     bookUUID,

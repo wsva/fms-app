@@ -15,6 +15,8 @@ import {
   History,
   Play,
   Columns,
+  RefreshCw,
+  FolderOpen,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import MdEditor from "@/components/wiki/MdEditor";
@@ -31,6 +33,7 @@ import {
   ToolbarMenuItem,
   RecordButton,
 } from "@/components/ui/toolbar";
+import { LocationsManager } from "@/components/ui/LocationsManager";
 import PracticePanel, { type RecorderCtl } from "./PracticePanel";
 import AttemptsPanel from "./AttemptsPanel";
 import DatasetDialog from "./DatasetDialog";
@@ -89,6 +92,9 @@ export default function ReadAloudPage() {
   const [normalized, setNormalized] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Locations overlay (shared manager) — opened from the datasets-view overflow
+  // menu, replacing the content area the same way the Cards page does.
+  const [showLocations, setShowLocations] = useState(false);
 
   // A dedicated inline editor for the LLM-normalized scoring reference, opened
   // from the practice view's overflow menu (mirrors the main edit mode). Its
@@ -224,6 +230,14 @@ export default function ReadAloudPage() {
   useEffect(() => {
     loadTexts(selectedDataset);
   }, [selectedDataset, loadTexts]);
+
+  // Toolbar Refresh — reload the dataset list and, when a dataset is open, its
+  // texts. Never touches an in-progress editor draft (that lives in local form
+  // state), so it is safe to offer at every view level.
+  const handleRefresh = useCallback(() => {
+    void loadDatasets();
+    if (selectedDataset) void loadTexts(selectedDataset);
+  }, [loadDatasets, loadTexts, selectedDataset]);
 
   // The normalized editor and the attempts page are per-text concerns; close
   // them whenever the selected text changes so they never leak across texts.
@@ -441,10 +455,18 @@ export default function ReadAloudPage() {
       <Breadcrumb>
         {inEditor ? (
           <span className="shrink-0 text-accent">Read Aloud</span>
+        ) : showLocations ? (
+          <Breadcrumb.Link onClick={() => setShowLocations(false)}>Read Aloud</Breadcrumb.Link>
         ) : viewMode === "datasets" ? (
           <Breadcrumb.Current grow={false}>Read Aloud</Breadcrumb.Current>
         ) : (
           <Breadcrumb.Link onClick={goDatasets}>Read Aloud</Breadcrumb.Link>
+        )}
+        {showLocations && (
+          <>
+            <Breadcrumb.Sep />
+            <Breadcrumb.Current grow={false}>Locations</Breadcrumb.Current>
+          </>
         )}
         {activeDataset && (
           <>
@@ -617,12 +639,27 @@ export default function ReadAloudPage() {
           </>
         )}
 
+        {/* Refresh — always available; reloads the dataset list and, when a
+            dataset is open, its texts. */}
+        <ToolbarButton
+          icon={RefreshCw}
+          label="Refresh"
+          title="Refresh"
+          ariaLabel="Refresh"
+          onClick={handleRefresh}
+        />
+
         {/* Overflow menu — Delete and the Normalized view toggle live here to
             keep the toolbar compact. Items are contextual to the current view;
             the attempts view has no overflow actions (its Play / Delete are in
             the toolbar above), so the menu is hidden there. */}
-        {!inEditor && (viewMode === "texts" || (viewMode === "practice" && !attemptsView)) && (
+        {!inEditor && (viewMode === "datasets" || viewMode === "texts" || (viewMode === "practice" && !attemptsView)) && (
           <ToolbarOverflow open={menuOpen} onOpenChange={setMenuOpen}>
+            {viewMode === "datasets" && (
+              <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>
+                Locations
+              </ToolbarMenuItem>
+            )}
             {viewMode === "texts" && (
               <ToolbarMenuItem
                 icon={Trash2}
@@ -657,8 +694,24 @@ export default function ReadAloudPage() {
       </Toolbar>
 
       {/* Content — while editing this is the inline text form; otherwise the
-          practice pane (own scroll) or the dataset/text lists. */}
-      {editing ? (
+          practice pane (own scroll) or the dataset/text lists. The Locations
+          overlay replaces all of them while open (Cards-page pattern). */}
+      {showLocations ? (
+        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+          {error && (
+            <div className="mx-4 mt-4 p-3 bg-error-bg text-error-text rounded-md text-sm">{error}</div>
+          )}
+          <div className="flex-1 min-h-0">
+            <LocationsManager
+              datasetType="read_aloud"
+              description="Read-aloud datasets are stored across dataset directories. Add linked directories to store datasets on external drives or other locations."
+              onError={setError}
+              onChanged={() => void loadDatasets()}
+              countFor={(path) => datasets.filter((ds) => ds.path.startsWith(path)).length}
+            />
+          </div>
+        </div>
+      ) : editing ? (
         <div className="flex-1 overflow-y-auto min-h-0 min-w-0 p-4 flex flex-col gap-3">
           <div>
             <label className={labelCls}>Title</label>

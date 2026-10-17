@@ -6,7 +6,7 @@ import { ask, message } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
   RefreshCw, ArrowLeft, ArrowRight, Cloud, Download, Pencil, Eye,
-  Folder, FileText, BookMarked, FilePlus, FolderPlus, Plus, Trash2,
+  Folder, FolderOpen, FileText, BookMarked, FilePlus, FolderPlus, Plus, Trash2,
   Save, CircleHelp, Search, ExternalLink,
 } from "lucide-react";
 import WikiSearch from "./WikiSearch";
@@ -20,7 +20,10 @@ import {
   Breadcrumb,
   ToolbarButton,
   ToolbarIconButton,
+  ToolbarOverflow,
+  ToolbarMenuItem,
 } from "@/components/ui/toolbar";
+import { LocationsManager } from "@/components/ui/LocationsManager";
 import {
   WikiDatasetSummary, HubWikiList, Selection, WikiSource, WikiFileEntry,
   WikiFileContent, selectionKey,
@@ -186,6 +189,11 @@ export default function WikiPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isIndexing, setIsIndexing] = useState(false);
+  // Locations overlay (shared manager) — opened from the datasets-view overflow
+  // menu, replacing the content area the same way the Cards page does. Wiki keeps
+  // its own dataset-roots UI; this manages the linked directories behind it.
+  const [showLocations, setShowLocations] = useState(false);
+  const [locError, setLocError] = useState<string | null>(null);
 
   // Hub read-only browse + local wiki datasets.
   const [hubMode, setHubMode] = useState(false);
@@ -829,11 +837,17 @@ export default function WikiPage() {
                 Wiki › dataset › directory › file trail. */}
             <Breadcrumb>
               <button
-                className={`shrink-0 cursor-pointer hover:underline ${viewMode === "datasets" ? "text-text-primary font-medium" : "text-accent"}`}
-                onClick={goDatasets}
+                className={`shrink-0 cursor-pointer hover:underline ${viewMode === "datasets" && !showLocations ? "text-text-primary font-medium" : "text-accent"}`}
+                onClick={() => { setShowLocations(false); goDatasets(); }}
               >
                 Wiki
               </button>
+              {showLocations && (
+                <>
+                  <Breadcrumb.Sep />
+                  <span className="text-text-primary font-medium shrink-0">Locations</span>
+                </>
+              )}
               {activeDatasetUuid && (
                 <>
                   <Breadcrumb.Sep />
@@ -903,7 +917,7 @@ export default function WikiPage() {
                   active={searchOpen}
                   onClick={() => setSearchOpen((v) => !v)}
                   title={searchOpen ? "Hide search" : "Show search"}
-                  ariaLabel="Search"
+                  ariaLabel="Toggle search"
                 />
               </div>
 
@@ -959,7 +973,7 @@ export default function WikiPage() {
                     variant="toggle"
                     active={mdDirty}
                     icon={Save}
-                    label={saving ? "Saving..." : "Save"}
+                    label={saving ? "Saving…" : "Save"}
                     onClick={() => void handleSave()}
                     disabled={saving || !mdDirty}
                     title="Save this file (Ctrl+S)"
@@ -1059,15 +1073,31 @@ export default function WikiPage() {
                 />
               )}
 
-              {viewMode !== "file" && (
-                <ToolbarButton
-                  icon={RefreshCw}
-                  iconProps={{ className: (viewMode === "browse" ? browseLoading : isLoading) ? "animate-spin" : "" }}
-                  label="Refresh"
-                  onClick={viewMode === "browse" ? refreshBrowse : loadLocalDatasets}
-                  disabled={viewMode === "browse" ? browseLoading : isLoading}
-                  title="Refresh"
-                />
+              {/* Refresh — always available. In hub browse it re-pulls the
+                  listing; on an open file (when not editing) it reloads that
+                  file; otherwise it reloads the local dataset list. Disabled
+                  while editing so a refresh can never discard the draft. */}
+              <ToolbarButton
+                icon={RefreshCw}
+                iconProps={{ className: (viewMode === "browse" ? browseLoading : isLoading) ? "animate-spin" : "" }}
+                label="Refresh"
+                title="Refresh"
+                ariaLabel="Refresh"
+                onClick={() => {
+                  if (viewMode === "browse") refreshBrowse();
+                  else if (viewMode === "file") {
+                    if (selection) void loadSelection(selection, false);
+                  } else void loadLocalDatasets();
+                }}
+                disabled={isLoading || browseLoading || (viewMode === "file" && editing)}
+              />
+
+              {/* Locations management (datasets view, local/non-hub only) — opens
+                  the shared manager as a full-content overlay, matching Cards. */}
+              {viewMode === "datasets" && canMutateRoots && (
+                <ToolbarOverflow>
+                  <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
+                </ToolbarOverflow>
               )}
             </Toolbar>
 
@@ -1201,7 +1231,25 @@ export default function WikiPage() {
               </div>
             )}
 
-            {/* Scrollable content */}
+            {/* Scrollable content — or the Locations overlay while open (Cards
+                pattern). Wiki keeps its own dataset-roots UI; this manages the
+                linked directories wiki datasets are stored in. */}
+            {showLocations ? (
+              <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                {locError && (
+                  <div className="mx-4 mt-4 p-3 bg-error-bg text-error-text rounded-md text-sm">{locError}</div>
+                )}
+                <div className="flex-1 min-h-0">
+                  <LocationsManager
+                    datasetType="wiki"
+                    description="Wiki datasets are stored across dataset directories. Add linked directories to store wiki datasets on external drives or other locations."
+                    onError={setLocError}
+                    onChanged={loadLocalDatasets}
+                    countFor={(path) => localDatasets.filter((ds) => ds.path.startsWith(path)).length}
+                  />
+                </div>
+              </div>
+            ) : (
             <div className="flex-1 overflow-y-auto min-h-0">
               {isLoading ? (
                 <div className="flex items-center justify-center h-full">
@@ -1344,6 +1392,7 @@ export default function WikiPage() {
                 </div>
               )}
             </div>
+            )}
           </div>
         </div>
       </div>

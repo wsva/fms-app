@@ -1,14 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   BookOpen,
-  FolderOpen,
-  FolderPlus,
-  MapPin,
-  X,
   AlertTriangle,
   Eye,
   RefreshCw,
@@ -22,7 +17,6 @@ import {
   type SyncResult,
 } from "@/lib/read/chapterMarkdown";
 import { isTauri } from "@/lib/tauri";
-import { isMobileApp } from "@/lib/platform";
 import HighlightedChapterInput from "./HighlightedChapterInput";
 import ConfirmDialog, { type ConfirmRequest } from "./ConfirmDialog";
 
@@ -47,78 +41,6 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
   const [addTitle, setAddTitle] = useState("");
   const [editBookUUID, setEditBookUUID] = useState<string | null>(null);
   const [editBookTitle, setEditBookTitle] = useState("");
-  // Deferred platform flag (SSR-safe). On touch there is no hover, so row
-  // actions that reveal on `group-hover` must stay visible on mobile. It also
-  // hides the folder Browse... button: `open({ directory: true })` is desktop-only
-  // (the dialog plugin returns FolderPickerNotImplemented), while the path field
-  // below can still be filled by hand.
-  const [mobile, setMobile] = useState(false);
-  useEffect(() => {
-    setMobile(isMobileApp());
-  }, []);
-
-  // Locations state
-  const [dirs, setDirs] = useState<{ name: string; path: string; is_linked: boolean; is_read_only?: boolean }[]>([]);
-  const [showAddDir, setShowAddDir] = useState(false);
-  const [newDirName, setNewDirName] = useState("");
-  const [newDirPath, setNewDirPath] = useState("");
-  const [locationError, setLocationError] = useState<string | null>(null);
-
-  const loadDirs = useCallback(async () => {
-    try {
-      const result = await invoke<{ name: string; path: string; is_linked: boolean; is_read_only?: boolean }[]>(
-        "dataset_list_dirs",
-        { datasetType: "book" }
-      );
-      setDirs(result);
-    } catch {
-      // Ignore
-    }
-  }, []);
-
-  useEffect(() => {
-    loadDirs();
-  }, [loadDirs]);
-
-  const handleAddLocation = async () => {
-    if (!newDirName.trim() || !newDirPath.trim()) return;
-    setLocationError(null);
-    try {
-      await invoke("dataset_add_dir", { name: newDirName.trim(), path: newDirPath.trim() });
-      setShowAddDir(false);
-      setNewDirName("");
-      setNewDirPath("");
-      loadDirs();
-      onBooksChanged();
-    } catch (e) {
-      setLocationError(String(e));
-    }
-  };
-
-  const handlePickLocation = async () => {
-    const picked = await open({ directory: true, multiple: false, title: "Select Book Directory" });
-    if (typeof picked === "string") {
-      setNewDirPath(picked);
-      if (!newDirName.trim()) {
-        setNewDirName(picked.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || picked);
-      }
-    }
-  };
-
-  const handleRemoveLocation = async (path: string) => {
-    const confirmed = await ask(`Unlink this directory? Books inside will no longer be visible.`, {
-      title: "Unlink Directory",
-    });
-    if (!confirmed) return;
-    setLocationError(null);
-    try {
-      await invoke("dataset_remove_dir", { path });
-      loadDirs();
-      onBooksChanged();
-    } catch (e) {
-      setLocationError(String(e));
-    }
-  };
 
   const [flat, setFlat] = useState<BookChapter[]>([]);
   const [chaptersLoading, setChaptersLoading] = useState(false);
@@ -328,131 +250,11 @@ export default function BookManager({ books, bookUUID, setBookUUID, onBooksChang
 
   return (
     <div className="flex flex-col gap-4 min-w-0 max-w-full h-full min-h-0 overflow-x-hidden">
-      {/* Books level (no book selected): Locations + book CRUD overview. When a
-          book is selected, Manage switches to editing that book's chapters. */}
+      {/* Books level (no book selected): book CRUD overview. When a book is
+          selected, Manage switches to editing that book's chapters. Locations are
+          managed from the toolbar's Locations overlay (shared LocationsManager). */}
       {!selectedBook && (
       <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4 min-w-0">
-      {/* Locations */}
-      <section>
-        <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
-          <FolderOpen size={18} />
-          Locations
-        </h2>
-        <p className="text-sm text-text-secondary mb-3">
-          Books are stored across book directories. Add linked directories to store books on external drives or other locations.
-        </p>
-
-        {locationError && (
-          <div className="p-3 bg-red-500/10 text-red-500 rounded-md text-sm mb-3">{locationError}</div>
-        )}
-
-        {/* Directory list */}
-        <div className="space-y-2 mb-3">
-          {dirs.map((dir) => {
-            const booksInDir = books.filter((b) => b.path.startsWith(dir.path));
-            return (
-              <div
-                key={dir.path}
-                className="p-3 rounded-lg border border-border-default bg-bg-card"
-              >
-                <div className="flex items-center justify-between mb-1 gap-2">
-                  <div className="flex items-center gap-2 flex-wrap min-w-0">
-                    <MapPin size={14} className="text-text-tertiary" />
-                    <span className="text-sm font-medium">{dir.name}</span>
-                    {!dir.is_linked && !dir.is_read_only && (
-                      <span className="text-xs px-1.5 py-0.5 rounded bg-accent-bg/10 text-accent">
-                        default
-                      </span>
-                    )}
-                    {dir.is_read_only && (
-                      <span className="text-xs px-1.5 py-0.5 rounded border border-border-light bg-bg-body text-text-secondary">
-                        app-managed
-                      </span>
-                    )}
-                    <span className="text-xs text-text-tertiary">
-                      {booksInDir.length} book{booksInDir.length !== 1 ? "s" : ""}
-                    </span>
-                  </div>
-                  {dir.is_linked && (
-                    <button
-                      onClick={() => handleRemoveLocation(dir.path)}
-                      className="p-1 rounded hover:bg-red-500/10 text-text-tertiary hover:text-red-500"
-                      title="Remove linked directory"
-                    >
-                      <X size={14} />
-                    </button>
-                  )}
-                </div>
-                <p className="text-xs text-text-tertiary font-mono break-all">{dir.path}</p>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Add linked directory */}
-        {showAddDir ? (
-          <div className="p-3 rounded-lg border border-border-default bg-bg-card space-y-2">
-            <div>
-              <label className="block text-xs font-medium mb-1">Display Name</label>
-              <input
-                type="text"
-                value={newDirName}
-                onChange={(e) => setNewDirName(e.target.value)}
-                placeholder="e.g. External SSD"
-                className="w-full px-2 py-1 rounded border border-border-default bg-bg-surface text-sm"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium mb-1">Directory Path</label>
-              <div className="flex gap-1">
-                <input
-                  type="text"
-                  value={newDirPath}
-                  onChange={(e) => setNewDirPath(e.target.value)}
-                  placeholder="e.g. /mnt/external/books"
-                  className="flex-1 px-2 py-1 rounded border border-border-default bg-bg-surface text-sm"
-                />
-                {!mobile && (
-                  <button
-                    onClick={handlePickLocation}
-                    className="px-2 py-1 rounded border border-border-default hover:bg-bg-hover text-sm"
-                    title="Browse..."
-                  >
-                    <FolderOpen size={14} />
-                  </button>
-                )}
-              </div>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={handleAddLocation}
-                className={btnPrimary}
-              >
-                Add
-              </button>
-              <button
-                onClick={() => {
-                  setShowAddDir(false);
-                  setNewDirName("");
-                  setNewDirPath("");
-                }}
-                className={btnGhost}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        ) : (
-          <button
-            onClick={() => setShowAddDir(true)}
-            className={btnGhost}
-          >
-            <FolderPlus size={14} className="inline mr-1" />
-            Add Linked Directory
-          </button>
-        )}
-      </section>
-
       {/* Books header */}
       <div className="flex flex-row items-center justify-between border-t border-border-default pt-4">
         <h2 className="text-lg font-semibold text-text-primary flex items-center gap-2">
