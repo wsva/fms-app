@@ -48,6 +48,8 @@ type TabId = "cards" | "review" | "tags";
 // (active = solid accent), mirroring ReadBook's Manage/Advanced mode group.
 // The former "Search" tab is gone: searching is unified into the Cards view's
 // search box, whose This-deck/All-decks scope toggle switches engines in place.
+// "Cards" itself is not rendered as a toggle either: it is the deck's default
+// view, and the breadcrumb's Cards crumb is the way back to it from Review/Tags.
 const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: "cards", label: "Cards", icon: <Layers size={16} /> },
   { id: "review", label: "Review", icon: <GraduationCap size={16} /> },
@@ -444,7 +446,17 @@ export default function CardsPage() {
       <nav className="shrink-0 flex items-center justify-start gap-2 px-4 py-2 text-sm select-none min-w-0 overflow-x-auto border-b border-border-default bg-bg-card">
         <button
           className={`shrink-0 text-left ${crumbTail ? "cursor-pointer hover:underline text-accent" : "text-text-primary font-medium"}`}
-          onClick={() => { setSelectedDatasetUuid(""); setShowManage(false); setMenuOpen(false); setSearchScope("deck"); setReviewScope(""); setActiveTab("cards"); }}
+          onClick={() => {
+            // Inside a deck, "back to Cards" means the deck's card list — stay in
+            // the deck and only leave the Review/Tags mode (also unseeding the
+            // deck-scoped session). From any other level it goes to the deck grid.
+            if (selectedDatasetUuid && activeTab !== "cards") {
+              setReviewScope("");
+              setActiveTab("cards");
+              return;
+            }
+            setSelectedDatasetUuid(""); setShowManage(false); setMenuOpen(false); setSearchScope("deck"); setReviewScope(""); setActiveTab("cards");
+          }}
         >
           Cards
         </button>
@@ -499,7 +511,10 @@ export default function CardsPage() {
         ) : selectedDatasetUuid ? (
           <>
             <div className="flex items-center gap-1 shrink-0">
-              {TABS.map((t) => (
+              {/* Review / Tags only — the card list is the deck's home view, not a
+                  mode you toggle to; the breadcrumb's Cards crumb returns to it. */}
+              {TABS.map((t) =>
+                t.id === "cards" ? null : (
                 <button
                   key={t.id}
                   type="button"
@@ -509,13 +524,16 @@ export default function CardsPage() {
                   onClick={() => {
                     // Entering Review from inside a deck keeps that deck as the
                     // session scope; the selector can still widen it to all decks.
+                    // Exiting Review back to the card list is the breadcrumb's
+                    // Cards crumb — the list has no toolbar toggle any more.
                     if (t.id === "review") setReviewScope(selectedDatasetUuid);
                     setActiveTab(t.id);
                   }}
                 >
                   {t.icon}{!mobile && ` ${t.label}`}
                 </button>
-              ))}
+                ),
+              )}
             </div>
             {/* Add Card lives on the deck toolbar so it is always reachable —
                 it used to hide inside the search row, which meant opening
