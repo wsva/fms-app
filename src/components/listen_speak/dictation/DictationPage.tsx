@@ -8,7 +8,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore, useLayoutEffect } from "react";
 
 import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui/react";
-import { RefreshCw, Trash2, Database, Target, CheckCircle, FolderOpen, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown, Captions } from "lucide-react";
+import { RefreshCw, Trash2, Target, CheckCircle, FolderOpen, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown, Captions } from "lucide-react";
 import CueEditor from "./components/CueEditor";
 import WaveformCanvas from "./components/WaveformCanvas";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
@@ -148,6 +148,18 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
         [datasetsByLocation, d.locations]
     );
     const readyCount = useMemo(() => d.datasets.filter((ds) => ds.status === "ready").length, [d.datasets]);
+
+    // What the single Refresh button re-reads depends on the level you are on,
+    // so the caption names that scope instead of a generic "Refresh": the
+    // linked directories in the Locations overlay, the dataset list at the
+    // root, this dataset's media list, or this media's cues.
+    const refreshCaption = showLocations
+        ? "Refresh locations"
+        : !d.selectedDatasetUuid
+            ? "Refresh datasets"
+            : d.stateMediaUUID
+                ? "Refresh media"
+                : "Refresh dataset";
 
     // Dataset card with a Ready / Not Ready mark; not-ready datasets cannot be
     // selected until their database is generated on the Datasets page.
@@ -356,7 +368,6 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 {/* ── Dataset section (media list view) ── */}
                 {d.selectedDatasetUuid && !d.stateMediaUUID && (
                     <div className="flex items-center gap-1">
-                        <ToolbarButton icon={Database} label="Reload" ariaLabel="Reload database" title="Reload database" disabled={!d.selectedDatasetUuid || d.stateLoading} onClick={d.handleReload} />
                         <ToolbarButton variant="toggle" active={mediaEditMode} icon={Pencil} label={mediaEditMode ? "View" : "Edit"} ariaLabel="Toggle edit mode" title={mediaEditMode ? "View" : "Edit"} disabled={!d.selectedDatasetUuid} onClick={() => setMediaEditMode((v) => !v)} />
                     </div>
                 )}
@@ -415,9 +426,12 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 )}
 
                 {/* Refresh — always available at every level (locations, media
-                    list, cue view); reloads the location list and the
-                    dataset/media lists from disk. */}
-                <ToolbarButton icon={RefreshCw} label="Refresh" ariaLabel="Refresh" title="Refresh" disabled={d.stateLoading} onClick={() => { d.loadLocations(); d.loadDatasets(); }} />
+                    list, cue view); reloads the location and dataset lists from
+                    disk and, when a dataset is open, bumps the reload token so
+                    its media/subtitles/cues are re-read too (no-op at the root
+                    level — this absorbs the old per-dataset Reload button).
+                    The caption carries the scope of the current level. */}
+                <ToolbarButton icon={RefreshCw} label={refreshCaption} ariaLabel={refreshCaption} title={refreshCaption} disabled={d.stateLoading} onClick={() => { d.loadLocations(); d.loadDatasets(); d.handleReload(); }} />
 
                 {/* Locations management (datasets view) — opens the shared manager
                     as a full-content overlay, matching the Cards page pattern. */}
