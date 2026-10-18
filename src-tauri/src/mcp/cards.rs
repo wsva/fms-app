@@ -255,7 +255,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "cards_indexed": count}).to_string())
     }
 
-    #[tool(name = "card_test_next", description = "Get the next card due for review using SM-2 spaced repetition. Returns the card and its review state, or null if no cards are due. Reviews are per user: this is the *current* workspace's schedule, not the deck's stored one.")]
+    #[tool(name = "card_test_next", description = "Get the next card due for review using SM-2 spaced repetition. Returns the card and its review state, or null if no cards are due. Reviews are per user: this is the *current* workspace's schedule, not the dataset's stored one.")]
     async fn card_test_next(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::info!("[MCP] card_test_next: dataset={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
@@ -302,7 +302,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&stats).unwrap_or_default())
     }
 
-    #[tool(name = "card_test_next_all", description = "Get the next card due for review across EVERY card dataset (a cross-deck session, no single deck open). Same due-first priority as card_test_next but global: an overdue card in any deck outranks a fresh one elsewhere. Returns the card, its review state, and the dataset_uuid + dataset_name it came from (submit the rating with card_test_submit using that dataset_uuid), or null if nothing is due anywhere.")]
+    #[tool(name = "card_test_next_all", description = "Get the next card due for review across EVERY card dataset (a cross-dataset session, no single dataset open). Same due-first priority as card_test_next but global: an overdue card in any dataset outranks a fresh one elsewhere. Returns the card, its review state, and the dataset_uuid + dataset_name it came from (submit the rating with card_test_submit using that dataset_uuid), or null if nothing is due anywhere.")]
     async fn card_test_next_all(&self) -> Result<String, String> {
         log::info!("[MCP] card_test_next_all");
         let settings = self.app.state::<SettingsState>();
@@ -329,7 +329,7 @@ impl DatasetMcpServer {
         }
     }
 
-    #[tool(name = "card_test_stats_all", description = "Count the review queue across EVERY card dataset *for the current user*, summed: due, fresh, mature, incomplete, total, and serving = which pool the next cross-deck draw comes from. The aggregate counterpart of card_test_stats.")]
+    #[tool(name = "card_test_stats_all", description = "Count the review queue across EVERY card dataset *for the current user*, summed: due, fresh, mature, incomplete, total, and serving = which pool the next cross-dataset draw comes from. The aggregate counterpart of card_test_stats.")]
     async fn card_test_stats_all(&self) -> Result<String, String> {
         log::info!("[MCP] card_test_stats_all");
         let settings = self.app.state::<SettingsState>();
@@ -397,7 +397,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"tags": items, "count": items.len()}).to_string())
     }
 
-    #[tool(name = "card_sync", description = "Sync one card dataset through the dataset-scope row journal: pushes this deck's pending edits and applies the hub's pulled rows (card rows are journal kinds since sync-v2 phase 7b — no bespoke card endpoint). Only for decks upstreamed by the cloud hub and owned by the current user; never a read-only shared copy under the download root. A deck that is not journal-synced here returns zeros.")]
+    #[tool(name = "card_sync", description = "Sync one card dataset through the dataset-scope row journal: pushes this dataset's pending edits and applies the hub's pulled rows (card rows are journal kinds since sync-v2 phase 7b — no bespoke card endpoint). Only for datasets upstreamed by the cloud hub and owned by the current user; never a read-only shared copy under the download root. A dataset that is not journal-synced here returns zeros.")]
     async fn card_sync(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
         log::info!("[MCP] card_sync: dataset={}", param.uuid);
         let settings = self.app.state::<SettingsState>();

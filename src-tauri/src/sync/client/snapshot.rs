@@ -283,7 +283,7 @@ pub(crate) fn card_sync_target(
         "cloud_hub" => Ok(CardSyncTarget::Website { origin: row_origin }),
         "desktop_hub" => Ok(CardSyncTarget::Skip {
             reason: format!(
-                "deck is upstreamed by a desktop hub ({row_origin}); its rows travel \
+                "dataset is upstreamed by a desktop hub ({row_origin}); its rows travel \
                  through the dataset-scope journal, so the website card round trip \
                  would be a second conflict engine (§3 fact 3)"
             ),

@@ -185,7 +185,7 @@ const KIND_META: Record<WorkflowCategory, { label: string; blurb: string; icon: 
   },
   card: {
     label: "Card",
-    blurb: "Create a deck, author cards / tags, rebuild the full-text index, sync online. Agent-facing.",
+    blurb: "Create a card dataset, author cards / tags, rebuild the full-text index, sync online. Agent-facing.",
     icon: Layers,
   },
 };

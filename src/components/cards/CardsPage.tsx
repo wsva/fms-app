@@ -32,7 +32,7 @@ import type {
   CardReview,
   CardTag,
   CardTestStats,
-  CrossDeckCard,
+  CrossDatasetCard,
 } from "@/lib/types";
 import { isMobileApp } from "@/lib/platform";
 import { LocationsManager } from "@/components/ui/LocationsManager";
@@ -52,8 +52,8 @@ type TabId = "cards" | "review" | "tags";
 // Detail-view toolbar modes, rendered as toggle buttons on the toolbar right
 // (active = solid accent), mirroring ReadBook's Manage/Advanced mode group.
 // The former "Search" tab is gone: searching is unified into the Cards view's
-// search box, whose This-deck/All-decks scope toggle switches engines in place.
-// "Cards" itself is not rendered as a toggle either: it is the deck's default
+// search box, whose This-dataset/All-datasets scope toggle switches engines in place.
+// "Cards" itself is not rendered as a toggle either: it is the dataset's default
 // view, and the breadcrumb's Cards crumb is the way back to it from Review/Tags.
 const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "cards", label: "Cards", icon: Layers },
@@ -79,8 +79,11 @@ export default function CardsPage() {
   const [activeTab, setActiveTab] = useState<TabId>("cards");
 
   // Toolbar "Locations" mode: shows the location management view as an overlay,
-  // reached from the overflow menu on the deck list.
+  // reached from the overflow menu on the dataset list.
   const [showManage, setShowManage] = useState(false);
+  // Bumped by the toolbar Refresh so an open Locations overlay re-reads its own
+  // directory list instead of keeping the one it mounted with.
+  const [locRefresh, setLocRefresh] = useState(0);
 
   // Overflow (three-dot) menu visibility — Locations currently lives in there.
   const [menuOpen, setMenuOpen] = useState(false);
@@ -93,14 +96,14 @@ export default function CardsPage() {
   const [reviewFlipped, setReviewFlipped] = useState(false);
   const [reviewResult, setReviewResult] = useState<CardReview | null>(null);
   const [reviewStats, setReviewStats] = useState<CardTestStats | null>(null);
-  // All-decks review: which deck the drawn card came from, so the panel can name
-  // it and submitReview can rate it in the right place. Empty in a deck-scoped
+  // All-datasets review: which dataset the drawn card came from, so the panel can name
+  // it and submitReview can rate it in the right place. Empty in a dataset-scoped
   // session, where reviewScope is the source and the submit targets it directly.
-  const [reviewDeckUuid, setReviewDeckUuid] = useState<string>("");
-  const [reviewDeckName, setReviewDeckName] = useState<string>("");
-  // Which deck the review session draws from: "" = all decks (the default),
+  const [reviewDatasetUuid, setReviewDatasetUuid] = useState<string>("");
+  const [reviewDatasetName, setReviewDatasetName] = useState<string>("");
+  // Which dataset the review session draws from: "" = all datasets (the default),
   // otherwise a dataset uuid picked in the review page's own selector. This is
-  // a filter on the session, not navigation — selecting a deck here does not
+  // a filter on the session, not navigation — selecting a dataset here does not
   // open it, so the review page stays a page of its own.
   const [reviewScope, setReviewScope] = useState<string>("");
 
@@ -116,25 +119,25 @@ export default function CardsPage() {
   const [searchMode, setSearchMode] = useState<"question" | "fulltext">("fulltext");
   const [rebuildingIndex, setRebuildingIndex] = useState(false);
 
-  // Unified search scope within the Cards view: "deck" filters the open deck
-  // live via card_list; "all" runs a cross-deck FTS5 query via card_search.
-  const [searchScope, setSearchScope] = useState<"deck" | "all">("deck");
+  // Unified search scope within the Cards view: "dataset" filters the open dataset
+  // live via card_list; "all" runs a cross-dataset FTS5 query via card_search.
+  const [searchScope, setSearchScope] = useState<"dataset" | "all">("dataset");
 
   // Search sub-toolbar visibility: toggled by the toolbar's search button and
   // hidden by default (the wiki page's idiom). Hiding also resets the view to
-  // the unfiltered deck list, so a live filter can't stay applied invisibly.
+  // the unfiltered dataset list, so a live filter can't stay applied invisibly.
   const [searchOpen, setSearchOpen] = useState(false);
 
   function toggleSearch() {
     if (searchOpen) {
       setSearchOpen(false);
-      setSearchScope("deck");
+      setSearchScope("dataset");
       setKeyword("");
       setPage(0);
     } else {
       // The search row lives in the Cards view, so opening it from Review/Tags
-      // jumps there first. At the deck-list root there is no current deck, so
-      // search is inherently cross-deck — force the "all decks" scope.
+      // jumps there first. At the dataset-list root there is no current dataset, so
+      // search is inherently cross-dataset — force the "all datasets" scope.
       setActiveTab("cards");
       if (!selectedDatasetUuid) setSearchScope("all");
       setSearchOpen(true);
@@ -197,11 +200,12 @@ export default function CardsPage() {
     }
   }, [loadCards, selectedDatasetUuid]);
 
-  // Toolbar Refresh — always available: reload the deck list and, when a deck
-  // is open, its cards.
+  // Toolbar Refresh — always available: reload the dataset list and, when a dataset
+  // is open, its cards (plus the Locations list while that overlay owns the view).
   const handleRefresh = useCallback(() => {
     void loadDatasets();
     if (selectedDatasetUuid) void loadCards();
+    setLocRefresh((n) => n + 1);
   }, [loadDatasets, loadCards, selectedDatasetUuid]);
 
   // Load tags when dataset changes
@@ -224,8 +228,8 @@ export default function CardsPage() {
   }, [selectedDatasetUuid, activeTab, loadTags]);
 
   // Queue counts for the Review tab. Refreshed with every draw so the numbers
-  // describe the same pool the draw just picked from: one deck's queue when a
-  // deck is selected, the aggregate over every deck in an all-decks session.
+  // describe the same pool the draw just picked from: one dataset's queue when a
+  // dataset is selected, the aggregate over every dataset in an all-datasets session.
   const loadReviewStats = useCallback(async () => {
     try {
       setReviewStats(
@@ -245,20 +249,20 @@ export default function CardsPage() {
   const loadNextReview = useCallback(async () => {
     try {
       if (reviewScope) {
-        // Deck-scoped session: the source deck is the one selected above.
+        // Dataset-scoped session: the source dataset is the one selected above.
         const result = await invoke<[Card, CardReview] | null>("card_test_get", {
           datasetUuid: reviewScope,
         });
         setReviewCard(result ? result[0] : null);
-        setReviewDeckUuid("");
-        setReviewDeckName("");
+        setReviewDatasetUuid("");
+        setReviewDatasetName("");
       } else {
-        // All-decks session: the drawn card names its own source deck, which
+        // All-datasets session: the drawn card names its own source dataset, which
         // submitReview must target.
-        const result = await invoke<CrossDeckCard | null>("card_test_get_all");
+        const result = await invoke<CrossDatasetCard | null>("card_test_get_all");
         setReviewCard(result ? result.card : null);
-        setReviewDeckUuid(result ? result.dataset_uuid : "");
-        setReviewDeckName(result ? result.dataset_name : "");
+        setReviewDatasetUuid(result ? result.dataset_uuid : "");
+        setReviewDatasetName(result ? result.dataset_name : "");
       }
       setReviewFlipped(false);
       setReviewResult(null);
@@ -270,8 +274,8 @@ export default function CardsPage() {
   }, [reviewScope, loadReviewStats]);
 
   useEffect(() => {
-    // Review works at the deck-list root too (all decks), so it never required
-    // an open deck — just the review mode. Changing the scope rebuilds
+    // Review works at the dataset-list root too (all datasets), so it never required
+    // an open dataset — just the review mode. Changing the scope rebuilds
     // loadNextReview, which is what re-draws from the new pool.
     if (activeTab === "review") {
       loadNextReview();
@@ -284,8 +288,8 @@ export default function CardsPage() {
   useEffect(() => {
     const unlisten = listen<{ dataset_uuid: string | null }>("agent-open-review", (event) => {
       const uuid = event.payload?.dataset_uuid;
-      // Scope the session to the requested deck, or to every deck when none was
-      // named. Also open that deck, so the breadcrumb shows where the review is.
+      // Scope the session to the requested dataset, or to every dataset when none was
+      // named. Also open that dataset, so the breadcrumb shows where the review is.
       setReviewScope(uuid ?? "");
       if (uuid) setSelectedDatasetUuid(uuid);
       setActiveTab("review");
@@ -298,13 +302,13 @@ export default function CardsPage() {
   // Submit review
   const submitReview = useCallback(
     async (quality: number) => {
-      // The deck to rate against: the scoped deck, or the source deck of a draw
-      // that came out of the all-decks pool.
-      const deckUuid = reviewScope || reviewDeckUuid;
-      if (!reviewCard || !deckUuid) return;
+      // The dataset to rate against: the scoped one, or the source dataset of a
+      // draw that came out of the all-datasets pool.
+      const targetDatasetUuid = reviewScope || reviewDatasetUuid;
+      if (!reviewCard || !targetDatasetUuid) return;
       try {
         const result = await invoke<CardReview>("card_test_submit", {
-          datasetUuid: deckUuid,
+          datasetUuid: targetDatasetUuid,
           cardUuid: reviewCard.uuid,
           quality,
         });
@@ -315,7 +319,7 @@ export default function CardsPage() {
         setError(`Failed to submit review: ${e}`);
       }
     },
-    [reviewCard, reviewScope, reviewDeckUuid, loadNextReview]
+    [reviewCard, reviewScope, reviewDatasetUuid, loadNextReview]
   );
 
   // Keyboard shortcuts for the review flow (Anki-style): Space/Enter flips the
@@ -403,20 +407,20 @@ export default function CardsPage() {
   const selectedDataset = datasets.find((d) => d.info.uuid === selectedDatasetUuid);
   const totalPages = Math.ceil(totalCards / pageSize);
 
-  // Search is a page-level concern (works from the deck-list root and from a
-  // deck's Cards view): the row shows while toggled on and not in Manage; the
-  // cross-deck results replace the normal content when scope is "all".
-  const deckOpen = !!selectedDatasetUuid;
-  // With no deck open there is nothing to filter in-place, so search is
-  // inherently cross-deck — effScope pins to "all" regardless of the toggle.
-  const effScope = deckOpen ? searchScope : "all";
+  // Search is a page-level concern (works from the dataset-list root and from a
+  // dataset's Cards view): the row shows while toggled on and not in Manage; the
+  // cross-dataset results replace the normal content when scope is "all".
+  const datasetOpen = !!selectedDatasetUuid;
+  // With no dataset open there is nothing to filter in-place, so search is
+  // inherently cross-dataset — effScope pins to "all" regardless of the toggle.
+  const effScope = datasetOpen ? searchScope : "all";
   const searchActive = searchOpen && !showManage;
   const showAllResults = searchActive && effScope === "all";
 
   // Root-level sub-views that own the content area, named in the breadcrumb so
   // the trail reads Cards › Locations / Cards › Review instead of a bare "Cards".
-  // Inside a deck the trail stays Cards › <deck>.
-  const rootSubView = deckOpen
+  // Inside a dataset the trail stays Cards › <dataset>.
+  const rootSubView = datasetOpen
     ? null
     : showManage
       ? "Locations"
@@ -424,6 +428,15 @@ export default function CardsPage() {
         ? "Review"
         : null;
   const crumbTail = selectedDataset ? selectedDataset.info.name : rootSubView;
+
+  // One Refresh button means different things per level, so its caption names the
+  // scope it actually re-reads here: the linked directories, this dataset's cards, or
+  // the dataset list. Mirrors the Dictation page.
+  const refreshCaption = showManage
+    ? "Refresh locations"
+    : datasetOpen
+      ? "Refresh cards"
+      : "Refresh datasets";
 
   // Familiarity color — theme-aware ramp (see --fam-* in globals.css), so the
   // row tint tracks the active Light/Dark/Solarized/Gruvbox theme instead of a
@@ -452,22 +465,22 @@ export default function CardsPage() {
   return (
     <main className="flex-1 flex flex-col min-h-0 min-w-0 bg-bg-body">
       {/* Breadcrumb navigation — wiki/dictation-style full-width bar above the
-          toolbar: the Cards › <deck> trail, or Cards › Locations / Cards › Review
+          toolbar: the Cards › <dataset> trail, or Cards › Locations / Cards › Review
           for the root-level sub-views. The root "Cards" crumb is the dataset list;
-          it becomes a link back to it whenever a deck or a sub-view owns the page. */}
+          it becomes a link back to it whenever a dataset or a sub-view owns the page. */}
       <Breadcrumb>
         {crumbTail ? (
           <Breadcrumb.Link
             onClick={() => {
-              // Inside a deck, "back to Cards" means the deck's card list — stay in
-              // the deck and only leave the Review/Tags mode (also unseeding the
-              // deck-scoped session). From any other level it goes to the deck grid.
+              // Inside a dataset, "back to Cards" means the dataset's card list — stay in
+              // the dataset and only leave the Review/Tags mode (also unseeding the
+              // dataset-scoped session). From any other level it goes to the dataset grid.
               if (selectedDatasetUuid && activeTab !== "cards") {
                 setReviewScope("");
                 setActiveTab("cards");
                 return;
               }
-              setSelectedDatasetUuid(""); setShowManage(false); setMenuOpen(false); setSearchScope("deck"); setReviewScope(""); setActiveTab("cards");
+              setSelectedDatasetUuid(""); setShowManage(false); setMenuOpen(false); setSearchScope("dataset"); setReviewScope(""); setActiveTab("cards");
             }}
           >
             Cards
@@ -483,20 +496,20 @@ export default function CardsPage() {
         )}
       </Breadcrumb>
 
-      {/* Toolbar — deck-level info on the left, actions on the right (Wiki-style
-          full-width bar under the breadcrumb): the mode toggles (in a deck) or the
-          deck-list actions, then search, then the overflow menu. */}
+      {/* Toolbar — dataset-level info on the left, actions on the right (Wiki-style
+          full-width bar under the breadcrumb): the mode toggles (in a dataset) or the
+          dataset-list actions, then search, then the overflow menu. */}
       <Toolbar mobile={mobile}>
         <span className="text-xs text-text-secondary truncate min-w-0">
           {selectedDataset
             ? `${selectedDataset.info.sharing.visibility} · ${selectedDataset.card_count} cards`
-            : `${datasets.length} deck${datasets.length !== 1 ? "s" : ""}`}
+            : `${datasets.length} dataset${datasets.length !== 1 ? "s" : ""}`}
         </span>
         <div className="flex-1 min-w-0" />
         {!showManage && (activeTab === "review" ? (
           <>
             {/* The review page's card-level actions live here. Its own mode toggles
-                and deck-list actions are hidden while it owns the screen, so the
+                and dataset-list actions are hidden while it owns the screen, so the
                 grade scale in the panel below is the only decision left in view. */}
             <ToolbarButton
               icon={FlipHorizontal}
@@ -517,7 +530,7 @@ export default function CardsPage() {
         ) : selectedDatasetUuid ? (
           <>
             <div className="flex items-center gap-1 shrink-0">
-              {/* Review / Tags only — the card list is the deck's home view, not a
+              {/* Review / Tags only — the card list is the dataset's home view, not a
                   mode you toggle to; the breadcrumb's Cards crumb returns to it. */}
               {TABS.map((t) =>
                 t.id === "cards" ? null : (
@@ -528,8 +541,8 @@ export default function CardsPage() {
                     icon={t.icon}
                     label={t.label}
                     onClick={() => {
-                      // Entering Review from inside a deck keeps that deck as the
-                      // session scope; the selector can still widen it to all decks.
+                      // Entering Review from inside a dataset keeps that dataset as the
+                      // session scope; the selector can still widen it to all datasets.
                       // Exiting Review back to the card list is the breadcrumb's
                       // Cards crumb — the list has no toolbar toggle any more.
                       if (t.id === "review") setReviewScope(selectedDatasetUuid);
@@ -539,7 +552,7 @@ export default function CardsPage() {
                 ),
               )}
             </div>
-            {/* Add Card lives on the deck toolbar so it is always reachable —
+            {/* Add Card lives on the dataset toolbar so it is always reachable —
                 it used to hide inside the search row, which meant opening
                 search just to create a card. */}
             <ToolbarButton
@@ -552,7 +565,7 @@ export default function CardsPage() {
           </>
         ) : (
           <>
-            {/* Cross-deck review — reachable from the deck list with no deck open.
+            {/* Cross-dataset review — reachable from the dataset list with no dataset open.
                 Shown only while the review page does NOT own the screen (the
                 review toolbar carries Answer/Skip alone); the breadcrumb's Cards
                 crumb is the way back. Opening it closes search so the review
@@ -560,30 +573,30 @@ export default function CardsPage() {
             <ToolbarButton
               icon={GraduationCap}
               label="Review"
-              title="Review cards across all decks"
-              ariaLabel="Review across all decks"
+              title="Review cards across all datasets"
+              ariaLabel="Review across all datasets"
               onClick={() => {
                 setSearchOpen(false);
                 setReviewScope("");
                 setActiveTab("review");
               }}
             />
-            <ToolbarButton icon={Plus} label="New Deck" title="Create new dataset" onClick={createDataset} />
+            <ToolbarButton icon={Plus} label="New Dataset" title="Create new dataset" onClick={createDataset} />
           </>
         ))}
-        {/* Refresh — always available at every level (deck list, inside a deck,
-            review, and the Locations overlay); reloads the deck list and, when a
-            deck is open, its cards. */}
+        {/* Refresh — always available at every level (dataset list, inside a dataset,
+            review, and the Locations overlay); reloads the dataset list and, when a
+            dataset is open, its cards. The caption carries the scope of the level. */}
         <ToolbarButton
           icon={RefreshCw}
-          label="Refresh"
-          title="Refresh"
-          ariaLabel="Refresh datasets"
+          label={refreshCaption}
+          title={refreshCaption}
+          ariaLabel={refreshCaption}
           onClick={handleRefresh}
         />
         {/* Search button — present at every level but Review, on the far right
-            (just before the overflow menu): inside a deck it toggles the
-            This-deck / All-decks row, from the deck list it opens a cross-deck
+            (just before the overflow menu): inside a dataset it toggles the
+            This-dataset / All-datasets row, from the dataset list it opens a cross-dataset
             search directly. Hidden while the Locations overlay or the review page
             owns the content area — the review toolbar shows only Answer/Skip — so
             its active state always matches a visible row. */}
@@ -599,7 +612,7 @@ export default function CardsPage() {
         )}
         {/* Overflow menu — the three-dot home for occasional actions. Locations
             (the former Manage toggle) lives here: it is a root-level concern, so
-            the menu is shown on the deck list only — never inside a deck, nor on
+            the menu is shown on the dataset list only — never inside a dataset, nor on
             the review page, which keeps its toolbar to card actions alone. Active
             state marks the overlay it is currently owning. */}
         {!selectedDatasetUuid && activeTab !== "review" && (
@@ -625,27 +638,27 @@ export default function CardsPage() {
       )}
 
       {/* Search row — page-level, toggled by the toolbar Search button, so it
-          works both from the deck-list root (always "All decks") and from a
-          deck's Cards view ("This deck" live filter vs cross-deck FTS5). */}
+          works both from the dataset-list root (always "All datasets") and from a
+          dataset's Cards view ("This dataset" live filter vs cross-dataset FTS5). */}
       {searchActive && (
         <div className="shrink-0 px-2 py-2 flex flex-wrap items-center gap-2 border-b border-border-default sm:px-6">
-          {deckOpen && (
+          {datasetOpen && (
             <div className="flex items-center gap-1 shrink-0">
               <ToolbarButton
                 variant="toggle"
-                active={searchScope === "deck"}
-                label="This deck"
-                onClick={() => setSearchScope("deck")}
+                active={searchScope === "dataset"}
+                label="This dataset"
+                onClick={() => setSearchScope("dataset")}
               />
               <ToolbarButton
                 variant="toggle"
                 active={searchScope === "all"}
-                label="All decks"
+                label="All datasets"
                 onClick={() => setSearchScope("all")}
               />
             </div>
           )}
-          {effScope === "deck" ? (
+          {effScope === "dataset" ? (
             <>
               <div className="relative flex-1 max-w-xs">
                 <Search
@@ -654,7 +667,7 @@ export default function CardsPage() {
                 />
                 <input
                   type="text"
-                  placeholder="Search this deck..."
+                  placeholder="Search this dataset..."
                   value={keyword}
                   onChange={(e) => {
                     setKeyword(e.target.value);
@@ -727,7 +740,7 @@ export default function CardsPage() {
       )}
 
       {/* Manage overlay (location management) when the toolbar Manage toggle is
-          on; otherwise the dataset list (no deck selected) or the deck detail. */}
+          on; otherwise the dataset list (no dataset selected) or the dataset detail. */}
       {showManage ? (
         <div className="flex-1 min-h-0 overflow-hidden">
           <LocationsManager
@@ -736,6 +749,7 @@ export default function CardsPage() {
             onError={setError}
             onChanged={loadDatasets}
             countFor={(path) => datasets.filter((d) => d.location === path).length}
+            refreshToken={locRefresh}
           />
         </div>
       ) : showAllResults ? (
@@ -767,9 +781,9 @@ export default function CardsPage() {
                   key={`${result.dataset_uuid}-${result.card_uuid}`}
                   className="p-3 rounded-lg border border-border-default bg-bg-card hover:bg-mid-gray/10 cursor-pointer"
                   onClick={() => {
-                    // Jump into the deck (back to This-deck scope) and open the card
+                    // Jump into the dataset (back to This-dataset scope) and open the card
                     setSelectedDatasetUuid(result.dataset_uuid);
-                    setSearchScope("deck");
+                    setSearchScope("dataset");
                     invoke<Card>("card_get", {
                       datasetUuid: result.dataset_uuid,
                       cardUuid: result.card_uuid,
@@ -810,7 +824,7 @@ export default function CardsPage() {
       ) : (!selectedDatasetUuid && activeTab !== "review") ? (
         <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
           {datasets.length === 0 ? (
-            <p className="text-text-secondary">No card datasets found. Use "New Deck" to create one.</p>
+            <p className="text-text-secondary">No card datasets found. Use "New Dataset" to create one.</p>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {datasets.map((ds) => (
@@ -822,7 +836,7 @@ export default function CardsPage() {
                     setPage(0);
                     setShowManage(false);
                     setKeyword("");
-                    setSearchScope("deck");
+                    setSearchScope("dataset");
                   }}
                   className="text-left p-4 rounded-xl border border-border-default bg-bg-card hover:border-accent-blue/40 transition-colors cursor-pointer flex flex-col gap-1"
                 >
@@ -858,9 +872,9 @@ export default function CardsPage() {
         {/* Cards tab */}
         {activeTab === "cards" && (
           <div className="flex flex-col h-full">
-            {/* Card list — the deck's own cards. The page-level search row above
-                drives a live keyword filter over these (This deck) or swaps the
-                content for cross-deck results (All decks). */}
+            {/* Card list — the dataset's own cards. The page-level search row above
+                drives a live keyword filter over these (This dataset) or swaps the
+                content for cross-dataset results (All datasets). */}
             <div className="flex-1 overflow-y-auto px-2 py-2 sm:px-6">
               {cards.length === 0 ? (
                 <p className="text-text-secondary text-center py-8">
@@ -937,9 +951,9 @@ export default function CardsPage() {
                 space back, so the opaque background covers the gutters and the top
                 edge too and no text peeks around it. */}
             <div className="sticky top-0 z-10 -mx-3 -mt-3 bg-bg-body px-3 pb-4 pt-3 sm:-mx-6 sm:-mt-6 sm:px-6 sm:pt-6">
-              {/* Scope selector — the deck this session draws from, "All decks" by
+              {/* Scope selector — the dataset this session draws from, "All datasets" by
                   default. A filter on the session rather than navigation, so picking
-                  a deck here does not open it. */}
+                  a dataset here does not open it. */}
               <div className="mb-3 flex items-center gap-2">
                 <Layers size={14} className="shrink-0 text-text-tertiary" />
                 <label htmlFor="review-scope" className="sr-only">
@@ -951,7 +965,7 @@ export default function CardsPage() {
                   onChange={(e) => setReviewScope(e.target.value)}
                   className="min-w-0 max-w-xs rounded-lg border border-border-default bg-bg-card px-2 py-1.5 text-sm hover:bg-mid-gray/20"
                 >
-                  <option value="">All decks</option>
+                  <option value="">All datasets</option>
                   {datasets.map((ds) => (
                     <option key={ds.info.uuid} value={ds.info.uuid}>
                       {ds.info.name}
@@ -992,13 +1006,13 @@ export default function CardsPage() {
             {reviewCard ? (
               <div className="w-full">
 
-                {/* In an all-decks session (no single deck scoped) name the source
-                    deck, so it is clear where this card came from and where the
+                {/* In an all-datasets session (no single dataset scoped) name the source
+                    dataset, so it is clear where this card came from and where the
                     rating is recorded. */}
-                {!reviewScope && reviewDeckName && (
+                {!reviewScope && reviewDatasetName && (
                   <div className="mb-2 flex items-center gap-1.5 text-xs text-text-tertiary">
                     <Layers size={12} className="shrink-0" />
-                    <span className="truncate">{reviewDeckName}</span>
+                    <span className="truncate">{reviewDatasetName}</span>
                   </div>
                 )}
 
@@ -1049,11 +1063,11 @@ export default function CardsPage() {
                   </div>
                 )}
 
-                <ReviewQueueBar stats={reviewStats} allDecks={!reviewScope} />
+                <ReviewQueueBar stats={reviewStats} allDatasets={!reviewScope} />
               </div>
             ) : (
               <div className="text-center">
-                <ReviewQueueBar stats={reviewStats} allDecks={!reviewScope} />
+                <ReviewQueueBar stats={reviewStats} allDatasets={!reviewScope} />
                 <p className="text-text-secondary text-lg mb-4">
                   No cards to review!
                 </p>
@@ -1163,19 +1177,19 @@ function IconLabel({ children }: { children: ReactNode }) {
  * count beside a small "due" count is not missing data — it is a queue that needs the
  * overdue cards answered first. Saying so here keeps that from looking like a bug.
  */
-function ReviewQueueBar({ stats, allDecks }: { stats: CardTestStats | null; allDecks?: boolean }) {
+function ReviewQueueBar({ stats, allDatasets }: { stats: CardTestStats | null; allDatasets?: boolean }) {
   if (!stats) return null;
 
-  // The counts describe one deck's queue when a deck is scoped, or the aggregate
-  // across every deck in an all-decks session — the hint wording follows.
-  const where = allDecks ? "across all your decks" : "in this dataset";
+  // The counts describe one dataset's queue when a dataset is scoped, or the aggregate
+  // across every dataset in an all-datasets session — the hint wording follows.
+  const where = allDatasets ? "across all your datasets" : "in this dataset";
   let hint: string | null = null;
   if (stats.due > 0 && stats.fresh > 0) {
     hint = `${stats.fresh} ${plural(stats.fresh, "card is", "cards are")} waiting to learn ${where}, but the ${stats.due} overdue ${plural(stats.due, "card goes", "cards go")} first — rate this one to bring the next forward.`;
   } else if (stats.fresh > 0) {
     hint = `${stats.fresh} ${plural(stats.fresh, "card is", "cards are")} waiting to learn ${where} — answer this one to get the next.`;
   } else if (stats.due > 0) {
-    hint = `No new cards left ${allDecks ? "anywhere" : "here"} — only the ${stats.due} overdue ${plural(stats.due, "one remains", "ones remain")}.`;
+    hint = `No new cards left ${allDatasets ? "anywhere" : "here"} — only the ${stats.due} overdue ${plural(stats.due, "one remains", "ones remain")}.`;
   }
 
   return (
