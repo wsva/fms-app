@@ -17,6 +17,9 @@ export default function ReadBookPage() {
   // the books level, replacing the content area the same way the Cards page does.
   const [showLocations, setShowLocations] = useState(false);
   const [locError, setLocError] = useState<string | null>(null);
+  // Bumped by the toolbar Refresh so an open Locations overlay re-reads its own
+  // directory list instead of keeping the one it mounted with.
+  const [locRefresh, setLocRefresh] = useState(0);
 
   // On a chapter page you are reading a chapter, so the book-level mode toggles
   // (Manage Chapters / Advanced) do not apply and are hidden; only the contextual
@@ -27,6 +30,18 @@ export default function ReadBookPage() {
   // in Read mode (nothing to go back to). Everywhere else — a book is open, or
   // you are in Manage/Advanced — it is a link back to the library.
   const booksIsCurrent = !b.bookUUID && b.view === "read" && !showLocations;
+
+  // One Refresh button means different things per level, so its caption names the
+  // scope b.refresh() actually re-reads here: the linked directories, the book
+  // list, the open book's chapters, or the open chapter's sentences. Mirrors the
+  // Dictation page.
+  const refreshCaption = showLocations
+    ? "Refresh locations"
+    : !b.bookUUID
+      ? "Refresh books"
+      : onChapterPage
+        ? "Refresh sentences"
+        : "Refresh chapters";
 
   return (
     <div className="flex h-full w-full bg-bg-body min-w-0">
@@ -160,14 +175,15 @@ export default function ReadBookPage() {
           )}
 
           {/* Refresh — always available at the far right; reloads the current
-              view (books / chapters / open chapter) from disk. */}
+              view (books / chapters / open chapter) from disk. The caption carries
+              the scope of the level. */}
           <ToolbarButton
             icon={RefreshCw}
-            label="Refresh"
-            title="Refresh"
-            ariaLabel="Refresh"
+            label={refreshCaption}
+            title={refreshCaption}
+            ariaLabel={refreshCaption}
             disabled={b.loading}
-            onClick={b.refresh}
+            onClick={() => { b.refresh(); setLocRefresh((n) => n + 1); }}
           />
 
           {/* Locations management (books level) — opens the shared manager as a
@@ -193,6 +209,7 @@ export default function ReadBookPage() {
                 onError={setLocError}
                 onChanged={b.loadBooks}
                 countFor={(path) => b.books.filter((bk) => bk.path.startsWith(path)).length}
+                refreshToken={locRefresh}
               />
             </div>
           </div>

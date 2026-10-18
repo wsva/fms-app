@@ -95,6 +95,9 @@ export default function ReadAloudPage() {
   // Locations overlay (shared manager) — opened from the datasets-view overflow
   // menu, replacing the content area the same way the Cards page does.
   const [showLocations, setShowLocations] = useState(false);
+  // Bumped by the toolbar Refresh so an open Locations overlay re-reads its own
+  // directory list instead of keeping the one it mounted with.
+  const [locRefresh, setLocRefresh] = useState(0);
 
   // A dedicated inline editor for the LLM-normalized scoring reference, opened
   // from the practice view's overflow menu (mirrors the main edit mode). Its
@@ -237,6 +240,7 @@ export default function ReadAloudPage() {
   const handleRefresh = useCallback(() => {
     void loadDatasets();
     if (selectedDataset) void loadTexts(selectedDataset);
+    setLocRefresh((n) => n + 1);
   }, [loadDatasets, loadTexts, selectedDataset]);
 
   // The normalized editor and the attempts page are per-text concerns; close
@@ -265,6 +269,15 @@ export default function ReadAloudPage() {
     : activeText
       ? "practice"
       : "texts";
+
+  // One Refresh button means different things per level, so its caption names the
+  // scope handleRefresh actually re-reads here: the linked directories, the dataset
+  // list, or the open dataset's texts. Mirrors the Dictation page.
+  const refreshCaption = showLocations
+    ? "Refresh locations"
+    : viewMode === "datasets"
+      ? "Refresh datasets"
+      : "Refresh texts";
 
   // Draft differs from the stored text (or, for a new one, from empty fields).
   const dirty =
@@ -640,12 +653,12 @@ export default function ReadAloudPage() {
         )}
 
         {/* Refresh — always available; reloads the dataset list and, when a
-            dataset is open, its texts. */}
+            dataset is open, its texts. The caption carries the scope of the level. */}
         <ToolbarButton
           icon={RefreshCw}
-          label="Refresh"
-          title="Refresh"
-          ariaLabel="Refresh"
+          label={refreshCaption}
+          title={refreshCaption}
+          ariaLabel={refreshCaption}
           onClick={handleRefresh}
         />
 
@@ -708,6 +721,7 @@ export default function ReadAloudPage() {
               onError={setError}
               onChanged={() => void loadDatasets()}
               countFor={(path) => datasets.filter((ds) => ds.path.startsWith(path)).length}
+              refreshToken={locRefresh}
             />
           </div>
         </div>

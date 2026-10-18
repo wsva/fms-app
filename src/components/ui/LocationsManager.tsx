@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { FolderOpen, FolderPlus, MapPin, Trash2 } from "lucide-react";
@@ -32,6 +32,7 @@ export function LocationsManager({
   onError,
   onChanged,
   countFor,
+  refreshToken,
 }: {
   datasetType: LocationDatasetType;
   /** Page-specific blurb; falls back to a generic one. */
@@ -42,6 +43,12 @@ export function LocationsManager({
   onChanged?: () => void;
   /** Optional per-directory dataset count (path → number), shown beside the name. */
   countFor?: (path: string) => number;
+  /**
+   * Bumped by the owning page's toolbar Refresh so the directory list is re-read
+   * as well — otherwise a caption promising "Refresh locations" would leave this
+   * overlay showing its originally mounted list. Pass a constant to opt out.
+   */
+  refreshToken?: number;
 }) {
   const [dirs, setDirs] = useState<DirEntry[]>([]);
   const [showAddDir, setShowAddDir] = useState(false);
@@ -68,6 +75,18 @@ export function LocationsManager({
   useEffect(() => {
     loadDirs();
   }, [loadDirs]);
+
+  // Re-read on every Refresh bump. The first render is skipped because the mount
+  // effect above already fetched; `loadDirs` is in the deps only to keep the
+  // rule happy — it is stable unless `datasetType` changes, which remounts anyway.
+  const skipFirstTokenRun = useRef(true);
+  useEffect(() => {
+    if (skipFirstTokenRun.current) {
+      skipFirstTokenRun.current = false;
+      return;
+    }
+    loadDirs();
+  }, [refreshToken, loadDirs]);
 
   return (
     <div className="p-3 overflow-y-auto h-full space-y-6 sm:p-6">

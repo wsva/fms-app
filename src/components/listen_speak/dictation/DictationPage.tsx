@@ -78,6 +78,9 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
     // replacing the dataset browser the same way the Cards page does.
     const [showLocations, setShowLocations] = useState(false);
     const [locError, setLocError] = useState<string | null>(null);
+    // Bumped by the toolbar Refresh so the open Locations overlay re-reads its own
+    // directory list, not just the page-level copy behind the counts.
+    const [locRefresh, setLocRefresh] = useState(0);
     // Keyboard-shortcut help tip: shown on hover, and also on click (controlled).
     const [helpOpen, setHelpOpen] = useState(false);
     const voiceError = useSyncExternalStore(subscribe, getVoiceError, getVoiceError);
@@ -431,7 +434,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                     its media/subtitles/cues are re-read too (no-op at the root
                     level — this absorbs the old per-dataset Reload button).
                     The caption carries the scope of the current level. */}
-                <ToolbarButton icon={RefreshCw} label={refreshCaption} ariaLabel={refreshCaption} title={refreshCaption} disabled={d.stateLoading} onClick={() => { d.loadLocations(); d.loadDatasets(); d.handleReload(); }} />
+                <ToolbarButton icon={RefreshCw} label={refreshCaption} ariaLabel={refreshCaption} title={refreshCaption} disabled={d.stateLoading} onClick={() => { d.loadLocations(); d.loadDatasets(); d.handleReload(); setLocRefresh((n) => n + 1); }} />
 
                 {/* Locations management (datasets view) — opens the shared manager
                     as a full-content overlay, matching the Cards page pattern. */}
@@ -479,6 +482,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                             onError={setLocError}
                             onChanged={() => { d.loadLocations(); d.loadDatasets(); }}
                             countFor={(path) => (datasetsByLocation.get(path) ?? []).length}
+                            refreshToken={locRefresh}
                         />
                     </div>
                 </div>

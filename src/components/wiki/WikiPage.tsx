@@ -194,6 +194,9 @@ export default function WikiPage() {
   // its own dataset-roots UI; this manages the linked directories behind it.
   const [showLocations, setShowLocations] = useState(false);
   const [locError, setLocError] = useState<string | null>(null);
+  // Bumped by the toolbar Refresh so an open Locations overlay re-reads its own
+  // directory list instead of keeping the one it mounted with.
+  const [locRefresh, setLocRefresh] = useState(0);
 
   // Hub read-only browse + local wiki datasets.
   const [hubMode, setHubMode] = useState(false);
@@ -626,6 +629,17 @@ export default function WikiPage() {
     : datasetBrowse
       ? "browse"
       : "datasets";
+
+  // One Refresh button means different things per level, so its caption names the
+  // scope its onClick re-reads here: the linked directories, the hub listing, the
+  // open document, or the local dataset list. Mirrors the Dictation page.
+  const refreshCaption = showLocations
+    ? "Refresh locations"
+    : viewMode === "browse"
+      ? "Refresh listing"
+      : viewMode === "file"
+        ? "Refresh document"
+        : "Refresh datasets";
 
   // Which dataset the breadcrumb refers to — from the open file's source when
   // viewing a file, else the dataset being browsed.
@@ -1076,18 +1090,20 @@ export default function WikiPage() {
               {/* Refresh — always available. In hub browse it re-pulls the
                   listing; on an open file (when not editing) it reloads that
                   file; otherwise it reloads the local dataset list. Disabled
-                  while editing so a refresh can never discard the draft. */}
+                  while editing so a refresh can never discard the draft. The
+                  caption carries the scope of the current level. */}
               <ToolbarButton
                 icon={RefreshCw}
                 iconProps={{ className: (viewMode === "browse" ? browseLoading : isLoading) ? "animate-spin" : "" }}
-                label="Refresh"
-                title="Refresh"
-                ariaLabel="Refresh"
+                label={refreshCaption}
+                title={refreshCaption}
+                ariaLabel={refreshCaption}
                 onClick={() => {
                   if (viewMode === "browse") refreshBrowse();
                   else if (viewMode === "file") {
                     if (selection) void loadSelection(selection, false);
                   } else void loadLocalDatasets();
+                  setLocRefresh((n) => n + 1);
                 }}
                 disabled={isLoading || browseLoading || (viewMode === "file" && editing)}
               />
@@ -1246,6 +1262,7 @@ export default function WikiPage() {
                     onError={setLocError}
                     onChanged={loadLocalDatasets}
                     countFor={(path) => localDatasets.filter((ds) => ds.path.startsWith(path)).length}
+                    refreshToken={locRefresh}
                   />
                 </div>
               </div>
