@@ -34,7 +34,7 @@ the spelling of the layout tag (`cards-v1`, `reading-v1`, `read-aloud-v1`,
 | field | type | who reads it |
 |---|---|---|
 | `spec` | number (`2`) | Tells a reader which contract the file was written against. Bump only on a removal or a change of meaning — a new field is invisible to old readers thanks to `extra`. |
-| `uuid` | string | Every lookup, the sync journal, the REST routes (`/api/v1/datasets/{uuid}/…`), `assert_uuid_free`. **Opaque**: unique per dataset and nothing more, never format-validated — the reserved Favorites id and the website-era ids (`de_a1_by_system`) are slugs, not RFC 4122 UUIDs. This opacity is what lets the companion-deck scheme below encode a *linkage* in the id itself. |
+| `uuid` | string | Every lookup, the sync journal, the REST routes (`/api/v1/datasets/{uuid}/…`), `assert_uuid_free`. **Opaque**: unique per dataset and nothing more, never format-validated — the reserved Favorites id and the website-era ids (`de_a1_by_system`) are slugs, not RFC 4122 UUIDs. This opacity is what lets the companion-dataset scheme below encode a *linkage* in the id itself. |
 | `type` | slug | `find_dataset_dir_typed` asserts it against the directory the dataset was found under, and warns + skips on mismatch. The directory stays the routing authority; `type` only makes the file self-describing for a reader that has the file and nothing else. |
 | `format` | `"<type-slug>-v<N>"` | The per-type internal layout: `cards/mod.rs` gates on `format == "card-v1"`. Split out of the old `structure` so `type` can be the directory verbatim while `format` still carries a version. |
 | `name` | string | Every listing and every title in the UI. Books used to call this `title`; the file, `BookMeta`, `book_create` and `book_rename` all say `name` now. |
@@ -72,15 +72,15 @@ external generator for no functional gain. All path construction goes through
   the UI (`DictationPage`) disables "add to Favorites" by comparing the selected
   dataset's uuid, not a boolean.
 
-## Companion decks carry the book's uuid, prefixed
+## Companion datasets carry the book's uuid, prefixed
 
-A card deck derived from a book encodes the linkage **in its own id**:
+A card dataset derived from a book encodes the linkage **in its own id**:
 
 ```
 uuid = "cards_of_book_" + <book's uuid>      e.g. cards_of_book_a3a033d207c84b9a88d97452a9c3f7b1
 ```
 
-- Locating the deck from a book (or recovering the book from the deck) is pure
+- Locating the companion from a book (or recovering the book from it) is pure
   string work — prepend or strip the prefix — with no schema field, no query
   over the dataset set, and nothing to keep in sync when either side moves.
   The link is visible wherever the id is: logs, the hub catalog, the
@@ -89,10 +89,10 @@ uuid = "cards_of_book_" + <book's uuid>      e.g. cards_of_book_a3a033d207c84b9a
   the value is an opaque slug, never format-validated, so a synthetic derived
   id is legal by construction.
 - **Convention, not contract.** No code validates the prefix, and the scheme is
-  1:1 — one deck per book. Should several decks per book ever be needed, the
+  1:1 — one dataset per book. Should several datasets per book ever be needed, the
   prefix strains and the right tool becomes an optional `derived_from` field on
   the *card* dataset (pointer on the child, per the `card_fork` lineage
-  precedent), resolved book→decks by reverse lookup. Not built.
+  precedent), resolved as book→datasets by reverse lookup. Not built.
 - The generator must mint the derived id, not clone the source's:
   `learning/dataset_studio`'s card export originally copied the book's
   `info.json` *including its uuid* — the collision below was introduced that
@@ -100,10 +100,10 @@ uuid = "cards_of_book_" + <book's uuid>      e.g. cards_of_book_a3a033d207c84b9a
 
 Why identity is the wrong binding: `uuid` is the dataset's global primary key
 — the REST routes, snapshot resolution (`find_dataset_dir_typed`, first root
-wins) and `dataset_sync_state` all key on it. A card deck that literally shared
+wins) and `dataset_sync_state` all key on it. A card dataset that literally shared
 its book's uuid silently shadowed the book: the local upload listing
 (`sync_local_datasets`, `src-tauri/src/sync/upload.rs`) dedupes across types by
-uuid in scan order `Dictation → Card → Book → …`, so the deck won and the book
+uuid in scan order `Dictation → Card → Book → …`, so the card dataset won and the book
 vanished from the Books section; on any follower the same uuid resolved to only
 one of the two, and progress of the two conflated into one state row. The
 listing now logs `duplicate dataset uuid … is shadowed by an earlier scan —
