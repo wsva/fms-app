@@ -143,7 +143,7 @@ pub async fn writeback_flush_inner(
         return Ok(0);
     }
 
-    // Against a website, a dataset row may only leave this device if the deck's
+    // Against a website, a dataset row may only leave this device if the dataset's
     // upstream is that cloud hub; rows for a desktop-hub (or other) upstream stay
     // held rather than shipping to a host that would refuse them. A LAN hub is
     // the desktop upstream, so no provenance filter applies there.
@@ -478,16 +478,16 @@ mod tests {
     use super::*;
 
     /// A fresh app-DB-equivalent with both pipeline tables and the same rows:
-    /// one `@app` row, a cloud-hub deck row, a desktop-hub deck row, and a deck
-    /// row with *no* provenance record (an unstamped deck).
+    /// one `@app` row, a cloud-hub dataset row, a desktop-hub dataset row, and a dataset
+    /// row with *no* provenance record (an unstamped dataset).
     fn seeded_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         ensure_sync_tables(&conn).unwrap();
         let queue_rows = [
             ("a1", "xp", "@app"),
-            ("d1", "card_save", "deck-cloud"),
-            ("d2", "cue_save", "deck-desktop"),
-            ("d3", "card_save", "deck-unstamped"),
+            ("d1", "card_save", "dataset-cloud"),
+            ("d2", "cue_save", "dataset-desktop"),
+            ("d3", "card_save", "dataset-unstamped"),
         ];
         for (id, kind, ds) in queue_rows {
             conn.execute(
@@ -496,7 +496,7 @@ mod tests {
             )
             .unwrap();
         }
-        for (uuid, kind) in [("deck-cloud", "cloud_hub"), ("deck-desktop", "desktop_hub")] {
+        for (uuid, kind) in [("dataset-cloud", "cloud_hub"), ("dataset-desktop", "desktop_hub")] {
             conn.execute(
                 "INSERT INTO dataset_sync_state \n                 (dataset_uuid, overall_hash, synced_at, upstream_kind, upstream_origin) \n                 VALUES (?1, '', datetime('now'), ?2, 'origin')",
                 params![uuid, kind],
@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn website_dataset_pass_holds_foreign_and_flushes_cloud_plus_unstamped() {
         let conn = seeded_conn();
-        // require_cloud_upstream = true (connected host is the website): a deck
+        // require_cloud_upstream = true (connected host is the website): a dataset
         // recorded against a desktop hub stays held; cloud-hub and unstamped rows
         // go (INV-19 one upstream, unstamped adopts the connected host).
         let mut ids = ids_for(&conn, &writeback_page_sql(false, true));

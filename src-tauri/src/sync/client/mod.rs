@@ -1454,7 +1454,7 @@ mod tests {
         let website = crate::auth::base_url();
         settings.settings.lock().unwrap().pc_url = website.clone();
         let (ck, co) = upstream_of(&website);
-        let uuid = "deck-web";
+        let uuid = "dataset-web";
         {
             let conn = datasets::dictation::open_app_db(&settings).unwrap();
             ensure_sync_tables(&conn).unwrap();
@@ -1471,13 +1471,13 @@ mod tests {
     fn card_sync_target_skips_desktop_hub() {
         let (settings, dir) = temp_settings("cst-lan");
         settings.settings.lock().unwrap().pc_url = "http://192.168.1.50:8756".to_string();
-        let uuid = "deck-lan";
+        let uuid = "dataset-lan";
         {
             let conn = datasets::dictation::open_app_db(&settings).unwrap();
             ensure_sync_tables(&conn).unwrap();
             insert_state(&conn, uuid, "desktop_hub", "http://192.168.1.50:8756", "listed");
         }
-        // A LAN-upstreamed deck travels through the dataset journal, not the
+        // A LAN-upstreamed dataset travels through the dataset journal, not the
         // website card round trip (§3 fact 3).
         assert!(matches!(
             card_sync_target(&settings, uuid).unwrap(),
@@ -1490,7 +1490,7 @@ mod tests {
     fn card_sync_target_adopts_connected_when_unstamped() {
         let (settings, dir) = temp_settings("cst-adopt");
         settings.settings.lock().unwrap().pc_url = "http://192.168.1.50:8756".to_string();
-        let uuid = "deck-fresh";
+        let uuid = "dataset-fresh";
         {
             let conn = datasets::dictation::open_app_db(&settings).unwrap();
             ensure_sync_tables(&conn).unwrap();
@@ -1506,7 +1506,7 @@ mod tests {
             card_sync_target(&settings, uuid).unwrap(),
             CardSyncTarget::Skip { .. }
         ));
-        // The fallback stamped the connected host as this deck's upstream.
+        // The fallback stamped the connected host as this dataset's upstream.
         let conn = datasets::dictation::open_app_db(&settings).unwrap();
         let (k, o): (String, String) = conn
             .query_row(
@@ -1525,10 +1525,10 @@ mod tests {
         let (settings, dir) = temp_settings("cst-refuse");
         // Connected host is a LAN desktop hub...
         settings.settings.lock().unwrap().pc_url = "http://192.168.1.50:8756".to_string();
-        // ...but the deck is recorded against the website. INV-19: refuse.
+        // ...but the dataset is recorded against the website. INV-19: refuse.
         let website = crate::auth::base_url();
         let (ck, co) = upstream_of(&website);
-        let uuid = "deck-split";
+        let uuid = "dataset-split";
         {
             let conn = datasets::dictation::open_app_db(&settings).unwrap();
             ensure_sync_tables(&conn).unwrap();

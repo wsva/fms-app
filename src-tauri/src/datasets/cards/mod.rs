@@ -103,11 +103,11 @@ pub struct CardTestStats {
     pub serving: String,
 }
 
-/// One card drawn from a cross-deck review session: the card plus the identity
-/// of the deck it came from, so the UI can name the source and the submit call
-/// can target the right deck (`card_test_submit` is per-deck).
+/// One card drawn from a cross-dataset review session: the card plus the identity
+/// of the dataset it came from, so the UI can name the source and the submit call
+/// can target the right dataset (`card_test_submit` is per-dataset).
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct CrossDeckCard {
+pub struct CrossDatasetCard {
     pub dataset_uuid: String,
     pub dataset_name: String,
     pub card: Card,
@@ -946,7 +946,7 @@ pub async fn card_dataset_move(
 /// Read one `card` row selected as `SELECT c.*` (the 12 content columns, in
 /// declaration order). When a review query appends the acting user's effective
 /// familiarity, pass its column index to `familiarity_override` so the UI shows
-/// *my* standing rather than the value the deck shipped (sync-v2.md §17).
+/// *my* standing rather than the value the dataset shipped (sync-v2.md §17).
 fn read_card(row: &rusqlite::Row<'_>, familiarity_override: Option<usize>) -> Result<Card, rusqlite::Error> {
     let idx = familiarity_override.unwrap_or(5);
     Ok(Card {
@@ -1081,7 +1081,7 @@ pub async fn card_get(
     let ctx = review::open(settings.inner(), &path, &dataset_uuid)?;
 
     // Same overlay as the list, so opening a card shows the standing I am in —
-    // not the value the deck shipped with.
+    // not the value the dataset shipped with.
     let sql = format!(
         "SELECT c.*, {} FROM card c {} WHERE c.uuid = ?2",
         review::FAMILIARITY,
@@ -1515,10 +1515,10 @@ fn review_eligible() -> String {
 /// text order mean instant order again.
 const REVIEW_DUE: &str = "cr.next_review_at IS NOT NULL AND cr.next_review_at <= ?2";
 
-/// Draw one card from an opened deck: due cards first, then never-reviewed ones.
+/// Draw one card from an opened dataset: due cards first, then never-reviewed ones.
 /// The third tuple element says whether the card came from the due pool, so a
-/// cross-deck session can keep the same due-first priority across every deck
-/// (an overdue card in any deck outranks a fresh one elsewhere).
+/// cross-dataset session can keep the same due-first priority across every dataset
+/// (an overdue card in any dataset outranks a fresh one elsewhere).
 fn draw_one(ctx: &review::ReviewCtx) -> Option<(Card, Option<CardReview>, bool)> {
     let conn = &ctx.conn;
     // The acting user is `?1` in every review query (see [`review::LATEST_JOIN`]).
@@ -1595,18 +1595,18 @@ pub async fn card_test_get(
     Ok(draw_one(&ctx).map(|(card, review, _)| (card, review)))
 }
 
-/// Count what an opened deck's review queue holds.
+/// Count what an opened dataset's review queue holds.
 ///
 /// The pool is split the way `draw_one` splits it: overdue cards are served
 /// before never-reviewed ones, so `fresh` is not lost, it is waiting. `serving`
 /// says which pool the next draw resolves to. Shared by `card_test_stats` (one
-/// deck) and `card_test_stats_all` (summed across every deck), so the numbers
+/// dataset) and `card_test_stats_all` (summed across every dataset), so the numbers
 /// always describe the queue that actually serves cards.
 fn stats_for_ctx(ctx: &review::ReviewCtx) -> Result<CardTestStats, String> {
     let due_now = now_row_stamp();
     // Every number below is *mine*: the same join the draw uses, so the badge
     // counts the queue that would actually serve me (memory: stats and selector
-    // share their predicates). `total` is the one deck-level figure — how many
+    // share their predicates). `total` is the one dataset-level figure — how many
     // cards this dataset publishes — and needs no review row, so it reads the
     // plain table.
     let from = format!("FROM card c {}", review::LATEST_JOIN);
@@ -1682,28 +1682,28 @@ fn rand_index(len: usize) -> usize {
     (n % len as u64) as usize
 }
 
-/// Get the next card for review across **every** deck — the root-level session
-/// used when no single deck is open. Draws one candidate per deck, then keeps
-/// the same due-first priority globally: if any deck has a due card, one of
+/// Get the next card for review across **every** dataset — the root-level session
+/// used when no single dataset is open. Draws one candidate per dataset, then keeps
+/// the same due-first priority globally: if any dataset has a due card, one of
 /// those wins; otherwise a never-reviewed card is served. Each card carries its
-/// deck identity so the UI can name the source and `card_test_submit` (per-deck)
-/// can target the right deck.
+/// dataset identity so the UI can name the source and `card_test_submit` (per-dataset)
+/// can target the right dataset.
 #[tauri::command]
 pub async fn card_test_get_all(
     settings: State<'_, SettingsState>,
-) -> Result<Option<CrossDeckCard>, String> {
+) -> Result<Option<CrossDatasetCard>, String> {
     let datasets = list_card_datasets(&settings);
-    let mut due_pool: Vec<CrossDeckCard> = Vec::new();
-    let mut fresh_pool: Vec<CrossDeckCard> = Vec::new();
+    let mut due_pool: Vec<CrossDatasetCard> = Vec::new();
+    let mut fresh_pool: Vec<CrossDatasetCard> = Vec::new();
     for ds in &datasets {
-        // Best-effort: a deck that will not open (missing/corrupt DB) is skipped
-        // rather than failing the whole cross-deck session.
+        // Best-effort: a dataset that will not open (missing/corrupt DB) is skipped
+        // rather than failing the whole cross-dataset session.
         let ctx = match review::open(settings.inner(), Path::new(&ds.path), &ds.info.uuid) {
             Ok(c) => c,
             Err(_) => continue,
         };
         if let Some((card, review, was_due)) = draw_one(&ctx) {
-            let item = CrossDeckCard {
+            let item = CrossDatasetCard {
                 dataset_uuid: ds.info.uuid.clone(),
                 dataset_name: ds.info.name.clone(),
                 card,
@@ -1716,7 +1716,7 @@ pub async fn card_test_get_all(
             }
         }
     }
-    // Due cards outrank fresh ones across decks, mirroring `draw_one`'s priority.
+    // Due cards outrank fresh ones across datasets, mirroring `draw_one`'s priority.
     let mut pool = if !due_pool.is_empty() { due_pool } else { fresh_pool };
     if pool.is_empty() {
         return Ok(None);
@@ -1724,9 +1724,9 @@ pub async fn card_test_get_all(
     Ok(Some(pool.remove(rand_index(pool.len()))))
 }
 
-/// Aggregate the review-queue counts across every deck, mirroring how
+/// Aggregate the review-queue counts across every dataset, mirroring how
 /// `card_test_get_all` draws: `due` is summed first, so `serving` reports
-/// `"due"` whenever any deck holds an overdue card.
+/// `"due"` whenever any dataset holds an overdue card.
 #[tauri::command]
 pub async fn card_test_stats_all(
     settings: State<'_, SettingsState>,
@@ -1765,9 +1765,9 @@ pub async fn card_test_stats_all(
 
 /// Submit a review result: append the resulting event, change nothing else.
 ///
-/// The deck DB is opened read-resolved and is not written at all — no
+/// The dataset DB is opened read-resolved and is not written at all — no
 /// `card_review` upsert, no `UPDATE card SET familiarity`, no `touch_info`. All
-/// three used to make a rating a *content* mutation of a shared deck, which is
+/// three used to make a rating a *content* mutation of a shared dataset, which is
 /// what pushed practice state into the content channel and onto the website as an
 /// edit (sync-v2.md §17.1).
 #[tauri::command]

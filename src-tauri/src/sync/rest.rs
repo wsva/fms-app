@@ -548,8 +548,8 @@ fn snapshot_db_copy(dir: &Path) -> Option<PathBuf> {
 /// dataset DB off-device must call this too.
 fn sanitize_snapshot_db(path: &Path) {
     if let Ok(conn) = rusqlite::Connection::open(path) {
-        // Idempotent; a deck carries at most one of these (card_review for card
-        // decks, read_attempt for read-aloud). Each table's indexes drop with it.
+        // Idempotent; a dataset carries at most one of these (card_review for card
+        // datasets, read_attempt for read-aloud). Each table's indexes drop with it.
         let _ = conn.execute_batch(
             "DROP TABLE IF EXISTS card_review;\
              DROP TABLE IF EXISTS read_attempt;",

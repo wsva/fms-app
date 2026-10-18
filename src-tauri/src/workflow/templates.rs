@@ -35,9 +35,9 @@ pub(crate) const SYNC_CUE_TIMES_YAML: &str =
 /// audio, build vocabulary. View / agent-facing (actions name real `book_*` tools).
 pub(crate) const BOOK_YAML: &str = include_str!("templates/book/build_book_library.yaml");
 
-/// The Card deck pipeline — create a deck, author cards / tags, build the search
+/// The Card dataset pipeline — create a dataset, author cards / tags, build the search
 /// index, sync online. View / agent-facing (actions name real `card_*` tools).
-pub(crate) const CARD_YAML: &str = include_str!("templates/card/setup_card_deck.yaml");
+pub(crate) const CARD_YAML: &str = include_str!("templates/card/setup_card_dataset.yaml");
 
 /// Every built-in template, as `(category, id, run_slug, yaml)` quadruples.
 /// `category` is the dataset type the Workflow page tabs on (`dictation` /
@@ -54,6 +54,6 @@ pub(crate) fn all() -> Vec<(&'static str, &'static str, Option<&'static str>, &'
         ("dictation", "build_dictation_dataset", None, DICTATION_YAML),
         ("dictation", "sync_dictation_cue_times", Some("sync_cue_times"), SYNC_CUE_TIMES_YAML),
         ("book", "build_book_library", None, BOOK_YAML),
-        ("card", "setup_card_deck", None, CARD_YAML),
+        ("card", "setup_card_dataset", None, CARD_YAML),
     ]
 }

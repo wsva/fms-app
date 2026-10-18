@@ -12,10 +12,10 @@
 //! into `INSERT OR IGNORE` and convergence into set equality (INV-23).
 //!
 //! Three consequences worth knowing before editing this file:
-//! * Rows are keyed by `user_id`, so two people practising one deck no longer
+//! * Rows are keyed by `user_id`, so two people practising one dataset no longer
 //!   fight over the single shared `card_review` row the old table forced.
 //! * Nothing here lives in the dataset directory, so practising a read-only
-//!   shared deck needs no overlay and never dirties a published hash (INV-9) —
+//!   shared dataset needs no overlay and never dirties a published hash (INV-9) —
 //!   and a rating no longer writes `card.familiarity`/`card.updated_at`, which
 //!   used to ship practice state to the website as a *content* edit.
 //! * The dataset DB's legacy `card_review` table is read once to seed events and
@@ -41,12 +41,12 @@ const APP_SCHEMA: &str = "app";
 /// `?1` to be the acting `user_id` — every query using it binds that first.
 ///
 /// A `LEFT JOIN`, because "this user has never rated it" is a state the queue
-/// has to see (it is what makes a card `fresh` for *me* even when the deck shipped
+/// has to see (it is what makes a card `fresh` for *me* even when the dataset shipped
 /// someone else's reviews).
 pub(crate) const LATEST_JOIN: &str =
     "LEFT JOIN app.card_review_latest cr ON cr.card_uuid = c.uuid AND cr.user_id = ?1";
 
-/// Familiarity as the acting user's, falling back to the value the deck shipped.
+/// Familiarity as the acting user's, falling back to the value the dataset shipped.
 /// Imports and online exports legitimately carry `card.familiarity`, so it stays
 /// the seed; after the first rating of my own it stops mattering.
 pub(crate) const FAMILIARITY: &str = "COALESCE(cr.familiarity, c.familiarity)";
@@ -108,7 +108,7 @@ fn ensure_review_schema(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_cre_owner_card
             ON card_review_event(user_id, dataset_uuid, card_uuid, reviewed_at);
 
-        /* The newest event per (user, deck, card) — the user's current schedule.
+        /* The newest event per (user, dataset, card) — the user's current schedule.
            SQLite's bare-column rule takes the other columns from the row that
            achieves the MAX, and the max is over `reviewed_at || '#' || uuid`
            rather than `reviewed_at` alone on purpose: two ratings stamped in the
@@ -136,7 +136,7 @@ fn ensure_review_schema(conn: &Connection) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// Open a deck for practice: its own DB for content, the app DB attached for my
+/// Open a dataset for practice: its own DB for content, the app DB attached for my
 /// review state, both under one connection so the queue query stays in SQL.
 ///
 /// Takes the **read** resolved directory on purpose — reviewing is not editing, so
@@ -168,10 +168,10 @@ pub(crate) fn open(
     Ok(ctx)
 }
 
-/// Fold this deck's legacy `card_review` rows into events for the acting user,
+/// Fold this dataset's legacy `card_review` rows into events for the acting user,
 /// once per (dataset, user).
 ///
-/// Seeding is what keeps an upgrading user's schedule. It is also, for a deck
+/// Seeding is what keeps an upgrading user's schedule. It is also, for a dataset
 /// downloaded from someone else, a way to inherit *their* schedule — which is the
 /// same leak that publishing should strip (sync-v2.md §17.5). The seed is
 /// idempotent because the legacy review row's uuid is stable per card, so the
@@ -396,8 +396,8 @@ pub(crate) fn rows_for_user(
 /// for a payload that predates this shape — fold the rating it carries.
 ///
 /// `dataset_uuid` may be empty: reviews journal under [`APP_SCOPE`], whose pull
-/// arms pass no dataset, so the deck is read out of the payload instead (as `xp`
-/// does). A legacy change logged under the *deck's* uuid arrives with it.
+/// arms pass no dataset, so the dataset is read out of the payload instead (as `xp`
+/// does). A legacy change logged under the *dataset's* uuid arrives with it.
 ///
 /// Returns `false` when the event was already present, which is the normal
 /// outcome for the author receiving its own echo and *not* an error. The caller
@@ -415,8 +415,8 @@ pub(crate) fn apply_remote(
     if card_uuid.is_empty() {
         return Err("card_review change carries no card_uuid".to_string());
     }
-    // Shadowed as an owned String so a payload-carried deck and an
-    // argument-carried deck follow the same path below.
+    // Shadowed as an owned String so a payload-carried dataset and an
+    // argument-carried dataset follow the same path below.
     let dataset_uuid = if dataset_uuid.is_empty() { get("dataset_uuid") } else { dataset_uuid.to_string() };
     if dataset_uuid.is_empty() {
         return Err("card_review change carries no dataset_uuid".to_string());
@@ -583,7 +583,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         // The page row must be exactly what `apply_remote` consumes: the same field
         // set `payload()` emits for a locally-authored event. Proving byte-identity
-        // here is the round-trip guarantee, without needing a full deck on disk.
+        // here is the round-trip guarantee, without needing a full dataset on disk.
         assert_eq!(rows[0], payload(&src), "a page row is identical to the journal payload");
     }
 }

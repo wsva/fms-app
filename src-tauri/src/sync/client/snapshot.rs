@@ -215,9 +215,9 @@ pub(crate) fn remove_dataset_dirs(settings: &SettingsState, uuid: &str) {
 /// journal (kind `card`) and the writeback queue. So the router has three
 /// verdicts, not two:
 ///
-/// * [`CardSyncTarget::Website`] — the deck's upstream is the cloud hub, run
+/// * [`CardSyncTarget::Website`] — the dataset's upstream is the cloud hub, run
 ///   today's round trip.
-/// * [`CardSyncTarget::Skip`] — the deck's upstream is a desktop hub, the LAN
+/// * [`CardSyncTarget::Skip`] — the dataset's upstream is a desktop hub, the LAN
 ///   journal already carries its rows; running the website round trip as well
 ///   would be the second conflict engine §3 fact 3 names.
 /// * `Err(_)` — provenance and the connected host disagree (INV-19). Refuse
@@ -254,7 +254,7 @@ pub(crate) fn card_sync_target(
         .ok();
     let (row_kind, row_origin) = match row {
         Some((k, o)) if !o.is_empty() => (k, o),
-        // No provenance yet: adopt the connected host as this deck's upstream
+        // No provenance yet: adopt the connected host as this dataset's upstream
         // and stamp it, so the next call takes the recorded-path branch.
         _ => {
             let _ = conn.execute(

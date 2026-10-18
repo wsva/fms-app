@@ -940,37 +940,37 @@ async fn incremental_refresh(
     Ok(true)
 }
 
-/// The counts of one manual, single-deck journal sync (the card-sync surface).
+/// The counts of one manual, single-dataset journal sync (the card-sync surface).
 /// Mirrors the old bespoke `SyncResult`: `pulled` = rows applied from the hub,
-/// `pushed` = this deck's writeback rows acknowledged, `conflicts` = pending local
+/// `pushed` = this dataset's writeback rows acknowledged, `conflicts` = pending local
 /// edits dropped by the INV-14 last-write-wins guard.
-pub(crate) struct DeckJournalSync {
+pub(crate) struct DatasetJournalSync {
     pub pulled: i64,
     pub pushed: i64,
     pub conflicts: i64,
 }
 
-/// One manual dataset-scope journal round for a single cloud-hub deck: push its
+/// One manual dataset-scope journal round for a single cloud-hub dataset: push its
 /// pending writeback rows, then pull + apply its row journal, and report the
 /// counts. The card-sync command and MCP tools ride this now that card rows travel
 /// through the journal (sync-v2.md §8.3, phase 7b) — the bespoke `/api/card/sync/*`
 /// round trip and its second conflict engine are gone.
 ///
-/// Returns `Ok(None)` when this deck is *not* journal-synced against the connected
-/// host — the host does not advertise `dataset_journal`, or the deck's recorded
+/// Returns `Ok(None)` when this dataset is *not* journal-synced against the connected
+/// host — the host does not advertise `dataset_journal`, or the dataset's recorded
 /// upstream is a desktop hub (its rows belong to the LAN journal) — matching the
 /// old skip path. `Err` only on a real provenance conflict (`card_sync_target`,
 /// INV-19) or a transport failure on the pull.
-pub(crate) async fn sync_one_deck_journal(
+pub(crate) async fn sync_one_dataset_journal(
     app: AppHandle,
     settings: State<'_, SettingsState>,
     dataset_uuid: &str,
-) -> Result<Option<DeckJournalSync>, String> {
+) -> Result<Option<DatasetJournalSync>, String> {
     let base = pc_base(&settings);
     if base.is_empty() {
         return Err("no hub configured; card sync needs an upstream".to_string());
     }
-    // Provenance gate (INV-19): route by the deck's recorded upstream, refusing a
+    // Provenance gate (INV-19): route by the dataset's recorded upstream, refusing a
     // disagreement with the connected host rather than silently switching targets.
     match crate::sync::client::card_sync_target(settings.inner(), dataset_uuid)? {
         crate::sync::client::CardSyncTarget::Skip { reason } => {
@@ -987,8 +987,8 @@ pub(crate) async fn sync_one_deck_journal(
     }
     let (connected_kind, connected_origin) = upstream_of(&base);
 
-    // The deck's cursor drives the incremental pull; count its queued writeback
-    // rows before and after the push so `pushed` reflects this deck's acks (the
+    // The dataset's cursor drives the incremental pull; count its queued writeback
+    // rows before and after the push so `pushed` reflects this dataset's acks (the
     // flush is queue-wide — it carries every scope the host accepts).
     let (cursor_opt, before) = {
         let conn = datasets::dictation::open_app_db(&settings)?;
@@ -1004,7 +1004,7 @@ pub(crate) async fn sync_one_deck_journal(
         (cursor, pending_dataset_rows(&conn, dataset_uuid))
     };
 
-    // 1. Push this deck's pending rows (and any other scope the host takes).
+    // 1. Push this dataset's pending rows (and any other scope the host takes).
     let _ = writeback_flush_inner(&settings, &cluster).await.unwrap_or_else(|e| {
         log::warn!("[CardSync] writeback flush failed for {dataset_uuid}: {e}");
         0usize
@@ -1016,7 +1016,7 @@ pub(crate) async fn sync_one_deck_journal(
     };
     let pushed = before.saturating_sub(after);
 
-    // 2. Pull + apply this deck's row journal (the shared 7b client).
+    // 2. Pull + apply this dataset's row journal (the shared 7b client).
     let mut applied = 0i64;
     let mut dropped = 0i64;
     let mut resynced: Vec<String> = Vec::new();
@@ -1048,7 +1048,7 @@ pub(crate) async fn sync_one_deck_journal(
         );
     }
     let _ = resynced;
-    Ok(Some(DeckJournalSync {
+    Ok(Some(DatasetJournalSync {
         pulled: applied,
         pushed,
         conflicts: dropped,
@@ -1056,7 +1056,7 @@ pub(crate) async fn sync_one_deck_journal(
 }
 
 /// Count this device's still-queued writeback rows for one dataset scope (the
-/// dataset-scope rows carry the deck uuid in `dataset_uuid`; `@app` rows do not).
+/// dataset-scope rows carry the dataset uuid in `dataset_uuid`; `@app` rows do not).
 fn pending_dataset_rows(conn: &Connection, dataset_uuid: &str) -> i64 {
     conn.query_row(
         "SELECT COUNT(*) FROM writeback_queue WHERE dataset_uuid = ?1",
@@ -1130,7 +1130,7 @@ pub async fn sync_round_inner(
     let mut dropped_pending = 0i64;
     let mut history: Option<Value> = None;
     // Card rows now arrive through the dataset-scope journal (folded into
-    // `applied`/`resynced`), so the bespoke per-deck card round trip is gone. The
+    // `applied`/`resynced`), so the bespoke per-dataset card round trip is gone. The
     // field is kept in the result shape (always empty) for status-surface compat.
     let cards: Vec<Value> = Vec::new();
 
@@ -1234,7 +1234,7 @@ pub async fn sync_round_inner(
             // rows through the dataset-scope journal exactly like a LAN hub, so it
             // runs the shared pull+apply client then the non-DB file-drift check.
             // Provenance decides (INV-19): `cloud_hub`, or unstamped (`''`, which
-            // the pull adopts and stamps). A deck upstreamed by a *desktop* hub
+            // the pull adopts and stamps). A dataset upstreamed by a *desktop* hub
             // keeps its rows on the LAN journal and must not be pulled from here.
             let journal_synced =
                 ds_ok && (upstream_kind == "cloud_hub" || upstream_kind.is_empty());
@@ -1271,8 +1271,8 @@ pub async fn sync_round_inner(
             // the website's manifest covers the same frozen non-DB recipe (§4.1),
             // so `check_file_drift` diffs the per-file map and moves only changed
             // bytes — falling back to a whole-archive snapshot for a `registry`
-            // copy (INV-8) or when a fetch fails. DB rows for a cloud-hub deck went
-            // through the journal above; a desktop-hub deck's rows go through the
+            // copy (INV-8) or when a fetch fails. DB rows for a cloud-hub dataset went
+            // through the journal above; a desktop-hub dataset's rows go through the
             // LAN journal in its own round. No usable cursor/hash → full snapshot.
             if !cursor_is_hash {
                 match dataset_sync_snapshot(app.clone(), settings.clone(), uuid.clone()).await {

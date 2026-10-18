@@ -260,10 +260,10 @@ pub const APP_SCOPE_KINDS: &[&str] = &[
 /// [`APP_SCOPE`] instead of under a dataset uuid.
 ///
 /// `card_review` joined this list deliberately (sync-v2.md §17): a rating is
-/// about the *user*, not the deck, so logging it under the deck's uuid both made
-/// delivery depend on that deck's subscriptions and — worse — let the resulting
+/// about the *user*, not the dataset, so logging it under the dataset's uuid both made
+/// delivery depend on that dataset's subscriptions and — worse — let the resulting
 /// `card.updated_at` bump ride the content channel as if someone had edited the
-/// card. The deck uuid it refers to now travels inside the payload instead.
+/// card. The dataset uuid it refers to now travels inside the payload instead.
 ///
 /// `read_attempt_save`/`read_attempt_delete` joined for the same reason: a
 /// recorded take is per-user practice history, so it is stored as an event in the
@@ -321,7 +321,7 @@ pub fn object_id_for(kind: &str, payload: &Value, user_key: &str) -> String {
         "card_save" => get("uuid"),
         "card_delete" | "card_set_tags" => get("card_uuid"),
         // One event per rating, so the id is the event uuid — and it must still
-        // carry the owner: the `@app` scope is shared by every user, and a deck
+        // carry the owner: the `@app` scope is shared by every user, and a dataset
         // two people practise has the same `card_uuid` on both sides. A payload
         // from before this shape has no event uuid, so fall back to the card.
         "card_review" => {
