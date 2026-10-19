@@ -17,6 +17,7 @@ import {
   Layers,
   ScanText,
   FileText,
+  FileType,
   AudioLines,
   User,
   LogOut,
@@ -44,6 +45,7 @@ export type TabId =
   | "chat"
   | "ocr"
   | "split-text"
+  | "pdf-reader"
   | "wiki"
   | "workspaces"
   | "logs"
@@ -79,6 +81,7 @@ const navGroups: NavGroup[] = [
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
       { id: "ocr", label: "OCR", icon: ScanText },
       { id: "split-text", label: "Split Text", icon: ArrowUpDown },
+      { id: "pdf-reader", label: "PDF Reader", icon: FileType },
       { id: "models", label: "Models", icon: Box },
       { id: "logs", label: "Logs", icon: FileText },
     ],
