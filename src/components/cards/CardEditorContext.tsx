@@ -4,7 +4,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react
 import { invoke } from "@tauri-apps/api/core";
 import { Check, Eye, Pencil, Trash2, Type, X } from "lucide-react";
 import type { Card, CardDatasetSummary } from "@/lib/types";
-import { isMobileApp } from "@/lib/platform";
+import { isMobileApp, isTauri } from "@/lib/platform";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import "./CardEditor.css";
 
@@ -354,6 +354,10 @@ export function CardEditorProvider({
   }, []);
 
   async function loadDatasets() {
+    // Card datasets only exist inside the Tauri runtime. This provider also
+    // wraps the public marketing site (`/`), so skip the invoke there instead of
+    // logging a failed call on every web visit.
+    if (!isTauri()) return;
     try {
       const result = await invoke<CardDatasetSummary[]>("card_dataset_list");
       setState((prev) => ({ ...prev, datasets: result }));
