@@ -191,6 +191,23 @@ pub(crate) fn hub_base(settings: &SettingsState) -> Result<String, String> {
     Ok(base)
 }
 
+/// Effective hub base with the account fallback: the persisted `pc_url` when
+/// set, else the signed-in account's website origin. This is what lets a
+/// Hub-role workspace (which never sets a `pc_url` upstream) still talk *outward*
+/// to the cloud — the market reads, and the snapshot download it triggers —
+/// while every LAN-era caller that requires an explicit hub keeps failing fast
+/// through [`hub_base`]. Never logged-out: no token, no fallback, `Err`.
+pub(crate) fn hub_base_or_account(settings: &SettingsState) -> Result<String, String> {
+    let base = pc_base(settings);
+    if !base.is_empty() {
+        return Ok(base);
+    }
+    if crate::auth::get_access_token(settings).is_ok() {
+        return Ok(crate::auth::base_url());
+    }
+    Err("No hub configured. Set the PC address, or sign in to use your account website.".into())
+}
+
 /// Attach origin-appropriate auth to an outbound hub request. Website:
 /// `Authorization: Bearer <access token>` and **no** `x-fms-*` headers — the
 /// website's principal is an account, not a device, and a future strict-mode
@@ -207,7 +224,13 @@ pub(crate) fn hub_request(
     query: &str,
     body: &[u8],
 ) -> Result<reqwest::RequestBuilder, String> {
-    match crate::sync::hub_kind(&pc_base(settings)) {
+    // Classification follows the *effective* base: an account-only workspace
+    // (empty pc_url + token) is on the website origin too, so its market and
+    // snapshot requests carry Bearer auth instead of failing LAN device signing.
+    // With pc_url unset and no token the empty base still classifies LanPc and
+    // [`with_device_auth`] errors exactly as before.
+    let base = hub_base_or_account(settings).unwrap_or_default();
+    match crate::sync::hub_kind(&base) {
         crate::sync::HubKind::Website => match crate::auth::get_access_token(settings) {
             Ok(token) => Ok(req.header("Authorization", format!("Bearer {}", token))),
             Err(_) => Ok(req),
@@ -260,6 +283,19 @@ pub(crate) async fn hub_get_json(
     qs: &str,
 ) -> Result<Value, String> {
     let base = hub_base(settings)?;
+    hub_get_json_at(settings, &base, api_path, qs).await
+}
+
+/// [`hub_get_json`] against an explicitly resolved base — the shape market reads
+/// need, where the effective origin may be the account fallback rather than
+/// `pc_url`. Same auth selection (via [`hub_request`]), same 401 token-clear,
+/// same error mapping.
+pub(crate) async fn hub_get_json_at(
+    settings: &SettingsState,
+    base: &str,
+    api_path: &str,
+    qs: &str,
+) -> Result<Value, String> {
     let client = crate::auth::hub_client_builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(30))
@@ -277,7 +313,7 @@ pub(crate) async fn hub_get_json(
         .map_err(|e| format!("Cannot reach hub at {base}: {e}"))?;
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED
-        && crate::sync::hub_kind(&base) == crate::sync::HubKind::Website
+        && crate::sync::hub_kind(base) == crate::sync::HubKind::Website
     {
         // The website mints tokens only; an expired/revoked one has no silent
         // refresh route, so clear it and send the user to sign in (T5).

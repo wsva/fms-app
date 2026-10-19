@@ -71,7 +71,16 @@ pub(crate) async fn hub_protocol_version(settings: &SettingsState) -> Option<u32
 /// instead of failing (INV-20). The website has no `/cluster` route yet, so it
 /// resolves to `None` and the app-data plane stays skipped exactly as before.
 pub(crate) async fn fetch_cluster(settings: &SettingsState) -> Option<crate::sync::ClusterInfo> {
-    let base = pc_base(settings);
+    fetch_cluster_at(settings, &pc_base(settings)).await
+}
+
+/// [`fetch_cluster`] against an explicitly resolved base (a hub round passes
+/// `pc_base`; the market passes its effective base, which may be the account
+/// fallback when `pc_url` is empty). Empty base advertises nothing.
+pub(crate) async fn fetch_cluster_at(
+    settings: &SettingsState,
+    base: &str,
+) -> Option<crate::sync::ClusterInfo> {
     if base.is_empty() {
         return None;
     }

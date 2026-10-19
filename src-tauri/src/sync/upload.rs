@@ -519,7 +519,14 @@ pub async fn dataset_upload_state(
     settings: tauri::State<'_, SettingsState>,
 ) -> Result<Vec<Value>, String> {
     let conn = datasets::dictation::open_app_db(&settings)?;
-    ensure_upload_table(&conn)?;
+    upload_state_rows(&conn)
+}
+
+/// The `dataset_upload_state` table as JSON rows, over a caller-supplied
+/// connection (the market surface joins it against the catalog in one app-DB
+/// read). Ensures the table exists first — a fresh device reads back empty.
+pub(crate) fn upload_state_rows(conn: &Connection) -> Result<Vec<Value>, String> {
+    ensure_upload_table(conn)?;
     let mut stmt = conn
         .prepare(
             "SELECT dataset_uuid, version, archive_sha256, archive_size, uploaded_at, current_version, published_at \

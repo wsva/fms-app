@@ -103,6 +103,7 @@ pub(crate) mod auth;
 pub(crate) mod availability;
 pub(crate) mod cluster;
 pub(crate) mod filediff;
+pub(crate) mod market;
 pub(crate) mod sync_state;
 pub(crate) mod writeback;
 pub(crate) mod snapshot;
@@ -113,6 +114,7 @@ pub(crate) mod round;
 pub(crate) use auth::*;
 pub(crate) use availability::*;
 pub(crate) use cluster::*;
+pub(crate) use market::*;
 pub(crate) use sync_state::*;
 pub(crate) use writeback::*;
 pub(crate) use snapshot::*;
@@ -131,7 +133,7 @@ pub async fn dataset_sync_snapshot(
     settings: State<'_, SettingsState>,
     uuid: String,
 ) -> Result<SyncResult, String> {
-    let base = hub_base(&settings)?;
+    let base = hub_base_or_account(&settings)?;
     let client = reqwest::Client::new();
 
     // Capability negotiation (sync-v2.md §7): a website host that advertises
@@ -139,9 +141,23 @@ pub async fn dataset_sync_snapshot(
     // else (a LAN hub, or today's website) falls back to the live dataset routes.
     // The install location and provenance are decided by host kind below either
     // way — only the read route and the recorded `published_version` differ.
-    let cluster = fetch_cluster(&settings).await;
+    let cluster = fetch_cluster_at(&settings, &base).await;
     let registry_reads =
         super::hub_kind(&base) == super::HubKind::Website && advertises(&cluster, "registry_reads");
+
+    // A website pull *adopts* a read-only registry copy; it must never shadow a
+    // writable dataset this workspace already owns under the same uuid (a hub
+    // serving that uuid to its followers, or a local original). The mirror
+    // install into the type root (LAN hub) keeps overwriting by design.
+    if super::hub_kind(&base) == super::HubKind::Website {
+        if let Some(dir) = owned_locally_conflict(&settings, &uuid) {
+            return Err(format!(
+                "owned-locally: dataset {uuid} is served by this workspace (writable copy at {}) \
+                 — market adoption refused; export it to the cloud via Publish instead",
+                dir.display()
+            ));
+        }
+    }
 
     // 1. Manifest -> compare hash.
     let api_path = if registry_reads {

@@ -164,6 +164,17 @@ pub fn get_stored_user_id(settings: &SettingsState) -> Option<String> {
         .map(|t| t.user_id)
 }
 
+/// The account email from stored tokens, without a network call. `None` when
+/// logged out or when the login echo carried no email (older deep-link flows).
+/// The market surface uses it for the `is_owner` partition and the whoami read.
+pub(crate) fn get_stored_email(settings: &SettingsState) -> Option<String> {
+    read_tokens(settings)
+        .ok()
+        .flatten()
+        .map(|t| t.email)
+        .filter(|s| !s.is_empty())
+}
+
 /// The OAuth2 access token for the website hub, read from the single stored
 /// token file — there is deliberately no second token store (dev guide T1).
 /// `datasets::cards::sync` and `sync::client`'s website path both take it

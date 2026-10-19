@@ -191,6 +191,76 @@ interface PublishStateEntry {
   error?: string;
 }
 
+// ---- Online market (mirrors sync/client/market.rs, docs/design/market.md) ---
+
+/** One catalog row of `market_list`, enriched with its local sync bucket. */
+interface MarketDataset {
+  uuid: string;
+  name: string;
+  description?: string | null;
+  dataset_type: string;
+  /** `private | shared | public`; null in lite-degraded mode. */
+  visibility?: string | null;
+  language?: string | null;
+  is_owner: boolean;
+  is_subscribed: boolean;
+  owner?: string | null;
+  tags?: { uuid: string; name: string }[] | null;
+  media_count?: number | null;
+  card_count?: number | null;
+  total_bytes?: number | null;
+  file_count?: number | null;
+  updated: string;
+  published_version?: number | null;
+  /** Coarse local bucket for this uuid (subset of DatasetSyncState). */
+  sync_state: DatasetSyncState;
+  withdrawn?: boolean;
+  /** True when the host lacks the `market` capability and rows came from the
+      lite catalog — no subscribe/visibility controls in that mode. */
+  lite?: boolean;
+  uploaded_version?: number | null;
+}
+
+/** One registry adoption on this device (`market_list` downloads section). */
+interface MarketDownload {
+  uuid: string;
+  name: string;
+  on_disk: boolean;
+  sync_state: DatasetSyncState;
+  availability?: string;
+  withdrawn?: boolean;
+  published_version?: number | null;
+  upstream_origin?: string;
+  bytes?: number;
+  file_count?: number;
+  synced_at?: string;
+}
+
+/** What this device uploaded under its account (`market_list` published section). */
+interface MarketPublished {
+  uuid: string;
+  version: number;
+  current_version?: number | null;
+  published_at?: string | null;
+  uploaded_at: string;
+  name?: string | null;
+  dataset_type?: string | null;
+  visibility?: string | null;
+  is_subscribed?: boolean | null;
+}
+
+interface MarketPayload {
+  datasets: MarketDataset[];
+  downloads: MarketDownload[];
+  published: MarketPublished[];
+  origin: string;
+  lite: boolean;
+  market_available: boolean;
+  can_subscribe: boolean;
+  signed_in: boolean;
+  degraded_reason?: string;
+}
+
 // Subset of the global settings this page needs (mirrors settings.rs).
 interface GlobalSettings {
   ollama_url: string;
@@ -256,6 +326,18 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   const [publishState, setPublishState] = useState<Record<string, PublishStateEntry>>({});
   const [publishBusy, setPublishBusy] = useState<string>("");
 
+  // Online market (the Pull tab's website branch). Role-agnostic: a hub browses
+  // and downloads from the cloud too. Filters mirror the web market (type chips,
+  // one tag, free text); every change re-fetches through `loadMarket`.
+  const [market, setMarket] = useState<MarketPayload | null>(null);
+  const [marketLoading, setMarketLoading] = useState(false);
+  const [marketError, setMarketError] = useState<string>("");
+  const [marketSection, setMarketSection] = useState<"browse" | "downloads" | "published">("browse");
+  const [marketTypes, setMarketTypes] = useState<string[]>([]);
+  const [marketTag, setMarketTag] = useState("");
+  const [marketQ, setMarketQ] = useState("");
+  const [marketBusyUuid, setMarketBusyUuid] = useState<string>("");
+
   // Aggregate sync status (§3.5) — the single source for role, cluster, hub
   // reachability, per-dataset state, and queued/pending counts. Read-only; the
   // page never mutates it directly, it reloads after each round/action.
@@ -287,6 +369,14 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   // datasets through the Datasets Sync page.
   const { authUser } = useAuth();
   const canPublish = authUser != null;
+
+  // The Pull tab's source split: the website branch (market) renders whenever
+  // the effective origin is the cloud — `pc_url` pointing at the website, or no
+  // `pc_url` with a signed-in account to fall back to (exactly the backend's
+  // `hub_base_or_account` order). It shows for every role: a hub may subscribe
+  // and download from the cloud while staying the authority for its LAN
+  // followers; only a LAN `pc_url` keeps the classic follower-only pull list.
+  const marketBranch = isWebsite || (!pcUrl && canPublish);
 
   // ---- Loaders ----------------------------------------------------------
 
@@ -409,6 +499,31 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     }
   }, [pcUrl]);
 
+  // Fetch the market catalog plus this device's downloads/published sections.
+  // Only ever runs in the website branch; every filter change re-fetches (the
+  // type/tag/q filters are server-side when the host advertises `market`,
+  // client-side over the lite rows for q).
+  const loadMarket = useCallback(async () => {
+    if (!isTauri()) return;
+    setMarketLoading(true);
+    setMarketError("");
+    try {
+      const p = await invoke<MarketPayload>("market_list", {
+        query: {
+          types: marketTypes,
+          tag: marketTag || null,
+          q: marketQ || null,
+        },
+      });
+      setMarket(p);
+    } catch (e) {
+      setMarketError(String(e));
+      setMarket(null);
+    } finally {
+      setMarketLoading(false);
+    }
+  }, [marketTypes, marketTag, marketQ]);
+
   // ---- Lifecycle --------------------------------------------------------
 
   useEffect(() => {
@@ -424,6 +539,12 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   useEffect(() => {
     fetchPcDatasets();
   }, [fetchPcDatasets]);
+
+  // The market branch fetches its own catalog on entry and whenever a filter
+  // changes — the LAN branch never triggers the call.
+  useEffect(() => {
+    if (mounted && isTauri() && marketBranch) loadMarket();
+  }, [mounted, marketBranch, loadMarket]);
 
   // Track snapshot progress events.
   const progressReq = useRef<(() => void) | undefined>(undefined);
@@ -516,6 +637,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       loadLocalState();
       loadStatus();
       loadUploadSurface();
+      if (marketBranch) loadMarket();
     }
   }
 
@@ -595,6 +717,98 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       loadStatus();
     } catch (e) {
       setMessage(`Could not remove: ${String(e)}`);
+    }
+  }
+
+  // ---- Online market actions --------------------------------------------
+
+  // Adopt one market dataset through the existing snapshot pipeline: registry
+  // read → read-only download/<type>/<uuid> with `upstream_kind='registry'`.
+  // No confirm — adoption never overwrites a writable local copy (the backend
+  // `owned-locally` guard refuses it and that actionable error is shown
+  // verbatim). Progress rides the same `dataset-sync-progress` events.
+  async function marketDownload(uuid: string, name: string) {
+    if (marketBusyUuid || busyUuid) return;
+    setMarketBusyUuid(uuid);
+    setMessage("");
+    try {
+      const res = await invoke<{ updated: boolean; bytes: number; file_count: number }>(
+        "dataset_sync_snapshot",
+        { uuid }
+      );
+      setMessage(res.updated ? `Downloaded “${name}” (${res.file_count} file(s)).` : "Already up to date.");
+    } catch (e) {
+      setMessage(`Download failed: ${String(e)}`);
+    } finally {
+      setMarketBusyUuid("");
+      loadLocalState();
+      loadStatus();
+      loadMarket();
+    }
+  }
+
+  // Free the disk space of an adopted market copy (same semantics as
+  // handleEvict: read-only base removed, provenance and progress kept, the
+  // Download button re-pulls on demand).
+  async function marketEvict(uuid: string, name: string) {
+    if (marketBusyUuid || busyUuid) return;
+    if (
+      !confirm(
+        `Evict the downloaded copy of “${name}”? This frees the disk space and keeps it re-downloadable; your progress is untouched.`
+      )
+    ) {
+      return;
+    }
+    setMarketBusyUuid(uuid);
+    setMessage("");
+    try {
+      const res = await invoke<{ evicted: boolean; freed_bytes: number }>("dataset_evict", { uuid });
+      const mb = ((res.freed_bytes ?? 0) / (1024 * 1024)).toFixed(1);
+      setMessage(`Evicted “${name}” — freed ${mb} MB. Re-download any time.`);
+    } catch (e) {
+      setMessage(`Evict failed: ${String(e)}`);
+    } finally {
+      setMarketBusyUuid("");
+      loadLocalState();
+      loadStatus();
+      loadMarket();
+    }
+  }
+
+  // Subscribe/unsubscribe is a pure website fact (dataset_subscription rows);
+  // it moves no bytes and unsubscribing never touches the local copy.
+  async function toggleSubscribe(d: MarketDataset) {
+    const on = !d.is_subscribed;
+    setMarketBusyUuid(d.uuid);
+    setMessage("");
+    try {
+      await invoke(on ? "market_subscribe" : "market_unsubscribe", { uuid: d.uuid });
+      setMessage(`${on ? "Subscribed to" : "Unsubscribed from"} “${d.name}”.`);
+    } catch (e) {
+      setMessage(`${on ? "Subscribe" : "Unsubscribe"} failed: ${String(e)}`);
+    } finally {
+      setMarketBusyUuid("");
+      loadMarket();
+    }
+  }
+
+  // Owner-only visibility toggle from My Published; the backend also refreshes
+  // the stored publish pin from the host's echo, so one re-fetch shows truth.
+  async function changeVisibility(
+    p: { uuid: string; name?: string | null; visibility?: string | null },
+    visibility: string
+  ) {
+    if (visibility === p.visibility) return;
+    setMarketBusyUuid(p.uuid);
+    setMessage("");
+    try {
+      await invoke("market_set_visibility", { uuid: p.uuid, visibility });
+      setMessage(`“${p.name || p.uuid}” is now ${visibility}.`);
+    } catch (e) {
+      setMessage(`Visibility change failed: ${String(e)}`);
+    } finally {
+      setMarketBusyUuid("");
+      loadMarket();
     }
   }
 
@@ -1143,9 +1357,9 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     return (
       <div className="flex flex-col gap-4">
         <p className="text-xs text-text-tertiary">
-          Subscribing to a shared dataset is browser-only on the website, so a shared
-          dataset shows up in your catalog here only after you subscribe to it on the
-          website market page.
+          Subscribing to a shared dataset happens on this page — sign in and open the Pull
+          tab's market (Browse section) — or on the website itself; a shared dataset joins
+          your catalog only after you subscribe to it.
         </p>
         {renderSectionTabs()}
         {items.length === 0 ? (
@@ -1248,12 +1462,423 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     );
   }
 
-  // Pull zone: hub catalog browsing for followers; a hub (which serves LAN
-  // followers and never pulls) sees the notice instead. isHub (this
-  // workspace's role) and isWebsite (the upstream is the cloud) are
-  // ORTHOGONAL — publishing lives in its own zone now, so the old "hide the
-  // whole body for a hub" trap is gone.
+  // ---- Online market rendering (the Pull tab's website branch) ----------
+
+  // Site-convention colors for the visibility chip: private muted, shared amber
+  // (only subscribed accounts can pull), public green (open to everyone).
+  const VIS_META: Record<string, { label: string; cls: string }> = {
+    private: { label: "Private", cls: "bg-bg-hover text-text-secondary" },
+    shared: { label: "Shared", cls: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
+    public: { label: "Public", cls: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" },
+  };
+
+  const MARKET_TYPE_CHIPS = ["dictation", "card", "book", "read_aloud", "wiki"];
+
+  function fmtBytes(n?: number | null): string {
+    if (n == null) return "";
+    if (n >= 1048576) return `${(n / 1048576).toFixed(1)} MB`;
+    if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+    return `${n} B`;
+  }
+
+  function marketSizeLabel(d: MarketDataset | MarketDownload): string {
+    const bits: string[] = [];
+    if ("card_count" in d && d.card_count != null) bits.push(`${d.card_count} cards`);
+    else if ("media_count" in d && d.media_count != null) bits.push(`${d.media_count} media`);
+    if (d.file_count != null) bits.push(`${d.file_count} file(s)`);
+    const b = fmtBytes("total_bytes" in d ? d.total_bytes : "bytes" in d ? d.bytes : null);
+    if (b) bits.push(b);
+    return bits.join(" · ");
+  }
+
+  // One Browse/My Published card. The Download/Evict wiring rides the same
+  // commands and progress events as the LAN pull flow — single-sourced.
+  function renderMarketCard(d: MarketDataset) {
+    const prog = progress[d.uuid];
+    const pct =
+      prog && prog.total > 0 ? Math.min(100, Math.round((prog.received / prog.total) * 100)) : 0;
+    const meta = STATE_META[d.sync_state];
+    const busy = marketBusyUuid === d.uuid;
+    const vis = d.visibility ? VIS_META[d.visibility] : null;
+    return (
+      <div key={d.uuid} className="flex flex-col gap-2 p-3 rounded-lg border border-border-default bg-bg-card">
+        <div className="flex items-start gap-3">
+          <div className="flex flex-col min-w-0 flex-1 gap-1">
+            <span className="font-medium truncate">{d.name}</span>
+            <span className="text-xs text-text-tertiary flex items-center gap-1.5 flex-wrap">
+              {vis && <span className={`px-1.5 py-0.5 rounded-full ${vis.cls}`}>{vis.label}</span>}
+              {d.owner && <span className="font-mono max-w-[180px] truncate">{d.owner}</span>}
+              {d.language && <span>{d.language}</span>}
+              {d.published_version != null && <span className="font-mono">v{d.published_version}</span>}
+              {marketSizeLabel(d)}
+              {d.updated && <span>· {d.updated}</span>}
+            </span>
+            {d.description && (
+              <span className="text-xs text-text-secondary line-clamp-2">{d.description}</span>
+            )}
+            {(d.tags ?? []).length > 0 && (
+              <span className="flex items-center gap-1 flex-wrap">
+                {(d.tags ?? []).slice(0, 6).map((t) => (
+                  <span key={t.uuid} className="px-1.5 py-0.5 rounded bg-bg-hover text-text-tertiary text-xs">
+                    {t.name}
+                  </span>
+                ))}
+              </span>
+            )}
+            {d.withdrawn && (
+              <span className="text-xs text-amber-600 dark:text-amber-400">withdrawn upstream — your copy stays practicable</span>
+            )}
+          </div>
+          <div className="flex flex-col items-end gap-2 shrink-0">
+            <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${meta.cls}`}>{meta.label}</span>
+            {/* Owner-only visibility toggle (My Published): the website-side
+                manage control, mirrored; hidden in lite-degraded mode. */}
+            {d.is_owner && market?.market_available && d.visibility && (
+              <select
+                className="text-xs px-2 py-1 rounded-md border border-border-default bg-bg-body text-text-primary"
+                value={d.visibility}
+                disabled={busy}
+                onChange={(e) => changeVisibility(d, e.target.value)}
+                title="Who can see and pull this dataset"
+              >
+                <option value="private">private</option>
+                <option value="shared">shared</option>
+                <option value="public">public</option>
+              </select>
+            )}
+            {d.sync_state !== "downloaded" && (
+              <ToolbarButton
+                variant="solid"
+                icon={Download}
+                className="shrink-0"
+                collapseOnMobile={false}
+                onClick={() => marketDownload(d.uuid, d.name)}
+                disabled={!!marketBusyUuid || !!busyUuid}
+                title="Download into the read-only library — evictable, re-downloadable, progress stays local"
+                label={busy ? "Downloading…" : "Download"}
+              />
+            )}
+            {d.sync_state === "downloaded" && (
+              <ToolbarButton
+                variant="ghost"
+                icon={Archive}
+                className="shrink-0"
+                collapseOnMobile={false}
+                onClick={() => marketEvict(d.uuid, d.name)}
+                disabled={!!marketBusyUuid || !!busyUuid}
+                title="Free disk space — keeps it re-downloadable, progress untouched"
+                label={busy ? "Evicting…" : "Evict"}
+              />
+            )}
+            {market?.can_subscribe && !d.is_owner && d.visibility === "shared" && (
+              <button className={tbGhost} onClick={() => toggleSubscribe(d)} disabled={busy}>
+                {busy ? <Loader2 size={12} className="animate-spin" /> : null}
+                {d.is_subscribed ? "Unsubscribe" : "Subscribe"}
+              </button>
+            )}
+          </div>
+        </div>
+        {prog && prog.phase !== "done" && (
+          <div className="flex flex-col gap-1">
+            <div className="h-1.5 w-full rounded bg-bg-hover overflow-hidden">
+              <div
+                className="h-full bg-accent-bg transition-[width]"
+                style={{ width: prog.phase === "extract" ? "100%" : `${pct}%` }}
+              />
+            </div>
+            <span className="text-xs text-text-tertiary">
+              {prog.phase === "extract"
+                ? "Extracting…"
+                : `Downloading… ${pct}% (${prog.received} / ${prog.total} bytes)`}
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // My Downloads: every locally adopted registry copy (from the app DB, not
+  // the catalog), so a hub user sees at a glance what the cloud gave them —
+  // including copies whose publisher withdrew them.
+  function renderMarketDownloads() {
+    const items = market?.downloads ?? [];
+    if (items.length === 0) {
+      return <p className="text-sm text-text-tertiary px-1">Nothing downloaded from the market yet.</p>;
+    }
+    return (
+      <div className="flex flex-col gap-2">
+        {items.map((d) => {
+          const meta = STATE_META[d.sync_state];
+          const busy = marketBusyUuid === d.uuid;
+          return (
+            <div key={d.uuid} className="flex items-center gap-3 p-3 rounded-lg border border-border-default bg-bg-card">
+              <div className="flex flex-col min-w-0 flex-1">
+                <span className="font-medium truncate">{d.name}</span>
+                <span className="text-xs text-text-tertiary">
+                  {d.published_version != null && <>v{d.published_version} · </>}
+                  {d.on_disk ? `${fmtBytes(d.bytes)} · ${d.file_count ?? 0} file(s)` : "not on disk"}
+                  {d.synced_at && <> · synced {d.synced_at}</>}
+                </span>
+                {d.withdrawn && (
+                  <span className="text-xs text-amber-600 dark:text-amber-400">withdrawn upstream — kept, still practicable</span>
+                )}
+              </div>
+              <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${meta.cls}`}>{meta.label}</span>
+              <div className="flex items-center gap-2 shrink-0">
+                {d.sync_state === "needs_resync" && d.on_disk && (
+                  <ToolbarButton
+                    variant="solid"
+                    icon={Download}
+                    className="shrink-0"
+                    collapseOnMobile={false}
+                    onClick={() => marketDownload(d.uuid, d.name)}
+                    disabled={!!marketBusyUuid || !!busyUuid}
+                    title="Pull the newly published version over the installed copy"
+                    label={busy ? "Updating…" : "Update"}
+                  />
+                )}
+                {d.on_disk ? (
+                  <ToolbarButton
+                    variant="ghost"
+                    icon={Archive}
+                    className="shrink-0"
+                    collapseOnMobile={false}
+                    onClick={() => marketEvict(d.uuid, d.name)}
+                    disabled={!!marketBusyUuid || !!busyUuid}
+                    title="Free disk space — keeps it re-downloadable, progress untouched"
+                    label="Evict"
+                  />
+                ) : (
+                  <ToolbarButton
+                    variant="solid"
+                    icon={Download}
+                    className="shrink-0"
+                    collapseOnMobile={false}
+                    onClick={() => marketDownload(d.uuid, d.name)}
+                    disabled={!!marketBusyUuid || !!busyUuid}
+                    title="Re-download the adopted copy"
+                    label={busy ? "Downloading…" : "Download"}
+                  />
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // My Published: this account's shared datasets (the host's own `is_owner`
+  // partition), with the visibility toggle and the subscribe/pull state —
+  // plus, below, what this device uploaded that the catalog cannot show. New
+  // archives still go through the Publish zone; this is the view of what the
+  // cloud already holds.
+  function renderMarketPublished(own: MarketDataset[]) {
+    const extra = (market?.published ?? []).filter(
+      (p) => !own.some((d) => d.uuid === p.uuid)
+    );
+    if (own.length === 0 && extra.length === 0) {
+      return (
+        <p className="text-sm text-text-tertiary px-1">
+          Nothing shared under this account yet — upload an archive in the Publish zone, then publish it.
+        </p>
+      );
+    }
+    return (
+      <div className="flex flex-col gap-2">
+        {own.map((d) => renderMarketCard(d))}
+        {extra.map((p) => {
+          const busy = marketBusyUuid === p.uuid;
+          return (
+            <div key={p.uuid} className="flex items-center gap-3 p-3 rounded-lg border border-border-default bg-bg-card">
+              <div className="flex flex-col min-w-0 flex-1">
+                <span className="font-medium truncate">{p.name || p.uuid}</span>
+                <span className="text-xs text-text-tertiary">
+                  {p.dataset_type ? <>{p.dataset_type} · </> : null}
+                  uploaded v{p.version} ({p.uploaded_at})
+                  {p.current_version != null ? <> · published v{p.current_version}</> : <> · not published</>}
+                </span>
+              </div>
+              {busy && <Loader2 size={14} className="animate-spin shrink-0" />}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // The website branch of the Pull tab: the market surface with three
+  // sections, rendered for every role. Download/Evict wiring stays
+  // single-sourced with the LAN flow (same commands, same events).
+  function renderMarketZone() {
+    if (marketError) {
+      const tokenish = /sign in|401|access token|not logged in/i.test(marketError);
+      return (
+        <div className="flex flex-col gap-2">
+          <div className="px-3 py-2 text-sm rounded-md bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300">
+            {marketError}
+            {tokenish && (
+              <button
+                className="ml-2 inline-flex items-center gap-1 underline font-medium"
+                onClick={() => invoke("auth_open_login").catch((err) => setMessage(`Sign-in failed: ${String(err)}`))}
+              >
+                <LogIn size={14} />
+                Sign in
+              </button>
+            )}
+          </div>
+          <button type="button" className={tbGhost + " self-start"} onClick={loadMarket}>
+            <RefreshCw size={14} /> Retry
+          </button>
+        </div>
+      );
+    }
+    if (!market) {
+      return (
+        <p className="text-sm text-text-tertiary flex items-center gap-2">
+          {marketLoading && <Loader2 size={14} className="animate-spin" />}
+          Loading the market…
+        </p>
+      );
+    }
+    // Section partition is purely client-side (`is_owner` carries through
+    // unfiltered): Browse = what others share, My Published = this account's
+    // own rows. `q` is server-side only in market mode; lite rows filter here.
+    const q = marketQ.toLowerCase();
+    const browse = market.datasets.filter(
+      (d) =>
+        !d.is_owner &&
+        (!market.lite ||
+          !q ||
+          (d.name ?? "").toLowerCase().includes(q) ||
+          (d.description ?? "").toLowerCase().includes(q))
+    );
+    const own = market.datasets.filter((d) => d.is_owner);
+    const tagPool = Array.from(
+      new Map(market.datasets.flatMap((d) => d.tags ?? []).map((t) => [t.uuid, t])).values()
+    );
+    const zoneSections: { key: "browse" | "downloads" | "published"; label: string; count: number }[] = [
+      { key: "browse", label: "Browse", count: browse.length },
+      { key: "downloads", label: "My Downloads", count: market.downloads.length },
+      { key: "published", label: "My Published", count: own.length + market.published.length },
+    ];
+    return (
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center gap-2 flex-wrap text-xs text-text-tertiary">
+          <span>
+            Market · <span className="font-mono">{market.origin}</span>
+          </span>
+          {marketLoading && <Loader2 size={14} className="animate-spin" />}
+        </div>
+        {market.lite && (
+          <p className="px-3 py-2 text-xs rounded-md bg-amber-500/15 text-amber-700 dark:text-amber-400">
+            Basic mode — {market.degraded_reason || "the website market API is not available yet"}. Descriptions,
+            tags, subscriptions and visibility controls need the website to ship its market routes; downloading
+            shared/public datasets works already.
+          </p>
+        )}
+
+        {/* Market sections — the same underline style as the dataset-type
+            tabs, but this dimension is the surface, not the type. */}
+        <div className="flex gap-1 border-b border-border-default">
+          {zoneSections.map((s) => (
+            <button
+              key={s.key}
+              onClick={() => setMarketSection(s.key)}
+              className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                marketSection === s.key
+                  ? "border-accent-bg text-text-primary"
+                  : "border-transparent text-text-tertiary hover:text-text-secondary"
+              }`}
+            >
+              {s.label}
+              {s.count > 0 && <span className="ml-1 text-xs opacity-70">{s.count}</span>}
+            </button>
+          ))}
+        </div>
+
+        {marketSection === "browse" && (
+          <>
+            <div className="flex items-center gap-2 flex-wrap">
+              {MARKET_TYPE_CHIPS.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  className={`px-2 py-1 text-xs rounded-full border transition-colors ${
+                    marketTypes.includes(t)
+                      ? "border-accent-bg bg-bg-hover text-text-primary"
+                      : "border-border-default text-text-tertiary hover:text-text-secondary"
+                  }`}
+                  onClick={() =>
+                    setMarketTypes((prev) =>
+                      prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]
+                    )
+                  }
+                >
+                  {publishLabel[t] ?? t}
+                </button>
+              ))}
+              {tagPool.length > 0 && (
+                <select
+                  className="text-xs px-2 py-1 rounded-md border border-border-default bg-bg-body text-text-primary"
+                  value={marketTag}
+                  onChange={(e) => setMarketTag(e.target.value)}
+                >
+                  <option value="">All tags</option>
+                  {tagPool.map((t) => (
+                    <option key={t.uuid} value={t.uuid}>{t.name}</option>
+                  ))}
+                </select>
+              )}
+              <input
+                type="search"
+                placeholder={market.lite ? "Search (name)…" : "Search…"}
+                className="text-xs px-2 py-1 rounded-md border border-border-default bg-bg-body text-text-primary w-40"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") setMarketQ((e.currentTarget.value ?? "").trim());
+                }}
+              />
+              {marketQ && (
+                <button className="text-xs underline text-text-tertiary" onClick={() => setMarketQ("")}>
+                  clear “{marketQ}”
+                </button>
+              )}
+            </div>
+            {browse.length === 0 ? (
+              <p className="text-sm text-text-tertiary px-1">
+                Nothing shared by others matches these filters.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-2">{browse.map((d) => renderMarketCard(d))}</div>
+            )}
+          </>
+        )}
+
+        {marketSection === "downloads" && renderMarketDownloads()}
+
+        {marketSection === "published" && (
+          <>
+            {market.market_available && own.length > 0 && (
+              <p className="text-xs text-text-tertiary">
+                The visibility toggle decides who can pull these — private stays owner-only, shared needs a
+                subscription, public is downloadable by everyone.
+              </p>
+            )}
+            {renderMarketPublished(own)}
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // Pull zone, source-aware. Website origin (or a signed-in account with no
+  // pc_url): the online market, rendered for every role — a hub may browse,
+  // subscribe and download from the cloud while staying the authority for its
+  // LAN followers (the owned-locally guard protects what it serves). A LAN
+  // pc_url: today's follower-only hub catalog; there the hub notice means "a
+  // hub serves, it does not pull **from a PC**".
   function renderPullZone() {
+    if (marketBranch) return renderMarketZone();
     if (isHub) {
       return (
         <div className="flex flex-col items-center justify-center gap-2 p-4 text-center rounded-lg border border-border-default bg-bg-card">
@@ -1261,11 +1886,14 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
           <p className="text-text-secondary max-w-md">
             This workspace is the sync <span className="font-semibold">hub</span>. It serves
             datasets to follower devices — the pull controls are hidden (only
-            followers pull).
+            followers pull <em>from a PC</em>).
           </p>
           <p className="text-sm text-text-tertiary max-w-md">
-            To sync datasets <em>into</em> this machine, designate it as a follower on the
-            Devices &amp; Hub page first. Publishing to your cloud account (in the Publish
+            To pull datasets <em>into</em> this machine from the cloud, use your account: sign in
+            (Settings › Account) and clear the PC address, and this tab becomes the online market
+            — a hub can download shared datasets without giving up its LAN role. To sync from
+            another PC, designate this machine as a follower on the Devices &amp; Hub page first.
+            Publishing to your cloud account (in the Publish
             zone, when you're signed in) works either way —{canPublish ? " and 'Push to cloud' in the toolbar drains this hub's local edits directly to it." : " sign in via Settings › Account to enable that."}
           </p>
           {onNavigate && (
@@ -1297,6 +1925,15 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
               Open Devices &amp; Hub
             </button>
           )}
+          {/* No hub configured and no account: the market needs a sign-in —
+              say so rather than leaving the option implicit. */}
+          <button
+            className={tbGhost + " mt-1"}
+            onClick={() => invoke("auth_open_login").catch((err) => setMessage(`Sign-in failed: ${String(err)}`))}
+          >
+            <LogIn size={14} />
+            Sign in to browse the online market
+          </button>
         </div>
       );
     }
@@ -1438,6 +2075,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
               loadStatus();
               loadUploadSurface();
               fetchPcDatasets();
+              if (marketBranch) loadMarket();
             }}
             disabled={loadingList}
           >

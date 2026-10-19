@@ -53,6 +53,24 @@ pub(crate) fn adoption_target(
     }
 }
 
+/// The `owned-locally` guard behind a website adoption (mirrors the website
+/// upload route's `owned-by-other` 409 from the opposite side): if the read
+/// resolver finds a copy of `uuid` *outside* the download root — a writable
+/// local dataset or an edited overlay — this workspace owns that identity and a
+/// registry base would only ever be shadowed by it (root order), while a hub
+/// would silently stop serving exactly what a pull claims to refresh.
+/// Returns the offending directory, `None` when adoption is safe (no copy, or
+/// only the adopted base itself).
+pub(crate) fn owned_locally_conflict(
+    settings: &SettingsState,
+    uuid: &str,
+) -> Option<std::path::PathBuf> {
+    match datasets::find_dataset_dir_typed(settings, uuid) {
+        Ok((dir, _ty)) if !datasets::is_under_download_root(settings, &dir) => Some(dir),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------

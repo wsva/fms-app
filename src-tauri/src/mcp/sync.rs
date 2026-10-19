@@ -169,6 +169,28 @@ struct PushFilesParam {
     auto: Option<bool>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct MarketListParam {
+    /// Dataset types to filter on (dictation, card, book, read_aloud, wiki).
+    #[serde(default)]
+    types: Option<Vec<String>>,
+    /// Tag uuid to restrict the catalog to (website-side tags).
+    #[serde(default)]
+    tag: Option<String>,
+    /// Free-text search; server-side when the host advertises the market
+    /// capability, ignored in degraded lite mode.
+    #[serde(default)]
+    q: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct MarketVisibilityParam {
+    /// Market dataset uuid whose visibility to change (must be yours).
+    uuid: String,
+    /// `private|shared|public` — the website vocabulary.
+    visibility: String,
+}
+
 #[tool_router(router = sync_router, vis = "pub(crate)")]
 impl DatasetMcpServer {
     #[tool(name = "web_service_get_status", description = "Get the web service status: whether it's running, port, enabled features, and URLs.")]
@@ -586,6 +608,44 @@ impl DatasetMcpServer {
             self.app.state::<SettingsState>(),
             param.dataset_uuid,
             param.auto,
+        )
+        .await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "market_list", description = "Browse the online dataset market on the website origin (pc_url when it is the website, else the signed-in account's website — role-agnostic, a hub workspace browses too). Against a host advertising the `market` capability this is the rich GET /api/v1/market (description, tags, visibility, is_owner/is_subscribed, published_version); otherwise it DEGRADES to GET /api/v1/datasets?lite=1 (rows carry `lite:true`, no subscribe/visibility controls). Optional filters: types[], tag, q. Every row is enriched with its LOCAL state (`sync_state`: downloaded/needs_resync/not_downloaded, `withdrawn`) and the payload returns { datasets, downloads (this device's registry adoptions, even withdrawn ones), published (what this device uploaded, with the stored pin), origin, lite, market_available, can_subscribe, signed_in, degraded_reason }. Download a row through the existing pc_sync_pull / dataset_sync_snapshot tool (registry adoption, owned-locally guarded); evict through dataset_evict.")]
+    async fn market_list(&self, Parameters(param): Parameters<MarketListParam>) -> Result<String, String> {
+        log::info!("[MCP] market_list: types={:?} tag={:?} q={:?}", param.types, param.tag, param.q);
+        let query = sync::client::MarketQuery {
+            types: param.types.unwrap_or_default(),
+            tag: param.tag.filter(|s| !s.is_empty()),
+            q: param.q.filter(|s| !s.is_empty()),
+        };
+        let v = sync::client::market_list(self.app.state::<SettingsState>(), Some(query)).await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "market_subscribe", description = "Subscribe the signed-in account to a `shared` market dataset (POST /api/v1/market/{uuid}/subscribe, account Bearer) so its updates keep surfacing for you. Only against a host advertising the `market` capability — in degraded lite mode there is nothing to subscribe to. Subscribing never downloads bytes (use market_list -> dataset_sync_snapshot for that) and unsubscribing never deletes the local copy. Returns { uuid, subscribed, result }.")]
+    async fn market_subscribe(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
+        log::info!("[MCP] market_subscribe: uuid={}", param.uuid);
+        let v = sync::client::market_subscribe(self.app.state::<SettingsState>(), param.uuid.clone()).await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "market_unsubscribe", description = "Undo a market subscription (DELETE /api/v1/market/{uuid}/subscribe, account Bearer). The locally adopted copy is untouched — evict/forget stay separate explicit actions. Returns { uuid, subscribed:false, result }.")]
+    async fn market_unsubscribe(&self, Parameters(param): Parameters<UuidParam>) -> Result<String, String> {
+        log::info!("[MCP] market_unsubscribe: uuid={}", param.uuid);
+        let v = sync::client::market_unsubscribe(self.app.state::<SettingsState>(), param.uuid.clone()).await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "market_set_visibility", description = "Owner-only visibility toggle for one market dataset (PATCH /api/v1/market/{uuid}, account Bearer): `visibility` is private|shared|public. Mirrors the website manage UI; the host's echo refreshes the locally stored publish pin so the My Published badge stays honest. Only works against a host advertising the `market` capability. The My Published section of market_list reads the result back. Returns { uuid, visibility, echo }.")]
+    async fn market_set_visibility(&self, Parameters(param): Parameters<MarketVisibilityParam>) -> Result<String, String> {
+        log::info!("[MCP] market_set_visibility: uuid={} visibility={}", param.uuid, param.visibility);
+        let v = sync::client::market_set_visibility(
+            self.app.state::<SettingsState>(),
+            param.uuid.clone(),
+            param.visibility.clone(),
         )
         .await?;
         Ok(v.to_string())
