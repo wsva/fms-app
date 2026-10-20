@@ -263,7 +263,17 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.tag.outputs.tag }}"
-          APK="$(ls src-tauri/gen/android/app/build/outputs/apk/*/release/*.apk | head -1)"
+          OUT=src-tauri/gen/android/app/build/outputs/apk
+
+          # `--target aarch64` still lands in universal/release; prefer it so a
+          # future multi-ABI build can never sign the wrong APK by accident.
+          APK="$(ls "$OUT"/universal/release/*.apk 2>/dev/null | head -1 || true)"
+          [ -n "$APK" ] || APK="$(ls "$OUT"/*/release/*.apk 2>/dev/null | head -1 || true)"
+          if [ -z "$APK" ]; then
+            echo "::error::no release APK found under $OUT"
+            exit 1
+          fi
+          echo "Signing $APK"
           mkdir -p dist
 
           if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
@@ -273,14 +283,22 @@ jobs:
           fi
 
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          if [ ! -s "$RUNNER_TEMP/release.keystore" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 decoded to an empty file - re-copy the whole base64 value"
+            exit 1
+          fi
+
           BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ | tail -1)"
           "$BT/zipalign" -f 4 "$APK" "$RUNNER_TEMP/aligned.apk"
+          # The aligned APK is a positional argument - apksigner has no --in flag
+          # and exits 1 with a bare usage error if it is omitted.
           "$BT/apksigner" sign \
             --ks "$RUNNER_TEMP/release.keystore" \
             --ks-key-alias "$ANDROID_KEY_ALIAS" \
             --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
             --key-pass env:ANDROID_KEY_PASSWORD \
-            --out "dist/fms-app-${TAG}-arm64.apk"
+            --out "dist/fms-app-${TAG}-arm64.apk" \
+            "$RUNNER_TEMP/aligned.apk"
           "$BT/apksigner" verify --print-certs "dist/fms-app-${TAG}-arm64.apk"
           rm -f "$RUNNER_TEMP/release.keystore" "$RUNNER_TEMP/aligned.apk"
 
