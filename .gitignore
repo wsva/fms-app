@@ -46,3 +46,6 @@ venv/
 
 learning
 dataset_studio/dataset_exports
+
+# Android release signing material - never commit
+.signing/

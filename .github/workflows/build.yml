@@ -158,14 +158,20 @@ jobs:
   # (aarch64-linux-android — see ort-sys's dist.txt), so armv7/i686/x86_64
   # cannot link ONNX and fail the `stt` build. minSdk 24 arm64 covers
   # essentially every device in scope.
-  # No keystore is configured, so the output is an unsigned release APK —
-  # installable after zipalign+apksigner, or wire up an ANDROID_KEYSTORE
-  # secret later to produce signed artifacts.
+  # Signing needs four repo secrets: ANDROID_KEYSTORE_BASE64 (the keystore,
+  # base64), ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD.
+  # Without them the job still succeeds but publishes an UNSIGNED APK, which
+  # Android refuses to install ("package appears to be invalid").
   # ──────────────────────────────────────────────
   build-android:
     name: Android
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -248,23 +254,41 @@ jobs:
           chmod +x src-tauri/gen/android/gradlew
           pnpm tauri android build --target aarch64 --apk
 
-      - name: Rename artifacts with tag
+      # Sign after the build rather than through a Gradle signingConfig:
+      # `tauri android init` regenerates app/build.gradle.kts, so a signing block
+      # added there would be silently wiped by the next CLI upgrade. zipalign
+      # must run before apksigner.
+      - name: Sign Android APK
         shell: bash
         run: |
+          set -euo pipefail
           TAG="${{ steps.tag.outputs.tag }}"
-          OUT=src-tauri/gen/android/app/build/outputs/apk
-          for f in "$OUT"/*/release/*.apk; do
-            [ -f "$f" ] || continue
-            dir="$(dirname "$f")"
-            base="$(basename "$f")"
-            mv "$f" "$dir/${base%.apk}-${TAG}.apk"
-          done
+          APK="$(ls src-tauri/gen/android/app/build/outputs/apk/*/release/*.apk | head -1)"
+          mkdir -p dist
+
+          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set - publishing an UNSIGNED APK that Android will refuse to install."
+            cp "$APK" "dist/fms-app-${TAG}-arm64-unsigned.apk"
+            exit 0
+          fi
+
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ | tail -1)"
+          "$BT/zipalign" -f 4 "$APK" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign \
+            --ks "$RUNNER_TEMP/release.keystore" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "dist/fms-app-${TAG}-arm64.apk"
+          "$BT/apksigner" verify --print-certs "dist/fms-app-${TAG}-arm64.apk"
+          rm -f "$RUNNER_TEMP/release.keystore" "$RUNNER_TEMP/aligned.apk"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: fms-app-Android-${{ steps.tag.outputs.tag }}
-          path: src-tauri/gen/android/app/build/outputs/apk/*/release/*.apk
+          path: dist/*.apk
 
   # ──────────────────────────────────────────────
   # Create GitHub Release
