@@ -182,33 +182,44 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          # cargo-ndk cross-compiles against these; the Tauri CLI expects them
+          # present rather than adding them itself.
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target-android
 
-      # JDK for Gradle + the Android SDK/NDK toolchain (Tauri needs NDK >= 25.2).
+      # JDK for Gradle 9.6 + the AGP 9 toolchain.
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
 
-      - name: Set up Android SDK & NDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK + build tools
+      # The ubuntu runner images ship the Android SDK and NDK side by side with
+      # ANDROID_HOME / ANDROID_NDK_HOME already exported, so nothing has to be
+      # downloaded here. This step only asserts the image still provides them and
+      # lists the available NDKs, so a future image change fails legibly.
+      - name: Verify Android toolchain
         shell: bash
         run: |
-          sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1" "platform-tools"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME:?no NDK on this runner image}"
+          java -version
+          ls "${ANDROID_NDK_HOME%/*}"
+          rustup target list --installed | grep android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
 
       - name: Install frontend dependencies
         run: pnpm install
 
-      # Generates any missing cargo config for the android targets, then builds
-      # release APKs (arm64 + x86_64). Feature selection comes from
+      # Ensures the committed gen/android scaffold matches this CLI version, then
+      # builds release APKs (arm64 + x86_64). Feature selection comes from
       # tauri.android.conf.json — no extra cargo flags (see docs/android-bringup.md).
       - name: Build Android APKs
         run: pnpm tauri android init && pnpm tauri android build
