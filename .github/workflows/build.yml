@@ -153,7 +153,11 @@ jobs:
 
   # ──────────────────────────────────────────────
   # Android build (thin client + local STT)
-  # Builds release APKs for arm64 and x86_64 via `pnpm tauri android build`.
+  # Builds the arm64 release APK via `pnpm tauri android build --target aarch64`.
+  # arm64 only, deliberately: ort ships a single Android prebuilt
+  # (aarch64-linux-android — see ort-sys's dist.txt), so armv7/i686/x86_64
+  # cannot link ONNX and fail the `stt` build. minSdk 24 arm64 covers
+  # essentially every device in scope.
   # No keystore is configured, so the output is an unsigned release APK —
   # installable after zipalign+apksigner, or wire up an ANDROID_KEYSTORE
   # secret later to produce signed artifacts.
@@ -183,14 +187,16 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          # cargo-ndk cross-compiles against these; the Tauri CLI expects them
-          # present rather than adding them itself.
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          # cargo-ndk cross-compiles against this; the Tauri CLI expects the
+          # target present rather than adding it itself.
+          targets: aarch64-linux-android
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri -> target-android
+          # The Gradle-driven cargo invocation builds into src-tauri/target
+          # (not target-android), so that is the directory worth caching.
+          workspaces: src-tauri -> target
 
       # JDK for Gradle 9.6 + the AGP 9 toolchain.
       - name: Set up JDK 21
@@ -218,11 +224,29 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
-      # Ensures the committed gen/android scaffold matches this CLI version, then
-      # builds release APKs (arm64 + x86_64). Feature selection comes from
-      # tauri.android.conf.json — no extra cargo flags (see docs/android-bringup.md).
-      - name: Build Android APKs
-        run: pnpm tauri android init && pnpm tauri android build
+      # `tauri.settings.gradle` is gitignored and holds absolute paths into this
+      # machine's ~/.cargo/registry, so `init` must run on the build machine —
+      # settings.gradle applies it unconditionally. Because init also rewrites the
+      # scaffold, assert right after that it did not strip the manifest
+      # customizations the released APK depends on.
+      - name: Initialize Android scaffold
+        shell: bash
+        run: |
+          pnpm tauri android init --ci --skip-targets-install
+          if ! git diff --quiet -- src-tauri/gen/android/app/src/main/AndroidManifest.xml; then
+            echo "::error::tauri android init rewrote AndroidManifest.xml — the APK would lose RECORD_AUDIO / the fms-app:// intent-filter"
+            git --no-pager diff -- src-tauri/gen/android/app/src/main/AndroidManifest.xml
+            exit 1
+          fi
+
+      # Feature selection comes from tauri.android.conf.json — no extra cargo
+      # flags (see docs/android-bringup.md). arm64 only: ort has no prebuilt
+      # ONNX for the other ABIs.
+      - name: Build Android APK
+        shell: bash
+        run: |
+          chmod +x src-tauri/gen/android/gradlew
+          pnpm tauri android build --target aarch64 --apk
 
       - name: Rename artifacts with tag
         shell: bash
