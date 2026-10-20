@@ -140,7 +140,7 @@ async fn post_website_json(
 ) -> Result<Value, String> {
     let base = crate::auth::base_url();
     // A missing token is a hard, actionable error for a write (unlike the reads).
-    let token = crate::auth::get_access_token(settings)?;
+    let token = crate::auth::access_token(settings).await?;
     let client = crate::auth::hub_client_builder()
         .timeout(Duration::from_secs(60))
         .build()
@@ -155,7 +155,7 @@ async fn post_website_json(
         .map_err(|e| format!("cannot reach the website at {url}: {e}"))?;
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        crate::auth::token_rejected(settings);
+        crate::auth::token_rejected(settings).await;
     }
     if !status.is_success() {
         return Err(publish_http_error(resp, api_path).await);
@@ -252,7 +252,7 @@ pub async fn dataset_publish_state(
     dataset_uuid: String,
 ) -> Result<Value, String> {
     let uuid = check_uuid(&dataset_uuid)?;
-    let token = crate::auth::get_access_token(&settings)?;
+    let token = crate::auth::access_token(&settings).await?;
     let (pin, uploaded) = {
         let conn = datasets::dictation::open_app_db(&settings)?;
         super::upload::upload_publish_pin(&conn, &uuid)

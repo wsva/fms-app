@@ -99,7 +99,8 @@ pub async fn sync_check_availability(settings: State<'_, SettingsState>) -> Resu
         .map_err(|e| e.to_string())?;
     // Optional: a public dataset's manifest is readable anonymously, so a missing
     // token is not fatal here — the takedown check still resolves either way.
-    let token = crate::auth::get_access_token(&settings).ok();
+    // Awaited so a token due for renewal is renewed before it is attached.
+    let token = crate::auth::access_token(&settings).await.ok();
 
     let mut results: Vec<Value> = Vec::new();
     for (uuid, version, origin) in &rows {

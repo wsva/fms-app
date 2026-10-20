@@ -185,14 +185,16 @@ async fn send_market_json(
     if !body_bytes.is_empty() {
         req = req.body(body_bytes.clone());
     }
-    let req = hub_request(req, settings, method, api_path, "", &body_bytes)?;
+    let req = hub_request(req, settings, method, api_path, "", &body_bytes).await?;
     let resp = req
         .send()
         .await
         .map_err(|e| format!("Cannot reach hub at {base}: {e}"))?;
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        crate::auth::token_rejected(settings);
+        // Renews in place; the next market read carries the fresh token. The
+        // session itself survives (only a refused refresh ends it).
+        crate::auth::token_rejected(settings).await;
     }
     if !status.is_success() {
         return Err(hub_http_error(resp, api_path).await);

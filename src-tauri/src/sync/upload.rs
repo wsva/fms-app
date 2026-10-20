@@ -359,7 +359,7 @@ async fn send_archive(
     // to publish TO). This lets a Hub with no upstream still upload its own
     // datasets. A missing OAuth token is a hard, actionable error (a write).
     let base = crate::auth::base_url();
-    let token = crate::auth::get_access_token(settings)?;
+    let token = crate::auth::access_token(settings).await?;
 
     let archive_bytes = std::fs::read(archive_path).map_err(|e| e.to_string())?;
     let sha = format!("{:x}", Sha256::digest(&archive_bytes));
@@ -405,7 +405,7 @@ async fn send_archive(
         .map_err(|e| format!("cannot reach hub at {base}: {e}"))?;
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        crate::auth::token_rejected(settings);
+        crate::auth::token_rejected(settings).await;
     }
     if !status.is_success() {
         return Err(upload_http_error(resp, uuid).await);

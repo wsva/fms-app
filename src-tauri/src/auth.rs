@@ -67,6 +67,52 @@ struct AuthTokens {
     username: String,
     #[serde(default)]
     email: String,
+    /// Unix seconds when this access token was minted (login or last silent
+    /// refresh). The renewal schedule normally reads the JWT's own `exp`; this is
+    /// the fallback clock for a token whose `exp` cannot be read, and `0` marks a
+    /// file written before the field existed — such a session is renewed on sight.
+    #[serde(default)]
+    obtained_at: u64,
+}
+
+/// Re-mint the access token this far ahead of its own expiry, so a request never
+/// races the deadline. When the token's `exp` claim cannot be read (a non-JWT
+/// token from some other hub), renewal falls back to this age instead.
+const TOKEN_RENEW_MARGIN_SECS: u64 = 24 * 3600;
+const TOKEN_MAX_AGE_SECS: u64 = 3 * 24 * 3600;
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The `exp` claim of a JWT access token, read without verifying the signature.
+/// Only the payload segment is base64url-decoded. This is not an authorization
+/// decision — the hub owns that — it is the app's own calendar for "renew me
+/// before the server starts saying no", and it has to tolerate a non-JWT token
+/// by answering `None`.
+fn token_expiry(access_token: &str) -> Option<u64> {
+    use base64::Engine;
+    let payload = access_token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    json["exp"].as_u64()
+}
+
+/// Whether the token is already past its own expiry (or, unreadable, past the
+/// age we assume). Logged for diagnosis: a request that goes out on a dead token
+/// is about to be refused, which is what a 401 renewal is for.
+fn token_is_dead(tokens: &AuthTokens) -> bool {
+    match token_expiry(&tokens.access_token) {
+        Some(exp) => now_unix() >= exp,
+        // No readable `exp`: assume the hub's 7-day lifetime from when we got it.
+        None => tokens.obtained_at == 0 || now_unix().saturating_sub(tokens.obtained_at) >= 7 * 24 * 3600,
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -146,6 +192,19 @@ fn write_tokens(settings: &SettingsState, tokens: &AuthTokens) -> Result<(), Str
     Ok(())
 }
 
+/// The identity the UI needs, built straight from the stored file — used
+/// whenever the server is unreachable, so being offline never logs anyone out.
+fn stored_user(tokens: &AuthTokens) -> AuthUser {
+    AuthUser {
+        name: if tokens.username.is_empty() {
+            tokens.user_id.clone()
+        } else {
+            tokens.username.clone()
+        },
+        email: tokens.email.clone(),
+    }
+}
+
 fn delete_tokens(settings: &SettingsState) -> Result<(), String> {
     let path = auth_file_path(settings)?;
     if path.exists() {
@@ -177,9 +236,11 @@ pub(crate) fn get_stored_email(settings: &SettingsState) -> Option<String> {
 
 /// The OAuth2 access token for the website hub, read from the single stored
 /// token file — there is deliberately no second token store (dev guide T1).
-/// `datasets::cards::sync` and `sync::client`'s website path both take it
-/// from here, so a logout (token file removed) ends every bearer-authorized
-/// flow at once.
+/// This is the *synchronous* read: no expiry check, no network. Use it for
+/// "am I signed in?" probes; use [`access_token`] on the request path, where the
+/// token gets renewed before it can die. `datasets::cards::sync` and
+/// `sync::client`'s website path both take it from here, so a logout (token
+/// file removed) ends every bearer-authorized flow at once.
 pub(crate) fn get_access_token(settings: &SettingsState) -> Result<String, String> {
     read_tokens(settings)?
         .map(|t| t.access_token)
@@ -187,13 +248,212 @@ pub(crate) fn get_access_token(settings: &SettingsState) -> Result<String, Strin
         .ok_or_else(|| "Not logged in. Please log in first.".to_string())
 }
 
-/// Drop the stored token after the website rejected it with 401 (expired or
-/// revoked server-side). The website has no silent-refresh route, so the only
-/// recovery is a fresh login; clearing the file makes every surface agree on
-/// "logged out" instead of replaying a dead token each request.
-pub(crate) fn token_rejected(settings: &SettingsState) {
-    let _ = delete_tokens(settings);
-    log::warn!("[Auth] website hub returned 401 — stored token cleared, sign in again");
+/// Why a silent refresh could not hand back a fresh access token.
+enum RefreshFail {
+    /// The server refused the refresh token (unknown, revoked, or the account
+    /// is deactivated). The session really is over — the token file goes with it.
+    Rejected(String),
+    /// The server was unreachable or answered unreadably. That says nothing
+    /// about the session, so the stored token survives and the user stays
+    /// signed in — only an explicit logout may end it.
+    Transient(String),
+}
+
+/// Outcome of an in-place renewal attempt, used by every caller that must not
+/// log the user out on a network hiccup.
+enum Renewal {
+    /// A new access token is in `tokens` and on disk.
+    Renewed,
+    /// The renewal could not be completed (hub unreachable, or a hub that does
+    /// not serve the route yet); the old token stands and may well still work.
+    Kept,
+    /// The hub refused this session's refresh token; the file has been cleared.
+    Ended,
+}
+
+/// Exchange the stored refresh token for a fresh access token at the website's
+/// `/api/oauth2/refresh` and persist the result over the old one. The refresh
+/// token itself is not rotated — the app keeps a single copy, and rotating it
+/// would need a store-and-swap dance for no gain at this trust level.
+async fn refresh_tokens(settings: &SettingsState, old: &AuthTokens) -> Result<AuthTokens, RefreshFail> {
+    if old.refresh_token.is_empty() {
+        return Err(RefreshFail::Rejected("the stored session carries no refresh token".into()));
+    }
+    let client = hub_client_builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| RefreshFail::Transient(e.to_string()))?;
+    let resp = client
+        .post(format!("{}/api/oauth2/refresh", base_url()))
+        .json(&serde_json::json!({ "refresh_token": old.refresh_token }))
+        .send()
+        .await
+        .map_err(|e| RefreshFail::Transient(err_chain(&e)))?;
+
+    let status = resp.status();
+    // The route reports a refused token as 200 + success:false; a bare 401/403
+    // from a gateway or an older server says the same thing, and only a refusal
+    // of *this* session's token justifies ending it.
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(RefreshFail::Rejected(format!("HTTP {status}")));
+    }
+    // Anything else non-2xx — including a 404 from a hub that predates this
+    // route — is an availability problem, not a verdict on the session.
+    if !status.is_success() {
+        return Err(RefreshFail::Transient(format!("HTTP {status}")));
+    }
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| RefreshFail::Transient(format!("unparsable refresh response (status {status}): {e}")))?;
+    if json["success"].as_bool() != Some(true) {
+        let msg = json["errMsg"].as_str().unwrap_or("refresh token refused");
+        return Err(RefreshFail::Rejected(msg.to_string()));
+    }
+    let list = json["data"]["list"]
+        .as_array()
+        .ok_or_else(|| RefreshFail::Transient("refresh response missing data.list".into()))?;
+    let field = |i: usize| list.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let access_token = field(0);
+    if access_token.is_empty() {
+        return Err(RefreshFail::Transient("refresh response carried no access token".into()));
+    }
+    let keep = |fresh: String, stored: String| if fresh.is_empty() { stored } else { fresh };
+    let renewed = AuthTokens {
+        access_token,
+        refresh_token: keep(field(3), old.refresh_token.clone()),
+        user_id: keep(field(1), old.user_id.clone()),
+        username: keep(field(2), old.username.clone()),
+        email: old.email.clone(),
+        obtained_at: now_unix(),
+    };
+    write_tokens(settings, &renewed).map_err(RefreshFail::Transient)?;
+    log::info!("[Auth] Access token silently refreshed for user_id='{}'", renewed.user_id);
+    Ok(renewed)
+}
+
+/// Renew `tokens` in place (and on disk), classifying failure so that no caller
+/// can mistake "server unreachable" for "logged out".
+async fn renew(settings: &SettingsState, tokens: &mut AuthTokens) -> Renewal {
+    match refresh_tokens(settings, tokens).await {
+        Ok(fresh) => {
+            *tokens = fresh;
+            Renewal::Renewed
+        }
+        Err(RefreshFail::Rejected(e)) => {
+            log::warn!("[Auth] refresh rejected ({}) — session ended, sign in again", e);
+            let _ = delete_tokens(settings);
+            Renewal::Ended
+        }
+        Err(RefreshFail::Transient(e)) => {
+            // The hub could not be reached, or cannot serve a renewal right now
+            // (a 404 from a hub that predates the route is this too). Nothing here
+            // can end a session: the refresh token outlives the access token, so
+            // even a long offline stretch is repaired on the next reachable call.
+            log::warn!(
+                "[Auth] refresh unavailable ({}) — keeping the session (token expired: {})",
+                e,
+                token_is_dead(tokens)
+            );
+            Renewal::Kept
+        }
+    }
+}
+
+fn token_is_stale(tokens: &AuthTokens) -> bool {
+    // Prefer the token's own expiry: renew just before it, which also means a
+    // token the hub handed us with a shorter or longer lifetime is renewed on the
+    // hub's schedule rather than ours.
+    match token_expiry(&tokens.access_token) {
+        Some(exp) => now_unix().saturating_add(TOKEN_RENEW_MARGIN_SECS) >= exp,
+        None => {
+            tokens.obtained_at == 0
+                || now_unix().saturating_sub(tokens.obtained_at) >= TOKEN_MAX_AGE_SECS
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    /// Serializes silent renewals. A burst of callers that all notice a stale
+    /// token — the keeper task, the startup probe, several hub requests in one
+    /// sync round — would otherwise each make a refresh round trip and each
+    /// rewrite auth.json. One renewal at a time, with staleness re-checked after
+    /// the lock is taken, collapses that to a single trip.
+    static ref REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
+}
+
+/// Bring the stored access token back from the edge of expiry. Silent and
+/// infallible by design: request paths call this before they talk to the hub, so
+/// the token they carry is always young enough to be accepted.
+pub(crate) async fn ensure_fresh(settings: &SettingsState) {
+    // Fast path: not signed in, or the token still has days of slack — no lock.
+    let tokens = match read_tokens(settings) {
+        Ok(Some(t)) => t,
+        Ok(None) => return,
+        Err(e) => {
+            log::warn!("[Auth] ensure_fresh: {}", e);
+            return;
+        }
+    };
+    if !token_is_stale(&tokens) {
+        return;
+    }
+    let _guard = REFRESH_LOCK.lock().await;
+    // Re-read under the lock: a caller that got here first has already renewed.
+    let mut tokens = match read_tokens(settings) {
+        Ok(Some(t)) => t,
+        Ok(None) => return,
+        Err(e) => {
+            log::warn!("[Auth] ensure_fresh: {}", e);
+            return;
+        }
+    };
+    if !token_is_stale(&tokens) {
+        return;
+    }
+    renew(settings, &mut tokens).await;
+}
+
+/// Renew regardless of age — the hub just said the token it was given is not
+/// acceptable, which is exactly what a refresh fixes.
+async fn force_renew(settings: &SettingsState, tokens: &mut AuthTokens) -> Renewal {
+    let _guard = REFRESH_LOCK.lock().await;
+    renew(settings, tokens).await
+}
+
+/// The request-path accessor: [`get_access_token`] with the staleness renewal
+/// in front of it. Errors only when nobody is signed in, or when the server has
+/// actively refused the session.
+pub(crate) async fn access_token(settings: &SettingsState) -> Result<String, String> {
+    ensure_fresh(settings).await;
+    get_access_token(settings)
+}
+
+/// Handle a 401 from the website. The token is renewed rather than thrown away:
+/// a 401 with a stored refresh token means "our copy aged out", which the
+/// refresh route fixes. Only a refresh token the server also refuses ends the
+/// session. Returns the fresh access token when the caller could retry.
+pub(crate) async fn token_rejected(settings: &SettingsState) -> Option<String> {
+    let mut tokens = read_tokens(settings).ok().flatten()?;
+    match force_renew(settings, &mut tokens).await {
+        Renewal::Renewed => Some(tokens.access_token),
+        Renewal::Kept | Renewal::Ended => None,
+    }
+}
+
+/// Keep the session alive for as long as the app runs: renew the stored token
+/// whenever it approaches the server's expiry, on a poll tighter than the
+/// renewal margin so a token is never found dead at request time. Started once
+/// from `setup()` on every platform. Without this, an app left open for a week
+/// would walk into the expiry mid-session.
+pub(crate) async fn session_keeper(app: AppHandle) {
+    loop {
+        {
+            let settings = app.state::<SettingsState>();
+            ensure_fresh(&settings).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(TOKEN_RENEW_MARGIN_SECS / 3)).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -330,11 +590,22 @@ pub async fn auth_process_token(
         user_id: user_id.clone(),
         username,
         email: String::new(),
+        obtained_at: now_unix(),
     };
     write_tokens(&settings, &tokens)?;
 
     // Fetch user info (includes email).
-    let user = fetch_user_info(&tokens.access_token).await?;
+    let user = match fetch_user_info(&tokens.access_token).await {
+        Userinfo::User(u) => u,
+        Userinfo::Rejected(e) => {
+            // The tokens we just stored were refused outright — a real login
+            // failure, not a hiccup, so report it and leave the file for retry.
+            return Err(format!("Login not confirmed by the server: {}", e));
+        }
+        Userinfo::Transient(e) => {
+            return Err(format!("Failed to fetch user info: {}", e));
+        }
+    };
     log::info!("auth_process_token success: user={}, email={}", user.name, user.email);
 
     // Persist email in tokens.
@@ -344,6 +615,7 @@ pub async fn auth_process_token(
         user_id: tokens.user_id,
         username: tokens.username,
         email: user.email.clone(),
+        obtained_at: tokens.obtained_at,
     };
     let _ = write_tokens(&settings, &tokens);
 
@@ -404,23 +676,51 @@ pub async fn auth_process_token(
 }
 
 /// Get the currently logged-in user, or None if not logged in.
+///
+/// This is the startup / workspace-switch probe the UI runs, so it is written to
+/// preserve the session: a token near expiry is renewed first, a renewal that
+/// cannot reach the server falls back to the stored identity, and only a token
+/// the server actively refuses (with the refresh token refusing too) reports
+/// `None`. Logging out is the user's decision, never a side effect of a lookup.
 #[tauri::command]
 pub async fn auth_get_user(
     settings: State<'_, SettingsState>,
 ) -> Result<Option<AuthUser>, String> {
-    let tokens = match read_tokens(&settings)? {
-        Some(t) => t,
-        None => return Ok(None),
+    if read_tokens(&settings)?.is_none() {
+        return Ok(None);
+    }
+    // 1. Renew proactively while the old token is still accepted. An ended
+    //    session here means the refresh token was refused — file already gone.
+    ensure_fresh(&settings).await;
+    let Some(mut tokens) = read_tokens(&settings)? else {
+        return Ok(None);
     };
 
-    match fetch_user_info(&tokens.access_token).await {
-        Ok(user) => Ok(Some(user)),
-        Err(e) => {
-            log::warn!("auth_get_user: token invalid, clearing: {}", e);
-            let _ = delete_tokens(&settings);
-            Ok(None)
+    // 2. Confirm against the server. A rejection gets exactly one renew + retry;
+    //    anything unreadable keeps the session, since the token is young.
+    for attempt in 0..2 {
+        match fetch_user_info(&tokens.access_token).await {
+            Userinfo::User(user) => return Ok(Some(user)),
+            Userinfo::Transient(e) => {
+                log::warn!("auth_get_user: userinfo unreachable ({}), reporting stored user", e);
+                return Ok(Some(stored_user(&tokens)));
+            }
+            Userinfo::Rejected(e) if attempt == 0 => {
+                log::warn!("auth_get_user: token refused ({}), refreshing once", e);
+                match force_renew(&settings, &mut tokens).await {
+                    Renewal::Renewed => continue,
+                    Renewal::Kept => return Ok(Some(stored_user(&tokens))),
+                    Renewal::Ended => return Ok(None),
+                }
+            }
+            Userinfo::Rejected(e) => {
+                log::warn!("auth_get_user: token refused twice ({}), ending session", e);
+                let _ = delete_tokens(&settings);
+                return Ok(None);
+            }
         }
     }
+    Ok(None)
 }
 
 /// Log out: clear tokens and notify the server.
@@ -455,30 +755,45 @@ pub async fn auth_logout(
 // Internal
 // ---------------------------------------------------------------------------
 
-async fn fetch_user_info(access_token: &str) -> Result<AuthUser, String> {
-    let client = apply_dev_tls(reqwest::Client::builder())
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
-    let resp = client
+/// What a userinfo probe says about the token it was given. Distinguishing "the
+/// server refused this token" from "we could not ask" is what lets the session
+/// survive the latter.
+enum Userinfo {
+    User(AuthUser),
+    Rejected(String),
+    Transient(String),
+}
+
+async fn fetch_user_info(access_token: &str) -> Userinfo {
+    let client = match apply_dev_tls(reqwest::Client::builder()).build() {
+        Ok(c) => c,
+        Err(e) => return Userinfo::Transient(format!("Failed to build HTTP client: {}", e)),
+    };
+    let resp = match client
         .get(format!("{}/api/oauth2/userinfo", base_url()))
         .header("Authorization", format!("Bearer {}", access_token))
         .send()
         .await
-        .map_err(|e| format!("Userinfo request failed: {}", e))?;
+    {
+        Ok(r) => r,
+        Err(e) => return Userinfo::Transient(err_chain(&e)),
+    };
 
-    if !resp.status().is_success() {
-        return Err("Failed to fetch user info".to_string());
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Userinfo::Rejected(format!("HTTP {status}"));
+    }
+    if !status.is_success() {
+        return Userinfo::Transient(format!("HTTP {status}"));
     }
 
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse userinfo response: {}", e))?;
-
-    let name = json["name"].as_str().unwrap_or("").to_string();
-    let email = json["email"].as_str().unwrap_or("").to_string();
-
-    Ok(AuthUser { name, email })
+    match resp.json::<serde_json::Value>().await {
+        Ok(json) => Userinfo::User(AuthUser {
+            name: json["name"].as_str().unwrap_or("").to_string(),
+            email: json["email"].as_str().unwrap_or("").to_string(),
+        }),
+        Err(e) => Userinfo::Transient(format!("Failed to parse userinfo response: {}", e)),
+    }
 }
 
 /// Get the current user's identifier (email preferred, fallback to user_id).
@@ -552,4 +867,98 @@ fn open_url(app: &AppHandle, url: &str) -> Result<(), String> {
         .opener()
         .open_url(url, None::<&str>)
         .map_err(|e| format!("Failed to open browser: {}", e))
+}
+
+// ---------------------------------------------------------------------------
+// Tests — the renewal calendar: the pure decisions behind "stay logged in until
+// the user logs out". When a token is due for renewal, and when it is already
+// past its life. No network, no workspace.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an unsigned JWT-shaped token carrying `exp` in its payload — the
+    /// same shape the hub hands out (the app only reads the claim).
+    fn jwt_with_exp(exp: u64) -> String {
+        use base64::Engine;
+        let seg = |json: String| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
+        format!(
+            "{}.{}.sig",
+            seg(r#"{"alg":"RS256","typ":"JWT"}"#.to_string()),
+            seg(format!(r#"{{"sub":"user-1","exp":{exp}}}"#))
+        )
+    }
+
+    fn tokens(access: &str, obtained_at: u64) -> AuthTokens {
+        AuthTokens {
+            access_token: access.to_string(),
+            refresh_token: "r".repeat(32),
+            user_id: "user-1".to_string(),
+            username: "Tester".to_string(),
+            email: "t@example.com".to_string(),
+            obtained_at,
+        }
+    }
+
+    #[test]
+    fn expiry_is_read_from_the_payload() {
+        assert_eq!(token_expiry(&jwt_with_exp(1_700_000_000)), Some(1_700_000_000));
+        // Not a JWT: the caller falls back to the age-based schedule.
+        assert_eq!(token_expiry("opaque-token"), None);
+        assert_eq!(token_expiry(""), None);
+    }
+
+    #[test]
+    fn a_token_with_days_left_is_not_renewed_yet() {
+        let t = tokens(&jwt_with_exp(now_unix() + 6 * 24 * 3600), now_unix());
+        assert!(!token_is_stale(&t), "a fresh token must not cost a round trip");
+        assert!(!token_is_dead(&t));
+    }
+
+    #[test]
+    fn a_token_inside_the_margin_is_renewed_before_it_dies() {
+        let t = tokens(&jwt_with_exp(now_unix() + TOKEN_RENEW_MARGIN_SECS / 2), now_unix());
+        assert!(token_is_stale(&t), "renewal must start while the hub still accepts us");
+        assert!(!token_is_dead(&t), "stale is not dead — the old token still works");
+    }
+
+    #[test]
+    fn a_past_expiry_token_is_stale_and_dead() {
+        let t = tokens(&jwt_with_exp(now_unix() - 60), now_unix() - 8 * 24 * 3600);
+        assert!(token_is_stale(&t));
+        assert!(token_is_dead(&t));
+    }
+
+    #[test]
+    fn opaque_tokens_fall_back_to_the_age_schedule() {
+        // A file written before `obtained_at` existed (0) is renewed on sight.
+        assert!(token_is_stale(&tokens("opaque", 0)));
+        let fresh = tokens("opaque", now_unix() - TOKEN_MAX_AGE_SECS + 3600);
+        assert!(!token_is_stale(&fresh));
+        assert!(!token_is_dead(&fresh));
+        let aged = tokens("opaque", now_unix() - TOKEN_MAX_AGE_SECS - 3600);
+        assert!(token_is_stale(&aged));
+    }
+
+    #[test]
+    fn legacy_auth_json_without_obtained_at_still_parses() {
+        // Sessions stored before this field existed must load, not error out.
+        let legacy = r#"{"access_token":"a","refresh_token":"b","user_id":"u","username":"n"}"#;
+        let parsed: AuthTokens = serde_json::from_str(legacy).expect("legacy auth.json must parse");
+        assert_eq!(parsed.obtained_at, 0);
+        assert_eq!(parsed.email, "");
+    }
+
+    #[test]
+    fn stored_user_prefers_the_username_and_falls_back_to_the_id() {
+        let u = stored_user(&tokens("opaque", now_unix()));
+        assert_eq!(u.name, "Tester");
+        assert_eq!(u.email, "t@example.com");
+        // A deep-link login that carried no username reports the user_id.
+        let mut anon = tokens("opaque", now_unix());
+        anon.username = String::new();
+        assert_eq!(stored_user(&anon).name, "user-1");
+    }
 }

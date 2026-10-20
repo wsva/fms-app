@@ -216,7 +216,12 @@ pub(crate) fn hub_base_or_account(settings: &SettingsState) -> Result<String, St
 /// website path degrades to an anonymous request rather than failing here: a
 /// 401 comes back from the gate and [`hub_http_error`] turns it into the
 /// sign-in message, while public reads keep working without a login.
-pub(crate) fn hub_request(
+///
+/// Async because the website branch first renews a token that has aged toward
+/// the hub's expiry ([`crate::auth::ensure_fresh`]) — every hub request goes
+/// through here, so no call site has to remember to do it. LAN requests cost
+/// nothing: the renewal no-ops unless a session file is due.
+pub(crate) async fn hub_request(
     req: reqwest::RequestBuilder,
     settings: &SettingsState,
     method: &str,
@@ -231,10 +236,13 @@ pub(crate) fn hub_request(
     // [`with_device_auth`] errors exactly as before.
     let base = hub_base_or_account(settings).unwrap_or_default();
     match crate::sync::hub_kind(&base) {
-        crate::sync::HubKind::Website => match crate::auth::get_access_token(settings) {
-            Ok(token) => Ok(req.header("Authorization", format!("Bearer {}", token))),
-            Err(_) => Ok(req),
-        },
+        crate::sync::HubKind::Website => {
+            crate::auth::ensure_fresh(settings).await;
+            match crate::auth::get_access_token(settings) {
+                Ok(token) => Ok(req.header("Authorization", format!("Bearer {}", token))),
+                Err(_) => Ok(req),
+            }
+        }
         crate::sync::HubKind::LanPc => with_device_auth(req, settings, method, path, query, body),
     }
 }
@@ -306,7 +314,7 @@ pub(crate) async fn hub_get_json_at(
     } else {
         format!("{base}{api_path}?{qs}")
     };
-    let req = hub_request(client.get(&url), settings, "GET", api_path, qs, b"")?;
+    let req = hub_request(client.get(&url), settings, "GET", api_path, qs, b"").await?;
     let resp = req
         .send()
         .await
@@ -315,9 +323,10 @@ pub(crate) async fn hub_get_json_at(
     if status == reqwest::StatusCode::UNAUTHORIZED
         && crate::sync::hub_kind(base) == crate::sync::HubKind::Website
     {
-        // The website mints tokens only; an expired/revoked one has no silent
-        // refresh route, so clear it and send the user to sign in (T5).
-        crate::auth::token_rejected(settings);
+        // Renew once (T5 is superseded by the website's /api/oauth2/refresh: the
+        // session now survives an aged token). Only a refresh token the hub also
+        // refuses clears the file and sends the user to sign in.
+        crate::auth::token_rejected(settings).await;
     }
     if !status.is_success() {
         return Err(hub_http_error(resp, api_path).await);

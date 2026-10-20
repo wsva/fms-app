@@ -225,7 +225,7 @@ async fn website_write(
     settings: &SettingsState,
 ) -> Result<(reqwest::Client, String, String), String> {
     let base = crate::auth::base_url();
-    let token = crate::auth::get_access_token(settings)?;
+    let token = crate::auth::access_token(settings).await?;
     // A generous overall timeout: this is a multi-MB blob PUT over WAN.
     let client = crate::auth::hub_client_builder()
         .timeout(Duration::from_secs(3600))
@@ -234,11 +234,12 @@ async fn website_write(
     Ok((client, base, token))
 }
 
-/// Handle 401 (drop the rejected token) then map any non-success to an error.
+/// Handle 401 (renew the stored token for the next call) then map any
+/// non-success to an error.
 async fn check_ok(resp: reqwest::Response, settings: &SettingsState, uuid: &str) -> Result<Value, String> {
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        crate::auth::token_rejected(settings);
+        crate::auth::token_rejected(settings).await;
     }
     if !status.is_success() {
         return Err(objects_http_error(resp, uuid).await);

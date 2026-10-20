@@ -312,7 +312,8 @@ async fn flush_scope(
             api_path,
             "",
             &body_bytes,
-        )?
+        )
+        .await?
         .header("content-type", "application/json")
         .body(body_bytes);
         let resp = req.send().await.map_err(|e| e.to_string())?;

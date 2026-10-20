@@ -98,6 +98,7 @@ pub(crate) async fn fetch_cluster_at(
         "",
         b"",
     )
+    .await
     .ok()?;
     let resp = req.send().await.ok()?;
     if !resp.status().is_success() {

@@ -289,6 +289,9 @@ async fn drain_scope(
         .map_err(|e| format!("cannot reach the inbox at {url}: {e}"))?;
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
+        // Renew for the next round; the session itself is not dropped (only a
+        // refused refresh token clears the file).
+        crate::auth::token_rejected(settings.inner()).await;
         set_drain_cursor(ledger, scope, cursor_before, Some("token_rejected"));
         return Err("token_rejected: the website refused the OAuth Bearer".to_string());
     }
@@ -375,6 +378,7 @@ async fn drain_scope(
             .map_err(|e| format!("cannot reach the inbox ack at {ack_url}: {e}"))?;
         let ack_status = ack_resp.status();
         if ack_status == reqwest::StatusCode::UNAUTHORIZED {
+            crate::auth::token_rejected(settings.inner()).await;
             let err = "token_rejected (ack)".to_string();
             set_drain_cursor(ledger, scope, cursor_before, Some(&err));
             return Err(err);
@@ -457,7 +461,7 @@ pub(crate) async fn drain_inner(
     scope: Option<&str>,
 ) -> Result<Value, String> {
     let base = crate::auth::base_url();
-    let token = crate::auth::get_access_token(settings.inner())?;
+    let token = crate::auth::access_token(settings.inner()).await?;
     let client = crate::auth::hub_client_builder()
         .timeout(Duration::from_secs(60))
         .build()

@@ -122,7 +122,8 @@ pub async fn card_sync_all(
     // Keep the friendly top-level auth error: the journal path degrades to an
     // anonymous request (→ a per-dataset 401) without a token, but the whole fan-out
     // is pointless when signed out.
-    crate::auth::get_access_token(&settings)
+    crate::auth::access_token(&settings)
+        .await
         .map_err(|e| format!("Not logged in: {}", e))?;
     let user_id = crate::auth::get_stored_user_id(&settings).unwrap_or_default();
     let mut results = Vec::new();

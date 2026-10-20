@@ -285,8 +285,10 @@ async fn mirror_http_error(resp: reqwest::Response) -> String {
     }
 }
 
-/// Send one batch. Clears the stored token on 401 (as `upload.rs` does) so the
-/// next status read reports "sign in again" rather than retrying a dead token.
+/// Send one batch. On 401 it renews the stored token (see
+/// [`crate::auth::token_rejected`]) so the next run carries a live credential;
+/// the session itself is never dropped over an aged token. The batch in flight
+/// still fails, since its bearer is already on the wire.
 async fn post_chunk(
     client: &reqwest::Client,
     url: &str,
@@ -304,7 +306,7 @@ async fn post_chunk(
         .map_err(|e| PushFail::Fatal(format!("cannot reach the website at {url}: {e}")))?;
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        crate::auth::token_rejected(settings);
+        crate::auth::token_rejected(settings).await;
     }
     if status.as_u16() == 413 {
         return Err(PushFail::TooLarge);
@@ -455,7 +457,7 @@ pub(crate) async fn mirror_push_inner(
 ) -> Result<Value, String> {
     let base = crate::auth::base_url();
     // A missing token is a hard, actionable error for a write.
-    let token = crate::auth::get_access_token(settings)?;
+    let token = crate::auth::access_token(settings).await?;
     let url = format!("{base}{MIRROR_PATH}");
     let client = crate::auth::hub_client_builder()
         .timeout(Duration::from_secs(60))
@@ -598,7 +600,7 @@ pub async fn sync_handover_to_cloud(
     let role = normalize_handover_role(role.as_deref())?;
 
     let base = crate::auth::base_url();
-    let token = crate::auth::get_access_token(&settings)?;
+    let token = crate::auth::access_token(&settings).await?;
     let client = crate::auth::hub_client_builder()
         .timeout(Duration::from_secs(60))
         .build()
@@ -630,7 +632,7 @@ pub async fn sync_handover_to_cloud(
         .map_err(|e| format!("cannot reach the website at {handover_url}: {e}"))?;
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        crate::auth::token_rejected(&settings);
+        crate::auth::token_rejected(&settings).await;
     }
     if !status.is_success() {
         let msg = handover_http_error(resp).await;

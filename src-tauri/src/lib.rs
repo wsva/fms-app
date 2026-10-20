@@ -547,6 +547,14 @@ pub fn run() {
                 sync::server::auto_start(handle).await;
             });
 
+            // Keep the website session alive for as long as the app runs: the
+            // hub's access token lives 7 days, so renew it in the background —
+            // an explicit logout must be the only thing that ends a session.
+            let keeper = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                auth::session_keeper(keeper).await;
+            });
+
             // Register deep link handler for OAuth login callback.
             // Register the fms-app:// scheme with the OS so the browser can redirect to it.
             match app.deep_link().register_all() {
@@ -931,6 +939,14 @@ pub fn run() {
                     Err(e) => log::error!("[Startup] Failed to load simple words: {}", e),
                 }
             }
+
+            // Same background session keeper as the desktop build: renew the
+            // website access token before its 7-day expiry, so the only way to
+            // get logged out is to tap Log out.
+            let keeper = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                auth::session_keeper(keeper).await;
+            });
 
             // On Android the fms-app:// scheme is registered by the OS at install
             // time via the AndroidManifest intent-filter, so there is no runtime

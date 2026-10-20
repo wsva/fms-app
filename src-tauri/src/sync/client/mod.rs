@@ -172,7 +172,8 @@ pub async fn dataset_sync_snapshot(
         &api_path,
         "",
         b"",
-    )?;
+    )
+    .await?;
     let mresp = mreq.send().await.map_err(|e| e.to_string())?;
     if !mresp.status().is_success() {
         return Err(hub_http_error(mresp, &api_path).await);
@@ -248,7 +249,8 @@ pub async fn dataset_sync_snapshot(
         &snap_path,
         &snap_qs,
         b"",
-    )?;
+    )
+    .await?;
     let resp = sreq.send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(hub_http_error(resp, &snap_path).await);
@@ -501,7 +503,8 @@ pub async fn pc_list_datasets(
             "/api/v1/datasets",
             "",
             b"",
-        )?;
+        )
+        .await?;
         let resp = req
             .send()
             .await
@@ -603,7 +606,8 @@ pub async fn pc_fetch_file(
         api_path,
         &qs,
         b"",
-    )?;
+    )
+    .await?;
     let req = match range {
         Some(r) => req.header("Range", r),
         None => req,
