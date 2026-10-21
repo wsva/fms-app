@@ -1,14 +1,16 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import type { LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
 import { useAuth } from "@/hooks/useAuth";
 import { message as showDialog } from "@tauri-apps/plugin-dialog";
 import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog, Upload, LogIn, Archive } from "lucide-react";
-import { tbGhost, tbSolid, tbToggle } from "@/lib/ui/toolbar";
+import { tbGhost, tbSolid, tbToggle, tbToggleStacked, TB_ICON } from "@/lib/ui/toolbar";
 import { ToolbarButton } from "@/components/ui/toolbar";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { logError, logInfo } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
@@ -352,6 +354,10 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   // account is signed in; "status" carries the connection + diagnostics that
   // used to sit permanently above the lists.
   const [activeZone, setActiveZone] = useState<"pull" | "publish" | "status">("pull");
+
+  // Phone toolbars have ~360px to spend, so there the bar stacks each control
+  // icon-over-label (the kit's stacked tokens) instead of dropping the words.
+  const mobile = useIsMobile();
 
   const pcUrl = (global?.pc_url ?? "").trim();
 
@@ -1163,6 +1169,22 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       lastRoundErrors > 0 ||
       num(lastRound?.dropped_pending) > 0);
 
+  // The sync CTA is the page's one primary action, so it keeps a word even on
+  // the phone. Stacked, that word is what sets the button's width, and "Push to
+  // cloud" at text-xs would be the widest thing in the bar — so mobile gets the
+  // short form and the tooltip/title still carries the full sentence.
+  const syncLabel = mobile
+    ? syncing
+      ? "Syncing"
+      : isHub
+        ? "Push"
+        : "Sync"
+    : syncing
+      ? "Syncing…"
+      : isHub
+        ? "Push to cloud"
+        : "Sync now";
+
   // The underline section tabs shared by the Pull and Publish zones — the
   // dataset-type dimension, deliberately styled apart from the toolbar's
   // segmented zone switcher above it.
@@ -1189,13 +1211,51 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     );
   }
 
-  // One label/value line of the Status zone's connection grid.
+  // One label/value line of the Status zone's connection grid. Side by side
+  // from `sm` up, but stacked on a phone: the 160px label column there leaves
+  // the value barely half the card, which wraps a device id or hub address over
+  // three lines. Width-driven (not platform-driven) so a tablet gets the
+  // two-column reading and no first-paint flash is involved.
   function statusRow(label: string, value: React.ReactNode) {
     return (
-      <div key={label} className="flex items-start gap-3">
-        <span className="w-40 shrink-0 text-text-tertiary">{label}</span>
+      <div key={label} className="flex flex-col gap-0.5 sm:flex-row sm:items-start sm:gap-3">
+        <span className="text-text-tertiary sm:w-40 sm:shrink-0">{label}</span>
         <span className="min-w-0 break-words">{value}</span>
       </div>
+    );
+  }
+
+  // One tab of the toolbar's zone switcher: icon, word, and the badge that says
+  // whether the zone is worth opening. Where the badge sits follows the layout —
+  // beside the icon when the tab is stacked (its label is on a line of its own
+  // below), after the word in the horizontal desktop row, where it reads as the
+  // word's count.
+  function zoneTab(opts: {
+    zone: "pull" | "publish" | "status";
+    icon: LucideIcon;
+    label: string;
+    title: string;
+    badge?: React.ReactNode;
+  }) {
+    const { zone, icon: Icon, label, title, badge } = opts;
+    const active = activeZone === zone;
+    return (
+      <button
+        type="button"
+        className={mobile ? tbToggleStacked(active) : tbToggle(active)}
+        onClick={() => setActiveZone(zone)}
+        title={title}
+        aria-label={label}
+      >
+        <span className="flex items-center gap-1">
+          <Icon size={TB_ICON} />
+          {mobile && badge}
+        </span>
+        <span className="flex items-center gap-0.5">
+          {label}
+          {!mobile && badge}
+        </span>
+      </button>
     );
   }
 
@@ -2041,34 +2101,49 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
           actions. Replaces the old h1 header, the always-on status strip, and
           the inline diagnostics block; connection detail lives in Status. */}
       <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card overflow-x-auto">
+        {/* Zone switcher. On a phone each tab stacks icon-over-label instead of
+            putting them side by side: the bar then fits every name in the width
+            a desktop row would not, at the cost of a little height. Each tab's
+            badge rides with the icon there, and with the word on desktop. */}
         <div className="flex items-center gap-1 shrink-0">
-          <button type="button" className={tbToggle(activeZone === "pull")} onClick={() => setActiveZone("pull")}>
-            <Download size={14} />
-            <span>Pull</span>
-            {pullPill > 0 && (
-              <span className="ml-0.5 px-1.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 text-xs">
-                {pullPill}
-              </span>
-            )}
-          </button>
-          {canPublish && (
-            <button type="button" className={tbToggle(activeZone === "publish")} onClick={() => setActiveZone("publish")}>
-              <Upload size={14} />
-              <span>Publish</span>
-              {publishPill && <span className="ml-0.5 w-2 h-2 rounded-full bg-white" />}
-            </button>
-          )}
-          <button type="button" className={tbToggle(activeZone === "status")} onClick={() => setActiveZone("status")}>
-            <ServerCog size={14} />
-            <span>Status</span>
-            {statusPill && <span className="ml-0.5 w-2 h-2 rounded-full bg-amber-500" />}
-          </button>
+          {zoneTab({
+            zone: "pull",
+            icon: Download,
+            label: "Pull",
+            title: "Pull — datasets offered by the hub",
+            badge:
+              pullPill > 0 ? (
+                <span className="px-1.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 text-xs">
+                  {pullPill}
+                </span>
+              ) : undefined,
+          })}
+          {canPublish &&
+            zoneTab({
+              zone: "publish",
+              icon: Upload,
+              label: "Publish",
+              title: "Publish — this device's own uploads",
+              badge: publishPill ? <span className="w-2 h-2 rounded-full bg-white" /> : undefined,
+            })}
+          {zoneTab({
+            zone: "status",
+            icon: ServerCog,
+            label: "Status",
+            title: "Status — connection and last rounds",
+            badge: statusPill ? <span className="w-2 h-2 rounded-full bg-amber-500" /> : undefined,
+          })}
         </div>
 
         <div className="ml-auto flex items-center gap-1 shrink-0">
-          <button
-            type="button"
-            className={tbGhost}
+          {/* Reload keeps its word too, stacked under the icon on a phone. */}
+          <ToolbarButton
+            icon={RefreshCw}
+            iconProps={{ className: loadingList ? "animate-spin" : undefined }}
+            label="Refresh"
+            stacked={mobile}
+            title="Reload settings, lists and status"
+            disabled={loadingList}
             onClick={() => {
               loadSettings();
               loadLocalState();
@@ -2077,29 +2152,27 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
               fetchPcDatasets();
               if (marketBranch) loadMarket();
             }}
-            disabled={loadingList}
-          >
-            <RefreshCw size={14} className={loadingList ? "animate-spin" : undefined} />
-            Refresh
-          </button>
+          />
           {/* One round moves everything it can in both directions (writeback
               push + pull deltas + step-7 mirror/file drain). Shown for followers
               always (disabled until a hub is configured), and for any Hub with a
               pc_url OR a logged-in account — an auth-only Hub triggers the
               cloud-only branch of sync_round_inner against auth::base_url(). A
               pure-LAN hub with no upstream and no sign-in is the one case a
-              round is meaningless, so we hide it rather than show a dead button. */}
+              round is meaningless, so we hide it rather than show a dead button.
+              Kept labelled on mobile, under its icon — it is the page's one
+              primary action, so a bare arrow would leave the word out. */}
           {(!isHub || pcUrl || canPublish) && (
-            <button
-              type="button"
-              className={tbSolid}
-              onClick={handleSyncNow}
-              disabled={syncing || (!isHub && !pcUrl)}
+            <ToolbarButton
+              variant="solid"
+              icon={syncing ? Loader2 : ArrowUpDown}
+              iconProps={{ className: syncing ? "animate-spin" : undefined }}
+              stacked={mobile}
+              label={syncLabel}
               title={isHub ? "Run a sync round: drain this hub's journal + changed files to the cloud" : "Run one incremental sync round (push + pull)"}
-            >
-              {syncing ? <Loader2 size={14} className="animate-spin" /> : <ArrowUpDown size={14} />}
-              {syncing ? "Syncing…" : isHub ? "Push to cloud" : "Sync now"}
-            </button>
+              disabled={syncing || (!isHub && !pcUrl)}
+              onClick={handleSyncNow}
+            />
           )}
         </div>
       </div>

@@ -7,6 +7,11 @@ import {
   tbSolid,
   tbToggle,
   tbToggleSoft,
+  tbGhostStacked,
+  tbDangerStacked,
+  tbSolidStacked,
+  tbToggleStacked,
+  tbToggleSoftStacked,
   TB_ICON,
 } from "@/lib/ui/toolbar";
 import { useToolbarMobile } from "./mobile-context";
@@ -30,10 +35,14 @@ type ToolbarButtonProps = {
   iconProps?: Record<string, unknown>;
   /** Override the icon size (defaults to TB_ICON = 14). */
   iconSize?: number;
-  /** Text label; hidden on mobile unless `collapseOnMobile={false}`. */
+  /** Text label; hidden on mobile unless `collapseOnMobile={false}`. Always
+   *  shown when `stacked`. */
   label?: string;
   /** Collapse the label to icon-only on mobile. Defaults to true. */
   collapseOnMobile?: boolean;
+  /** Icon above the label instead of beside it. Lets a toolbar keep its words
+   *  in the width a phone has; implies the label is shown. */
+  stacked?: boolean;
   title?: string;
   /** Accessible name; auto-derived from `label`/`title` when omitted. */
   ariaLabel?: string;
@@ -43,18 +52,22 @@ type ToolbarButtonProps = {
   onClick?: () => void;
 };
 
-function variantClass(variant: ToolbarButtonVariant, active: boolean): string {
+function variantClass(
+  variant: ToolbarButtonVariant,
+  active: boolean,
+  stacked: boolean
+): string {
   switch (variant) {
     case "danger":
-      return tbDanger;
+      return stacked ? tbDangerStacked : tbDanger;
     case "solid":
-      return tbSolid;
+      return stacked ? tbSolidStacked : tbSolid;
     case "toggle":
-      return tbToggle(active);
+      return stacked ? tbToggleStacked(active) : tbToggle(active);
     case "toggleSoft":
-      return tbToggleSoft(active);
+      return stacked ? tbToggleSoftStacked(active) : tbToggleSoft(active);
     default:
-      return tbGhost;
+      return stacked ? tbGhostStacked : tbGhost;
   }
 }
 
@@ -72,6 +85,7 @@ export function ToolbarButton({
   iconSize = TB_ICON,
   label,
   collapseOnMobile = true,
+  stacked = false,
   title,
   ariaLabel,
   disabled,
@@ -82,13 +96,15 @@ export function ToolbarButton({
   const detected = useIsMobile();
   const mobile = ctx ?? detected;
   // A label-only button (no icon) must never collapse, or it would render empty
-  // on mobile — collapsing only makes sense when the icon remains.
-  const showLabel = !!label && (!mobile || !collapseOnMobile || !Icon);
+  // on mobile — collapsing only makes sense when the icon remains. A stacked
+  // button shows its label by definition: the vertical layout is chosen precisely
+  // because the words are worth keeping.
+  const showLabel = !!label && (stacked || !mobile || !collapseOnMobile || !Icon);
 
   return (
     <button
       type="button"
-      className={`${variantClass(variant, active)} ${className}`.trim()}
+      className={`${variantClass(variant, active, stacked)} ${className}`.trim()}
       disabled={disabled}
       title={title ?? label}
       aria-label={ariaLabel ?? label ?? title}

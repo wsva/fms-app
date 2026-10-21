@@ -23,6 +23,10 @@
 //   active recording state (RecordButton).
 // - Label spacing comes from `gap-1.5` only; no leading-space-in-label idiom.
 // - Mobile label collapsing defaults ON for labeled buttons.
+// - Stacked (`tb*Stacked`) is the alternative layout: icon above a `text-xs`
+//   label, in a narrower box. Use it where a horizontal row of labeled buttons
+//   cannot fit a phone's width but the words still matter — it trades ~10px of
+//   bar height for dropping the labels. A stacked button never hides its label.
 // - `aria-label` is auto-derived from label/title; icon-only buttons require one.
 // ---------------------------------------------------------------------------
 
@@ -42,34 +46,54 @@ const base =
  *  above unless you must supply a custom color. */
 export const tbBase = base;
 
+// Base box for the stacked layout: icon on top, label underneath.
+const baseStacked =
+  "flex flex-col items-center gap-0.5 px-2.5 py-1 text-xs rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed";
+
+/** The bare stacked-button box, same role as `tbBase` for the vertical layout. */
+export const tbBaseStacked = baseStacked;
+
 // Base box for a square, icon-only toolbar button (Back / Forward / arrows).
 const iconBase = "p-1.5 rounded-md transition-colors";
-const iconGhost = "text-text-secondary hover:text-text-primary hover:bg-bg-hover";
+
+// Color/affordance pairs, orthogonal to the layout so every button exists in
+// both orientations without repeating a color string.
+const ghostColor = "text-text-secondary hover:text-text-primary hover:bg-bg-hover";
+const dangerColor = "text-text-secondary hover:text-error-text hover:bg-bg-hover";
+const solidColor = "bg-accent text-white hover:bg-accent/90";
+const toggleColor = (active: boolean) => (active ? solidColor : ghostColor);
+const toggleSoftColor = (active: boolean) =>
+  active ? "bg-bg-hover text-text-primary" : ghostColor;
 
 /** Neutral (ghost) action: Refresh, Reload, Edit, New File… */
-export const tbGhost = `${base} ${iconGhost}`;
+export const tbGhost = `${base} ${ghostColor}`;
 
 /** Destructive action, tinted on hover: Delete, Delete Dataset… */
-export const tbDanger = `${base} text-text-secondary hover:text-error-text hover:bg-bg-hover`;
+export const tbDanger = `${base} ${dangerColor}`;
 
 /** Solid accent call-to-action, always "on": Download… */
-export const tbSolid = `${base} bg-accent text-white hover:bg-accent/90`;
+export const tbSolid = `${base} ${solidColor}`;
 
 /** Toggle action — solid accent when active, ghost when inactive. */
-export const tbToggle = (active: boolean) =>
-  `${base} ${active ? "bg-accent text-white hover:bg-accent/90" : iconGhost}`;
+export const tbToggle = (active: boolean) => `${base} ${toggleColor(active)}`;
 
 /** Toggle action — subtle highlighted background when active (Tools / View…). */
-export const tbToggleSoft = (active: boolean) =>
-  `${base} ${active ? "bg-bg-hover text-text-primary" : iconGhost}`;
+export const tbToggleSoft = (active: boolean) => `${base} ${toggleSoftColor(active)}`;
+
+/** Stacked (icon-top / label-bottom) counterparts of the five above. */
+export const tbGhostStacked = `${baseStacked} ${ghostColor}`;
+export const tbDangerStacked = `${baseStacked} ${dangerColor}`;
+export const tbSolidStacked = `${baseStacked} ${solidColor}`;
+export const tbToggleStacked = (active: boolean) => `${baseStacked} ${toggleColor(active)}`;
+export const tbToggleSoftStacked = (active: boolean) => `${baseStacked} ${toggleSoftColor(active)}`;
 
 /** Icon-only navigation button, ghost in both states. */
-export const tbIcon = `${iconBase} ${iconGhost} disabled:opacity-30 disabled:cursor-default`;
+export const tbIcon = `${iconBase} ${ghostColor} disabled:opacity-30 disabled:cursor-default`;
 
 /** Icon-only toggle, solid accent when active (mobile collapse toggle). */
 export const tbIconToggle = (active: boolean) =>
-  `${iconBase} ${active ? "bg-accent text-white hover:bg-accent/90" : iconGhost}`;
+  `${iconBase} ${active ? solidColor : ghostColor}`;
 
 /** Icon-only toggle, subtle highlighted background when active (search). */
 export const tbIconToggleSoft = (active: boolean) =>
-  `${iconBase} ${active ? "bg-bg-hover text-text-primary" : iconGhost}`;
+  `${iconBase} ${active ? "bg-bg-hover text-text-primary" : ghostColor}`;
