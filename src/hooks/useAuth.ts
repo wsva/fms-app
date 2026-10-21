@@ -38,13 +38,21 @@ export function useAuth() {
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [xpUser, setXpUser] = useState<XpUser | null>(null);
   const [xpFlash, setXpFlash] = useState<number | null>(null);
+  // True while `auth_get_user` is in flight (startup, workspace switch, manual
+  // re-check). The user-info area renders "Checking…" instead of the Login
+  // button so a pending network validation never reads as signed out.
+  const [checking, setChecking] = useState(true);
   // In-app login modal visibility. Login is verified against the website's
   // signin API (see LoginModal + auth_login_password), not via a browser
   // deep-link round trip, so it works reliably on Android.
   const [loginOpen, setLoginOpen] = useState(false);
 
   const checkAuth = useCallback(async () => {
-    if (!isTauri()) return;
+    if (!isTauri()) {
+      setChecking(false);
+      return;
+    }
+    setChecking(true);
     try {
       const user = await invoke<AuthUser | null>("auth_get_user");
       setAuthUser(user);
@@ -56,6 +64,8 @@ export function useAuth() {
       }
     } catch {
       /* ignore */
+    } finally {
+      setChecking(false);
     }
   }, []);
 
@@ -64,12 +74,14 @@ export function useAuth() {
     if (!isTauri()) return;
     const unlistenLogin = listen<AuthUser>("auth-login-success", (event) => {
       setAuthUser(event.payload);
+      setChecking(false);
       // Fetch XP after login.
       invoke<XpUser | null>("xp_get_user").then(setXpUser).catch(() => {});
     });
     const unlistenLogout = listen("auth-logout", () => {
       setAuthUser(null);
       setXpUser(null);
+      setChecking(false);
     });
     // Auth is per-workspace: on workspace switch, clear the old user and
     // reload auth/XP from the newly selected workspace's auth.json.
@@ -114,5 +126,5 @@ export function useAuth() {
     }
   }, []);
 
-  return { authUser, xpUser, xpFlash, login, logout, loginOpen, closeLogin };
+  return { authUser, xpUser, xpFlash, checking, login, logout, loginOpen, closeLogin };
 }

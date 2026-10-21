@@ -143,7 +143,7 @@ export default function Sidebar({
   });
 
   // ---- Auth state (shared with the mobile bottom nav via useAuth) ----
-  const { authUser, xpUser, xpFlash, login, logout, loginOpen, closeLogin } = useAuth();
+  const { authUser, xpUser, xpFlash, checking, login, logout, loginOpen, closeLogin } = useAuth();
 
   // Load saved width from localStorage
   useEffect(() => {
@@ -362,6 +362,20 @@ export default function Sidebar({
               <span className="text-[9px] text-yellow-500 font-bold text-center animate-bounce">
                 +{xpFlash}
               </span>
+            )}
+          </div>
+        ) : checking ? (
+          /* Login status still being validated (startup / workspace switch) —
+             show a placeholder instead of the Login button. */
+          <div
+            className={`flex items-center w-full rounded-lg px-2 py-1.5 ${
+              collapsed ? "justify-center" : "gap-2"
+            }`}
+            title="Checking login status…"
+          >
+            <User size={18} className="text-text-tertiary shrink-0 animate-pulse" />
+            {!collapsed && (
+              <span className="text-xs font-medium text-text-tertiary animate-pulse">Checking…</span>
             )}
           </div>
         ) : (
