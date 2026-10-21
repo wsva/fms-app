@@ -316,13 +316,13 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                 </div>
             )}
             {/* Breadcrumb navigation — wiki-style full-width bar sitting above the
-                toolbar: Datasets › dataset › media › subtitle trail. Always shown,
+                toolbar: Dictation › dataset › media › subtitle trail. Always shown,
                 including mobile "cues only" mode, so the navigation trail stays reachable. */}
             <Breadcrumb>
                 {d.selectedDatasetUuid || showLocations ? (
-                    <Breadcrumb.Link onClick={() => { d.setSelectedDatasetUuid(""); setShowLocations(false); }}>Datasets</Breadcrumb.Link>
+                    <Breadcrumb.Link onClick={() => { d.setSelectedDatasetUuid(""); setShowLocations(false); }}>Dictation</Breadcrumb.Link>
                 ) : (
-                    <Breadcrumb.Current grow={false}>Datasets</Breadcrumb.Current>
+                    <Breadcrumb.Current grow={false}>Dictation</Breadcrumb.Current>
                 )}
                 {showLocations && (
                     <>
