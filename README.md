@@ -58,5 +58,8 @@ Grab a prebuilt installer from the [latest release](https://github.com/wsva/fms-
 |----------|-----------|
 | Windows  | `.exe` (NSIS), `.msi` |
 | Linux    | `.AppImage`, `.deb`, `.rpm` |
+| Android  | `.apk` (arm64) |
 
-Releases are built automatically by [GitHub Actions](.github/workflows/build.yml) on every `v*` tag.
+Each asset is named `FmS_<platform>_<arch>_<tag>.<ext>` — `FmS_windows_x64_v0.1.1.exe`, `FmS_linux_amd64_v0.1.1.deb`, `FmS_android_arm64_v0.1.1.apk` — so the
+release tag is the only version in the name. Releases are built automatically by
+[GitHub Actions](.github/workflows/build.yml) on every `v*` tag.

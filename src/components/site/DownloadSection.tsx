@@ -31,22 +31,26 @@ interface GitHubRelease {
 
 type Platform = "windows" | "linux" | "android";
 
-// Extension/keyword preference per platform, highest priority first. Tauri's
-// bundler emits names like `fms-app_0.1.0_x64-setup.exe` and
-// `fms-app_0.1.0_amd64.AppImage`, so matching on the lowercased name is enough.
+// Extension/keyword preference per platform, highest priority first. CI renames
+// every asset to `FmS_<platform>_<arch>_<tag>.<ext>` (see
+// .github/workflows/build.yml), but the lowercased-extension test also keeps
+// working for the releases published before that rename, where Tauri's own names
+// (`fms-app_0.1.0_x64-setup.exe`, `fms-app_0.1.0_amd64.deb`) are still attached.
 const PLATFORM_MATCHERS: Record<Platform, ((name: string) => boolean)[]> = {
-  windows: [
-    (n) => n.endsWith("-setup.exe"),
-    (n) => n.endsWith(".exe"),
-    (n) => n.endsWith(".msi"),
-  ],
+  windows: [(n) => n.endsWith(".exe"), (n) => n.endsWith(".msi")],
   linux: [
     (n) => n.endsWith(".appimage"),
     (n) => n.endsWith(".deb"),
     (n) => n.endsWith(".rpm"),
     (n) => n.endsWith(".tar.gz") && !n.includes("apple") && !n.includes("macos"),
   ],
-  android: [(n) => n.endsWith(".apk"), (n) => n.endsWith(".aab")],
+  // A release built without the signing secrets carries only an `-unsigned` APK,
+  // which Android refuses to install - prefer a signed one whenever both exist.
+  android: [
+    (n) => n.endsWith(".apk") && !n.includes("unsigned"),
+    (n) => n.endsWith(".apk"),
+    (n) => n.endsWith(".aab"),
+  ],
 };
 
 function pickAsset(assets: GitHubAsset[], platform: Platform): GitHubAsset | null {

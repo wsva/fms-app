@@ -125,25 +125,48 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Rename artifacts with tag
+      - name: Rename artifacts for the release
         shell: bash
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
           OUT="src-tauri/target/release/bundle"
 
+          # Assets read FmS_<platform>_<arch>_<tag>.<ext>: brand first, the tag as
+          # the only version (Tauri's internal 0.1.0 and NSIS's `-setup` suffix are
+          # noise a downloader can't use), extension kept so the several formats we
+          # build per OS stay distinguishable. Files land in bundle/ itself, which
+          # is what the upload step globs.
+          #
+          # Arch comes from the runner, not from the filename Tauri chose, because
+          # each package format spells the same arch differently (amd64 on deb,
+          # x86_64 on AppImage/rpm, x64 on the Windows installers).
+          case "$(uname -m)" in
+            x86_64)  ARCH_WIN=x64;   ARCH_NIX=amd64 ;;
+            aarch64) ARCH_WIN=arm64; ARCH_NIX=arm64 ;;
+            *)       ARCH_WIN="$(uname -m)"; ARCH_NIX="$(uname -m)" ;;
+          esac
+
           for f in "$OUT"/nsis/*.exe "$OUT"/msi/*.msi \
                    "$OUT"/appimage/*.AppImage "$OUT"/deb/*.deb "$OUT"/rpm/*.rpm; do
             [ -f "$f" ] || continue
-            base="$(basename "$f")"
-            name="${base%.*}"
-            ext="${base##*.}"
-            mv "$f" "$OUT/${name}-${TAG}.${ext}"
+            ext="${f##*.}"
+            case "$f" in
+              */nsis/*)     plat=windows; arch="$ARCH_WIN" ;;
+              */msi/*)      plat=windows; arch="$ARCH_WIN" ;;
+              */appimage/*) plat=linux;   arch="$ARCH_NIX" ;;
+              */deb/*)      plat=linux;   arch="$ARCH_NIX" ;;
+              */rpm/*)      plat=linux;   arch="$ARCH_NIX" ;;
+              *) continue ;;
+            esac
+            dest="$OUT/FmS_${plat}_${arch}_${TAG}.${ext}"
+            mv -f "$f" "$dest"
+            echo "release asset: $(basename "$dest")"
           done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: fms-app-${{ runner.os }}-${{ steps.tag.outputs.tag }}
+          name: FmS-${{ runner.os }}-${{ steps.tag.outputs.tag }}
           path: |
             src-tauri/target/release/bundle/*.exe
             src-tauri/target/release/bundle/*.msi
@@ -278,7 +301,7 @@ jobs:
 
           if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
             echo "::warning::ANDROID_KEYSTORE_BASE64 is not set - publishing an UNSIGNED APK that Android will refuse to install."
-            cp "$APK" "dist/fms-app-${TAG}-arm64-unsigned.apk"
+            cp "$APK" "dist/FmS_android_arm64_${TAG}-unsigned.apk"
             exit 0
           fi
 
@@ -297,15 +320,15 @@ jobs:
             --ks-key-alias "$ANDROID_KEY_ALIAS" \
             --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
             --key-pass env:ANDROID_KEY_PASSWORD \
-            --out "dist/fms-app-${TAG}-arm64.apk" \
+            --out "dist/FmS_android_arm64_${TAG}.apk" \
             "$RUNNER_TEMP/aligned.apk"
-          "$BT/apksigner" verify --print-certs "dist/fms-app-${TAG}-arm64.apk"
+          "$BT/apksigner" verify --print-certs "dist/FmS_android_arm64_${TAG}.apk"
           rm -f "$RUNNER_TEMP/release.keystore" "$RUNNER_TEMP/aligned.apk"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: fms-app-Android-${{ steps.tag.outputs.tag }}
+          name: FmS-Android-${{ steps.tag.outputs.tag }}
           path: dist/*.apk
 
   # ──────────────────────────────────────────────
@@ -330,7 +353,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: FMS App ${{ github.ref_name }}
+          name: FmS ${{ github.ref_name }}
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
