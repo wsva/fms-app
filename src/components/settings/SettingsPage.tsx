@@ -25,6 +25,7 @@ import {
   DEFAULT_NAV_CONFIG,
   MAX_BAR_MENUS,
   NAV_MENUS,
+  NAV_TOOLS_LABEL,
   saveNavConfig,
   useNavConfig,
 } from "@/lib/mobile-nav";
@@ -172,7 +173,9 @@ export default function SettingsPage() {
   // Shared live config with BottomNav (lib/mobile-nav): every edit saves to
   // localStorage and re-renders the bar immediately through the change event.
   // One ordered list drives both surfaces — checked rows go to the bar in
-  // list order, the rest to the "More" drawer in the same order.
+  // list order, the rest to the "More" drawer, which keeps the PC sidebar's
+  // grouping (root menus, Tools, Settings); order positions a menu inside its
+  // group.
   const { config: navConfig } = useNavConfig();
 
   const toggleNavInBar = (id: TabId) => {
@@ -434,7 +437,9 @@ export default function SettingsPage() {
             <p className="text-text-secondary text-sm mb-4">
               Pick which menus sit in the bottom bar (up to {MAX_BAR_MENUS}); checked
               rows appear there left-to-right in this order. The rest go into the
-              “More” drawer, top-to-bottom in the same order. Changes apply immediately.
+              “More” drawer, which keeps the PC sidebar’s structure — plain menus,
+              the Tools group, then Settings at the bottom — and your order places
+              each menu inside its group. Changes apply immediately.
             </p>
             <div className="flex flex-col max-w-md">
               {navConfig.order.map((id, i) => {
@@ -449,6 +454,17 @@ export default function SettingsPage() {
                   >
                     <Icon width={18} height={18} className="text-text-tertiary shrink-0" />
                     <span className="flex-1 text-sm text-text-primary truncate">{menu.label}</span>
+                    {/* Where the drawer will put this menu, since it groups by zone. */}
+                    {menu.group === "tools" && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-mid-gray/20 text-text-tertiary shrink-0">
+                        {NAV_TOOLS_LABEL}
+                      </span>
+                    )}
+                    {menu.group === "bottom" && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-mid-gray/20 text-text-tertiary shrink-0">
+                        Bottom
+                      </span>
+                    )}
                     <label
                       className={`flex items-center gap-1.5 text-xs shrink-0 ${
                         inBar || !barFull

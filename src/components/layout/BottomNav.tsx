@@ -9,7 +9,7 @@ import {
   X,
 } from "lucide-react";
 import type { TabId } from "./Sidebar";
-import { useNavConfig } from "@/lib/mobile-nav";
+import { NAV_TOOLS_ICON, NAV_TOOLS_LABEL, useNavConfig, type NavMenu } from "@/lib/mobile-nav";
 import { useAuth } from "@/hooks/useAuth";
 import LoginModal from "@/components/auth/LoginModal";
 
@@ -17,10 +17,12 @@ import LoginModal from "@/components/auth/LoginModal";
  * Mobile-only bottom navigation. Replaces the desktop sidebar on the Android
  * thin client: the primary tabs plus a "More" drawer (slides in from the left,
  * same idiom as CollapsibleSidebar's mobile drawer) holding the remaining
- * sections and the login/user/XP controls. Which menus sit in the bar versus
- * the drawer — and in what order — is user-configurable in Settings → Bottom
- * Nav (see lib/mobile-nav). Rendered as a normal flex child (see page.tsx),
- * so page content is never obscured by it.
+ * sections and the login/user/XP controls. The drawer mirrors the PC sidebar's
+ * structure — root menus, a collapsible Tools group, Settings at the bottom —
+ * so the same mental model applies on both. Which menus sit in the bar versus
+ * the drawer — and in what order inside each zone — is user-configurable in
+ * Settings → Bottom Nav (see lib/mobile-nav). Rendered as a normal flex child
+ * (see page.tsx), so page content is never obscured by it.
  */
 export default function BottomNav({
   activeTab,
@@ -30,14 +32,44 @@ export default function BottomNav({
   onTabChange: (id: TabId) => void;
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const { barMenus, drawerMenus } = useNavConfig();
+  // Same default the PC sidebar uses: the Tools group starts expanded.
+  const [toolsOpen, setToolsOpen] = useState(true);
+  const { barMenus, drawerMenus, drawerZones } = useNavConfig();
   const { authUser, xpUser, xpFlash, login, logout, loginOpen, closeLogin } = useAuth();
 
   const moreActive = drawerMenus.some((t) => t.id === activeTab);
+  // The Tools header lights up like the PC sidebar's when a member is current.
+  const ToolsIcon = NAV_TOOLS_ICON;
+  const toolsActive = drawerZones.tools.some((t) => t.id === activeTab);
 
   const go = (id: TabId) => {
     onTabChange(id);
     setDrawerOpen(false);
+  };
+
+  /** One drawer row; `isChild` gives Tools members the PC sidebar's indent. */
+  const renderMenu = (tab: NavMenu, isChild = false) => {
+    const Icon = tab.icon;
+    const active = activeTab === tab.id;
+    return (
+      <button
+        key={tab.id}
+        onClick={() => go(tab.id)}
+        title={tab.label}
+        className={`flex items-center w-full p-2 rounded-lg cursor-pointer transition-colors ${
+          isChild ? "gap-2 pl-10" : "gap-2"
+        } ${
+          active
+            ? "bg-logo-primary/80 text-white"
+            : "text-text-primary hover:bg-bg-hover"
+        }`}
+      >
+        <Icon width={isChild ? 18 : 20} height={isChild ? 18 : 20} className="shrink-0" />
+        <span className={`${isChild ? "text-xs" : "text-sm"} font-medium truncate`}>
+          {tab.label}
+        </span>
+      </button>
+    );
   };
 
   return (
@@ -161,26 +193,45 @@ export default function BottomNav({
           )}
         </div>
 
-        {/* Overflow navigation — scrolls when the list exceeds the drawer */}
-        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col p-2">
-          {drawerMenus.map((tab) => {
-            const Icon = tab.icon;
-            const active = activeTab === tab.id;
-            return (
+        {/* Overflow navigation — the PC sidebar's structure: root menus, a
+            collapsible Tools group, then the bottom menus (Settings). Scrolls
+            when the list exceeds the drawer. */}
+        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1 p-2">
+          {drawerZones.root.map((tab) => renderMenu(tab))}
+
+          {drawerZones.tools.length > 0 && (
+            <>
+              {/* Group header — same styling as a root row, with the chevron */}
               <button
-                key={tab.id}
-                onClick={() => go(tab.id)}
-                className={`flex items-center gap-3 px-3 py-3 rounded-lg cursor-pointer transition-colors ${
-                  active
+                onClick={() => setToolsOpen((v) => !v)}
+                title={NAV_TOOLS_LABEL}
+                className={`flex items-center gap-2 w-full p-2 rounded-lg cursor-pointer transition-colors ${
+                  toolsActive
                     ? "bg-logo-primary/80 text-white"
                     : "text-text-primary hover:bg-bg-hover"
                 }`}
               >
-                <Icon width={20} height={20} className="shrink-0" />
-                <span className="text-sm font-medium">{tab.label}</span>
+                <ToolsIcon width={20} height={20} className="shrink-0" />
+                <span className="text-sm font-medium flex-1 truncate text-left">
+                  {NAV_TOOLS_LABEL}
+                </span>
+                <span
+                  className={`text-xs opacity-70 transition-transform ${
+                    toolsOpen ? "rotate-90" : ""
+                  }`}
+                >
+                  ▶
+                </span>
               </button>
-            );
-          })}
+              {toolsOpen && (
+                <div className="flex flex-col gap-0.5 mt-0.5">
+                  {drawerZones.tools.map((tab) => renderMenu(tab, true))}
+                </div>
+              )}
+            </>
+          )}
+
+          {drawerZones.bottom.map((tab) => renderMenu(tab))}
         </div>
       </div>
 

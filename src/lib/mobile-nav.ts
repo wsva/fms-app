@@ -6,8 +6,10 @@
 // per-device UI preference — a phone must not inherit a tablet's (or another
 // machine's) layout, same tier as the theme and the pinned microphone. The
 // `order` list is the single source of sequence: the bar shows the checked
-// ids left-to-right in list order, the "More" drawer shows the rest top-to-
-// bottom in the same order — so one reorder control drives both surfaces.
+// ids left-to-right in list order; the "More" drawer shows the rest with the
+// same structure the PC sidebar uses — root menus, then the Tools group, then
+// Settings at the bottom — with the custom order positioning each entry
+// inside its section.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -22,31 +24,44 @@ import {
   MessagesSquare,
   Settings,
   Users,
+  Wrench,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import type { TabId } from "@/components/layout/Sidebar";
+
+/** Structural zones mirroring the PC sidebar: root tabs on top, the collapsible
+ *  Tools group, then Settings at the nav bottom. */
+export type NavZone = "root" | "tools" | "bottom";
+
+export const NAV_TOOLS_LABEL = "Tools";
 
 export type NavMenu = {
   id: TabId;
   label: string;
   icon: React.ComponentType<{ width?: number; height?: number; className?: string }>;
+  group: NavZone;
 };
 
-/** The full menu universe the bar/drawer split applies to, in default order. */
+/** The full menu universe the bar/drawer split applies to, in default order
+ *  (the PC sidebar's: root tabs, Tools members, Settings last). Only the
+ *  mobile-visible PC tabs are listed — see Sidebar's MOBILE_VISIBLE_TABS. */
 export const NAV_MENUS: NavMenu[] = [
-  { id: "dictation", label: "Dictation", icon: Headphones },
-  { id: "cards", label: "Cards", icon: Layers },
-  { id: "read-book", label: "Read a Book", icon: BookOpen },
-  { id: "read-aloud", label: "Read Aloud", icon: MicGlyph },
-  { id: "devices-hub", label: "Devices & Hub", icon: Users },
-  { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown },
-  { id: "chat", label: "Cross-Device Chat", icon: MessagesSquare },
-  { id: "wiki", label: "Wiki", icon: BookOpenText },
-  { id: "workspaces", label: "Workspaces", icon: FolderKanban },
-  { id: "logs", label: "Logs", icon: FileText },
-  { id: "models", label: "Models", icon: Box },
-  { id: "settings", label: "Settings", icon: Settings },
+  { id: "dictation", label: "Dictation", icon: Headphones, group: "root" },
+  { id: "read-book", label: "Read a Book", icon: BookOpen, group: "root" },
+  { id: "read-aloud", label: "Read Aloud", icon: MicGlyph, group: "root" },
+  { id: "cards", label: "Cards", icon: Layers, group: "root" },
+  { id: "wiki", label: "Wiki", icon: BookOpenText, group: "root" },
+  { id: "workspaces", label: "Workspaces", icon: FolderKanban, group: "tools" },
+  { id: "devices-hub", label: "Devices & Hub", icon: Users, group: "tools" },
+  { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown, group: "tools" },
+  { id: "chat", label: "Cross-Device Chat", icon: MessagesSquare, group: "tools" },
+  { id: "models", label: "Models", icon: Box, group: "tools" },
+  { id: "logs", label: "Logs", icon: FileText, group: "tools" },
+  { id: "settings", label: "Settings", icon: Settings, group: "bottom" },
 ];
+
+/** The Wrench icon the PC sidebar uses for its Tools group header. */
+export const NAV_TOOLS_ICON = Wrench;
 
 const MENU_BY_ID = new Map<TabId, NavMenu>(NAV_MENUS.map((m) => [m.id, m]));
 
@@ -124,6 +139,17 @@ export function useNavConfig() {
     () => config.order.filter((id) => !config.bar.includes(id)).map((id) => MENU_BY_ID.get(id)!),
     [config]
   );
+  // The drawer renders its menus with the PC sidebar's structure: root zone,
+  // a Tools section header, then Settings at the bottom. The user's order
+  // positions each entry inside its zone.
+  const drawerZones = useMemo(
+    () => ({
+      root: drawerMenus.filter((m) => m.group === "root"),
+      tools: drawerMenus.filter((m) => m.group === "tools"),
+      bottom: drawerMenus.filter((m) => m.group === "bottom"),
+    }),
+    [drawerMenus]
+  );
 
-  return { config, barMenus, drawerMenus };
+  return { config, barMenus, drawerMenus, drawerZones };
 }
