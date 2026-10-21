@@ -124,7 +124,7 @@ async fn status(State(st): State<RestState>) -> Response {
         StatusCode::OK,
         Json(StatusResp {
             version: env!("CARGO_PKG_VERSION"),
-            app_name: "fms-app",
+            app_name: "FmS",
             dataset_count: count,
             ok: true,
             protocol_version: crate::sync::PROTOCOL_VERSION,

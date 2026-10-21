@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "fms-app",
+  "productName": "FmS",
   "version": "0.1.0",
   "identifier": "com.wsva.fms-app",
   "build": {
@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "fms-app",
+        "title": "FmS",
         "width": 800,
         "height": 600
       }

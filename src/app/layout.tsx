@@ -3,7 +3,7 @@ import "./globals.css";
 import Providers from "./providers";
 
 export const metadata: Metadata = {
-  title: "fms-app",
+  title: "FmS",
   description: "A Tauri App",
 };
 

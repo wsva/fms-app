@@ -284,7 +284,7 @@ export default function SettingsPage() {
         setAgentTest({
           kind: "ok",
           text: `Connected (session ${status.session_id ?? "?"})${
-            status.mcp_registered ? " · fms-app tools registered" : ""
+            status.mcp_registered ? " · FmS tools registered" : ""
           }.`,
         });
       } else {
@@ -500,7 +500,7 @@ export default function SettingsPage() {
               <h3 className="text-lg font-semibold mb-1">Agent (Goose ACP)</h3>
               <p className="text-text-secondary text-sm mb-4">
                 Connect to a running <code>goose serve</code> over the Agent Client Protocol so the
-                agent can drive fms-app with natural messages. Desktop only. The app offers its
+                agent can drive FmS with natural messages. Desktop only. The app offers its
                 built-in MCP tools to goose automatically on connect when goose supports HTTP MCP;
                 otherwise register the fms-app extension in goose pointing at the loopback server.
               </p>

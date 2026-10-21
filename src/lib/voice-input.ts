@@ -327,7 +327,7 @@ export function describeMicError(err: unknown): string {
     case "NotAllowedError":
     case "SecurityError":
       return isMobileApp()
-        ? "Microphone access was denied. Allow it under Android Settings → Apps → fms-app → Permissions → Microphone, then restart the app."
+        ? "Microphone access was denied. Allow it under Android Settings → Apps → FmS → Permissions → Microphone, then restart the app."
         : "Microphone access was denied.";
     case "NotFoundError":
     case "OverconstrainedError":

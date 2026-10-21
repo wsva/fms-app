@@ -682,13 +682,13 @@ async fn index_handler(State(s): State<AppState>) -> Response {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>fms-app</title>
+<title>FmS</title>
 <style>{PAGE_STYLE}</style>
 </head>
 <body>
 <div class="container">
 <header>
-<h1>fms-app <span class="badge">v2</span></h1>
+<h1>FmS <span class="badge">v2</span></h1>
 <p class="subtitle">Desktop language-learning app &mdash; HTTP API running on port <strong>{port}</strong></p>
 </header>
 
@@ -713,7 +713,7 @@ async fn index_handler(State(s): State<AppState>) -> Response {
 </details>
 
 <div class="footer">
-<p>fms-app &mdash; built with Tauri, axum, and Rust</p>
+<p>FmS &mdash; built with Tauri, axum, and Rust</p>
 </div>
 </div>
 </body>
