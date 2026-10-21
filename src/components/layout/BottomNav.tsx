@@ -2,64 +2,25 @@
 
 import { useState } from "react";
 import {
-  Headphones,
-  Layers,
   Menu,
-  BookOpen,
-  MessagesSquare,
-  BookOpenText,
-  FolderKanban,
-  Settings,
-  FileText,
-  Box,
-  ArrowUpDown,
-  Users,
   User,
   LogOut,
   Star,
   X,
 } from "lucide-react";
 import type { TabId } from "./Sidebar";
-import { MicGlyph } from "@/components/voice/MicGlyph";
+import { useNavConfig } from "@/lib/mobile-nav";
 import { useAuth } from "@/hooks/useAuth";
 import LoginModal from "@/components/auth/LoginModal";
 
-type IconType = React.ComponentType<{ width?: number; height?: number; className?: string }>;
-
-type NavItem = {
-  id: TabId;
-  label: string;
-  icon: IconType;
-};
-
-// Primary tabs shown directly in the bottom bar.
-const PRIMARY_TABS: NavItem[] = [
-  { id: "dictation", label: "Dictation", icon: Headphones },
-  { id: "cards", label: "Cards", icon: Layers },
-];
-
-// Overflow tabs surfaced inside the "More" left drawer.
-const OVERFLOW_TABS: NavItem[] = [
-  { id: "read-book", label: "Read a Book", icon: BookOpen },
-  { id: "read-aloud", label: "Read Aloud", icon: MicGlyph },
-  { id: "devices-hub", label: "Devices & Hub", icon: Users },
-  { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown },
-  { id: "chat", label: "Cross-Device Chat", icon: MessagesSquare },
-  { id: "wiki", label: "Wiki", icon: BookOpenText },
-  { id: "workspaces", label: "Workspaces", icon: FolderKanban },
-  { id: "logs", label: "Logs", icon: FileText },
-  { id: "models", label: "Models", icon: Box },
-  { id: "settings", label: "Settings", icon: Settings },
-];
-
-const OVERFLOW_IDS: TabId[] = OVERFLOW_TABS.map((t) => t.id);
-
 /**
  * Mobile-only bottom navigation. Replaces the desktop sidebar on the Android
- * thin client: two primary tabs plus a "More" drawer (slides in from the left,
+ * thin client: the primary tabs plus a "More" drawer (slides in from the left,
  * same idiom as CollapsibleSidebar's mobile drawer) holding the remaining
- * sections and the login/user/XP controls. Rendered as a normal flex child
- * (see page.tsx), so page content is never obscured by it.
+ * sections and the login/user/XP controls. Which menus sit in the bar versus
+ * the drawer — and in what order — is user-configurable in Settings → Bottom
+ * Nav (see lib/mobile-nav). Rendered as a normal flex child (see page.tsx),
+ * so page content is never obscured by it.
  */
 export default function BottomNav({
   activeTab,
@@ -69,9 +30,10 @@ export default function BottomNav({
   onTabChange: (id: TabId) => void;
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const { barMenus, drawerMenus } = useNavConfig();
   const { authUser, xpUser, xpFlash, login, logout, loginOpen, closeLogin } = useAuth();
 
-  const moreActive = OVERFLOW_IDS.includes(activeTab);
+  const moreActive = drawerMenus.some((t) => t.id === activeTab);
 
   const go = (id: TabId) => {
     onTabChange(id);
@@ -85,7 +47,7 @@ export default function BottomNav({
         className="shrink-0 flex items-stretch border-t border-border-default bg-bg-card select-none"
         style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
       >
-        {PRIMARY_TABS.map((tab) => {
+        {barMenus.map((tab) => {
           const Icon = tab.icon;
           const active = activeTab === tab.id;
           return (
@@ -201,7 +163,7 @@ export default function BottomNav({
 
         {/* Overflow navigation — scrolls when the list exceeds the drawer */}
         <div className="flex-1 min-h-0 overflow-y-auto flex flex-col p-2">
-          {OVERFLOW_TABS.map((tab) => {
+          {drawerMenus.map((tab) => {
             const Icon = tab.icon;
             const active = activeTab === tab.id;
             return (

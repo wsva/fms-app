@@ -3,11 +3,14 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  ChevronDown,
+  ChevronUp,
   Globe,
   LayoutGrid,
   Palette,
   Server,
   Settings as SettingsIcon,
+  Smartphone,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import {
@@ -18,6 +21,14 @@ import {
 import MicTestPanel from "@/components/voice/MicTestPanel";
 import { isMobileApp } from "@/lib/platform";
 import { logError, logInfo } from "@/lib/logger";
+import {
+  DEFAULT_NAV_CONFIG,
+  MAX_BAR_MENUS,
+  NAV_MENUS,
+  saveNavConfig,
+  useNavConfig,
+} from "@/lib/mobile-nav";
+import type { TabId } from "@/components/layout/Sidebar";
 import {
   getPreferredMicDeviceId,
   listInputDevices,
@@ -149,10 +160,37 @@ export default function SettingsPage() {
   const sections = [
     { id: "all", label: "All", icon: LayoutGrid },
     { id: "theme", label: "Theme", icon: Palette },
+    // Mobile only: this customizes the Android bottom bar, which the desktop
+    // sidebar shell never renders.
+    ...(mobile ? [{ id: "bottom-nav", label: "Bottom Nav", icon: Smartphone }] : []),
     { id: "global", label: "Global Settings", icon: Globe },
     { id: "workspace", label: "Workspace Settings", icon: Server },
     { id: "microphone", label: "Microphone", icon: MicGlyph },
   ];
+
+  // ---- Bottom nav customization (mobile only) ----
+  // Shared live config with BottomNav (lib/mobile-nav): every edit saves to
+  // localStorage and re-renders the bar immediately through the change event.
+  // One ordered list drives both surfaces — checked rows go to the bar in
+  // list order, the rest to the "More" drawer in the same order.
+  const { config: navConfig } = useNavConfig();
+
+  const toggleNavInBar = (id: TabId) => {
+    const inBar = navConfig.bar.includes(id);
+    if (!inBar && navConfig.bar.length >= MAX_BAR_MENUS) return;
+    saveNavConfig({
+      ...navConfig,
+      bar: inBar ? navConfig.bar.filter((b) => b !== id) : [...navConfig.bar, id],
+    });
+  };
+
+  const moveNavItem = (index: number, dir: -1 | 1) => {
+    const to = index + dir;
+    if (to < 0 || to >= navConfig.order.length) return;
+    const order = [...navConfig.order];
+    [order[index], order[to]] = [order[to], order[index]];
+    saveNavConfig({ ...navConfig, order });
+  };
 
   // Section hidden while another one is selected? Visibility is toggled with
   // a class instead of unmounting, so form state and "Saved!" toasts survive
@@ -388,6 +426,73 @@ export default function SettingsPage() {
             ))}
           </div>
         </section>
+
+        {/* ── Bottom Nav section (mobile only) ─────────────────────── */}
+        {mobile && (
+          <section className={`mb-8${showSection("bottom-nav") ? "" : " hidden"}`}>
+            <h2 className="text-[1.3em] font-semibold mb-2">Bottom Nav</h2>
+            <p className="text-text-secondary text-sm mb-4">
+              Pick which menus sit in the bottom bar (up to {MAX_BAR_MENUS}); checked
+              rows appear there left-to-right in this order. The rest go into the
+              “More” drawer, top-to-bottom in the same order. Changes apply immediately.
+            </p>
+            <div className="flex flex-col max-w-md">
+              {navConfig.order.map((id, i) => {
+                const menu = NAV_MENUS.find((m) => m.id === id)!;
+                const Icon = menu.icon;
+                const inBar = navConfig.bar.includes(id);
+                const barFull = navConfig.bar.length >= MAX_BAR_MENUS;
+                return (
+                  <div
+                    key={id}
+                    className="flex items-center gap-2 py-2 border-b border-border-light last:border-b-0"
+                  >
+                    <Icon width={18} height={18} className="text-text-tertiary shrink-0" />
+                    <span className="flex-1 text-sm text-text-primary truncate">{menu.label}</span>
+                    <label
+                      className={`flex items-center gap-1.5 text-xs shrink-0 ${
+                        inBar || !barFull
+                          ? "cursor-pointer text-text-secondary"
+                          : "cursor-not-allowed text-text-tertiary/60"
+                      }`}
+                      title={inBar || !barFull ? "Show in the bottom bar" : `The bar holds at most ${MAX_BAR_MENUS} menus`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="w-4 h-4 cursor-pointer disabled:cursor-not-allowed"
+                        checked={inBar}
+                        disabled={!inBar && barFull}
+                        onChange={() => toggleNavInBar(id)}
+                      />
+                      In bar
+                    </label>
+                    <button
+                      className={`${btnGhost} px-2 py-1`}
+                      disabled={i === 0}
+                      onClick={() => moveNavItem(i, -1)}
+                      title="Move up"
+                    >
+                      <ChevronUp size={14} />
+                    </button>
+                    <button
+                      className={`${btnGhost} px-2 py-1`}
+                      disabled={i === navConfig.order.length - 1}
+                      onClick={() => moveNavItem(i, 1)}
+                      title="Move down"
+                    >
+                      <ChevronDown size={14} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-3 max-w-md">
+              <button className={btnGhost} onClick={() => saveNavConfig(DEFAULT_NAV_CONFIG)}>
+                Reset to defaults
+              </button>
+            </div>
+          </section>
+        )}
 
         {/* ── Global Settings section ────────────────────────────── */}
         <section className={`mb-8${showSection("global") ? "" : " hidden"}`}>
