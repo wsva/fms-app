@@ -11,6 +11,7 @@ import {
   Server,
   Settings as SettingsIcon,
   Smartphone,
+  Type,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import {
@@ -21,6 +22,13 @@ import {
 import MicTestPanel from "@/components/voice/MicTestPanel";
 import { isMobileApp } from "@/lib/platform";
 import { logError, logInfo } from "@/lib/logger";
+import {
+  applyMdFont,
+  getStoredMdFont,
+  MD_FONT_OPTIONS,
+  MD_FONT_SAMPLE,
+  type MdFontId,
+} from "@/lib/md-font";
 import {
   DEFAULT_NAV_CONFIG,
   MAX_BAR_MENUS,
@@ -127,6 +135,7 @@ export default function SettingsPage() {
   const [savedGlobal, setSavedGlobal] = useState(false);
   const [agentTest, setAgentTest] = useState<{ kind: "ok" | "err" | "busy"; text: string } | null>(null);
   const [currentTheme, setCurrentTheme] = useState<ThemeId>("light");
+  const [currentMdFont, setCurrentMdFont] = useState<MdFontId>("default");
 
   // ---- Platform (mobile vs desktop) ----
   // `isMobileApp()` is false during prerendering (no navigator) and only turns
@@ -161,6 +170,7 @@ export default function SettingsPage() {
   const sections = [
     { id: "all", label: "All", icon: LayoutGrid },
     { id: "theme", label: "Theme", icon: Palette },
+    { id: "fonts", label: "Fonts", icon: Type },
     // Mobile only: this customizes the Android bottom bar, which the desktop
     // sidebar shell never renders.
     ...(mobile ? [{ id: "bottom-nav", label: "Bottom Nav", icon: Smartphone }] : []),
@@ -276,6 +286,7 @@ export default function SettingsPage() {
   useEffect(() => {
     fetchSettings();
     setCurrentTheme(getStoredTheme());
+    setCurrentMdFont(getStoredMdFont());
   }, [fetchSettings]);
 
   // ---- Theme change ----
@@ -283,6 +294,17 @@ export default function SettingsPage() {
   function handleThemeChange(theme: ThemeId) {
     setCurrentTheme(theme);
     applyTheme(theme);
+  }
+
+  // ---- Reading-font change ----
+  // Same shape as the theme picker: a presentation preference of *this*
+  // webview, so it lives in localStorage rather than the backend settings file
+  // and takes effect immediately. applyMdFont() is shared with the app-wide
+  // mount in providers.tsx, so both surfaces write the same custom properties.
+
+  function handleMdFontChange(id: MdFontId) {
+    setCurrentMdFont(id);
+    applyMdFont(id);
   }
 
   // ---- Update helpers ----
@@ -425,6 +447,48 @@ export default function SettingsPage() {
                   className={`w-full h-10 rounded-md border ${t.preview}`}
                 />
                 <span className="text-sm font-medium">{t.label}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {/* ── Fonts section ──────────────────────────────────────── */}
+        <section className={`mb-8${showSection("fonts") ? "" : " hidden"}`}>
+          <h2 className="text-[1.3em] font-semibold mb-2">Fonts</h2>
+          <p className="text-text-secondary text-sm mb-4">
+            Font used for readable prose — wiki documents and card text. Buttons,
+            menus and other controls always keep the interface font. Each card is
+            drawn in its own typeface; the five scripts come from the CTAN
+            schulschriften package (Walter Entenmann, LPPL) and cover Latin letters
+            plus <code>ÄÖÜäöüß</code>, so accented capitals and other alphabets fall
+            back. Changes apply immediately and are stored on this device.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-w-4xl">
+            {MD_FONT_OPTIONS.map((f) => (
+              <button
+                key={f.id}
+                className={`flex flex-col items-start gap-1.5 p-3 rounded-lg border-2 transition-colors cursor-pointer text-left min-w-0 ${
+                  currentMdFont === f.id
+                    ? "border-accent bg-bg-hover"
+                    : "border-border-default bg-bg-card hover:border-accent-hover"
+                }`}
+                onClick={() => handleMdFontChange(f.id)}
+              >
+                {/* Preview box: the sample is inline-styled with the very family
+                    the card offers, so hovering a choice shows it before it is
+                    picked. `default` carries no css and simply inherits the UI
+                    font. Overflow is clipped rather than wrapped — these scripts
+                    are much wider than the interface font. */}
+                <span className="w-full h-11 rounded-md border border-border-light bg-bg-input flex items-center justify-center overflow-hidden px-2">
+                  <span
+                    className="text-lg leading-none whitespace-nowrap text-text-primary"
+                    style={f.css ? { fontFamily: f.css } : undefined}
+                  >
+                    {MD_FONT_SAMPLE}
+                  </span>
+                </span>
+                <span className="text-sm font-medium leading-tight">{f.label}</span>
+                <span className="text-[11px] text-text-tertiary leading-tight">{f.hint}</span>
               </button>
             ))}
           </div>

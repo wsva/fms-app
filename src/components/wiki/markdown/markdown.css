@@ -91,7 +91,17 @@
 /* ─── Body ───────────────────────────────────────────────────── */
 .md-body {
     min-width: 0;
-    line-height: 1.7;
+    /* Reading font chosen in Settings → Fonts (src/lib/md-font.ts), which sets
+       --md-body-font / --md-body-leading on <html>. When the property is unset
+       (the "UI font" choice), the var() reference is invalid at computed-value
+       time and font-family resolves as unset → inherit, i.e. the interface font
+       from :root. That is why there is no per-family selector here and why
+       "default" needs no special case. Joined cursive descenders and ascenders
+       collide at the UI leading, hence the scripts also carry their own leading;
+       code keeps its monospace family because the .md-body code rule below is
+       more specific. */
+    font-family: var(--md-body-font);
+    line-height: var(--md-body-leading, 1.7);
     color: var(--text-primary);
 }
 
@@ -162,7 +172,7 @@
 
 /* ─── Paragraph & links ──────────────────────────────────────── */
 .md-body p {
-    line-height: 1.7;
+    line-height: var(--md-body-leading, 1.7);
     padding: 0.3em 0;
     margin: 0;
 }
@@ -258,7 +268,7 @@
 
 .md-body ul li {
     display: block;
-    line-height: 1.6;
+    line-height: var(--md-body-leading, 1.6);
 }
 
 .md-body ul li::before {
@@ -283,7 +293,7 @@
 
 .md-body ol li {
     display: block;
-    line-height: 1.6;
+    line-height: var(--md-body-leading, 1.6);
     counter-increment: md-ol;
 }
 
