@@ -1,41 +1,6 @@
 @import "tailwindcss";
 @import "@heroui/react/styles";
 
-/* ── Schulschriften web fonts (LPPL 1.3c, Walter Entenmann) ──────────────
-   Five German school scripts converted from the CTAN schulschriften METAFONT
-   sources. Their binaries are maintained in the separate wsva/fms-font repo;
-   the .woff2 faces this app serves are copied into public/fonts/. Every family
-   ships a real RIBBI set (bold comes from the METAFONT `fetter` pen scaling,
-   italic from its `slant` transform), so <b>/<i> and the markdown headings pick
-   true renders instead of synthetic ones — which matters because :root sets
-   `font-synthesis: none`. Names are changed from the CTAN originals (wesu,
-   wedn, wela, wesa, weva) as LPPL §6 requires for modified versions; which
-   family prose actually uses is driven by --md-body-font (src/lib/md-font.ts). */
-@font-face { font-family: "Suetterlinschrift Entenmann"; font-weight: 400; font-style: normal; font-display: swap; src: url("/fonts/entenmann-su-regular.woff2") format("woff2"); }
-@font-face { font-family: "Suetterlinschrift Entenmann"; font-weight: 700; font-style: normal; font-display: swap; src: url("/fonts/entenmann-su-bold.woff2") format("woff2"); }
-@font-face { font-family: "Suetterlinschrift Entenmann"; font-weight: 400; font-style: italic; font-display: swap; src: url("/fonts/entenmann-su-italic.woff2") format("woff2"); }
-@font-face { font-family: "Suetterlinschrift Entenmann"; font-weight: 700; font-style: italic; font-display: swap; src: url("/fonts/entenmann-su-bold-italic.woff2") format("woff2"); }
-
-@font-face { font-family: "Deutsche Normalschrift Entenmann"; font-weight: 400; font-style: normal; font-display: swap; src: url("/fonts/entenmann-dn-regular.woff2") format("woff2"); }
-@font-face { font-family: "Deutsche Normalschrift Entenmann"; font-weight: 700; font-style: normal; font-display: swap; src: url("/fonts/entenmann-dn-bold.woff2") format("woff2"); }
-@font-face { font-family: "Deutsche Normalschrift Entenmann"; font-weight: 400; font-style: italic; font-display: swap; src: url("/fonts/entenmann-dn-italic.woff2") format("woff2"); }
-@font-face { font-family: "Deutsche Normalschrift Entenmann"; font-weight: 700; font-style: italic; font-display: swap; src: url("/fonts/entenmann-dn-bold-italic.woff2") format("woff2"); }
-
-@font-face { font-family: "Lateinische Ausgangsschrift Entenmann"; font-weight: 400; font-style: normal; font-display: swap; src: url("/fonts/entenmann-la-regular.woff2") format("woff2"); }
-@font-face { font-family: "Lateinische Ausgangsschrift Entenmann"; font-weight: 700; font-style: normal; font-display: swap; src: url("/fonts/entenmann-la-bold.woff2") format("woff2"); }
-@font-face { font-family: "Lateinische Ausgangsschrift Entenmann"; font-weight: 400; font-style: italic; font-display: swap; src: url("/fonts/entenmann-la-italic.woff2") format("woff2"); }
-@font-face { font-family: "Lateinische Ausgangsschrift Entenmann"; font-weight: 700; font-style: italic; font-display: swap; src: url("/fonts/entenmann-la-bold-italic.woff2") format("woff2"); }
-
-@font-face { font-family: "Schulausgangsschrift Entenmann"; font-weight: 400; font-style: normal; font-display: swap; src: url("/fonts/entenmann-sas-regular.woff2") format("woff2"); }
-@font-face { font-family: "Schulausgangsschrift Entenmann"; font-weight: 700; font-style: normal; font-display: swap; src: url("/fonts/entenmann-sas-bold.woff2") format("woff2"); }
-@font-face { font-family: "Schulausgangsschrift Entenmann"; font-weight: 400; font-style: italic; font-display: swap; src: url("/fonts/entenmann-sas-italic.woff2") format("woff2"); }
-@font-face { font-family: "Schulausgangsschrift Entenmann"; font-weight: 700; font-style: italic; font-display: swap; src: url("/fonts/entenmann-sas-bold-italic.woff2") format("woff2"); }
-
-@font-face { font-family: "Vereinfachte Ausgangsschrift Entenmann"; font-weight: 400; font-style: normal; font-display: swap; src: url("/fonts/entenmann-va-regular.woff2") format("woff2"); }
-@font-face { font-family: "Vereinfachte Ausgangsschrift Entenmann"; font-weight: 700; font-style: normal; font-display: swap; src: url("/fonts/entenmann-va-bold.woff2") format("woff2"); }
-@font-face { font-family: "Vereinfachte Ausgangsschrift Entenmann"; font-weight: 400; font-style: italic; font-display: swap; src: url("/fonts/entenmann-va-italic.woff2") format("woff2"); }
-@font-face { font-family: "Vereinfachte Ausgangsschrift Entenmann"; font-weight: 700; font-style: italic; font-display: swap; src: url("/fonts/entenmann-va-bold-italic.woff2") format("woff2"); }
-
 @theme {
   --color-logo-primary: var(--accent);
   --color-mid-gray: var(--gray-mid);

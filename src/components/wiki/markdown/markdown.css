@@ -91,17 +91,7 @@
 /* ─── Body ───────────────────────────────────────────────────── */
 .md-body {
     min-width: 0;
-    /* Reading font chosen in Settings → Fonts (src/lib/md-font.ts), which sets
-       --md-body-font / --md-body-leading on <html>. When the property is unset
-       (the "UI font" choice), the var() reference is invalid at computed-value
-       time and font-family resolves as unset → inherit, i.e. the interface font
-       from :root. That is why there is no per-family selector here and why
-       "default" needs no special case. Joined cursive descenders and ascenders
-       collide at the UI leading, hence the scripts also carry their own leading;
-       code keeps its monospace family because the .md-body code rule below is
-       more specific. */
-    font-family: var(--md-body-font);
-    line-height: var(--md-body-leading, 1.7);
+    line-height: 1.7;
     color: var(--text-primary);
 }
 
@@ -109,24 +99,6 @@
     max-width: 100%;
     height: auto;
     border-radius: 6px;
-}
-
-/* ─── Block edges ────────────────────────────────────────────── */
-/* TeX pads every character list with its boundarychar - these fonts set it to the
-   space glyph - so a block's first word gets its entry stroke from that pad and
-   its last word the exit stroke. GSUB can only substitute over glyphs it can see,
-   and at the edge of a block there is nothing to see, which is why the first word
-   of a paragraph started without its entry stroke and the last ended without its
-   exit one. The faces therefore answer to U+200B in every context the program
-   gives the boundarychar (font/work/ligatures.py), and generated content places
-   one at the edge: zero-width, undrawn, and outside the DOM, so it is not copied,
-   not found by in-page search and not spoken. Only leaf text blocks are listed -
-   a `::before` before a child block would be wrapped in an anonymous block of its
-   own and add a line. `li::before` is the bullet, so a list item gets the exit
-   stroke and not the entry one. */
-.md-body :is(p, h1, h2, h3, h4, h5, h6, td, th)::before,
-.md-body :is(p, h1, h2, h3, h4, h5, h6, td, th, li)::after {
-    content: "\200b";
 }
 
 /* ─── Headings ───────────────────────────────────────────────── */
@@ -190,7 +162,7 @@
 
 /* ─── Paragraph & links ──────────────────────────────────────── */
 .md-body p {
-    line-height: var(--md-body-leading, 1.7);
+    line-height: 1.7;
     padding: 0.3em 0;
     margin: 0;
 }
@@ -286,7 +258,7 @@
 
 .md-body ul li {
     display: block;
-    line-height: var(--md-body-leading, 1.6);
+    line-height: 1.6;
 }
 
 .md-body ul li::before {
@@ -311,7 +283,7 @@
 
 .md-body ol li {
     display: block;
-    line-height: var(--md-body-leading, 1.6);
+    line-height: 1.6;
     counter-increment: md-ol;
 }
 

@@ -49,6 +49,3 @@ dataset_studio/dataset_exports
 
 # Android release signing material - never commit
 .signing/
-
-# Schulschriften web fonts - tracked in the separate wsva/fms-font repo
-font/
