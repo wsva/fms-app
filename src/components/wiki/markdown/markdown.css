@@ -111,6 +111,24 @@
     border-radius: 6px;
 }
 
+/* ─── Block edges ────────────────────────────────────────────── */
+/* TeX pads every character list with its boundarychar - these fonts set it to the
+   space glyph - so a block's first word gets its entry stroke from that pad and
+   its last word the exit stroke. GSUB can only substitute over glyphs it can see,
+   and at the edge of a block there is nothing to see, which is why the first word
+   of a paragraph started without its entry stroke and the last ended without its
+   exit one. The faces therefore answer to U+200B in every context the program
+   gives the boundarychar (font/work/ligatures.py), and generated content places
+   one at the edge: zero-width, undrawn, and outside the DOM, so it is not copied,
+   not found by in-page search and not spoken. Only leaf text blocks are listed -
+   a `::before` before a child block would be wrapped in an anonymous block of its
+   own and add a line. `li::before` is the bullet, so a list item gets the exit
+   stroke and not the entry one. */
+.md-body :is(p, h1, h2, h3, h4, h5, h6, td, th)::before,
+.md-body :is(p, h1, h2, h3, h4, h5, h6, td, th, li)::after {
+    content: "\200b";
+}
+
 /* ─── Headings ───────────────────────────────────────────────── */
 .md-body h1 {
     font-size: 2em;
