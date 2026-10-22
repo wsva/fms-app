@@ -304,10 +304,14 @@ html[data-mobile="1"] .app-boot-splash {
   src: url("/fonts/playwrite-de-la-wght.woff2") format("woff2");
 }
 
-/* The single hook: the text to read carries this class and sets --ra-font to
-   one of the stacks named in src/lib/read_aloud/fonts.ts, which passes on
-   `inherit` for the interface font. Only that one div is styled - the title,
-   the buttons and the transcript diff stay in the UI font. */
+/* The single hook: the text to read carries this class and sets --ra-font to one
+   of the stacks named in src/lib/read_aloud/fonts.ts, which passes on `inherit`
+   for the interface font, plus --ra-space for the extra gap between words. Only
+   that one div is styled - the title, the buttons and the transcript diff stay in
+   the UI font. */
 .ra-text {
   font-family: var(--ra-font, inherit);
+  /* An addition to the space the font already has, so 1x asks for none. The em
+     figures on the other side are measured per face, not guessed. */
+  word-spacing: var(--ra-space, normal);
 }

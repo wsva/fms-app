@@ -17,18 +17,23 @@ import {
   Columns,
   RefreshCw,
   FolderOpen,
+  Space,
   Type,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import MdEditor from "@/components/wiki/MdEditor";
 import type { ReadAloudMeta, ReadAttempt, ReadText } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
-import type { RaFontId } from "@/lib/read_aloud/fonts";
+import type { RaFontId, RaSpaceId } from "@/lib/read_aloud/fonts";
 import {
   RA_FONT_OPTIONS,
+  RA_SPACE_OPTIONS,
   getStoredRaFont,
+  getStoredRaSpace,
   raFontOption,
+  raSpaceOption,
   setStoredRaFont,
+  setStoredRaSpace,
 } from "@/lib/read_aloud/fonts";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
@@ -139,6 +144,12 @@ export default function ReadAloudPage() {
   const chooseRaFont = useCallback((id: RaFontId) => {
     setRaFont(id);
     setStoredRaFont(id);
+  }, []);
+  // How far apart the words are - the same kind of device-local view state.
+  const [raSpace, setRaSpace] = useState<RaSpaceId>(() => getStoredRaSpace());
+  const chooseRaSpace = useCallback((id: RaSpaceId) => {
+    setRaSpace(id);
+    setStoredRaSpace(id);
   }, []);
 
   // Playback of the open attempt's recording, driven by the toolbar Play/Stop
@@ -650,6 +661,23 @@ export default function ReadAloudPage() {
                     </ToolbarMenuItem>
                   ))}
                 </ToolbarSelect>
+                {/* How wide the gap between the words is. It matters most in the
+                    cursive models, where a space is the only thing left marking
+                    where one word ends and the next begins. */}
+                <ToolbarSelect icon={Space} label="Spacing" value={raSpaceOption(raSpace).label}>
+                  {RA_SPACE_OPTIONS.map((o) => (
+                    <ToolbarMenuItem
+                      key={o.id}
+                      checked={o.id === raSpace}
+                      onClick={() => chooseRaSpace(o.id)}
+                    >
+                      <span className="flex flex-col items-start leading-tight">
+                        {o.label}
+                        <span className="text-[11px] text-text-tertiary">{o.hint}</span>
+                      </span>
+                    </ToolbarMenuItem>
+                  ))}
+                </ToolbarSelect>
               </>
             )}
 
@@ -832,6 +860,7 @@ export default function ReadAloudPage() {
           datasetUuid={activeDataset.uuid}
           text={activeText}
           fontCss={raFontOption(raFont).css}
+          spaceCss={raSpaceOption(raSpace).css}
           onScored={() => loadTexts(selectedDataset)}
           onRecorder={handleRecorder}
         />

@@ -25,6 +25,9 @@ type Props = {
   /** `font-family` for the text to read - one of the Playwrite DE school
    *  scripts, or empty for the interface font. See src/lib/read_aloud/fonts.ts. */
   fontCss?: string;
+  /** `word-spacing` added between its words - one or two of the font's own
+   *  spaces, or empty for the spacing the font itself has. */
+  spaceCss?: string;
   /** Called after a submission so the caller can refresh best score / counts. */
   onScored: () => void;
   /** Publishes recorder status/toggle upward so the toolbar can render the
@@ -41,7 +44,7 @@ function playUrl(url?: string | null) {
  * Practice panel for a single text: record yourself reading it, transcribe via
  * STT, score against the reference, and review past attempts.
  */
-export default function PracticePanel({ datasetUuid, text, showNormalized = false, fontCss = "", onScored, onRecorder }: Props) {
+export default function PracticePanel({ datasetUuid, text, showNormalized = false, fontCss = "", spaceCss = "", onScored, onRecorder }: Props) {
   const [result, setResult] = useState<ReadAloudSubmitResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,11 +111,12 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
             scoring
           </p>
         )}
-        {/* The one line the script applies to: this is the text being read aloud,
-            and nothing else on the page is meant to look like handwriting. */}
+        {/* The one line the script and the spacing apply to: this is the text
+            being read aloud, and nothing else on the page is meant to look
+            like handwriting. */}
         <div
           className="ra-text mt-2 p-4 rounded-xl bg-bg-muted text-text-primary text-lg leading-relaxed whitespace-pre-wrap break-words"
-          style={{ "--ra-font": fontCss || "inherit" } as CSSProperties}
+          style={{ "--ra-font": fontCss || "inherit", "--ra-space": spaceCss || "normal" } as CSSProperties}
         >
           {showNormalized && text.normalized_content ? text.normalized_content : text.content}
         </div>
