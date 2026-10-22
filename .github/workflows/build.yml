@@ -120,6 +120,32 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
+      # The tag is the release version, and it has to reach inside the package too.
+      # Two separate authorities feed different parts of a release: tauri.conf.json's
+      # `version` becomes the Windows app list entry, the deb/rpm metadata and
+      # Android's versionName, while Cargo.toml's reaches the binary through
+      # CARGO_PKG_VERSION - the `fms-app/<v>` User-Agent and the `version` a hub
+      # advertises over /api/v1, which devices compare. Stamp both (and the matching
+      # Cargo.lock entry, so the tree the build starts from is self-consistent), so
+      # an installed FmS says the same thing the asset name does. The committed
+      # 0.1.0 is only a dev placeholder. No `$` anchors anywhere: a Windows checkout
+      # may carry CRLF, and the carriage return sits just past these matches.
+      - name: Stamp the release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VER\"/" src-tauri/tauri.conf.json
+          sed -i "s/^version = \"[^\"]*\"/version = \"$VER\"/" src-tauri/Cargo.toml
+          sed -i "/^name = \"fms-app\"/{n;s/^version = \"[^\"]*\"/version = \"$VER\"/}" src-tauri/Cargo.lock
+          # These greps double as the assertion: no match means the pattern drifted
+          # away from the file, and the build would ship the placeholder again.
+          grep -m1 "\"version\": \"$VER\"" src-tauri/tauri.conf.json
+          grep -m1 "^version = \"$VER\"" src-tauri/Cargo.toml
+          LOCK_V="$(grep -A1 '^name = "fms-app"' src-tauri/Cargo.lock | tail -1 | tr -d '\r')"
+          [ "$LOCK_V" = "version = \"$VER\"" ] && echo "Cargo.lock: $LOCK_V"
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -131,11 +157,12 @@ jobs:
           TAG="${{ steps.tag.outputs.tag }}"
           OUT="src-tauri/target/release/bundle"
 
-          # Assets read FmS_<platform>_<arch>_<tag>.<ext>: brand first, the tag as
-          # the only version (Tauri's internal 0.1.0 and NSIS's `-setup` suffix are
-          # noise a downloader can't use), extension kept so the several formats we
-          # build per OS stay distinguishable. Files land in bundle/ itself, which
-          # is what the upload step globs.
+          # Assets read FmS_<platform>_<arch>_<tag>.<ext>: brand first, and the tag
+          # written where a downloader can see it (NSIS's `-setup` suffix and each
+          # format's own spelling of the arch are noise), extension kept so the
+          # several formats we build per OS stay distinguishable. The package itself
+          # now carries the same version - see "Stamp the release version". Files
+          # land in bundle/ itself, which is what the upload step globs.
           #
           # Arch comes from the runner, not from the filename Tauri chose, because
           # each package format spells the same arch differently (amd64 on deb,
@@ -252,6 +279,22 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install
+
+      # Same stamping as the desktop job, and it must happen before `android init`:
+      # that generates the Gradle project, whose versionName comes from the config.
+      - name: Stamp the release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VER\"/" src-tauri/tauri.conf.json
+          sed -i "s/^version = \"[^\"]*\"/version = \"$VER\"/" src-tauri/Cargo.toml
+          sed -i "/^name = \"fms-app\"/{n;s/^version = \"[^\"]*\"/version = \"$VER\"/}" src-tauri/Cargo.lock
+          grep -m1 "\"version\": \"$VER\"" src-tauri/tauri.conf.json
+          grep -m1 "^version = \"$VER\"" src-tauri/Cargo.toml
+          LOCK_V="$(grep -A1 '^name = "fms-app"' src-tauri/Cargo.lock | tail -1 | tr -d '\r')"
+          [ "$LOCK_V" = "version = \"$VER\"" ] && echo "Cargo.lock: $LOCK_V"
 
       # `tauri.settings.gradle` is gitignored and holds absolute paths into this
       # machine's ~/.cargo/registry, so `init` must run on the build machine —
