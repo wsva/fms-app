@@ -262,3 +262,52 @@
 html[data-mobile="1"] .app-boot-splash {
   display: flex;
 }
+
+/* ─── Read Aloud scripts ─────────────────────────────────────────────
+   Playwrite DE (OFL 1.1 - public/fonts/PLAYWRITE-OFL.txt): the four German
+   school writing models, in the order they are taught - Grundschrift
+   (connected print) and then the three cursive ones, VA, SAS, LA. The faces
+   are self-hosted rather than pulled from fonts.googleapis.com so the page
+   still renders on a phone with no network.
+
+   Each binary is the variable font as shipped, wght 100..400 with 400 as the
+   default instance, and only 400 is ever used: these are handwriting faces
+   with no bold in them, and `font-synthesis: none` on :root means a bold
+   ancestor cannot fake one either - it stays at 400. The letter joins live in
+   the outlines, not behind a feature flag, so there is nothing to switch on. */
+@font-face {
+  font-family: "Playwrite DE Grund";
+  font-style: normal;
+  font-weight: 100 400;
+  font-display: swap;
+  src: url("/fonts/playwrite-de-grund-wght.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Playwrite DE VA";
+  font-style: normal;
+  font-weight: 100 400;
+  font-display: swap;
+  src: url("/fonts/playwrite-de-va-wght.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Playwrite DE SAS";
+  font-style: normal;
+  font-weight: 100 400;
+  font-display: swap;
+  src: url("/fonts/playwrite-de-sas-wght.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Playwrite DE LA";
+  font-style: normal;
+  font-weight: 100 400;
+  font-display: swap;
+  src: url("/fonts/playwrite-de-la-wght.woff2") format("woff2");
+}
+
+/* The single hook: the text to read carries this class and sets --ra-font to
+   one of the stacks named in src/lib/read_aloud/fonts.ts, which passes on
+   `inherit` for the interface font. Only that one div is styled - the title,
+   the buttons and the transcript diff stay in the UI font. */
+.ra-text {
+  font-family: var(--ra-font, inherit);
+}

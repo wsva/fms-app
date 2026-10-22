@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { Play, RotateCcw, Wand2 } from "lucide-react";
 import type { ReadAloudSubmitResult, ReadText } from "@/lib/read_aloud/types";
@@ -22,6 +22,9 @@ type Props = {
   /** Show the LLM-normalized reference instead of the raw text (view toggle
    *  driven from the page toolbar's overflow menu). */
   showNormalized?: boolean;
+  /** `font-family` for the text to read - one of the Playwrite DE school
+   *  scripts, or empty for the interface font. See src/lib/read_aloud/fonts.ts. */
+  fontCss?: string;
   /** Called after a submission so the caller can refresh best score / counts. */
   onScored: () => void;
   /** Publishes recorder status/toggle upward so the toolbar can render the
@@ -38,7 +41,7 @@ function playUrl(url?: string | null) {
  * Practice panel for a single text: record yourself reading it, transcribe via
  * STT, score against the reference, and review past attempts.
  */
-export default function PracticePanel({ datasetUuid, text, showNormalized = false, onScored, onRecorder }: Props) {
+export default function PracticePanel({ datasetUuid, text, showNormalized = false, fontCss = "", onScored, onRecorder }: Props) {
   const [result, setResult] = useState<ReadAloudSubmitResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -105,7 +108,12 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
             scoring
           </p>
         )}
-        <div className="mt-2 p-4 rounded-xl bg-bg-muted text-text-primary text-lg leading-relaxed whitespace-pre-wrap break-words">
+        {/* The one line the script applies to: this is the text being read aloud,
+            and nothing else on the page is meant to look like handwriting. */}
+        <div
+          className="ra-text mt-2 p-4 rounded-xl bg-bg-muted text-text-primary text-lg leading-relaxed whitespace-pre-wrap break-words"
+          style={{ "--ra-font": fontCss || "inherit" } as CSSProperties}
+        >
           {showNormalized && text.normalized_content ? text.normalized_content : text.content}
         </div>
       </section>

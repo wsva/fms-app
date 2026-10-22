@@ -17,11 +17,19 @@ import {
   Columns,
   RefreshCw,
   FolderOpen,
+  Type,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import MdEditor from "@/components/wiki/MdEditor";
 import type { ReadAloudMeta, ReadAttempt, ReadText } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
+import type { RaFontId } from "@/lib/read_aloud/fonts";
+import {
+  RA_FONT_OPTIONS,
+  getStoredRaFont,
+  raFontOption,
+  setStoredRaFont,
+} from "@/lib/read_aloud/fonts";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
@@ -30,6 +38,7 @@ import {
   Breadcrumb,
   ToolbarButton,
   ToolbarOverflow,
+  ToolbarSelect,
   ToolbarMenuItem,
   RecordButton,
 } from "@/components/ui/toolbar";
@@ -123,6 +132,14 @@ export default function ReadAloudPage() {
   // Toggled by the toolbar's "Compare" button: the attempt detail then shows the
   // text and the recognized transcript side by side, sentence by sentence.
   const [compareView, setCompareView] = useState(false);
+  // Which writing the text to read is set in. Device-local view state, like the
+  // theme, so it is read straight from storage on first render and written back
+  // when the toolbar changes it - see src/lib/read_aloud/fonts.ts.
+  const [raFont, setRaFont] = useState<RaFontId>(() => getStoredRaFont());
+  const chooseRaFont = useCallback((id: RaFontId) => {
+    setRaFont(id);
+    setStoredRaFont(id);
+  }, []);
 
   // Playback of the open attempt's recording, driven by the toolbar Play/Stop
   // button. The element is kept in a ref so playback can be stopped — on toggle,
@@ -617,6 +634,22 @@ export default function ReadAloudPage() {
                   title="Show attempts"
                   onClick={() => setAttemptsView(true)}
                 />
+                {/* Which writing the text is set in. A view setting, so it shows
+                    its value in the bar rather than hiding in the overflow. */}
+                <ToolbarSelect icon={Type} label="Writing" value={raFontOption(raFont).label}>
+                  {RA_FONT_OPTIONS.map((o) => (
+                    <ToolbarMenuItem
+                      key={o.id}
+                      checked={o.id === raFont}
+                      onClick={() => chooseRaFont(o.id)}
+                    >
+                      <span className="flex flex-col items-start leading-tight">
+                        {o.label}
+                        <span className="text-[11px] text-text-tertiary">{o.hint}</span>
+                      </span>
+                    </ToolbarMenuItem>
+                  ))}
+                </ToolbarSelect>
               </>
             )}
 
@@ -798,6 +831,7 @@ export default function ReadAloudPage() {
         <PracticePanel
           datasetUuid={activeDataset.uuid}
           text={activeText}
+          fontCss={raFontOption(raFont).css}
           onScored={() => loadTexts(selectedDataset)}
           onRecorder={handleRecorder}
         />
