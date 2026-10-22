@@ -97,8 +97,12 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
 
   useEffect(() => () => onRecorder?.(null), [onRecorder]);
 
+  // The pb-[50vh] on the scroll root is what lets the last line be scrolled up to
+  // the middle of the screen: this is the text you read aloud, so it should sit in
+  // front of you while you speak instead of stopping at the bottom edge. The same
+  // room the wiki reader and ReadingView give their prose.
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 flex flex-col gap-4 min-w-0">
+    <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 pb-[50vh] flex flex-col gap-4 min-w-0">
       {/* Reference text */}
       <section className="flex flex-col gap-1 min-w-0">
         <h2 className="text-lg font-semibold text-text-primary break-words">{text.title || "Untitled"}</h2>

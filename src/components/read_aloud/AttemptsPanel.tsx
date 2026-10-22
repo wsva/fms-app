@@ -357,7 +357,9 @@ export default function AttemptsPanel({
   }, [selectedAttempt, onSelectAttempt]);
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 flex flex-col gap-3 min-w-0">
+    // Same bottom room as the practice pane - the attempt detail and the compare
+    // view are read too, and end on a sentence rather than at the edge.
+    <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 pb-[50vh] flex flex-col gap-3 min-w-0">
       {selectedAttempt ? (
         <>
           {/* Detail panel — the recognized text at normal reading size.
