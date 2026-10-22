@@ -24,9 +24,16 @@ import { useCallback, useEffect, useState } from "react";
  * Settings is never opened. It is written in an effect rather than during
  * render: the prerendered HTML carries no inline style, so there is nothing for
  * the theme/zoom head script in layout.tsx to mirror and no hydration mismatch.
+ *
+ * A profile that has never chosen falls back to DEFAULT_MD_FONT, so prose is
+ * set in one of the scripts out of the box instead of waiting for a visit to
+ * Settings; "UI font" remains one click away for anyone who prefers it.
  */
 
 const MD_FONT_KEY = "mdFont";
+
+/** Out-of-the-box reading font for a profile that has not chosen one yet. */
+const DEFAULT_MD_FONT: MdFontId = "la";
 
 /** Custom properties consumed by .md-body in components/wiki/markdown/markdown.css. */
 const FONT_PROP = "--md-body-font";
@@ -98,15 +105,17 @@ export const MD_FONT_OPTIONS: MdFontOption[] = [
 export const MD_FONT_SAMPLE = "Fremdsprachen machen Spaß";
 
 function findOption(id: MdFontId): MdFontOption {
-  return MD_FONT_OPTIONS.find((o) => o.id === id) ?? MD_FONT_OPTIONS[0];
+  return MD_FONT_OPTIONS.find((o) => o.id === id)
+    ?? MD_FONT_OPTIONS.find((o) => o.id === DEFAULT_MD_FONT)
+    ?? MD_FONT_OPTIONS[0];
 }
 
 export function getStoredMdFont(): MdFontId {
-  if (typeof window === "undefined") return "default";
+  if (typeof window === "undefined") return DEFAULT_MD_FONT;
   const stored = localStorage.getItem(MD_FONT_KEY) as MdFontId | null;
   // An id with no option behind it (a family later removed from public/fonts/)
   // must not leave prose pointing at a font that cannot load.
-  return stored && MD_FONT_OPTIONS.some((o) => o.id === stored) ? stored : "default";
+  return stored && MD_FONT_OPTIONS.some((o) => o.id === stored) ? stored : DEFAULT_MD_FONT;
 }
 
 /** Write (or clear) the custom properties the markdown body reads. */
