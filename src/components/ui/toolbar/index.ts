@@ -9,5 +9,6 @@ export type { ToolbarButtonVariant } from "./ToolbarButton";
 export { ToolbarIconButton } from "./ToolbarIconButton";
 export type { ToolbarIconButtonVariant } from "./ToolbarIconButton";
 export { ToolbarOverflow } from "./ToolbarOverflow";
+export { ToolbarSelect } from "./ToolbarSelect";
 export { ToolbarMenuItem } from "./ToolbarMenuItem";
 export { RecordButton } from "./RecordButton";
