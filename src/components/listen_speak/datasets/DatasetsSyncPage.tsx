@@ -1195,15 +1195,27 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
           <button
             key={section.key}
             onClick={() => setActiveSection(section.key)}
-            className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+            className={`flex flex-col items-center px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
               activeSection === section.key
                 ? "border-accent-bg text-text-primary"
                 : "border-transparent text-text-tertiary hover:text-text-secondary"
             }`}
           >
-            {section.label}
+            {/* Five full-width names already push the phone row to scroll, so
+                there the count rides on a line of its own under the label;
+                desktop keeps it inline after the word, where it reads as the
+                word's count. Same shape as the toolbar's zone switcher. */}
+            <span>{section.label}</span>
             {section.items.length > 0 && (
-              <span className="ml-1 text-xs opacity-70">{section.items.length}</span>
+              <span
+                className={
+                  mobile
+                    ? "block text-xs opacity-70 leading-none"
+                    : "ml-1 text-xs opacity-70"
+                }
+              >
+                {section.items.length}
+              </span>
             )}
           </button>
         ))}
