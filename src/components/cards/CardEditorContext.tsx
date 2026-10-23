@@ -216,7 +216,6 @@ function CardEditModal({
         />
         {!viewMode && (
           <ToolbarButton
-            variant="solid"
             icon={Check}
             label="Save"
             disabled={!question.trim()}
