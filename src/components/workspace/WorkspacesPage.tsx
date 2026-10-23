@@ -103,7 +103,7 @@ function LabeledField({ label, value, mono }: { label: string; value: string; mo
         {label}
       </span>
       <span
-        className={`text-xs text-text-secondary truncate ${mono ? "font-mono" : ""}`}
+        className={`min-w-0 text-xs text-text-secondary truncate ${mono ? "font-mono" : ""}`}
         title={value}
       >
         {value}
@@ -276,13 +276,13 @@ export default function WorkspacesPage() {
     <ToolbarButton
       icon={Plus}
       label="New Workspace"
-      variant="solid"
+      title="Create a new workspace"
       onClick={() => setShowCreateDialog(true)}
     />
   );
 
   return (
-    <main className="flex-1 flex flex-col h-full min-h-0">
+    <main className="flex-1 flex flex-col h-full min-w-0 min-h-0">
       <PageHeader title="Workspaces" />
       <Toolbar>
         <div className="flex-1 min-w-0" />
@@ -290,7 +290,7 @@ export default function WorkspacesPage() {
         {createButton}
       </Toolbar>
 
-      <div className="flex-1 overflow-y-auto p-8 min-h-0">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-8 min-w-0 min-h-0">
       <section className="mb-8">
         {description}
 
