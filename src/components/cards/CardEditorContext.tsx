@@ -77,16 +77,20 @@ function CardEditModal({
 
   // TOC drawer, mirroring the wiki page: the toolbar's TOC button toggles a
   // left drawer hosting the answer's heading tree (drag-resizable split column
-  // on desktop, slide-in drawer on mobile). Starts closed; width persists.
+  // on desktop, slide-in drawer on mobile). Opens by default on a PC — the
+  // hook itself forces it closed on mobile; width persists.
   const tocSidebar = useCollapsibleSidebar({
     storageKey: "card-toc-width",
     defaultWidth: 240,
     minWidth: 180,
-    initialVisible: false,
+    initialVisible: true,
   });
 
   useEffect(() => {
-    setMobile(isMobileApp());
+    const m = isMobileApp();
+    setMobile(m);
+    // On a PC the card is the whole page, so it reads better big by default.
+    if (!m) setFontScale("x2");
   }, []);
 
   // Callback ref that resizes the textarea when it's mounted
@@ -254,7 +258,7 @@ function CardEditModal({
             </CollapsibleSidebar>
           )}
           <div className="flex-1 min-h-0 overflow-y-auto">
-            <div className="mx-auto max-w-3xl px-4 py-6 sm:px-8" style={scaleStyle}>
+            <div className="px-4 py-6 sm:px-8" style={scaleStyle}>
               <div className="space-y-6">
                 <h2 className="text-3xl font-semibold break-words">
                   {question || "(empty question)"}
@@ -291,7 +295,7 @@ function CardEditModal({
         </div>
       ) : (
         <div className="flex-1 min-h-0 overflow-y-auto">
-          <div className="mx-auto max-w-3xl px-4 py-6 sm:px-8" style={scaleStyle}>
+          <div className="px-4 py-6 sm:px-8" style={scaleStyle}>
             <div className="space-y-6">
               <div>
                 <label className={labelCls}>Dataset</label>
