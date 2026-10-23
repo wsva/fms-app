@@ -5,6 +5,7 @@ import { AlignJustify, AlignLeft, Settings2, Zap, RefreshCw, FolderOpen } from "
 import { useBookData } from "@/hooks/useBookData";
 import { Toolbar, Breadcrumb, ToolbarButton, ToolbarOverflow, ToolbarMenuItem } from "@/components/ui/toolbar";
 import { LocationsManager } from "@/components/ui/LocationsManager";
+import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import ReadingView from "./ReadingView";
 import BookManager from "./BookManager";
 import BookAdvanced from "./BookAdvanced";
@@ -46,6 +47,9 @@ export default function ReadBookPage() {
   return (
     <div className="flex h-full w-full bg-bg-body min-w-0">
       <div className="flex-1 flex flex-col min-h-0 min-w-0">
+        {/* Thin-client reminder: chapter/sentence/word edits wait in the
+            writeback queue until a sync round flushes them to the hub. */}
+        <PendingWritebackBanner mobile={mobile} />
         {/* Breadcrumb navigation — wiki/dictation-style full-width bar sitting
             above the toolbar. Always shown (including mobile) so the trail stays
             reachable. The root crumb is always "Books"; it gains the selected book

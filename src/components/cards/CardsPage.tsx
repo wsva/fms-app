@@ -36,6 +36,7 @@ import type {
 } from "@/lib/types";
 import { isMobileApp } from "@/lib/platform";
 import { LocationsManager } from "@/components/ui/LocationsManager";
+import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import {
   Toolbar,
   Breadcrumb,
@@ -464,6 +465,9 @@ export default function CardsPage() {
 
   return (
     <main className="flex-1 flex flex-col min-h-0 min-w-0 bg-bg-body">
+      {/* Thin-client reminder: card edits and reviews sit in the writeback
+          queue until a sync round flushes them to the hub. */}
+      <PendingWritebackBanner mobile={mobile} />
       {/* Breadcrumb navigation — wiki/dictation-style full-width bar above the
           toolbar: the Cards › <dataset> trail, or Cards › Locations / Cards › Review
           for the root-level sub-views. The root "Cards" crumb is the dataset list;

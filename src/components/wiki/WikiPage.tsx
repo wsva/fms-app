@@ -24,6 +24,7 @@ import {
   ToolbarMenuItem,
 } from "@/components/ui/toolbar";
 import { LocationsManager } from "@/components/ui/LocationsManager";
+import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import {
   WikiDatasetSummary, HubWikiList, Selection, WikiSource, WikiFileEntry,
   WikiFileContent, selectionKey,
@@ -836,6 +837,9 @@ export default function WikiPage() {
   return (
     <div className="flex h-full w-full bg-bg-body min-w-0">
       <div className="flex-1 flex flex-col min-h-0 min-w-0">
+        {/* Thin-client reminder: wiki file saves/deletes wait in the writeback
+            queue until a sync round flushes them to the hub. */}
+        <PendingWritebackBanner mobile={mobile} />
         {/* Hub read-only banner */}
         {hubMode && (
           <div className="px-4 py-1.5 text-xs bg-accent/10 text-accent border-b border-border-default flex items-center gap-2">

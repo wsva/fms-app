@@ -26,6 +26,7 @@ import {
     ToolbarMenuItem,
 } from "@/components/ui/toolbar";
 import { LocationsManager } from "@/components/ui/LocationsManager";
+import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import { subscribe, getVoiceError, clearVoiceError } from "@/lib/voice-input";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
@@ -87,9 +88,9 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
     // Guards against double-submits while a favorite clip is being cut.
     const [addingFavorite, setAddingFavorite] = useState(false);
 
-    // Mobile thin client: surface how many local edits await upload.
+    // Mobile thin client: local edits awaiting upload are surfaced by the
+    // shared <PendingWritebackBanner> (it polls the writeback queue itself).
     const [mobile, setMobile] = useState(false);
-    const [pendingUpload, setPendingUpload] = useState(0);
     // "Cues only" mode: a phone screen barely fits one cue, so hide the
     // player, waveform and progress line behind a toolbar toggle. The
     // breadcrumb stays visible — it is a compact nav bar and its dataset/media
@@ -118,20 +119,6 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
             localStorage.setItem(COLLAPSED_KEY, next ? "1" : "0");
         } catch { /* ignore */ }
     };
-    useEffect(() => {
-        if (!isTauri() || !mobile) return;
-        let alive = true;
-        const refresh = () =>
-            invoke<number>("writeback_pending_count")
-                .then((n) => alive && setPendingUpload(n))
-                .catch(() => {});
-        refresh();
-        const timer = setInterval(refresh, 5000);
-        return () => {
-            alive = false;
-            clearInterval(timer);
-        };
-    }, [mobile]);
 
     // Group ready datasets by their root location for the datasets view.
     type DatasetItem = (typeof d.datasets)[number];
@@ -310,11 +297,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
     return (
         <div className="flex h-full w-full bg-bg-body min-w-0">
           <div className="flex-1 flex flex-col min-h-0 min-w-0">
-            {mobile && pendingUpload > 0 && (
-                <div className="shrink-0 px-4 py-1.5 text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300 border-b border-border-default">
-                    {pendingUpload} change(s) pending upload
-                </div>
-            )}
+            <PendingWritebackBanner mobile={mobile} />
             {/* Breadcrumb navigation — wiki-style full-width bar sitting above the
                 toolbar: Dictation › dataset › media › subtitle trail. Always shown,
                 including mobile "cues only" mode, so the navigation trail stays reachable. */}

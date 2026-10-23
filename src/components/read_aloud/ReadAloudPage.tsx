@@ -48,6 +48,7 @@ import {
   RecordButton,
 } from "@/components/ui/toolbar";
 import { LocationsManager } from "@/components/ui/LocationsManager";
+import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import PracticePanel, { type RecorderCtl } from "./PracticePanel";
 import AttemptsPanel from "./AttemptsPanel";
 import DatasetDialog from "./DatasetDialog";
@@ -490,6 +491,9 @@ export default function ReadAloudPage() {
 
   return (
     <main className="flex-1 flex flex-col h-full min-h-0 min-w-0 bg-bg-body">
+      {/* Thin-client reminder: recorded takes and text edits wait in the
+          writeback queue until a sync round flushes them to the hub. */}
+      <PendingWritebackBanner mobile={mobile} />
       {/* Breadcrumb navigation — Read Aloud › dataset › text, mirroring the wiki
           page's edge-to-edge trail. Crumbs are inert while editing so a stray
           click can't discard the draft. */}
