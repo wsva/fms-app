@@ -87,6 +87,30 @@ function formatRelativeTime(dateStr: string): string {
   return date.toLocaleDateString();
 }
 
+function formatDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleDateString();
+}
+
+/** A labelled key/value line for the detailed mobile workspace card — the
+ *  owner user_id (an email once claimed) and the timestamps get their own
+ *  labeled row rather than being crammed into a single truncated caption. */
+function LabeledField({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex items-baseline gap-2 min-w-0">
+      <span className="shrink-0 w-24 text-[11px] uppercase tracking-wide text-text-tertiary">
+        {label}
+      </span>
+      <span
+        className={`text-xs text-text-secondary truncate ${mono ? "font-mono" : ""}`}
+        title={value}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
 // ── Component ───────────────────────────────────────────────────────────────
 
 export default function WorkspacesPage() {
@@ -225,7 +249,7 @@ export default function WorkspacesPage() {
         )
       );
     } catch (e) {
-      setError(`Failed to toggle auto-login: ${e}`);
+      setError(`Failed to update startup setting: ${e}`);
     }
   }
 
@@ -329,6 +353,116 @@ export default function WorkspacesPage() {
               const ownership = ownershipOf(ws, currentUser);
               const styles = ownershipStyles[ownership];
               const isCurrent = ws.uuid === currentUuid;
+              const owner = isUnclaimed(ws.user_id) ? "Not claimed" : ws.user_id;
+              const isEditing = editingUuid === ws.uuid;
+
+              // Only a handful of workspaces ever exist, so the mobile card is
+              // given more height and detail: larger avatar, labeled owner and
+              // timestamps, and labeled text buttons across the full width.
+              if (mobile) {
+                return (
+                  <div
+                    key={ws.uuid}
+                    className={`flex flex-col gap-3 p-4 rounded-xl border transition-colors ${styles.card} ${
+                      isCurrent ? "ring-2 ring-accent" : ""
+                    }`}
+                  >
+                    {/* Identity row: avatar + name/badges */}
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-12 h-12 rounded-full bg-accent-bg text-white flex items-center justify-center text-xl font-bold shrink-0">
+                        {ws.avatar || ws.name.charAt(0).toUpperCase()}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        {isEditing ? (
+                          <div className="flex items-center gap-1">
+                            <input
+                              className="flex-1 min-w-0 px-2 py-1 text-sm border border-border-light rounded bg-bg-input text-text-primary"
+                              value={editName}
+                              onChange={(e) => setEditName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") handleRename(ws.uuid);
+                                if (e.key === "Escape") setEditingUuid(null);
+                              }}
+                              autoFocus
+                            />
+                            <Button isIconOnly size="sm" variant="ghost" onPress={() => handleRename(ws.uuid)}>
+                              <Check size={16} />
+                            </Button>
+                            <Button isIconOnly size="sm" variant="ghost" onPress={() => setEditingUuid(null)}>
+                              <X size={16} />
+                            </Button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-medium text-text-primary truncate">{ws.name}</span>
+                            {isCurrent && (
+                              <span className="px-2 py-0.5 rounded-full bg-accent-bg text-white text-[11px] font-medium">
+                                Current
+                              </span>
+                            )}
+                            <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${styles.badge}`}>
+                              {styles.badgeLabel}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Detail rows */}
+                    <div className="flex flex-col gap-1.5">
+                      <LabeledField label="Owner" value={owner} />
+                      <LabeledField label="Last used" value={formatRelativeTime(ws.last_accessed)} />
+                      <LabeledField label="Created" value={formatDate(ws.created_at)} />
+                      <LabeledField label="Workspace ID" value={ws.uuid} mono />
+                    </div>
+
+                    {/* Actions: labeled text buttons across the card width. */}
+                    <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-border-light">
+                      {!isCurrent && !isEditing && (
+                        <Button size="sm" variant="ghost" isDisabled={refreshing} onPress={() => handleSwitch(ws)}>
+                          <FolderOpen size={14} /> Load
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onPress={() => handleToggleAutoLogin(ws)}
+                        className={ws.auto_login ? "text-accent" : "text-text-tertiary"}
+                      >
+                        <MonitorCheck size={14} /> Open at startup: {ws.auto_login ? "On" : "Off"}
+                      </Button>
+                      {!isEditing && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onPress={() => {
+                            setEditingUuid(ws.uuid);
+                            setEditName(ws.name);
+                          }}
+                        >
+                          <Edit2 size={14} /> Rename
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        isDisabled={isCurrent}
+                        onPress={() =>
+                          setConfirmReq({
+                            title: "Delete workspace",
+                            message: `Delete workspace "${ws.name}"? This will move all data to trash.`,
+                            confirmLabel: "Delete",
+                            onConfirm: () => handleDelete(ws),
+                          })
+                        }
+                      >
+                        <Trash2 size={14} className="text-error-text" /> Delete
+                      </Button>
+                    </div>
+                  </div>
+                );
+              }
+
               return (
                 <div
                   key={ws.uuid}
@@ -391,9 +525,9 @@ export default function WorkspacesPage() {
                           {ws.auto_login && (
                             <span
                               className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-mid-gray/20 text-text-tertiary text-[10px]"
-                              title="Auto-selected at app startup"
+                              title="Opens at startup"
                             >
-                              <MonitorCheck size={10} /> Auto
+                              <MonitorCheck size={10} /> Startup
                             </span>
                           )}
                         </div>
@@ -420,7 +554,7 @@ export default function WorkspacesPage() {
                         </Button>
                       </span>
                     )}
-                    <span title={ws.auto_login ? "Disable auto-login" : "Enable auto-login"}>
+                    <span title={ws.auto_login ? "Disable open at startup" : "Enable open at startup"}>
                       <Button
                         isIconOnly
                         size="sm"
