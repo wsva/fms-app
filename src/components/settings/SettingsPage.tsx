@@ -43,6 +43,22 @@ function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+// Compare two dotted numeric versions ("0.1.4" vs "0.1.10"); missing parts count as 0.
+function cmpSemver(a: string, b: string): number {
+  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+// Strip a leading "v" so a git tag and a stamped package version compare equal.
+function normVer(v: string): string {
+  return v.trim().replace(/^v/, "");
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -153,15 +169,51 @@ export default function SettingsPage() {
   });
   const [activeSection, setActiveSection] = useState("all");
 
-  // App version for the About section — Tauri reports the packaged version from
-  // tauri.conf.json; empty in the web dev preview (isTauri() false).
-  const [appVersion, setAppVersion] = useState("");
+  // Build identity for the About section. `app_build_version` reports the git tag
+  // baked at build time (dev builds) or the CI-stamped package version (released
+  // builds); falls back to getVersion() if the command is unavailable, and stays
+  // empty in the web dev preview (isTauri() false).
+  const [installedVersion, setInstalledVersion] = useState("");
   useEffect(() => {
     if (!isTauri()) return;
-    getVersion()
-      .then(setAppVersion)
-      .catch(() => {});
+    invoke<{ git_describe: string; package_version: string }>("app_build_version")
+      .then(({ git_describe, package_version }) => setInstalledVersion(git_describe || package_version))
+      .catch(() => {
+        getVersion().then(setInstalledVersion).catch(() => {});
+      });
   }, []);
+
+  // Latest published GitHub release, fetched at runtime. Offline / blocked -> stays null.
+  const [latestRelease, setLatestRelease] = useState<{ tag: string; url: string } | null>(null);
+  const [releaseState, setReleaseState] = useState<"checking" | "done" | "error">("checking");
+  useEffect(() => {
+    let alive = true;
+    fetch("https://api.github.com/repos/wsva/fms-app/releases/latest", {
+      headers: { Accept: "application/vnd.github+json" },
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((d: { tag_name?: string; html_url?: string }) => {
+        if (!alive) return;
+        if (d?.tag_name) setLatestRelease({ tag: d.tag_name, url: d.html_url ?? "" });
+        setReleaseState("done");
+      })
+      .catch(() => {
+        if (alive) setReleaseState("error");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Update status: compare the installed tag's base against the latest release.
+  const installedBase = normVer(installedVersion.split("-")[0]);
+  const latestBase = latestRelease ? normVer(latestRelease.tag) : "";
+  const isDevBuild = installedVersion.includes("-g") || installedVersion.endsWith("-dirty");
+  let updateState: "none" | "up-to-date" | "update" | "ahead" = "none";
+  if (latestRelease && installedBase && latestBase) {
+    const c = cmpSemver(installedBase, latestBase);
+    updateState = c < 0 ? "update" : c > 0 ? "ahead" : isDevBuild ? "ahead" : "up-to-date";
+  }
 
   function selectSection(id: string) {
     setActiveSection(id);
@@ -800,11 +852,41 @@ export default function SettingsPage() {
           <p className="text-text-secondary text-sm mb-4">
             Application build information.
           </p>
-          <div className="flex items-center gap-3">
-            <span className="text-sm text-text-secondary">Version</span>
-            <span className="text-sm font-mono text-text-primary">
-              {appVersion || "unknown"}
-            </span>
+          <div className="flex flex-col gap-2 max-w-xl">
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-text-secondary w-36 shrink-0">Installed version</span>
+              <span className="text-sm font-mono text-text-primary break-all">
+                {installedVersion || "unknown"}
+              </span>
+            </div>
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="text-sm text-text-secondary w-36 shrink-0">Latest release</span>
+              {releaseState === "checking" && (
+                <span className="text-sm text-text-tertiary">Checking…</span>
+              )}
+              {releaseState === "error" && (
+                <span className="text-sm text-text-tertiary">Unavailable (offline?)</span>
+              )}
+              {latestRelease && (
+                <a
+                  href={latestRelease.url || "#"}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm font-mono text-accent hover:underline break-all"
+                >
+                  {latestRelease.tag}
+                </a>
+              )}
+              {updateState === "up-to-date" && (
+                <span className="text-xs px-1.5 py-0.5 rounded bg-green-600/20 text-green-500 shrink-0">Up to date</span>
+              )}
+              {updateState === "update" && (
+                <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-600/20 text-yellow-500 shrink-0">Update available</span>
+              )}
+              {updateState === "ahead" && (
+                <span className="text-xs px-1.5 py-0.5 rounded bg-mid-gray/20 text-text-tertiary shrink-0">Development build</span>
+              )}
+            </div>
           </div>
         </section>
         </div>

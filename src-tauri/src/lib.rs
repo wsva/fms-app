@@ -142,6 +142,24 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+/// Which build is running. `git_describe` is baked at compile time by `build.rs`
+/// (empty on a shallow/tag-less CI checkout); `package_version` is the Cargo version,
+/// which CI stamps to the release tag. The UI prefers `git_describe` and falls back
+/// to `package_version`, so released installs still report the tag.
+#[derive(serde::Serialize)]
+struct BuildVersion {
+    git_describe: String,
+    package_version: String,
+}
+
+#[tauri::command]
+fn app_build_version() -> BuildVersion {
+    BuildVersion {
+        git_describe: option_env!("FMS_GIT_DESCRIBE").unwrap_or_default().to_string(),
+        package_version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
 #[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -173,6 +191,7 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             greet,
+            app_build_version,
             models::model_get_status,
             models::model_select_version,
             models::model_set_default,
@@ -631,6 +650,7 @@ macro_rules! mobile_invoke_handler {
     ($($extra:path),* $(,)?) => {
         tauri::generate_handler![
             greet,
+            app_build_version,
             settings::settings_get,
             settings::settings_set,
             settings::settings_get_global,

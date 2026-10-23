@@ -204,6 +204,17 @@ impl DatasetMcpServer {
         serde_json::json!({"status": "ok", "path": path.to_string_lossy(), "size_bytes": size}).to_string()
     }
 
+    #[tool(name = "app_version", description = "Get the running app's build identity: git_describe (the release tag baked at build time; empty on a shallow/tag-less CI build) and package_version (the Cargo version, which CI stamps to the release tag). Prefer git_describe, fall back to package_version to report which build is installed.")]
+    async fn app_version(&self) -> String {
+        log::info!("[MCP] app_version");
+        serde_json::json!({
+            "status": "ok",
+            "git_describe": option_env!("FMS_GIT_DESCRIBE").unwrap_or_default(),
+            "package_version": env!("CARGO_PKG_VERSION"),
+        })
+        .to_string()
+    }
+
     #[tool(name = "log_read_file_history", description = "Read archived log entries from the persistent log file (oldest first, includes the rotated backup). Survives app restarts and log_clear, unlike log_get_history. Optional 'limit' returns only the newest N entries.")]
     async fn log_read_file_history(&self, Parameters(param): Parameters<LogHistoryParam>) -> String {
         log::info!("[MCP] log_read_file_history: limit={:?}", param.limit);
