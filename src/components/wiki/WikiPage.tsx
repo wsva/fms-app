@@ -910,9 +910,9 @@ export default function WikiPage() {
 
             {/* Shared sub-toolbar: always shown under the breadcrumb, whether
                 viewing the dataset list, a dataset's directory, or a file.
-                Left side carries the old top-bar controls (Back / Forward /
-                Search toggle / Hub browse); right side keeps the contextual
-                file/dataset actions. */}
+                Left side carries the navigation controls (Back / Forward); the
+                flexible label pushes Search / Hub and the contextual file/dataset
+                actions to the end. */}
             <Toolbar mobile={mobile}>
               <div className="flex items-center gap-1 shrink-0">
                 <ToolbarIconButton
@@ -929,6 +929,13 @@ export default function WikiPage() {
                   title="Forward (Alt+Right)"
                   ariaLabel="Forward"
                 />
+              </div>
+
+              <div className="text-xs text-text-tertiary truncate flex-1 min-w-0">{toolbarLabel}</div>
+
+              {/* Search toggle + Hub browse pinned to the end. The Hub toggle is
+                  hidden for the hub itself (it already sees everything locally). */}
+              <div className="flex items-center gap-1 shrink-0">
                 <ToolbarButton
                   icon={Search}
                   variant="toggleSoft"
@@ -937,23 +944,17 @@ export default function WikiPage() {
                   onClick={() => setSearchOpen((v) => !v)}
                   title={searchOpen ? "Hide search" : "Show search"}
                 />
+                {!isHub && (
+                  <ToolbarButton
+                    variant="toggle"
+                    active={hubMode}
+                    icon={Cloud}
+                    label={hubMode ? "Local" : "Hub"}
+                    onClick={toggleHubMode}
+                    title={hubMode ? "Leave hub browse" : "Browse the hub's wiki (read-only)"}
+                  />
+                )}
               </div>
-
-              {/* Hub browse toggle — read-only view of the paired hub's wiki.
-                  Hidden for the hub itself (it already sees everything locally). */}
-              {!isHub && (
-                <ToolbarButton
-                  variant="toggle"
-                  active={hubMode}
-                  icon={Cloud}
-                  label={hubMode ? "Local" : "Hub"}
-                  className="shrink-0"
-                  onClick={toggleHubMode}
-                  title={hubMode ? "Leave hub browse" : "Browse the hub's wiki (read-only)"}
-                />
-              )}
-
-              <div className="text-xs text-text-tertiary truncate flex-1 min-w-0">{toolbarLabel}</div>
 
               {viewMode === "file" && hubSrc && (
                 <ToolbarButton
