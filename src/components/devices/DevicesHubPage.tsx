@@ -604,7 +604,7 @@ export default function DevicesHubPage() {
 
   return (
     <div className="flex flex-col w-full h-full min-h-0">
-      <PageHeader title="Devices & Hub" icon={Users} />
+      <PageHeader title="Devices & Hub" />
 
       <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4 min-h-0">
       {/* ── 1. Current Workspace Status ──────────────────────── */}

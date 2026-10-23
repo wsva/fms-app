@@ -193,7 +193,7 @@ export default function SimpleWordsPage() {
   // ── Render ────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-full">
-      <PageHeader title="Simple Words" icon={Globe} />
+      <PageHeader title="Simple Words" />
       <Toolbar>
         <div className="flex-1 min-w-0" />
         <ToolbarButton icon={Plus} label="Add Language" onClick={() => setShowAddLang(true)} />

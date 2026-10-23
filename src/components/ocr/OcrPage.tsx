@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ScanText,
   ImagePlus,
   MonitorUp,
   Loader2,
@@ -153,7 +152,6 @@ export default function OcrPage() {
     <main className="flex-1 flex flex-col h-full">
       <PageHeader
         title="OCR"
-        icon={ScanText}
         badge={<span className="text-xs text-text-tertiary">Tesseract</span>}
       />
 

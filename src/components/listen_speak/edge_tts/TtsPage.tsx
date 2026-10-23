@@ -152,7 +152,6 @@ export default function TtsPage() {
     <main className="flex-1 flex flex-col h-full">
       <PageHeader
         title="Text to Speech"
-        icon={Volume2}
         badge={loadingVoices ? <Loader2 size={18} className="animate-spin text-text-tertiary" /> : undefined}
       />
 

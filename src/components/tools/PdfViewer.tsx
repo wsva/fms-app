@@ -113,7 +113,7 @@ export default function PdfViewer() {
 
   return (
     <div className="flex flex-col h-full w-full min-w-0 bg-bg-body text-text-primary overflow-hidden">
-      <PageHeader title="PDF Reader" icon={FileText} />
+      <PageHeader title="PDF Reader" />
       {/* Toolbar */}
       <Toolbar className="flex-wrap">
         <button onClick={() => fileInputRef.current?.click()} className={btnPrimary}>

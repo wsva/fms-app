@@ -623,7 +623,7 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
         <ToolbarButton
           icon={RefreshCw}
           iconProps={{ className: loading ? "animate-spin" : undefined }}
-          label="Reload"
+          label="Refresh"
           onClick={() => void reload()}
           disabled={loading}
         />

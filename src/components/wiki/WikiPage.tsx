@@ -830,7 +830,7 @@ export default function WikiPage() {
   const toolbarLabel =
     viewMode === "file" ? headerLabel
       : viewMode === "browse" ? `${browseItemCount} item${browseItemCount === 1 ? "" : "s"}`
-        : `${treeDatasets.length} dataset${treeDatasets.length === 1 ? "" : "s"}`;
+        : "";
 
   const mdDirty = editContent !== fileContent;
 
@@ -929,13 +929,13 @@ export default function WikiPage() {
                   title="Forward (Alt+Right)"
                   ariaLabel="Forward"
                 />
-                <ToolbarIconButton
+                <ToolbarButton
                   icon={Search}
                   variant="toggleSoft"
                   active={searchOpen}
+                  label="Search"
                   onClick={() => setSearchOpen((v) => !v)}
                   title={searchOpen ? "Hide search" : "Show search"}
-                  ariaLabel="Toggle search"
                 />
               </div>
 

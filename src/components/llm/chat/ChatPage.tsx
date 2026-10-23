@@ -280,7 +280,6 @@ export default function LLMChatPage() {
     <main className="flex-1 flex flex-col h-full">
       <PageHeader
         title="LLM Chat"
-        icon={Bot}
         badge={<span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-bg-muted border border-border-default text-text-tertiary">{provider}</span>}
       />
       <Toolbar className="flex-wrap">

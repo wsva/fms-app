@@ -283,7 +283,7 @@ export default function WorkspacesPage() {
 
   return (
     <main className="flex-1 flex flex-col h-full min-h-0">
-      <PageHeader title="Workspaces" icon={FolderOpen} />
+      <PageHeader title="Workspaces" />
       <Toolbar>
         <div className="flex-1 min-w-0" />
         {refreshButton}

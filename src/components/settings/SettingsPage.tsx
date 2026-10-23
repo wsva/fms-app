@@ -9,7 +9,6 @@ import {
   LayoutGrid,
   Palette,
   Server,
-  Settings as SettingsIcon,
   Smartphone,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
@@ -364,7 +363,7 @@ export default function SettingsPage() {
 
   return (
     <main className="flex-1 flex flex-col h-full min-h-0 min-w-0">
-      <PageHeader title="Settings" icon={SettingsIcon} />
+      <PageHeader title="Settings" />
       <Toolbar>
         <div className="flex-1 min-w-0" />
         <SidebarToggleButton sidebar={sidebar} title="Show/hide sections" />

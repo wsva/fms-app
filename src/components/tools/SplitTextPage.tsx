@@ -5,7 +5,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { message } from "@tauri-apps/plugin-dialog";
 import {
-  ArrowUpDown,
   Loader2,
   Download,
   Copy,
@@ -224,7 +223,6 @@ export default function SplitTextPage() {
     <main className="flex-1 flex flex-col h-full min-w-0 min-h-0">
       <PageHeader
         title="Split Text"
-        icon={ArrowUpDown}
         badge={
           <span
             className={`px-2 py-0.5 rounded-full text-xs font-medium ${
