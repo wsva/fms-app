@@ -138,7 +138,7 @@ export function LocationsManager({
                         );
                         if (!confirmed) return;
                         try {
-                          await invoke("dataset_remove_dir", { path: dir.path });
+                          await invoke("dataset_remove_dir", { datasetType, path: dir.path });
                           loadDirs();
                           onChanged?.();
                         } catch (e) {
@@ -205,7 +205,7 @@ export function LocationsManager({
                 onClick={async () => {
                   if (!newDirName.trim() || !newDirPath.trim()) return;
                   try {
-                    await invoke("dataset_add_dir", { name: newDirName.trim(), path: newDirPath.trim() });
+                    await invoke("dataset_add_dir", { datasetType, name: newDirName.trim(), path: newDirPath.trim() });
                     setShowAddDir(false);
                     setNewDirName("");
                     setNewDirPath("");

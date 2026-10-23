@@ -197,6 +197,35 @@ fn write_dataset_meta(datasets_dir: &str, meta: &DatasetMeta) -> Result<(), Stri
     fs::write(&meta_path, data).map_err(|e| e.to_string())
 }
 
+/// The `meta.json` that owns one type's linked locations: `<datasets>/<type>/meta.json`.
+///
+/// Linked directories are per type (a card location is not also a dictation
+/// location), and both readers — `dataset_roots` and `dataset_list_dirs` — resolve
+/// them from here. Every writer must target the same file: a root-level
+/// `<datasets>/meta.json` is never consulted, so writing there makes an add/remove
+/// silently invisible to the UI.
+fn type_meta_dir(settings: &SettingsState, dataset_type: DatasetType) -> String {
+    datasets_dir(settings)
+        .join(dataset_type.as_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Compare two location paths as *directories*, not as strings: the same folder
+/// reached through a different separator, trailing slash or drive-letter case must
+/// still match the entry it was linked with. Canonicalizes when the directory still
+/// exists (which also folds Windows case) and falls back to the raw path otherwise
+/// (e.g. an unplugged external drive).
+fn same_location(a: &str, b: &str) -> bool {
+    let canon = |p: &str| fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
+    let (a, b) = (canon(a), canon(b));
+    if cfg!(windows) {
+        a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+    } else {
+        a == b
+    }
+}
+
 /// Resolve all dataset root directories: default datasets_dir + linked dirs from meta.json
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DatasetType {
@@ -382,15 +411,16 @@ pub async fn dataset_list_dirs(
     Ok(entries)
 }
 
-/// Add a linked directory for datasets
+/// Add a linked directory for one dataset type
 #[tauri::command]
 pub async fn dataset_add_dir(
     settings: State<'_, SettingsState>,
+    dataset_type: String,
     name: String,
     path: String,
 ) -> Result<(), String> {
-    let default_dir = datasets_dir(&settings);
-    let default_str = default_dir.to_string_lossy().to_string();
+    let ds_type = DatasetType::from_str(&dataset_type)?;
+    let path = path.trim().to_string();
     
     // Verify the path exists and is a directory
     let target_path = PathBuf::from(&path);
@@ -407,10 +437,13 @@ pub async fn dataset_add_dir(
         return Err("The download location is app-managed and cannot be added manually".into());
     }
     
-    let mut meta = read_dataset_meta(&default_str);
+    // Links live in `<datasets>/<type>/meta.json` — the exact file `dataset_roots`
+    // and `dataset_list_dirs` read back.
+    let meta_dir = type_meta_dir(&settings, ds_type);
+    let mut meta = read_dataset_meta(&meta_dir);
     
     // Check if already linked
-    if meta.linked_dirs.iter().any(|d| d.path == path) {
+    if meta.linked_dirs.iter().any(|d| same_location(&d.path, &path)) {
         return Err(format!("Directory already linked: {}", path));
     }
     
@@ -419,35 +452,37 @@ pub async fn dataset_add_dir(
         path: path.clone(),
     });
     
-    write_dataset_meta(&default_str, &meta)?;
-    log::info!("[Dataset] Linked directory '{}' -> {}", name, path);
+    write_dataset_meta(&meta_dir, &meta)?;
+    log::info!("[Dataset] {}: linked directory '{}' -> {}", ds_type.as_str(), name, path);
     Ok(())
 }
 
-/// Remove a linked directory from datasets
+/// Remove a linked directory from one dataset type's locations (unlink only — the
+/// directory and the datasets inside it are left untouched on disk)
 #[tauri::command]
 pub async fn dataset_remove_dir(
     settings: State<'_, SettingsState>,
+    dataset_type: String,
     path: String,
 ) -> Result<(), String> {
-    let default_dir = datasets_dir(&settings);
-    let default_str = default_dir.to_string_lossy().to_string();
+    let ds_type = DatasetType::from_str(&dataset_type)?;
     
     // The download root is app-managed; refuse to unlink it (dataset-layers.md §4.2).
     if is_under_download_root(&settings, &PathBuf::from(&path)) {
         return Err("The download location is app-managed and cannot be removed".into());
     }
     
-    let mut meta = read_dataset_meta(&default_str);
+    let meta_dir = type_meta_dir(&settings, ds_type);
+    let mut meta = read_dataset_meta(&meta_dir);
     let initial_len = meta.linked_dirs.len();
-    meta.linked_dirs.retain(|d| d.path != path);
+    meta.linked_dirs.retain(|d| !same_location(&d.path, &path));
     
     if meta.linked_dirs.len() == initial_len {
-        return Err(format!("Directory not found in linked directories: {}", path));
+        return Err(format!("Directory not found in {} locations: {}", ds_type.as_str(), path));
     }
     
-    write_dataset_meta(&default_str, &meta)?;
-    log::info!("[Dataset] Unlinked directory: {}", path);
+    write_dataset_meta(&meta_dir, &meta)?;
+    log::info!("[Dataset] {}: unlinked directory: {}", ds_type.as_str(), path);
     Ok(())
 }
 

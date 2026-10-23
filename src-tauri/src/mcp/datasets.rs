@@ -44,7 +44,14 @@ struct DatasetListDirsParam {
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct DatasetAddDirParam {
+    dataset_type: String,
     name: String,
+    path: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct DatasetRemoveDirParam {
+    dataset_type: String,
     path: String,
 }
 
@@ -551,20 +558,20 @@ impl DatasetMcpServer {
         }
     }
 
-    #[tool(name = "dataset_add_dir", description = "Add a linked directory for datasets. The path must exist and be a directory. Requires a name for display.")]
+    #[tool(name = "dataset_add_dir", description = "Add a linked directory for one dataset type (card, dictation, book, read_aloud, wiki). The path must exist and be a directory. Requires a name for display. Only that type's locations change.")]
     async fn dataset_add_dir(&self, Parameters(param): Parameters<DatasetAddDirParam>) -> Result<String, String> {
-        log::info!("[MCP] dataset_add_dir: name={}, path={}", param.name, param.path);
+        log::info!("[MCP] dataset_add_dir: type={}, name={}, path={}", param.dataset_type, param.name, param.path);
         let settings = self.app.state::<SettingsState>();
-        datasets::dataset_add_dir(settings, param.name.clone(), param.path.clone()).await?;
-        Ok(serde_json::json!({"status": "ok", "message": format!("Linked directory '{}' -> {}", param.name, param.path)}).to_string())
+        datasets::dataset_add_dir(settings, param.dataset_type.clone(), param.name.clone(), param.path.clone()).await?;
+        Ok(serde_json::json!({"status": "ok", "dataset_type": param.dataset_type, "message": format!("Linked directory '{}' -> {}", param.name, param.path)}).to_string())
     }
 
-    #[tool(name = "dataset_remove_dir", description = "Remove a linked directory from datasets. Datasets in that directory are no longer visible.")]
-    async fn dataset_remove_dir(&self, Parameters(param): Parameters<PathParam>) -> Result<String, String> {
-        log::info!("[MCP] dataset_remove_dir: path={}", param.path);
+    #[tool(name = "dataset_remove_dir", description = "Remove a linked directory from one dataset type's locations (unlink only: files on disk are untouched). Datasets in that directory are no longer visible for that type.")]
+    async fn dataset_remove_dir(&self, Parameters(param): Parameters<DatasetRemoveDirParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_remove_dir: type={}, path={}", param.dataset_type, param.path);
         let settings = self.app.state::<SettingsState>();
-        datasets::dataset_remove_dir(settings, param.path.clone()).await?;
-        Ok(serde_json::json!({"status": "ok", "message": format!("Unlinked directory: {}", param.path)}).to_string())
+        datasets::dataset_remove_dir(settings, param.dataset_type.clone(), param.path.clone()).await?;
+        Ok(serde_json::json!({"status": "ok", "dataset_type": param.dataset_type, "message": format!("Unlinked directory: {}", param.path)}).to_string())
     }
 
     #[tool(name = "dataset_import", description = "Import an existing dataset directory. The directory must contain an info.json file. Returns the dataset summary with UUID.")]

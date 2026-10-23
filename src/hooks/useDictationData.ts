@@ -145,7 +145,7 @@ export function useDictationData() {
             const path = await invoke<string>("settings_pick_folder", { field: "dataset_location" });
             // Derive display name from the folder name (last path segment).
             const name = path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
-            await invoke("dataset_add_dir", { name, path });
+            await invoke("dataset_add_dir", { datasetType: "dictation", name, path });
             loadLocations();
             loadDatasets();
         } catch (e) {
@@ -160,7 +160,7 @@ export function useDictationData() {
         if (!isTauri()) return;
         setLocationError(null);
         try {
-            await invoke("dataset_remove_dir", { path });
+            await invoke("dataset_remove_dir", { datasetType: "dictation", path });
             loadLocations();
             loadDatasets();
         } catch (e) {
