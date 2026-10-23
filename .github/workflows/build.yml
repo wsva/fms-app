@@ -1,14 +1,18 @@
 # FmS release pipeline: Windows, Linux, Android, macOS and iOS.
 #
-# Triggers — a build no longer needs a tag:
-#   push to any branch   full build of all five targets, rolling pre-release
-#   push of a v* tag     same build, but the tag is stamped into the packages
-#                        and published as a versioned release
+# Triggers — a release is the only thing worth building:
+#   push of a v* tag     full build of all five targets, the tag stamped into the
+#                        packages, published as a versioned release
+#   workflow_dispatch    full build, refreshed as the rolling `latest-build`
+#                        pre-release (no version number burned)
 #   pull_request         the sync-conformance tests only (path-filtered)
-#   workflow_dispatch    full build, always refreshes the rolling pre-release
+#
+# A branch push builds nothing. The five-target matrix costs ~25 minutes per
+# commit (macOS bills at 10x), and nobody consumed those artifacts, so the tag
+# is the single automatic trigger.
 #
 # Deliverables — Actions artifacts, plus the release assets the last job
-# publishes (tag name when the build came from a tag, otherwise `<sha>`):
+# publishes (the tag name on a tag build, the commit sha on a manual one):
 #   FmS_windows_x64_<ref>.exe / .msi
 #   FmS_linux_amd64_<ref>.AppImage / .deb / .rpm
 #   FmS_android_arm64_<ref>.apk            (or -unsigned.apk, see below)
@@ -48,15 +52,14 @@
 name: Build FMS App
 
 on:
-  # Every branch push builds everything. The `branches: ['**']` entry is
-  # deliberately broad: the commit is the input, not a hand-made tag. Tag
-  # pushes are opted in separately so a versioned release stays possible.
+  # Releases only: a tag push is the single automatic trigger. Branch pushes used
+  # to build the whole matrix on every commit; that is now opt-in through
+  # `workflow_dispatch`, which produces the rolling pre-release below.
   push:
-    branches: ['**']
     tags: ['v*']
   workflow_dispatch:
-  # A PR only has to prove the sync contract still holds; the bundles are
-  # built on the branch itself, not on every PR.
+  # A PR only has to prove the sync contract still holds; the bundles are built
+  # on the release tag, not on every PR.
   pull_request:
     paths:
       - 'src-tauri/src/sync/**'
@@ -683,17 +686,15 @@ jobs:
   # Publish
   # GitHub only serves release assets from a release, and a release needs a
   # tag ref. Two outcomes:
-  #   tag push  -> a normal release at that tag, release notes generated
-  #   otherwise -> one rolling pre-release, always tagged `latest-build` and
-  #                recreated at the current commit, so nobody pushes a tag by
-  #                hand and the asset list never grows by five per push.
-  # Only the default branch refreshes the rolling one; feature-branch pushes
-  # still get their artifacts from the jobs above.
+  #   tag push        -> a normal release at that tag, release notes generated
+  #   manual dispatch -> one rolling pre-release, always tagged `latest-build`
+  #                      and recreated at the current commit, so a preview build
+  #                      never burns a version number
   # ──────────────────────────────────────────────
   publish:
     name: Publish release
     needs: [build-desktop, build-android, macos, ios]
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -724,7 +725,7 @@ jobs:
           prerelease: true
           make_latest: false
           body: |
-            Rebuilt from commit ${{ github.sha }} on every push to `main`.
+            Rebuilt from commit ${{ github.sha }} on a manual dispatch.
 
             **Windows / Linux / Android** — installers as built; the APK is
             signed only when the Android signing secrets are configured.
