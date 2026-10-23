@@ -1,7 +1,7 @@
 /* ─── Card editor markdown scope ────────────────────────────────
  * Overrides for the shared MarkdownViewer (src/components/wiki/markdown)
  * when rendered inside the card editor. Kept separate from markdown.css so
- * the wiki page's TOC behaviour (fixed to the viewport) is unaffected.
+ * the wiki page's TOC behaviour (inline panel, toolbar-toggled) is unaffected.
  *
  * The `.card-md` scope has higher specificity than the global
  * `#table-of-contents` rule, so this wins regardless of CSS load order.
@@ -17,9 +17,23 @@
     max-width: 60%;
 }
 
+/* The card editor has no TOC toggle, so it keeps the old collapse-to-hover
+   panel that markdown.css dropped for the wiki: title row only until hovered. */
+.card-md #text-table-of-contents {
+    display: none;
+}
+
+.card-md #table-of-contents:hover #text-table-of-contents {
+    display: block;
+}
+
+.card-md #table-of-contents:hover h2 {
+    display: none;
+}
+
 /* This panel is absolute inside a content-sized `.card-md` box, so its
    percentage max-height has no viewport-relative bound to clamp against — unlike
-   the wiki's fixed panel, whose flex chain sizes the list scroller. Keep a
+   the wiki's inline panel, whose flex chain sizes the list scroller. Keep a
    viewport ceiling for this scope so a long answer TOC cannot outgrow the modal. */
 .card-md #text-table-of-contents {
     max-height: calc(80vh - 2em);

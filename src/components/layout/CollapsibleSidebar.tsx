@@ -39,6 +39,9 @@ type Options = {
   minWidth?: number;
   /** Defaults to 80% of the window width, evaluated during drag. */
   maxWidth?: number;
+  /** Desktop open/closed starting state (mobile always starts closed).
+      Defaults to true, matching the original split-column behaviour. */
+  initialVisible?: boolean;
 };
 
 export function useCollapsibleSidebar({
@@ -46,11 +49,12 @@ export function useCollapsibleSidebar({
   defaultWidth,
   minWidth = 160,
   maxWidth,
+  initialVisible = true,
 }: Options): SidebarController {
   // Deferred platform flag so SSR/prerender HTML matches the first client
   // paint (desktop layout); on mobile the drawer starts closed.
   const [mobile, setMobile] = useState(false);
-  const [visible, setVisible] = useState(true);
+  const [visible, setVisible] = useState(initialVisible);
   const [width, setWidth] = useState(defaultWidth);
   const widthRef = useRef(defaultWidth);
 

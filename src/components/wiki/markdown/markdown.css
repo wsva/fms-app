@@ -1,22 +1,17 @@
-/* ─── TOC (fixed hover-panel, top-right corner of viewport, sitting below
-       the wiki page's top bar + breadcrumb + sub-toolbar stack) ─── */
+/* ─── TOC (inline panel above the document, toggled from the wiki page's
+       sub-toolbar — no longer a floating hover-panel) ─── */
 .md-container {
     position: relative;
 }
 
 #table-of-contents {
-    position: fixed;
-    right: 1.5rem;
-    top: 6rem;
-    z-index: 200;
-    /* Column flex container + percentage clamp so the list below can scroll *inside*
-       the panel. Percentage rather than 100vh: this box is fixed, so it resolves
-       against the viewport already corrected for the global page zoom, while a
-       viewport unit would be multiplied by it and overshoot the window. */
+    /* Column flex container + max-height clamp so a long TOC scrolls *inside*
+       the panel instead of pushing the document far down the page. */
     display: flex;
     flex-direction: column;
-    max-height: calc(100% - 6rem);
+    max-height: 50vh;
     overflow: hidden;
+    margin: 0 0 1.5em;
     background: var(--bg-card);
     box-shadow: 0 0 1em rgba(0, 0, 0, 0.15);
     border-radius: 8px;
@@ -56,11 +51,6 @@
 }
 
 #text-table-of-contents {
-    display: none;
-}
-
-#table-of-contents:hover #text-table-of-contents {
-    display: block;
     /* The scroller: min-height: 0 lets this flex item shrink below its content
        once the panel hits its max-height, so a long TOC scrolls vertically
        instead of being clipped away. contain stops the chain to the page behind
@@ -72,10 +62,6 @@
     overscroll-behavior: contain;
 }
 
-#table-of-contents:hover h2 {
-    display: none;
-}
-
 #table-of-contents .toc-section-number {
    font-weight: 500;
    color: var(--text-primary);
@@ -85,6 +71,29 @@
 #table-of-contents .toc-section-title {
     font-weight: 400;
     color: var(--text-secondary);
+}
+
+/* ─── TOC in the wiki page's left drawer ───────────────────────
+   The drawer's own column supplies the background, border and scroll, so the
+   panel drops its inline-card chrome and flows naturally down the column. */
+.wiki-toc #table-of-contents {
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    background: transparent;
+    box-shadow: none;
+    border: none;
+    border-radius: 0;
+    overflow: visible;
+}
+
+.wiki-toc #table-of-contents h2 {
+    padding-left: 0;
+}
+
+.wiki-toc #text-table-of-contents {
+    padding-left: 0;
+    overflow: visible;
 }
 
 

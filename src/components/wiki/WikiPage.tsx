@@ -1,18 +1,19 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
   RefreshCw, ArrowLeft, ArrowRight, Cloud, Download, Pencil, Eye,
   Folder, FolderOpen, FileText, BookMarked, FilePlus, FolderPlus, Plus, Trash2,
-  Save, CircleHelp, Search, ExternalLink,
+  Save, CircleHelp, Search, ExternalLink, List,
 } from "lucide-react";
 import WikiSearch from "./WikiSearch";
 import MdEditor from "./MdEditor";
 import { insertAround, insertAtLineStart } from "./mdEditorInserts";
 import MarkdownViewer from "./markdown/markdown";
+import { toHTML } from "./markdown/html";
 import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
 import {
@@ -23,6 +24,7 @@ import {
   ToolbarOverflow,
   ToolbarMenuItem,
 } from "@/components/ui/toolbar";
+import { CollapsibleSidebar, useCollapsibleSidebar } from "@/components/layout/CollapsibleSidebar";
 import { LocationsManager } from "@/components/ui/LocationsManager";
 import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import {
@@ -227,6 +229,17 @@ export default function WikiPage() {
   // toggles a second row hosting the WikiSearch input and the Index button —
   // folding the old top navigation bar into the same vertical stack.
   const [searchOpen, setSearchOpen] = useState(false);
+
+  // TOC drawer. The sub-toolbar's TOC button toggles a left drawer hosting the
+  // document's table of contents — the shared CollapsibleSidebar (drag-resizable
+  // split column on desktop, slide-in drawer on mobile). Starts closed on desktop
+  // and its width persists per-page.
+  const tocSidebar = useCollapsibleSidebar({
+    storageKey: "wiki-toc-width",
+    defaultWidth: 240,
+    minWidth: 180,
+    initialVisible: false,
+  });
 
   // Dual-mode content: rendered HTML view vs. the ported markdown editor.
   // Editing is only ever offered for a locally stored wiki dataset file.
@@ -827,12 +840,27 @@ export default function WikiPage() {
   }, [datasetBrowse, activeDatasetName, loadLocalDatasets, goDatasets]);
 
   const browseItemCount = browseEntries?.length ?? 0;
+  // Toolbar caption: the document name is deliberately not shown here — the
+  // breadcrumb trail above already carries it. Only the browse listing gets a
+  // label (its item count); the datasets view stays blank.
   const toolbarLabel =
-    viewMode === "file" ? headerLabel
+    viewMode === "file" ? ""
       : viewMode === "browse" ? `${browseItemCount} item${browseItemCount === 1 ? "" : "s"}`
         : "";
 
   const mdDirty = editContent !== fileContent;
+
+  // ---- TOC drawer state ------------------------------------------------------
+  // The drawer is only meaningful while a rendered markdown document shows, so
+  // the same condition gates the toolbar button and the sidebar column. The TOC
+  // node is built from the content the body is rendering (view mode: the saved
+  // file; mdView: the live draft), keeping the `#sec-...` anchors in sync.
+  const tocContent = editing ? editContent : fileContent;
+  const showTocTarget = viewMode === "file" && fileKind === "markdown" && (!editing || mdView);
+  const tocNode = useMemo(
+    () => (showTocTarget && tocContent ? toHTML(tocContent).toc : null),
+    [showTocTarget, tocContent],
+  );
 
   return (
     <div className="flex h-full w-full bg-bg-body min-w-0">
@@ -915,6 +943,19 @@ export default function WikiPage() {
                 actions to the end. */}
             <Toolbar mobile={mobile}>
               <div className="flex items-center gap-1 shrink-0">
+                {/* TOC toggle leads the toolbar: it opens the left drawer over
+                    the document's heading tree (markdown view only, and only
+                    when the document actually has headings). */}
+                {showTocTarget && !!tocNode && (
+                  <ToolbarButton
+                    icon={List}
+                    variant="toggleSoft"
+                    active={tocSidebar.visible}
+                    label="TOC"
+                    onClick={tocSidebar.toggle}
+                    title={tocSidebar.visible ? "Hide table of contents" : "Show table of contents"}
+                  />
+                )}
                 <ToolbarIconButton
                   icon={ArrowLeft}
                   onClick={goBack}
@@ -1287,6 +1328,27 @@ export default function WikiPage() {
               </div>
             )}
 
+            {/* Body row under the toolbar stack: the TOC drawer occupies the
+                left (drag-resizable split column on desktop, slide-in drawer
+                on mobile) and the document fills the rest. Anchored here —
+                below breadcrumb/toolbar/rows — so the drawer never covers the
+                chrome that opens it. */}
+            <div className="relative flex flex-1 min-h-0 overflow-hidden">
+              {!showLocations && showTocTarget && !!tocNode && (
+                <CollapsibleSidebar sidebar={tocSidebar}>
+                  <div
+                    className="wiki-toc flex-1 min-h-0 overflow-y-auto px-3 py-2"
+                    onClick={(e) => {
+                      // Mobile: picking a section closes the drawer so the anchor
+                      // jump is visible; the desktop column stays put.
+                      if ((e.target as HTMLElement).closest("a")) tocSidebar.closeOnSelect();
+                    }}
+                  >
+                    {tocNode}
+                  </div>
+                </CollapsibleSidebar>
+              )}
+
             {/* Scrollable content — or the Locations overlay while open (Cards
                 pattern). Wiki keeps its own dataset-roots UI; this manages the
                 linked directories wiki datasets are stored in. */}
@@ -1307,7 +1369,7 @@ export default function WikiPage() {
                 </div>
               </div>
             ) : (
-            <div className="flex-1 overflow-y-auto min-h-0">
+            <div className="flex-1 overflow-y-auto min-h-0 min-w-0">
               {isLoading ? (
                 <div className="flex items-center justify-center h-full">
                   <div className="text-text-tertiary">Loading...</div>
@@ -1346,7 +1408,7 @@ export default function WikiPage() {
                         // the unsaved draft.
                         <div className="px-6 pt-6 pb-[50vh]">
                           {fileTruncated && <TruncatedNote />}
-                          <MarkdownViewer content={editContent} withTOC={true} />
+                          <MarkdownViewer content={editContent} />
                         </div>
                       ) : (
                         <div className="px-4 py-3">
@@ -1362,7 +1424,7 @@ export default function WikiPage() {
                     ) : fileKind === "markdown" ? (
                       <div className="px-6 pt-6 pb-[50vh]">
                         {fileTruncated && <TruncatedNote />}
-                        <MarkdownViewer content={fileContent} withTOC={true} onWikiLink={handleWikiLink} />
+                        <MarkdownViewer content={fileContent} onWikiLink={handleWikiLink} />
                       </div>
                     ) : fileKind === "text" ? (
                       <div className="px-6 pt-6 pb-[50vh]">
@@ -1450,6 +1512,7 @@ export default function WikiPage() {
               )}
             </div>
             )}
+            </div>
           </div>
         </div>
       </div>
