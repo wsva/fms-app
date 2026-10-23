@@ -182,8 +182,11 @@ export default function ReadBookPage() {
 
           {/* Refresh — always available at the far right; reloads the current
               view (books / chapters / open chapter) from disk. The caption carries
-              the scope of the level. */}
-          {!mobile && (
+              the scope of the level. Inline on desktop. On a phone it rides in the
+              overflow, except at the books root where the bar is otherwise empty —
+              there it shows inline so the action stays one tap instead of hiding
+              behind the three-dot. */}
+          {(!mobile || !b.bookUUID) && (
             <ToolbarButton
               icon={RefreshCw}
               label={refreshCaption}
@@ -212,7 +215,7 @@ export default function ReadBookPage() {
                   {b.bookUUID ? "Manage Chapters" : "Manage Books"}
                 </ToolbarMenuItem>
               )}
-              {mobile && (
+              {mobile && b.bookUUID && (
                 <ToolbarMenuItem icon={RefreshCw} disabled={b.loading} onClick={() => { b.refresh(); setLocRefresh((n) => n + 1); }}>{refreshCaption}</ToolbarMenuItem>
               )}
             </ToolbarOverflow>
