@@ -417,8 +417,11 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                     its media/subtitles/cues are re-read too (no-op at the root
                     level — this absorbs the old per-dataset Reload button).
                     The caption carries the scope of the current level. Inline on
-                    desktop; on a phone it rides in the overflow below. */}
-                {!mobile && (
+                    desktop. On a phone it rides in the overflow, except at the
+                    datasets root where the bar is otherwise empty — there it shows
+                    inline so the action stays one tap instead of hiding behind the
+                    three-dot. */}
+                {(!mobile || !d.selectedDatasetUuid) && (
                     <ToolbarButton icon={RefreshCw} label={refreshCaption} ariaLabel={refreshCaption} title={refreshCaption} disabled={d.stateLoading} onClick={() => { d.loadLocations(); d.loadDatasets(); d.handleReload(); setLocRefresh((n) => n + 1); }} />
                 )}
 
@@ -431,7 +434,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                         {!d.selectedDatasetUuid && (
                             <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
                         )}
-                        {mobile && (
+                        {mobile && d.selectedDatasetUuid && (
                             <ToolbarMenuItem icon={RefreshCw} disabled={d.stateLoading} onClick={() => { d.loadLocations(); d.loadDatasets(); d.handleReload(); setLocRefresh((n) => n + 1); }}>{refreshCaption}</ToolbarMenuItem>
                         )}
                     </ToolbarOverflow>

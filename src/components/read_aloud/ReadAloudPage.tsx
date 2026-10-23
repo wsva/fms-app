@@ -721,8 +721,10 @@ export default function ReadAloudPage() {
 
         {/* Refresh — always available; reloads the dataset list and, when a
             dataset is open, its texts. The caption carries the scope of the level.
-            Inline on desktop; on a phone it rides in the overflow below. */}
-        {!mobile && (
+            Inline on desktop. On a phone it rides in the overflow, except at the
+            datasets root where the bar is otherwise empty — there it shows inline
+            so the action stays one tap instead of hiding behind the three-dot. */}
+        {(!mobile || viewMode === "datasets") && (
           <ToolbarButton
             icon={RefreshCw}
             label={refreshCaption}
@@ -790,7 +792,7 @@ export default function ReadAloudPage() {
                 </ToolbarMenuItem>
               </>
             )}
-            {mobile && (
+            {mobile && viewMode !== "datasets" && (
               <ToolbarMenuItem icon={RefreshCw} onClick={handleRefresh}>
                 {refreshCaption}
               </ToolbarMenuItem>
