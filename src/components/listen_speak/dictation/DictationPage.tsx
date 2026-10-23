@@ -519,8 +519,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                                             {loc.is_read_only && (
                                                 <span className="shrink-0 text-[11px] px-1.5 py-0.5 rounded border border-border-light bg-bg-body text-text-secondary">app-managed</span>
                                             )}
-                                            <span className="text-xs text-text-tertiary truncate flex-1" title={loc.path}>{loc.path}</span>
-                                            <span className="text-xs text-text-tertiary shrink-0">{items.length}</span>
+                                            <span className="ml-auto text-xs text-text-tertiary shrink-0">{items.length}</span>
                                         </div>
                                         {/* Datasets under this location */}
                                         {items.length === 0 ? (
