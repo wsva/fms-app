@@ -10,7 +10,7 @@ use crate::auth;
 use crate::capture;
 use crate::logger::LogBuffer;
 use crate::ocr::{self, OcrState};
-use crate::simple_words::SimpleWordsState;
+use crate::ocr::hyphen::{self, HyphenState};
 #[cfg(feature = "textsplit")]
 use crate::textsplit::{self, TextSplitState};
 use crate::settings::SettingsState;
@@ -34,6 +34,17 @@ struct OcrRecognizeTsvParam {
     image_base64: String,
     #[serde(default)]
     lang: String,
+    /// How to treat line-break hyphens: "auto" (default, dictionary-driven),
+    /// "join" (fold every one into a single word) or "keep" (leave all as printed).
+    #[serde(default)]
+    hyphen_policy: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct OcrDictionaryParam {
+    /// Hunspell dictionary code, e.g. "de", "en", "fr" (see
+    /// ocr_hyphen_dictionary_status for the list).
+    code: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -141,19 +152,58 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "languages": langs}).to_string())
     }
 
-    #[tool(name = "ocr_recognize_tsv", description = "Recognize text in an image using Tesseract's TSV layout output, then rebuild it in Rust: words are grouped into lines and paragraphs (gap, Tesseract ids, indentation) and line-break hyphenation is repaired using the configured Simple Words of the active language. No LLM needed. Pass image as base64 (with or without data URL prefix) and optional language code (default: 'eng'). Returns {text, tsv} — the reconstructed text plus the raw TSV dump. Prefer this over ocr_recognize when paragraph structure and layout fidelity matter.")]
+    #[tool(name = "ocr_recognize_tsv", description = "Recognize text in an image using Tesseract's TSV layout output, then rebuild it in Rust: words are grouped into lines and paragraphs (gap, Tesseract ids, indentation) and every line-break hyphen is decided against the downloaded Hunspell dictionaries of the page's language set (Sprach- + verarbeitung joins when German knows 'Sprachverarbeitung'; E- + Mail stays as printed; a word known to any selected language's dictionary joins). No LLM needed. Pass image as base64 (with or without data URL prefix), optional language code (default: 'eng', combine with '+' e.g. 'deu+eng') and optional hyphen_policy 'auto' | 'join' | 'keep'. Returns {text, baseline, tsv, hyphens, dictionaries, uncovered}: the decided text, the same page with all hyphens kept, the raw dump, one entry per hyphen ({left, hyphen, right, joined, decision, reason}), one entry per dictionary of the language set ({code, label, language, installed}) and the selected languages no dictionary exists for. 'dictionaries' tells you which installs would improve the decisions (use ocr_hyphen_dictionary_download); 'hyphens' lets a caller review or override them by re-running with a hyphen_policy. Prefer this over ocr_recognize when paragraph structure and layout fidelity matter.")]
     async fn ocr_recognize_tsv(&self, Parameters(param): Parameters<OcrRecognizeTsvParam>) -> Result<String, String> {
-        log::info!("[MCP] ocr_recognize_tsv: lang={:?}", param.lang);
+        log::info!("[MCP] ocr_recognize_tsv: lang={:?} policy={:?}", param.lang, param.hyphen_policy);
         let state = self.app.state::<OcrState>();
-        let sw_state = self.app.state::<SimpleWordsState>();
+        let hyphen_state = self.app.state::<HyphenState>();
         let lang = if param.lang.is_empty() { None } else { Some(param.lang) };
-        let result = ocr::ocr_recognize_tsv(state, sw_state, param.image_base64, lang).await?;
+        let result = ocr::ocr_recognize_tsv(state, hyphen_state, param.image_base64, lang, param.hyphen_policy).await?;
         Ok(serde_json::json!({
             "status": "ok",
             "text": result.text,
+            "baseline": result.baseline,
             "tsv": result.tsv,
+            "hyphens": result.hyphens,
+            "dictionaries": result.dictionaries,
+            "uncovered": result.uncovered,
         })
         .to_string())
+    }
+
+    #[tool(name = "ocr_hyphen_dictionary_status", description = "List the Hunspell dictionaries available for line-break hyphen repair in TSV mode (code, label, upstream version, licence, Tesseract languages it serves, whether it is installed, its size on disk and its download size). 15 languages: de, en, fr, es, it, pt, nl, sv, da, pl, cs, ru, uk, el, tr. Call this before ocr_recognize_tsv to know whether hyphens will be decided by dictionaries or by the fallback shape heuristic, and to see which installs are worth making.")]
+    async fn ocr_hyphen_dictionary_status(&self) -> String {
+        log::info!("[MCP] ocr_hyphen_dictionary_status");
+        let dictionaries = ocr::hyphen::status_all();
+        let installed: Vec<&str> = dictionaries
+            .iter()
+            .filter(|entry| entry.installed)
+            .map(|entry| entry.code)
+            .collect();
+        serde_json::json!({
+            "status": "ok",
+            "installed": installed,
+            "dictionaries": dictionaries,
+        })
+        .to_string()
+    }
+
+    #[tool(name = "ocr_hyphen_dictionary_download", description = "Download and install the Hunspell dictionary for one language (0.5-19 MB, fetched from an npm CDN with mirrors as fallback). The download size is in ocr_hyphen_dictionary_status as approx_bytes. Install the codes of the languages you recognise pages in: every installed dictionary of the recognised language set is consulted, so a German page with English terms benefits from both 'de' and 'en'. Returns the updated status.")]
+    async fn ocr_hyphen_dictionary_download(&self, Parameters(param): Parameters<OcrDictionaryParam>) -> Result<String, String> {
+        log::info!("[MCP] ocr_hyphen_dictionary_download: {}", param.code);
+        let state = self.app.state::<HyphenState>();
+        let status = hyphen::download(&param.code).await?;
+        state.forget(&param.code);
+        Ok(serde_json::json!({"status": "ok", "dictionary": status}).to_string())
+    }
+
+    #[tool(name = "ocr_hyphen_dictionary_delete", description = "Delete an installed Hunspell dictionary to free disk space. It can be downloaded again at any time with ocr_hyphen_dictionary_download, so this is safe.")]
+    async fn ocr_hyphen_dictionary_delete(&self, Parameters(param): Parameters<OcrDictionaryParam>) -> Result<String, String> {
+        log::info!("[MCP] ocr_hyphen_dictionary_delete: {}", param.code);
+        let state = self.app.state::<HyphenState>();
+        hyphen::delete(&param.code)?;
+        state.forget(&param.code);
+        Ok(serde_json::json!({"status": "ok", "message": format!("Dictionary '{}' removed", param.code)}).to_string())
     }
 
     #[cfg(feature = "textsplit")]

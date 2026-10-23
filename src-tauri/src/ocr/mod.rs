@@ -4,18 +4,24 @@
 //! - `ocr_recognize` dumps plain text (`<base>.txt`). Layout is lost there, so
 //!   re-joining broken lines is left to an LLM pass in the UI.
 //! - `ocr_recognize_tsv` asks Tesseract for its TSV layout dump and rebuilds the
-//!   paragraphs in Rust (`tsv`): words → lines → paragraphs, plus line-break
-//!   hyphen repair against the user's word list. No model involved.
+//!   paragraphs in Rust (`tsv`): words → lines → paragraphs. Line-break hyphens
+//!   are then decided by `hyphen` against the downloaded Hunspell dictionaries
+//!   of the page's language set (`deu+eng` = German + English). No model
+//!   involved.
+//!
+//! The dictionaries are fetched on demand (`ocr_hyphen_dictionary_*`) rather
+//! than bundled: they are data under their own licences (0.5–19 MB each), and
+//! most users only ever need the languages they read.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
 use tauri::State;
 
-use crate::simple_words::SimpleWordsState;
+use hyphen::{HyphenState, Policy};
 
+pub(crate) mod hyphen;
 pub(crate) mod tsv;
 
 // ---------------------------------------------------------------------------
@@ -116,27 +122,105 @@ pub async fn ocr_recognize(
 /// What `ocr_recognize_tsv` returns: the reconstructed text plus the raw dump.
 #[derive(serde::Serialize)]
 pub struct OcrTsvResult {
-    /// Final text: paragraphs grouped, broken lines joined, hyphenation repaired.
+    /// Final text: paragraphs grouped, broken lines joined, and line-break
+    /// hyphens folded into one word where the decision said so.
     pub text: String,
+    /// The same page with every line-break hyphen kept (`Sprach- verarbeitung`).
+    /// The UI re-applies decisions to this when the user flips one.
+    pub baseline: String,
     /// Raw Tesseract TSV, so the UI can show what the layout looked like.
     pub tsv: String,
+    /// One entry per line-break hyphen, in reading order.
+    pub hyphens: Vec<HyphenInfo>,
+    /// Every dictionary the page's language set maps to, in selection order,
+    /// each with its install state to the UI can offer the missing ones.
+    pub dictionaries: Vec<OcrDictionaryInfo>,
+    /// Selected Tesseract codes with no dictionary at all (CJK, Arabic, …):
+    /// those pages are decided by the shape rule alone.
+    pub uncovered: Vec<String>,
+}
+
+/// One line-break hyphen and how it was decided.
+#[derive(serde::Serialize)]
+pub struct HyphenInfo {
+    /// Text before the hyphen, hyphen stripped.
+    pub left: String,
+    /// The hyphen character that ended the line (`-`, `‐`, `‑`).
+    pub hyphen: String,
+    /// First word of the following line.
+    pub right: String,
+    /// What joining produces: `left` + `right`.
+    pub joined: String,
+    /// `join` or `keep`.
+    pub decision: String,
+    /// Evidence: `dictionary`, `unknown-word`, `lowercase`, `uppercase`,
+    /// `digit` or `policy`.
+    pub reason: String,
+}
+
+/// One dictionary the page's language set maps to.
+#[derive(serde::Serialize)]
+pub struct OcrDictionaryInfo {
+    /// Hunspell/npm code, e.g. `de` — what `ocr_hyphen_dictionary_download` takes.
+    pub code: String,
+    pub label: String,
+    /// The Tesseract code in the selection that mapped to this dictionary
+    /// (`deu` for `de`), so the UI can say "Deutsch (deu)".
+    pub language: String,
+    /// `false` when the dictionary could be downloaded but is not installed.
+    pub installed: bool,
 }
 
 /// Recognize text via Tesseract's TSV layout output and rebuild it in Rust.
 ///
-/// The reconstruction groups words into lines, lines into paragraphs (gap,
-/// Tesseract ids, indentation) and repairs line-break hyphenation against the
-/// words the user has configured for the active language — so a page comes out
-/// as clean paragraphs without an LLM.
+/// The reconstruction groups words into lines and lines into paragraphs (gap,
+/// Tesseract ids, indentation). Every line-break hyphen comes back as a
+/// candidate and is folded into one word when any installed dictionary of the
+/// page's language set knows the joined form — so `Sprach-` / `verarbeitung`
+/// becomes `Sprachverarbeitung` while `E-` / `Mail` stays as printed. The
+/// languages selected for recognition (`deu+eng`) are exactly the dictionaries
+/// consulted; a language with no dictionary falls back to the shape rule.
 #[tauri::command]
 pub async fn ocr_recognize_tsv(
     state: State<'_, OcrState>,
-    sw_state: State<'_, SimpleWordsState>,
+    hyphen_state: State<'_, HyphenState>,
     image_base64: String,
     lang: Option<String>,
+    hyphen_policy: Option<String>,
 ) -> Result<OcrTsvResult, String> {
     let tesseract_exe = tesseract_exe(&state)?;
-    let known_words = known_words(&sw_state);
+    let lang_arg = lang.as_deref().unwrap_or("eng").to_string();
+    let policy = Policy::parse(hyphen_policy.as_deref());
+
+    // Loading the dictionaries parses them the first time round (over a second
+    // for German), so it happens off the async runtime.
+    let hyphen_state = hyphen_state.inner().clone();
+    let selection = tokio::task::spawn_blocking({
+        let hyphen_state = hyphen_state.clone();
+        let lang = lang_arg.clone();
+        move || hyphen::selection(&lang, &hyphen_state)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?;
+
+    // Every dictionary of the language set, installed or not, so the UI can
+    // offer the missing ones; the decisions below use all that are there.
+    let dictionaries: Vec<OcrDictionaryInfo> = selection
+        .entries
+        .iter()
+        .map(|(source, dictionary)| OcrDictionaryInfo {
+            code: source.code.to_string(),
+            label: source.label.to_string(),
+            language: lang_arg
+                .split('+')
+                .map(str::trim)
+                .find(|code| source.tesseract.contains(code))
+                .unwrap_or(source.code)
+                .to_string(),
+            installed: dictionary.is_some(),
+        })
+        .collect();
+    let uncovered = selection.uncovered.clone();
 
     // Decode base64 image and save to a unique temp file.
     let image_data = decode_base64_image(&image_base64)?;
@@ -144,13 +228,10 @@ pub async fn ocr_recognize_tsv(
     std::fs::write(&input_path, &image_data)
         .map_err(|e| format!("Failed to write temp file: {}", e))?;
 
-    let lang_arg = lang.as_deref().unwrap_or("eng").to_string();
-
     let result = tokio::task::spawn_blocking({
         let tesseract_exe = tesseract_exe.clone();
         let input_path = input_path.clone();
         let output_base = output_base.clone();
-        let known_words = known_words.clone();
         move || {
             run_tesseract(
                 &tesseract_exe,
@@ -163,17 +244,57 @@ pub async fn ocr_recognize_tsv(
             let tsv = std::fs::read_to_string(output_base.with_extension("tsv"))
                 .map_err(|e| format!("Failed to read TSV output: {}", e))?;
 
-            let text = tsv::reconstruct_paragraphs(&tsv, &known_words)
+            let mut page = tsv::reconstruct(&tsv)
                 .map_err(|e| format!("Failed to rebuild text from TSV: {}", e))?;
 
+            // A word known to any dictionary of the set joins, so a German page
+            // quoting an English compound needs no second run.
+            let loaded = selection.loaded();
+            hyphen::resolve(&mut page.candidates, &loaded, policy);
+            let text = hyphen::apply(&page.text, &page.candidates);
+
+            let joined = page.candidates.iter().filter(|c| c.join).count();
+            let deciding: Vec<&str> = selection
+                .entries
+                .iter()
+                .filter(|(_, dictionary)| dictionary.is_some())
+                .map(|(source, _)| source.code)
+                .collect();
             log::info!(
-                "[OCR] tsv: {} TSV rows, {} output chars, {} dictionary words",
+                "[OCR] tsv: {} TSV rows, {} output chars, {} line-break hyphens ({} joined, policy {}, dictionaries {})",
                 tsv.lines().count(),
                 text.chars().count(),
-                known_words.len()
+                page.candidates.len(),
+                joined,
+                policy.as_str(),
+                if deciding.is_empty() {
+                    "none".to_string()
+                } else {
+                    deciding.join("+")
+                },
             );
 
-            Ok(OcrTsvResult { text, tsv })
+            let hyphens = page
+                .candidates
+                .iter()
+                .map(|candidate| HyphenInfo {
+                    left: candidate.left.clone(),
+                    hyphen: candidate.hyphen.to_string(),
+                    right: candidate.right.clone(),
+                    joined: candidate.joined.clone(),
+                    decision: if candidate.join { "join" } else { "keep" }.to_string(),
+                    reason: candidate.reason.to_string(),
+                })
+                .collect();
+
+            Ok(OcrTsvResult {
+                text,
+                baseline: page.text,
+                tsv,
+                hyphens,
+                dictionaries,
+                uncovered,
+            })
         }
     })
     .await
@@ -182,6 +303,37 @@ pub async fn ocr_recognize_tsv(
     cleanup(&input_path, &output_base, &["tsv"]);
 
     result
+}
+
+/// Hunspell dictionaries available for line-break hyphen repair, with their
+/// install state and licence.
+#[tauri::command]
+pub fn ocr_hyphen_dictionary_status() -> Vec<hyphen::DictionaryStatus> {
+    hyphen::status_all()
+}
+
+/// Download and install the dictionary for `code` (e.g. "de"). Used for
+/// line-break hyphen repair in TSV mode; safe to call when already installed.
+#[tauri::command]
+pub async fn ocr_hyphen_dictionary_download(
+    state: State<'_, HyphenState>,
+    code: String,
+) -> Result<hyphen::DictionaryStatus, String> {
+    let status = hyphen::download(&code).await?;
+    // Drop the cached copy so the next recognition parses the new files.
+    state.forget(&code);
+    Ok(status)
+}
+
+/// Delete an installed dictionary. It can be downloaded again at any time.
+#[tauri::command]
+pub fn ocr_hyphen_dictionary_delete(
+    state: State<'_, HyphenState>,
+    code: String,
+) -> Result<(), String> {
+    hyphen::delete(&code)?;
+    state.forget(&code);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -247,20 +399,6 @@ fn cleanup(input_path: &Path, output_base: &Path, extensions: &[&str]) {
     let _ = std::fs::remove_file(input_path);
     for extension in extensions {
         let _ = std::fs::remove_file(output_base.with_extension(extension));
-    }
-}
-
-/// Lowercase dictionary for hyphen repair: every word the user has configured
-/// for the active language (Simple Words). Compound entries are skipped since
-/// the repair only ever tests fragment+headword.
-fn known_words(sw_state: &SimpleWordsState) -> HashSet<String> {
-    match sw_state.words.lock() {
-        Ok(words) => words
-            .iter()
-            .map(|word| word.trim().to_lowercase())
-            .filter(|word| !word.is_empty() && !word.contains('-') && !word.contains('\u{00AD}'))
-            .collect(),
-        Err(_) => HashSet::new(),
     }
 }
 

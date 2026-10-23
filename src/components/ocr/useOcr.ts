@@ -21,10 +21,124 @@ const IMAGE_FILTERS = [
  */
 export type OcrMode = "plain" | "tsv";
 
+/** One line-break hyphen of a TSV result, with the decision the rebuild made. */
+export interface OcrHyphen {
+  /** Fragment before the hyphen, hyphen already stripped. */
+  left: string;
+  /** The hyphen character that ended the line (`-`, `‐`, `‑`). */
+  hyphen: string;
+  /** First word of the following line. */
+  right: string;
+  /** What "Join" produces: `left` + `right`. */
+  joined: string;
+  decision: "join" | "keep";
+  /** Evidence: `dictionary`, `unknown-word`, `lowercase`, `uppercase`, `digit`, `policy`. */
+  reason: string;
+}
+
+/** One dictionary the page's language set maps to, with its install state. */
+export interface OcrDictionary {
+  /** Hunspell/npm code, e.g. `de`. */
+  code: string;
+  label: string;
+  /** The Tesseract code of the selection that mapped to it (`deu` for `de`). */
+  language: string;
+  installed: boolean;
+}
+
+/** A catalog entry as reported by `ocr_hyphen_dictionary_status`. */
+export interface OcrDictionaryStatus {
+  code: string;
+  label: string;
+  version: string;
+  license: string;
+  /** Tesseract codes this dictionary serves. */
+  tesseract: string[];
+  installed: boolean;
+  /** Bytes on disk — 0 when not installed. */
+  size_bytes: number;
+  /** What the download costs. */
+  approx_bytes: number;
+}
+
 /** Tauri command result of `ocr_recognize_tsv`. */
 interface OcrTsvResult {
+  /** Text with the hyphen decisions applied. */
   text: string;
+  /** The same page with every line-break hyphen kept (`Sprach- verarbeitung`). */
+  baseline: string;
   tsv: string;
+  hyphens: OcrHyphen[];
+  /** Every dictionary of the recognised language set, installed or not. */
+  dictionaries: OcrDictionary[];
+  /** Selected Tesseract codes with no dictionary at all (CJK, Arabic, …). */
+  uncovered: string[];
+}
+
+/**
+ * Index just past `hyphen.left` at or after `from`, or -1.
+ *
+ * Mirrors `ocr::hyphen::locate`: an earlier occurrence of the fragment that is
+ * not followed by the hyphen and a space (the same letters inside a longer
+ * word, say) must not end the search, or that decision would look broken — the
+ * click is registered but the text never moves.
+ */
+function locateHyphen(baseline: string, hyphen: OcrHyphen, from: number): number {
+  if (!hyphen.left) return -1;
+
+  let search = from;
+
+  for (;;) {
+    const at = baseline.indexOf(hyphen.left, search);
+    if (at < 0) return -1;
+
+    const afterLeft = at + hyphen.left.length;
+    const afterHyphen = afterLeft + hyphen.hyphen.length;
+
+    if (baseline.startsWith(hyphen.hyphen, afterLeft) && baseline[afterHyphen] === " ") {
+      return afterLeft;
+    }
+
+    search = afterLeft;
+  }
+}
+
+/**
+ * Render a page from its kept-hyphen baseline with the current decisions.
+ *
+ * Mirrors `ocr::hyphen::apply` in the backend: the rebuild leaves every
+ * candidate as `left` + hyphen + one space + `right`, so a single forward scan
+ * locates them in reading order. A join drops exactly the hyphen and that
+ * space — nothing else is rewritten, so every other word survives verbatim.
+ */
+function renderHyphens(baseline: string, hyphens: OcrHyphen[]): string {
+  const removals: Array<{ at: number; length: number }> = [];
+  let cursor = 0;
+
+  for (const hyphen of hyphens) {
+    const afterLeft = locateHyphen(baseline, hyphen, cursor);
+    if (afterLeft < 0) continue;
+
+    if (hyphen.decision === "join") {
+      removals.push({ at: afterLeft, length: hyphen.hyphen.length + 1 });
+    }
+
+    // Resume after the next word so a repeated fragment cannot match the same
+    // region twice.
+    cursor = afterLeft + hyphen.hyphen.length + 1;
+    if (baseline.startsWith(hyphen.right, cursor)) cursor += hyphen.right.length;
+  }
+
+  if (removals.length === 0) return baseline;
+
+  let out = "";
+  let last = 0;
+  for (const removal of removals) {
+    out += baseline.slice(last, removal.at);
+    last = removal.at + removal.length;
+  }
+
+  return out + baseline.slice(last);
 }
 
 function errorMessage(e: unknown): string {
@@ -64,6 +178,20 @@ export function useOcr() {
   const [tsvText, setTsvText] = useState("");
   // Raw Tesseract TSV behind the last TSV-mode recognition.
   const [rawTsv, setRawTsv] = useState("");
+  // Line-break hyphens of the last TSV result. `baseline` is the same page with
+  // every hyphen kept, so toggling one re-renders from it instead of patching
+  // the visible text.
+  const [hyphens, setHyphens] = useState<OcrHyphen[]>([]);
+  const [baseline, setBaseline] = useState("");
+  // The dictionaries the page's languages map to, and the languages no
+  // dictionary covers — together they explain every hyphen decision.
+  const [dictionaries, setDictionaries] = useState<OcrDictionary[]>([]);
+  const [uncovered, setUncovered] = useState<string[]>([]);
+  // Set once the result is edited by hand or by the LLM: the candidates can no
+  // longer be located in the text, so the review list turns read-only.
+  const [edited, setEdited] = useState(false);
+  // Code of the dictionary being downloaded right now.
+  const [installingDictionary, setInstallingDictionary] = useState<string | null>(null);
 
   // ---- Shared UI state ----
   const [error, setError] = useState("");
@@ -135,7 +263,10 @@ export function useOcr() {
   const setResultText = useCallback(
     (text: string) => {
       if (mode === "plain") setPlainText(text);
-      else setTsvText(text);
+      else {
+        setTsvText(text);
+        setEdited(true);
+      }
     },
     [mode]
   );
@@ -155,6 +286,11 @@ export function useOcr() {
           });
           setTsvText(res.text);
           setRawTsv(res.tsv);
+          setBaseline(res.baseline);
+          setHyphens(res.hyphens);
+          setDictionaries(res.dictionaries);
+          setUncovered(res.uncovered);
+          setEdited(false);
         } else {
           const text = await invoke<string>("ocr_recognize", {
             imageBase64,
@@ -220,11 +356,66 @@ Return ONLY the corrected plain text, no explanations.`,
     }
   }, [resultText, setResultText, setError]);
 
+  // ---- Hyphen review ----
+
+  // Re-render from the baseline: the source of truth is the decision list, and
+  // the visible text is derived, so "Join all" and single toggles agree.
+  const applyHyphens = useCallback(
+    (next: OcrHyphen[]) => {
+      setHyphens(next);
+      setTsvText(renderHyphens(baseline, next));
+    },
+    [baseline]
+  );
+
+  const setHyphenDecision = useCallback(
+    (index: number, decision: "join" | "keep") => {
+      if (edited) return;
+      applyHyphens(
+        hyphens.map((hyphen, i) => (i === index ? { ...hyphen, decision } : hyphen))
+      );
+    },
+    [applyHyphens, edited, hyphens]
+  );
+
+  const setAllHyphens = useCallback(
+    (decision: "join" | "keep") => {
+      if (edited) return;
+      applyHyphens(hyphens.map((hyphen) => ({ ...hyphen, decision })));
+    },
+    [applyHyphens, edited, hyphens]
+  );
+
+  // One-time download of one language's Hunspell dictionary. The caller
+  // re-runs recognition afterwards, which is what picks the dictionary up.
+  const installDictionary = useCallback(async (code: string) => {
+    if (!isTauri()) return false;
+    setInstallingDictionary(code);
+    setError("");
+    try {
+      await invoke("ocr_hyphen_dictionary_download", { code });
+      setDictionaries((prev) =>
+        prev.map((entry) => (entry.code === code ? { ...entry, installed: true } : entry))
+      );
+      return true;
+    } catch (e) {
+      setError(`Dictionary download failed: ${errorMessage(e)}`);
+      return false;
+    } finally {
+      setInstallingDictionary(null);
+    }
+  }, []);
+
   const reset = useCallback(() => {
     setSourceImage(null);
     setPlainText("");
     setTsvText("");
     setRawTsv("");
+    setHyphens([]);
+    setBaseline("");
+    setDictionaries([]);
+    setUncovered([]);
+    setEdited(false);
     setError("");
   }, []);
 
@@ -246,6 +437,15 @@ Return ONLY the corrected plain text, no explanations.`,
     copied,
     fixWithLlm,
     fixingText,
+    // hyphen review (TSV mode)
+    hyphens,
+    dictionaries,
+    uncovered,
+    edited,
+    installingDictionary,
+    setHyphenDecision,
+    setAllHyphens,
+    installDictionary,
     // shared
     error,
     setError,

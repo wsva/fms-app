@@ -15,6 +15,7 @@ import {
   Table2,
   Type,
   Copy,
+  BookOpen,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
@@ -23,6 +24,8 @@ import { PageHeader, Toolbar, ToolbarButton, ToolbarIconButton, ToolbarMenuItem,
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useOcr } from "./useOcr";
 import ImageEditor from "./ImageEditor";
+import HyphenPanel from "./HyphenPanel";
+import HyphenDictionariesDialog from "./HyphenDictionariesDialog";
 
 // Friendly labels for common languages; unknown codes are shown as-is.
 const LANG_LABELS: Record<string, string> = {
@@ -64,6 +67,14 @@ export default function OcrPage() {
     copied,
     fixWithLlm,
     fixingText,
+    hyphens,
+    dictionaries,
+    uncovered,
+    edited: hyphensEdited,
+    installingDictionary,
+    setHyphenDecision,
+    setAllHyphens,
+    installDictionary,
     error,
     setError,
     reset,
@@ -83,6 +94,12 @@ export default function OcrPage() {
   // Raw TSV opens as an overlay, not inline: a 100+ row dump inline would shove
   // the text down every time it is toggled.
   const [showRawTsv, setShowRawTsv] = useState(false);
+  // Dictionary manager: one Hunspell dictionary per language, installed once
+  // and then used by every TSV recognition of that language.
+  const [showDictionaries, setShowDictionaries] = useState(false);
+  // Installs inside the manager are batched: the page is re-recognised once on
+  // close, not once per dictionary.
+  const dictionaryDirty = useRef(false);
 
   // ---- Image pane, narrow layouts only (from `lg` the pane is always open) ----
   const [imageOpen, setImageOpen] = useState(false);
@@ -200,6 +217,16 @@ export default function OcrPage() {
     setShowRawTsv(false);
   }, [reset]);
 
+  // Installing a dictionary only affects the next run, so refresh the page
+  // straight away while the image is still loaded.
+  const handleInstallDictionary = useCallback(
+    async (code: string) => {
+      const installed = await installDictionary(code);
+      if (installed && editedImage) recognize(editedImage, langString);
+    },
+    [editedImage, installDictionary, recognize, langString]
+  );
+
   const canRecognize = !!editedImage && !recognizing;
 
   // Ctrl/Cmd+Enter runs recognition, Ctrl/Cmd+Shift+C copies the result — the
@@ -266,6 +293,9 @@ export default function OcrPage() {
               onClick={handleClear}
             >
               Clear image and results
+            </ToolbarMenuItem>
+            <ToolbarMenuItem icon={BookOpen} onClick={() => setShowDictionaries(true)}>
+              Hyphen dictionaries
             </ToolbarMenuItem>
           </ToolbarOverflow>
         )}
@@ -362,6 +392,16 @@ export default function OcrPage() {
             </div>
           )}
         </div>
+
+        {/* One dictionary per language: installed once, used by every TSV run. */}
+        {!mobile && (
+          <ToolbarButton
+            icon={BookOpen}
+            label="Dictionaries"
+            onClick={() => setShowDictionaries(true)}
+            title="Hunspell dictionaries for line-break hyphen repair (one per language)"
+          />
+        )}
 
         <ToolbarButton
           variant="solid"
@@ -524,6 +564,21 @@ export default function OcrPage() {
                 className="flex-1 min-h-[240px] lg:min-h-0 w-full px-3 py-2 bg-transparent text-text-primary resize-y lg:resize-none focus:outline-none"
               />
 
+              {/* Line-break hyphens: what the dictionary/heuristic decided, and
+                  one click to overrule any of it. */}
+              {mode === "tsv" && hyphens.length > 0 && (
+                <HyphenPanel
+                  hyphens={hyphens}
+                  dictionaries={dictionaries}
+                  uncovered={uncovered}
+                  disabled={hyphensEdited}
+                  installing={installingDictionary}
+                  onDecide={setHyphenDecision}
+                  onDecideAll={setAllHyphens}
+                  onInstall={handleInstallDictionary}
+                />
+              )}
+
               <div className="shrink-0 flex flex-wrap items-center gap-2 px-3 py-1.5 border-t border-border-default">
                 <p className="text-xs text-text-tertiary">
                   {resultText.length} characters · {words} words
@@ -562,6 +617,23 @@ export default function OcrPage() {
 
       {showRawTsv && rawTsv && (
         <RawTsvOverlay tsv={rawTsv} rows={tsvRowCount} onClose={() => setShowRawTsv(false)} />
+      )}
+
+      {showDictionaries && (
+        <HyphenDictionariesDialog
+          onClose={() => {
+            setShowDictionaries(false);
+            // A dictionary appearing or disappearing changes the decisions of
+            // the page on screen, so re-run it while the image is still loaded.
+            if (dictionaryDirty.current && editedImage) {
+              recognize(editedImage, langString);
+            }
+            dictionaryDirty.current = false;
+          }}
+          onChanged={() => {
+            dictionaryDirty.current = true;
+          }}
+        />
       )}
     </main>
   );

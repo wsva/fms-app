@@ -3,9 +3,16 @@
 //! Tesseract's `tsv` config writes one row per layout element (page, block,
 //! paragraph, line, word) with pixel geometry and per-word confidence. The
 //! plain-text mode throws that structure away and leaves line re-joining to an
-//! LLM; here the TSV is used directly: words go back into lines, lines into
-//! paragraphs, and words the typesetter split across a line break are repaired
-//! against a dictionary.
+//! LLM; here the TSV is used directly: words go back into lines and lines into
+//! paragraphs.
+//!
+//! Words the typesetter split across a line break are *recorded*, not decided:
+//! the rebuild returns a [`Candidate`] per line-end hyphen (fragment, hyphen
+//! character, first word of the next line) and leaves the text in its "kept"
+//! form (`Sprach- verarbeitung`). [`super::hyphen`] resolves the candidates
+//! against a Hunspell dictionary and [`super::hyphen::apply`] folds the
+//! decisions back into the text. Soft hyphens (U+00AD) are the one exception —
+//! they exist only to mark a break, so they always join.
 //!
 //! Column positions are read from the header row rather than assumed, so a
 //! Tesseract that adds a column (or reorders them) still parses.
@@ -14,12 +21,21 @@
 //! level, page_num, block_num, par_num, line_num, word_num,
 //! left, top, width, height, conf, text
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
 /// Column layout used when the dump has no header row (Tesseract's default).
 const DEFAULT_COLUMNS: [usize; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+
+/// A soft hyphen never survives a line break: it is invisible on the page and
+/// exists only to say "this word continues".
+const SOFT_HYPHEN: char = '\u{00AD}';
+
+/// Hyphens a typesetter uses to break a word at the margin: hyphen-minus,
+/// U+2010 HYPHEN and U+2011 NON-BREAKING HYPHEN. Tesseract emits all three, so
+/// matching only `-` let whole classes of breaks slip through as plain words.
+const BREAK_HYPHENS: [char; 3] = ['-', '\u{2010}', '\u{2011}'];
 
 /// Dashes that stand alone in running text: em dash, en dash, horizontal bar.
 /// A dash glued to its neighbours is a layout accident of the OCR, not part of
@@ -31,6 +47,38 @@ const COLUMN_NAMES: [&str; 12] = [
     "level", "page_num", "block_num", "par_num", "line_num", "word_num", "left", "top", "width",
     "height", "conf", "text",
 ];
+
+/// One line-end hyphen, plus what the two sides of the break were.
+///
+/// `join` and `reason` are filled in by [`super::hyphen::resolve`]; until then
+/// the text carries the hyphen and a space (`Sprach- verarbeitung`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    /// Text before the hyphen, hyphen already stripped (`Sprach`).
+    pub left: String,
+    /// The hyphen character that ended the line, kept verbatim so the repair
+    /// restores exactly what was printed.
+    pub hyphen: char,
+    /// First word of the following line (`verarbeitung`).
+    pub right: String,
+    /// `left` + `right`, i.e. the word "Join" produces (`Sprachverarbeitung`).
+    pub joined: String,
+    /// Whether to fold the two fragments into one word.
+    pub join: bool,
+    /// Short machine tag for the evidence: `dictionary`, `unknown-word`,
+    /// `lowercase`, `uppercase`, `digit`, `policy`, or `pending`.
+    pub reason: &'static str,
+}
+
+/// One page: the paragraphs as rebuilt, plus every line-break hyphen in them.
+#[derive(Debug, Clone)]
+pub struct Reconstruction {
+    /// Paragraphs joined with the hyphens still in place, i.e. the layout as
+    /// printed. [`super::hyphen::apply`] turns the decisions into the text.
+    pub text: String,
+    /// Line-break hyphens in reading order.
+    pub candidates: Vec<Candidate>,
+}
 
 /// One OCR'd text line: its layout box plus its words in reading order.
 #[derive(Debug, Clone)]
@@ -66,23 +114,20 @@ impl fmt::Display for OcrError {
 
 impl Error for OcrError {}
 
-/// Reconstruct paragraphs from one page of Tesseract TSV.
+/// Rebuild paragraphs from one page of Tesseract TSV.
 ///
-/// `known_words` holds lowercase, unhyphenated dictionary entries of the
-/// document's language (e.g. "sprachverarbeitung"). It is only consulted for
-/// ordinary line-break hyphens: `Sprach-\nverarbeitung` is joined when the
-/// joined word is known, and left as `Sprach- verarbeitung` otherwise, since a
-/// real compound written with a hyphen is indistinguishable without a
-/// dictionary. Soft hyphens are always removed at line boundaries, and
-/// standalone dashes (`—`, `–`, `―`) are padded on both sides.
-pub fn reconstruct_paragraphs(
-    tsv: &str,
-    known_words: &HashSet<String>,
-) -> Result<String, OcrError> {
+/// Pure and dictionary-free: every line-break hyphen is returned as a
+/// [`Candidate`] so the caller decides it (see [`super::hyphen`]). Standalone
+/// dashes (`—`, `–`, `―`) are padded on both sides here, and soft hyphens are
+/// always removed at line boundaries.
+pub fn reconstruct(tsv: &str) -> Result<Reconstruction, OcrError> {
     let mut lines = parse_lines(tsv)?;
 
     if lines.is_empty() {
-        return Ok(String::new());
+        return Ok(Reconstruction {
+            text: String::new(),
+            candidates: Vec::new(),
+        });
     }
 
     // Establish reading order for ordinary, single-column pages.
@@ -98,11 +143,14 @@ pub fn reconstruct_paragraphs(
 
     let paragraphs = group_paragraphs(lines, typical_height, typical_left);
 
-    Ok(paragraphs
+    let mut candidates = Vec::new();
+    let text = paragraphs
         .iter()
-        .map(|paragraph| join_paragraph(paragraph, known_words))
+        .map(|paragraph| join_paragraph(paragraph, &mut candidates))
         .collect::<Vec<_>>()
-        .join("\n\n"))
+        .join("\n\n");
+
+    Ok(Reconstruction { text, candidates })
 }
 
 // ---------------------------------------------------------------------------
@@ -275,10 +323,10 @@ fn group_paragraphs(
 }
 
 // ---------------------------------------------------------------------------
-// Line joining and hyphen repair
+// Line joining and hyphen detection
 // ---------------------------------------------------------------------------
 
-fn join_paragraph(paragraph: &[OcrLine], known_words: &HashSet<String>) -> String {
+fn join_paragraph(paragraph: &[OcrLine], candidates: &mut Vec<Candidate>) -> String {
     let mut text = String::new();
 
     for line in paragraph {
@@ -296,21 +344,81 @@ fn join_paragraph(paragraph: &[OcrLine], known_words: &HashSet<String>) -> Strin
             .unwrap_or("")
             .to_string();
 
-        if join_hyphenated(
-            &mut text,
-            &previous_last,
-            &line_text,
-            next_first,
-            known_words,
-        ) {
+        // A soft hyphen is unambiguous evidence of a broken word, so it joins
+        // here without asking anyone.
+        if glue_soft_hyphen(&mut text, &previous_last, &line_text, next_first) {
             continue;
         }
+
+        // A real hyphen is ambiguous: it may be a break (`Sprach-` +
+        // `verarbeitung`) or a genuine compound (`E-` + `Mail`). Record it and
+        // join with a plain space for now; the resolver decides.
+        record_candidate(&previous_last, next_first, candidates);
 
         text.push(' ');
         text.push_str(&line_text);
     }
 
     space_dashes(&text)
+}
+
+/// Note the line-end hyphen with the words on both sides of it, if any.
+fn record_candidate(previous_last: &str, next_first: &str, candidates: &mut Vec<Candidate>) {
+    let Some(hyphen) = previous_last.chars().last().filter(|c| BREAK_HYPHENS.contains(c)) else {
+        return;
+    };
+
+    let fragment = previous_last.trim_end_matches(BREAK_HYPHENS);
+
+    // Nothing to glue the next word onto (e.g. a lone dash as its own word).
+    if fragment.is_empty() || next_first.is_empty() {
+        return;
+    }
+
+    candidates.push(Candidate {
+        left: fragment.to_string(),
+        hyphen,
+        right: next_first.to_string(),
+        joined: format!("{fragment}{next_first}"),
+        join: false,
+        reason: "pending",
+    });
+}
+
+/// Glue a line whose last word ends in a soft hyphen. Returns whether the text
+/// was repaired.
+fn glue_soft_hyphen(
+    text: &mut String,
+    previous_last: &str,
+    line_text: &str,
+    next_first: &str,
+) -> bool {
+    if next_first.is_empty() || !previous_last.ends_with(SOFT_HYPHEN) {
+        return false;
+    }
+
+    let fragment = previous_last.trim_end_matches(SOFT_HYPHEN);
+
+    if fragment.is_empty() {
+        return false;
+    }
+
+    let Some(position) = text.rfind(previous_last) else {
+        return false;
+    };
+
+    // Drop the soft hyphen, keep the rest of the next line, then insert its
+    // first word straight after the fragment (no space).
+    text.replace_range(position..position + previous_last.len(), fragment);
+
+    let rest = match line_text.find(next_first) {
+        Some(start) => &line_text[start + next_first.len()..],
+        None => "",
+    };
+    text.push_str(rest);
+    text.insert_str(position + fragment.len(), next_first);
+
+    true
 }
 
 /// Put a single space on both sides of every standalone dash.
@@ -367,60 +475,6 @@ fn is_numeric_range(chars: &[char], index: usize) -> bool {
         && matches!(after, Some(ch) if ch.is_ascii_digit())
 }
 
-/// Fold `previous_last` and `next_first` into one word when the previous line
-/// ended in a break hyphen. Returns whether the text was repaired.
-fn join_hyphenated(
-    text: &mut String,
-    previous_last: &str,
-    line_text: &str,
-    next_first: &str,
-    known_words: &HashSet<String>,
-) -> bool {
-    if next_first.is_empty() || previous_last.is_empty() {
-        return false;
-    }
-
-    let has_soft_hyphen = previous_last.ends_with('\u{00AD}');
-    let has_ascii_hyphen = previous_last.ends_with('-');
-
-    if !has_soft_hyphen && !has_ascii_hyphen {
-        return false;
-    }
-
-    let fragment = previous_last.trim_end_matches(['\u{00AD}', '-']);
-
-    // Nothing to glue the next word onto (e.g. a lone dash as its own word).
-    if fragment.is_empty() {
-        return false;
-    }
-
-    // Only repair normal hyphens when the dictionary confirms the
-    // reconstructed German word.
-    if !has_soft_hyphen {
-        let candidate = format!("{}{}", fragment, next_first).to_lowercase();
-        if !known_words.contains(&candidate) {
-            return false;
-        }
-    }
-
-    let Some(position) = text.rfind(previous_last) else {
-        return false;
-    };
-
-    // Drop the hyphen, keep the rest of the next line, then insert its first
-    // word straight after the fragment (no space).
-    text.replace_range(position..position + previous_last.len(), fragment);
-
-    let rest = match line_text.find(next_first) {
-        Some(start) => &line_text[start + next_first.len()..],
-        None => "",
-    };
-    text.push_str(rest);
-    text.insert_str(position + fragment.len(), next_first);
-
-    true
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -431,12 +485,8 @@ mod tests {
 
     const HEADER: &str = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext";
 
-    fn words(dict: &[&str]) -> HashSet<String> {
-        dict.iter().map(|w| w.to_lowercase()).collect()
-    }
-
     #[test]
-    fn joins_lines_and_repairs_known_hyphenation() {
+    fn records_a_line_break_hyphen_without_deciding_it() {
         // A hyphenated word is split across two Tesseract *lines* (line_num 1/2).
         let tsv = format!(
             "{HEADER}\n\
@@ -446,20 +496,39 @@ mod tests {
              5\t1\t1\t1\t3\t2\t60\t70\t40\t20\t92.0\tschwer\n"
         );
 
-        let text = reconstruct_paragraphs(&tsv, &words(&["sprachverarbeitung"])).unwrap();
-        assert_eq!(text, "Sprachverarbeitung ist schwer");
+        let page = reconstruct(&tsv).unwrap();
+
+        assert_eq!(page.text, "Sprach- verarbeitung ist schwer");
+        assert_eq!(page.candidates.len(), 1);
+
+        let candidate = &page.candidates[0];
+        assert_eq!(candidate.left, "Sprach");
+        assert_eq!(candidate.hyphen, '-');
+        assert_eq!(candidate.right, "verarbeitung");
+        assert_eq!(candidate.joined, "Sprachverarbeitung");
+        // Undecided until the resolver runs.
+        assert!(!candidate.join);
+        assert_eq!(candidate.reason, "pending");
     }
 
     #[test]
-    fn keeps_ascii_hyphen_without_dictionary_confirmation() {
-        let tsv = format!(
-            "{HEADER}\n\
-             5\t1\t1\t1\t1\t1\t10\t10\t50\t20\t96.5\tSprach-\n\
-             5\t1\t1\t1\t2\t1\t10\t40\t60\t20\t95.0\tverarbeitung\n"
-        );
+    fn records_the_unicode_hyphens_tesseract_emits() {
+        // U+2010 HYPHEN and U+2011 NON-BREAKING HYPHEN are what a scanned
+        // German book usually shows; matching only `-` used to miss them.
+        for hyphen in ['\u{2010}', '\u{2011}'] {
+            let tsv = format!(
+                "{HEADER}\n\
+                 5\t1\t1\t1\t1\t1\t10\t10\t50\t20\t96.5\tSprach{hyphen}\n\
+                 5\t1\t1\t1\t2\t1\t10\t40\t60\t20\t95.0\tverarbeitung\n"
+            );
 
-        let text = reconstruct_paragraphs(&tsv, &words(&[])).unwrap();
-        assert_eq!(text, "Sprach- verarbeitung");
+            let page = reconstruct(&tsv).unwrap();
+
+            assert_eq!(page.candidates.len(), 1);
+            assert_eq!(page.candidates[0].hyphen, hyphen);
+            assert_eq!(page.candidates[0].left, "Sprach");
+            assert_eq!(page.candidates[0].joined, "Sprachverarbeitung");
+        }
     }
 
     #[test]
@@ -470,8 +539,25 @@ mod tests {
              5\t1\t1\t1\t2\t1\t10\t40\t60\t20\t95.0\tverarbeitung\n"
         );
 
-        let text = reconstruct_paragraphs(&tsv, &words(&[])).unwrap();
-        assert_eq!(text, "Sprachverarbeitung");
+        let page = reconstruct(&tsv).unwrap();
+
+        assert_eq!(page.text, "Sprachverarbeitung");
+        // A soft hyphen is evidence, not a question.
+        assert!(page.candidates.is_empty());
+    }
+
+    #[test]
+    fn ignores_a_line_ending_in_a_lone_dash() {
+        let tsv = format!(
+            "{HEADER}\n\
+             5\t1\t1\t1\t1\t1\t10\t10\t50\t20\t96.5\t-\n\
+             5\t1\t1\t1\t2\t1\t10\t40\t60\t20\t95.0\tverarbeitung\n"
+        );
+
+        let page = reconstruct(&tsv).unwrap();
+
+        assert!(page.candidates.is_empty());
+        assert_eq!(page.text, "- verarbeitung");
     }
 
     #[test]
@@ -482,7 +568,7 @@ mod tests {
              5\t1\t1\t1\t1\t1\t10\t10\t50\t20\t96.5\tWort\u{2014}Wort\n"
         );
 
-        let text = reconstruct_paragraphs(&tsv, &words(&[])).unwrap();
+        let text = reconstruct(&tsv).unwrap().text;
         assert_eq!(text, "Wort — Wort");
     }
 
@@ -495,7 +581,7 @@ mod tests {
              5\t1\t1\t1\t1\t3\t80\t10\t50\t20\t96.5\tWort\n"
         );
 
-        let text = reconstruct_paragraphs(&tsv, &words(&[])).unwrap();
+        let text = reconstruct(&tsv).unwrap().text;
         assert_eq!(text, "Wort — Wort");
     }
 
@@ -507,7 +593,7 @@ mod tests {
              5\t1\t1\t1\t2\t1\t10\t40\t50\t20\t96.5\tWeiter\n"
         );
 
-        let text = reconstruct_paragraphs(&tsv, &words(&[])).unwrap();
+        let text = reconstruct(&tsv).unwrap().text;
         assert_eq!(text, "Ende — Weiter");
     }
 
@@ -518,7 +604,7 @@ mod tests {
              5\t1\t1\t1\t1\t1\t10\t10\t50\t20\t96.5\t2020\u{2013}2021\n"
         );
 
-        let text = reconstruct_paragraphs(&tsv, &words(&[])).unwrap();
+        let text = reconstruct(&tsv).unwrap().text;
         assert_eq!(text, "2020–2021");
     }
 
@@ -529,10 +615,10 @@ mod tests {
              5\t1\t1\t1\t1\t1\t10\t10\t50\t20\t96.5\tErster\n\
              5\t1\t1\t1\t1\t2\t70\t10\t50\t20\t96.5\tAbsatz\n\
              5\t1\t2\t1\t1\t1\t10\t120\t50\t20\t96.5\tZweiter\n\
-             5\t1\t2\t1\t1\t2\t70\t120\t50\t20\t96.5\tAbsatz\n"
+             5\t1\t2\t1\t2\t2\t70\t120\t50\t20\t96.5\tAbsatz\n"
         );
 
-        let text = reconstruct_paragraphs(&tsv, &words(&[])).unwrap();
+        let text = reconstruct(&tsv).unwrap().text;
         assert_eq!(text, "Erster Absatz\n\nZweiter Absatz");
     }
 
@@ -545,7 +631,7 @@ mod tests {
              5\t1\t1\t2\t1\t1\t10\t10\t50\t20\t96.5\tZweiter\n"
         );
 
-        let text = reconstruct_paragraphs(&tsv, &words(&[])).unwrap();
+        let text = reconstruct(&tsv).unwrap().text;
         assert_eq!(text, "Erster\n\nZweiter");
     }
 
@@ -556,18 +642,20 @@ mod tests {
                    5\t1\t1\t1\t1\t1\t10\t10\t50\t20\t96.5\tHallo\n\
                    5\t1\t1\t1\t1\t2\t10\t70\t50\t20\t95.0\tWelt\n";
 
-        let text = reconstruct_paragraphs(tsv, &words(&[])).unwrap();
+        let text = reconstruct(tsv).unwrap().text;
         assert_eq!(text, "Hallo Welt");
     }
 
     #[test]
     fn rejects_rows_with_missing_columns() {
         let tsv = format!("{HEADER}\n5\t1\t1\t1\t1\n");
-        assert!(reconstruct_paragraphs(&tsv, &words(&[])).is_err());
+        assert!(reconstruct(&tsv).is_err());
     }
 
     #[test]
     fn empty_input_yields_empty_text() {
-        assert_eq!(reconstruct_paragraphs("", &words(&[])).unwrap(), "");
+        let page = reconstruct("").unwrap();
+        assert_eq!(page.text, "");
+        assert!(page.candidates.is_empty());
     }
 }

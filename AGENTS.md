@@ -156,8 +156,14 @@ src-tauri/src/
 ├── edge_tts.rs             # Edge TTS voices + synthesis
 ├── capture.rs              # Screenshot / clipboard image capture — desktop
 └── ocr/                    # Tesseract OCR — desktop
-    ├── mod.rs              # Path discovery, plain-text recognition (`ocr_recognize`), language list
-    └── tsv.rs              # `ocr_recognize_tsv`: TSV layout → paragraphs, line joins, hyphen repair
+    ├── mod.rs              # Path discovery, plain-text recognition (`ocr_recognize`), language list,
+    │                       #   TSV recognition and the `ocr_hyphen_dictionary_*` commands
+    ├── tsv.rs              # `ocr_recognize_tsv`: TSV layout → paragraphs, line joins, dash spacing;
+    │                       #   line-break hyphens are recorded as candidates, never decided here
+    └── hyphen.rs           # Hyphen decisions against the downloaded Hunspell dictionaries of the page's
+                            #   language set (`spellbook`): 15-language catalog, install/delete/status,
+                            #   `selection`/`mapped_sources`, decide (any dictionary joins) + apply,
+                            #   shape-heuristic fallback for languages with no dictionary
 ```
 
 Feature gates: `default = ["stt"]`, `desktop = ["stt", ..., "server"]`. Android builds with

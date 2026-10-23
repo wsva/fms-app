@@ -9,11 +9,17 @@ The **Tools** group in the sidebar holds FmS's utilities — helpers that suppor
 - **Load an image** from a file, **capture a screenshot** / clipboard image directly, or drop an image onto the page.
 - Choose the **language(s)** to recognise, then run recognition.
 - Two result modes share the same image and languages, with **TSV** as the default:
-  - **TSV** — Tesseract's layout dump, rebuilt in Rust: words are regrouped into lines and paragraphs, words hyphenated across a line break are re-joined, and dashes (— – ―) are spaced off their neighbours. It needs no model, and **Raw TSV** shows the layout it worked from.
+  - **TSV** — Tesseract's layout dump, rebuilt in Rust: words are regrouped into lines and paragraphs, and dashes (— – ―) are spaced off their neighbours. Every word hyphenated across a line break is listed under the result: it is joined into one word when a dictionary of the selected languages knows it (`Sprach-` + `verarbeitung` → `Sprachverarbeitung`), and kept as printed otherwise (`E-` + `Mail`). Flip a single decision, use **Join all** / **Keep all**, or install a missing dictionary with one click from the list — without one, a shape rule takes over (a lowercase continuation joins, a capitalised one is kept). It needs no model, and **Raw TSV** shows the layout it worked from.
   - **Plain** — Tesseract's flat text, kept for pages the layout rebuild cannot order reliably (two columns, right-to-left scripts) and for poetry or code, where line breaks carry meaning. A **Fix with LLM** pass can then clean up obvious errors.
 - The result is shown as editable text you can copy; the source image stays visible beside it, and the text size can be adjusted in the result footer. `Ctrl/⌘+Enter` runs recognition, `Ctrl/⌘+Shift+C` copies the result.
 
 OCR needs a recognition model — if it says one is missing, download it from [Models](models.md). (Desktop feature.)
+
+### Hyphen dictionaries
+
+The TSV rebuild repairs words broken across a line break with a **Hunspell dictionary**, and one is downloaded per language — 15 are available (German, English, French, Spanish, Italian, Portuguese, Dutch, Swedish, Danish, Polish, Czech, Russian, Ukrainian, Greek, Turkish). They are data under their own licences, so they are not bundled with the app.
+
+**Dictionaries** in the toolbar lists them all with their version, licence and download size; install or remove any of them there. You do not have to install one per page: the languages you select for recognition are exactly the dictionaries consulted, so `deu+eng` uses both — a German text quoting `Workflow-` + `Editor` still joins correctly when only the English dictionary knows the word. Installed dictionaries are used automatically and live in the app data folder; deleting one just means the shape rule decides again. Languages with no dictionary of their own (Japanese, Chinese, Arabic…) are shown as using the shape rule, which is all their scripts need — they do not hyphenate at the margin.
 
 ## Split Text
 

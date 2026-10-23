@@ -54,6 +54,7 @@ desktop = [
     "dep:goose-sdk",
     "dep:tokio-tungstenite",
     "dep:serde_yaml",
+    "dep:spellbook",
     "server",
     "textsplit",
 ]
@@ -138,6 +139,9 @@ goose-sdk = { version = "0.1.0-alpha.11", features = ["uniffi"], optional = true
 # `goose serve` over ws://). Already in the tree transitively, so the pinned
 # 0.28 resolves from the offline registry cache.
 tokio-tungstenite = { version = "0.28", optional = true }
+# Hunspell dictionaries for the TSV hyphen decisions in `ocr/` (desktop only),
+# parsed in process instead of shelling out to hunspell/nuspell.
+spellbook = { version = "0.4", optional = true }
 
 # Windows: native snipping via `ms-screenclip:` + clipboard image read.
 [target.'cfg(windows)'.dependencies]

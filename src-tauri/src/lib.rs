@@ -319,6 +319,9 @@ pub fn run() {
             ocr::ocr_recognize,
             ocr::ocr_recognize_tsv,
             ocr::ocr_list_languages,
+            ocr::ocr_hyphen_dictionary_status,
+            ocr::ocr_hyphen_dictionary_download,
+            ocr::ocr_hyphen_dictionary_delete,
             models::model_download_hf,
             textsplit::text_split_status,
             textsplit::text_split,
@@ -491,6 +494,7 @@ pub fn run() {
         .manage(datasets::DatasetState::new())
         .manage(sync::server::WebServiceState::new())
         .manage(ocr::OcrState::new())
+        .manage(ocr::hyphen::HyphenState::new())
         .manage(textsplit::TextSplitState::new())
         .manage(simple_words::SimpleWordsState::new())
         .manage(ai::agent_acp::AcpClientState::new())
