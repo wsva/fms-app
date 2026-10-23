@@ -14,7 +14,6 @@ import {
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import {
   CollapsibleSidebar,
-  SidebarToggleButton,
   useCollapsibleSidebar,
 } from "@/components/layout/CollapsibleSidebar";
 import MicTestPanel from "@/components/voice/MicTestPanel";
@@ -35,7 +34,7 @@ import {
   setPreferredMicDeviceId,
   type MicDevice,
 } from "@/lib/voice-input";
-import { PageHeader, Toolbar } from "@/components/ui/toolbar";
+import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -366,7 +365,14 @@ export default function SettingsPage() {
       <PageHeader title="Settings" />
       <Toolbar>
         <div className="flex-1 min-w-0" />
-        <SidebarToggleButton sidebar={sidebar} title="Show/hide sections" />
+        <ToolbarButton
+          icon={LayoutGrid}
+          label="Sections"
+          variant="toggleSoft"
+          active={sidebar.visible}
+          onClick={sidebar.toggle}
+          title={sidebar.visible ? "Hide sections" : "Show sections"}
+        />
       </Toolbar>
 
       {/* Body — flex row so the desktop section list splits the page with the
