@@ -9,7 +9,14 @@ import {
   X,
 } from "lucide-react";
 import type { TabId } from "./Sidebar";
-import { NAV_TOOLS_ICON, NAV_TOOLS_LABEL, useNavConfig, type NavMenu } from "@/lib/mobile-nav";
+import {
+  NAV_CROSS_DEVICE_ICON,
+  NAV_CROSS_DEVICE_LABEL,
+  NAV_TOOLS_ICON,
+  NAV_TOOLS_LABEL,
+  useNavConfig,
+  type NavMenu,
+} from "@/lib/mobile-nav";
 import { useAuth } from "@/hooks/useAuth";
 import LoginModal from "@/components/auth/LoginModal";
 
@@ -18,7 +25,8 @@ import LoginModal from "@/components/auth/LoginModal";
  * thin client: the primary tabs plus a "More" drawer (slides in from the left,
  * same idiom as CollapsibleSidebar's mobile drawer) holding the remaining
  * sections and the login/user/XP controls. The drawer mirrors the PC sidebar's
- * structure — root menus, a collapsible Tools group, Settings at the bottom —
+ * structure — root menus, collapsible Cross Device and Tools groups, Settings
+ * at the bottom —
  * so the same mental model applies on both. Which menus sit in the bar versus
  * the drawer — and in what order inside each zone — is user-configurable in
  * Settings → Bottom Nav (see lib/mobile-nav). Rendered as a normal flex child
@@ -32,13 +40,16 @@ export default function BottomNav({
   onTabChange: (id: TabId) => void;
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
-  // Same default the PC sidebar uses: the Tools group starts expanded.
+  // Same default the PC sidebar uses: both group headers start expanded.
+  const [crossOpen, setCrossOpen] = useState(true);
   const [toolsOpen, setToolsOpen] = useState(true);
   const { barMenus, drawerMenus, drawerZones } = useNavConfig();
   const { authUser, xpUser, xpFlash, login, logout, loginOpen, closeLogin } = useAuth();
 
   const moreActive = drawerMenus.some((t) => t.id === activeTab);
-  // The Tools header lights up like the PC sidebar's when a member is current.
+  // The group headers light up like the PC sidebar's when a member is current.
+  const CrossIcon = NAV_CROSS_DEVICE_ICON;
+  const crossActive = drawerZones.crossDevice.some((t) => t.id === activeTab);
   const ToolsIcon = NAV_TOOLS_ICON;
   const toolsActive = drawerZones.tools.some((t) => t.id === activeTab);
 
@@ -198,6 +209,38 @@ export default function BottomNav({
             when the list exceeds the drawer. */}
         <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1 p-2">
           {drawerZones.root.map((tab) => renderMenu(tab))}
+
+          {drawerZones.crossDevice.length > 0 && (
+            <>
+              {/* Group header — same styling as a root row, with the chevron */}
+              <button
+                onClick={() => setCrossOpen((v) => !v)}
+                title={NAV_CROSS_DEVICE_LABEL}
+                className={`flex items-center gap-2 w-full p-2 rounded-lg cursor-pointer transition-colors ${
+                  crossActive
+                    ? "bg-logo-primary/80 text-white"
+                    : "text-text-primary hover:bg-bg-hover"
+                }`}
+              >
+                <CrossIcon width={20} height={20} className="shrink-0" />
+                <span className="text-sm font-medium flex-1 truncate text-left">
+                  {NAV_CROSS_DEVICE_LABEL}
+                </span>
+                <span
+                  className={`text-xs opacity-70 transition-transform ${
+                    crossOpen ? "rotate-90" : ""
+                  }`}
+                >
+                  ▶
+                </span>
+              </button>
+              {crossOpen && (
+                <div className="flex flex-col gap-0.5 mt-0.5">
+                  {drawerZones.crossDevice.map((tab) => renderMenu(tab, true))}
+                </div>
+              )}
+            </>
+          )}
 
           {drawerZones.tools.length > 0 && (
             <>

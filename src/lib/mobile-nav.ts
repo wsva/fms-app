@@ -22,6 +22,7 @@ import {
   Headphones,
   Layers,
   MessagesSquare,
+  Network,
   Settings,
   Users,
   Wrench,
@@ -30,10 +31,11 @@ import { MicGlyph } from "@/components/voice/MicGlyph";
 import type { TabId } from "@/components/layout/Sidebar";
 
 /** Structural zones mirroring the PC sidebar: root tabs on top, the collapsible
- *  Tools group, then Settings at the nav bottom. */
-export type NavZone = "root" | "tools" | "bottom";
+ *  Cross Device and Tools groups, then Settings at the nav bottom. */
+export type NavZone = "root" | "cross-device" | "tools" | "bottom";
 
 export const NAV_TOOLS_LABEL = "Tools";
+export const NAV_CROSS_DEVICE_LABEL = "Cross Device";
 
 export type NavMenu = {
   id: TabId;
@@ -51,10 +53,10 @@ export const NAV_MENUS: NavMenu[] = [
   { id: "read-aloud", label: "Read Aloud", icon: MicGlyph, group: "root" },
   { id: "cards", label: "Cards", icon: Layers, group: "root" },
   { id: "wiki", label: "Wiki", icon: BookOpenText, group: "root" },
-  { id: "workspaces", label: "Workspaces", icon: FolderKanban, group: "tools" },
-  { id: "devices-hub", label: "Devices & Hub", icon: Users, group: "tools" },
-  { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown, group: "tools" },
-  { id: "chat", label: "Cross-Device Chat", icon: MessagesSquare, group: "tools" },
+  { id: "workspaces", label: "Workspaces", icon: FolderKanban, group: "cross-device" },
+  { id: "devices-hub", label: "Devices & Hub", icon: Users, group: "cross-device" },
+  { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown, group: "cross-device" },
+  { id: "chat", label: "Chat", icon: MessagesSquare, group: "cross-device" },
   { id: "models", label: "Models", icon: Box, group: "tools" },
   { id: "logs", label: "Logs", icon: FileText, group: "tools" },
   { id: "settings", label: "Settings", icon: Settings, group: "bottom" },
@@ -62,6 +64,9 @@ export const NAV_MENUS: NavMenu[] = [
 
 /** The Wrench icon the PC sidebar uses for its Tools group header. */
 export const NAV_TOOLS_ICON = Wrench;
+
+/** The Network icon the PC sidebar uses for its Cross Device group header. */
+export const NAV_CROSS_DEVICE_ICON = Network;
 
 const MENU_BY_ID = new Map<TabId, NavMenu>(NAV_MENUS.map((m) => [m.id, m]));
 
@@ -145,6 +150,7 @@ export function useNavConfig() {
   const drawerZones = useMemo(
     () => ({
       root: drawerMenus.filter((m) => m.group === "root"),
+      crossDevice: drawerMenus.filter((m) => m.group === "cross-device"),
       tools: drawerMenus.filter((m) => m.group === "tools"),
       bottom: drawerMenus.filter((m) => m.group === "bottom"),
     }),

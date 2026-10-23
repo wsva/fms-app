@@ -19,6 +19,7 @@ import {
   FileText,
   FileType,
   AudioLines,
+  Network,
   User,
   LogOut,
   Star,
@@ -64,18 +65,26 @@ type NavGroup = {
   tabs: TabDef[];
 };
 
-// Navigation structure with groups
+// Navigation structure with groups. Cross Device holds the multi-device /
+// multi-user coordination pages; Tools keeps the local processing utilities.
 const navGroups: NavGroup[] = [
+  {
+    id: "cross-device",
+    label: "Cross Device",
+    icon: Network,
+    tabs: [
+      { id: "workspaces", label: "Workspaces", icon: FolderKanban },
+      { id: "devices-hub", label: "Devices & Hub", icon: Users },
+      { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown },
+      { id: "chat", label: "Chat", icon: MessagesSquare },
+    ],
+  },
   {
     id: "tools",
     label: "Tools",
     icon: Wrench,
     tabs: [
-      { id: "workspaces", label: "Workspaces", icon: FolderKanban },
       { id: "workflow", label: "Workflow", icon: Workflow },
-      { id: "devices-hub", label: "Devices & Hub", icon: Users },
-      { id: "datasets-sync", label: "Datasets Sync", icon: ArrowUpDown },
-      { id: "chat", label: "Cross-Device Chat", icon: MessagesSquare },
       { id: "simple-words", label: "Simple Words", icon: Type },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
@@ -139,6 +148,7 @@ export default function Sidebar({
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
+    "cross-device": true,
     tools: true,
   });
 

@@ -24,6 +24,7 @@ import { logError, logInfo } from "@/lib/logger";
 import {
   DEFAULT_NAV_CONFIG,
   MAX_BAR_MENUS,
+  NAV_CROSS_DEVICE_LABEL,
   NAV_MENUS,
   NAV_TOOLS_LABEL,
   saveNavConfig,
@@ -454,8 +455,8 @@ export default function SettingsPage() {
               Pick which menus sit in the bottom bar (up to {MAX_BAR_MENUS}); checked
               rows appear there left-to-right in this order. The rest go into the
               “More” drawer, which keeps the PC sidebar’s structure — plain menus,
-              the Tools group, then Settings at the bottom — and your order places
-              each menu inside its group. Changes apply immediately.
+              the Cross Device and Tools groups, then Settings at the bottom — and
+              your order places each menu inside its group. Changes apply immediately.
             </p>
             <div className="flex flex-col max-w-md">
               {navConfig.order.map((id, i) => {
@@ -471,6 +472,11 @@ export default function SettingsPage() {
                     <Icon width={18} height={18} className="text-text-tertiary shrink-0" />
                     <span className="flex-1 text-sm text-text-primary truncate">{menu.label}</span>
                     {/* Where the drawer will put this menu, since it groups by zone. */}
+                    {menu.group === "cross-device" && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-mid-gray/20 text-text-tertiary shrink-0">
+                        {NAV_CROSS_DEVICE_LABEL}
+                      </span>
+                    )}
                     {menu.group === "tools" && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-mid-gray/20 text-text-tertiary shrink-0">
                         {NAV_TOOLS_LABEL}
