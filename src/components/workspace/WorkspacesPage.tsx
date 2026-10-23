@@ -462,20 +462,18 @@ export default function WorkspacesPage() {
                           autoFocus
                         />
                         <Button
-                          isIconOnly
                           size="sm"
                           variant="ghost"
                           onPress={() => handleRename(ws.uuid)}
                         >
-                          <Check size={14} />
+                          <Check size={14} /> Save
                         </Button>
                         <Button
-                          isIconOnly
                           size="sm"
                           variant="ghost"
                           onPress={() => setEditingUuid(null)}
                         >
-                          <X size={14} />
+                          <X size={14} /> Cancel
                         </Button>
                       </div>
                     ) : (
@@ -512,47 +510,39 @@ export default function WorkspacesPage() {
                     )}
                   </div>
 
-                  {/* Actions */}
+                  {/* Actions — labeled text buttons on desktop for the same
+                      actions the phone card spells out. */}
                   <div className="flex items-center gap-1 shrink-0">
                     {!isCurrent && editingUuid !== ws.uuid && (
-                      <span title="Load this workspace (switch to it)">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          isDisabled={refreshing}
-                          onPress={() => handleSwitch(ws)}
-                        >
-                          <FolderOpen size={14} /> Load
-                        </Button>
-                      </span>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        isDisabled={refreshing}
+                        onPress={() => handleSwitch(ws)}
+                      >
+                        <FolderOpen size={14} /> Load
+                      </Button>
                     )}
-                    <span title={ws.auto_login ? "Disable open at startup" : "Enable open at startup"}>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onPress={() => handleToggleAutoLogin(ws)}
+                      className={ws.auto_login ? "text-accent" : "text-text-tertiary"}
+                    >
+                      <MonitorCheck size={14} /> Startup: {ws.auto_login ? "On" : "Off"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onPress={() => {
+                        setEditingUuid(ws.uuid);
+                        setEditName(ws.name);
+                      }}
+                    >
+                      <Edit2 size={14} /> Rename
+                    </Button>
+                    <span title={isCurrent ? "Cannot delete the active workspace" : "Delete workspace"}>
                       <Button
-                        isIconOnly
-                        size="sm"
-                        variant="ghost"
-                        onPress={() => handleToggleAutoLogin(ws)}
-                        className={ws.auto_login ? "text-accent" : "text-text-tertiary"}
-                      >
-                        <MonitorCheck size={14} />
-                      </Button>
-                    </span>
-                    <span title="Rename">
-                      <Button
-                        isIconOnly
-                        size="sm"
-                        variant="ghost"
-                        onPress={() => {
-                          setEditingUuid(ws.uuid);
-                          setEditName(ws.name);
-                        }}
-                      >
-                        <Edit2 size={14} />
-                      </Button>
-                    </span>
-                    <span title={isCurrent ? "Cannot delete the active workspace" : "Delete"}>
-                      <Button
-                        isIconOnly
                         size="sm"
                         variant="ghost"
                         isDisabled={isCurrent}
@@ -565,7 +555,7 @@ export default function WorkspacesPage() {
                           })
                         }
                       >
-                        <Trash2 size={14} className="text-error-text" />
+                        <Trash2 size={14} className="text-error-text" /> Delete
                       </Button>
                     </span>
                   </div>

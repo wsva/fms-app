@@ -147,9 +147,11 @@ export default function Sidebar({
   const [mobile, setMobile] = useState(false);
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
+  // Both groups start collapsed so the default sidebar stays short; clicking a
+  // group header expands it (session-only state).
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
-    "cross-device": true,
-    tools: true,
+    "cross-device": false,
+    tools: false,
   });
 
   // ---- Auth state (shared with the mobile bottom nav via useAuth) ----
