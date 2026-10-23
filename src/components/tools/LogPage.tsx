@@ -4,8 +4,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
-import { Trash2, ArrowDown, Pause, Play, FileText, Radio } from "lucide-react";
-import { PageHeader, Toolbar } from "@/components/ui/toolbar";
+import { Trash2, ArrowDown, Play, FileText, Radio } from "lucide-react";
+import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -37,18 +37,39 @@ function levelColor(level: string): string {
   }
 }
 
+// Background tint + neutral text for the inline log-entry level badges, matching
+// the filter chips: the hue lives in the background, the label text stays the
+// same `text-text-secondary` used across the toolbar.
 function levelBadgeColor(level: string): string {
   switch (level) {
     case "DEBUG":
-      return "bg-gray-600/30 text-gray-400";
+      return "bg-gray-600/30 text-text-secondary";
     case "INFO":
-      return "bg-blue-600/30 text-blue-300";
+      return "bg-blue-600/30 text-text-secondary";
     case "WARN":
-      return "bg-yellow-600/30 text-yellow-400";
+      return "bg-yellow-600/30 text-text-secondary";
     case "ERROR":
-      return "bg-red-600/30 text-red-400";
+      return "bg-red-600/30 text-text-secondary";
     default:
-      return "bg-gray-600/30 text-gray-400";
+      return "bg-gray-600/30 text-text-secondary";
+  }
+}
+
+// Background-only tints for the level FILTER chips. Text always uses the same
+// neutral toolbar color (`text-text-secondary`) so the background hue alone
+// distinguishes the levels.
+function levelChipBg(level: string): string {
+  switch (level) {
+    case "DEBUG":
+      return "bg-gray-600/30";
+    case "INFO":
+      return "bg-blue-600/30";
+    case "WARN":
+      return "bg-yellow-600/30";
+    case "ERROR":
+      return "bg-red-600/30";
+    default:
+      return "bg-gray-600/30";
   }
 }
 
@@ -61,7 +82,11 @@ export default function LogPage() {
   const [activeFilters, setActiveFilters] = useState<Set<LevelFilter>>(
     new Set(["INFO", "WARN", "ERROR"])
   );
-  const [autoScroll, setAutoScroll] = useState(true);
+  // Smart auto-scroll: stick to the newest entry only while the view is already
+  // pinned at the bottom. Scrolling up pauses it; returning to the bottom (or
+  // "Jump to latest") resumes. Replaces the old explicit Auto-scroll toggle.
+  const [atBottom, setAtBottom] = useState(true);
+  const atBottomRef = useRef(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   // The live listener must not mix streamed entries into a static file snapshot.
   const sourceRef = useRef<"memory" | "file">("memory");
@@ -102,12 +127,39 @@ export default function LogPage() {
       .catch(() => {});
   }, []);
 
-  // Auto-scroll to bottom
+  // Within a small threshold counts as "at the bottom", so sub-pixel rounding or
+  // a not-yet-laid-out line doesn't break the stickiness.
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight <= 40;
+    if (near !== atBottomRef.current) {
+      atBottomRef.current = near;
+      setAtBottom(near);
+    }
+  }, []);
+
+  const jumpToLatest = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    atBottomRef.current = true;
+    setAtBottom(true);
+  }, []);
+
+  // Re-pin on a source switch (memory <-> file) so the newest lines show and
+  // auto-scroll resumes. Declared before the follow effect so that when both
+  // `source` and `logs` change in one commit, the reset lands first.
   useEffect(() => {
-    if (autoScroll && scrollRef.current) {
+    atBottomRef.current = true;
+    setAtBottom(true);
+  }, [source]);
+
+  // Follow new entries only while already pinned at the bottom.
+  useEffect(() => {
+    if (atBottomRef.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [logs, autoScroll]);
+  }, [logs]);
 
   const toggleFilter = useCallback((level: LevelFilter) => {
     setActiveFilters((prev) => {
@@ -159,64 +211,47 @@ export default function LogPage() {
   return (
     <div className="flex flex-1 min-w-0 flex-col h-full bg-bg-base">
       <PageHeader title="Logs" />
-      {/* Toolbar — wraps on narrow screens so the filter chips never push the
-          actions past the viewport. */}
+      {/* Toolbar — page-level actions. Wraps on narrow screens. */}
       <Toolbar className="flex-wrap">
-          {/* Level filters */}
+        <div className="flex-1 min-w-0" />
+        {/* Memory / file source toggle */}
+        <ToolbarButton
+          variant="toggle"
+          active={source === "file"}
+          icon={source === "memory" ? FileText : Radio}
+          label={source === "memory" ? "Memory" : "File"}
+          onClick={handleToggleSource}
+          title={
+            source === "memory"
+              ? "Read the persisted log file (full history, survives restarts)"
+              : "Back to the live in-memory buffer (last 1000 entries)"
+          }
+        />
+        {/* Clear button */}
+        <ToolbarButton
+          icon={Trash2}
+          label="Clear"
+          onClick={handleClear}
+          title="Clear logs"
+        />
+      </Toolbar>
+
+      {/* Sub-toolbar — log-level filters. On their own row so the action
+          toolbar stays compact and the chips can wrap freely on a phone. */}
+      <Toolbar className="flex-wrap">
           {ALL_LEVELS.map((level) => (
             <button
               key={level}
               onClick={() => toggleFilter(level)}
               className={`px-2 py-0.5 rounded text-xs font-mono font-medium transition-colors ${
                 activeFilters.has(level)
-                  ? levelBadgeColor(level)
+                  ? `${levelChipBg(level)} text-text-secondary`
                   : "bg-gray-700/20 text-gray-500 line-through"
               }`}
             >
               {level}
             </button>
           ))}
-
-          <div className="w-px h-4 bg-border-default mx-1" />
-
-          {/* Auto-scroll toggle */}
-          <button
-            onClick={() => setAutoScroll(!autoScroll)}
-            className={`p-1.5 rounded transition-colors ${
-              autoScroll
-                ? "text-accent hover:bg-accent/10"
-                : "text-text-tertiary hover:bg-mid-gray/20"
-            }`}
-            title={autoScroll ? "Auto-scroll ON" : "Auto-scroll OFF"}
-          >
-            {autoScroll ? <ArrowDown width={16} height={16} /> : <Pause width={16} height={16} />}
-          </button>
-
-          {/* Memory / file source toggle */}
-          <button
-            onClick={handleToggleSource}
-            className={`p-1.5 rounded transition-colors ${
-              source === "file"
-                ? "text-accent hover:bg-accent/10"
-                : "text-text-tertiary hover:bg-mid-gray/20"
-            }`}
-            title={
-              source === "memory"
-                ? "Read the persisted log file (full history, survives restarts)"
-                : "Back to the live in-memory buffer (last 1000 entries)"
-            }
-          >
-            {source === "memory" ? <FileText width={16} height={16} /> : <Radio width={16} height={16} />}
-          </button>
-
-          {/* Clear button */}
-          <button
-            onClick={handleClear}
-            className="p-1.5 rounded text-text-tertiary hover:text-red-400 hover:bg-red-400/10 transition-colors"
-            title="Clear logs"
-          >
-            <Trash2 width={16} height={16} />
-          </button>
       </Toolbar>
 
       {/* Log count bar */}
@@ -228,15 +263,27 @@ export default function LogPage() {
           <span className="truncate max-w-full sm:max-w-[50%] min-w-0 font-mono" title={logFilePath}>
             file: {logFilePath}
           </span>
-        ) : autoScroll ? (
+        ) : atBottom ? (
           <span className="flex items-center gap-1">
             <Play width={10} height={10} className="fill-current" /> Live
           </span>
-        ) : null}
+        ) : (
+          <button
+            onClick={jumpToLatest}
+            className="flex items-center gap-1 text-accent hover:underline"
+            title="Scroll to the newest entry and resume auto-follow"
+          >
+            <ArrowDown width={12} height={12} /> Jump to latest
+          </button>
+        )}
       </div>
 
       {/* Log output */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden p-2 font-mono text-xs min-h-0 min-w-0">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto overflow-x-hidden p-2 font-mono text-xs min-h-0 min-w-0"
+      >
         {filteredLogs.length === 0 ? (
           <div className="flex items-center justify-center h-full text-text-tertiary">
             {logs.length === 0 ? (source === "file" ? "Log file is empty" : "No logs yet") : "No entries match the current filters"}
