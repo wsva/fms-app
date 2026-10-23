@@ -17,6 +17,7 @@ import {
   MonitorCheck,
 } from "lucide-react";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
+import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -262,65 +263,36 @@ export default function WorkspacesPage() {
   );
 
   const refreshButton = (
-    <span title="Refresh workspace list">
-      <Button
-        isIconOnly
-        variant="ghost"
-        size="sm"
-        isDisabled={refreshing}
-        onPress={fetchAll}
-      >
-        <RefreshCw size={16} className={refreshing ? "animate-spin" : undefined} />
-      </Button>
-    </span>
+    <ToolbarButton
+      icon={RefreshCw}
+      iconProps={{ className: refreshing ? "animate-spin" : undefined }}
+      label="Refresh"
+      onClick={fetchAll}
+      disabled={refreshing}
+    />
   );
 
   const createButton = (
-    <Button variant="primary" size="sm" onPress={() => setShowCreateDialog(true)}>
-      <Plus size={16} /> New Workspace
-    </Button>
-  );
-
-  const createIconButton = (
-    <span title="New workspace">
-      <Button
-        isIconOnly
-        variant="ghost"
-        size="sm"
-        onPress={() => setShowCreateDialog(true)}
-      >
-        <Plus size={16} />
-      </Button>
-    </span>
+    <ToolbarButton
+      icon={Plus}
+      label="New Workspace"
+      variant="solid"
+      onClick={() => setShowCreateDialog(true)}
+    />
   );
 
   return (
-    <main className="flex-1 p-8 overflow-y-auto">
+    <main className="flex-1 flex flex-col h-full min-h-0">
+      <PageHeader title="Workspaces" icon={FolderOpen} />
+      <Toolbar>
+        <div className="flex-1 min-w-0" />
+        {refreshButton}
+        {createButton}
+      </Toolbar>
+
+      <div className="flex-1 overflow-y-auto p-8 min-h-0">
       <section className="mb-8">
-        {/* Header */}
-        {mobile ? (
-          <div className="mb-4">
-            <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-bold text-text-primary">Workspaces</h1>
-              <div className="flex items-center gap-1">
-                {refreshButton}
-                {createIconButton}
-              </div>
-            </div>
-            {description}
-          </div>
-        ) : (
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h1 className="text-2xl font-bold text-text-primary">Workspaces</h1>
-              {description}
-            </div>
-            <div className="flex items-center gap-2">
-              {refreshButton}
-              {createButton}
-            </div>
-          </div>
-        )}
+        {description}
 
         {/* Legend */}
         <div className="flex items-center gap-3 mb-4 text-xs text-text-secondary">
@@ -641,6 +613,7 @@ export default function WorkspacesPage() {
       )}
 
       <ConfirmDialog request={confirmReq} onClose={() => setConfirmReq(null)} />
+      </div>
     </main>
   );
 }

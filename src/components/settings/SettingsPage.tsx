@@ -36,6 +36,7 @@ import {
   setPreferredMicDeviceId,
   type MicDevice,
 } from "@/lib/voice-input";
+import { PageHeader, Toolbar } from "@/components/ui/toolbar";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -363,14 +364,11 @@ export default function SettingsPage() {
 
   return (
     <main className="flex-1 flex flex-col h-full min-h-0 min-w-0">
-      {/* Header — same bar style as Read a Book: icon + title on a bordered
-          strip pinned above the scrolling content. */}
-      <div className="p-4 border-b border-border-default flex items-center gap-4 shrink-0 min-w-0">
-        <h1 className="text-lg font-semibold flex items-center gap-2 text-text-primary">
-          <SettingsIcon size={20} /> Settings
-        </h1>
+      <PageHeader title="Settings" icon={SettingsIcon} />
+      <Toolbar>
+        <div className="flex-1 min-w-0" />
         <SidebarToggleButton sidebar={sidebar} title="Show/hide sections" />
-      </div>
+      </Toolbar>
 
       {/* Body — flex row so the desktop section list splits the page with the
           content; on mobile the drawer is anchored here (absolute, not fixed

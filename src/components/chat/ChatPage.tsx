@@ -20,6 +20,7 @@ import {
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { logError, logInfo } from "@/lib/logger";
+import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
 
 // ── Types (mirror src-tauri/src/chat.rs) ────────────────────────────────────
 
@@ -616,18 +617,17 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
 
   return (
     <div ref={rootRef} className="flex flex-col w-full h-full min-h-0 bg-bg-base">
-      {/* Header */}
-      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border-default shrink-0">
-        <h1 className="text-[1.1em] font-bold text-text-primary">Cross-Device Chat</h1>
-        <button
+      <PageHeader title="Cross-Device Chat" />
+      <Toolbar>
+        <div className="flex-1 min-w-0" />
+        <ToolbarButton
+          icon={RefreshCw}
+          iconProps={{ className: loading ? "animate-spin" : undefined }}
+          label="Reload"
           onClick={() => void reload()}
           disabled={loading}
-          className="ml-auto p-1.5 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover cursor-pointer disabled:opacity-50"
-          title="Reload"
-        >
-          <RefreshCw size={15} className={loading ? "animate-spin" : undefined} />
-        </button>
-      </div>
+        />
+      </Toolbar>
 
       {/* Phone precondition / connection errors */}
       {mobile && !pcUrl && (

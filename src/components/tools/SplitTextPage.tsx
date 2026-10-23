@@ -17,6 +17,7 @@ import {
 import { isTauri } from "@/lib/tauri";
 import { logError } from "@/lib/logger";
 import { type DownloadProgress } from "@/lib/models/types";
+import { PageHeader, Toolbar } from "@/components/ui/toolbar";
 
 // ---------------------------------------------------------------------------
 // Types (mirror the Rust `Serialize` shapes; serde keeps snake_case field names)
@@ -221,27 +222,12 @@ export default function SplitTextPage() {
 
   return (
     <main className="flex-1 flex flex-col h-full min-w-0 min-h-0">
-      {/* Header */}
-      <div className="p-4 border-b border-border-default flex items-center gap-3 flex-wrap">
-        <ArrowUpDown size={20} className="text-text-secondary shrink-0" />
-        <h1 className="text-lg font-semibold flex-1 min-w-0">Split Text</h1>
-
-        {/* Model status badge */}
-        <div className="flex items-center gap-2 text-xs">
-          <select
-            value={selectedId}
-            onChange={(e) => setSelectedId(e.target.value)}
-            className="max-w-[220px] px-2 py-1 rounded-lg bg-bg-muted border border-border-default text-text-primary focus:outline-none focus:border-accent"
-            title={model?.description}
-          >
-            {(status?.models.length ? status.models : [{ id: DEFAULT_MODEL_ID, name: "SaT 3L Small" } as TextSplitModelInfo]).map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}{m.downloaded ? "" : " (not downloaded)"}
-              </option>
-            ))}
-          </select>
+      <PageHeader
+        title="Split Text"
+        icon={ArrowUpDown}
+        badge={
           <span
-            className={`px-2 py-0.5 rounded-full font-medium ${
+            className={`px-2 py-0.5 rounded-full text-xs font-medium ${
               loaded
                 ? "bg-green-500/15 text-green-500"
                 : downloaded
@@ -251,19 +237,34 @@ export default function SplitTextPage() {
           >
             {loaded ? "Loaded" : downloaded ? "Downloaded" : "Not downloaded"}
           </span>
-          {!downloaded && (
-            <button
-              type="button"
-              onClick={handleDownload}
-              disabled={downloading}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent text-white font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
-            >
-              {downloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-              {downloading ? "Downloading…" : "Download"}
-            </button>
-          )}
-        </div>
-      </div>
+        }
+      />
+      <Toolbar className="flex-wrap">
+        <div className="flex-1 min-w-0" />
+        <select
+          value={selectedId}
+          onChange={(e) => setSelectedId(e.target.value)}
+          className="max-w-[220px] px-2 py-1 rounded-lg bg-bg-muted border border-border-default text-text-primary focus:outline-none focus:border-accent"
+          title={model?.description}
+        >
+          {(status?.models.length ? status.models : [{ id: DEFAULT_MODEL_ID, name: "SaT 3L Small" } as TextSplitModelInfo]).map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}{m.downloaded ? "" : " (not downloaded)"}
+            </option>
+          ))}
+        </select>
+        {!downloaded && (
+          <button
+            type="button"
+            onClick={handleDownload}
+            disabled={downloading}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent text-white font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
+          >
+            {downloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+            {downloading ? "Downloading…" : "Download"}
+          </button>
+        )}
+      </Toolbar>
 
       <div className="flex-1 overflow-y-auto p-4 min-h-0">
         <div className="flex flex-col gap-4 h-full min-h-0">

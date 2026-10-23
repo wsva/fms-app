@@ -11,6 +11,7 @@ import { logError } from "@/lib/logger";
 import { type CardModelInfo, type ModelVersionInfo, type DownloadProgress, type ModelStatus, statusBadgeClass } from "@/lib/models/types";
 import ModelCard from "./components/ModelCard";
 import ModelDetailsDialog from "./components/ModelDetailsDialog";
+import { PageHeader } from "@/components/ui/toolbar";
 
 // Text-split (SaT) model info, mirroring the Rust `TextSplitModelInfo` shape.
 interface TextSplitModelInfo {
@@ -293,9 +294,9 @@ export default function ModelsPage() {
 
   return (
     <>
-      <main className="flex-1 p-6 overflow-y-auto min-h-0">
-        <h1 className="text-xl font-bold mb-4">Models</h1>
-
+      <main className="flex-1 flex flex-col h-full min-h-0">
+        <PageHeader title="Models" />
+        <div className="flex-1 overflow-y-auto p-6 min-h-0">
         {/* ─── STT Models Section ─── */}
         <section className="mb-6">
           <div className="flex items-center gap-2 mb-1">
@@ -433,6 +434,7 @@ export default function ModelsPage() {
             </div>
           </section>
         )}
+        </div>
       </main>
 
       {detailsModel && (

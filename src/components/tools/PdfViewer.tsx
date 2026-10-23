@@ -26,6 +26,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import { FileText, Upload } from "lucide-react";
 import { logError } from "@/lib/logger";
+import { PageHeader, Toolbar } from "@/components/ui/toolbar";
 import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 
@@ -112,8 +113,9 @@ export default function PdfViewer() {
 
   return (
     <div className="flex flex-col h-full w-full min-w-0 bg-bg-body text-text-primary overflow-hidden">
+      <PageHeader title="PDF Reader" icon={FileText} />
       {/* Toolbar */}
-      <div className="flex flex-wrap items-center gap-2 p-2 border-b border-border-default bg-bg-card shrink-0">
+      <Toolbar className="flex-wrap">
         <button onClick={() => fileInputRef.current?.click()} className={btnPrimary}>
           {pdfUrl ? "Change PDF" : "Open PDF"}
         </button>
@@ -171,7 +173,7 @@ export default function PdfViewer() {
             <span className="text-xs text-text-tertiary ml-auto">{numPages} pages</span>
           </>
         )}
-      </div>
+      </Toolbar>
 
       {error && (
         <div className="px-3 py-2 text-sm text-error-text border-b border-border-default bg-bg-card">{error}</div>

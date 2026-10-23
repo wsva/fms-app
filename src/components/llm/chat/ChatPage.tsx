@@ -7,6 +7,7 @@ import { Send, Bot, User, Loader2, ChevronDown, ChevronUp, Wand2, ZoomIn, ZoomOu
 import { isTauri } from "@/lib/tauri";
 import { startRecording, stopRecording, type VoiceState } from "@/lib/voice-input";
 import { VoiceMicButton } from "@/components/voice/VoiceMicButton";
+import { PageHeader, Toolbar } from "@/components/ui/toolbar";
 import {
   type ChatMessage,
   type OllamaModelInfo,
@@ -277,15 +278,13 @@ export default function LLMChatPage() {
 
   return (
     <main className="flex-1 flex flex-col h-full">
-      {/* Header */}
-      <div className="p-4 border-b border-border-default flex items-center gap-4">
-        <h1 className="text-lg font-semibold flex-1 flex items-center gap-2">
-          LLM Chat
-          <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-bg-muted border border-border-default text-text-tertiary">
-            {provider}
-          </span>
-        </h1>
-        <div className="flex items-center gap-3">
+      <PageHeader
+        title="LLM Chat"
+        icon={Bot}
+        badge={<span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-bg-muted border border-border-default text-text-tertiary">{provider}</span>}
+      />
+      <Toolbar className="flex-wrap">
+        <div className="flex-1 min-w-0" />
           {/* Temperature control */}
           <div className="flex items-center gap-2" title="Temperature: controls response randomness">
             <span className="text-xs text-text-tertiary">Temp:</span>
@@ -351,8 +350,7 @@ export default function LLMChatPage() {
               placeholder="Model name"
             />
           )}
-        </div>
-      </div>
+      </Toolbar>
 
       {/* Messages area */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">

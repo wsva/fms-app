@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { RefreshCw, Plus, X, Star, Globe, Play } from "lucide-react";
+import { Plus, X, Star, Globe, Play } from "lucide-react";
 import type { CardDatasetSummary } from "@/lib/types";
+import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -192,25 +193,11 @@ export default function SimpleWordsPage() {
   // ── Render ────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="p-4 border-b border-border-default shrink-0 flex items-center gap-3">
-        <div className="flex-1">
-          <h1 className="text-lg font-semibold text-text-primary flex items-center gap-2">
-            <Globe size={18} /> Simple Words
-          </h1>
-          <p className="text-xs text-text-secondary mt-0.5">
-            Load card datasets into memory as a "known simple" word set. Only one language is active at a time.
-            When filtering a word list, all words present in the set are removed. New words you mark as simple
-            are added to the <strong>default dataset</strong> (⭐).
-          </p>
-        </div>
-        <button
-          onClick={() => setShowAddLang(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-border-default hover:bg-bg-hover text-text-secondary cursor-pointer"
-        >
-          <Plus size={14} /> Add Language
-        </button>
-      </div>
+      <PageHeader title="Simple Words" icon={Globe} />
+      <Toolbar>
+        <div className="flex-1 min-w-0" />
+        <ToolbarButton icon={Plus} label="Add Language" onClick={() => setShowAddLang(true)} />
+      </Toolbar>
 
       {/* Status bar */}
       <div className="px-4 py-2 flex items-center gap-4 text-xs text-text-tertiary border-b border-border-default shrink-0">
@@ -224,6 +211,11 @@ export default function SimpleWordsPage() {
 
       {/* Language sections */}
       <div className="flex-1 overflow-auto p-4 space-y-4">
+        <p className="text-xs text-text-secondary">
+          Load card datasets into memory as a "known simple" word set. Only one language is active at a time.
+          When filtering a word list, all words present in the set are removed. New words you mark as simple
+          are added to the <strong>default dataset</strong> (⭐).
+        </p>
         {showAddLang && (
           <div className="flex items-center gap-2 p-3 rounded-lg border border-accent bg-accent/5">
             <input

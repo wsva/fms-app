@@ -4,6 +4,7 @@
 // names stay consistent. See that module's header for the conventions.
 export { Toolbar } from "./Toolbar";
 export { Breadcrumb } from "./Breadcrumb";
+export { PageHeader } from "./PageHeader";
 export { ToolbarButton } from "./ToolbarButton";
 export type { ToolbarButtonVariant } from "./ToolbarButton";
 export { ToolbarIconButton } from "./ToolbarIconButton";

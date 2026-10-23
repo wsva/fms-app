@@ -7,6 +7,7 @@ import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { Search, Link2, KeyRound, Unplug, RefreshCw, Loader2, Users, ShieldCheck } from "lucide-react";
 import { logInfo, logError } from "@/lib/logger";
+import { PageHeader } from "@/components/ui/toolbar";
 
 // ---------------------------------------------------------------------------
 // Types (mirror the backend commands this page drives)
@@ -602,9 +603,10 @@ export default function DevicesHubPage() {
   const isWebsiteHub = hubKind === "website";
 
   return (
-    <div className="flex flex-col w-full h-full min-h-0 overflow-y-auto p-4 gap-4">
-      <h1 className="text-[1.3em] font-bold shrink-0">Devices &amp; Hub</h1>
+    <div className="flex flex-col w-full h-full min-h-0">
+      <PageHeader title="Devices & Hub" icon={Users} />
 
+      <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4 min-h-0">
       {/* ── 1. Current Workspace Status ──────────────────────── */}
       <section className="shrink-0 flex flex-col gap-3 p-4 rounded-lg border border-border-default bg-bg-card">
         <h2 className="text-base font-semibold">Current Workspace Status</h2>
@@ -1148,6 +1150,7 @@ export default function DevicesHubPage() {
           </div>
         </section>
       )}
+      </div>
     </div>
   );
 }

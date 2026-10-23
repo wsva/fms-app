@@ -19,6 +19,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
 import { useOcr } from "./useOcr";
 import ImageEditor from "./ImageEditor";
+import { PageHeader } from "@/components/ui/toolbar";
 
 export default function OcrPage() {
   const {
@@ -150,12 +151,11 @@ export default function OcrPage() {
 
   return (
     <main className="flex-1 flex flex-col h-full">
-      {/* Header */}
-      <div className="p-4 border-b border-border-default flex items-center gap-3">
-        <ScanText size={20} className="text-text-secondary" />
-        <h1 className="text-lg font-semibold flex-1">OCR</h1>
-        <span className="text-xs text-text-tertiary">Tesseract</span>
-      </div>
+      <PageHeader
+        title="OCR"
+        icon={ScanText}
+        badge={<span className="text-xs text-text-tertiary">Tesseract</span>}
+      />
 
       <div className="flex-1 overflow-y-auto p-4">
         <div className="space-y-5">

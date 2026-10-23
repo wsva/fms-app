@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
 import { Trash2, ArrowDown, Pause, Play, FileText, Radio } from "lucide-react";
+import { PageHeader, Toolbar } from "@/components/ui/toolbar";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -157,11 +158,10 @@ export default function LogPage() {
 
   return (
     <div className="flex flex-1 min-w-0 flex-col h-full bg-bg-base">
-      {/* Header — wraps on narrow screens so the filter chips never push the
-          toolbar past the viewport. */}
-      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 py-3 border-b border-border-default shrink-0">
-        <h2 className="text-lg font-semibold text-text-primary shrink-0">Logs</h2>
-        <div className="flex flex-wrap items-center gap-2 min-w-0">
+      <PageHeader title="Logs" />
+      {/* Toolbar — wraps on narrow screens so the filter chips never push the
+          actions past the viewport. */}
+      <Toolbar className="flex-wrap">
           {/* Level filters */}
           {ALL_LEVELS.map((level) => (
             <button
@@ -217,8 +217,7 @@ export default function LogPage() {
           >
             <Trash2 width={16} height={16} />
           </button>
-        </div>
-      </div>
+      </Toolbar>
 
       {/* Log count bar */}
       <div className="flex flex-wrap items-center justify-between gap-x-3 px-4 py-1 text-xs text-text-tertiary border-b border-border-default/50 shrink-0">

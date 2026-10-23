@@ -6,6 +6,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { Volume2, Loader2, Play } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import { type TtsVoice, type TtsSynthesizeResult, type TtsPreviewResult } from "@/lib/edge_tts/types";
+import { PageHeader } from "@/components/ui/toolbar";
 
 // Popular European languages with their locale prefixes
 const EUROPEAN_LANGUAGES: { code: string; label: string; prefix: string }[] = [
@@ -149,11 +150,11 @@ export default function TtsPage() {
 
   return (
     <main className="flex-1 flex flex-col h-full">
-      {/* Header */}
-      <div className="p-4 border-b border-border-default flex items-center gap-4">
-        <h1 className="text-lg font-semibold flex-1">Text to Speech</h1>
-        {loadingVoices && <Loader2 size={18} className="animate-spin text-text-tertiary" />}
-      </div>
+      <PageHeader
+        title="Text to Speech"
+        icon={Volume2}
+        badge={loadingVoices ? <Loader2 size={18} className="animate-spin text-text-tertiary" /> : undefined}
+      />
 
       <div className="flex-1 overflow-y-auto p-4">
         <div className="max-w-3xl mx-auto space-y-6">

@@ -35,6 +35,14 @@
 //   the three-dot `ToolbarOverflow` on mobile (they stay inline on desktop), so
 //   the visible stacked row carries only the contextual actions that matter now.
 // - `aria-label` is auto-derived from label/title; icon-only buttons require one.
+// Page top-area pattern (every page, unified): a single header row on top, then
+//   an optional `Toolbar` action row directly beneath it. The header is a
+//   `Breadcrumb` when the page drills into children (its root crumb IS the page
+//   name, so no separate title) or a `PageHeader` title bar when it has no
+//   breadcrumb. Render the `Toolbar` on any page with at least one page-level
+//   action and omit it entirely when there are none. Only actionable controls
+//   belong in the toolbar; a non-action status (provider/model badge, spinner)
+//   stays in the header's `badge` slot.
 // ---------------------------------------------------------------------------
 
 /** Icon size for a labeled toolbar button. */

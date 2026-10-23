@@ -9,7 +9,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { message as showDialog } from "@tauri-apps/plugin-dialog";
 import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog, Upload, LogIn, Archive } from "lucide-react";
 import { tbGhost, tbSolid, tbToggle, tbToggleStacked, TB_ICON } from "@/lib/ui/toolbar";
-import { ToolbarButton } from "@/components/ui/toolbar";
+import { ToolbarButton, PageHeader } from "@/components/ui/toolbar";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { logError, logInfo } from "@/lib/logger";
 
@@ -2108,6 +2108,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
 
   return (
     <div className="flex flex-col w-full h-full min-h-0 bg-bg-body">
+      <PageHeader title="Datasets Sync" />
       {/* Toolbar row: the segmented zone switcher (mode, not dataset-type — the
           underline section tabs below keep that dimension) and the page-level
           actions. Replaces the old h1 header, the always-on status strip, and
