@@ -27,8 +27,6 @@ use tauri::{AppHandle, Emitter, State};
 use crate::datasets;
 use crate::settings::SettingsState;
 
-use super::client::pc_base;
-
 /// Hub route that accepts an archive (guide §3.6 — multipart `file`,
 /// optional `visibility`, repeated `tag_uuids`).
 const UPLOAD_PATH: &str = "/api/dataset/upload";

@@ -450,7 +450,7 @@ pub async fn xp_get_user(
 
     // On a follower, overlay how much of the displayed total the hub has not
     // confirmed yet (§3.6 reconcile-on-ack). The hub role has no queue.
-    let pending_xp = if _settings.role() != "hub" {
+    let pending_xp = if !_settings.is_hub() {
         crate::sync::client::pending_xp_delta(&_settings, &user_id).unwrap_or(0)
     } else {
         0

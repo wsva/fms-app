@@ -267,7 +267,7 @@ pub fn sync_handover_epoch(
     settings: tauri::State<'_, crate::settings::SettingsState>,
     scope: String,
 ) -> Result<i64, String> {
-    if settings.role() != "hub" {
+    if !settings.is_hub() {
         return Err("only a hub holds journal authority to hand a scope over".to_string());
     }
     let scope = scope.trim().to_string();

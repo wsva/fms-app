@@ -1078,7 +1078,7 @@ pub async fn sync_round_inner(
         // `pc_url`. That's the "cloud-only round" branch below. Anything else
         // (follower with no upstream, or a hub with no token) has literally
         // nothing to talk to, so error out with an actionable message.
-        let role_hub = settings.role() == "hub";
+        let role_hub = settings.is_hub();
         let has_token = crate::auth::get_access_token(&settings).is_ok();
         if !(role_hub && has_token) {
             return Err(if role_hub {
@@ -1388,7 +1388,7 @@ pub async fn sync_round_inner(
     //    website to drain toward, and only a hub owns journal/file state worth
     //    mirroring — anything else skips both legs (keys stay absent, so the
     //    status surface can tell "skipped" from "drained, nothing to do").
-    let auto_on = settings.role() == "hub"
+    let auto_on = settings.is_hub()
         && crate::auth::get_access_token(settings.inner()).is_ok();
     let owned_uuids: Vec<String> = if auto_on {
         datasets::dictation::open_app_db(settings.inner())

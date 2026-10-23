@@ -828,7 +828,7 @@ pub fn commit_change_as(
     let scope = scope_for(kind, dataset_uuid);
     #[cfg(feature = "desktop")]
     {
-        if settings.role() == "hub" {
+        if settings.is_hub() {
             let object_id = object_id_for(kind, payload, user_key);
             // One shape for every stamp that leaves the hub: `edit_time` is
             // compared as an instant here, but a follower writes it into row

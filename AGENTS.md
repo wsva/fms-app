@@ -117,7 +117,7 @@ src-tauri/src/
 ├── mcp/                    # Built-in MCP server (rmcp), nested at `/mcp` — desktop
 │   ├── mod.rs              # `DatasetMcpServer`, params shared by 2+ domains, `tool_router()`
 │   │                       #   merging the domain routers, `ServerHandler` impl, `create_mcp_service()`
-│   ├── datasets.rs         # dataset discovery/CRUD + subtitle & waveform pipeline (25 tools)
+│   ├── datasets.rs         # dataset discovery/CRUD + subtitle & waveform pipeline (26 tools)
 │   │                       #   `dataset_audit` is subject-only — per-step reading is `workflow_verify`/`workflow_adopt`;
 │   │                       #   `dataset_full_report` composes audit + runs + model state for one call
 │   ├── dictation.rs        # cue adjust/align, dictation progress, favourites, subtitle versions (15)

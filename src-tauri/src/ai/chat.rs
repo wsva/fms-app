@@ -522,7 +522,7 @@ pub(crate) fn send_pc_message(
     // A demoted PC (`role = "follower"`) never writes a local chat copy: stage
     // the send in the durable outbox mirror instead, delivered by the next sync
     // round or an open chat view (§3.4 writeback + §4 mirror discipline).
-    if settings.role() != "hub" {
+    if !settings.is_hub() {
         let conn = open_mirror(settings)?;
         enqueue_outbox(settings, &conn, &uuid, &text, &files)?;
         let me = crate::sync::client::local_device_id(settings).unwrap_or_default();
@@ -556,7 +556,7 @@ pub async fn chat_list_messages(
     limit: Option<i64>,
 ) -> Result<ChatListResponse, String> {
     #[cfg(feature = "desktop")]
-    if settings.role() == "hub" {
+    if settings.is_hub() {
         let messages = match after_id {
             Some(id) => list_messages_after_id(&settings, id, limit.unwrap_or(200))?,
             None => list_messages(&settings, after.as_deref().unwrap_or(""), limit.unwrap_or(200))?,
@@ -597,7 +597,7 @@ pub async fn chat_send_message(
         file_paths,
     );
     #[cfg(feature = "desktop")]
-    if settings.role() == "hub" {
+    if settings.is_hub() {
         return send_pc_message(&app, &settings, text, file_paths, uuid);
     }
 
@@ -663,7 +663,7 @@ pub async fn chat_resolve_attachment(
     filename: Option<String>,
 ) -> Result<String, String> {
     #[cfg(feature = "desktop")]
-    if settings.role() == "hub" {
+    if settings.is_hub() {
         let (path, _att) = attachment_file(&settings, &uuid)?;
         return Ok(path.to_string_lossy().into_owned());
     }
@@ -749,7 +749,7 @@ pub async fn chat_save_attachment(
     dest: Option<String>,
 ) -> Result<String, String> {
     #[cfg(feature = "desktop")]
-    if settings.role() == "hub" {
+    if settings.is_hub() {
         let dest = dest.ok_or_else(|| "no destination chosen".to_string())?;
         return copy_local_attachment(&app, &settings, &uuid, dest).await;
     }

@@ -627,6 +627,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
     }
 
+    #[tool(name = "dataset_info_save", description = "Overwrite a dataset's whole info.json from a JSON document — the escape hatch for fields dataset_info_update does not expose. The text must parse as that dataset's info document; identity fields (uuid, type, format, created_at) are always taken from the file on disk, so an edit can never re-key or re-type a dataset, and updated_at is refreshed. Returns the descriptor actually written. Prefer dataset_info_update when only name / description / language / visibility / owner_id change.")]
     async fn dataset_info_save(&self, Parameters(param): Parameters<DatasetInfoSaveParam>) -> Result<String, String> {
         log::info!("[MCP] dataset_info_save: uuid={}", param.uuid);
         let settings = self.app.state::<SettingsState>();

@@ -126,12 +126,17 @@ pub struct PairedDevice {
 pub struct AuthContext {
     pub device_id: Option<String>,
     pub bound_user_id: Option<String>,
-    /// Declared sync role from `x-fms-role` (`"hub"`/`"follower"`), for status.
+    /// Declared sync role from `x-fms-role` (`"hub"`/`"follower"`), recorded by
+    /// the zone guard for observability; no handler reads it yet.
+    #[allow(dead_code)]
     pub role: Option<String>,
-    /// Declared cluster id from `x-fms-cluster`; the hub compares it against its
-    /// own to detect a mis-paired follower (§3.1). None for legacy clients.
+    /// Declared cluster id from `x-fms-cluster`, recorded for a future handler
+    /// check; the zone guard itself already warns on a mismatch with this hub.
+    #[allow(dead_code)]
     pub cluster_id: Option<String>,
-    /// Peer `x-fms-protocol` version (0 when the header is absent/old client).
+    /// Peer `x-fms-protocol` version (0 when the header is absent/old client),
+    /// recorded for a future per-request capability gate.
+    #[allow(dead_code)]
     pub protocol_version: u32,
 }
 

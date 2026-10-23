@@ -71,6 +71,7 @@ const INBOX_ACK_PATH: &str = "/api/v1/inbox/ack";
 pub(crate) struct InboxEntry {
     pub(crate) change_id: String,
     pub(crate) proposal_seq: i64,
+    #[allow(dead_code)]
     pub(crate) object_id: String,
     pub(crate) kind: String,
     #[allow(dead_code)]
@@ -441,7 +442,7 @@ pub async fn sync_inbox_drain(
     scope: Option<String>,
     auto: Option<bool>,
 ) -> Result<Value, String> {
-    if settings.role() != "hub" {
+    if !settings.is_hub() {
         return Err(
             "this device is not role=hub; only a desktop hub drains the website inbox (a follower must forward edits via writeback instead)".to_string(),
         );

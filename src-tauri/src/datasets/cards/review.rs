@@ -34,9 +34,6 @@ use super::CardReview;
 use crate::datasets::{now_row_stamp, row_stamp_at};
 use crate::settings::SettingsState;
 
-/// The schema alias the app DB gets when attached to a card connection.
-const APP_SCHEMA: &str = "app";
-
 /// The acting user's newest review, joined onto a card row aliased `c`. Expects
 /// `?1` to be the acting `user_id` — every query using it binds that first.
 ///

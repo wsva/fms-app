@@ -695,7 +695,7 @@ async fn changes(
     // the journal and raises `pruned_up_to`, which is what makes a follower with
     // a stale cursor below the new mark get `resync_required` from `read_changes`
     // below. Only the hub owns a journal worth pruning.
-    if settings.role() == "hub" {
+    if settings.is_hub() {
         crate::sync::change_log::maybe_prune(&conn);
     }
     match crate::sync::change_log::read_changes(&conn, &uuid, after) {
@@ -725,7 +725,7 @@ async fn app_changes(
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
     let after = q.after.unwrap_or(-1);
-    if settings.role() == "hub" {
+    if settings.is_hub() {
         crate::sync::change_log::maybe_prune(&conn);
     }
     match crate::sync::change_log::read_changes(&conn, sync::change_log::APP_SCOPE, after) {

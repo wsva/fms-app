@@ -590,7 +590,7 @@ pub async fn sync_handover_to_cloud(
     uuid: String,
     role: Option<String>,
 ) -> Result<Value, String> {
-    if settings.role() != "hub" {
+    if !settings.is_hub() {
         return Err("only a hub holds journal authority to hand a scope over".to_string());
     }
     let uuid = uuid.trim().to_string();

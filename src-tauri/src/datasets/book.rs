@@ -696,7 +696,7 @@ pub(crate) fn sync_chapters(
 
     let deleted_uuids: Vec<String>;
     {
-        let mut tx = conn.transaction().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
         let mut deleted: Vec<String> = Vec::new();
         for root in &roots {
             deleted.extend(delete_chapter_subtree_tx(&tx, root)?);
