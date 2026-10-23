@@ -1057,18 +1057,22 @@ export default function WikiPage() {
 
               {viewMode === "browse" && !hubMode && (
                 <>
-                  <ToolbarButton
-                    icon={FilePlus}
-                    label="New File"
-                    onClick={handleCreateFile}
-                    title="New file in this folder"
-                  />
-                  <ToolbarButton
-                    icon={FolderPlus}
-                    label="New Folder"
-                    onClick={handleCreateDir}
-                    title="New folder in this folder"
-                  />
+                  {!mobile && (
+                    <ToolbarButton
+                      icon={FilePlus}
+                      label="New File"
+                      onClick={handleCreateFile}
+                      title="New file in this folder"
+                    />
+                  )}
+                  {!mobile && (
+                    <ToolbarButton
+                      icon={FolderPlus}
+                      label="New Folder"
+                      onClick={handleCreateDir}
+                      title="New folder in this folder"
+                    />
+                  )}
                 </>
               )}
 
@@ -1082,7 +1086,7 @@ export default function WikiPage() {
                 />
               )}
 
-              {viewMode === "datasets" && canMutateRoots && !hubMode && (
+              {viewMode === "datasets" && canMutateRoots && !hubMode && !mobile && (
                 <ToolbarButton
                   icon={Plus}
                   label="New Dataset"
@@ -1095,30 +1099,61 @@ export default function WikiPage() {
                   listing; on an open file (when not editing) it reloads that
                   file; otherwise it reloads the local dataset list. Disabled
                   while editing so a refresh can never discard the draft. The
-                  caption carries the scope of the current level. */}
-              <ToolbarButton
-                icon={RefreshCw}
-                iconProps={{ className: (viewMode === "browse" ? browseLoading : isLoading) ? "animate-spin" : "" }}
-                label={refreshCaption}
-                title={refreshCaption}
-                ariaLabel={refreshCaption}
-                onClick={() => {
-                  if (viewMode === "browse") refreshBrowse();
-                  else if (viewMode === "file") {
-                    if (selection) void loadSelection(selection, false);
-                  } else void loadLocalDatasets();
-                  setLocRefresh((n) => n + 1);
-                }}
-                disabled={isLoading || browseLoading || (viewMode === "file" && editing)}
-              />
+                  caption carries the scope of the current level. Inline on
+                  desktop; on a phone it rides in the overflow below. */}
+              {!mobile && (
+                <ToolbarButton
+                  icon={RefreshCw}
+                  iconProps={{ className: (viewMode === "browse" ? browseLoading : isLoading) ? "animate-spin" : "" }}
+                  label={refreshCaption}
+                  title={refreshCaption}
+                  ariaLabel={refreshCaption}
+                  onClick={() => {
+                    if (viewMode === "browse") refreshBrowse();
+                    else if (viewMode === "file") {
+                      if (selection) void loadSelection(selection, false);
+                    } else void loadLocalDatasets();
+                    setLocRefresh((n) => n + 1);
+                  }}
+                  disabled={isLoading || browseLoading || (viewMode === "file" && editing)}
+                />
+              )}
 
               {/* Locations management (datasets view, local/non-hub only) — opens
-                  the shared manager as a full-content overlay, matching Cards. */}
-              {viewMode === "datasets" && canMutateRoots && (
+                  the shared manager as a full-content overlay, matching Cards. On a
+                  phone the overflow shows at every level and also carries the Add/New
+                  actions and Refresh, so the visible stacked row stays short. */}
+              {mobile || (viewMode === "datasets" && canMutateRoots) ? (
                 <ToolbarOverflow>
-                  <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
+                  {viewMode === "datasets" && canMutateRoots && (
+                    <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
+                  )}
+                  {mobile && viewMode === "browse" && !hubMode && (
+                    <>
+                      <ToolbarMenuItem icon={FilePlus} onClick={handleCreateFile}>New File</ToolbarMenuItem>
+                      <ToolbarMenuItem icon={FolderPlus} onClick={handleCreateDir}>New Folder</ToolbarMenuItem>
+                    </>
+                  )}
+                  {mobile && viewMode === "datasets" && canMutateRoots && !hubMode && (
+                    <ToolbarMenuItem icon={Plus} onClick={handleCreateDataset}>New Dataset</ToolbarMenuItem>
+                  )}
+                  {mobile && (
+                    <ToolbarMenuItem
+                      icon={RefreshCw}
+                      disabled={isLoading || browseLoading || (viewMode === "file" && editing)}
+                      onClick={() => {
+                        if (viewMode === "browse") refreshBrowse();
+                        else if (viewMode === "file") {
+                          if (selection) void loadSelection(selection, false);
+                        } else void loadLocalDatasets();
+                        setLocRefresh((n) => n + 1);
+                      }}
+                    >
+                      {refreshCaption}
+                    </ToolbarMenuItem>
+                  )}
                 </ToolbarOverflow>
-              )}
+              ) : null}
             </Toolbar>
 
             {/* Tools row: revealed by the sub-toolbar's Tools button while

@@ -22,11 +22,18 @@
 // - Destructive toolbar action: `danger` (ghost-red). Solid-red is only the
 //   active recording state (RecordButton).
 // - Label spacing comes from `gap-1.5` only; no leading-space-in-label idiom.
-// - Mobile label collapsing defaults ON for labeled buttons.
-// - Stacked (`tb*Stacked`) is the alternative layout: icon above a `text-xs`
-//   label, in a narrower box. Use it where a horizontal row of labeled buttons
-//   cannot fit a phone's width but the words still matter — it trades ~10px of
-//   bar height for dropping the labels. A stacked button never hides its label.
+// - Mobile labeled icon buttons STACK (icon over a `text-xs` label) by default —
+//   the words are kept, not dropped to icon-only. Pass `collapseOnMobile={false}`
+//   to hold the inline horizontal labeled button instead (used by the Sync page's
+//   per-card action rows).
+// - Stacked (`tb*Stacked`) is the icon-over-`text-xs`-label layout, in a narrower
+//   box. It trades ~10px of bar height for keeping the words, which is the right
+//   call on a phone's toolbar where a horizontal row of labeled buttons would
+//   not fit. A stacked button never hides its label.
+// - Because stacking keeps the words, a phone bar fills up fast. Occasional
+//   actions — Add / New *, Manage / Locations, and Refresh — therefore tuck into
+//   the three-dot `ToolbarOverflow` on mobile (they stay inline on desktop), so
+//   the visible stacked row carries only the contextual actions that matter now.
 // - `aria-label` is auto-derived from label/title; icon-only buttons require one.
 // ---------------------------------------------------------------------------
 

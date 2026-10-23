@@ -41,7 +41,6 @@ import {
   Toolbar,
   Breadcrumb,
   ToolbarButton,
-  ToolbarIconButton,
   ToolbarOverflow,
   ToolbarMenuItem,
 } from "@/components/ui/toolbar";
@@ -504,11 +503,6 @@ export default function CardsPage() {
           full-width bar under the breadcrumb): the mode toggles (in a dataset) or the
           dataset-list actions, then search, then the overflow menu. */}
       <Toolbar mobile={mobile}>
-        <span className="text-xs text-text-secondary truncate min-w-0">
-          {selectedDataset
-            ? `${selectedDataset.info.sharing.visibility} · ${selectedDataset.card_count} cards`
-            : `${datasets.length} dataset${datasets.length !== 1 ? "s" : ""}`}
-        </span>
         <div className="flex-1 min-w-0" />
         {!showManage && (activeTab === "review" ? (
           <>
@@ -556,16 +550,19 @@ export default function CardsPage() {
                 ),
               )}
             </div>
-            {/* Add Card lives on the dataset toolbar so it is always reachable —
-                it used to hide inside the search row, which meant opening
-                search just to create a card. */}
-            <ToolbarButton
-              icon={Plus}
-              label="Add Card"
-              title="Add a new card"
-              ariaLabel="Add card"
-              onClick={() => openCardEditor(selectedDatasetUuid, null, () => loadCards())}
-            />
+            {/* Add Card lives on the dataset toolbar (desktop) so it is always
+                reachable — it used to hide inside the search row, which meant
+                opening search just to create a card. On a phone it tucks into the
+                overflow, since the stacked bar has no room for a one-shot action. */}
+            {!mobile && (
+              <ToolbarButton
+                icon={Plus}
+                label="Add Card"
+                title="Add a new card"
+                ariaLabel="Add card"
+                onClick={() => openCardEditor(selectedDatasetUuid, null, () => loadCards())}
+              />
+            )}
           </>
         ) : (
           <>
@@ -585,19 +582,24 @@ export default function CardsPage() {
                 setActiveTab("review");
               }}
             />
-            <ToolbarButton icon={Plus} label="New Dataset" title="Create new dataset" onClick={createDataset} />
+            {!mobile && (
+              <ToolbarButton icon={Plus} label="New Dataset" title="Create new dataset" onClick={createDataset} />
+            )}
           </>
         ))}
         {/* Refresh — always available at every level (dataset list, inside a dataset,
             review, and the Locations overlay); reloads the dataset list and, when a
-            dataset is open, its cards. The caption carries the scope of the level. */}
-        <ToolbarButton
-          icon={RefreshCw}
-          label={refreshCaption}
-          title={refreshCaption}
-          ariaLabel={refreshCaption}
-          onClick={handleRefresh}
-        />
+            dataset is open, its cards. The caption carries the scope of the level.
+            Inline on desktop; on a phone it rides in the overflow below. */}
+        {!mobile && (
+          <ToolbarButton
+            icon={RefreshCw}
+            label={refreshCaption}
+            title={refreshCaption}
+            ariaLabel={refreshCaption}
+            onClick={handleRefresh}
+          />
+        )}
         {/* Search button — present at every level but Review, on the far right
             (just before the overflow menu): inside a dataset it toggles the
             This-dataset / All-datasets row, from the dataset list it opens a cross-dataset
@@ -605,29 +607,50 @@ export default function CardsPage() {
             owns the content area — the review toolbar shows only Answer/Skip — so
             its active state always matches a visible row. */}
         {!showManage && activeTab !== "review" && (
-          <ToolbarIconButton
+          <ToolbarButton
             icon={Search}
             variant="toggleSoft"
             active={searchOpen}
+            label="Search"
             title={searchOpen ? "Hide search" : "Show search"}
             ariaLabel="Toggle search"
             onClick={toggleSearch}
           />
         )}
-        {/* Overflow menu — the three-dot home for occasional actions. Locations
-            (the former Manage toggle) lives here: it is a root-level concern, so
-            the menu is shown on the dataset list only — never inside a dataset, nor on
-            the review page, which keeps its toolbar to card actions alone. Active
-            state marks the overlay it is currently owning. */}
-        {!selectedDatasetUuid && activeTab !== "review" && (
+        {/* Overflow menu — the three-dot home for occasional actions. On desktop it
+            shows only at the dataset list and carries Locations (the former Manage
+            toggle), a root-level concern. On a phone it shows at every level and also
+            swallows Add Card / New Dataset and Refresh, so the visible stacked row
+            keeps just the contextual actions. Active state marks the overlay owning. */}
+        {(mobile || (!selectedDatasetUuid && activeTab !== "review")) && (
           <ToolbarOverflow open={menuOpen} onOpenChange={setMenuOpen}>
-            <ToolbarMenuItem
-              icon={FolderCog}
-              checked={showManage}
-              onClick={() => setShowManage((v) => !v)}
-            >
-              Locations
-            </ToolbarMenuItem>
+            {!selectedDatasetUuid && activeTab !== "review" && (
+              <ToolbarMenuItem
+                icon={FolderCog}
+                checked={showManage}
+                onClick={() => setShowManage((v) => !v)}
+              >
+                Locations
+              </ToolbarMenuItem>
+            )}
+            {mobile && selectedDatasetUuid && activeTab !== "review" && (
+              <ToolbarMenuItem
+                icon={Plus}
+                onClick={() => openCardEditor(selectedDatasetUuid, null, () => loadCards())}
+              >
+                Add Card
+              </ToolbarMenuItem>
+            )}
+            {mobile && !selectedDatasetUuid && (
+              <ToolbarMenuItem icon={Plus} onClick={createDataset}>
+                New Dataset
+              </ToolbarMenuItem>
+            )}
+            {mobile && (
+              <ToolbarMenuItem icon={RefreshCw} onClick={handleRefresh}>
+                {refreshCaption}
+              </ToolbarMenuItem>
+            )}
           </ToolbarOverflow>
         )}
       </Toolbar>
@@ -898,7 +921,7 @@ export default function CardsPage() {
                       }}
                     >
                       <div className="flex-1 min-w-0">
-                        <p className="text-lg font-medium truncate sm:text-2xl">
+                        <p className="text-lg font-medium whitespace-normal break-words sm:text-2xl">
                           {card.question || "(empty question)"}
                         </p>
                       </div>

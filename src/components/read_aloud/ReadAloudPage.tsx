@@ -608,7 +608,7 @@ export default function ReadAloudPage() {
           </>
         ) : (
           <>
-            {viewMode === "datasets" && (
+            {viewMode === "datasets" && !mobile && (
               <ToolbarButton
                 icon={Plus}
                 label="New Dataset"
@@ -619,12 +619,14 @@ export default function ReadAloudPage() {
 
             {viewMode === "texts" && (
               <>
-                <ToolbarButton
-                  icon={FilePlus}
-                  label="New Text"
-                  title="Add text"
-                  onClick={() => startEdit(null)}
-                />
+                {!mobile && (
+                  <ToolbarButton
+                    icon={FilePlus}
+                    label="New Text"
+                    title="Add text"
+                    onClick={() => startEdit(null)}
+                  />
+                )}
                 <ToolbarButton
                   icon={Pencil}
                   label="Edit"
@@ -718,39 +720,60 @@ export default function ReadAloudPage() {
         )}
 
         {/* Refresh — always available; reloads the dataset list and, when a
-            dataset is open, its texts. The caption carries the scope of the level. */}
-        <ToolbarButton
-          icon={RefreshCw}
-          label={refreshCaption}
-          title={refreshCaption}
-          ariaLabel={refreshCaption}
-          onClick={handleRefresh}
-        />
+            dataset is open, its texts. The caption carries the scope of the level.
+            Inline on desktop; on a phone it rides in the overflow below. */}
+        {!mobile && (
+          <ToolbarButton
+            icon={RefreshCw}
+            label={refreshCaption}
+            title={refreshCaption}
+            ariaLabel={refreshCaption}
+            onClick={handleRefresh}
+          />
+        )}
 
-        {/* Overflow menu — Delete and the Normalized view toggle live here to
-            keep the toolbar compact. Items are contextual to the current view;
-            the attempts view has no overflow actions (its Play / Delete are in
-            the toolbar above), so the menu is hidden there. */}
-        {!inEditor && (viewMode === "datasets" || viewMode === "texts" || (viewMode === "practice" && !attemptsView)) && (
+        {/* Overflow menu — the three-dot home for occasional actions: Locations
+            and Delete (desktop) plus, on a phone, the Add/New actions and Refresh,
+            so the visible stacked row keeps only the contextual actions. The menu
+            is hidden while inline-editing a text (Save/Cancel own the bar there). */}
+        {!inEditor &&
+          (mobile ||
+            viewMode === "datasets" ||
+            viewMode === "texts" ||
+            (viewMode === "practice" && !attemptsView)) && (
           <ToolbarOverflow open={menuOpen} onOpenChange={setMenuOpen}>
             {viewMode === "datasets" && (
-              <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>
-                Locations
-              </ToolbarMenuItem>
+              <>
+                <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>
+                  Locations
+                </ToolbarMenuItem>
+                {mobile && (
+                  <ToolbarMenuItem icon={Plus} onClick={() => setDatasetDialog({ mode: "create" })}>
+                    New Dataset
+                  </ToolbarMenuItem>
+                )}
+              </>
             )}
             {viewMode === "texts" && (
-              <ToolbarMenuItem
-                icon={Trash2}
-                danger
-                disabled={!activeDataset}
-                onClick={() => {
-                  if (activeDataset) deleteDataset(activeDataset);
-                }}
-              >
-                Delete dataset
-              </ToolbarMenuItem>
+              <>
+                {mobile && (
+                  <ToolbarMenuItem icon={FilePlus} onClick={() => startEdit(null)}>
+                    New Text
+                  </ToolbarMenuItem>
+                )}
+                <ToolbarMenuItem
+                  icon={Trash2}
+                  danger
+                  disabled={!activeDataset}
+                  onClick={() => {
+                    if (activeDataset) deleteDataset(activeDataset);
+                  }}
+                >
+                  Delete dataset
+                </ToolbarMenuItem>
+              </>
             )}
-            {viewMode === "practice" && activeText && (
+            {viewMode === "practice" && activeText && !attemptsView && (
               <>
                 <ToolbarMenuItem icon={Pencil} onClick={() => startEdit(activeText)}>
                   Edit text
@@ -766,6 +789,11 @@ export default function ReadAloudPage() {
                   Delete text
                 </ToolbarMenuItem>
               </>
+            )}
+            {mobile && (
+              <ToolbarMenuItem icon={RefreshCw} onClick={handleRefresh}>
+                {refreshCaption}
+              </ToolbarMenuItem>
             )}
           </ToolbarOverflow>
         )}

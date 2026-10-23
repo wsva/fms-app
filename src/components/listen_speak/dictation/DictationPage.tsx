@@ -416,14 +416,24 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                     disk and, when a dataset is open, bumps the reload token so
                     its media/subtitles/cues are re-read too (no-op at the root
                     level — this absorbs the old per-dataset Reload button).
-                    The caption carries the scope of the current level. */}
-                <ToolbarButton icon={RefreshCw} label={refreshCaption} ariaLabel={refreshCaption} title={refreshCaption} disabled={d.stateLoading} onClick={() => { d.loadLocations(); d.loadDatasets(); d.handleReload(); setLocRefresh((n) => n + 1); }} />
+                    The caption carries the scope of the current level. Inline on
+                    desktop; on a phone it rides in the overflow below. */}
+                {!mobile && (
+                    <ToolbarButton icon={RefreshCw} label={refreshCaption} ariaLabel={refreshCaption} title={refreshCaption} disabled={d.stateLoading} onClick={() => { d.loadLocations(); d.loadDatasets(); d.handleReload(); setLocRefresh((n) => n + 1); }} />
+                )}
 
                 {/* Locations management (datasets view) — opens the shared manager
-                    as a full-content overlay, matching the Cards page pattern. */}
-                {!d.selectedDatasetUuid && (
+                    as a full-content overlay, matching the Cards page pattern. On a
+                    phone the overflow also shows at every level and carries Refresh,
+                    so the stacked bar stays short. */}
+                {(mobile || !d.selectedDatasetUuid) && (
                     <ToolbarOverflow>
-                        <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
+                        {!d.selectedDatasetUuid && (
+                            <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
+                        )}
+                        {mobile && (
+                            <ToolbarMenuItem icon={RefreshCw} disabled={d.stateLoading} onClick={() => { d.loadLocations(); d.loadDatasets(); d.handleReload(); setLocRefresh((n) => n + 1); }}>{refreshCaption}</ToolbarMenuItem>
+                        )}
                     </ToolbarOverflow>
                 )}
 

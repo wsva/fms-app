@@ -35,10 +35,13 @@ type ToolbarButtonProps = {
   iconProps?: Record<string, unknown>;
   /** Override the icon size (defaults to TB_ICON = 14). */
   iconSize?: number;
-  /** Text label; hidden on mobile unless `collapseOnMobile={false}`. Always
-   *  shown when `stacked`. */
+  /** Text label; on mobile a labeled icon button stacks icon-over-label by
+   *  default (words kept). Set `collapseOnMobile={false}` to instead keep the
+   *  horizontal icon-beside-label layout on a phone. Always shown when `stacked`. */
   label?: string;
-  /** Collapse the label to icon-only on mobile. Defaults to true. */
+  /** Mobile layout for a labeled icon button. Default true = stack icon over the
+   *  label (the Datasets Sync toolbar shape). Pass false to keep the inline
+   *  horizontal labeled button instead. No effect off-mobile. */
   collapseOnMobile?: boolean;
   /** Icon above the label instead of beside it. Lets a toolbar keep its words
    *  in the width a phone has; implies the label is shown. */
@@ -95,16 +98,19 @@ export function ToolbarButton({
   const ctx = useToolbarMobile();
   const detected = useIsMobile();
   const mobile = ctx ?? detected;
-  // A label-only button (no icon) must never collapse, or it would render empty
-  // on mobile — collapsing only makes sense when the icon remains. A stacked
-  // button shows its label by definition: the vertical layout is chosen precisely
-  // because the words are worth keeping.
-  const showLabel = !!label && (stacked || !mobile || !collapseOnMobile || !Icon);
+  // A label-only button (no icon) can never stack — there is no icon to sit on
+  // top — and must never collapse, or it would render empty on mobile. On a
+  // phone a labeled ICON button stacks by default (icon over a `text-xs` label);
+  // pass `collapseOnMobile={false}` to hold the inline horizontal shape instead.
+  // A stacked button shows its label by definition: the vertical layout is
+  // chosen precisely because the words are worth keeping.
+  const stack = stacked || (mobile && !!label && !!Icon && collapseOnMobile);
+  const showLabel = !!label && (stack || !mobile || !collapseOnMobile || !Icon);
 
   return (
     <button
       type="button"
-      className={`${variantClass(variant, active, stacked)} ${className}`.trim()}
+      className={`${variantClass(variant, active, stack)} ${className}`.trim()}
       disabled={disabled}
       title={title ?? label}
       aria-label={ariaLabel ?? label ?? title}

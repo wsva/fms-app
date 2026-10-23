@@ -125,13 +125,15 @@ export default function ReadBookPage() {
                 at the books level it is "Manage Books" (Locations + book
                 add/edit/delete); on a book page it is "Manage Chapters" (edit that
                 book's chapters). */}
-            <ToolbarButton
-              variant="toggle"
-              active={b.view === "manage"}
-              icon={Settings2}
-              label={b.bookUUID ? "Manage Chapters" : "Manage Books"}
-              onClick={() => b.setView(b.view === "manage" ? "read" : "manage")}
-            />
+            {!mobile && (
+              <ToolbarButton
+                variant="toggle"
+                active={b.view === "manage"}
+                icon={Settings2}
+                label={b.bookUUID ? "Manage Chapters" : "Manage Books"}
+                onClick={() => b.setView(b.view === "manage" ? "read" : "manage")}
+              />
+            )}
             {/* Advanced is book-scoped — shown only on a book page, not at the
                 books-list level. */}
             {b.bookUUID && (
@@ -181,20 +183,38 @@ export default function ReadBookPage() {
           {/* Refresh — always available at the far right; reloads the current
               view (books / chapters / open chapter) from disk. The caption carries
               the scope of the level. */}
-          <ToolbarButton
-            icon={RefreshCw}
-            label={refreshCaption}
-            title={refreshCaption}
-            ariaLabel={refreshCaption}
-            disabled={b.loading}
-            onClick={() => { b.refresh(); setLocRefresh((n) => n + 1); }}
-          />
+          {!mobile && (
+            <ToolbarButton
+              icon={RefreshCw}
+              label={refreshCaption}
+              title={refreshCaption}
+              ariaLabel={refreshCaption}
+              disabled={b.loading}
+              onClick={() => { b.refresh(); setLocRefresh((n) => n + 1); }}
+            />
+          )}
 
           {/* Locations management (books level) — opens the shared manager as a
-              full-content overlay, matching the Cards page pattern. */}
-          {!b.bookUUID && (
+              full-content overlay, matching the Cards page pattern. On a phone the
+              overflow also shows at every level and swallows the Manage toggle and
+              Refresh, so the visible stacked row keeps just the read actions. */}
+          {(mobile || !b.bookUUID) && (
             <ToolbarOverflow>
-              <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
+              {!b.bookUUID && (
+                <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
+              )}
+              {mobile && !onChapterPage && (
+                <ToolbarMenuItem
+                  icon={Settings2}
+                  checked={b.view === "manage"}
+                  onClick={() => b.setView(b.view === "manage" ? "read" : "manage")}
+                >
+                  {b.bookUUID ? "Manage Chapters" : "Manage Books"}
+                </ToolbarMenuItem>
+              )}
+              {mobile && (
+                <ToolbarMenuItem icon={RefreshCw} disabled={b.loading} onClick={() => { b.refresh(); setLocRefresh((n) => n + 1); }}>{refreshCaption}</ToolbarMenuItem>
+              )}
             </ToolbarOverflow>
           )}
         </Toolbar>
