@@ -55,6 +55,17 @@ jobs:
     name: macOS (arm64)
     runs-on: macos-15
     timeout-minutes: 90
+    # transcribe-cpp-sys builds ggml through CMake, and ggml's backend loader
+    # uses std::filesystem (macOS 10.15+). With no deployment target set,
+    # AppleClang considers every API newer than the SDK floor unavailable and
+    # the C++ build stops at "'path' is unavailable: introduced in macOS 10.15".
+    # Tauri's own minimumSystemVersion only reaches the app crate as a
+    # cargo:rustc-env, never a dependency's build script, so it cannot fix
+    # this by itself. CMake and cc both read this from the environment, so
+    # setting it at job level covers every C/C++ dependency. 11.0 is already
+    # the floor for arm64.
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
       - uses: actions/checkout@v4
 
@@ -191,9 +202,12 @@ jobs:
 
       # `--no-sign` archives with signing disabled and packages the archived
       # .app into an unsigned IPA at gen/apple/build/<arch>/<app>.ipa.
-      # The feature set is the Cargo default (`stt`): the CLI does not apply
-      # `build.features` to mobile targets, so this is the same thin-client +
-      # local-STT set the Android build ships.
+      #
+      # The feature set comes from src-tauri/tauri.ios.conf.json, which the CLI
+      # merges over tauri.conf.json for iOS: `stt` only. Without it the build
+      # inherits `build.features = ["desktop"]` from the base config and tries
+      # to compile the whole PC stack for iOS (xcap has no iOS platform module),
+      # so this file is what keeps the iOS target to the thin-client set.
       - name: Build the unsigned IPA
         run: pnpm tauri ios build --target aarch64 --no-sign --ci
 
