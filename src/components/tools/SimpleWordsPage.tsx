@@ -192,7 +192,7 @@ export default function SimpleWordsPage() {
 
   // ── Render ────────────────────────────────────────────────
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full w-full min-w-0 bg-bg-body">
       <PageHeader title="Simple Words" />
       <Toolbar>
         <div className="flex-1 min-w-0" />
