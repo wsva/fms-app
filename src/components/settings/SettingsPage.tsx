@@ -2,10 +2,12 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import {
   ChevronDown,
   ChevronUp,
   Globe,
+  Info,
   LayoutGrid,
   Palette,
   Server,
@@ -150,6 +152,16 @@ export default function SettingsPage() {
   });
   const [activeSection, setActiveSection] = useState("all");
 
+  // App version for the About section — Tauri reports the packaged version from
+  // tauri.conf.json; empty in the web dev preview (isTauri() false).
+  const [appVersion, setAppVersion] = useState("");
+  useEffect(() => {
+    if (!isTauri()) return;
+    getVersion()
+      .then(setAppVersion)
+      .catch(() => {});
+  }, []);
+
   function selectSection(id: string) {
     setActiveSection(id);
     // Closes the mobile drawer only — the desktop column stays open so the
@@ -166,6 +178,7 @@ export default function SettingsPage() {
     { id: "global", label: "Global Settings", icon: Globe },
     { id: "workspace", label: "Workspace Settings", icon: Server },
     { id: "microphone", label: "Microphone", icon: MicGlyph },
+    { id: "about", label: "About", icon: Info },
   ];
 
   // ---- Bottom nav customization (mobile only) ----
@@ -773,6 +786,20 @@ export default function SettingsPage() {
 
           {/* Zoom-style audio check on the currently selected device. */}
           <MicTestPanel />
+        </section>
+
+        {/* ── About section ────────────────────────────────── */}
+        <section className={`mb-8${showSection("about") ? "" : " hidden"}`}>
+          <h2 className="text-[1.3em] font-semibold mb-2">About</h2>
+          <p className="text-text-secondary text-sm mb-4">
+            Application build information.
+          </p>
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-text-secondary">Version</span>
+            <span className="text-sm font-mono text-text-primary">
+              {appVersion || "unknown"}
+            </span>
+          </div>
         </section>
         </div>
       </div>
