@@ -8,9 +8,9 @@ const WIKI_LINK_PREFIX = "fms-app://wiki/";
 
 type Props = {
     content?: string;
-    // Renders the TOC inline above the body. The wiki page leaves this false and
-    // shows the same TOC in its own left drawer instead (it builds the node via
-    // toHTML); the card editor keeps the inline hover-panel form.
+    // Renders the TOC inline above the body. The wiki page and the card viewer
+    // both leave this false and show the same TOC in their own left drawer
+    // instead (they build the node via toHTML).
     withTOC?: boolean;
     onWikiLink?: (relativePath: string) => void;
 }

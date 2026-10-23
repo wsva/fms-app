@@ -1,12 +1,20 @@
 "use client";
 
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, Eye, Pencil, Trash2, Type, X } from "lucide-react";
+import { Check, Eye, List, Pencil, Trash2, Type, X } from "lucide-react";
 import type { Card, CardDatasetSummary } from "@/lib/types";
 import { isMobileApp, isTauri } from "@/lib/platform";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
-import "./CardEditor.css";
+import { toHTML } from "@/components/wiki/markdown/html";
+import { CollapsibleSidebar, useCollapsibleSidebar } from "@/components/layout/CollapsibleSidebar";
+import {
+  PageHeader,
+  Toolbar,
+  ToolbarButton,
+  ToolbarMenuItem,
+  ToolbarSelect,
+} from "@/components/ui/toolbar";
 
 type FontScaleKey = "normal" | "large" | "x2";
 
@@ -16,6 +24,24 @@ const FONT_SCALE_MAP: Record<FontScaleKey, { zoom: number; weight: number }> = {
   large: { zoom: 1.3, weight: 500 },
   x2: { zoom: 1.6, weight: 600 },
 };
+
+const FONT_SCALE_LABELS: Record<FontScaleKey, string> = {
+  normal: "Normal",
+  large: "Large",
+  x2: "Large x2",
+};
+
+// Familiarity tint ramp (theme-aware --fam-* tokens, see globals.css), shared
+// with the Cards list rows. Literal class names keep Tailwind's scanner happy.
+const FAM_CLASSES = [
+  "bg-fam-0",
+  "bg-fam-1",
+  "bg-fam-2",
+  "bg-fam-3",
+  "bg-fam-4",
+  "bg-fam-5",
+  "bg-fam-6",
+];
 
 function CardEditModal({
   card,
@@ -49,6 +75,16 @@ function CardEditModal({
   const [mobile, setMobile] = useState(false);
   const answerRef = useRef<HTMLTextAreaElement>(null);
 
+  // TOC drawer, mirroring the wiki page: the toolbar's TOC button toggles a
+  // left drawer hosting the answer's heading tree (drag-resizable split column
+  // on desktop, slide-in drawer on mobile). Starts closed; width persists.
+  const tocSidebar = useCollapsibleSidebar({
+    storageKey: "card-toc-width",
+    defaultWidth: 240,
+    minWidth: 180,
+    initialVisible: false,
+  });
+
   useEffect(() => {
     setMobile(isMobileApp());
   }, []);
@@ -63,11 +99,21 @@ function CardEditModal({
   }, []);
 
   // Applied to an inner content wrapper (not the scroll container) so text
-  // renders bigger and bolder per level without overflowing the modal.
+  // renders bigger and bolder per level without overflowing the overlay.
   const scaleStyle: React.CSSProperties = {
     zoom: FONT_SCALE_MAP[fontScale].zoom,
     fontWeight: FONT_SCALE_MAP[fontScale].weight,
   };
+
+  // Escape closes the overlay, like the Close toolbar button does. No dirty
+  // guard: the overlay never had one, and discards stay as silent as before.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   // Auto-resize the answer textarea to fit its content.
   // useLayoutEffect ensures it runs on initial mount before paint.
@@ -81,221 +127,230 @@ function CardEditModal({
   const selectedDatasetName =
     datasets.find((ds) => ds.info.uuid === selectedDataset)?.info.name || "";
 
-  // Compact square icon button used for the header actions on narrow screens.
-  const iconBtn = "p-1.5 rounded-lg border flex items-center justify-center";
-  const iconSize = 16;
+  // Build the TOC node from the same content the body renders, so the
+  // `#sec-...` anchors stay in sync (wiki pattern). Null when the answer has
+  // no headings — that gates both the toolbar button and the drawer column.
+  const tocNode = useMemo(
+    () => (viewMode && answer.trim() ? toHTML(answer).toc : null),
+    [viewMode, answer],
+  );
+
+  const inputCls =
+    "w-full rounded-lg border border-border-default bg-bg-surface px-3 py-2 text-base";
+  const labelCls = "block text-sm font-medium text-text-secondary mb-1.5";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div
-        className={`relative bg-bg-card border border-border-default flex flex-col ${
-          mobile
-            ? "rounded-none w-full h-full px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]"
-            // Percentages, not `vw`/`vh`: the `fixed inset-0` overlay already
-            // tracks the window under the global <html> zoom, but viewport
-            // units get multiplied by the zoom factor — `80vh` would overshoot
-            // the window and overflow the modal at any level above 100%.
-            : "rounded-xl p-8 w-[80%] h-[80%] max-h-full max-w-full"
-        }`}
-      >
-        {/* Close button (top-right corner, desktop only — on mobile it joins the header row) */}
-        {!mobile && (
-          <button
-            onClick={onClose}
-            className="absolute top-4 right-4 p-1.5 rounded-lg text-text-tertiary hover:text-text-primary hover:bg-mid-gray/20 transition-colors"
-            title="Close"
-          >
-            <X size={20} />
-          </button>
+    // Full-screen overlay with the unified page top-area pattern: a PageHeader
+    // bar, a Toolbar action row directly beneath it, and a scrolling body.
+    // On a phone the safe-area insets go on the root (same idiom as the mobile
+    // app shell in (app)/home) so the bars sit below the status bar.
+    <div
+      className="fixed inset-0 z-50 flex flex-col bg-bg-body"
+      style={
+        mobile
+          ? {
+              paddingTop: "env(safe-area-inset-top)",
+              paddingBottom: "env(safe-area-inset-bottom)",
+            }
+          : undefined
+      }
+    >
+      <PageHeader
+        title={viewMode ? "Card" : card?.uuid ? "Edit Card" : "New Card"}
+        badge={
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span
+              className="text-[10px] px-1.5 py-0.5 rounded bg-mid-gray/20 text-text-tertiary max-w-[180px] truncate"
+              title={selectedDatasetName || undefined}
+            >
+              {selectedDatasetName || "(unknown dataset)"}
+            </span>
+            {viewMode && card && (
+              <span
+                className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                  FAM_CLASSES[Math.min(card.familiarity, 6)]
+                }`}
+                title={`Familiarity ${card.familiarity}`}
+              >
+                f={card.familiarity}
+              </span>
+            )}
+          </div>
+        }
+      />
+
+      {/* Toolbar — the viewer's actions live here, right-aligned, through the
+          shared kit (TOC toggle, Font size picker, View/Edit mode toggle, Save,
+          Delete, Close). */}
+      <Toolbar mobile={mobile}>
+        <div className="flex-1 min-w-0" />
+        {viewMode && !!tocNode && (
+          <ToolbarButton
+            icon={List}
+            variant="toggleSoft"
+            active={tocSidebar.visible}
+            label="TOC"
+            onClick={tocSidebar.toggle}
+            title={tocSidebar.visible ? "Hide table of contents" : "Show table of contents"}
+          />
         )}
-        {/* Header with title and buttons */}
-        <div className={`flex items-center justify-between ${mobile ? "flex-wrap gap-y-2" : ""} mb-4`}>
-          <h2 className={`${mobile ? "text-lg" : "text-xl"} font-semibold min-w-0 truncate`}>
-            {viewMode ? "View Card" : card ? "Edit Card" : "New Card"}
-          </h2>
-          <div className={`flex items-center gap-2 ${mobile ? "" : "pr-10"}`}>
-            <div
-              className="flex items-center gap-1.5 px-2 rounded-lg border border-border-default bg-bg-surface"
-              title="Font size"
-            >
-              <Type size={15} className="text-text-tertiary shrink-0" />
-              <select
-                value={fontScale}
-                onChange={(e) => setFontScale(e.target.value as FontScaleKey)}
-                className={`${mobile ? "py-1" : "py-2"} pr-1 bg-transparent text-sm cursor-pointer outline-none text-text-primary`}
+        <ToolbarSelect icon={Type} label="Font size" value={FONT_SCALE_LABELS[fontScale]}>
+          {(Object.keys(FONT_SCALE_MAP) as FontScaleKey[]).map((k) => (
+            <ToolbarMenuItem key={k} checked={fontScale === k} onClick={() => setFontScale(k)}>
+              {FONT_SCALE_LABELS[k]}
+            </ToolbarMenuItem>
+          ))}
+        </ToolbarSelect>
+        {/* Mode switch as an action button: in view mode it offers Edit, in
+            edit mode it offers View — the label names what the click does, not
+            the mode you are in. */}
+        <ToolbarButton
+          icon={viewMode ? Pencil : Eye}
+          label={viewMode ? "Edit" : "View"}
+          title={viewMode ? "Switch to edit mode" : "Switch to view mode"}
+          onClick={() => setViewMode((v) => !v)}
+        />
+        {!viewMode && (
+          <ToolbarButton
+            variant="solid"
+            icon={Check}
+            label="Save"
+            disabled={!question.trim()}
+            onClick={() =>
+              onSave(selectedDataset, {
+                uuid: card?.uuid || "",
+                question,
+                answer,
+                note,
+                suggestion,
+                familiarity: card?.familiarity || 0,
+              })
+            }
+          />
+        )}
+        {onDelete && (
+          <ToolbarButton variant="danger" icon={Trash2} label="Delete" onClick={onDelete} />
+        )}
+        <ToolbarButton icon={X} label="Close" onClick={onClose} />
+      </Toolbar>
+
+      {viewMode ? (
+        // Body row: the TOC drawer occupies the left (split column on desktop,
+        // slide-in on mobile) and the card fills the rest — anchored under the
+        // bars so it never covers the chrome that opens it (wiki layout).
+        <div className="relative flex flex-1 min-h-0 overflow-hidden">
+          {!!tocNode && (
+            <CollapsibleSidebar sidebar={tocSidebar}>
+              <div
+                className="wiki-toc flex-1 min-h-0 overflow-y-auto px-3 py-2"
+                onClick={(e) => {
+                  // Mobile: picking a section closes the drawer so the anchor
+                  // jump is visible; the desktop column stays put.
+                  if ((e.target as HTMLElement).closest("a")) tocSidebar.closeOnSelect();
+                }}
               >
-                <option value="normal">Normal</option>
-                <option value="large">Large</option>
-                <option value="x2">Large x2</option>
-              </select>
+                {tocNode}
+              </div>
+            </CollapsibleSidebar>
+          )}
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <div className="mx-auto max-w-3xl px-4 py-6 sm:px-8" style={scaleStyle}>
+              <div className="space-y-6">
+                <h2 className="text-3xl font-semibold break-words">
+                  {question || "(empty question)"}
+                </h2>
+                <div className="border-t border-border-default" />
+                {answer.trim() ? (
+                  <div className="px-4 py-3 rounded-lg border border-border-default bg-bg-surface">
+                    <MarkdownViewer content={answer} />
+                  </div>
+                ) : (
+                  <div className="text-text-tertiary italic">(no answer)</div>
+                )}
+                {suggestion.trim() && (
+                  <div>
+                    <div className="text-xs uppercase tracking-wide text-text-tertiary mb-2">
+                      Suggestion
+                    </div>
+                    <div className="text-lg break-words">{suggestion}</div>
+                  </div>
+                )}
+                {note.trim() && (
+                  <div>
+                    <div className="text-xs uppercase tracking-wide text-text-tertiary mb-2">
+                      Note
+                    </div>
+                    <div className="px-4 py-3 rounded-lg border border-border-default bg-bg-surface">
+                      <MarkdownViewer content={note} />
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
-            <button
-              onClick={() => setViewMode((v) => !v)}
-              className={mobile ? `${iconBtn} border-border-default hover:bg-mid-gray/20` : "px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 flex items-center gap-2"}
-              title={viewMode ? "Switch to edit mode" : "Switch to view mode"}
-              aria-label={viewMode ? "Edit" : "View"}
-            >
-              {viewMode ? (
-                <Pencil size={mobile ? iconSize : 14} />
-              ) : (
-                <Eye size={mobile ? iconSize : 14} />
-              )}
-              {!mobile && (viewMode ? "Edit" : "View")}
-            </button>
-            {onDelete && (
-              <button
-                onClick={onDelete}
-                className={
-                  mobile
-                    ? `${iconBtn} border-red-500/20 bg-red-500/10 text-red-500 hover:bg-red-500/20`
-                    : "px-4 py-2 rounded-lg bg-red-500/10 text-red-500 text-sm hover:bg-red-500/20"
-                }
-                title="Delete"
-                aria-label="Delete"
-              >
-                {mobile ? <Trash2 size={iconSize} /> : "Delete"}
-              </button>
-            )}
-            {!viewMode && (
-              <button
-                onClick={() =>
-                  onSave(selectedDataset, {
-                    uuid: card?.uuid || "",
-                    question,
-                    answer,
-                    note,
-                    suggestion,
-                    familiarity: card?.familiarity || 0,
-                  })
-                }
-                disabled={!question.trim()}
-                className={`${
-                  mobile
-                    ? `${iconBtn} border-accent/20 bg-accent-bg/20 text-accent hover:bg-accent-bg/30`
-                    : "px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20"
-                } disabled:opacity-50`}
-                title="Save"
-                aria-label="Save"
-              >
-                {mobile ? <Check size={iconSize} /> : "Save"}
-              </button>
-            )}
-            {mobile && (
-              <button
-                onClick={onClose}
-                className={`${iconBtn} border-border-default text-text-tertiary hover:text-text-primary hover:bg-mid-gray/20`}
-                title="Close"
-                aria-label="Close"
-              >
-                <X size={iconSize} />
-              </button>
-            )}
           </div>
         </div>
-
-        {viewMode ? (
-          <div className="flex-1 overflow-y-auto">
-            <div className="space-y-6" style={scaleStyle}>
-            <div>
-              <div className="text-sm text-text-tertiary mb-2">
-                Dataset: {selectedDatasetName || "(unknown)"}
-              </div>
-            </div>
-            <div>
-              <div className="text-3xl font-semibold">
-                {question || "(empty question)"}
-              </div>
-            </div>
-            <div>
-              {answer.trim() ? (
-                <div className="card-md relative px-4 py-3 rounded-lg border border-border-default bg-bg-surface">
-                  <MarkdownViewer content={answer} withTOC={!mobile} />
-                </div>
-              ) : (
-                <div className="text-text-tertiary italic">(no answer)</div>
-              )}
-            </div>
-            {suggestion.trim() && (
+      ) : (
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          <div className="mx-auto max-w-3xl px-4 py-6 sm:px-8" style={scaleStyle}>
+            <div className="space-y-6">
               <div>
-                <div className="text-sm text-text-tertiary mb-2">Suggestion</div>
-                <div className="text-lg">{suggestion}</div>
+                <label className={labelCls}>Dataset</label>
+                <select
+                  value={selectedDataset}
+                  onChange={(e) => setSelectedDataset(e.target.value)}
+                  className={`${inputCls} cursor-pointer`}
+                >
+                  {datasets.map((ds) => (
+                    <option key={ds.info.uuid} value={ds.info.uuid}>
+                      {ds.info.name} ({ds.card_count} cards)
+                    </option>
+                  ))}
+                </select>
               </div>
-            )}
-            {note.trim() && (
               <div>
-                <div className="text-sm text-text-tertiary mb-2">Note</div>
-                <div className="px-4 py-3 rounded-lg border border-border-default bg-bg-surface">
-                  <MarkdownViewer content={note} />
-                </div>
+                <label className={labelCls}>Question</label>
+                <textarea
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  rows={1}
+                  className={`${inputCls} resize-y`}
+                  placeholder="What do you want to learn?"
+                />
               </div>
-            )}
+              <div>
+                <label className={labelCls}>Answer</label>
+                <textarea
+                  ref={setAnswerRef}
+                  value={answer}
+                  onChange={(e) => setAnswer(e.target.value)}
+                  className={`${inputCls} resize-none overflow-hidden min-h-[15rem]`}
+                  placeholder="The answer or explanation (Markdown supported)"
+                />
+              </div>
+              <div>
+                <label className={labelCls}>Suggestion (optional)</label>
+                <input
+                  type="text"
+                  value={suggestion}
+                  onChange={(e) => setSuggestion(e.target.value)}
+                  className={inputCls}
+                  placeholder="AI suggestion or hint"
+                />
+              </div>
+              <div>
+                <label className={labelCls}>Note (optional)</label>
+                <textarea
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  rows={3}
+                  className={`${inputCls} resize-y`}
+                  placeholder="Additional notes (Markdown supported)"
+                />
+              </div>
             </div>
           </div>
-        ) : (
-          <div className="flex-1 overflow-y-auto">
-            <div className="space-y-6" style={scaleStyle}>
-            <div>
-              <label className="block text-lg font-medium mb-2">Dataset</label>
-              <select
-                value={selectedDataset}
-                onChange={(e) => setSelectedDataset(e.target.value)}
-                className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-lg"
-              >
-                {datasets.map((ds) => (
-                  <option key={ds.info.uuid} value={ds.info.uuid}>
-                    {ds.info.name} ({ds.card_count} cards)
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-lg font-medium mb-2">Question</label>
-              <textarea
-                value={question}
-                onChange={(e) => setQuestion(e.target.value)}
-                rows={1}
-                className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl"
-                placeholder="What do you want to learn?"
-              />
-            </div>
-            <div>
-              <label className="block text-lg font-medium mb-2">Answer</label>
-              <textarea
-                ref={setAnswerRef}
-                value={answer}
-                onChange={(e) => setAnswer(e.target.value)}
-                className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl resize-none overflow-hidden min-h-[15rem]"
-                placeholder="The answer or explanation (Markdown supported)"
-              />
-            </div>
-            <div>
-              <label className="block text-lg font-medium mb-2">
-                Suggestion (optional)
-              </label>
-              <input
-                type="text"
-                value={suggestion}
-                onChange={(e) => setSuggestion(e.target.value)}
-                className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl"
-                placeholder="AI suggestion or hint"
-              />
-            </div>
-            <div>
-              <label className="block text-lg font-medium mb-2">
-                Note (optional)
-              </label>
-              <textarea
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                rows={3}
-                className="w-full px-4 py-3 rounded-lg border border-border-default bg-bg-surface text-2xl"
-                placeholder="Additional notes (Markdown supported)"
-              />
-            </div>
-            </div>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

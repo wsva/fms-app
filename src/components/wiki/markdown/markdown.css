@@ -73,7 +73,7 @@
     color: var(--text-secondary);
 }
 
-/* ─── TOC in the wiki page's left drawer ───────────────────────
+/* ─── TOC in a CollapsibleSidebar left drawer (wiki page, card viewer) ──
    The drawer's own column supplies the background, border and scroll, so the
    panel drops its inline-card chrome and flows naturally down the column. */
 .wiki-toc #table-of-contents {
