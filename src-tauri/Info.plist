@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged additively into the generated macOS / iOS Info.plist by the Tauri
+     bundler (see `tauri ios build`, which merges src-tauri/Info.plist too).
+     Without NSMicrophoneUsageDescription, macOS and iOS terminate the app the
+     first time the WebView opens the microphone (voice input, read-aloud
+     takes, dictation recording) instead of showing a permission prompt. -->
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>FmS records your voice so you can practise dictation, record read-aloud takes and dictate text.</string>
+</dict>
+</plist>

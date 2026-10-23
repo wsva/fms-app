@@ -1,0 +1,409 @@
+name: Build FMS App
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src-tauri/src/sync/**'
+      - 'src-tauri/src/conformance.rs'
+      - 'src-tauri/src/datasets/cards/sync.rs'
+      - 'src-tauri/tests/sync_conformance/**'
+      - '.github/workflows/build.yml'
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Sync conformance + provenance unit tests (sync-v2.md §13).
+  # Runs on every PR that touches the sync subsystem and on every
+  # release tag. Deliberately separate from the bundle builds so a
+  # contract regression fails fast without a full Tauri build.
+  # ──────────────────────────────────────────────
+  conformance:
+    name: Sync conformance
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev \
+            librsvg2-dev \
+            pkg-config libclang-dev \
+            libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev \
+            libxrandr-dev libx11-dev \
+            libdbus-1-dev \
+            libwayland-dev libegl-dev \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libgbm-dev libdrm-dev
+
+      - name: Run conformance vectors
+        working-directory: src-tauri
+        run: cargo test --test sync_conformance
+
+      - name: Run provenance unit tests
+        working-directory: src-tauri
+        run: cargo test --lib sync::client::tests
+
+  # ──────────────────────────────────────────────
+  # Desktop builds (Windows, Linux)
+  # ──────────────────────────────────────────────
+  build-desktop:
+    name: ${{ matrix.label }}
+    # Release bundles are built on tags / manual dispatch only — a PR runs the
+    # conformance job above, not a full platform bundle.
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+          - os: ubuntu-24.04
+            label: Linux
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get tag name
+        id: tag
+        shell: bash
+        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev \
+            librsvg2-dev \
+            pkg-config libclang-dev \
+            libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev \
+            libxrandr-dev libx11-dev \
+            libdbus-1-dev \
+            libwayland-dev libegl-dev \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libgbm-dev libdrm-dev
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      # The tag is the release version, and it has to reach inside the package too.
+      # Two separate authorities feed different parts of a release: tauri.conf.json's
+      # `version` becomes the Windows app list entry, the deb/rpm metadata and
+      # Android's versionName, while Cargo.toml's reaches the binary through
+      # CARGO_PKG_VERSION - the `fms-app/<v>` User-Agent and the `version` a hub
+      # advertises over /api/v1, which devices compare. Stamp both (and the matching
+      # Cargo.lock entry, so the tree the build starts from is self-consistent), so
+      # an installed FmS says the same thing the asset name does. The committed
+      # 0.1.0 is only a dev placeholder. No `$` anchors anywhere: a Windows checkout
+      # may carry CRLF, and the carriage return sits just past these matches.
+      - name: Stamp the release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VER\"/" src-tauri/tauri.conf.json
+          sed -i "s/^version = \"[^\"]*\"/version = \"$VER\"/" src-tauri/Cargo.toml
+          sed -i "/^name = \"fms-app\"/{n;s/^version = \"[^\"]*\"/version = \"$VER\"/}" src-tauri/Cargo.lock
+          # These greps double as the assertion: no match means the pattern drifted
+          # away from the file, and the build would ship the placeholder again.
+          grep -m1 "\"version\": \"$VER\"" src-tauri/tauri.conf.json
+          grep -m1 "^version = \"$VER\"" src-tauri/Cargo.toml
+          LOCK_V="$(grep -A1 '^name = "fms-app"' src-tauri/Cargo.lock | tail -1 | tr -d '\r')"
+          [ "$LOCK_V" = "version = \"$VER\"" ] && echo "Cargo.lock: $LOCK_V"
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rename artifacts for the release
+        shell: bash
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          OUT="src-tauri/target/release/bundle"
+
+          # Assets read FmS_<platform>_<arch>_<tag>.<ext>: brand first, and the tag
+          # written where a downloader can see it (NSIS's `-setup` suffix and each
+          # format's own spelling of the arch are noise), extension kept so the
+          # several formats we build per OS stay distinguishable. The package itself
+          # now carries the same version - see "Stamp the release version". Files
+          # land in bundle/ itself, which is what the upload step globs.
+          #
+          # Arch comes from the runner, not from the filename Tauri chose, because
+          # each package format spells the same arch differently (amd64 on deb,
+          # x86_64 on AppImage/rpm, x64 on the Windows installers).
+          case "$(uname -m)" in
+            x86_64)  ARCH_WIN=x64;   ARCH_NIX=amd64 ;;
+            aarch64) ARCH_WIN=arm64; ARCH_NIX=arm64 ;;
+            *)       ARCH_WIN="$(uname -m)"; ARCH_NIX="$(uname -m)" ;;
+          esac
+
+          for f in "$OUT"/nsis/*.exe "$OUT"/msi/*.msi \
+                   "$OUT"/appimage/*.AppImage "$OUT"/deb/*.deb "$OUT"/rpm/*.rpm; do
+            [ -f "$f" ] || continue
+            ext="${f##*.}"
+            case "$f" in
+              */nsis/*)     plat=windows; arch="$ARCH_WIN" ;;
+              */msi/*)      plat=windows; arch="$ARCH_WIN" ;;
+              */appimage/*) plat=linux;   arch="$ARCH_NIX" ;;
+              */deb/*)      plat=linux;   arch="$ARCH_NIX" ;;
+              */rpm/*)      plat=linux;   arch="$ARCH_NIX" ;;
+              *) continue ;;
+            esac
+            dest="$OUT/FmS_${plat}_${arch}_${TAG}.${ext}"
+            mv -f "$f" "$dest"
+            echo "release asset: $(basename "$dest")"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FmS-${{ runner.os }}-${{ steps.tag.outputs.tag }}
+          path: |
+            src-tauri/target/release/bundle/*.exe
+            src-tauri/target/release/bundle/*.msi
+            src-tauri/target/release/bundle/*.deb
+            src-tauri/target/release/bundle/*.rpm
+            src-tauri/target/release/bundle/*.AppImage
+
+  # ──────────────────────────────────────────────
+  # Android build (thin client + local STT)
+  # Builds the arm64 release APK via `pnpm tauri android build --target aarch64`.
+  # arm64 only, deliberately: ort ships a single Android prebuilt
+  # (aarch64-linux-android — see ort-sys's dist.txt), so armv7/i686/x86_64
+  # cannot link ONNX and fail the `stt` build. minSdk 24 arm64 covers
+  # essentially every device in scope.
+  # Signing needs four repo secrets: ANDROID_KEYSTORE_BASE64 (the keystore,
+  # base64), ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD.
+  # Without them the job still succeeds but publishes an UNSIGNED APK, which
+  # Android refuses to install ("package appears to be invalid").
+  # ──────────────────────────────────────────────
+  build-android:
+    name: Android
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get tag name
+        id: tag
+        shell: bash
+        run: echo "tag=${GITHUB_REF_NAME:-dev}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # cargo-ndk cross-compiles against this; the Tauri CLI expects the
+          # target present rather than adding it itself.
+          targets: aarch64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # The Gradle-driven cargo invocation builds into src-tauri/target
+          # (not target-android), so that is the directory worth caching.
+          workspaces: src-tauri -> target
+
+      # JDK for Gradle 9.6 + the AGP 9 toolchain.
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # The ubuntu runner images ship the Android SDK and NDK side by side with
+      # ANDROID_HOME / ANDROID_NDK_HOME already exported, so nothing has to be
+      # downloaded here. This step only asserts the image still provides them and
+      # lists the available NDKs, so a future image change fails legibly.
+      - name: Verify Android toolchain
+        shell: bash
+        run: |
+          echo "ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME:?no NDK on this runner image}"
+          java -version
+          ls "${ANDROID_NDK_HOME%/*}"
+          rustup target list --installed | grep android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      # Same stamping as the desktop job, and it must happen before `android init`:
+      # that generates the Gradle project, whose versionName comes from the config.
+      - name: Stamp the release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VER\"/" src-tauri/tauri.conf.json
+          sed -i "s/^version = \"[^\"]*\"/version = \"$VER\"/" src-tauri/Cargo.toml
+          sed -i "/^name = \"fms-app\"/{n;s/^version = \"[^\"]*\"/version = \"$VER\"/}" src-tauri/Cargo.lock
+          grep -m1 "\"version\": \"$VER\"" src-tauri/tauri.conf.json
+          grep -m1 "^version = \"$VER\"" src-tauri/Cargo.toml
+          LOCK_V="$(grep -A1 '^name = "fms-app"' src-tauri/Cargo.lock | tail -1 | tr -d '\r')"
+          [ "$LOCK_V" = "version = \"$VER\"" ] && echo "Cargo.lock: $LOCK_V"
+
+      # `tauri.settings.gradle` is gitignored and holds absolute paths into this
+      # machine's ~/.cargo/registry, so `init` must run on the build machine —
+      # settings.gradle applies it unconditionally. Because init also rewrites the
+      # scaffold, assert right after that it did not strip the manifest
+      # customizations the released APK depends on.
+      - name: Initialize Android scaffold
+        shell: bash
+        run: |
+          pnpm tauri android init --ci --skip-targets-install
+          if ! git diff --quiet -- src-tauri/gen/android/app/src/main/AndroidManifest.xml; then
+            echo "::error::tauri android init rewrote AndroidManifest.xml — the APK would lose RECORD_AUDIO / the fms-app:// intent-filter"
+            git --no-pager diff -- src-tauri/gen/android/app/src/main/AndroidManifest.xml
+            exit 1
+          fi
+
+      # Feature selection comes from tauri.android.conf.json — no extra cargo
+      # flags (see docs/android-bringup.md). arm64 only: ort has no prebuilt
+      # ONNX for the other ABIs.
+      - name: Build Android APK
+        shell: bash
+        run: |
+          chmod +x src-tauri/gen/android/gradlew
+          pnpm tauri android build --target aarch64 --apk
+
+      # Sign after the build rather than through a Gradle signingConfig:
+      # `tauri android init` regenerates app/build.gradle.kts, so a signing block
+      # added there would be silently wiped by the next CLI upgrade. zipalign
+      # must run before apksigner.
+      - name: Sign Android APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          OUT=src-tauri/gen/android/app/build/outputs/apk
+
+          # `--target aarch64` still lands in universal/release; prefer it so a
+          # future multi-ABI build can never sign the wrong APK by accident.
+          APK="$(ls "$OUT"/universal/release/*.apk 2>/dev/null | head -1 || true)"
+          [ -n "$APK" ] || APK="$(ls "$OUT"/*/release/*.apk 2>/dev/null | head -1 || true)"
+          if [ -z "$APK" ]; then
+            echo "::error::no release APK found under $OUT"
+            exit 1
+          fi
+          echo "Signing $APK"
+          mkdir -p dist
+
+          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set - publishing an UNSIGNED APK that Android will refuse to install."
+            cp "$APK" "dist/FmS_android_arm64_${TAG}-unsigned.apk"
+            exit 0
+          fi
+
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          if [ ! -s "$RUNNER_TEMP/release.keystore" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 decoded to an empty file - re-copy the whole base64 value"
+            exit 1
+          fi
+
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ | tail -1)"
+          "$BT/zipalign" -f 4 "$APK" "$RUNNER_TEMP/aligned.apk"
+          # The aligned APK is a positional argument - apksigner has no --in flag
+          # and exits 1 with a bare usage error if it is omitted.
+          "$BT/apksigner" sign \
+            --ks "$RUNNER_TEMP/release.keystore" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "dist/FmS_android_arm64_${TAG}.apk" \
+            "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" verify --print-certs "dist/FmS_android_arm64_${TAG}.apk"
+          rm -f "$RUNNER_TEMP/release.keystore" "$RUNNER_TEMP/aligned.apk"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FmS-Android-${{ steps.tag.outputs.tag }}
+          path: dist/*.apk
+
+  # ──────────────────────────────────────────────
+  # Create GitHub Release
+  # ──────────────────────────────────────────────
+  release:
+    name: Create Release
+    needs: [build-desktop, build-android]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: FmS ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.exe
+            artifacts/**/*.msi
+            artifacts/**/*.AppImage
+            artifacts/**/*.deb
+            artifacts/**/*.rpm
+            artifacts/**/*.apk
