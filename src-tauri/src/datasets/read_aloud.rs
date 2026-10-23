@@ -988,6 +988,101 @@ fn delete_attempt_inner(settings: &SettingsState, dataset_uuid: &str, uuid: &str
     Ok(())
 }
 
+/// Re-run recognition for an existing attempt: overwrite its transcript and
+/// recompute the score against the current reference, in place. The recording is
+/// untouched — only the transcript changes — so this is the seam the UI's
+/// "Recognize again" button (and the matching MCP tool) writes through after it
+/// re-transcribes the device-local WAV with the loaded STT model.
+#[tauri::command]
+pub async fn read_aloud_rerecognize(
+    settings: State<'_, SettingsState>,
+    dataset_uuid: String,
+    uuid: String,
+    recognized: String,
+) -> Result<ReadAttempt, String> {
+    update_recognized_inner(&settings, &dataset_uuid, &uuid, &recognized)
+}
+
+/// Shared body of [`read_aloud_rerecognize`]: overwrite one of my attempt events'
+/// transcript, re-score it against the effective reference, and re-journal the
+/// save. Never touches the dataset directory or the recording file.
+fn update_recognized_inner(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    uuid: &str,
+    recognized: &str,
+) -> Result<ReadAttempt, String> {
+    let ctx = open_attempts(settings, dataset_uuid)?;
+    let me = ctx.me.clone();
+    // Load the event (must belong to me) plus its text's reference for scoring.
+    let (text_uuid, audio_path, created_at, content, normalized): (
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+    ) = ctx
+        .conn
+        .query_row(
+            "SELECT a.text_uuid, a.audio_path, a.created_at, t.content, t.normalized_content \
+             FROM app.read_attempt_event a LEFT JOIN read_text t ON t.uuid = a.text_uuid \
+             WHERE a.uuid = ?1 AND a.user_id = ?2",
+            params![uuid, &me],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .map_err(|_| format!("Attempt {} not found", uuid))?;
+
+    // Score against the effective reference while the text row still exists; a
+    // missing row degrades to 0, the same fallback list_attempts applies.
+    let score = match &content {
+        Some(c) => score_value(&effective_reference(c, normalized.as_deref()), recognized),
+        None => 0.0,
+    };
+
+    ctx
+        .conn
+        .execute(
+            "UPDATE app.read_attempt_event SET recognized = ?1, score = ?2 \
+             WHERE uuid = ?3 AND user_id = ?4",
+            params![recognized, score, uuid, &me],
+        )
+        .map_err(|e| e.to_string())?;
+
+    let audio_url = resolve_audio_url(&ctx.dataset_dir, &ctx.audio_dir, &audio_path);
+    let ev = AttemptEvent {
+        uuid: uuid.to_string(),
+        user_id: me.clone(),
+        dataset_uuid: dataset_uuid.to_string(),
+        text_uuid: text_uuid.clone(),
+        audio_path: audio_path.clone(),
+        recognized: recognized.to_string(),
+        score,
+        created_at: canonical_stamp(&created_at),
+    };
+    // Re-journal the save for the change log. Peers replay events by uuid with
+    // INSERT OR IGNORE, so an already-delivered take keeps its own copy — the
+    // right outcome, since re-recognition runs against a device-local recording
+    // with a device-local model (§17).
+    let _ = crate::sync::change_log::commit_change_as(
+        settings,
+        "read_attempt_save",
+        dataset_uuid,
+        &attempt_payload(&ev),
+        &ev.user_id,
+    );
+
+    Ok(ReadAttempt {
+        uuid: uuid.to_string(),
+        text_uuid,
+        user_id: me,
+        audio_url,
+        audio_path,
+        recognized: recognized.to_string(),
+        score,
+        created_at,
+    })
+}
+
 /// Persist one attempt as a per-user event in the app DB and journal it under
 /// `@app`. Shared by `read_aloud_submit`; the sync apply paths use
 /// [`apply_remote_save`]. Nothing is written into the dataset directory — the

@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { Play, Trash2, History, ChevronRight, Loader2 } from "lucide-react";
+import { Play, Trash2, History, ChevronRight, Loader2, RefreshCw } from "lucide-react";
 import type { ReadAttempt, ReadText } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 import { highlightDifferences } from "@/components/read_book/diff";
 import { lcs } from "@/lib/listen/lcs";
+import { arrayBufferToBase64 } from "@/lib/voice-input";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
@@ -308,6 +309,9 @@ export default function AttemptsPanel({
   const [attempts, setAttempts] = useState<ReadAttempt[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
+  // The attempt currently being re-recognized (its uuid), so the row can show a
+  // spinner and other rows disable while the model runs.
+  const [rerecognizing, setRerecognizing] = useState<string | null>(null);
 
   const loadAttempts = useCallback(async () => {
     if (!isTauri()) return;
@@ -344,6 +348,38 @@ export default function AttemptsPanel({
         }
       },
     });
+  };
+
+  // Re-run STT over an existing recording and refresh its transcript + score in
+  // place. The recording itself is untouched — only the recognized text changes.
+  // Mirrors the recorder's model-loading guard: ensure a model is loaded before
+  // transcribing. The WAV is device-local, so this is only offered when a.audio_url
+  // resolves on this machine.
+  const recognizeAgain = async (a: ReadAttempt) => {
+    if (!isTauri() || !a.audio_url) return;
+    setRerecognizing(a.uuid);
+    setError(null);
+    try {
+      const status = await invoke<{ active_version: string | null }>("model_get_status");
+      if (!status.active_version) await invoke("model_start");
+      const res = await fetch(convertFileSrc(a.audio_url));
+      if (!res.ok) throw new Error(`Could not read the recording (HTTP ${res.status}).`);
+      const wavBase64 = arrayBufferToBase64(await res.arrayBuffer());
+      const text = await invoke<string>("model_transcribe", { wavBase64 });
+      await invoke("read_aloud_rerecognize", {
+        datasetUuid,
+        uuid: a.uuid,
+        recognized: (text || "").trim(),
+      });
+      await loadAttempts();
+      onChanged?.();
+    } catch (e) {
+      const msg = String(e);
+      logError(`recognize again failed: ${msg}`, LOG_MODULE);
+      setError(msg);
+    } finally {
+      setRerecognizing(null);
+    }
   };
 
   const selectedAttempt = attempts.find((a) => a.uuid === selectedUuid) ?? null;
@@ -432,6 +468,23 @@ export default function AttemptsPanel({
                       className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover cursor-pointer shrink-0"
                     >
                       <Play size={15} />
+                    </button>
+                  )}
+                  {a.audio_url && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void recognizeAgain(a);
+                      }}
+                      disabled={rerecognizing !== null}
+                      title="Recognize again (re-transcribe this recording with the current model)"
+                      className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover cursor-pointer shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {rerecognizing === a.uuid ? (
+                        <Loader2 size={15} className="animate-spin" />
+                      ) : (
+                        <RefreshCw size={15} />
+                      )}
                     </button>
                   )}
                   <button

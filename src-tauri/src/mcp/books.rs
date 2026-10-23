@@ -133,6 +133,13 @@ struct ReadAloudDeleteAttemptParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudRerecognizeParam {
+    dataset_uuid: String,
+    uuid: String,
+    recognized: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudScoreParam {
     content: String,
     recognized: String,
@@ -327,6 +334,14 @@ impl DatasetMcpServer {
         let settings = self.app.state::<SettingsState>();
         datasets::read_aloud::read_aloud_delete_attempt(settings, param.dataset_uuid, param.uuid).await?;
         Ok(serde_json::json!({"status": "ok", "message": "Attempt deleted"}).to_string())
+    }
+
+    #[tool(name = "read_aloud_rerecognize", description = "Overwrite an existing attempt's transcript with a freshly recognized one and recompute its score against the current reference, in place. The recording is left untouched — pass the transcript produced by re-transcribing the attempt's device-local WAV (e.g. via model_transcribe) with the loaded STT model. Use this to refresh a take whose recognition was poor or predates a model change. Returns the updated attempt (score included).")]
+    async fn read_aloud_rerecognize(&self, Parameters(param): Parameters<ReadAloudRerecognizeParam>) -> Result<String, String> {
+        log::info!("[MCP] read_aloud_rerecognize: dataset={}, attempt={}", param.dataset_uuid, param.uuid);
+        let settings = self.app.state::<SettingsState>();
+        let attempt = datasets::read_aloud::read_aloud_rerecognize(settings, param.dataset_uuid, param.uuid, param.recognized).await?;
+        Ok(serde_json::to_string_pretty(&attempt).unwrap_or_default())
     }
 
     #[tool(name = "read_aloud_score", description = "Compute the WIP-based ASR score (0-100) and the word-level alignment (wer, mer, hits/substitutions/deletions/insertions, chunks) between a reference text and a recognized transcript, without persisting anything. Score >= 60 passes. Use the chunks to see exactly which words were misread, inserted, or skipped. Also returned inside read_aloud_submit results.")]
