@@ -10,6 +10,7 @@ use crate::auth;
 use crate::capture;
 use crate::logger::LogBuffer;
 use crate::ocr::{self, OcrState};
+use crate::simple_words::SimpleWordsState;
 #[cfg(feature = "textsplit")]
 use crate::textsplit::{self, TextSplitState};
 use crate::settings::SettingsState;
@@ -23,6 +24,13 @@ struct SettingsSetParam {
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct OcrRecognizeParam {
+    image_base64: String,
+    #[serde(default)]
+    lang: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct OcrRecognizeTsvParam {
     image_base64: String,
     #[serde(default)]
     lang: String,
@@ -131,6 +139,21 @@ impl DatasetMcpServer {
         let state = self.app.state::<OcrState>();
         let langs = ocr::ocr_list_languages(state).await?;
         Ok(serde_json::json!({"status": "ok", "languages": langs}).to_string())
+    }
+
+    #[tool(name = "ocr_recognize_tsv", description = "Recognize text in an image using Tesseract's TSV layout output, then rebuild it in Rust: words are grouped into lines and paragraphs (gap, Tesseract ids, indentation) and line-break hyphenation is repaired using the configured Simple Words of the active language. No LLM needed. Pass image as base64 (with or without data URL prefix) and optional language code (default: 'eng'). Returns {text, tsv} — the reconstructed text plus the raw TSV dump. Prefer this over ocr_recognize when paragraph structure and layout fidelity matter.")]
+    async fn ocr_recognize_tsv(&self, Parameters(param): Parameters<OcrRecognizeTsvParam>) -> Result<String, String> {
+        log::info!("[MCP] ocr_recognize_tsv: lang={:?}", param.lang);
+        let state = self.app.state::<OcrState>();
+        let sw_state = self.app.state::<SimpleWordsState>();
+        let lang = if param.lang.is_empty() { None } else { Some(param.lang) };
+        let result = ocr::ocr_recognize_tsv(state, sw_state, param.image_base64, lang).await?;
+        Ok(serde_json::json!({
+            "status": "ok",
+            "text": result.text,
+            "tsv": result.tsv,
+        })
+        .to_string())
     }
 
     #[cfg(feature = "textsplit")]

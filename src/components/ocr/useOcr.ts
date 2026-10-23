@@ -14,6 +14,19 @@ const IMAGE_FILTERS = [
   },
 ];
 
+/**
+ * Result post-processing mode:
+ * - `plain` — Tesseract plain text, re-joined afterwards by an LLM on request.
+ * - `tsv` — Tesseract TSV layout, rebuilt into paragraphs in Rust (no model).
+ */
+export type OcrMode = "plain" | "tsv";
+
+/** Tauri command result of `ocr_recognize_tsv`. */
+interface OcrTsvResult {
+  text: string;
+  tsv: string;
+}
+
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -29,7 +42,28 @@ export function useOcr() {
   // ---- Recognition ----
   const [recognizing, setRecognizing] = useState(false);
   const [fixingText, setFixingText] = useState(false);
-  const [resultText, setResultText] = useState("");
+  // One result per mode: switching tabs never overwrites the other result.
+  // TSV is the default — the Rust rebuild resolves paragraphs, line joins and
+  // hyphenation with no model, so it is the better starting point; Plain stays
+  // for multi-column and right-to-left pages, where reading order is safer left
+  // to Tesseract.
+  const [mode, setModeState] = useState<OcrMode>("tsv");
+
+  // Remember a deliberate switch to Plain, the same way the font size is kept.
+  // The saved value is applied in an effect, not as lazy initial state, so the
+  // prerendered HTML and the first client paint agree.
+  useEffect(() => {
+    const saved = localStorage.getItem("ocr_mode");
+    if (saved === "plain" || saved === "tsv") setModeState(saved);
+  }, []);
+  const setMode = useCallback((next: OcrMode) => {
+    setModeState(next);
+    localStorage.setItem("ocr_mode", next);
+  }, []);
+  const [plainText, setPlainText] = useState("");
+  const [tsvText, setTsvText] = useState("");
+  // Raw Tesseract TSV behind the last TSV-mode recognition.
+  const [rawTsv, setRawTsv] = useState("");
 
   // ---- Shared UI state ----
   const [error, setError] = useState("");
@@ -96,19 +130,48 @@ export function useOcr() {
 
   // ---- Recognition ----
 
-  const recognize = useCallback(async (imageBase64: string, lang?: string) => {
-    if (!isTauri()) return;
-    setRecognizing(true);
-    setError("");
-    try {
-      const text = await invoke<string>("ocr_recognize", { imageBase64, lang: lang || null });
-      setResultText(text);
-    } catch (e) {
-      setError(`Recognition failed: ${errorMessage(e)}`);
-    } finally {
-      setRecognizing(false);
-    }
-  }, []);
+  const resultText = mode === "plain" ? plainText : tsvText;
+
+  const setResultText = useCallback(
+    (text: string) => {
+      if (mode === "plain") setPlainText(text);
+      else setTsvText(text);
+    },
+    [mode]
+  );
+
+  const recognize = useCallback(
+    async (imageBase64: string, lang?: string) => {
+      if (!isTauri()) return;
+      // Capture the mode: the user may switch tabs while Tesseract runs.
+      const target = mode;
+      setRecognizing(true);
+      setError("");
+      try {
+        if (target === "tsv") {
+          const res = await invoke<OcrTsvResult>("ocr_recognize_tsv", {
+            imageBase64,
+            lang: lang || null,
+          });
+          setTsvText(res.text);
+          setRawTsv(res.tsv);
+        } else {
+          const text = await invoke<string>("ocr_recognize", {
+            imageBase64,
+            lang: lang || null,
+          });
+          setPlainText(text);
+        }
+      } catch (e) {
+        setError(
+          `${target === "tsv" ? "TSV recognition" : "Recognition"} failed: ${errorMessage(e)}`
+        );
+      } finally {
+        setRecognizing(false);
+      }
+    },
+    [mode]
+  );
 
   const copyResult = useCallback(async () => {
     if (!resultText) return;
@@ -155,11 +218,13 @@ Return ONLY the corrected plain text, no explanations.`,
     } finally {
       setFixingText(false);
     }
-  }, [resultText, setError]);
+  }, [resultText, setResultText, setError]);
 
   const reset = useCallback(() => {
     setSourceImage(null);
-    setResultText("");
+    setPlainText("");
+    setTsvText("");
+    setRawTsv("");
     setError("");
   }, []);
 
@@ -172,8 +237,11 @@ Return ONLY the corrected plain text, no explanations.`,
     // recognition
     recognizing,
     recognize,
+    mode,
+    setMode,
     resultText,
     setResultText,
+    rawTsv,
     copyResult,
     copied,
     fixWithLlm,

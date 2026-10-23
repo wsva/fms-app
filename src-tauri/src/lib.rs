@@ -317,6 +317,7 @@ pub fn run() {
             sync::server::web_service_stop,
             sync::server::sync_handover_epoch,
             ocr::ocr_recognize,
+            ocr::ocr_recognize_tsv,
             ocr::ocr_list_languages,
             models::model_download_hf,
             textsplit::text_split_status,

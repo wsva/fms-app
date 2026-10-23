@@ -81,18 +81,18 @@ export default function ImageEditor({ src, onImageReady, onError }: ImageEditorP
   }, [src]);
 
   return (
-    <div className="rounded-lg border border-border-default bg-bg-muted p-3 flex items-center justify-center min-h-[240px] overflow-auto">
+    <div className="h-full min-h-0 rounded-lg border border-border-default bg-bg-muted p-3 flex items-center justify-center overflow-auto">
       {working ? (
         <img
           src={working}
           alt="OCR source"
-          className="block max-w-full max-h-[52vh] object-contain rounded"
+          className="block max-w-full max-h-full object-contain rounded"
         />
       ) : (
         <div className="text-center text-text-tertiary py-10 px-4">
           <Crop size={40} className="mx-auto mb-3 opacity-40" />
           <p className="text-sm">
-            No image yet. Use the buttons above to select or screenshot an image.
+            No image yet. Use the toolbar to select or screenshot one, or drop a file here.
           </p>
         </div>
       )}

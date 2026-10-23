@@ -6,9 +6,12 @@ The **Tools** group in the sidebar holds FmS's utilities — helpers that suppor
 
 **Tools → OCR** recognises text inside images, so you can turn a screenshot, a photo of a page, or a scanned exercise into editable text.
 
-- **Load an image** from a file, or **capture a screenshot** / clipboard image directly.
+- **Load an image** from a file, **capture a screenshot** / clipboard image directly, or drop an image onto the page.
 - Choose the **language(s)** to recognise, then run recognition.
-- The result is shown as editable text you can copy; a light image editor lets you zoom and adjust the source before recognising.
+- Two result modes share the same image and languages, with **TSV** as the default:
+  - **TSV** — Tesseract's layout dump, rebuilt in Rust: words are regrouped into lines and paragraphs, words hyphenated across a line break are re-joined, and dashes (— – ―) are spaced off their neighbours. It needs no model, and **Raw TSV** shows the layout it worked from.
+  - **Plain** — Tesseract's flat text, kept for pages the layout rebuild cannot order reliably (two columns, right-to-left scripts) and for poetry or code, where line breaks carry meaning. A **Fix with LLM** pass can then clean up obvious errors.
+- The result is shown as editable text you can copy; the source image stays visible beside it, and the text size can be adjusted in the result footer. `Ctrl/⌘+Enter` runs recognition, `Ctrl/⌘+Shift+C` copies the result.
 
 OCR needs a recognition model — if it says one is missing, download it from [Models](models.md). (Desktop feature.)
 

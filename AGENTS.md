@@ -155,7 +155,9 @@ src-tauri/src/
 ├── simple_words.rs         # "Known simple" words sourced from selected card datasets
 ├── edge_tts.rs             # Edge TTS voices + synthesis
 ├── capture.rs              # Screenshot / clipboard image capture — desktop
-└── ocr.rs                  # Tesseract OCR — desktop
+└── ocr/                    # Tesseract OCR — desktop
+    ├── mod.rs              # Path discovery, plain-text recognition (`ocr_recognize`), language list
+    └── tsv.rs              # `ocr_recognize_tsv`: TSV layout → paragraphs, line joins, hyphen repair
 ```
 
 Feature gates: `default = ["stt"]`, `desktop = ["stt", ..., "server"]`. Android builds with
@@ -254,7 +256,7 @@ When adding new colors, define the CSS variable in all 4 theme blocks in `global
 - New files go into the matching group directory, not the crate root; a group's children are
   declared `pub(crate) mod` in its `mod.rs` (a private `mod` would be invisible outside the group)
 - A directory earns its place only with 2+ files or a planned split — don't wrap a single file in
-  a `mod.rs` (this is why `wiki.rs`, `xp.rs`, `ocr.rs` are still flat)
+  a `mod.rs` (this is why `wiki.rs` and `xp.rs` are still flat)
 - `mcp/` is the exception to the `pub(crate) mod` rule: its submodules are plain private `mod`s,
   since nothing outside the group names them — it only exposes `create_mcp_service`
 
