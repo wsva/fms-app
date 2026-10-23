@@ -390,15 +390,8 @@ pub async fn text_split_status(state: State<'_, TextSplitState>) -> Result<TextS
     let downloaded = resolve_model_dir(&model_id).map(|d| is_downloaded_dir(&d)).unwrap_or(false);
     let loaded = loaded_id.as_deref() == Some(model_id.as_str());
 
-    let hint = if loaded {
-        format!("Model '{}' is loaded and ready.", model_id)
-    } else if downloaded {
-        format!("Model '{}' is downloaded; it loads on the first text_split call.", model_id)
-    } else {
-        "No text-split model downloaded. Use model_download_hf with segment-any-text/sat-3l-sm.".to_string()
-    };
-    log::info!("[textsplit] status: {}", hint);
-
+    // No log here: this is a read-only getter that `useLoadedModels` polls on a
+    // global timer, so an info line would emit once per poll and drown the log.
     Ok(TextSplitStatus { downloaded, loaded, model_id, models })
 }
 
