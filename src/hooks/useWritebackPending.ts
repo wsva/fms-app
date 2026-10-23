@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
+import { notifyWritebackCount } from "@/lib/sync/autoFlush";
 
 // Matches how long a local edit can sit un-flushed before the user would
 // act on it manually — cheap enough to poll from every mounted page.
@@ -43,7 +44,14 @@ export function useWritebackPending(externalMobile?: boolean): number {
     let alive = true;
     const refresh = () =>
       invoke<number>("writeback_pending_count")
-        .then((n) => alive && setPending(n))
+        .then((n) => {
+          if (!alive) return;
+          setPending(n);
+          // The banner is only the read side; hand the depth to the shared
+          // auto-flush controller so the phone pushes its own edits instead of
+          // waiting for the user to visit the Sync page.
+          notifyWritebackCount(n);
+        })
         .catch(() => {});
     refresh();
     const timer = setInterval(refresh, POLL_MS);
