@@ -16,7 +16,12 @@ import {
 import { isTauri } from "@/lib/tauri";
 import { logError } from "@/lib/logger";
 import { type DownloadProgress } from "@/lib/models/types";
-import { PageHeader, Toolbar } from "@/components/ui/toolbar";
+import {
+  PageHeader,
+  Toolbar,
+  ToolbarButton,
+  ToolbarIconButton,
+} from "@/components/ui/toolbar";
 
 // ---------------------------------------------------------------------------
 // Types (mirror the Rust `Serialize` shapes; serde keeps snake_case field names)
@@ -38,13 +43,61 @@ interface TextSplitStatus {
   models: TextSplitModelInfo[];
 }
 
+/**
+ * The split parameters the page exposes. Persisted as one object so a tuned
+ * threshold survives a restart, the same way the OCR page keeps its font size.
+ */
+interface SplitOptions {
+  /** Boundary probability above which a sentence break is inserted. */
+  threshold: number;
+  stripWhitespace: boolean;
+  splitOnNewlines: boolean;
+}
+
 const DEFAULT_MODEL_ID = "segment-any-text/sat-3l-sm";
+const OPTIONS_KEY = "text_split_options";
+
+/** SaT probabilities are near zero around real boundaries; 0.5 is already far
+ *  past "every clause is a sentence", so the slider stops there. */
+const THRESHOLD_MAX = 0.5;
+const THRESHOLD_STEP = 0.005;
+
+const DEFAULT_OPTIONS: SplitOptions = {
+  threshold: 0.01,
+  stripWhitespace: true,
+  splitOnNewlines: true,
+};
 
 function formatBytes(n: number): string {
   if (n <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
   const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
   return `${(n / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+/**
+ * Count word runs without allocating a string per word: a book-sized paste is
+ * re-counted on every keystroke, where `split(/\s+/)` would churn the heap.
+ */
+function countWords(text: string): number {
+  let words = 0;
+  let inWord = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === " " || ch === "\n" || ch === "\t" || ch === "\r") {
+      inWord = false;
+    } else if (!inWord) {
+      inWord = true;
+      words++;
+    }
+  }
+  return words;
+}
+
+/** "1 line" / "2 lines" — counts sit in one-word footers, where the dangling
+ *  plural is obvious. */
+function plural(count: number, one: string, many = `${one}s`): string {
+  return `${count.toLocaleString()} ${count === 1 ? one : many}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -56,15 +109,14 @@ export default function SplitTextPage() {
   const [selectedId, setSelectedId] = useState<string>(DEFAULT_MODEL_ID);
   const [input, setInput] = useState("");
   const [sentences, setSentences] = useState<string[]>([]);
-  const [threshold, setThreshold] = useState(0.01);
-  const [stripWhitespace, setStripWhitespace] = useState(true);
-  const [splitOnNewlines, setSplitOnNewlines] = useState(true);
+  const [options, setOptions] = useState<SplitOptions>(DEFAULT_OPTIONS);
 
   const [downloading, setDownloading] = useState(false);
   const [splitting, setSplitting] = useState(false);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const copyTimer = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // Deferred platform check: calling isTauri() during render diverges between
@@ -102,6 +154,35 @@ export default function SplitTextPage() {
     return () => {
       if (copyTimer.current) window.clearTimeout(copyTimer.current);
     };
+  }, []);
+
+  // Restore the last tuning (client only, so prerender and first paint agree).
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(OPTIONS_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as Partial<SplitOptions>;
+      setOptions((prev) => ({
+        threshold:
+          typeof saved.threshold === "number" && Number.isFinite(saved.threshold)
+            ? Math.min(THRESHOLD_MAX, Math.max(0, saved.threshold))
+            : prev.threshold,
+        stripWhitespace:
+          typeof saved.stripWhitespace === "boolean" ? saved.stripWhitespace : prev.stripWhitespace,
+        splitOnNewlines:
+          typeof saved.splitOnNewlines === "boolean" ? saved.splitOnNewlines : prev.splitOnNewlines,
+      }));
+    } catch {
+      // A corrupt entry is not worth an error banner; defaults still apply.
+    }
+  }, []);
+
+  const updateOptions = useCallback((patch: Partial<SplitOptions>) => {
+    setOptions((prev) => {
+      const next = { ...prev, ...patch };
+      localStorage.setItem(OPTIONS_KEY, JSON.stringify(next));
+      return next;
+    });
   }, []);
 
   const model = useMemo(
@@ -150,21 +231,23 @@ export default function SplitTextPage() {
     }
   }
 
-  async function handleSplit() {
+  const handleSplit = useCallback(async () => {
     if (!isTauri()) return;
     if (!input.trim()) {
       setSentences([]);
       return;
     }
     setError("");
+    setCopied(false);
+    setCopiedIndex(null);
     setSplitting(true);
     try {
       const result = await invoke<string[]>("text_split", {
         text: input,
         model: selectedId,
-        threshold,
-        stripWhitespace,
-        splitOnInputNewlines: splitOnNewlines,
+        threshold: options.threshold,
+        stripWhitespace: options.stripWhitespace,
+        splitOnInputNewlines: options.splitOnNewlines,
       });
       setSentences(result);
       await refreshStatus();
@@ -177,11 +260,11 @@ export default function SplitTextPage() {
     } finally {
       setSplitting(false);
     }
-  }
+  }, [input, selectedId, options, refreshStatus]);
 
-  function handlePickFile() {
+  const handlePickFile = useCallback(() => {
     fileInputRef.current?.click();
-  }
+  }, []);
 
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -198,26 +281,88 @@ export default function SplitTextPage() {
     }
   }
 
-  async function handleCopyAll() {
+  const handleCopyAll = useCallback(async () => {
     if (sentences.length === 0) return;
     try {
       await navigator.clipboard.writeText(sentences.join("\n"));
       setCopied(true);
+      setCopiedIndex(null);
       if (copyTimer.current) window.clearTimeout(copyTimer.current);
       copyTimer.current = window.setTimeout(() => setCopied(false), 1500);
     } catch (e) {
       logError(`clipboard write failed: ${String(e)}`);
     }
-  }
+  }, [sentences]);
+
+  const copySentence = useCallback(async (text: string, index: number) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedIndex(index);
+      setCopied(false);
+      if (copyTimer.current) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => setCopiedIndex(null), 1500);
+    } catch (e) {
+      logError(`clipboard write failed: ${String(e)}`);
+    }
+  }, []);
+
+  const clearAll = useCallback(() => {
+    setInput("");
+    setSentences([]);
+    setError("");
+    setCopied(false);
+    setCopiedIndex(null);
+  }, []);
 
   const downloaded = model?.downloaded ?? false;
-  const loaded = model?.loaded ?? false;
   const canSplit = inTauri && !!input.trim() && !splitting && !downloading;
+
+  // Ctrl/Cmd+Enter splits, Ctrl/Cmd+Shift+C copies every sentence — the same
+  // shortcuts the OCR page uses.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (canSplit) void handleSplit();
+      } else if (e.shiftKey && (e.key === "C" || e.key === "c")) {
+        e.preventDefault();
+        void handleCopyAll();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [canSplit, handleSplit, handleCopyAll]);
 
   const progressPct = useMemo(() => {
     if (!progress || progress.overall_total_bytes <= 0) return null;
     return Math.min(100, Math.round((progress.overall_bytes_downloaded / progress.overall_total_bytes) * 100));
   }, [progress]);
+
+  const inputStats = useMemo(
+    () => ({
+      chars: input.length,
+      words: countWords(input),
+      lines: input ? input.split("\n").length : 0,
+    }),
+    [input],
+  );
+
+  const resultStats = useMemo(
+    () => ({
+      count: sentences.length,
+      chars: sentences.reduce((total, s) => total + s.length, 0),
+    }),
+    [sentences],
+  );
+
+  const splitTitle = !inTauri
+    ? "Available in the desktop app"
+    : !input.trim()
+      ? "Paste or upload text first"
+      : !downloaded
+        ? "Split text into sentences — download the model first if this fails"
+        : "Split text into sentences (Ctrl+Enter)";
 
   return (
     <main className="flex-1 flex flex-col h-full min-w-0 min-h-0">
@@ -226,192 +371,248 @@ export default function SplitTextPage() {
         badge={
           <span
             className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-              loaded
+              model?.loaded
                 ? "bg-green-500/15 text-green-500"
                 : downloaded
                   ? "bg-accent-bg/20 text-accent"
                   : "bg-bg-muted text-text-tertiary"
             }`}
           >
-            {loaded ? "Loaded" : downloaded ? "Downloaded" : "Not downloaded"}
+            {model?.loaded ? "Loaded" : downloaded ? "Downloaded" : "Not downloaded"}
           </span>
         }
       />
+
+      {/* Page-level actions, above the panes, so Split and Copy stay in reach
+          whichever pane is scrolling. */}
       <Toolbar className="flex-wrap">
+        <ToolbarButton
+          icon={Upload}
+          label="Upload"
+          onClick={handlePickFile}
+          title="Read a text file (.txt, .md, .vtt, .srt) into the input"
+        />
+        <ToolbarButton
+          icon={X}
+          label="Clear"
+          onClick={clearAll}
+          disabled={!input && sentences.length === 0}
+          title="Clear the input and the sentences"
+        />
         <div className="flex-1 min-w-0" />
+
         <select
           value={selectedId}
           onChange={(e) => setSelectedId(e.target.value)}
-          className="max-w-[220px] px-2 py-1 rounded-lg bg-bg-muted border border-border-default text-text-primary focus:outline-none focus:border-accent"
+          className="min-w-0 max-w-[220px] px-2 py-1 rounded-md bg-bg-muted border border-border-default text-sm text-text-primary focus:outline-none focus:border-accent"
           title={model?.description}
+          aria-label="Split model"
         >
-          {(status?.models.length ? status.models : [{ id: DEFAULT_MODEL_ID, name: "SaT 3L Small" } as TextSplitModelInfo]).map((m) => (
+          {(status?.models.length
+            ? status.models
+            : [{ id: DEFAULT_MODEL_ID, name: "SaT 3L Small" } as TextSplitModelInfo]
+          ).map((m) => (
             <option key={m.id} value={m.id}>
-              {m.name}{m.downloaded ? "" : " (not downloaded)"}
+              {m.name}
+              {m.downloaded ? "" : " (not downloaded)"}
             </option>
           ))}
         </select>
+
         {!downloaded && (
-          <button
-            type="button"
+          <ToolbarButton
+            icon={downloading ? Loader2 : Download}
+            iconProps={downloading ? { className: "animate-spin" } : undefined}
+            label={downloading ? "Downloading…" : "Download"}
             onClick={handleDownload}
             disabled={downloading}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent text-white font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
-          >
-            {downloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-            {downloading ? "Downloading…" : "Download"}
-          </button>
+            title={`Download ${model?.name ?? "the split model"}`}
+          />
         )}
+
+        <ToolbarButton
+          variant="solid"
+          icon={splitting ? Loader2 : Scissors}
+          iconProps={splitting ? { className: "animate-spin" } : undefined}
+          label={splitting ? "Splitting…" : "Split"}
+          onClick={handleSplit}
+          disabled={!canSplit}
+          title={splitTitle}
+        />
+        <ToolbarButton
+          icon={copied ? Check : Copy}
+          label={copied ? "Copied" : "Copy all"}
+          onClick={handleCopyAll}
+          disabled={sentences.length === 0}
+          title="Copy every sentence, one per line"
+        />
       </Toolbar>
 
-      <div className="flex-1 overflow-y-auto p-4 min-h-0">
-        <div className="flex flex-col gap-4 h-full min-h-0">
-          {/* Download progress */}
-          {downloading && progress && (
-            <div className="px-4 py-3 rounded-lg bg-bg-card border border-border-default text-sm">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-text-primary font-medium">Downloading model…</span>
-                <span className="text-text-tertiary">
-                  {formatBytes(progress.overall_bytes_downloaded)}
-                  {progress.overall_total_bytes > 0 && ` / ${formatBytes(progress.overall_total_bytes)}`}
-                  {progressPct !== null && ` (${progressPct}%)`}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".txt,.md,.vtt,.srt,text/plain"
+        onChange={handleFileChange}
+        className="hidden"
+      />
+
+      {downloading && progress && (
+        <div className="shrink-0 px-4 py-2 border-b border-border-default bg-bg-card">
+          <div className="mb-1.5 flex items-center justify-between gap-3 text-xs">
+            <span className="font-medium text-text-primary">Downloading model…</span>
+            <span className="text-text-tertiary">
+              {formatBytes(progress.overall_bytes_downloaded)}
+              {progress.overall_total_bytes > 0 && ` / ${formatBytes(progress.overall_total_bytes)}`}
+              {progressPct !== null && ` (${progressPct}%)`}
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-bg-muted overflow-hidden">
+            <div
+              className="h-full bg-accent transition-[width] duration-200"
+              style={{ width: `${progressPct ?? 0}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <div className="shrink-0 mx-4 mt-3 px-4 py-3 rounded-lg bg-error-bg text-error-text text-sm flex items-start gap-2">
+          <span className="flex-1 whitespace-pre-wrap break-words">{error}</span>
+          <button
+            type="button"
+            onClick={() => setError("")}
+            className="shrink-0 opacity-70 hover:opacity-100"
+            title="Dismiss"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
+      {/* Split options — one slim strip, not a card: they belong to the Split
+          action, not to either pane. */}
+      <div
+        role="group"
+        aria-label="Split options"
+        className="shrink-0 flex flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2 border-b border-border-default bg-bg-card"
+      >
+        <label className="flex items-center gap-2 text-sm text-text-primary">
+          <span className="text-text-secondary">Threshold</span>
+          <input
+            type="range"
+            min={0}
+            max={THRESHOLD_MAX}
+            step={THRESHOLD_STEP}
+            value={options.threshold}
+            onChange={(e) => updateOptions({ threshold: Number(e.target.value) })}
+            className="w-28 cursor-pointer accent-accent"
+            aria-label="Sentence boundary threshold"
+          />
+          <span className="w-12 text-xs tabular-nums text-text-tertiary">
+            {options.threshold.toFixed(3)}
+          </span>
+        </label>
+
+        <Toggle
+          label="Strip whitespace"
+          checked={options.stripWhitespace}
+          onChange={(v) => updateOptions({ stripWhitespace: v })}
+        />
+        <Toggle
+          label="Split on newlines"
+          checked={options.splitOnNewlines}
+          onChange={(v) => updateOptions({ splitOnNewlines: v })}
+        />
+
+        <p className="hidden xl:block flex-1 min-w-0 truncate text-right text-xs text-text-tertiary">
+          Lower threshold → more sentence breaks
+        </p>
+      </div>
+
+      {/* Narrow: two stacked panes inside one scroll container. Wide: a fixed
+          split whose panes scroll internally. */}
+      <div className="flex-1 min-h-0 overflow-y-auto p-4 lg:overflow-hidden">
+        <div className="grid gap-4 lg:h-full lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          {/* ---- Input pane ---- */}
+          <section className="flex flex-col rounded-xl border border-border-default bg-bg-card min-w-0 min-h-0 overflow-hidden">
+            <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-border-default">
+              <h2 className="flex-1 min-w-0 text-sm font-semibold text-text-primary">Input</h2>
+              <span className="whitespace-nowrap text-xs text-text-tertiary">
+                {plural(inputStats.chars, "character")} · {plural(inputStats.words, "word")}
+              </span>
+            </div>
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Paste text to split into sentences, or use Upload."
+              aria-label="Text to split"
+              className="flex-1 min-h-[220px] lg:min-h-0 w-full px-3 py-2 bg-transparent text-sm leading-6 text-text-primary resize-y lg:resize-none focus:outline-none"
+            />
+            <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 border-t border-border-default text-xs text-text-tertiary">
+              <span className="truncate">Paste, upload a text file, or type</span>
+              <span className="flex-1" />
+              <span className="whitespace-nowrap">{plural(inputStats.lines, "line")}</span>
+            </div>
+          </section>
+
+          {/* ---- Sentences pane ---- */}
+          <section className="flex flex-col rounded-xl border border-border-default bg-bg-card min-w-0 min-h-0 overflow-hidden">
+            <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-border-default">
+              <h2 className="flex-1 min-w-0 text-sm font-semibold text-text-primary">Sentences</h2>
+              {sentences.length > 0 && (
+                <span className="px-1.5 rounded bg-bg-muted border border-border-default text-xs leading-5 text-text-secondary tabular-nums">
+                  {sentences.length}
                 </span>
-              </div>
-              <div className="h-1.5 rounded-full bg-bg-muted overflow-hidden">
-                <div
-                  className="h-full bg-accent transition-[width] duration-200"
-                  style={{ width: `${progressPct ?? 0}%` }}
-                />
-              </div>
+              )}
             </div>
-          )}
 
-          {/* Error banner */}
-          {error && (
-            <div className="px-4 py-3 rounded-lg bg-error-bg text-error-text text-sm flex items-start gap-2">
-              <span className="flex-1 whitespace-pre-wrap break-words">{error}</span>
-              <button
-                type="button"
-                onClick={() => setError("")}
-                className="shrink-0 opacity-70 hover:opacity-100"
-                title="Dismiss"
-              >
-                <X size={16} />
-              </button>
-            </div>
-          )}
-
-          {/* Options toolbar */}
-          <div className="flex flex-wrap items-center gap-x-5 gap-y-3 rounded-xl border border-border-default bg-bg-card px-4 py-3">
-            <label className="flex items-center gap-2 text-sm text-text-primary">
-              <span className="text-text-secondary">Threshold</span>
-              <input
-                type="number"
-                min={0}
-                max={1}
-                step={0.01}
-                value={threshold}
-                onChange={(e) => setThreshold(Math.max(0, Math.min(1, parseFloat(e.target.value) || 0)))}
-                className="w-20 px-2 py-1 rounded-lg bg-bg-muted border border-border-default text-text-primary focus:outline-none focus:border-accent"
-                title="Sentence-boundary probability threshold (default 0.01)"
-              />
-            </label>
-
-            <Toggle label="Strip whitespace" checked={stripWhitespace} onChange={setStripWhitespace} />
-            <Toggle label="Split on newlines" checked={splitOnNewlines} onChange={setSplitOnNewlines} />
-
-            <div className="flex-1" />
-
-            <button
-              type="button"
-              onClick={handleSplit}
-              disabled={!canSplit}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
-              title={!downloaded ? "Download the model first" : "Split text into sentences"}
-            >
-              {splitting ? <Loader2 size={16} className="animate-spin" /> : <Scissors size={16} />}
-              {splitting ? "Splitting…" : "Split Text"}
-            </button>
-          </div>
-
-          {/* Two-pane body */}
-          <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 min-h-[320px]">
-            {/* Input */}
-            <section className="flex flex-col rounded-xl border border-border-default bg-bg-card p-4 min-w-0 min-h-0">
-              <div className="flex items-center justify-between mb-2">
-                <h2 className="text-sm font-semibold text-text-primary">Input</h2>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-text-tertiary">{input.length} characters</span>
-                  <button
-                    type="button"
-                    onClick={handlePickFile}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-bg-muted border border-border-default text-xs font-medium text-text-primary hover:bg-bg-hover transition-colors"
-                    title="Upload a text file"
-                  >
-                    <Upload size={14} />
-                    Upload
-                  </button>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".txt,.md,.vtt,.srt,text/plain"
-                    onChange={handleFileChange}
-                    className="hidden"
-                  />
-                </div>
-              </div>
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="Paste text to split into sentences…"
-                className="flex-1 min-h-[200px] w-full px-3 py-2 rounded-lg bg-bg-muted border border-border-default text-text-primary resize-y focus:outline-none focus:border-accent"
-              />
-            </section>
-
-            {/* Results */}
-            <section className="flex flex-col rounded-xl border border-border-default bg-bg-card p-4 min-w-0 min-h-0">
-              <div className="flex items-center justify-between mb-2">
-                <h2 className="text-sm font-semibold text-text-primary">
-                  Sentences
-                  {sentences.length > 0 && (
-                    <span className="ml-2 text-xs font-normal text-text-tertiary">{sentences.length}</span>
-                  )}
-                </h2>
-                {sentences.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={handleCopyAll}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-bg-muted border border-border-default text-xs font-medium text-text-primary hover:bg-bg-hover transition-colors"
-                    title="Copy all sentences"
-                  >
-                    {copied ? <Check size={14} /> : <Copy size={14} />}
-                    {copied ? "Copied" : "Copy all"}
-                  </button>
-                )}
-              </div>
-
-              <div className="flex-1 min-h-[200px] overflow-y-auto rounded-lg bg-bg-muted border border-border-default p-2">
-                {sentences.length === 0 ? (
-                  <div className="h-full flex items-center justify-center text-sm text-text-tertiary px-4 text-center">
+            <div className="flex-1 min-h-[220px] lg:min-h-0 overflow-y-auto p-2">
+              {sentences.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center gap-3 px-4 text-center text-text-tertiary">
+                  <Scissors size={36} className="opacity-40" />
+                  <p className="text-sm">
                     {inTauri
-                      ? "Split sentences appear here."
+                      ? "Split sentences appear here, one per line."
                       : "Available in the desktop app."}
-                  </div>
-                ) : (
-                  <ul className="flex flex-col gap-1">
-                    {sentences.map((s, i) => (
-                      <li
-                        key={i}
-                        className="flex gap-2 px-2 py-1.5 rounded-md bg-bg-card border border-border-default text-sm text-text-primary"
+                  </p>
+                </div>
+              ) : (
+                <ol className="flex flex-col gap-0.5">
+                  {sentences.map((sentence, index) => (
+                    <li
+                      key={index}
+                      className="group flex items-start gap-2 px-2 py-1.5 rounded-md hover:bg-bg-muted"
+                    >
+                      <span className="w-7 shrink-0 text-right text-xs leading-6 text-text-tertiary tabular-nums">
+                        {index + 1}
+                      </span>
+                      <span className="flex-1 min-w-0 break-words text-sm leading-6 text-text-primary">
+                        {sentence}
+                      </span>
+                      {/* Always visible on touch: a hover-only control would be
+                          unreachable there. */}
+                      <button
+                        type="button"
+                        onClick={() => copySentence(sentence, index)}
+                        className="shrink-0 p-1 rounded text-text-tertiary opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus-visible:opacity-100 hover:text-text-primary hover:bg-bg-hover transition-opacity"
+                        title="Copy this sentence"
+                        aria-label={`Copy sentence ${index + 1}`}
                       >
-                        <span className="flex-1 min-w-0 break-words">{s}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </section>
-          </div>
+                        {copiedIndex === index ? <Check size={14} /> : <Copy size={14} />}
+                      </button>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+
+            <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 border-t border-border-default text-xs text-text-tertiary">
+              <span className="whitespace-nowrap">
+                {plural(resultStats.count, "sentence")} · {plural(resultStats.chars, "character")}
+              </span>
+              {splitting && <span>· splitting…</span>}
+            </div>
+          </section>
         </div>
       </div>
     </main>

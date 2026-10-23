@@ -17,7 +17,7 @@ OCR needs a recognition model — if it says one is missing, download it from [M
 
 ## Split Text
 
-**Tools → Split Text** runs the **SaT** sentence‑segmentation model on a block of text: paste or upload text and FmS breaks it into clean sentences, which you can copy back out. It's the same engine used to prepare Book datasets, exposed here as a standalone utility — handy for tidying a raw text before turning it into a book or a wiki. The model download is managed on the [Models](models.md) page. (Desktop feature.)
+**Tools → Split Text** runs the **SaT** sentence‑segmentation model on a block of text: paste or upload text (`.txt`, `.md`, `.vtt`, `.srt`) and FmS breaks it into clean sentences, which you can copy all at once or one at a time. **Threshold**, **Strip whitespace** and **Split on newlines** tune the result — a lower threshold produces more breaks, and your settings are remembered between sessions. `Ctrl/⌘+Enter` splits, `Ctrl/⌘+Shift+C` copies every sentence. It's the same engine used to prepare Book datasets, exposed here as a standalone utility — handy for tidying a raw text before turning it into a book or a wiki. The model download is managed on the [Models](models.md) page. (Desktop feature.)
 
 ## PDF Reader
 
