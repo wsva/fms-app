@@ -1761,14 +1761,23 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
         {own.map((d) => renderMarketCard(d))}
         {extra.map((p) => {
           const busy = marketBusyUuid === p.uuid;
+          // Type/name come from the catalog when it still lists the row and
+          // from the local info.json otherwise (`market_list` falls back), so
+          // the uuid only shows as a last resort.
+          const typeLabel = p.dataset_type ? publishLabel[p.dataset_type] ?? p.dataset_type : null;
+          const vis = p.visibility ? VIS_META[p.visibility] : null;
           return (
             <div key={p.uuid} className="flex items-center gap-3 p-3 rounded-lg border border-border-default bg-bg-card">
-              <div className="flex flex-col min-w-0 flex-1">
-                <span className="font-medium truncate">{p.name || p.uuid}</span>
-                <span className="text-xs text-text-tertiary">
-                  {p.dataset_type ? <>{p.dataset_type} · </> : null}
-                  uploaded v{p.version} ({p.uploaded_at})
-                  {p.current_version != null ? <> · published v{p.current_version}</> : <> · not published</>}
+              <div className="flex flex-col min-w-0 flex-1 gap-1">
+                <span className="font-medium truncate">{p.name || "Unnamed dataset"}</span>
+                <span className="text-xs text-text-tertiary flex items-center gap-1.5 flex-wrap">
+                  {typeLabel && (
+                    <span className="px-1.5 py-0.5 rounded-full bg-bg-hover text-text-secondary">{typeLabel}</span>
+                  )}
+                  {vis && <span className={`px-1.5 py-0.5 rounded-full ${vis.cls}`}>{vis.label}</span>}
+                  <span>uploaded v{p.version} ({p.uploaded_at})</span>
+                  <span>{p.current_version != null ? `published v${p.current_version}` : "not published"}</span>
+                  {!p.name && <span className="font-mono max-w-[180px] truncate">{p.uuid}</span>}
                 </span>
               </div>
               {busy && <Loader2 size={14} className="animate-spin shrink-0" />}
@@ -1832,7 +1841,16 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     const zoneSections: { key: "browse" | "downloads" | "published"; label: string; count: number }[] = [
       { key: "browse", label: "Browse", count: browse.length },
       { key: "downloads", label: "My Downloads", count: market.downloads.length },
-      { key: "published", label: "My Published", count: own.length + market.published.length },
+      // `published` overlaps `own` (an uploaded dataset the catalog also lists),
+      // so count only the rows that add a card: `renderMarketPublished` splits
+      // the same way.
+      {
+        key: "published",
+        label: "My Published",
+        count:
+          own.length +
+          (market.published ?? []).filter((p) => !own.some((d) => d.uuid === p.uuid)).length,
+      },
     ];
     return (
       <div className="flex flex-col gap-4">

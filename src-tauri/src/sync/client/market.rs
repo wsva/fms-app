@@ -345,12 +345,28 @@ pub async fn market_list(
     }
 
     // What this device uploaded under its own account, joined with the catalog
-    // row (name/visibility) when the host still lists it.
+    // row (name/visibility) when the host still lists it. The catalog hides
+    // private rows — and a browse filter can drop owner rows too — so name and
+    // type fall back to the local dataset descriptor: this device uploaded it,
+    // so the info.json is right here.
     let published: Vec<Value> = uploads
         .iter()
         .map(|u| {
             let uuid = u["dataset_uuid"].as_str().unwrap_or("").to_string();
             let cat = rows.iter().find(|r| r["uuid"].as_str() == Some(uuid.as_str()));
+            let local = datasets::find_dataset_dir_typed(&settings, &uuid)
+                .ok()
+                .and_then(|(dir, ty)| datasets::read_info_opt(&dir).map(|i| (i.name, ty)));
+            let name = cat
+                .map(|c| c["name"].clone())
+                .filter(|v| !v.is_null())
+                .or_else(|| local.as_ref().map(|(n, _)| json!(n)))
+                .unwrap_or(Value::Null);
+            let dataset_type = cat
+                .map(|c| c["dataset_type"].clone())
+                .filter(|v| !v.is_null())
+                .or_else(|| local.as_ref().map(|(_, ty)| json!(ty.as_str())))
+                .unwrap_or(Value::Null);
             json!({
                 "uuid": uuid,
                 "version": u["version"],
@@ -358,8 +374,8 @@ pub async fn market_list(
                 "published_at": u["published_at"],
                 "uploaded_at": u["uploaded_at"],
                 "archive_sha256": u["archive_sha256"],
-                "name": cat.map(|c| c["name"].clone()).unwrap_or(Value::Null),
-                "dataset_type": cat.map(|c| c["dataset_type"].clone()).unwrap_or(Value::Null),
+                "name": name,
+                "dataset_type": dataset_type,
                 "visibility": cat.map(|c| c["visibility"].clone()).unwrap_or(Value::Null),
                 "is_subscribed": cat.map(|c| c["is_subscribed"].clone()).unwrap_or(Value::Null),
             })
