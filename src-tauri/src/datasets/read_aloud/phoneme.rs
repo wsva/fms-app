@@ -32,6 +32,15 @@
 //! `model_missing` — see the degradation matrix in
 //! `docs/design/read-aloud-score.md`. There is deliberately no proxy score.
 //!
+//! ## Two budgets
+//!
+//! Memory is why [`PhonemeModel::posteriors`] cuts its input into windows: the
+//! network's self-attention is quadratic in frames, and one call over a whole
+//! multi-minute recording asked ONNX Runtime for ~20 GB and failed (see
+//! [`WINDOW_SAMPLES`]). Time is why the session is offered to the GPU first on
+//! Windows — see [`execution_providers`] — and the very same code runs on the
+//! CPU when no provider is registered.
+//!
 //! [`super::assess::PronReason`]: the vocabulary of "why not measured".
 
 use std::collections::HashMap;
@@ -39,6 +48,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use half::f16;
+use ort::ep::ExecutionProviderDispatch;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::{DynTensor, Tensor, TensorElementType, ValueType};
@@ -47,6 +57,27 @@ use super::gop::LogPost;
 
 /// 16 kHz mono, the rate the recorder writes and `audio::decode_to_pcm` emits.
 const SAMPLE_RATE: u32 = 16_000;
+
+/// Longest audio handed to the model in one call, in samples (20 s).
+///
+/// The network is a transformer: its self-attention buffer is quadratic in the
+/// number of frames (~50 per second), so a single call over a five-minute
+/// recording asks ONNX Runtime for ~20 GB and the assessment dies with
+/// "Failed to allocate memory" after minutes of apparent hanging. A window this
+/// long keeps one call's attention buffer in the low hundreds of MB while still
+/// holding a whole sentence, which is where accuracy is decided.
+const WINDOW_SAMPLES: usize = SAMPLE_RATE as usize * 20;
+
+/// How much audio a window repeats from its predecessor, in samples (2 s).
+///
+/// The model's left context at a cut is worth well under a second; two seconds
+/// is generous and costs a tenth of a window's compute. The frames covering the
+/// repeat are dropped after inference (see [`overlap_frames`]), so the
+/// concatenation carries no duplicated time.
+const OVERLAP_SAMPLES: usize = SAMPLE_RATE as usize * 2;
+
+/// How far the window start advances: everything except the overlap is new.
+const STEP_SAMPLES: usize = WINDOW_SAMPLES - OVERLAP_SAMPLES;
 
 /// Preferred weights file name. Any `*.onnx` in the directory is accepted — see
 /// [`find_onnx`] — because exports disagree on the name.
@@ -100,6 +131,96 @@ fn audio_input_dtype(session: &Session) -> InputDtype {
     }
 }
 
+/// Execution providers for the model's session, best first.
+///
+/// On a Windows desktop this is DirectML, the DirectX 12 compute provider, so
+/// the model runs on whatever GPU the machine already has instead of on every
+/// core of its CPU. The pyke ONNX Runtime ships the provider compiled in, so an
+/// empty list means this runtime has none — `ort` then keeps its CPU provider,
+/// which is also the only option on Android. Both outcomes are logged: a silent
+/// fallback is exactly what made the last slow assessment hard to explain.
+#[cfg(all(target_os = "windows", feature = "directml"))]
+fn execution_providers() -> Vec<ExecutionProviderDispatch> {
+    use ort::ep::ExecutionProvider;
+
+    let directml = ort::ep::DirectML::default();
+    match directml.is_available() {
+        Ok(true) => vec![directml.build()],
+        Ok(false) => {
+            log::info!(
+                "read_aloud: this ONNX Runtime has no DirectML provider; the pronunciation model runs on the CPU"
+            );
+            Vec::new()
+        }
+        Err(e) => {
+            log::warn!(
+                "read_aloud: could not query the DirectML provider ({}); the pronunciation model runs on the CPU",
+                e
+            );
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "windows", feature = "directml")))]
+fn execution_providers() -> Vec<ExecutionProviderDispatch> {
+    Vec::new()
+}
+
+/// Build the session, on the GPU when this target offers one.
+///
+/// A GPU that cannot host this graph — an old driver, a provider that rejects
+/// an operator the exporter emitted — must cost speed, never the assessment:
+/// the failure is logged and the session is rebuilt on the CPU provider.
+fn open_session(onnx: &Path) -> Result<Session, String> {
+    let providers = execution_providers();
+    let on_gpu = !providers.is_empty();
+    match create_session(onnx, providers) {
+        Ok(session) => {
+            if on_gpu {
+                log::info!("read_aloud: pronunciation model loaded onto the GPU (DirectML)");
+            }
+            Ok(session)
+        }
+        Err(message) if on_gpu => {
+            log::warn!(
+                "read_aloud: the pronunciation model could not run on the GPU ({}); retrying on the CPU",
+                message
+            );
+            create_session(onnx, Vec::new())
+        }
+        Err(message) => Err(message),
+    }
+}
+
+fn create_session(
+    onnx: &Path,
+    providers: Vec<ExecutionProviderDispatch>,
+) -> Result<Session, String> {
+    Session::builder()
+        .map_err(|e| format!("Failed to create ONNX session builder: {}", e))?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|e| format!("Failed to set optimization level: {}", e))?
+        .with_execution_providers(providers)
+        .map_err(|e| format!("Failed to set the execution provider: {}", e))?
+        .commit_from_file(onnx)
+        .map_err(|e| format!("Failed to load phoneme model {}: {}", onnx.display(), e))
+}
+
+/// How many leading frames of a window cover the repeated overlap.
+///
+/// The model's stride is read off the window itself — the ratio between the
+/// frames it returned and the samples it was given — rather than assumed. One
+/// frame of slack is harmless: a dropped frame is 20 ms the neighbouring window
+/// still saw, and the aligner works over the whole matrix.
+fn overlap_frames(frames: usize, window_samples: usize) -> usize {
+    if frames == 0 || window_samples == 0 {
+        return 0;
+    }
+    let share = frames as f64 * OVERLAP_SAMPLES as f64 / window_samples as f64;
+    (share.round() as usize).min(frames - 1)
+}
+
 /// An ONNX CTC acoustic model over a phone inventory.
 pub(crate) struct PhonemeModel {
     session: Session,
@@ -122,12 +243,7 @@ impl PhonemeModel {
             .ok_or_else(|| format!("No ONNX model (*.onnx) found in {}", dir.display()))?;
         let vocab = dir.join(VOCAB_FILE);
 
-        let session = Session::builder()
-            .map_err(|e| format!("Failed to create ONNX session builder: {}", e))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| format!("Failed to set optimization level: {}", e))?
-            .commit_from_file(&onnx)
-            .map_err(|e| format!("Failed to load phoneme model {}: {}", onnx.display(), e))?;
+        let session = open_session(&onnx)?;
 
         let (tokens, specials, blank) = read_vocab(&vocab)?;
         if tokens.is_empty() {
@@ -163,12 +279,72 @@ impl PhonemeModel {
 
     /// Run the acoustic model over 16 kHz mono samples and return per-frame
     /// log-probabilities, ready for [`super::gop`].
+    ///
+    /// Audio longer than one window is cut into overlapping windows and their
+    /// frames are concatenated (see [`WINDOW_SAMPLES`]), because one call over a
+    /// whole recording exhausts memory before it finishes.
     pub(crate) fn posteriors(&mut self, samples: &[f32]) -> Result<LogPost, String> {
         if samples.is_empty() {
             return Ok(LogPost::new(Vec::new(), self.blank));
         }
 
-        let input = audio_input(self.audio_dtype, &normalize(samples))?;
+        // Normalise once, over the whole utterance: the statistics are the
+        // recording's own, as the feature extractor computes them before the
+        // graph. Per window, one quiet stretch would be scaled against whichever
+        // neighbours happened to share its window.
+        let audio = normalize(samples);
+
+        // Short enough for one pass — the ordinary case (a sentence read aloud).
+        if audio.len() <= WINDOW_SAMPLES {
+            let rows = self.window_rows(&audio)?;
+            return Ok(LogPost::new(rows, self.blank));
+        }
+
+        let total = audio.len();
+        let windows = total.div_ceil(STEP_SAMPLES);
+        log::info!(
+            "read_aloud: phoneme inference over {:.1} s of audio in {} windows of {:.0} s",
+            seconds(&audio),
+            windows,
+            WINDOW_SAMPLES as f64 / SAMPLE_RATE as f64
+        );
+
+        let mut rows: Vec<Vec<f32>> = Vec::new();
+        let mut start = 0usize;
+        for index in 0..windows {
+            let end = (start + WINDOW_SAMPLES).min(total);
+            let window = &audio[start..end];
+            // Say which window is being run *before* running it: on the CPU a
+            // window takes seconds, and silence is what makes a wait look stuck.
+            log::info!(
+                "read_aloud: phoneme window {}/{} — {:.1}–{:.1} s",
+                index + 1,
+                windows,
+                start as f64 / SAMPLE_RATE as f64,
+                end as f64 / SAMPLE_RATE as f64
+            );
+            let window_rows = self.window_rows(window)?;
+            // Everything before `skip` repeats the previous window, which saw it
+            // with the left context a cut would have taken away.
+            let skip = if index == 0 {
+                0
+            } else {
+                overlap_frames(window_rows.len(), window.len())
+            };
+            rows.extend(window_rows.into_iter().skip(skip));
+            start += STEP_SAMPLES;
+        }
+
+        log::info!("read_aloud: phoneme inference produced {} frames", rows.len());
+        Ok(LogPost::new(rows, self.blank))
+    }
+
+    /// One ONNX call: `window` in, per-frame log-softmax rows out.
+    ///
+    /// Split out of [`Self::posteriors`] so the chunking loop there has a single
+    /// place that knows the tensor shape, the output name and the vocabulary.
+    fn window_rows(&mut self, window: &[f32]) -> Result<Vec<Vec<f32>>, String> {
+        let input = audio_input(self.audio_dtype, window)?;
 
         let outputs = self
             .session
@@ -228,7 +404,7 @@ impl PhonemeModel {
             rows.push(row.iter().map(|x| x - lse).collect());
         }
 
-        Ok(LogPost::new(rows, self.blank))
+        Ok(rows)
     }
 
     /// Free-decode: CTC-collapse the posteriors into phone ids, dropping blanks
@@ -409,7 +585,14 @@ pub(crate) fn with_model<T>(
         None => true,
     };
     if stale {
+        // First use (and after a model swap) pays for the ONNX load; say so, as
+        // the UI's live assessment log is otherwise silent through the wait.
+        log::info!(
+            "read_aloud: loading the pronunciation model from {}",
+            dir.display()
+        );
         *guard = Some(Cached { dir: dir.to_path_buf(), model: PhonemeModel::load(dir)? });
+        log::info!("read_aloud: pronunciation model loaded");
     }
 
     let cached = guard.as_mut().expect("just filled");
@@ -599,6 +782,18 @@ mod tests {
         // still map to silence instead of blowing up into noise.
         assert!(normalize(&[0.0; 64]).iter().all(|x| *x == 0.0));
         assert!(normalize(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_overlap_is_dropped_by_the_share_of_the_window_it_takes() {
+        // A 20 s window of 1000 frames repeats 2 s of it => 100 frames.
+        assert_eq!(overlap_frames(1000, 320_000), 100);
+        // A short final window still keeps at least one frame of its own.
+        assert_eq!(overlap_frames(2, 32_001), 1);
+        assert_eq!(overlap_frames(1, 16_000), 0);
+        // Nothing to drop without frames to drop.
+        assert_eq!(overlap_frames(0, 16_000), 0);
+        assert_eq!(overlap_frames(100, 0), 0);
     }
 
     #[test]

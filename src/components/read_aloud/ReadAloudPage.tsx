@@ -250,7 +250,7 @@ export default function ReadAloudPage() {
   const handleSelectAttempt = useCallback((a: ReadAttempt | null) => setSelectedAttempt(a), []);
   // Bumped after the toolbar deletes the open attempt so AttemptsPanel reloads.
   const [attemptsRefreshKey, setAttemptsRefreshKey] = useState(0);
-  // True while the toolbar's "Recognize again" re-transcribes the open attempt.
+  // True while the toolbar's "Assess again" re-transcribes the open attempt.
   const [rerecognizingAttempt, setRerecognizingAttempt] = useState(false);
   // Toggled by the toolbar's "Compare" button: the attempt detail then shows the
   // text and the recognized transcript side by side, sentence by sentence.
@@ -621,10 +621,11 @@ export default function ReadAloudPage() {
   }, [editing]);
 
   // Re-transcribe the open attempt with the current model. The same work as the
-  // attempts list's per-row button, reached from the detail page's toolbar so
+  // attempts list's per-row button, reached from the attempt page's toolbar so
   // the reader does not have to navigate back to the list to redo one take.
-  // `rerecognizeAttempt` decides which model; see the note there.
-  const recognizeSelectedAgain = async () => {
+  // `rerecognizeAttempt` decides which model and reports each stage to the live
+  // assessment log; see the note there.
+  const assessSelectedAgain = async () => {
     if (!isTauri() || !selectedAttempt || !selectedDataset) return;
     const a = selectedAttempt;
     setRerecognizingAttempt(true);
@@ -638,7 +639,7 @@ export default function ReadAloudPage() {
       await loadTexts(selectedDataset);
     } catch (e) {
       const msg = String(e);
-      logError(`recognize again failed: ${msg}`, LOG_MODULE);
+      logError(`assess again failed: ${msg}`, LOG_MODULE);
       setError(msg);
     } finally {
       setRerecognizingAttempt(false);
@@ -910,7 +911,7 @@ export default function ReadAloudPage() {
               </>
             )}
 
-            {/* Attempt detail — its Play / Recognize again / Delete actions
+            {/* Attempt detail — its Play / Assess again / Delete actions
                 live here rather than inside the panel, mirroring how Record
                 lives in the toolbar. */}
             {viewMode === "practice" && activeText && attemptsView && selectedAttempt && (
@@ -927,10 +928,10 @@ export default function ReadAloudPage() {
                   <ToolbarButton
                     icon={rerecognizingAttempt ? Loader2 : RefreshCw}
                     iconProps={rerecognizingAttempt ? { className: "animate-spin" } : undefined}
-                    label="Recognize again"
-                    title="Recognize again (re-transcribe this recording with the current model and score it again)"
+                    label="Assess again"
+                    title="Assess again (re-transcribe this recording with the current model and score it again)"
                     disabled={rerecognizingAttempt}
-                    onClick={() => void recognizeSelectedAgain()}
+                    onClick={() => void assessSelectedAgain()}
                   />
                 )}
                 {selectedAttempt.audio_url && (
@@ -1218,7 +1219,7 @@ export default function ReadAloudPage() {
           </div>
         </div>
       ) : attemptsView && activeDataset && activeText ? (
-        // The page-level error is where the toolbar's Recognize again reports a
+        // The page-level error is where the toolbar's Assess again reports a
         // failure; the panel owns its own row-level errors.
         <>
           {error && (

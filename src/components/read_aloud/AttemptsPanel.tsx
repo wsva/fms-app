@@ -8,6 +8,7 @@ import { scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { rerecognizeAttempt } from "@/lib/read_aloud/rerecognize";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 import AssessmentCards, { PauseRibbon } from "@/components/read_aloud/AssessmentCards";
+import AssessmentLogPanel from "@/components/read_aloud/AssessmentLogPanel";
 import { highlightDifferences } from "@/components/read_book/diff";
 import { lcs } from "@/lib/listen/lcs";
 import { isTauri } from "@/lib/tauri";
@@ -356,8 +357,8 @@ export default function AttemptsPanel({
   // place. The recording itself is untouched — only the recognized text changes.
   // The WAV is device-local, so this is only offered when a.audio_url resolves on
   // this machine. The work itself lives in `rerecognizeAttempt`, shared with the
-  // attempt detail page's toolbar button.
-  const recognizeAgain = async (a: ReadAttempt) => {
+  // attempt page's toolbar button; it also feeds the live assessment log.
+  const assessAgain = async (a: ReadAttempt) => {
     if (!isTauri() || !a.audio_url) return;
     setRerecognizing(a.uuid);
     setError(null);
@@ -367,7 +368,7 @@ export default function AttemptsPanel({
       onChanged?.();
     } catch (e) {
       const msg = String(e);
-      logError(`recognize again failed: ${msg}`, LOG_MODULE);
+      logError(`assess again failed: ${msg}`, LOG_MODULE);
       setError(msg);
     } finally {
       setRerecognizing(null);
@@ -385,140 +386,148 @@ export default function AttemptsPanel({
   }, [selectedAttempt, onSelectAttempt]);
 
   return (
-    // Same bottom room as the practice pane - the attempt detail and the compare
-    // view are read too, and end on a sentence rather than at the edge.
-    <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 pb-[50vh] flex flex-col gap-3 min-w-0">
-      {selectedAttempt ? (
-        <>
-          {/* Detail panel — the recognized text at normal reading size.
-              Navigation back to the list is via the breadcrumb's "Attempts" crumb;
-              Play / Delete for the open attempt live in the page toolbar. */}
-          <div className="flex items-center gap-3 min-w-0">
-            <span
-              className={`text-2xl font-bold tabular-nums ${scoreBadgeClasses(selectedAttempt.score)}`}
-            >
-              {Math.round(selectedAttempt.score)}%
-            </span>
-            <span className="text-xs text-text-tertiary tabular-nums">
-              {formatWhen(selectedAttempt.created_at)}
-            </span>
-          </div>
+    // The live log is docked under the scroll area rather than inside it, so a
+    // long assessment stays visible while the attempt itself is read.
+    <div className="flex-1 min-h-0 min-w-0 flex flex-col">
+      {/* Same bottom room as the practice pane - the attempt detail and the compare
+          view are read too, and end on a sentence rather than at the edge. */}
+      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 pb-[50vh] flex flex-col gap-3 min-w-0">
+        {selectedAttempt ? (
+          <>
+            {/* Detail panel — the recognized text at normal reading size.
+                Navigation back to the list is via the breadcrumb's "Attempts" crumb;
+                Play / Delete for the open attempt live in the page toolbar. */}
+            <div className="flex items-center gap-3 min-w-0">
+              <span
+                className={`text-2xl font-bold tabular-nums ${scoreBadgeClasses(selectedAttempt.score)}`}
+              >
+                {Math.round(selectedAttempt.score)}%
+              </span>
+              <span className="text-xs text-text-tertiary tabular-nums">
+                {formatWhen(selectedAttempt.created_at)}
+              </span>
+            </div>
 
-          {/* The stored assessment, when this take has one. Takes recorded
-              before assessment existed (or whose recording is gone) simply have
-              none — the accuracy number above is still there. */}
-          {selectedAttempt.metrics && (
-            <section className="flex flex-col gap-2 min-w-0">
-              <AssessmentCards assessment={selectedAttempt.metrics} />
-              <PauseRibbon
-                pauses={selectedAttempt.metrics.pauses}
-                duration={
-                  selectedAttempt.metrics.fluency?.duration ??
-                  selectedAttempt.metrics.pauses[selectedAttempt.metrics.pauses.length - 1]?.end ??
-                  0
-                }
-              />
-            </section>
-          )}
+            {/* The stored assessment, when this take has one. Takes recorded
+                before assessment existed (or whose recording is gone) simply have
+                none — the accuracy number above is still there. */}
+            {selectedAttempt.metrics && (
+              <section className="flex flex-col gap-2 min-w-0">
+                <AssessmentCards assessment={selectedAttempt.metrics} />
+                <PauseRibbon
+                  pauses={selectedAttempt.metrics.pauses}
+                  duration={
+                    selectedAttempt.metrics.fluency?.duration ??
+                    selectedAttempt.metrics.pauses[selectedAttempt.metrics.pauses.length - 1]?.end ??
+                    0
+                  }
+                />
+              </section>
+            )}
 
-          {/* Compare mode (toolbar "Compare") pairs the texts sentence by
-              sentence; otherwise just show the recognized transcript. */}
-          {compare ? (
-            <SentenceCompare reference={reference} recognized={selectedAttempt.recognized} />
-          ) : (
+            {/* Compare mode (toolbar "Compare") pairs the texts sentence by
+                sentence; otherwise just show the recognized transcript. */}
+            {compare ? (
+              <SentenceCompare reference={reference} recognized={selectedAttempt.recognized} />
+            ) : (
+              <section className="flex flex-col gap-1 min-w-0">
+                <h3 className="text-xs font-medium text-text-secondary">Recognized text</h3>
+                <div className="p-4 rounded-xl bg-bg-muted text-text-primary text-base leading-relaxed whitespace-pre-wrap break-words">
+                  {selectedAttempt.recognized || "(no speech recognized)"}
+                </div>
+              </section>
+            )}
+          </>
+        ) : (
+          <>
             <section className="flex flex-col gap-1 min-w-0">
-              <h3 className="text-xs font-medium text-text-secondary">Recognized text</h3>
-              <div className="p-4 rounded-xl bg-bg-muted text-text-primary text-base leading-relaxed whitespace-pre-wrap break-words">
-                {selectedAttempt.recognized || "(no speech recognized)"}
-              </div>
+              <h2 className="text-lg font-semibold text-text-primary break-words flex items-center gap-2">
+                <History size={18} className="text-text-tertiary shrink-0" />
+                Attempts
+              </h2>
+              <p className="text-xs text-text-tertiary break-words">
+                {text.title || "Untitled"} · {attempts.length} attempt{attempts.length === 1 ? "" : "s"}
+              </p>
             </section>
-          )}
-        </>
-      ) : (
-        <>
-          <section className="flex flex-col gap-1 min-w-0">
-            <h2 className="text-lg font-semibold text-text-primary break-words flex items-center gap-2">
-              <History size={18} className="text-text-tertiary shrink-0" />
-              Attempts
-            </h2>
-            <p className="text-xs text-text-tertiary break-words">
-              {text.title || "Untitled"} · {attempts.length} attempt{attempts.length === 1 ? "" : "s"}
-            </p>
-          </section>
 
-          {attempts.length === 0 ? (
-            <p className="text-xs text-text-tertiary">
-              No attempts yet. Record yourself reading in the practice view.
-            </p>
-          ) : (
-            <ul className="flex flex-col gap-1.5">
-              {attempts.map((a) => (
-                <li
-                  key={a.uuid}
-                  onClick={() => onSelectUuid(a.uuid)}
-                  className="flex items-center gap-2 p-2 rounded-lg border border-border-default bg-bg-card hover:bg-bg-hover cursor-pointer transition-colors"
-                >
-                  <span className={scoreBadgeClasses(a.score)}>{Math.round(a.score)}%</span>
-                  <div className="flex flex-col min-w-0 flex-1">
-                    <span className="text-xs text-text-secondary truncate" title={a.recognized}>
-                      {a.recognized || "(no speech recognized)"}
-                    </span>
-                    <span className="text-[10px] text-text-tertiary tabular-nums">
-                      {formatWhen(a.created_at)}
-                    </span>
-                  </div>
-                  {a.audio_url && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        playUrl(a.audio_url);
-                      }}
-                      title="Play recording"
-                      className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover cursor-pointer shrink-0"
-                    >
-                      <Play size={15} />
-                    </button>
-                  )}
-                  {a.audio_url && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void recognizeAgain(a);
-                      }}
-                      disabled={rerecognizing !== null}
-                      title="Recognize again (re-transcribe this recording with the current model)"
-                      className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover cursor-pointer shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {rerecognizing === a.uuid ? (
-                        <Loader2 size={15} className="animate-spin" />
-                      ) : (
-                        <RefreshCw size={15} />
-                      )}
-                    </button>
-                  )}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteAttempt(a);
-                    }}
-                    title="Delete attempt"
-                    className="p-1 rounded text-text-tertiary hover:text-error-text hover:bg-bg-hover cursor-pointer shrink-0"
+            {attempts.length === 0 ? (
+              <p className="text-xs text-text-tertiary">
+                No attempts yet. Record yourself reading in the practice view.
+              </p>
+            ) : (
+              <ul className="flex flex-col gap-1.5">
+                {attempts.map((a) => (
+                  <li
+                    key={a.uuid}
+                    onClick={() => onSelectUuid(a.uuid)}
+                    className="flex items-center gap-2 p-2 rounded-lg border border-border-default bg-bg-card hover:bg-bg-hover cursor-pointer transition-colors"
                   >
-                    <Trash2 size={15} />
-                  </button>
-                  <ChevronRight size={16} className="text-text-tertiary shrink-0" />
-                </li>
-              ))}
-            </ul>
-          )}
-        </>
-      )}
+                    <span className={scoreBadgeClasses(a.score)}>{Math.round(a.score)}%</span>
+                    <div className="flex flex-col min-w-0 flex-1">
+                      <span className="text-xs text-text-secondary truncate" title={a.recognized}>
+                        {a.recognized || "(no speech recognized)"}
+                      </span>
+                      <span className="text-[10px] text-text-tertiary tabular-nums">
+                        {formatWhen(a.created_at)}
+                      </span>
+                    </div>
+                    {a.audio_url && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          playUrl(a.audio_url);
+                        }}
+                        title="Play recording"
+                        className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover cursor-pointer shrink-0"
+                      >
+                        <Play size={15} />
+                      </button>
+                    )}
+                    {a.audio_url && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void assessAgain(a);
+                        }}
+                        disabled={rerecognizing !== null}
+                        title="Assess again (re-transcribe this recording and score it again)"
+                        className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover cursor-pointer shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {rerecognizing === a.uuid ? (
+                          <Loader2 size={15} className="animate-spin" />
+                        ) : (
+                          <RefreshCw size={15} />
+                        )}
+                      </button>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteAttempt(a);
+                      }}
+                      title="Delete attempt"
+                      className="p-1 rounded text-text-tertiary hover:text-error-text hover:bg-bg-hover cursor-pointer shrink-0"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                    <ChevronRight size={16} className="text-text-tertiary shrink-0" />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
 
-      {error && (
-        <div className="p-3 rounded-lg bg-error-bg text-error-text text-sm break-words">{error}</div>
-      )}
+        {error && (
+          <div className="p-3 rounded-lg bg-error-bg text-error-text text-sm break-words">{error}</div>
+        )}
 
-      <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
+        <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
+      </div>
+
+      {/* Live log of the running assessment: appears with the first run, tails
+          the backend model log while it works, and stays as the run's record. */}
+      <AssessmentLogPanel />
     </div>
   );
 }

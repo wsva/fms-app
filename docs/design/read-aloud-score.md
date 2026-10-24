@@ -108,6 +108,10 @@ Decoding the clip through the phoneme model is the expensive half of the referen
 
 The key is `sha256(model_identity ‖ sha256(clip PCM))`, with `model_identity` the phoneme directory's name plus `model.onnx`'s length and mtime — a re-crop, a regenerate or a different model each self-invalidate, so there is no invalidation logic to get wrong. Workspace, not dataset: scoring is a read path and must never write into a dataset.
 
+### Inference budget
+
+The phoneme model is a transformer: its self-attention is quadratic in frames (~50 per second at 16 kHz), so a single call over a five-minute recording asks ONNX Runtime for ~20 GB and the assessment dies with `Failed to allocate memory` — which to the learner looks like a hang. `PhonemeModel::posteriors` therefore normalises the utterance once and runs it in 20 s windows with 2 s of overlap, dropping the repeated frames after each window, so memory is bounded by the window rather than by the recording. On Windows the session is offered to DirectML first (the DirectX 12 provider the shipped ONNX Runtime already contains), falling back to the CPU — with a log line saying so — when the driver cannot host the graph: a GPU may cost nothing but speed. The provider, every window and the frame count are logged, and the attempt page's assessment log shows them live.
+
 ### Standard audio and sync
 
 The clips ride the existing dataset channels for free. `read_standard_audio_save` / `_delete` join the dataset-scoped change kinds beside `read_text_save` / `_delete` (object id = uuid, delete → tombstone); the hub's snapshot is a whole `data.sqlite3` copy and `sanitize_snapshot_db` drops only `card_review` + `read_attempt`; and the wavs travel as ordinary files, hashed into `compute_manifest` and fetched by hash. Deleting a text cascades: its rows go with it, and `media/<text_uuid>/` is removed.

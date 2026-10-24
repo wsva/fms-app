@@ -1064,7 +1064,7 @@ fn delete_attempt_inner(settings: &SettingsState, dataset_uuid: &str, uuid: &str
 /// Re-run recognition for an existing attempt: overwrite its transcript,
 /// re-score and re-assess it against the current reference, in place. The
 /// recording is untouched — only the transcript (and everything derived from
-/// it) changes — so this is the seam the UI's "Recognize again" button (and the
+/// it) changes — so this is the seam the UI's "Assess again" button (and the
 /// matching MCP tool) writes through after it re-transcribes the device-local
 /// WAV with the loaded STT model.
 #[tauri::command]
@@ -1145,19 +1145,35 @@ async fn update_recognized_inner(
     let reference = content.as_deref().map(|c| effective_reference(c, normalized.as_deref()));
     let summary = reference.as_deref().map(|r| score_asr(r, recognized));
     let score = summary.as_ref().map(|s| s.score).unwrap_or(0.0);
+    // Stage lines, so the UI's live assessment log can show where a long
+    // re-assessment currently is.
+    log::info!(
+        "read_aloud: assessing attempt {} — accuracy {:.1} against the current reference",
+        uuid, score
+    );
 
     // Re-derive the metrics from the recording that is still on this device.
     // A missing WAV leaves fluency and pronunciation unmeasured — the score
-    // still updates, which is what "recognize again" means.
+    // still updates, which is what "assess again" means.
     let samples = stored_recording(settings, dataset_uuid, &audio_path);
+    log::info!(
+        "read_aloud: attempt {} — recording decoded ({} samples)",
+        uuid,
+        samples.len()
+    );
     let clip = match reference.as_deref() {
         Some(reference) => load_default_clip(settings, dataset_uuid, &text_uuid, reference),
         None => standard_audio::DefaultClip::Missing,
     };
     let metrics = match (summary.as_ref(), reference.as_deref()) {
         (Some(summary), Some(reference)) => {
+            log::info!(
+                "read_aloud: attempt {} — measuring fluency and pronunciation",
+                uuid
+            );
             let assessment =
                 assess_attempt(settings, summary, reference, recognized, &samples, words, &clip).await;
+            log::info!("read_aloud: attempt {} — assessment computed", uuid);
             stored_metrics(Some(assessment.metrics_json()))
         }
         _ => None,
@@ -1203,6 +1219,11 @@ async fn update_recognized_inner(
         dataset_uuid,
         &attempt_payload(&ev),
         &ev.user_id,
+    );
+
+    log::info!(
+        "read_aloud: attempt {} — assessment stored (score {:.1})",
+        uuid, score
     );
 
     Ok(ReadAttempt {

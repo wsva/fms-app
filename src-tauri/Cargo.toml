@@ -62,6 +62,7 @@ desktop = [
     "dep:spellbook",
     "server",
     "textsplit",
+    "directml",
 ]
 server = [
     "dep:axum",
@@ -75,6 +76,14 @@ stt = ["dep:transcribe-rs"]
 # Phoneme CTC inference reuses the same `ort`/`ndarray`/`half` versions that
 # transcribe-rs and `textsplit` already resolve, so no second ONNX Runtime.
 phoneme = ["stt", "dep:ort", "dep:ndarray", "dep:half"]
+# Windows GPU acceleration for the phoneme model. `ort/directml` compiles the
+# DirectML (DirectX 12) execution provider into our side of the bindings; the
+# pyke ONNX Runtime on Windows already ships the provider and links
+# `DirectML.dll`, so no distribution changes and no second runtime. Desktop
+# only: the Tauri CLI re-applies `default` features to the Android build and an
+# Android device has no DirectML — there `phoneme` stays the exact CPU build.
+# See `datasets/read_aloud/phoneme.rs::execution_providers`.
+directml = ["ort/directml"]
 # Vendored SaT sentence segmentation (ported from wtsplit-rs). Desktop-only: it
 # runs the ONNX on the same statically-linked `ort` that `stt` already pulls in
 # via transcribe-rs, so `textsplit` depends on `stt` and adds `tokenizers` as

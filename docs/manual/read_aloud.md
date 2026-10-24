@@ -47,7 +47,10 @@ Every recording you make is saved as an **attempt**. The **attempts panel** list
 
 - Play back earlier recordings and compare them to now.
 - Watch your scores trend upward as you repeat a passage.
+- **Assess again** an earlier take: it re‑transcribes the recording and recomputes its accuracy, fluency and pronunciation in place. The recording is device‑local, so the action only appears where that recording lives.
 - Navigate between attempts and, where relevant, navigate to the sentences that most need work.
+
+Assessment can take a while (transcription first, then the phoneme model). An **assessment log** docked at the bottom of the attempts page tails each stage as it runs, so the wait is never silent; collapse it to a single line or close it once the run finishes.
 
 Re‑reading the same passage is encouraged — repetition with feedback is how fluency builds.
 
