@@ -201,6 +201,7 @@ pub fn run() {
             models::model_delete,
             models::model_cancel_download,
             models::model_transcribe,
+            models::model_transcribe_detailed,
             settings::settings_get,
             settings::settings_set,
             settings::settings_get_global,
@@ -311,6 +312,7 @@ pub fn run() {
             datasets::read_aloud::read_aloud_list_attempts,
             datasets::read_aloud::read_aloud_delete_attempt,
             datasets::read_aloud::read_aloud_score,
+            datasets::read_aloud::read_aloud_assess,
             datasets::read_aloud::read_aloud_submit,
             datasets::read_aloud::read_aloud_rerecognize,
             sync::server::web_service_get_status,
@@ -741,6 +743,7 @@ macro_rules! mobile_invoke_handler {
             datasets::read_aloud::read_aloud_list_attempts,
             datasets::read_aloud::read_aloud_delete_attempt,
             datasets::read_aloud::read_aloud_score,
+            datasets::read_aloud::read_aloud_assess,
             datasets::read_aloud::read_aloud_submit,
             datasets::read_aloud::read_aloud_rerecognize,
             xp::xp_get_user,
@@ -889,6 +892,7 @@ pub fn run() {
             models::model_delete,
             models::model_cancel_download,
             models::model_transcribe,
+            models::model_transcribe_detailed,
             models::index::model_index_get,
             models::index::model_index_refresh
         ));

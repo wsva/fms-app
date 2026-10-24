@@ -8,7 +8,18 @@
 //! holds every recorded take.
 //!
 //! Scoring uses the word-alignment ASR metric from `asr_metric` —
-//! `score = WIP × 100` with H/S/D/I counts and alignment chunks (0-100).
+//! `score = WIP × 100` with H/S/D/I counts and alignment chunks (0-100) — plus
+//! two new axes built on the same take: fluency (VAD + word timings) and
+//! pronunciation (CTC phoneme GOP). `assess.rs` is the single seam that turns a
+//! take into that three-axis picture; this file owns storage, sync and commands.
+
+pub(crate) mod assess;
+pub(crate) mod fluency;
+pub(crate) mod gop;
+#[cfg(feature = "phoneme")]
+pub(crate) mod phoneme;
+pub(crate) mod tts_ref;
+pub(crate) mod vad;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,9 +42,17 @@ use crate::settings::SettingsState;
 use crate::datasets::asr_metric::{score_asr, score_value, AsrScoreSummary};
 use crate::xp::{xp_award_internal, XpAwardResult};
 
+use assess::{Assessment, PronEvidence, PronReason};
+use fluency::TimedWord;
+
 /// Score thresholds for the scaled XP reward.
 const XP_PASS_SCORE: f64 = 60.0;
 const XP_GOOD_SCORE: f64 = 80.0;
+
+/// Edge TTS voice used for the canonical pronunciation reference when the user
+/// has not chosen one. Multilingual so the same default covers English, German
+/// and the rest of the European set the TTS page offers.
+pub(crate) const DEFAULT_TTS_VOICE: &str = "en-US-EmmaMultilingualNeural";
 
 // ============================================================
 // Types
@@ -94,6 +113,12 @@ pub struct ReadAttempt {
     pub recognized: String,
     /// WIP-based ASR score 0-100 against the reference text.
     pub score: f64,
+    /// The stored assessment (accuracy + fluency + pronunciation), when one was
+    /// computed. `None` for takes recorded before assessment existed and for
+    /// takes whose recording is gone. Additive: peers that do not know the key
+    /// simply drop it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<Value>,
     pub created_at: String,
 }
 
@@ -105,6 +130,9 @@ pub struct ReadAloudSubmitResult {
     /// submitted transcript.
     pub summary: AsrScoreSummary,
     pub attempt: ReadAttempt,
+    /// Accuracy (unchanged WIP), fluency and pronunciation for this take. The
+    /// accuracy number is byte-identical to `score` — see `assess.rs`.
+    pub assessment: Assessment,
     /// XP awarded for this submission (0 when below threshold or already earned).
     pub xp_awarded: i64,
     pub lifetime_xp: i64,
@@ -263,6 +291,11 @@ struct AttemptEvent {
     audio_path: Option<String>,
     recognized: String,
     score: f64,
+    /// Compact assessment JSON (`assess::Assessment::metrics_json`). Capped at
+    /// roughly 2 KB: aggregates, the twelve weakest words, at most forty pauses.
+    /// Per-frame and per-phone arrays are never stored — they are re-derived
+    /// from the device-local recording on demand.
+    metrics: Option<String>,
     created_at: String,
 }
 
@@ -278,6 +311,7 @@ fn ensure_attempt_schema(conn: &Connection) -> Result<(), String> {
             audio_path   TEXT,
             recognized   TEXT NOT NULL DEFAULT '',
             score        REAL NOT NULL DEFAULT 0,
+            metrics_json TEXT,
             created_at   TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_rae_owner_text
@@ -292,7 +326,20 @@ fn ensure_attempt_schema(conn: &Connection) -> Result<(), String> {
             PRIMARY KEY (dataset_uuid, user_id)
         );",
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    // Idempotent migration for databases created before assessment existed. An
+    // old row simply has no metrics; nothing is back-filled, because the old
+    // recording may be gone and a recomputed score would be invented.
+    let has_metrics: bool = conn
+        .prepare("SELECT 1 FROM PRAGMA_table_info('read_attempt_event') WHERE name = 'metrics_json'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if !has_metrics {
+        conn.execute("ALTER TABLE read_attempt_event ADD COLUMN metrics_json TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// The per-user, device-local directory attempt recordings live in: beside
@@ -397,9 +444,9 @@ fn append_attempt_event(conn: &Connection, ev: &AttemptEvent) -> Result<bool, St
     let changed = conn
         .execute(
             "INSERT OR IGNORE INTO read_attempt_event \
-             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![ev.uuid, ev.user_id, ev.dataset_uuid, ev.text_uuid, ev.audio_path, ev.recognized, ev.score, ev.created_at],
+             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![ev.uuid, ev.user_id, ev.dataset_uuid, ev.text_uuid, ev.audio_path, ev.recognized, ev.score, ev.metrics, ev.created_at],
         )
         .map_err(|e| e.to_string())?;
     Ok(changed > 0)
@@ -416,6 +463,10 @@ fn attempt_payload(ev: &AttemptEvent) -> Value {
         "audio_path": ev.audio_path,
         "recognized": ev.recognized,
         "score": ev.score,
+        // Optional key: an old peer ignores it, a new peer reads it, and a
+        // payload without it (`get()` returns None) stays valid — so no
+        // PROTOCOL_VERSION bump is needed.
+        "metrics": ev.metrics,
         "created_at": ev.created_at,
     })
 }
@@ -442,7 +493,7 @@ pub(crate) fn rows_for_user(
     let conn = open_app_attempts(settings)?;
     let mut stmt = conn
         .prepare(
-            "SELECT rowid, uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, created_at \
+            "SELECT rowid, uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at \
              FROM read_attempt_event WHERE user_id = ?1 AND rowid > ?2 ORDER BY rowid ASC LIMIT ?3",
         )
         .map_err(|e| e.to_string())?;
@@ -457,7 +508,8 @@ pub(crate) fn rows_for_user(
                 "audio_path": row.get::<_, Option<String>>(5)?,
                 "recognized": row.get::<_, String>(6)?,
                 "score": row.get::<_, f64>(7)?,
-                "created_at": row.get::<_, String>(8)?,
+                "metrics": row.get::<_, Option<String>>(8)?,
+                "created_at": row.get::<_, String>(9)?,
             });
             Ok((rowid, value))
         })
@@ -509,6 +561,14 @@ pub(crate) fn apply_remote_save(
         audio_path: payload.get("audio_path").and_then(|v| v.as_str()).map(|s| s.to_string()),
         recognized: get("recognized"),
         score: payload.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        // Stored as the JSON text it travelled as. A string keeps the exact
+        // serialisation, so re-reading it on another device yields the same
+        // metrics card instead of a re-typed object.
+        metrics: payload.get("metrics").and_then(|v| match v {
+            Value::String(s) if !s.is_empty() => Some(s.clone()),
+            Value::Null | Value::String(_) => None,
+            other => Some(other.to_string()),
+        }),
         created_at: canonical_or_now(payload.get("created_at").and_then(|v| v.as_str())),
     };
     let conn = open_app_attempts(settings)?;
@@ -906,7 +966,7 @@ pub async fn read_aloud_list_attempts(
         .conn
         .prepare(
             "SELECT a.uuid, a.text_uuid, a.user_id, a.audio_path, a.recognized, a.score, a.created_at, \
-                    t.content, t.normalized_content \
+                    t.content, t.normalized_content, a.metrics_json \
              FROM app.read_attempt_event a LEFT JOIN read_text t ON t.uuid = a.text_uuid \
              WHERE a.text_uuid = ?1 AND a.user_id = ?2 ORDER BY a.created_at DESC",
         )
@@ -935,6 +995,7 @@ pub async fn read_aloud_list_attempts(
                 audio_path,
                 recognized,
                 score,
+                metrics: stored_metrics(row.get::<_, Option<String>>(9)?),
                 created_at: row.get(6)?,
             })
         })
@@ -988,32 +1049,65 @@ fn delete_attempt_inner(settings: &SettingsState, dataset_uuid: &str, uuid: &str
     Ok(())
 }
 
-/// Re-run recognition for an existing attempt: overwrite its transcript and
-/// recompute the score against the current reference, in place. The recording is
-/// untouched — only the transcript changes — so this is the seam the UI's
-/// "Recognize again" button (and the matching MCP tool) writes through after it
-/// re-transcribes the device-local WAV with the loaded STT model.
+/// Re-run recognition for an existing attempt: overwrite its transcript,
+/// re-score and re-assess it against the current reference, in place. The
+/// recording is untouched — only the transcript (and everything derived from
+/// it) changes — so this is the seam the UI's "Recognize again" button (and the
+/// matching MCP tool) writes through after it re-transcribes the device-local
+/// WAV with the loaded STT model.
 #[tauri::command]
 pub async fn read_aloud_rerecognize(
     settings: State<'_, SettingsState>,
     dataset_uuid: String,
     uuid: String,
     recognized: String,
+    words: Option<Vec<TimedWord>>,
 ) -> Result<ReadAttempt, String> {
-    update_recognized_inner(&settings, &dataset_uuid, &uuid, &recognized)
+    update_recognized_inner(&settings, &dataset_uuid, &uuid, &recognized, words.as_deref()).await
+}
+
+/// Decode the device-local recording behind an attempt, when it is still here.
+/// A take recorded on another device resolves to nothing, and a decode failure
+/// is logged rather than surfaced: the transcript can still be updated.
+fn stored_recording(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    audio_path: &Option<String>,
+) -> Vec<f32> {
+    let Some(rel) = audio_path.as_ref().filter(|p| !p.is_empty()) else {
+        return Vec::new();
+    };
+    let Ok(dataset_dir) = find_dataset_dir(settings, dataset_uuid) else {
+        return Vec::new();
+    };
+    let Some(path) = resolve_audio_url(&dataset_dir, &audio_dir(settings), &Some(rel.clone())) else {
+        return Vec::new();
+    };
+    match crate::audio::decode_to_pcm(Path::new(&path)) {
+        Ok(samples) => samples,
+        Err(e) => {
+            log::warn!("read_aloud: could not decode '{}' for assessment: {}", path, e);
+            Vec::new()
+        }
+    }
 }
 
 /// Shared body of [`read_aloud_rerecognize`]: overwrite one of my attempt events'
-/// transcript, re-score it against the effective reference, and re-journal the
-/// save. Never touches the dataset directory or the recording file.
-fn update_recognized_inner(
+/// transcript, re-score and re-assess it against the effective reference, and
+/// re-journal the save. Never touches the dataset directory or the recording.
+///
+/// The read and the write take their own short-lived connections: the
+/// assessment in between is async, and a `rusqlite::Connection` must not be
+/// held across an await point.
+async fn update_recognized_inner(
     settings: &SettingsState,
     dataset_uuid: &str,
     uuid: &str,
     recognized: &str,
+    words: Option<&[TimedWord]>,
 ) -> Result<ReadAttempt, String> {
-    let ctx = open_attempts(settings, dataset_uuid)?;
-    let me = ctx.me.clone();
+    let me = workspace_identity(settings);
+
     // Load the event (must belong to me) plus its text's reference for scoring.
     let (text_uuid, audio_path, created_at, content, normalized): (
         String,
@@ -1021,34 +1115,56 @@ fn update_recognized_inner(
         String,
         Option<String>,
         Option<String>,
-    ) = ctx
-        .conn
-        .query_row(
-            "SELECT a.text_uuid, a.audio_path, a.created_at, t.content, t.normalized_content \
-             FROM app.read_attempt_event a LEFT JOIN read_text t ON t.uuid = a.text_uuid \
-             WHERE a.uuid = ?1 AND a.user_id = ?2",
-            params![uuid, &me],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-        )
-        .map_err(|_| format!("Attempt {} not found", uuid))?;
+    ) = {
+        let ctx = open_attempts(settings, dataset_uuid)?;
+        ctx.conn
+            .query_row(
+                "SELECT a.text_uuid, a.audio_path, a.created_at, t.content, t.normalized_content \
+                 FROM app.read_attempt_event a LEFT JOIN read_text t ON t.uuid = a.text_uuid \
+                 WHERE a.uuid = ?1 AND a.user_id = ?2",
+                params![uuid, &me],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .map_err(|_| format!("Attempt {} not found", uuid))?
+    };
 
     // Score against the effective reference while the text row still exists; a
     // missing row degrades to 0, the same fallback list_attempts applies.
-    let score = match &content {
-        Some(c) => score_value(&effective_reference(c, normalized.as_deref()), recognized),
-        None => 0.0,
+    let reference = content.as_deref().map(|c| effective_reference(c, normalized.as_deref()));
+    let summary = reference.as_deref().map(|r| score_asr(r, recognized));
+    let score = summary.as_ref().map(|s| s.score).unwrap_or(0.0);
+
+    // Re-derive the metrics from the recording that is still on this device.
+    // A missing WAV leaves fluency and pronunciation unmeasured — the score
+    // still updates, which is what "recognize again" means.
+    let samples = stored_recording(settings, dataset_uuid, &audio_path);
+    let metrics = match (summary.as_ref(), reference.as_deref()) {
+        (Some(summary), Some(reference)) => {
+            let assessment = assess_take(settings, summary, reference, recognized, &samples, words).await;
+            stored_metrics(Some(assessment.metrics_json()))
+        }
+        _ => None,
     };
 
-    ctx
-        .conn
-        .execute(
-            "UPDATE app.read_attempt_event SET recognized = ?1, score = ?2 \
-             WHERE uuid = ?3 AND user_id = ?4",
-            params![recognized, score, uuid, &me],
+    {
+        let conn = open_app_attempts(settings)?;
+        conn.execute(
+            "UPDATE read_attempt_event SET recognized = ?1, score = ?2, metrics_json = ?3 \
+             WHERE uuid = ?4 AND user_id = ?5",
+            params![
+                recognized,
+                score,
+                metrics.as_ref().map(|v| v.to_string()),
+                uuid,
+                &me
+            ],
         )
         .map_err(|e| e.to_string())?;
+    }
 
-    let audio_url = resolve_audio_url(&ctx.dataset_dir, &ctx.audio_dir, &audio_path);
+    let audio_url = find_dataset_dir(settings, dataset_uuid)
+        .ok()
+        .and_then(|dir| resolve_audio_url(&dir, &audio_dir(settings), &audio_path));
     let ev = AttemptEvent {
         uuid: uuid.to_string(),
         user_id: me.clone(),
@@ -1057,6 +1173,7 @@ fn update_recognized_inner(
         audio_path: audio_path.clone(),
         recognized: recognized.to_string(),
         score,
+        metrics: metrics.as_ref().map(|v| v.to_string()),
         created_at: canonical_stamp(&created_at),
     };
     // Re-journal the save for the change log. Peers replay events by uuid with
@@ -1079,6 +1196,7 @@ fn update_recognized_inner(
         audio_path,
         recognized: recognized.to_string(),
         score,
+        metrics,
         created_at,
     })
 }
@@ -1104,6 +1222,7 @@ pub(crate) fn save_attempt_row(
         audio_path: attempt.audio_path.clone(),
         recognized: attempt.recognized.clone(),
         score: attempt.score,
+        metrics: attempt.metrics.as_ref().map(|v| v.to_string()),
         created_at: canonical_stamp(&attempt.created_at),
     };
     append_attempt_event(&conn, &ev)?;
@@ -1139,12 +1258,215 @@ pub async fn read_aloud_score(content: String, recognized: String) -> Result<Asr
     Ok(score_asr(&content, &recognized))
 }
 
+/// Read the stored metrics text back as a JSON value. Unparseable text is
+/// treated as absent rather than failing the whole attempt list.
+fn stored_metrics(raw: Option<String>) -> Option<Value> {
+    serde_json::from_str(raw.as_deref()?).ok()
+}
+
+// ============================================================
+// Assessment — the three axes for one take
+// ============================================================
+
+/// Pronunciation evidence, gathered before [`assess::assess`] runs.
+///
+/// `assess` is synchronous and pure, so the model- and network-shaped work has
+/// to happen first and be handed in. Bundling it here keeps the borrow of the
+/// posteriors alive for exactly the call that needs it.
+struct PronRun {
+    post: gop::LogPost,
+    spans: Vec<Vec<gop::PhoneSpan>>,
+    reason: Option<PronReason>,
+}
+
+impl PronRun {
+    fn unavailable(reason: PronReason) -> Self {
+        Self { post: gop::LogPost::new(Vec::new(), 0), spans: Vec::new(), reason: Some(reason) }
+    }
+
+    fn evidence(&self) -> PronEvidence<'_> {
+        match self.reason {
+            Some(reason) => PronEvidence::Unavailable(reason),
+            None => PronEvidence::Measured {
+                post: &self.post,
+                spans: &self.spans,
+                tau: assess::GOP_TAU,
+            },
+        }
+    }
+}
+
+/// The Edge TTS voice the canonical reference is synthesised with.
+fn tts_voice(settings: &SettingsState) -> String {
+    let configured = settings
+        .settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .read_aloud_tts_voice
+        .trim()
+        .to_string();
+    if configured.is_empty() {
+        DEFAULT_TTS_VOICE.to_string()
+    } else {
+        configured
+    }
+}
+
+/// Cache location for canonical reference renderings: a workspace dir beside
+/// the recordings, never inside a dataset (INV-9).
+fn reference_cache_dir(settings: &SettingsState) -> PathBuf {
+    settings.workspace_subdir(tts_ref::CACHE_DIR, "")
+}
+
+/// Gather pronunciation evidence: build the reference phone timeline from a
+/// canonical TTS rendering, then pin it onto the learner's take.
+///
+/// Every early return names *why* nothing was measured. No proxy score is ever
+/// substituted — an honest gap is the point.
+#[cfg(feature = "phoneme")]
+async fn pronunciation_evidence(
+    settings: &SettingsState,
+    reference: &str,
+    ref_words: usize,
+    samples: &[f32],
+) -> PronRun {
+    if samples.is_empty() || ref_words == 0 {
+        return PronRun::unavailable(PronReason::TooShort);
+    }
+    let model_root = crate::models::index::model_root();
+    let Some(dir) = phoneme::find_model_dir(&model_root) else {
+        return PronRun::unavailable(PronReason::ModelMissing);
+    };
+
+    let voice = tts_voice(settings);
+    let canonical = match tts_ref::resolve(&reference_cache_dir(settings), reference, &voice).await {
+        Ok(reference) => reference,
+        Err(tts_ref::RefError::NoNetwork) => return PronRun::unavailable(PronReason::NoNetwork),
+        Err(tts_ref::RefError::Failed(message)) => {
+            log::warn!("read_aloud reference unavailable: {}", message);
+            return PronRun::unavailable(PronReason::TtsFailed);
+        }
+    };
+
+    // 1. The reference timeline. Decode the canonical rendering with the same
+    //    model, then pin that decode back onto its own posteriors so each phone
+    //    has a span (and therefore a time) to be grouped by.
+    let decoded = phoneme::with_model(&dir, |model| {
+        let post = model.posteriors(&canonical.samples)?;
+        let phones = model.collapse(&post);
+        Ok((post, phones))
+    });
+    let (reference_post, phones) = match decoded {
+        Ok(value) => value,
+        Err(message) => {
+            log::warn!("read_aloud phoneme model failed on the reference: {}", message);
+            return PronRun::unavailable(PronReason::ModelError);
+        }
+    };
+    if phones.is_empty() {
+        log::warn!("read_aloud reference decoded to no phones");
+        return PronRun::unavailable(PronReason::TtsFailed);
+    }
+    let Some(reference_spans) = gop::forced_align(&reference_post, &phones) else {
+        log::warn!("read_aloud reference has more phones than frames");
+        return PronRun::unavailable(PronReason::TtsFailed);
+    };
+
+    let frame_secs = tts_ref::frame_seconds(reference_post.len(), canonical.seconds());
+    let groups = tts_ref::group_phones(
+        &reference_spans,
+        frame_secs,
+        &canonical.boundaries,
+        ref_words,
+    );
+    let target = tts_ref::flatten(&groups);
+    if target.is_empty() {
+        log::warn!("read_aloud reference grouped into no phones");
+        return PronRun::unavailable(PronReason::TtsFailed);
+    }
+
+    // 2. The learner's posteriors — the same model, so the two sides share one
+    //    phone inventory and nothing has to be mapped between them.
+    let post = match phoneme::with_model(&dir, |model| model.posteriors(samples)) {
+        Ok(post) => post,
+        Err(message) => {
+            log::warn!("read_aloud phoneme model failed on the take: {}", message);
+            return PronRun::unavailable(PronReason::ModelError);
+        }
+    };
+
+    // 3. Pin the reference phones onto the take.
+    let Some(aligned) = gop::forced_align(&post, &target) else {
+        return PronRun::unavailable(PronReason::TooShort);
+    };
+    let spans = tts_ref::split_by_word(&aligned, &groups);
+
+    PronRun { post, spans, reason: None }
+}
+
+/// Without the `phoneme` feature nothing can measure pronunciation; say so
+/// instead of compiling a stub that pretends.
+#[cfg(not(feature = "phoneme"))]
+async fn pronunciation_evidence(
+    _settings: &SettingsState,
+    _reference: &str,
+    _ref_words: usize,
+    _samples: &[f32],
+) -> PronRun {
+    PronRun::unavailable(PronReason::ModelMissing)
+}
+
+/// Decode a recorder WAV to 16 kHz mono samples. An empty input means "no
+/// recording", which is not an error — fluency is simply unavailable.
+fn decode_samples(wav_base64: &str) -> Result<Vec<f32>, String> {
+    if wav_base64.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(wav_base64.trim())
+        .map_err(|e| format!("Invalid base64 audio: {}", e))?;
+    crate::audio::decode_wav_pcm(&bytes)
+}
+
+/// The single seam every scoring path goes through: accuracy from the existing
+/// metric, fluency from VAD + word timings, pronunciation from GOP.
+async fn assess_take(
+    settings: &SettingsState,
+    summary: &AsrScoreSummary,
+    reference: &str,
+    recognized: &str,
+    samples: &[f32],
+    words: Option<&[TimedWord]>,
+) -> Assessment {
+    let ref_words = crate::datasets::asr_metric::normalize_words(reference).len();
+    let pron = pronunciation_evidence(settings, reference, ref_words, samples).await;
+    assess::assess(summary, reference, recognized, samples, words, pron.evidence())
+}
+
+/// Score one take without persisting anything: accuracy + fluency +
+/// pronunciation. The preview twin of [`read_aloud_submit`].
+#[tauri::command]
+pub async fn read_aloud_assess(
+    settings: State<'_, SettingsState>,
+    content: String,
+    recognized: String,
+    wav_base64: String,
+    words: Option<Vec<TimedWord>>,
+) -> Result<Assessment, String> {
+    let samples = decode_samples(&wav_base64)?;
+    let summary = score_asr(&content, &recognized);
+    Ok(assess_take(&settings, &summary, &content, &recognized, &samples, words.as_deref()).await)
+}
+
 /// Submit a recorded take: persist the audio, score it against the reference
 /// text, store the attempt, and award scaled XP when the score passes.
 ///
-/// The frontend records + runs STT (via `model_transcribe`) and passes the WAV
-/// (base64) plus the recognized text here so scoring, storage and XP all happen
-/// atomically on the backend.
+/// The frontend records + runs STT (via `model_transcribe_detailed`) and passes
+/// the WAV (base64), the recognized text and, when the model gave any, the word
+/// timings here so scoring, storage and XP all happen atomically on the backend.
+///
+/// The accuracy score is unchanged by the three-axis work: `score` is still the
+/// WIP number XP and `best_score` have always used.
 #[tauri::command]
 pub async fn read_aloud_submit(
     app: tauri::AppHandle,
@@ -1153,6 +1475,7 @@ pub async fn read_aloud_submit(
     text_uuid: String,
     wav_base64: String,
     recognized: String,
+    words: Option<Vec<TimedWord>>,
 ) -> Result<ReadAloudSubmitResult, String> {
     let dir = find_dataset_dir(&settings, &dataset_uuid)?;
 
@@ -1172,6 +1495,23 @@ pub async fn read_aloud_submit(
 
     let summary = score_asr(&content, &recognized);
     let score = summary.score;
+
+    // The recorder writes 16 kHz mono; a decode failure must not lose the take,
+    // so it degrades to "no fluency" instead of failing the submission.
+    let samples = decode_samples(&wav_base64).unwrap_or_else(|e| {
+        log::warn!("read_aloud: recording could not be decoded for fluency: {}", e);
+        Vec::new()
+    });
+
+    let assessment = assess_take(
+        &settings,
+        &summary,
+        &content,
+        &recognized,
+        &samples,
+        words.as_deref(),
+    )
+    .await;
 
     // Persist the recording in the per-user audio dir — never inside the dataset,
     // so a take stays out of the shared manifest and needs no overlay (§17).
@@ -1200,6 +1540,7 @@ pub async fn read_aloud_submit(
         audio_path,
         recognized,
         score,
+        metrics: stored_metrics(Some(assessment.metrics_json())),
         created_at: now,
     };
     // Event write + `@app` change journal, through the same path a synced attempt
@@ -1255,6 +1596,7 @@ pub async fn read_aloud_submit(
         score,
         summary,
         attempt,
+        assessment,
         xp_awarded: total_awarded,
         lifetime_xp,
         level,
@@ -1312,6 +1654,7 @@ mod tests {
             audio_url: None,
             recognized: "hello world".into(),
             score,
+            metrics: None,
             created_at: now_row_stamp(),
         }
     }

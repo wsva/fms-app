@@ -332,7 +332,8 @@ pub fn write_wav(
 }
 
 /// Output sample rate produced by [`decode_to_pcm`] (it always resamples to this).
-const DECODED_SAMPLE_RATE: u32 = 16_000;
+/// Public so callers that reason about seconds (VAD, phoneme GOP) agree with it.
+pub(crate) const DECODED_SAMPLE_RATE: u32 = 16_000;
 
 /// Peak-envelope waveform in the audiowaveform v2 JSON layout: interleaved
 /// `[min, max]` signed 8-bit pairs, one pair per pixel bucket. Produced entirely
@@ -393,4 +394,111 @@ pub fn generate_waveform(path: &Path, pixels_per_second: u32) -> Result<Waveform
 fn scale_to_i8(sample: f32) -> i8 {
     let v = (sample.clamp(-1.0, 1.0) * 128.0).round();
     v.clamp(-128.0, 127.0) as i8
+}
+
+/// Decode an in-memory WAV buffer that is already 16 kHz mono PCM.
+///
+/// Contrast with [`decode_to_pcm`], which probes a file and resamples whatever
+/// it finds. This one is for audio that arrives as bytes and whose format is
+/// known by construction: the browser recorder writes 16 kHz mono WAV itself
+/// before handing it over for scoring. Anything else is rejected rather than
+/// resampled, so a scoring path can never silently run on audio the models were
+/// not trained on.
+pub fn decode_wav_pcm(data: &[u8]) -> Result<Vec<f32>, String> {
+    if data.len() < 44 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        return Err("Invalid WAV file".into());
+    }
+
+    let mut pos = 12;
+    let mut channels: u16 = 0;
+    let mut sample_rate: u32 = 0;
+    let mut bits_per_sample: u16 = 0;
+    let mut pcm_data: Option<&[u8]> = None;
+
+    while pos + 8 <= data.len() {
+        let chunk_id = &data[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes([
+            data[pos + 4],
+            data[pos + 5],
+            data[pos + 6],
+            data[pos + 7],
+        ]) as usize;
+        pos += 8;
+
+        if chunk_id == b"fmt " {
+            if chunk_size < 16 || pos + 16 > data.len() {
+                return Err("Invalid fmt chunk".into());
+            }
+            let format_tag = u16::from_le_bytes([data[pos], data[pos + 1]]);
+            if format_tag != 1 {
+                return Err("Only PCM WAV files are supported".into());
+            }
+            channels = u16::from_le_bytes([data[pos + 2], data[pos + 3]]);
+            sample_rate = u32::from_le_bytes([
+                data[pos + 4],
+                data[pos + 5],
+                data[pos + 6],
+                data[pos + 7],
+            ]);
+            bits_per_sample = u16::from_le_bytes([data[pos + 14], data[pos + 15]]);
+        } else if chunk_id == b"data" {
+            let end = (pos + chunk_size).min(data.len());
+            pcm_data = Some(&data[pos..end]);
+        }
+
+        pos += chunk_size;
+    }
+
+    if sample_rate != DECODED_SAMPLE_RATE {
+        return Err(format!("Expected 16kHz audio, got {}Hz", sample_rate));
+    }
+    if channels != 1 {
+        return Err(format!("Expected mono audio, got {} channels", channels));
+    }
+
+    let raw = pcm_data.ok_or("No data chunk in WAV file")?;
+
+    match bits_per_sample {
+        16 => Ok(raw
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+            .collect()),
+        32 => Ok(raw
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()),
+        other => Err(format!("Unsupported bit depth: {}", other)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A canonical 16 kHz mono WAV around the given samples.
+    fn wav(samples: &[f32]) -> Vec<u8> {
+        let dir = std::env::temp_dir().join(format!("fms-audio-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.wav");
+        write_wav(&path, samples, 16_000, 1).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        bytes
+    }
+
+    #[test]
+    fn a_written_wav_round_trips() {
+        let original = vec![0.0f32, 0.5, -0.5, 0.25];
+        let decoded = decode_wav_pcm(&wav(&original)).unwrap();
+        assert_eq!(decoded.len(), original.len());
+        for (a, b) in original.iter().zip(decoded.iter()) {
+            assert!((a - b).abs() < 1e-4, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn non_wav_input_is_rejected_rather_than_guessed() {
+        assert!(decode_wav_pcm(b"not a wav file at all, just bytes").is_err());
+        assert!(decode_wav_pcm(&[]).is_err());
+    }
 }

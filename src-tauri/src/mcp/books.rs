@@ -137,12 +137,31 @@ struct ReadAloudRerecognizeParam {
     dataset_uuid: String,
     uuid: String,
     recognized: String,
+    /// Word-level timings for `recognized`, as returned by
+    /// `model_transcribe_detailed`. Without them the attempt keeps accuracy and
+    /// pronunciation but reports fluency as not measured.
+    #[serde(default)]
+    words: Option<Vec<McpTimedWord>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudScoreParam {
     content: String,
     recognized: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudAssessParam {
+    /// The reference text (the text's `normalized_content` when it has one).
+    content: String,
+    /// The transcript to score against it.
+    recognized: String,
+    /// Base64 of the 16 kHz mono WAV take. Empty keeps accuracy only.
+    #[serde(default)]
+    wav_base64: String,
+    /// Word-level timings from `model_transcribe_detailed` (fluency evidence).
+    #[serde(default)]
+    words: Option<Vec<McpTimedWord>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -154,6 +173,34 @@ struct ReadAloudSubmitParam {
     /// Optional base64-encoded 16kHz mono WAV of the reading.
     #[serde(default)]
     wav_base64: String,
+    /// Optional word-level timings from `model_transcribe_detailed`, matching
+    /// `recognized`. Needed for the fluency axis; omit and it is not measured.
+    #[serde(default)]
+    words: Option<Vec<McpTimedWord>>,
+}
+
+/// Mirrors `read_aloud::fluency::TimedWord`, the shape
+/// `model_transcribe_detailed` returns. Declared separately because `schemars`
+/// is a server-only dependency while the domain type is platform-neutral.
+#[derive(Deserialize, schemars::JsonSchema)]
+struct McpTimedWord {
+    text: String,
+    start: f64,
+    end: f64,
+}
+
+fn timed_words(
+    words: Option<Vec<McpTimedWord>>,
+) -> Option<Vec<datasets::read_aloud::fluency::TimedWord>> {
+    words.map(|ws| {
+        ws.into_iter()
+            .map(|w| datasets::read_aloud::fluency::TimedWord {
+                text: w.text,
+                start: w.start,
+                end: w.end,
+            })
+            .collect()
+    })
 }
 
 #[tool_router(router = books_router, vis = "pub(crate)")]
@@ -322,7 +369,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Text deleted"}).to_string())
     }
 
-    #[tool(name = "read_aloud_list_attempts", description = "List all recorded attempts for a text (newest first) with score, transcript, and resolved audio URL.")]
+    #[tool(name = "read_aloud_list_attempts", description = "List all recorded attempts for a text (newest first) with score, transcript, resolved audio URL, and the stored assessment (`metrics`: accuracy counts, fluency, pronunciation, weakest words, pauses) when one was computed. Metrics are absent for takes whose recording is gone or that predate assessment.")]
     async fn read_aloud_list_attempts(&self, Parameters(param): Parameters<ReadAloudListAttemptsParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         let items = datasets::read_aloud::read_aloud_list_attempts(settings, param.dataset_uuid, param.text_uuid).await?;
@@ -336,11 +383,18 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Attempt deleted"}).to_string())
     }
 
-    #[tool(name = "read_aloud_rerecognize", description = "Overwrite an existing attempt's transcript with a freshly recognized one and recompute its score against the current reference, in place. The recording is left untouched — pass the transcript produced by re-transcribing the attempt's device-local WAV (e.g. via model_transcribe) with the loaded STT model. Use this to refresh a take whose recognition was poor or predates a model change. Returns the updated attempt (score included).")]
+    #[tool(name = "read_aloud_rerecognize", description = "Overwrite an existing attempt's transcript with a freshly recognized one and recompute its score against the current reference, in place. The recording is left untouched — pass the transcript produced by re-transcribing the attempt's device-local WAV (via model_transcribe_detailed, whose `words` go straight into this tool's `words` parameter) with the loaded STT model. Use this to refresh a take whose recognition was poor or predates a model change. Returns the updated attempt (score and recomputed metrics included).")]
     async fn read_aloud_rerecognize(&self, Parameters(param): Parameters<ReadAloudRerecognizeParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_rerecognize: dataset={}, attempt={}", param.dataset_uuid, param.uuid);
         let settings = self.app.state::<SettingsState>();
-        let attempt = datasets::read_aloud::read_aloud_rerecognize(settings, param.dataset_uuid, param.uuid, param.recognized).await?;
+        let attempt = datasets::read_aloud::read_aloud_rerecognize(
+            settings,
+            param.dataset_uuid,
+            param.uuid,
+            param.recognized,
+            timed_words(param.words),
+        )
+        .await?;
         Ok(serde_json::to_string_pretty(&attempt).unwrap_or_default())
     }
 
@@ -352,7 +406,22 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&v).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_submit", description = "Submit a reading attempt: stores the (optional) recording, scores the recognized transcript against the reference text with the WIP-based ASR metric, saves the attempt, and awards scaled XP (1 XP at score >= 60, +1 more at >= 80). Returns the score, the full scoring summary (alignment chunks included), the saved attempt, and XP awarded.")]
+    #[tool(name = "read_aloud_assess", description = "Score a take across all three axes without persisting anything: accuracy (the WIP 0-100 score, identical to read_aloud_score), fluency (words/min, articulation rate, pauses, longest run — needs `words` timings from model_transcribe_detailed and the WAV), and pronunciation (CTC phoneme GOP against a TTS-derived reference). Each axis degrades honestly: a missing phoneme model, an offline device or a non-resumable take reports `unavailable_reason` instead of a fabricated score. Use this to preview a result before read_aloud_submit.")]
+    async fn read_aloud_assess(&self, Parameters(param): Parameters<ReadAloudAssessParam>) -> Result<String, String> {
+        log::info!("[MCP] read_aloud_assess: {} chars", param.content.len());
+        let settings = self.app.state::<SettingsState>();
+        let assessment = datasets::read_aloud::read_aloud_assess(
+            settings,
+            param.content,
+            param.recognized,
+            param.wav_base64,
+            timed_words(param.words),
+        )
+        .await?;
+        Ok(serde_json::to_string_pretty(&assessment).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_submit", description = "Submit a reading attempt: stores the (optional) recording, scores the recognized transcript against the reference text with the WIP-based ASR metric, assesses fluency and pronunciation from the WAV, saves the attempt, and awards scaled XP (1 XP at score >= 60, +1 more at >= 80). Pass `words` (from model_transcribe_detailed) to get the fluency axis. Returns the score, the full scoring summary (alignment chunks included), the three-axis `assessment`, the saved attempt (with `metrics`), and XP awarded.")]
     async fn read_aloud_submit(&self, Parameters(param): Parameters<ReadAloudSubmitParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_submit: dataset={}, text={}", param.dataset_uuid, param.text_uuid);
         let settings = self.app.state::<SettingsState>();
@@ -363,6 +432,7 @@ impl DatasetMcpServer {
             param.text_uuid,
             param.wav_base64,
             param.recognized,
+            timed_words(param.words),
         )
         .await?;
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())

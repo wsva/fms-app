@@ -19,7 +19,7 @@
 //! `textsim` (Ratcliff-Obershelp) remains the metric for cue alignment; this
 //! module is for transcript-vs-reference scoring only.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
 // ============================================================
@@ -211,17 +211,309 @@ fn align_banded(reference: &[String], hypothesis: &[String], dist: usize) -> Vec
 // Normalization
 // ============================================================
 
-/// The single preprocessing seam shared by scoring and chunk building:
-/// NFC-normalize, lowercase (`ẞ → ß`), fold `ß → ss`, strip Unicode
-/// punctuation (keeps umlauts; removes `„“«»…`), split into word tokens.
-pub(crate) fn normalize_tokens(text: &str) -> Vec<String> {
+/// Punctuation recorded *next to* a normalized word instead of being compared.
+///
+/// Scoring never looks at it — punctuation is stripped from both sides before
+/// alignment — but fluency does: a pause after a comma or a full stop is a
+/// different event from a pause mid-phrase, and that distinction is only
+/// available from the reference text.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct WordPunct {
+    /// The trailing run of non-alphanumeric characters (`","`, `"!?"`, `"…"`).
+    pub trailing: String,
+    /// That run contains a sentence terminator (`. ! ? …`).
+    pub sentence_end: bool,
+}
+
+/// One reference word as the scorer sees it: the compared form, the surface
+/// form, and the punctuation that trails it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NormWord {
+    /// The compared form (lowercased, `ß → ss`, punctuation removed).
+    pub norm: String,
+    /// The token as it appeared in the source, case-folded but otherwise raw.
+    pub original: String,
+    pub punct: WordPunct,
+}
+
+/// The single preprocessing seam shared by scoring, chunk building and
+/// fluency: NFC-normalize, lowercase (`ẞ → ß`), fold `ß → ss`, drop Unicode
+/// punctuation (keeps umlauts; removes `„“«»…`) and split on whitespace.
+///
+/// Word boundaries come from whitespace only, exactly as before, so
+/// `Eisen-Bahn` still folds to one token `eisenbahn`: punctuation is deleted,
+/// never a split point.
+pub(crate) fn normalize_words(text: &str) -> Vec<NormWord> {
     let lowered: String = text.nfc().collect::<String>().to_lowercase();
     let folded = lowered.replace('ß', "ss");
-    let cleaned: String = folded
-        .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect();
-    cleaned.split_whitespace().map(|w| w.to_string()).collect()
+    let mut words: Vec<NormWord> = Vec::new();
+
+    for raw in folded.split_whitespace() {
+        let norm: String = raw.chars().filter(|c| c.is_alphanumeric()).collect();
+        let trailing: String = raw
+            .chars()
+            .rev()
+            .take_while(|c| !c.is_alphanumeric())
+            .collect::<Vec<char>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let sentence_end = trailing.chars().any(|c| matches!(c, '.' | '!' | '?' | '…'));
+
+        if norm.is_empty() {
+            // A token that is nothing but punctuation (`—`, `…`) carries no
+            // word of its own; its mark belongs to the word it follows, which
+            // is where the pause it signals actually fell.
+            if let Some(prev) = words.last_mut() {
+                prev.punct.trailing.push_str(&trailing);
+                prev.punct.sentence_end |= sentence_end;
+            }
+            continue;
+        }
+
+        words.push(NormWord {
+            norm,
+            original: raw.to_string(),
+            punct: WordPunct { trailing, sentence_end },
+        });
+    }
+
+    words
+}
+
+/// The compared tokens of a text — the form `align` and `build_chunks` use.
+pub(crate) fn normalize_tokens(text: &str) -> Vec<String> {
+    normalize_words(text).into_iter().map(|w| w.norm).collect()
+}
+
+// ============================================================
+// Numbers
+// ============================================================
+
+/// The language a spelled-out number is rendered in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NumLang {
+    En,
+    De,
+}
+
+/// What to do with digit tokens in the *reference* text.
+///
+/// `Digits` (the default) leaves `2000` alone, which is the historical
+/// behaviour and the one read-aloud actually uses: the reference language is
+/// not recorded on a `read_text` row, and the sanctioned fix for surface
+/// mismatches is the LLM-normalized content field. `Words` exists for callers
+/// that do know the language and would rather score spoken forms directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum NumberPolicy {
+    #[default]
+    Digits,
+    Words(NumLang),
+}
+
+/// Everything the classification step needs to be tuned, kept in one struct so
+/// no threshold hides in a function body.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScoringConfig {
+    pub number_policy: NumberPolicy,
+    pub number_lang: NumLang,
+}
+
+impl Default for ScoringConfig {
+    fn default() -> Self {
+        Self { number_policy: NumberPolicy::Digits, number_lang: NumLang::En }
+    }
+}
+
+const UNITS_EN: [&str; 20] = [
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+    "eighteen", "nineteen",
+];
+const TENS_EN: [&str; 8] = ["twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+
+const UNITS_DE: [&str; 20] = [
+    "null", "eins", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun",
+    "zehn", "elf", "zwölf", "dreizehn", "vierzehn", "fünfzehn", "sechzehn", "siebzehn",
+    "achtzehn", "neunzehn",
+];
+const TENS_DE: [&str; 8] = [
+    "zwanzig", "dreißig", "vierzig", "fünfzig", "sechzig", "siebzig", "achtzig", "neunzig",
+];
+
+fn below_hundred(n: u64, lang: NumLang) -> String {
+    match lang {
+        NumLang::En => {
+            if n < 20 {
+                UNITS_EN[n as usize].to_string()
+            } else {
+                let tens = TENS_EN[(n / 10 - 2) as usize];
+                let unit = n % 10;
+                if unit == 0 {
+                    tens.to_string()
+                } else {
+                    format!("{} {}", tens, UNITS_EN[unit as usize])
+                }
+            }
+        }
+        NumLang::De => {
+            if n < 20 {
+                UNITS_DE[n as usize].to_string()
+            } else {
+                let tens = TENS_DE[(n / 10 - 2) as usize];
+                let unit = n % 10;
+                if unit == 0 {
+                    tens.to_string()
+                } else {
+                    // German inverts and fuses: 42 → zweiundvierzig.
+                    format!("{}und{}", UNITS_DE[unit as usize], tens)
+                }
+            }
+        }
+    }
+}
+
+fn below_thousand(n: u64, lang: NumLang) -> String {
+    let hundreds = n / 100;
+    let rest = n % 100;
+    match lang {
+        NumLang::En => {
+            let mut out = String::new();
+            if hundreds > 0 {
+                out.push_str(UNITS_EN[hundreds as usize]);
+                out.push_str(" hundred");
+            }
+            if rest > 0 {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(&below_hundred(rest, lang));
+            }
+            out
+        }
+        NumLang::De => {
+            if hundreds == 0 {
+                return below_hundred(rest, lang);
+            }
+            let mut out = if hundreds == 1 {
+                "ein".to_string()
+            } else {
+                UNITS_DE[hundreds as usize].to_string()
+            };
+            out.push_str("hundert");
+            if rest > 0 {
+                out.push_str(&below_hundred(rest, lang));
+            }
+            out
+        }
+    }
+}
+
+/// Spell an integer (`0..=999_999`) out in words. Larger values fall back to
+/// their digits, because a number nobody reads aloud is not worth spelling.
+pub(crate) fn spell_number(value: u64, lang: NumLang) -> String {
+    if value > 999_999 {
+        return value.to_string();
+    }
+    let thousands = value / 1000;
+    let rest = value % 1000;
+    match lang {
+        NumLang::En => {
+            let mut out = String::new();
+            if thousands > 0 {
+                out.push_str(&below_thousand(thousands, lang));
+                out.push_str(" thousand");
+            }
+            if rest > 0 {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(&below_thousand(rest, lang));
+            }
+            if out.is_empty() {
+                out.push_str(UNITS_EN[0]);
+            }
+            out
+        }
+        NumLang::De => {
+            let mut out = String::new();
+            if thousands > 0 {
+                if thousands == 1 {
+                    out.push_str("ein");
+                } else {
+                    out.push_str(&below_thousand(thousands, lang));
+                }
+                out.push_str("tausend");
+            }
+            if rest > 0 {
+                out.push_str(&below_thousand(rest, lang));
+            }
+            if out.is_empty() {
+                out.push_str(UNITS_DE[0]);
+            }
+            out
+        }
+    }
+}
+
+/// Rewrite digit runs in `text` as spoken words when the policy asks for it.
+/// The rewrite happens *before* tokenization so a spelled multi-word number
+/// (`two thousand`) lines up with what STT emits as two tokens.
+pub(crate) fn apply_number_policy(text: &str, policy: NumberPolicy) -> String {
+    let lang = match policy {
+        NumberPolicy::Digits => return text.to_string(),
+        NumberPolicy::Words(lang) => lang,
+    };
+
+    let mut out = String::with_capacity(text.len());
+    let mut digits = String::new();
+    let flush = |digits: &mut String, out: &mut String| {
+        if let Ok(value) = digits.parse::<u64>() {
+            out.push_str(&spell_number(value, lang));
+        } else {
+            out.push_str(digits);
+        }
+        digits.clear();
+    };
+
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+        } else {
+            if !digits.is_empty() {
+                flush(&mut digits, &mut out);
+            }
+            out.push(ch);
+        }
+    }
+    if !digits.is_empty() {
+        flush(&mut digits, &mut out);
+    }
+    out
+}
+
+/// Is `a` the same number as `b` written differently?
+///
+/// Two digit forms compare by value (`2000` vs `2.000`, once punctuation is
+/// gone); a digit form compares against a single-token spelled form (`20` vs
+/// `zwanzig`). Multi-word English spellings (`twenty one`) cannot match a
+/// single token and are left to the word-level alignment, where they show up
+/// as an insertion plus a substitution — see the rounding note in the design
+/// doc.
+fn number_variant(a: &str, b: &str, lang: NumLang) -> bool {
+    match (a.parse::<u64>(), b.parse::<u64>()) {
+        (Ok(x), Ok(y)) => return x == y,
+        (Ok(x), Err(_)) => {
+            let joined: String = spell_number(x, lang).split_whitespace().collect();
+            return joined == b;
+        }
+        (Err(_), Ok(y)) => {
+            let joined: String = spell_number(y, lang).split_whitespace().collect();
+            return joined == a;
+        }
+        (Err(_), Err(_)) => {}
+    }
+    false
 }
 
 // ============================================================
@@ -250,23 +542,70 @@ pub struct AsrChunk {
     pub hyp_index: Option<usize>,
 }
 
+/// Per-word outcome of the alignment. `AsrOp` says what the *aligner* did;
+/// a verdict says what the *reader* did, which is the same thing with two
+/// refinements: a near-miss substitution is `Minor`, and an insertion that
+/// repeats the words just spoken is `Repeated` (a restart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Verdict {
+    Correct,
+    Minor,
+    Substituted,
+    Omitted,
+    Inserted,
+    Repeated,
+}
+
+/// One cell of the alignment, keyed by the indices it touches (`ref_index` is
+/// `None` for insertions, `hyp_index` `None` for omissions).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WordVerdict {
+    pub ref_index: Option<usize>,
+    pub hyp_index: Option<usize>,
+    pub verdict: Verdict,
+}
+
 /// The whole read-aloud scoring picture: WIP-based `score` (0-100), the raw
-/// WER/MER rates, H/S/D/I counts, and the alignment chunks to highlight.
+/// WER/MER rates, H/S/D/I counts, the alignment chunks to highlight and the
+/// per-word verdicts the assessment and the UI read.
 #[derive(Debug, Clone, Serialize)]
 pub struct AsrScoreSummary {
     /// `wip × 100` — the number shown to the user and stored per attempt.
+    /// Counts exact matches only, so it is unchanged by the verdict classes.
     pub score: f64,
+    /// The same shape with `Minor` verdicts counted as hits.
+    pub lenient_score: f64,
     /// Word Error Rate `(S + D + I) / N`.
     pub wer: f64,
     /// Match Error Rate `(S + D + I) / (H + S + D + I)`.
     pub mer: f64,
     pub hits: usize,
+    /// Substitutions that are homophones or one character off. Counted as an
+    /// error by `score`, as a hit by `lenient_score`.
+    pub minor: usize,
     pub substitutions: usize,
     pub deletions: usize,
     pub insertions: usize,
+    /// Insertions that repeat the preceding 1-3 words (restarts). A subset of
+    /// `insertions`, reported separately because fluency cares and accuracy
+    /// already charges them.
+    pub repeated: usize,
     pub ref_len: usize,
     pub hyp_len: usize,
     pub chunks: Vec<AsrChunk>,
+    pub words: Vec<WordVerdict>,
+}
+
+/// `(H/N) · (H/(H+S+D+I))` — multiplicative, so omissions and substitutions
+/// both compound; an empty side preserves nothing (0).
+fn wip(hits: usize, ref_len: usize, errors: usize) -> f64 {
+    let denom = hits + errors;
+    if ref_len == 0 || denom == 0 {
+        0.0
+    } else {
+        (hits as f64 / ref_len as f64) * (hits as f64 / denom as f64)
+    }
 }
 
 impl AsrScoreSummary {
@@ -274,7 +613,10 @@ impl AsrScoreSummary {
         ref_len: usize,
         hyp_len: usize,
         counts: &OperationCounts,
+        minor: usize,
+        repeated: usize,
         chunks: Vec<AsrChunk>,
+        words: Vec<WordVerdict>,
     ) -> Self {
         let errors = counts.substitutions + counts.deletions + counts.insertions;
         let denom = counts.hits + errors;
@@ -288,24 +630,23 @@ impl AsrScoreSummary {
             errors as f64 / ref_len as f64
         };
         let mer = if denom == 0 { 0.0 } else { errors as f64 / denom as f64 };
-        // WIP = (H/N) · (H/(H+S+D+I)) — multiplicative, so omissions and
-        // substitutions both compound; an empty side preserves nothing (0).
-        let wip = if ref_len == 0 || denom == 0 {
-            0.0
-        } else {
-            (counts.hits as f64 / ref_len as f64) * (counts.hits as f64 / denom as f64)
-        };
+        let lenient_hits = counts.hits + minor;
+        let lenient_errors = errors.saturating_sub(minor);
         Self {
-            score: wip * 100.0,
+            score: wip(counts.hits, ref_len, errors) * 100.0,
+            lenient_score: wip(lenient_hits, ref_len, lenient_errors) * 100.0,
             wer,
             mer,
             hits: counts.hits,
+            minor,
             substitutions: counts.substitutions,
             deletions: counts.deletions,
             insertions: counts.insertions,
+            repeated,
             ref_len,
             hyp_len,
             chunks,
+            words,
         }
     }
 }
@@ -317,21 +658,184 @@ fn align_raw(reference: &str, hypothesis: &str) -> (Vec<String>, Vec<String>, Ve
     (ref_words, hyp_words, ops)
 }
 
-/// Full scoring picture including the alignment chunks (what the commands and
-/// the MCP tool return).
+/// Full scoring picture including the alignment chunks and per-word verdicts
+/// (what the commands and the MCP tool return).
 pub(crate) fn score_asr(reference: &str, hypothesis: &str) -> AsrScoreSummary {
-    let (ref_words, hyp_words, ops) = align_raw(reference, hypothesis);
-    let counts = count_operations(&ops);
-    let chunks = build_chunks(&ops, &ref_words, &hyp_words);
-    AsrScoreSummary::new(ref_words.len(), hyp_words.len(), &counts, chunks)
+    score_asr_with(reference, hypothesis, &ScoringConfig::default())
 }
 
-/// Score only (no chunk building) — the cheap path for re-scoring stored
-/// attempts on read.
-pub(crate) fn score_value(reference: &str, hypothesis: &str) -> f64 {
-    let (ref_words, hyp_words, ops) = align_raw(reference, hypothesis);
+/// [`score_asr`] with explicit number handling. `score` is identical either
+/// way for a given normalized reference — the policy changes what the reference
+/// normalizes to, never how the number is computed.
+pub(crate) fn score_asr_with(
+    reference: &str,
+    hypothesis: &str,
+    cfg: &ScoringConfig,
+) -> AsrScoreSummary {
+    let reference = apply_number_policy(reference, cfg.number_policy);
+    let ref_words = normalize_words(&reference);
+    let hyp_words = normalize_tokens(hypothesis);
+    let ref_tokens: Vec<String> = ref_words.iter().map(|w| w.norm.clone()).collect();
+    let ops = align(&ref_tokens, &hyp_words);
     let counts = count_operations(&ops);
-    AsrScoreSummary::new(ref_words.len(), hyp_words.len(), &counts, Vec::new()).score
+    let verdicts = classify(&ops, &ref_tokens, &hyp_words, cfg);
+    let minor = verdicts.iter().filter(|v| v.verdict == Verdict::Minor).count();
+    let repeated = verdicts.iter().filter(|v| v.verdict == Verdict::Repeated).count();
+    let chunks = build_chunks(&ops, &ref_tokens, &hyp_words);
+    AsrScoreSummary::new(ref_tokens.len(), hyp_words.len(), &counts, minor, repeated, chunks, verdicts)
+}
+
+/// Score only (no chunk or verdict building) — the cheap path for re-scoring
+/// stored attempts on read.
+pub(crate) fn score_value(reference: &str, hypothesis: &str) -> f64 {
+    let (ref_words, _hyp_words, ops) = align_raw(reference, hypothesis);
+    let counts = count_operations(&ops);
+    let errors = counts.substitutions + counts.deletions + counts.insertions;
+    wip(counts.hits, ref_words.len(), errors) * 100.0
+}
+
+/// Classify every alignment cell into a verdict. Counts stay op-based —
+/// `minor` is a refinement of a substitution and `repeated` of an insertion,
+/// so the WIP inputs never move.
+fn classify(
+    ops: &[EditOp],
+    ref_words: &[String],
+    hyp_words: &[String],
+    cfg: &ScoringConfig,
+) -> Vec<WordVerdict> {
+    ops.iter()
+        .map(|op| match op {
+            EditOp::Equal { ref_index, hyp_index } => WordVerdict {
+                ref_index: Some(*ref_index),
+                hyp_index: Some(*hyp_index),
+                verdict: Verdict::Correct,
+            },
+            EditOp::Substitute { ref_index, hyp_index } => {
+                let verdict = if is_minor(&ref_words[*ref_index], &hyp_words[*hyp_index], cfg) {
+                    Verdict::Minor
+                } else {
+                    Verdict::Substituted
+                };
+                WordVerdict {
+                    ref_index: Some(*ref_index),
+                    hyp_index: Some(*hyp_index),
+                    verdict,
+                }
+            }
+            EditOp::Delete { ref_index } => WordVerdict {
+                ref_index: Some(*ref_index),
+                hyp_index: None,
+                verdict: Verdict::Omitted,
+            },
+            EditOp::Insert { hyp_index } => WordVerdict {
+                ref_index: None,
+                hyp_index: Some(*hyp_index),
+                verdict: if repeats_preceding(hyp_words, *hyp_index) {
+                    Verdict::Repeated
+                } else {
+                    Verdict::Inserted
+                },
+            },
+        })
+        .collect()
+}
+
+/// Homophone pairs, one list for both languages the app ships STT models for.
+/// Deliberately small: a pair earns its place only when the two words sound
+/// the same in ordinary speech and STT plausibly picks the other one.
+const HOMOPHONES: &[(&str, &str)] = &[
+    // German
+    ("das", "dass"),
+    ("dann", "denn"),
+    ("wenn", "wen"),
+    ("seit", "seid"),
+    ("war", "wahr"),
+    ("mehr", "meer"),
+    ("leere", "lehre"),
+    ("fiel", "viel"),
+    ("stadt", "statt"),
+    ("wieder", "wider"),
+    ("mann", "man"),
+    // English
+    ("there", "their"),
+    ("your", "youre"),
+    ("to", "too"),
+    ("then", "than"),
+    ("weather", "whether"),
+    ("write", "right"),
+    ("break", "brake"),
+    ("hear", "here"),
+    ("threw", "through"),
+    ("one", "won"),
+    ("knew", "new"),
+    ("allowed", "aloud"),
+    ("passed", "past"),
+];
+
+fn is_homophone(a: &str, b: &str) -> bool {
+    HOMOPHONES
+        .iter()
+        .any(|(x, y)| (a == *x && b == *y) || (a == *y && b == *x))
+}
+
+/// Character-level Levenshtein distance, capped at `cap` (the walk stops as
+/// soon as every cell in a row exceeds it).
+fn char_distance(a: &str, b: &str, cap: usize) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        curr[0] = i;
+        let mut row_min = curr[0];
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+            row_min = row_min.min(curr[j]);
+        }
+        if row_min > cap {
+            return cap + 1;
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
+}
+
+/// A substitution the reader plausibly did not make: a homophone, a one-character
+/// slip in a long word, or the same number in another form.
+fn is_minor(ref_word: &str, hyp_word: &str, cfg: &ScoringConfig) -> bool {
+    if is_homophone(ref_word, hyp_word) {
+        return true;
+    }
+    if number_variant(ref_word, hyp_word, cfg.number_lang) {
+        return true;
+    }
+    let long_enough = ref_word.chars().count() >= 5 && hyp_word.chars().count() >= 5;
+    long_enough && char_distance(ref_word, hyp_word, 1) <= 1
+}
+
+/// Does the hypothesis word at `index` belong to a duplicated run?
+///
+/// Catches both the stutter (`the the`) and the restart (`the cat the cat`).
+/// The duplicate is searched for on **both** sides: the banded aligner may
+/// place the extra words before the run they repeat or after it (`the cat |
+/// the cat sat` backtracks to the leftmost placement), so looking only
+/// backwards would silently miss every restart.
+///
+/// Bounded on purpose: a long verbatim repeat is a re-read of the passage, and
+/// marking all of it `Repeated` would hide the insertion from the reader.
+fn repeats_preceding(words: &[String], index: usize) -> bool {
+    (1..=3).any(|k| {
+        let backwards = index >= k
+            && index + k <= words.len()
+            && words[index - k..index] == words[index..index + k];
+        let forwards = index + 2 * k <= words.len()
+            && words[index..index + k] == words[index + k..index + 2 * k];
+        backwards || forwards
+    })
 }
 
 /// Merge consecutive same-op cells into readable chunks.
@@ -549,5 +1053,148 @@ mod tests {
                 (AsrOp::Equal, "d", "d"),
             ]
         );
+    }
+
+    // --- verdicts (what the *reader* did, not what the aligner did) ---
+
+    fn verdicts(s: &AsrScoreSummary) -> Vec<Verdict> {
+        s.words.iter().map(|w| w.verdict).collect()
+    }
+
+    #[test]
+    fn a_homophone_substitution_is_minor() {
+        let s = score_asr("das wetter ist gut", "dass wetter ist gut");
+        assert_eq!(s.substitutions, 1, "the aligner still sees a substitution");
+        assert_eq!(s.minor, 1);
+        assert_eq!(verdicts(&s)[0], Verdict::Minor);
+    }
+
+    #[test]
+    fn a_one_character_slip_in_a_long_word_is_minor() {
+        let s = score_asr("the garden is big", "the gardan is big");
+        assert_eq!(s.minor, 1);
+        // Below the length floor a one-character difference is a real error:
+        let short = score_asr("the cat sat", "the vat sat");
+        assert_eq!(short.minor, 0, "3-letter words are not eligible");
+    }
+
+    #[test]
+    fn a_whole_word_change_is_a_substitution() {
+        let s = score_asr("the cat sat", "the dog sat");
+        assert_eq!(s.minor, 0);
+        assert_eq!(verdicts(&s)[1], Verdict::Substituted);
+    }
+
+    #[test]
+    fn omissions_and_insertions_keep_their_verdicts() {
+        let omitted = score_asr("a b c", "a c");
+        assert!(omitted.words.iter().any(|w| w.verdict == Verdict::Omitted && w.hyp_index.is_none()));
+
+        let inserted = score_asr("a c", "a b c");
+        assert!(inserted.words.iter().any(|w| w.verdict == Verdict::Inserted && w.ref_index.is_none()));
+    }
+
+    #[test]
+    fn a_restart_marks_the_repeated_words() {
+        let s = score_asr("the cat sat", "the cat the cat sat");
+        assert_eq!(s.repeated, 1, "summary: {:?}", verdicts(&s));
+        let repeated: Vec<&WordVerdict> =
+            s.words.iter().filter(|w| w.verdict == Verdict::Repeated).collect();
+        assert_eq!(repeated.len(), 1);
+        assert!(repeated[0].ref_index.is_none(), "a repeat is an insertion");
+        // Accuracy still charges it in full.
+        assert_eq!(s.insertions, 2);
+    }
+
+    #[test]
+    fn minor_counts_as_an_error_for_score_and_as_a_hit_for_lenient_score() {
+        let s = score_asr("das wetter", "dass wetter");
+        // (H/N) · (H/(H+S+D+I)) with H=1, N=2, errors=1 → 0.25.
+        assert!(approx(s.score, 25.0), "score: {}", s.score);
+        assert!(approx(s.lenient_score, 100.0), "lenient: {}", s.lenient_score);
+    }
+
+    #[test]
+    fn every_existing_score_is_unchanged_by_the_verdict_classes() {
+        // The hard invariant, as a table: these are the pre-existing cases.
+        for (r, h, expected) in [
+            ("the cat sat", "the cat sat on", 75.0),
+            ("a b c", "a c", (2.0 / 3.0) * (2.0 / 3.0) * 100.0),
+            ("guten tag", "guten tag", 100.0),
+            ("Der Hund bellt laut im Garten", "Der Hund bellt laut im park", (5.0 / 6.0) * (5.0 / 6.0) * 100.0),
+        ] {
+            let s = score_asr(r, h);
+            assert!(approx(s.score, expected), "{r} vs {h}: {} != {expected}", s.score);
+        }
+    }
+
+    #[test]
+    fn empty_sides_produce_no_verdicts() {
+        assert!(score_asr("", "").words.is_empty());
+        assert!(score_asr("", "eins zwei").words.is_empty() || score_asr("", "eins zwei").hits == 0);
+        assert!(score_asr("eins zwei", "").words.iter().all(|w| w.verdict == Verdict::Omitted));
+    }
+
+    // --- punctuation memory (for fluency, never for scoring) ---
+
+    #[test]
+    fn punctuation_is_remembered_next_to_the_word() {
+        let words = normalize_words("\u{201e}Hallo,\u{201c} sagte er.");
+        assert_eq!(words.len(), 3, "words: {:?}", words.iter().map(|w| &w.norm).collect::<Vec<_>>());
+        assert_eq!(words[0].norm, "hallo");
+        assert!(words[0].punct.trailing.contains(','), "trailing: {:?}", words[0].punct.trailing);
+        assert!(!words[0].punct.sentence_end);
+        assert!(words[2].punct.sentence_end, "a full stop ends the sentence");
+        // And none of it reaches the compared form.
+        assert!(approx(score_value("Hallo, sagte er.", "hallo sagte er"), 100.0));
+    }
+
+    #[test]
+    fn a_punctuation_only_token_attaches_to_the_word_before_it() {
+        let words = normalize_words("Ende \u{2014} gut");
+        assert_eq!(words.len(), 2);
+        assert!(!words[0].punct.trailing.is_empty(), "the dash belongs to 'Ende'");
+        assert!(words[1].punct.trailing.is_empty());
+    }
+
+    #[test]
+    fn word_boundaries_still_come_from_whitespace_only() {
+        // A hyphenated compound stays one token, exactly as before.
+        let words = normalize_words("die Eisen-Bahn");
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[1].norm, "eisenbahn");
+    }
+
+    // --- numbers ---
+
+    #[test]
+    fn the_default_number_policy_leaves_digits_alone() {
+        assert_eq!(apply_number_policy("im Jahr 2000", NumberPolicy::Digits), "im Jahr 2000");
+    }
+
+    #[test]
+    fn the_words_policy_spells_numbers_out() {
+        assert_eq!(spell_number(42, NumLang::En), "forty two");
+        assert_eq!(spell_number(42, NumLang::De), "zweiundvierzig");
+        assert_eq!(spell_number(2000, NumLang::De), "zweitausend");
+        assert_eq!(spell_number(0, NumLang::En), "zero");
+        assert_eq!(
+            apply_number_policy("im Jahr 2000", NumberPolicy::Words(NumLang::De)),
+            "im Jahr zweitausend"
+        );
+    }
+
+    #[test]
+    fn the_numbers_above_the_spelling_limit_keep_their_digits() {
+        assert_eq!(spell_number(1_000_000, NumLang::En), "1000000");
+    }
+
+    #[test]
+    fn a_spoken_number_matches_its_digits() {
+        assert!(number_variant("20", "twenty", NumLang::En));
+        assert!(number_variant("zwanzig", "20", NumLang::De));
+        assert!(!number_variant("twenty", "thirty", NumLang::En));
+        // Punctuation never reaches the comparison: normalize strips it first.
+        assert!(approx(score_value("im Jahr 2.000 Euro", "im Jahr 2000 Euro"), 100.0));
     }
 }

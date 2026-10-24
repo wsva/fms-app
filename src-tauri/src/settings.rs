@@ -104,6 +104,11 @@ pub struct AppSettings {
     /// the hub" ambiguity. Workspace-scoped, not global.
     #[serde(default)]
     pub cluster_id: String,
+    /// Edge TTS voice used to build the canonical pronunciation reference for
+    /// read-aloud scoring (`datasets::read_aloud::tts_ref`). Empty means the
+    /// built-in default — see `read_aloud::DEFAULT_TTS_VOICE`.
+    #[serde(default)]
+    pub read_aloud_tts_voice: String,
 }
 
 fn default_ollama_url() -> String {
@@ -248,6 +253,11 @@ pub struct WorkspaceSettings {
     /// Cluster id this workspace belongs to (see `AppSettings::cluster_id`).
     #[serde(default)]
     pub cluster_id: String,
+    /// Edge TTS voice for the read-aloud pronunciation reference (see
+    /// `AppSettings::read_aloud_tts_voice`). Workspace-scoped: it is a reading
+    /// preference, and it travels with the rest of a workspace's setup.
+    #[serde(default)]
+    pub read_aloud_tts_voice: String,
 }
 
 impl Default for WorkspaceSettings {
@@ -259,6 +269,7 @@ impl Default for WorkspaceSettings {
             books_dir: data_dir.join("datasets").join("book").to_string_lossy().into_owned(),
             role: String::new(),
             cluster_id: String::new(),
+            read_aloud_tts_voice: String::new(),
         }
     }
 }
@@ -271,6 +282,7 @@ impl WorkspaceSettings {
             books_dir: s.books_dir.clone(),
             role: s.role.clone(),
             cluster_id: s.cluster_id.clone(),
+            read_aloud_tts_voice: s.read_aloud_tts_voice.clone(),
         }
     }
 
@@ -280,6 +292,7 @@ impl WorkspaceSettings {
         s.books_dir = self.books_dir.clone();
         s.role = self.role.clone();
         s.cluster_id = self.cluster_id.clone();
+        s.read_aloud_tts_voice = self.read_aloud_tts_voice.clone();
     }
 }
 
@@ -308,6 +321,7 @@ impl Default for AppSettings {
             device_seed: String::new(),
             role: String::new(),
             cluster_id: String::new(),
+            read_aloud_tts_voice: String::new(),
         }
     }
 }

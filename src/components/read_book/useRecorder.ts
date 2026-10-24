@@ -16,7 +16,26 @@ import { logError, logInfo } from "@/lib/logger";
 /** Log-page tag for the reading drawer's recording flow. */
 const LOG_MODULE = "read-book-recorder";
 
-export type RecorderResult = { wavBase64: string; text: string };
+export type RecorderResult = {
+  wavBase64: string;
+  text: string;
+  /**
+   * Word-level timings, when the loaded model reports them. Read-aloud scoring
+   * uses them for fluency; a model without timestamps simply omits them and
+   * fluency is reported as not measured.
+   */
+  words?: RecorderWord[];
+};
+
+/** One word of the transcript with its position in the take, in seconds. */
+export type RecorderWord = { text: string; start: number; end: number };
+
+/** What `model_transcribe_detailed` returns. */
+type DetailedTranscript = {
+  text: string;
+  words: RecorderWord[];
+  capabilities: { word_timings: boolean };
+};
 
 // ---------------------------------------------------------------------------
 // Live preview segmentation
@@ -68,9 +87,11 @@ function chooseLiveCut(fresh: Float32Array): number {
 /**
  * Microphone recorder for the reading drawer.
  *
- * Records audio, converts it to 16kHz mono WAV, runs STT via `model_transcribe`,
- * and hands back BOTH the WAV (base64) and the recognized text so the caller can
- * persist the audio and show a diff.
+ * Records audio, converts it to 16kHz mono WAV, runs STT via
+ * `model_transcribe_detailed`, and hands back the WAV (base64), the recognized
+ * text, and — when the model reports them — per-word timings. The caller
+ * persists the audio and shows a diff; read-aloud scoring turns the timings
+ * into fluency metrics.
  *
  * Capture is delegated to `openMicCapture`, which is what lets this work on the
  * Android WebView as well as on the desktop app.
@@ -112,6 +133,17 @@ export function useRecorder(
       invoke<string>("model_transcribe", {
         wavBase64: arrayBufferToBase64(encodeWav(samples, 16000)),
       }),
+    []
+  );
+
+  /**
+   * The final pass: same model, but asking for word timings as well as text.
+   * Runs once per take (the live preview keeps using the cheap text-only call),
+   * because timings are only meaningful for the whole recording.
+   */
+  const transcribeDetailed = useCallback(
+    (wavBase64: string) =>
+      invoke<DetailedTranscript>("model_transcribe_detailed", { wavBase64 }),
     []
   );
 
@@ -245,13 +277,17 @@ export function useRecorder(
           logInfo(
             `recording: ${(samples.length / 16000).toFixed(2)} s captured as ${(
               wav.byteLength / 1024
-            ).toFixed(0)} KB of WAV — sending it to model_transcribe`,
+            ).toFixed(0)} KB of WAV — sending it to model_transcribe_detailed`,
             LOG_MODULE
           );
           const transcribedAt = Date.now();
-          const text = await transcribe(samples);
+          const detailed = await transcribeDetailed(wavBase64);
+          const text = detailed.text ?? "";
+          const words = detailed.capabilities?.word_timings ? detailed.words : undefined;
           logInfo(
-            `recording: model_transcribe answered after ${Date.now() - transcribedAt} ms: "${text}"`,
+            `recording: model_transcribe_detailed answered after ${
+              Date.now() - transcribedAt
+            } ms: "${text}" (${words?.length ?? 0} word timings)`,
             LOG_MODULE
           );
           // A silent take is worthless as a recording, so report it. A take with
@@ -264,7 +300,7 @@ export function useRecorder(
                 "virtual microphones from Steam, OBS or Voicemeeter often hold the system default slot."
             );
           }
-          cbRef.current.onResult({ wavBase64, text: (text || "").trim() });
+          cbRef.current.onResult({ wavBase64, text: (text || "").trim(), words });
         } catch (err) {
           const msg = describeMicError(err);
           logError(`recording: failed — ${msg}`, LOG_MODULE);
@@ -283,7 +319,7 @@ export function useRecorder(
       logError(`recording: could not start — ${msg}`, LOG_MODULE);
       cbRef.current.onError(msg);
     }
-  }, [live, runLiveLoop, transcribe]);
+  }, [live, runLiveLoop, transcribe, transcribeDetailed]);
 
   const stop = useCallback(() => {
     requestStopRef.current?.();

@@ -930,7 +930,7 @@ pub async fn model_transcribe(
         .decode(&wav_base64)
         .map_err(|e| format!("Invalid base64: {}", e))?;
 
-    let samples = parse_wav_pcm(&wav_bytes)?;
+    let samples = crate::audio::decode_wav_pcm(&wav_bytes)?;
 
     // Acquire the transcription lock to serialize requests.
     // This prevents race conditions where the model is temporarily unavailable
@@ -1008,74 +1008,105 @@ pub async fn model_transcribe(
 }
 
 // ---------------------------------------------------------------------------
-// WAV parser (16-bit PCM, 16kHz mono)
+// Detailed transcription (text + word timings + capabilities)
 // ---------------------------------------------------------------------------
 
-fn parse_wav_pcm(data: &[u8]) -> Result<Vec<f32>, String> {
-    if data.len() < 44 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
-        return Err("Invalid WAV file".into());
-    }
+/// One recognised word with the timing the model gave it.
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptWord {
+    pub text: String,
+    pub start: f32,
+    pub end: f32,
+}
 
-    let mut pos = 12;
-    let mut channels: u16 = 0;
-    let mut sample_rate: u32 = 0;
-    let mut bits_per_sample: u16 = 0;
-    let mut pcm_data: Option<&[u8]> = None;
+/// What the active backend could actually deliver for this call. Reported so a
+/// caller can tell "no pauses" from "pauses were not measurable".
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct TranscriptCapabilities {
+    pub word_timings: bool,
+}
 
-    while pos + 8 <= data.len() {
-        let chunk_id = &data[pos..pos + 4];
-        let chunk_size = u32::from_le_bytes([
-            data[pos + 4],
-            data[pos + 5],
-            data[pos + 6],
-            data[pos + 7],
-        ]) as usize;
-        pos += 8;
+#[derive(Debug, Clone, Serialize)]
+pub struct DetailedTranscript {
+    pub text: String,
+    /// Empty when the backend has no word-level timestamps.
+    pub words: Vec<TranscriptWord>,
+    pub capabilities: TranscriptCapabilities,
+}
 
-        if chunk_id == b"fmt " {
-            if chunk_size < 16 {
-                return Err("Invalid fmt chunk".into());
-            }
-            let format_tag = u16::from_le_bytes([data[pos], data[pos + 1]]);
-            if format_tag != 1 {
-                return Err("Only PCM WAV files are supported".into());
-            }
-            channels = u16::from_le_bytes([data[pos + 2], data[pos + 3]]);
-            sample_rate = u32::from_le_bytes([
-                data[pos + 4],
-                data[pos + 5],
-                data[pos + 6],
-                data[pos + 7],
-            ]);
-            bits_per_sample = u16::from_le_bytes([data[pos + 14], data[pos + 15]]);
-        } else if chunk_id == b"data" {
-            let end = (pos + chunk_size).min(data.len());
-            pcm_data = Some(&data[pos..end]);
+impl DetailedTranscript {
+    fn text_only(text: String) -> Self {
+        Self {
+            text,
+            words: Vec::new(),
+            capabilities: TranscriptCapabilities { word_timings: false },
         }
+    }
+}
 
-        pos += chunk_size;
+/// Transcribe 16 kHz mono WAV bytes and report word timings when the active
+/// backend can produce them (Parakeet only — see
+/// [`transcribe_file_word_level`] for the backend support table).
+///
+/// This is the read-aloud evidence call. [`model_transcribe`] stays the plain
+/// text call every other caller uses, so nothing existing changes shape.
+#[tauri::command]
+pub async fn model_transcribe_detailed(
+    state: State<'_, ModelState>,
+    wav_base64: String,
+) -> Result<DetailedTranscript, String> {
+    let wav_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&wav_base64)
+        .map_err(|e| format!("Invalid base64: {}", e))?;
+    let samples = crate::audio::decode_wav_pcm(&wav_bytes)?;
+
+    let _transcribe_guard = state.transcribe_lock.lock().unwrap();
+
+    let mut model = {
+        let mut m = state.model.lock().unwrap();
+        m.take().ok_or_else(|| "No model is loaded".to_string())?
+    };
+
+    let result = transcribe_detailed_pass(&mut model, &samples);
+
+    // Always hand the model back, including after a failed pass — a dropped
+    // model would leave every later transcription reporting "not loaded".
+    {
+        let mut m = state.model.lock().unwrap();
+        *m = Some(model);
     }
 
-    if sample_rate != 16000 {
-        return Err(format!("Expected 16kHz audio, got {}Hz", sample_rate));
-    }
-    if channels != 1 {
-        return Err(format!("Expected mono audio, got {} channels", channels));
+    result
+}
+
+fn transcribe_detailed_pass(
+    model: &mut ActiveModel,
+    samples: &[f32],
+) -> Result<DetailedTranscript, String> {
+    if let ActiveModel::Parakeet(m) = model {
+        let params = ParakeetParams {
+            language: None,
+            timestamp_granularity: Some(TimestampGranularity::Word),
+        };
+        let result = m
+            .transcribe_with(samples, &params)
+            .map_err(|e| format!("Parakeet word-level transcription failed: {}", e))?;
+        let words = result
+            .segments
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| TranscriptWord { text: s.text, start: s.start, end: s.end })
+            .filter(|w| !w.text.trim().is_empty())
+            .collect();
+        return Ok(DetailedTranscript {
+            text: result.text,
+            words,
+            capabilities: TranscriptCapabilities { word_timings: true },
+        });
     }
 
-    let raw = pcm_data.ok_or("No data chunk in WAV file")?;
-
-    match bits_per_sample {
-        16 => Ok(raw
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
-            .collect()),
-        32 => Ok(raw
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect()),
-        other => Err(format!("Unsupported bit depth: {}", other)),
-    }
+    let text = run_transcribe_text(model, samples)?;
+    Ok(DetailedTranscript::text_only(text))
 }
 
 // ---------------------------------------------------------------------------
@@ -1519,7 +1550,7 @@ pub(crate) fn ensure_model_loaded(state: &ModelState) -> Result<(), String> {
 /// Transcribe raw 16kHz mono PCM WAV bytes, loading the model first if needed.
 pub(crate) fn transcribe_wav_bytes(state: &ModelState, wav: &[u8]) -> Result<String, String> {
     ensure_model_loaded(state)?;
-    let samples = parse_wav_pcm(wav)?;
+    let samples = crate::audio::decode_wav_pcm(wav)?;
 
     let mut model = {
         let mut m = state.model.lock().unwrap();

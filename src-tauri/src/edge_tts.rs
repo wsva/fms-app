@@ -35,16 +35,38 @@ pub struct TtsPreviewResult {
     pub audio_base64: String,
 }
 
-/// Synthesize text and return the raw audio bytes (reused by the web service).
-#[allow(dead_code)]
-pub(crate) async fn synthesize_to_bytes(
+/// A word boundary reported by Edge TTS. Times are seconds from the start of
+/// the returned audio.
+///
+/// These were always available — `Boundary::Word` is requested — and were
+/// always thrown away. The read-aloud reference timeline needs them to know
+/// which phones belong to which word.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TtsWordBoundary {
+    pub text: String,
+    pub start: f64,
+    pub duration: f64,
+}
+
+/// Synthesised audio plus the word boundaries the service reported.
+pub(crate) struct TtsAudio {
+    pub audio: Vec<u8>,
+    pub boundaries: Vec<TtsWordBoundary>,
+}
+
+/// Edge TTS reports offsets in 100 ns ticks (Windows FILETIME units).
+const TICKS_PER_SECOND: f64 = 10_000_000.0;
+
+/// Synthesize text and return the raw audio bytes **and** its word boundaries
+/// (used by the read-aloud reference timeline).
+pub(crate) async fn synthesize_with_boundaries(
     text: &str,
     voice: &str,
     rate: Option<String>,
     volume: Option<String>,
     pitch: Option<String>,
-) -> Result<Vec<u8>, String> {
-    log::debug!("edge_tts synthesize_to_bytes: voice={}, text_len={}", voice, text.len());
+) -> Result<TtsAudio, String> {
+    log::debug!("edge_tts synthesize_with_boundaries: voice={}, text_len={}", voice, text.len());
     let client = EdgeTtsClient::new().map_err(|e| e.to_string())?;
 
     let options = SpeakOptions {
@@ -61,7 +83,32 @@ pub(crate) async fn synthesize_to_bytes(
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(result.audio)
+    let boundaries = result
+        .boundaries
+        .into_iter()
+        .filter(|b| matches!(b.kind, Boundary::Word))
+        .map(|b| TtsWordBoundary {
+            text: b.text,
+            start: b.offset_ticks as f64 / TICKS_PER_SECOND,
+            duration: b.duration_ticks as f64 / TICKS_PER_SECOND,
+        })
+        .collect();
+
+    Ok(TtsAudio { audio: result.audio, boundaries })
+}
+
+/// Synthesize text and return the raw audio bytes (reused by the web service).
+#[allow(dead_code)]
+pub(crate) async fn synthesize_to_bytes(
+    text: &str,
+    voice: &str,
+    rate: Option<String>,
+    volume: Option<String>,
+    pitch: Option<String>,
+) -> Result<Vec<u8>, String> {
+    Ok(synthesize_with_boundaries(text, voice, rate, volume, pitch)
+        .await?
+        .audio)
 }
 
 /// List all available voices from Edge TTS.

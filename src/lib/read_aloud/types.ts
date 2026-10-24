@@ -54,6 +54,12 @@ export interface ReadAttempt {
   recognized: string;
   /** WIP-based ASR score 0-100 against the reference text. */
   score: number;
+  /**
+   * The stored three-axis assessment, when one was computed. Absent for takes
+   * recorded before assessment existed and for takes whose recording is gone.
+   * It is the compact form: worst words only, at most 24 pauses.
+   */
+  metrics?: Assessment | null;
   created_at: string;
 }
 
@@ -96,10 +102,144 @@ export interface ReadAloudSubmitResult {
   /** WER/MER, H/S/D/I counts and the alignment chunks to highlight. */
   summary: AsrScoreSummary;
   attempt: ReadAttempt;
+  /** Accuracy (the same number as `score`), fluency and pronunciation. */
+  assessment: Assessment;
   xp_awarded: number;
   lifetime_xp: number;
   level: number;
 }
+
+/**
+ * Why an axis is missing. First-class states, never a substituted proxy —
+ * `gop.rs`/`assess.rs` report an honest gap instead of a fabricated score.
+ */
+export type PronUnavailableReason =
+  | "model_missing"
+  | "model_error"
+  | "no_network"
+  | "tts_failed"
+  | "too_short";
+
+/** What this take's pipeline could actually measure. */
+export interface AssessmentCapabilities {
+  /** The STT model returned per-word timings, so fluency exists. */
+  word_timings: boolean;
+  /** The phoneme GOP pass ran. */
+  gop: boolean;
+  /** A TTS-derived reference phone timeline was available. */
+  tts_reference: boolean;
+}
+
+/** Per-word outcome, a refinement of the alignment op. */
+export type WordVerdictKind =
+  | "correct"
+  | "minor"
+  | "substituted"
+  | "omitted"
+  | "inserted"
+  | "repeated";
+
+export interface AccuracyCounts {
+  ref: number;
+  correct: number;
+  /** Near-miss substitutions: an error for `score`, a hit for `lenient_score`. */
+  minor: number;
+  substituted: number;
+  omitted: number;
+  inserted: number;
+  repeated: number;
+}
+
+/** The accuracy axis — `score` is the unchanged WIP number. */
+export interface Accuracy {
+  score: number;
+  lenient_score: number;
+  wer: number;
+  counts: AccuracyCounts;
+}
+
+/** Reading-speed band, from words per minute. */
+export type RateBand = "slow" | "target" | "fast";
+
+/** Where a silence fell, relative to the reference text. */
+export type PauseKind =
+  | "leading"
+  | "at_punctuation"
+  | "within_phrase"
+  | "trailing";
+
+export interface Pause {
+  start: number;
+  end: number;
+  kind: PauseKind;
+  /** Index of the reference word this pause followed. */
+  after_ref?: number | null;
+}
+
+/** The aggregate fluency picture. Absent when the STT gave no word timings. */
+export interface FluencyMetrics {
+  /** Length of the whole recording, in seconds. */
+  duration: number;
+  /** First word to last word, minus the pauses in between. */
+  speaking_time: number;
+  /** Correct words per minute. */
+  wcpm: number;
+  /** Spoken words per minute over the reading span (includes pauses). */
+  speech_rate: number;
+  /** Spoken words per minute excluding pauses. */
+  articulation_rate: number;
+  /** Pauses while reading (at punctuation or mid-phrase). */
+  pause_count: number;
+  long_pause_count: number;
+  /** Share of reading pauses that fell mid-phrase — the hesitancy proxy. */
+  within_phrase_pause_ratio: number;
+  /** Mean words between pauses. */
+  mean_length_of_run: number;
+  repetition_count: number;
+  restart_count: number;
+  band: RateBand;
+}
+
+/**
+ * The pronunciation axis. `score` is null exactly when
+ * `unavailable_reason` is set: nothing is ever substituted for a real GOP.
+ */
+export interface Pronunciation {
+  score: number | null;
+  /** `"ctc_gop"` when measured. */
+  method: string | null;
+  /** Share of scored words below the weak-word threshold. */
+  weak_ratio: number | null;
+  unavailable_reason: PronUnavailableReason | null;
+}
+
+/** One reference word with everything known about it. */
+export interface WordAssessment {
+  ref_index?: number | null;
+  ref: string;
+  hyp: string;
+  verdict: WordVerdictKind;
+  start?: number | null;
+  end?: number | null;
+  /** GOP score of this word in (0, 1], when pronunciation was measured. */
+  pron?: number | null;
+}
+
+/** The whole scored picture for one take. */
+export interface Assessment {
+  schema_version: number;
+  capabilities: AssessmentCapabilities;
+  accuracy: Accuracy;
+  fluency?: FluencyMetrics | null;
+  pronunciation: Pronunciation;
+  /** Every reference word on submit; the worst 12 when read back from storage. */
+  words: WordAssessment[];
+  /** At most 24 when read back from storage. */
+  pauses: Pause[];
+}
+
+/** Below this a word's pronunciation is reported as weak. */
+export const WEAK_WORD_SCORE = 0.4;
 
 /** Score threshold at/above which a reading passes and earns XP. */
 export const PASS_SCORE = 60;

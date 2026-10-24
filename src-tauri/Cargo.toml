@@ -41,10 +41,15 @@ tauri-build = { version = "2", features = [] }
 #   (Whisper GGUF) stays desktop-only for now.
 # - `server` = the HTTP/MCP web_service, a PC-only subsystem and a dependency of
 #   `desktop`. Android consumes the PC over the network, so it compiles none.
+# - `phoneme` = the CTC phoneme model behind read-aloud pronunciation scoring
+#   (`datasets/read_aloud/gop.rs` + `phoneme.rs`). It must reach Android for the
+#   same reason `stt` does, hence default-enabled. `ort-sys` 2.0.0-rc.12 ships
+#   `aarch64-linux-android` prebuilts, which match the aarch64-only APK.
 [features]
-default = ["stt"]
+default = ["stt", "phoneme"]
 desktop = [
     "stt",
+    "phoneme",
     "dep:transcribe-cpp",
     "dep:rfd",
     "dep:xcap",
@@ -67,6 +72,9 @@ server = [
     "dep:anyhow",
 ]
 stt = ["dep:transcribe-rs"]
+# Phoneme CTC inference reuses the same `ort`/`ndarray`/`half` versions that
+# transcribe-rs and `textsplit` already resolve, so no second ONNX Runtime.
+phoneme = ["stt", "dep:ort", "dep:ndarray", "dep:half"]
 # Vendored SaT sentence segmentation (ported from wtsplit-rs). Desktop-only: it
 # runs the ONNX on the same statically-linked `ort` that `stt` already pulls in
 # via transcribe-rs, so `textsplit` depends on `stt` and adds `tokenizers` as

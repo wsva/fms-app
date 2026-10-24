@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { Play, RotateCcw, Wand2 } from "lucide-react";
 import type { ReadAloudSubmitResult, ReadText } from "@/lib/read_aloud/types";
 import { GOOD_SCORE, PASS_SCORE, scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { useRecorder } from "@/components/read_book/useRecorder";
 import AsrDiff from "@/components/read_aloud/AsrDiff";
+import AssessmentCards from "@/components/read_aloud/AssessmentCards";
 import { isTauri } from "@/lib/tauri";
 import { logError, logInfo } from "@/lib/logger";
 
@@ -72,7 +73,15 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
   }, [text.uuid]);
 
   const handleResult = useCallback(
-    async ({ wavBase64, text: recognized }: { wavBase64: string; text: string }) => {
+    async ({
+      wavBase64,
+      text: recognized,
+      words,
+    }: {
+      wavBase64: string;
+      text: string;
+      words?: { text: string; start: number; end: number }[];
+    }) => {
       if (!isTauri()) return;
       setSubmitting(true);
       setError(null);
@@ -82,9 +91,15 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
           textUuid: text.uuid,
           wavBase64,
           recognized,
+          // Word timings (when the model reports them) are what fluency is
+          // measured from — without them that axis is reported as not measured.
+          words: words ?? null,
         });
+        const a = res.assessment;
         logInfo(
-          `submit: score=${res.score.toFixed(1)} xp=+${res.xp_awarded} recognized="${recognized}"`,
+          `submit: score=${res.score.toFixed(1)} xp=+${res.xp_awarded} recognized="${recognized}"` +
+            ` fluency=${a.fluency ? `${Math.round(a.fluency.wcpm)} wcpm` : "not measured"}` +
+            ` pron=${a.pronunciation.score != null ? Math.round(a.pronunciation.score * 100) : "not measured"}`,
           LOG_MODULE
         );
         setResult(res);
@@ -104,6 +119,16 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
 
   const busy = recorder.processing || submitting;
   const score = result?.score ?? null;
+
+  // Reference-word index → GOP score, so the diff can underline words that were
+  // heard correctly but pronounced weakly. Only words that were measured appear.
+  const pronByRef = useMemo(() => {
+    const map: Record<number, number> = {};
+    for (const w of result?.assessment.words ?? []) {
+      if (w.ref_index != null && w.pron != null) map[w.ref_index] = w.pron;
+    }
+    return Object.keys(map).length > 0 ? map : undefined;
+  }, [result]);
 
   // Surface the recorder to the page frame: publish the latest toggle/status and
   // live preview whenever they change, and clear it on unmount so the Record
@@ -199,7 +224,13 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
           </div>
           {/* Diff of transcript vs reference (rendered from the scoring alignment) */}
           <div className="mt-1 p-2 rounded bg-bg-muted text-text-primary leading-relaxed whitespace-pre-wrap break-words">
-            <AsrDiff summary={result.summary} />
+            <AsrDiff summary={result.summary} pron={pronByRef} />
+          </div>
+
+          {/* The other two axes. Accuracy is the number above — unchanged in
+              meaning and in what XP is awarded for. */}
+          <div className="mt-1">
+            <AssessmentCards assessment={result.assessment} />
           </div>
           {result.attempt.audio_url && (
             <button

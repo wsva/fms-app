@@ -6,6 +6,7 @@ import { Play, Trash2, History, ChevronRight, Loader2, RefreshCw } from "lucide-
 import type { ReadAttempt, ReadText } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
+import AssessmentCards, { PauseRibbon } from "@/components/read_aloud/AssessmentCards";
 import { highlightDifferences } from "@/components/read_book/diff";
 import { lcs } from "@/lib/listen/lcs";
 import { arrayBufferToBase64 } from "@/lib/voice-input";
@@ -294,7 +295,8 @@ function SentenceCompare({ reference, recognized }: { reference: string; recogni
 /**
  * A dedicated page listing every recorded attempt at one text. Clicking an
  * attempt opens a detail panel that shows the full recognized text at reading
- * size. Reached from the practice view's toolbar ("Attempts").
+ * size, plus the stored three-axis assessment when the take has one. Reached
+ * from the practice view's toolbar ("Attempts").
  */
 export default function AttemptsPanel({
   datasetUuid,
@@ -365,11 +367,18 @@ export default function AttemptsPanel({
       const res = await fetch(convertFileSrc(a.audio_url));
       if (!res.ok) throw new Error(`Could not read the recording (HTTP ${res.status}).`);
       const wavBase64 = arrayBufferToBase64(await res.arrayBuffer());
-      const text = await invoke<string>("model_transcribe", { wavBase64 });
+      // Detailed (not plain) transcription: the attempt is re-scored, so it needs
+      // the word timings that fluency is measured from as well as the text.
+      const detailed = await invoke<{
+        text: string;
+        words: { text: string; start: number; end: number }[];
+        capabilities: { word_timings: boolean };
+      }>("model_transcribe_detailed", { wavBase64 });
       await invoke("read_aloud_rerecognize", {
         datasetUuid,
         uuid: a.uuid,
-        recognized: (text || "").trim(),
+        recognized: (detailed.text || "").trim(),
+        words: detailed.capabilities?.word_timings ? detailed.words : null,
       });
       await loadAttempts();
       onChanged?.();
@@ -411,6 +420,23 @@ export default function AttemptsPanel({
               {formatWhen(selectedAttempt.created_at)}
             </span>
           </div>
+
+          {/* The stored assessment, when this take has one. Takes recorded
+              before assessment existed (or whose recording is gone) simply have
+              none — the accuracy number above is still there. */}
+          {selectedAttempt.metrics && (
+            <section className="flex flex-col gap-2 min-w-0">
+              <AssessmentCards assessment={selectedAttempt.metrics} />
+              <PauseRibbon
+                pauses={selectedAttempt.metrics.pauses}
+                duration={
+                  selectedAttempt.metrics.fluency?.duration ??
+                  selectedAttempt.metrics.pauses[selectedAttempt.metrics.pauses.length - 1]?.end ??
+                  0
+                }
+              />
+            </section>
+          )}
 
           {/* Compare mode (toolbar "Compare") pairs the texts sentence by
               sentence; otherwise just show the recognized transcript. */}
