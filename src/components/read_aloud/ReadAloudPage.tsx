@@ -52,11 +52,32 @@ import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import PracticePanel, { type RecorderCtl } from "./PracticePanel";
 import AttemptsPanel from "./AttemptsPanel";
 import DatasetDialog from "./DatasetDialog";
+import LiveTranscript from "./LiveTranscript";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 
 const LOG_MODULE = "read-aloud";
 
 type DatasetDialogState = { mode: "create" } | { mode: "edit"; meta: ReadAloudMeta } | null;
+
+/** Recorder state mirrored from PracticePanel: the Record button in the toolbar
+ *  reads it, and so does the live transcript dock under the practice pane. */
+type RecorderMirror = {
+  ready: boolean;
+  recording: boolean;
+  busy: boolean;
+  liveText: string;
+  liveBusy: boolean;
+  liveSeconds: number;
+};
+
+const NO_RECORDER: RecorderMirror = {
+  ready: false,
+  recording: false,
+  busy: false,
+  liveText: "",
+  liveBusy: false,
+  liveSeconds: 0,
+};
 
 function getUUID(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
@@ -205,22 +226,26 @@ export default function ReadAloudPage() {
     setCompareView(false);
   }, [selectedAttemptUuid]);
 
-  // The Record button lives in the toolbar, but the recorder + submit logic stay
-  // in PracticePanel; it publishes its control here (and clears it on unmount).
+  // The Record button and the live transcript dock live in this page frame, but
+  // the recorder + submit logic stay in PracticePanel; it publishes its control
+  // here (and clears it on unmount).
   const recToggleRef = useRef<() => void>(() => {});
-  const [rec, setRec] = useState({ ready: false, recording: false, busy: false });
+  const [rec, setRec] = useState<RecorderMirror>(NO_RECORDER);
   const handleRecorder = useCallback((ctl: RecorderCtl | null) => {
     if (!ctl) {
       recToggleRef.current = () => {};
-      setRec({ ready: false, recording: false, busy: false });
+      setRec(NO_RECORDER);
       return;
     }
     recToggleRef.current = ctl.toggle;
-    setRec((prev) =>
-      prev.ready && prev.recording === ctl.recording && prev.busy === ctl.busy
-        ? prev
-        : { ready: true, recording: ctl.recording, busy: ctl.busy }
-    );
+    setRec({
+      ready: true,
+      recording: ctl.recording,
+      busy: ctl.busy,
+      liveText: ctl.liveText,
+      liveBusy: ctl.liveBusy,
+      liveSeconds: ctl.liveSeconds,
+    });
   }, []);
 
   const loadDatasets = useCallback(async (preferUuid?: string) => {
@@ -965,6 +990,19 @@ export default function ReadAloudPage() {
             ))
           )}
         </div>
+      )}
+
+      {/* Live recognition — docked under the practice pane while a take is being
+          recorded. The transcript arrives as the reader speaks, so a silent
+          microphone or a model in the wrong language shows up while there is
+          still time to start over. It steps aside as soon as the take ends
+          (`busy`) and the result takes over. */}
+      {viewMode === "practice" && !attemptsView && activeText && rec.recording && !rec.busy && (
+        <LiveTranscript
+          text={rec.liveText}
+          busy={rec.liveBusy}
+          seconds={rec.liveSeconds}
+        />
       )}
 
       {datasetDialog && (

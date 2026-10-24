@@ -12,9 +12,11 @@ Open **Read Aloud** from the sidebar and pick a dataset (and, within it, the tex
 
 For the selected text you'll see the passage and a **record** control:
 
-1. Read the passage aloud while recording.
+1. Read the passage aloud while recording. A **live recognition** panel at the bottom of the page shows the transcript as you speak, so you can see immediately whether the model is hearing you — and whether it is hearing the right thing.
 2. Stop when finished. FmS transcribes your recording and compares it to the target text.
 3. A **score** badge shows how close you were, colour‑coded so you can see at a glance whether it was strong or needs work.
+
+The live panel is read‑only: it is there to catch a silent microphone or a model in the wrong language while there is still time to start over. The take itself always ends with **Stop**.
 
 The **practice panel** holds the text, the recorder, and the scoring view.
 

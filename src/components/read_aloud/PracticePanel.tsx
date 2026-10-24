@@ -12,9 +12,20 @@ import { logError, logInfo } from "@/lib/logger";
 
 const LOG_MODULE = "read-aloud";
 
-/** Recorder control surfaced to the page so the Record button can live in the
- *  toolbar while the recording/submit logic stays here. */
-export type RecorderCtl = { toggle: () => void; recording: boolean; busy: boolean };
+/** Recorder control surfaced to the page so the Record button and the live
+ *  transcript dock can live in the toolbar / page frame while the recording and
+ *  submit logic stay here. */
+export type RecorderCtl = {
+  toggle: () => void;
+  recording: boolean;
+  busy: boolean;
+  /** The transcript recognized so far, while `recording` is true. */
+  liveText: string;
+  /** A stretch of the take is being recognized right now. */
+  liveBusy: boolean;
+  /** Seconds recorded so far. */
+  liveSeconds: number;
+};
 
 type Props = {
   datasetUuid: string;
@@ -43,6 +54,11 @@ function playUrl(url?: string | null) {
 /**
  * Practice panel for a single text: record yourself reading it, transcribe via
  * STT, score against the reference, and review past attempts.
+ *
+ * The recorder runs with the live preview on: the transcript being produced is
+ * published upward with the rest of the recorder state, so the page can show it
+ * while the reader is still speaking. The take still ends with the toolbar's
+ * Stop, which transcribes the whole recording.
  */
 export default function PracticePanel({ datasetUuid, text, showNormalized = false, fontCss = "", spaceCss = "", onScored, onRecorder }: Props) {
   const [result, setResult] = useState<ReadAloudSubmitResult | null>(null);
@@ -84,23 +100,41 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
     [datasetUuid, text.uuid, onScored]
   );
 
-  const recorder = useRecorder(handleResult, (msg) => setError(msg));
+  const recorder = useRecorder(handleResult, (msg) => setError(msg), { live: true });
 
   const busy = recorder.processing || submitting;
   const score = result?.score ?? null;
 
-  // Surface the recorder to the page toolbar: publish the latest toggle/status
-  // whenever they change, and clear it on unmount so the Record button disables.
+  // Surface the recorder to the page frame: publish the latest toggle/status and
+  // live preview whenever they change, and clear it on unmount so the Record
+  // button disables and the dock closes.
   useEffect(() => {
-    onRecorder?.({ toggle: recorder.toggle, recording: recorder.recording, busy });
-  }, [onRecorder, recorder.toggle, recorder.recording, busy]);
+    onRecorder?.({
+      toggle: recorder.toggle,
+      recording: recorder.recording,
+      busy,
+      liveText: recorder.liveText,
+      liveBusy: recorder.liveBusy,
+      liveSeconds: recorder.liveSeconds,
+    });
+  }, [
+    onRecorder,
+    recorder.toggle,
+    recorder.recording,
+    busy,
+    recorder.liveText,
+    recorder.liveBusy,
+    recorder.liveSeconds,
+  ]);
 
   useEffect(() => () => onRecorder?.(null), [onRecorder]);
 
   // The pb-[50vh] on the scroll root is what lets the last line be scrolled up to
   // the middle of the screen: this is the text you read aloud, so it should sit in
   // front of you while you speak instead of stopping at the bottom edge. The same
-  // room the wiki reader and ReadingView give their prose.
+  // room the wiki reader and ReadingView give their prose. The live transcript is
+  // published upward with the rest of the recorder state, so the page can dock it
+  // under this pane where it stays put while the reader scrolls.
   return (
     <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 pb-[50vh] flex flex-col gap-4 min-w-0">
       {/* Reference text */}
@@ -127,14 +161,12 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
       </section>
 
       {/* Recorder status — the Record button itself lives in the page toolbar.
-          Silent when idle; only surfaces an in-progress state. */}
-      {(recorder.recording || recorder.processing || submitting) && (
+          Silent when idle; it appears once the take has ended and the audio is
+          being recognized or scored (while recording, the live dock in the page
+          frame already says what is happening). */}
+      {(recorder.processing || submitting) && (
         <p className="text-xs text-text-tertiary text-center">
-          {recorder.recording
-            ? "Reading… tap Stop in the toolbar when done"
-            : recorder.processing
-            ? "Transcribing…"
-            : "Scoring…"}
+          {recorder.processing ? "Transcribing…" : "Scoring…"}
         </p>
       )}
 

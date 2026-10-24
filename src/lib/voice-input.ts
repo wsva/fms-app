@@ -128,6 +128,15 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
 /** An open microphone. `stop()` finalises the recording and returns 16 kHz mono PCM. */
 export type MicCapture = {
   stop: () => Promise<Float32Array>;
+  /**
+   * Everything captured so far, 16 kHz mono, without ending the recording — the
+   * seam the read-aloud live preview reads while the user is still reading.
+   *
+   * Empty on the MediaRecorder backend: a compressed container only exists once
+   * the recorder is stopped, so a caller that needs the samples as they arrive
+   * asks for `live` in `openMicCapture`, which captures raw PCM instead.
+   */
+  samples: () => Float32Array;
   backend: "mediarecorder" | "pcm";
   /** Human-readable name of the device actually capturing, for error messages. */
   device: string;
@@ -380,8 +389,13 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
  * outright, and even when it records there is no guarantee the container can be
  * decoded back. A decode failure flips `preferPcm`, so the very next tap
  * captures through Web Audio without any user intervention.
+ *
+ * `live: true` forces the PCM backend: a live preview needs the audio while it
+ * is still being captured, which a MediaRecorder container cannot provide. The
+ * final samples are the same 16 kHz mono PCM either way.
  */
-export async function openMicCapture(): Promise<MicCapture> {
+export async function openMicCapture(options: { live?: boolean } = {}): Promise<MicCapture> {
+  const live = options.live === true;
   const openedAt = Date.now();
   const preferred = getPreferredMicDeviceId();
   const stream = await openMicStream(preferred);
@@ -390,7 +404,7 @@ export async function openMicCapture(): Promise<MicCapture> {
   const track = stream.getAudioTracks()[0];
   const settings = track?.getSettings() ?? {};
   const recorderAvailable = typeof MediaRecorder !== "undefined";
-  const useRecorder = !preferPcm && recorderAvailable;
+  const useRecorder = !preferPcm && recorderAvailable && !live;
   logInfo(
     `voice input: microphone "${track?.label || "unnamed"}" granted after ${
       Date.now() - openedAt
@@ -398,11 +412,13 @@ export async function openMicCapture(): Promise<MicCapture> {
       track?.readyState ?? "no track"
     }), capture backend = ${useRecorder ? "MediaRecorder" : "raw PCM"}` +
       (preferred ? " [pinned in Settings → Microphone]" : " [system default device]") +
-      (preferPcm
-        ? " — MediaRecorder output could not be decoded earlier"
-        : recorderAvailable
-          ? ""
-          : " — MediaRecorder is unavailable here"),
+      (live
+        ? " — live preview reads the samples as they arrive"
+        : preferPcm
+          ? " — MediaRecorder output could not be decoded earlier"
+          : recorderAvailable
+            ? ""
+            : " — MediaRecorder is unavailable here"),
     LOG_MODULE
   );
   const device = track?.label || (preferred ? "selected microphone" : "system default microphone");
@@ -420,6 +436,9 @@ export async function openMicCapture(): Promise<MicCapture> {
     return {
       backend: "mediarecorder",
       device,
+      // Nothing to hand out until the container is finalised; `live` callers
+      // never reach this backend.
+      samples: () => new Float32Array(0),
       async stop() {
         logInfo("voice input: stopping MediaRecorder", LOG_MODULE);
         recorder.stop();
@@ -468,6 +487,17 @@ export async function openMicCapture(): Promise<MicCapture> {
   } catch {
     ctx = new AudioContext();
   }
+  // A suspended context never runs the graph, so the take would come out empty.
+  // Chromium holds one back until the page has had a user gesture; the Record tap
+  // is one, but loading the model first can outlast that, so ask explicitly.
+  if (ctx.state === "suspended") {
+    await ctx.resume().catch((err) => {
+      logError(
+        `voice input: the AudioContext would not resume (${describeMicError(err)}) — the take may capture silence`,
+        LOG_MODULE
+      );
+    });
+  }
   const inRate = ctx.sampleRate;
   logInfo(
     `voice input: raw PCM capture running (AudioContext ${inRate} Hz, state ${ctx.state})`,
@@ -483,6 +513,17 @@ export async function openMicCapture(): Promise<MicCapture> {
   processor.onaudioprocess = (e) => {
     chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
   };
+  /** Everything captured so far, before resampling. */
+  const collect = (): Float32Array => {
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    const merged = new Float32Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+      merged.set(c, offset);
+      offset += c.length;
+    }
+    return merged;
+  };
   // Chromium only pulls a graph that reaches the destination; the muted gain
   // node keeps the monitored audio from coming back out of the speaker.
   const sink = ctx.createGain();
@@ -494,19 +535,14 @@ export async function openMicCapture(): Promise<MicCapture> {
   return {
     backend: "pcm",
     device,
+    samples: () => resampleLinear(collect(), inRate, 16000),
     async stop() {
       processor.onaudioprocess = null;
       processor.disconnect();
       source.disconnect();
       sink.disconnect();
       release();
-      const total = chunks.reduce((n, c) => n + c.length, 0);
-      const merged = new Float32Array(total);
-      let offset = 0;
-      for (const c of chunks) {
-        merged.set(c, offset);
-        offset += c.length;
-      }
+      const merged = collect();
       await ctx.close();
       const out = resampleLinear(merged, inRate, 16000);
       logInfo(
