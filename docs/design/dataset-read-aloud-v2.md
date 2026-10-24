@@ -129,7 +129,7 @@ Two tolerances, both deliberate. **One default is enforced on write** (the first
 
 Nothing extra is needed to share them. `read_standard_audio_save` / `_delete` journal as dataset-scoped change kinds beside `read_text_save` / `_delete`; the hub's snapshot is a whole `data.sqlite3` copy, which `sanitize_snapshot_db` passes through (it drops only `card_review` and `read_attempt`); and the wavs ride the ordinary file channel, hashed into `compute_manifest` and fetched by hash. Deleting a text cascades — its rows go with it and `media/<text_uuid>/` is removed.
 
-The clips themselves are made in the practice view's **Manage** dialog: *Generate with Edge TTS* (word timings included, so per-word attribution is exact) or *Upload audio* and crop (no timings, so per-word attribution is time-proportional; the aggregate score is unaffected). An upload's crop is the only edit offered — re-cropping means re-picking the file — and no source copy is kept, because an Edge TTS clip is one click to regenerate and an uploaded one still exists wherever the user picked it.
+The clips themselves are made in the practice view's **Manage** page — the text's only editor, since the clip, the normalized reference and the text are three answers to "what is the reference": *Generate with Edge TTS* (word timings included, so per-word attribution is exact) or *Upload audio* and crop (no timings, so per-word attribution is time-proportional; the aggregate score is unaffected). An upload's crop is the only edit offered — re-cropping means re-picking the file — and no source copy is kept, because an Edge TTS clip is one click to regenerate and an uploaded one still exists wherever the user picked it.
 
 ## The pipeline
 

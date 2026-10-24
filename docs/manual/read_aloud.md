@@ -26,12 +26,12 @@ The **practice panel** holds the text, the recorder, and the scoring view.
 
 Accuracy — how close your words were — needs nothing but the text. **Pronunciation** — whether it *sounded* right — needs something to compare you against: a clip of the text read clearly and correctly. That clip is called the text's **standard audio**, and a text with none cannot be scored for pronunciation at all; the card says so instead of inventing a number.
 
-To make one, open the practice toolbar's **Manage** button for the text and use the **Standard audio** section. There are two ways:
+To make one, open the practice toolbar's **Manage** button for the text and use the **Standard audio** card at the bottom of that page. If you have unsaved edits, **Save** first: a clip describes the text as it is stored, so while the draft differs those controls are greyed out. There are two ways:
 
-- **Generate with Edge TTS** — synthesises the text in the voice chosen on the [Edge TTS](ai_chat_agents.md#edge-text-to-speech) page (pick another voice in the dialog if you like). This is the quick route, and it is also the accurate one for per‑word detail, because the synthesis reports exactly when each word is spoken.
+- **Generate with Edge TTS** — synthesises the text in the voice chosen on the [Edge TTS](ai_chat_agents.md#edge-text-to-speech) page (pick another voice in the list if you like). This is the quick route, and it is also the accurate one for per‑word detail, because the synthesis reports exactly when each word is spoken.
 - **Upload audio** — pick a recording of the text read by a person (your teacher, a native speaker, yourself being careful), then drag the two handles on the waveform to the part that reads the text and press **Save clip**. Only the selection is stored; nothing else of the file is kept. Per‑word detail for an upload is estimated in proportion to the time each word takes, so the overall score is unaffected but a single word's score is approximate.
 
-A text can have several clips — try voices, or keep a human reading beside a synthesised one — and exactly one is the **Default**, the only one pronunciation is measured against. Use **Set default** to switch, **Play** to compare, and the bin icon to delete. The texts list marks a text that has one with a small audio icon.
+A text can have several clips — try voices, or keep a human reading beside a synthesised one — and exactly one is **in use**: the circle beside a clip chooses the one pronunciation is measured against. Use **Play** to compare and the bin icon to delete; a clip whose audio file has not synced to this device yet says so, so an unplayable row is never mistaken for a bad one.
 
 If you later edit the text, its clip is marked **Stale**: the words no longer match what the clip says, so pronunciation stops being scored until you make a new clip. That is deliberate — grading you against a target for a passage you are no longer reading would be worse than a blank. Nothing is regenerated behind your back.
 
@@ -53,7 +53,14 @@ Re‑reading the same passage is encouraged — repetition with feedback is how 
 
 ## Creating and editing texts
 
-You can add your own Read Aloud datasets and texts. A dataset dialog manages the collection, and each text can be edited (the same Markdown editor used in [Wiki](wiki.md)), so you can import or write the passages you want to practice speaking. A text can also carry a **normalized reference** — a spelling‑out of numbers and abbreviations — which is what scoring and the generated standard audio read when it is set.
+You can add your own Read Aloud datasets and texts. A dataset dialog manages the collection, and each text is edited on its own page, opened with **Manage** in the practice toolbar (or **New Text** for a fresh one). The page is a short stack of cards, so you can see what you are changing:
+
+- **Details** — title and note.
+- **Text to read** — the passage you record, in the same Markdown editor used in [Wiki](wiki.md).
+- **Scoring reference** — a **normalized reference**: a spelling‑out of numbers and abbreviations, which is what scoring and the generated standard audio read when it is set. Under the box, *Scoring will read* names which of the two the scorer will actually use and shows it, so you never have to guess between them.
+- **Standard audio** — the reference clips below.
+
+The first three are one draft: **Save** writes them and leaves you on the page (the header confirms it), **Cancel** discards them. Standard audio is separate — clips take effect immediately. On a phone the first three cards can be folded away to reach the audio without scrolling.
 
 ## XP
 

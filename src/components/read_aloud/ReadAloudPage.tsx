@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import {
   Plus,
@@ -21,6 +22,8 @@ import {
   Space,
   Type,
   AudioLines,
+  Check,
+  ChevronDown,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import MdEditor from "@/components/wiki/MdEditor";
@@ -61,7 +64,7 @@ import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import PracticePanel, { type RecorderCtl } from "./PracticePanel";
 import AttemptsPanel from "./AttemptsPanel";
 import DatasetDialog from "./DatasetDialog";
-import ManageTextDialog from "./ManageTextDialog";
+import StandardAudioSection from "./StandardAudioSection";
 import LiveTranscript from "./LiveTranscript";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 
@@ -113,6 +116,60 @@ function formatStamp(iso: string): string {
   )}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+/** Collapse whitespace and elide a long reference so one line of it fits. */
+function preview(text: string, max = 140): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max).trimEnd()}…` : flat;
+}
+
+/** One card of the text page: a header and a body. On a phone the cards
+ *  collapse, because four stacked editors are a lot of scrolling; on a desktop
+ *  they are always open, so the page reads straight down. */
+function ManageGroup({
+  title,
+  collapsible,
+  defaultOpen = true,
+  children,
+}: {
+  title: string;
+  collapsible?: boolean;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const expanded = !collapsible || open;
+  return (
+    <section className="rounded-lg border border-border-default bg-bg-card">
+      <div
+        className={`flex items-center gap-2 px-3 py-2 ${
+          expanded ? "border-b border-border-default" : ""
+        }`}
+      >
+        {collapsible ? (
+          <button
+            className="flex items-center gap-1.5 cursor-pointer"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+          >
+            <ChevronDown
+              size={13}
+              className={`text-text-tertiary transition-transform ${open ? "" : "-rotate-90"}`}
+            />
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">
+              {title}
+            </h3>
+          </button>
+        ) : (
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">
+            {title}
+          </h3>
+        )}
+      </div>
+      {expanded && <div className="flex flex-col gap-3 p-3">{children}</div>}
+    </section>
+  );
+}
+
 export default function ReadAloudPage() {
   const [datasets, setDatasets] = useState<ReadAloudMeta[]>([]);
   const [selectedDataset, setSelectedDataset] = useState<string>("");
@@ -126,10 +183,12 @@ export default function ReadAloudPage() {
     setMobile(isMobileApp());
   }, []);
 
-  // ── Inline text editor (edit/view mode, mirroring the wiki page) ──
-  // `editing` swaps the content column for the text form and the sub-toolbar for
-  // Save / Cancel. `editText` is the text being edited, or null for a brand-new
-  // one.
+  // ── The text page (edit / view mode, mirroring the wiki page) ──────
+  // One page holds everything about a text that is not the reading itself:
+  // its title and note, the text, the LLM-normalized reference scoring reads,
+  // and the standard audio pronunciation is measured against. `editing` swaps
+  // the content column for that page and the sub-toolbar for Save / Cancel;
+  // `editText` is the text being edited, or null for a brand-new one.
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState<ReadText | null>(null);
   const [title, setTitle] = useState("");
@@ -138,24 +197,23 @@ export default function ReadAloudPage() {
   const [normalized, setNormalized] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Briefly true after a save, so the header can confirm it: the page no longer
+  // closes on Save, so without a word the button would look inert.
+  const [savedFlash, setSavedFlash] = useState(false);
+  // Bumped after a save so the standard-audio section re-reads its clips: a
+  // content edit turns every clip stale, and that badge lives in the section.
+  const [clipsVersion, setClipsVersion] = useState(0);
+  useEffect(() => {
+    if (!savedFlash) return;
+    const t = window.setTimeout(() => setSavedFlash(false), 2000);
+    return () => window.clearTimeout(t);
+  }, [savedFlash]);
   // Locations overlay (shared manager) — opened from the datasets-view overflow
   // menu, replacing the content area the same way the Cards page does.
   const [showLocations, setShowLocations] = useState(false);
   // Bumped by the toolbar Refresh so an open Locations overlay re-reads its own
   // directory list instead of keeping the one it mounted with.
   const [locRefresh, setLocRefresh] = useState(0);
-
-  // A dedicated inline editor for the LLM-normalized scoring reference, opened
-  // from the practice view's overflow menu (mirrors the main edit mode). Its
-  // draft is separate from `normalized` (used by the main text editor) so the
-  // two flows never interfere.
-  const [editingNormalized, setEditingNormalized] = useState(false);
-  const [normalizedDraft, setNormalizedDraft] = useState("");
-
-  // The Manage dialog: everything about the open text that is not the reading
-  // itself (its content, and the standard audio pronunciation is measured
-  // against).
-  const [manageOpen, setManageOpen] = useState(false);
 
   // Which texts of the open dataset have a usable standard clip, from one
   // dataset-wide listing. Kept beside the texts rather than on `ReadText` so the
@@ -305,7 +363,7 @@ export default function ReadAloudPage() {
   }, []);
 
   // The dataset-wide clip listing, grouped by text: one call badges every row
-  // in the texts list, and the Manage dialog refreshes it when a clip changes.
+  // in the texts list, and the text page refreshes it when a clip changes.
   const loadStandardClips = useCallback(async (datasetUuid: string) => {
     if (!isTauri() || !datasetUuid) {
       setClipsByText(new Map());
@@ -340,14 +398,11 @@ export default function ReadAloudPage() {
     setLocRefresh((n) => n + 1);
   }, [loadDatasets, loadStandardClips, loadTexts, selectedDataset]);
 
-  // The normalized editor, the attempts page and the Manage dialog are per-text
-  // concerns; close them whenever the selected text changes so they never leak
-  // across texts.
+  // The attempts page is a per-text concern; close it whenever the selected
+  // text changes so it never leaks across texts.
   useEffect(() => {
-    setEditingNormalized(false);
     setAttemptsView(false);
     setSelectedAttemptUuid(null);
-    setManageOpen(false);
   }, [selectedText]);
 
   // Leaving the attempts page clears any open attempt detail.
@@ -385,6 +440,11 @@ export default function ReadAloudPage() {
     content !== (editText?.content ?? "") ||
     normalized !== (editText?.normalized_content ?? "");
 
+  // What the scorer actually reads: the normalized reference when one is set,
+  // otherwise the text itself. Shown on the page so the two boxes above it are
+  // never a guess about which one wins.
+  const scoringText = normalized.trim() || content.trim();
+
   const goDatasets = () => {
     setSelectedDataset("");
     setSelectedText(null);
@@ -400,6 +460,7 @@ export default function ReadAloudPage() {
     setNormalized(t?.normalized_content ?? "");
     setMenuOpen(false);
     setError(null);
+    setSavedFlash(false);
     setEditing(true);
   };
 
@@ -407,6 +468,7 @@ export default function ReadAloudPage() {
     setEditing(false);
     setEditText(null);
     setError(null);
+    setSavedFlash(false);
   };
 
   const saveText = async () => {
@@ -438,11 +500,28 @@ export default function ReadAloudPage() {
     };
     try {
       await invoke("read_aloud_save_text", { datasetUuid: selectedDataset, text: payload });
-      setEditing(false);
-      setEditText(null);
+      // Stay on the page rather than returning to the practice view: a text that
+      // was just created has no other way to get its standard audio (clips
+      // attach to an existing text), and an edited one has probably just turned
+      // its clips stale — the section below is where both get fixed.
+      //
+      // The backend keeps the stored normalization when only the box was emptied
+      // with the text untouched, so mirror that rather than showing a blank the
+      // save did not actually write.
+      const normalizedAfter = contentChanged
+        ? ""
+        : (normalizedValue ?? editText?.normalized_content ?? "");
+      const saved: ReadText = { ...payload, normalized_content: normalizedAfter || null };
+      setEditText(saved);
+      setTitle(saved.title);
+      setNote(saved.note);
+      setContent(saved.content);
+      setNormalized(normalizedAfter);
+      setSelectedText(saved.uuid);
+      setSavedFlash(true);
       await loadTexts(selectedDataset);
-      // Open the saved text in the practice (view) pane.
-      setSelectedText(payload.uuid);
+      setClipsVersion((n) => n + 1);
+      void loadStandardClips(selectedDataset);
     } catch (e) {
       const msg = String(e);
       logError(`save text failed: ${msg}`, LOG_MODULE);
@@ -452,50 +531,12 @@ export default function ReadAloudPage() {
     }
   };
 
-  // ── Normalized-reference editor lifecycle ──────────────────────────
-  const startNormalizeEdit = () => {
-    if (!activeText) return;
-    setNormalizedDraft(activeText.normalized_content ?? "");
-    setMenuOpen(false);
-    setError(null);
-    setEditingNormalized(true);
-  };
-
-  const cancelNormalizeEdit = () => {
-    setEditingNormalized(false);
-    setError(null);
-  };
-
-  const saveNormalized = async () => {
-    if (!isTauri() || !selectedDataset || !activeText) return;
-    setSaving(true);
-    setError(null);
-    const t = activeText;
-    // Only the normalized reference changes here; content is passed through
-    // untouched so the backend staleness rule keeps the value we set.
-    const payload: ReadText = {
-      ...t,
-      normalized_content: normalizedDraft.trim() || null,
-      updated_at: nowIso(),
-    };
-    try {
-      await invoke("read_aloud_save_text", { datasetUuid: selectedDataset, text: payload });
-      setEditingNormalized(false);
-      await loadTexts(selectedDataset);
-      setSelectedText(t.uuid);
-    } catch (e) {
-      const msg = String(e);
-      logError(`save normalized failed: ${msg}`, LOG_MODULE);
-      setError(msg);
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const deleteText = (t: ReadText) => {
     setConfirm({
       title: "Delete text",
-      message: `Delete "${t.title || "Untitled"}" and all its recordings?`,
+      // The cascade takes the text's standard audio and every attempt with it,
+      // so the confirmation says so rather than only "recordings".
+      message: `Delete "${t.title || "Untitled"}" with its standard audio and every attempt?`,
       confirmLabel: "Delete",
       onConfirm: async () => {
         try {
@@ -577,13 +618,6 @@ export default function ReadAloudPage() {
     "w-full p-2 rounded-md bg-bg-muted border border-border-default text-text-primary text-sm focus:outline-none focus:border-accent-bg";
   const labelCls = "text-xs font-medium text-text-secondary mb-1 block";
 
-  // Either inline editor (the main text form or the normalized-reference form)
-  // swaps the content column and the sub-toolbar into Save / Cancel.
-  const inEditor = editing || editingNormalized;
-  const editorDirty = editing
-    ? dirty
-    : normalizedDraft !== (activeText?.normalized_content ?? "");
-
   return (
     <main className="flex-1 flex flex-col h-full min-h-0 min-w-0 bg-bg-body">
       {/* Thin-client reminder: recorded takes and text edits wait in the
@@ -593,7 +627,7 @@ export default function ReadAloudPage() {
           page's edge-to-edge trail. Crumbs are inert while editing so a stray
           click can't discard the draft. */}
       <Breadcrumb>
-        {inEditor ? (
+        {editing ? (
           <span className="shrink-0 text-accent">Read Aloud</span>
         ) : showLocations ? (
           <Breadcrumb.Link onClick={() => setShowLocations(false)}>Read Aloud</Breadcrumb.Link>
@@ -611,7 +645,7 @@ export default function ReadAloudPage() {
         {activeDataset && (
           <>
             <Breadcrumb.Sep />
-            {inEditor ? (
+            {editing ? (
               <span className="truncate min-w-0 max-w-[240px] text-accent" title={activeDataset.name}>
                 {activeDataset.name}
               </span>
@@ -683,22 +717,22 @@ export default function ReadAloudPage() {
       <Toolbar mobile={mobile}>
         <div className="flex-1 min-w-0" />
 
-        {inEditor ? (
+        {editing ? (
           <>
             <ToolbarButton
               variant="toggle"
-              active={editorDirty}
+              active={dirty}
               icon={Save}
               label={saving ? "Saving…" : "Save"}
               title="Save"
-              disabled={saving || !editorDirty}
-              onClick={() => void (editing ? saveText() : saveNormalized())}
+              disabled={saving || !dirty}
+              onClick={() => void saveText()}
             />
             <ToolbarButton
               icon={X}
               label="Cancel"
               title="Cancel editing"
-              onClick={editing ? cancelEdit : cancelNormalizeEdit}
+              onClick={cancelEdit}
             />
           </>
         ) : (
@@ -779,14 +813,16 @@ export default function ReadAloudPage() {
                     </ToolbarMenuItem>
                   ))}
                 </ToolbarSelect>
-                {/* The text's content and the standard audio its pronunciation is
-                    measured against. A text with no clip cannot be scored for
-                    pronunciation at all, so making one is a first-class action. */}
+                {/* Everything about the text that is not the reading itself:
+                    its title and note, the text, its normalized scoring
+                    reference, and the standard audio pronunciation is measured
+                    against. A text with no clip cannot be scored for
+                    pronunciation at all, so this is also where that gets fixed. */}
                 <ToolbarButton
                   icon={AudioLines}
                   label="Manage"
-                  title="Manage this text and its standard audio"
-                  onClick={() => setManageOpen(true)}
+                  title="Manage this text: text, normalized reference and standard audio"
+                  onClick={() => startEdit(activeText)}
                 />
               </>
             )}
@@ -853,7 +889,7 @@ export default function ReadAloudPage() {
             and Delete (desktop) plus, on a phone, the Add/New actions and Refresh,
             so the visible stacked row keeps only the contextual actions. The menu
             is hidden while inline-editing a text (Save/Cancel own the bar there). */}
-        {!inEditor &&
+        {!editing &&
           (mobile ||
             viewMode === "datasets" ||
             viewMode === "texts" ||
@@ -891,21 +927,9 @@ export default function ReadAloudPage() {
               </>
             )}
             {viewMode === "practice" && activeText && !attemptsView && (
-              <>
-                <ToolbarMenuItem icon={Pencil} onClick={() => startEdit(activeText)}>
-                  Edit text
-                </ToolbarMenuItem>
-                <ToolbarMenuItem
-                  icon={Wand2}
-                  checked={!!activeText.normalized_content}
-                  onClick={startNormalizeEdit}
-                >
-                  Normalized text
-                </ToolbarMenuItem>
-                <ToolbarMenuItem icon={Trash2} danger onClick={() => deleteText(activeText)}>
-                  Delete text
-                </ToolbarMenuItem>
-              </>
+              <ToolbarMenuItem icon={Trash2} danger onClick={() => deleteText(activeText)}>
+                Delete text
+              </ToolbarMenuItem>
             )}
             {mobile && viewMode !== "datasets" && (
               <ToolbarMenuItem icon={RefreshCw} onClick={handleRefresh}>
@@ -936,29 +960,53 @@ export default function ReadAloudPage() {
           </div>
         </div>
       ) : editing ? (
-        <div className="flex-1 overflow-y-auto min-h-0 min-w-0 p-4 flex flex-col gap-3">
-          <div>
-            <label className={labelCls}>Title</label>
-            <input
-              className={fieldCls}
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Der Erlkönig — first stanza"
-            />
+        <div className="flex-1 overflow-y-auto min-h-0 min-w-0 p-4 flex flex-col gap-4">
+          {/* Page header: which text this is, and whether the draft is stored.
+              Save no longer closes the page, so the header has to say that it
+              worked — and say the opposite while the draft runs ahead of it. */}
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <h2 className="text-base font-semibold text-text-primary truncate min-w-0">
+              {editText ? title.trim() || "Untitled" : "New text"}
+            </h2>
+            {/* Dirty first: typing within the two-second window must not keep
+                claiming the text is saved. */}
+            {dirty ? (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-bg-muted text-text-secondary">
+                {editText ? "unsaved changes" : "not saved yet"}
+              </span>
+            ) : savedFlash ? (
+              <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-success-bg text-text-primary">
+                <Check size={10} /> Saved
+              </span>
+            ) : null}
           </div>
 
-          <div>
-            <label className={labelCls}>Note (source, location, …)</label>
-            <input
-              className={fieldCls}
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="e.g. Goethe, from a textbook p.42"
-            />
-          </div>
+          {error && (
+            <div className="p-2 rounded-md bg-error-bg text-error-text text-xs break-words">{error}</div>
+          )}
 
-          <div className="flex flex-col min-h-0">
-            <label className={labelCls}>Text to read</label>
+          <ManageGroup title="Details" collapsible={mobile}>
+            <div>
+              <label className={labelCls}>Title</label>
+              <input
+                className={fieldCls}
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="e.g. Der Erlkönig — first stanza"
+              />
+            </div>
+            <div>
+              <label className={labelCls}>Note (source, location, …)</label>
+              <input
+                className={fieldCls}
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="e.g. Goethe, from a textbook p.42"
+              />
+            </div>
+          </ManageGroup>
+
+          <ManageGroup title="Text to read" collapsible={mobile}>
             <MdEditor
               value={content}
               onChange={setContent}
@@ -966,31 +1014,64 @@ export default function ReadAloudPage() {
               shortcutsOpen={false}
               textareaBgClass="bg-bg-muted"
             />
-          </div>
+          </ManageGroup>
 
-          {error && (
-            <div className="p-2 rounded-md bg-error-bg text-error-text text-xs break-words">{error}</div>
-          )}
-        </div>
-      ) : editingNormalized && activeText ? (
-        <div className="flex-1 overflow-y-auto min-h-0 min-w-0 p-4 flex flex-col gap-3">
-          <div className="flex flex-col min-h-0">
-            <label className={labelCls}>Normalized text for scoring</label>
-            <p className="text-[11px] text-text-tertiary mb-1">
-              LLM-normalized reference — numbers and abbreviations spelled out so they match the
-              transcription. Scoring uses this when set; leave it empty to score against the text to
-              read.
+          <ManageGroup title="Scoring reference" collapsible={mobile}>
+            <p className="text-[11px] text-text-tertiary">
+              <span className="text-text-secondary">Normalized text</span> — numbers and
+              abbreviations spelled out so they match a transcription. Leave it empty to score
+              against the text to read. Editing the passage clears it, because it described the old
+              wording; emptying this box alone does not, since the stored reference is kept while
+              the passage is unchanged. Generating standard audio reads the same reference, so the
+              two always agree.
             </p>
             <MdEditor
-              value={normalizedDraft}
-              onChange={setNormalizedDraft}
+              value={normalized}
+              onChange={setNormalized}
               spellCheck={false}
               shortcutsOpen={false}
               textareaBgClass="bg-bg-muted"
             />
-          </div>
-          {error && (
-            <div className="p-2 rounded-md bg-error-bg text-error-text text-xs break-words">{error}</div>
+            {/* Which of the two boxes the scorer will actually read. */}
+            <div className="rounded-md bg-bg-muted px-2.5 py-2">
+              <div className="text-[11px] text-text-secondary">
+                <span className="font-medium">Scoring will read</span>{" "}
+                <span className="text-text-tertiary">
+                  ({normalized.trim() ? "the normalized reference" : "the text to read"})
+                </span>
+              </div>
+              <div className="text-[11px] text-text-primary mt-0.5 break-words">
+                {scoringText ? (
+                  preview(scoringText)
+                ) : (
+                  <span className="text-text-tertiary">
+                    nothing yet — the text to read is empty
+                  </span>
+                )}
+              </div>
+            </div>
+          </ManageGroup>
+
+          {/* The clips belong to the *saved* text: a clip made from an unsaved
+              draft would be stale the moment Save landed. A new text has no row
+              to hang them on yet. Both cases keep the card visible and say why
+              rather than letting a section vanish — the page never changes
+              shape under the cursor. */}
+          {editText && selectedDataset ? (
+            <StandardAudioSection
+              datasetUuid={selectedDataset}
+              textUuid={editText.uuid}
+              disabled={dirty}
+              refreshKey={clipsVersion}
+              onChanged={() => void loadStandardClips(selectedDataset)}
+            />
+          ) : (
+            <ManageGroup title="Standard audio" collapsible={mobile}>
+              <p className="text-[11px] text-text-secondary">
+                Save the text first — a clip is recorded against the text as it is stored, so there
+                is nothing to attach one to yet.
+              </p>
+            </ManageGroup>
           )}
         </div>
       ) : attemptsView && activeDataset && activeText ? (
@@ -1108,16 +1189,6 @@ export default function ReadAloudPage() {
           text={rec.liveText}
           busy={rec.liveBusy}
           seconds={rec.liveSeconds}
-        />
-      )}
-
-      {manageOpen && activeDataset && activeText && (
-        <ManageTextDialog
-          datasetUuid={activeDataset.uuid}
-          text={activeText}
-          onClose={() => setManageOpen(false)}
-          onEditText={() => startEdit(activeText)}
-          onChanged={() => void loadStandardClips(activeDataset.uuid)}
         />
       )}
 
