@@ -60,8 +60,22 @@ src-tauri/src/
 ├── main.rs
 │
 ├── datasets/               # One submodule per dataset type + the shared core
-│   ├── mod.rs              # dataset_roots()/DatasetType/meta.json discovery, dataset CRUD,
-│   │                       #   subtitle generation, waveform generation (Symphonia peaks), DB generation
+│   ├── mod.rs              # Group root: the stage-module declarations, the re-export facade the rest
+│   │                       #   of the crate names (`datasets::find_dataset_dir`, `datasets::DatasetInfo`),
+│   │                       #   and the one cross-stage command (`dataset_advance_to_stage2`)
+│   ├── roots.rs            # `DatasetType`, where each type lives (`meta.json` linked dirs, download
+│   │                       #   roots), the `dataset_*_dir` commands
+│   ├── registry.rs         # Dataset discovery + the summary/detail DTOs, import/update/delete, the
+│   │                       #   base/overlay handover (`dataset_layer_*`)
+│   ├── paths.rs            # uuid → directory: base (read-only) vs writable overlay, and the overlay fork
+│   ├── media.rs            # Media enumeration, the `subtitle/`+`waveform/` mirror paths, trash, the
+│   │                       #   create/init/sync commands, and the favourites dataset
+│   ├── subtitle.rs         # Stage 2a: STT pass into `subtitle/*.vtt` and the VTT sentence shaping that
+│   │                       #   decides cue boundaries (desktop parts `cfg`-gated)
+│   ├── waveform.rs         # Stage 2b: symphonia peaks into `waveform/*.json`, which the dictation page
+│   │                       #   draws without decoding the audio again
+│   ├── db.rs               # Stage 3: the `data.sqlite3` schema, VTT parsing, cue generation
+│   ├── info.rs             # The unified `info.json` descriptor every dataset type shares
 │   ├── dictation/
 │   │   ├── mod.rs          # Dictation commands: media/subtitle/cue queries, progress (app-level DB)
 │   │   ├── align.rs        # Cue alignment (multi-pass anchor DP): `dataset_align_cues` (shared
@@ -82,8 +96,7 @@ src-tauri/src/
 │   └── textsim.rs          # Ratcliff-Obershelp similarity, shared by align + read_aloud
 │
 ├── models/                 # Whole group is `stt`-gated
-│   ├── mod.rs              # The `model_*` commands + the group's re-export facade (commands cannot
-│   │                       #   move into a submodule: `generate_handler!` needs their `__cmd__` macro)
+│   ├── mod.rs              # The `model_*` command wrappers, each a few lines over a submodule body
 │   ├── state.rs            # `ActiveModel`, `ModelState`, status/download DTOs, default + selected
 │   │                       #   model preferences (what auto-load consults)
 │   ├── engine.rs           # Load/unload/delete/cancel + `ensure_model_loaded`
