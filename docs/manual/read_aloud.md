@@ -57,10 +57,12 @@ You can add your own Read Aloud datasets and texts. A dataset dialog manages the
 
 - **Details** — title and note.
 - **Text to read** — the passage you record, in the same Markdown editor used in [Wiki](wiki.md).
-- **Scoring reference** — a **normalized reference**: a spelling‑out of numbers and abbreviations, which is what scoring and the generated standard audio read when it is set. Under the box, *Scoring will read* names which of the two the scorer will actually use and shows it, so you never have to guess between them.
+- **Scoring reference** — a **normalized reference**: a spelling‑out of numbers and abbreviations, which is what scoring and the generated standard audio read when it is set. Under the box, *Scoring will read* names which of the two the scorer will actually use and shows it, so you never have to guess between them. Two buttons fill the box for you: **Generate with Ollama** asks a local model, and **Copy prompt** copies the exact prompt to paste into ChatGPT or any other LLM — its answer goes back into the box. Either way it is still a draft, stored only when you **Save**; and when the text already has recordings, **Measure** scores what is in the box against them so you can see whether it actually helps.
 - **Standard audio** — the reference clips below.
 
-The first three are one draft: **Save** writes them and leaves you on the page (the header confirms it), **Cancel** discards them. Standard audio is separate — clips take effect immediately. On a phone the first three cards can be folded away to reach the audio without scrolling.
+The first three are one draft: **Save** writes them and leaves you on the page (the header confirms it), **Cancel** discards them. Standard audio is separate — clips take effect immediately.
+
+Beside the cards is a **Sections** list. The leftmost button in the toolbar shows and hides it: on a PC it is open to begin with, on a phone it slides in over the page and closes again once you pick something. Choose a section to jump to it — as you scroll, the list marks the card you are reading. It jumps rather than hides, because the cards are one draft: the note on the audio card about saving first only makes sense next to the fields it is about.
 
 ## XP
 

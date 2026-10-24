@@ -23,10 +23,16 @@ import {
   Type,
   AudioLines,
   Check,
-  ChevronDown,
+  AlignLeft,
+  LayoutGrid,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import MdEditor from "@/components/wiki/MdEditor";
+import NormalizeActions from "./NormalizeActions";
+import {
+  CollapsibleSidebar,
+  useCollapsibleSidebar,
+} from "@/components/layout/CollapsibleSidebar";
 import type {
   ReadAloudMeta,
   ReadAttempt,
@@ -122,50 +128,38 @@ function preview(text: string, max = 140): string {
   return flat.length > max ? `${flat.slice(0, max).trimEnd()}…` : flat;
 }
 
-/** One card of the text page: a header and a body. On a phone the cards
- *  collapse, because four stacked editors are a lot of scrolling; on a desktop
- *  they are always open, so the page reads straight down. */
+/** The cards of the text page, in the order they are stacked. The ids are the
+ *  scroll anchors the sections sidebar jumps to. */
+const MANAGE_SECTIONS = [
+  { id: "manage-details", label: "Details", icon: FileText },
+  { id: "manage-text", label: "Text to read", icon: AlignLeft },
+  { id: "manage-scoring", label: "Scoring reference", icon: Wand2 },
+  { id: "manage-audio", label: "Standard audio", icon: AudioLines },
+];
+
+/** One card of the text page: a header and a body. Every card is always open —
+ *  the sections sidebar scrolls to these, and a collapsed card would make its
+ *  own entry in that list a dead click. */
 function ManageGroup({
+  id,
   title,
-  collapsible,
-  defaultOpen = true,
   children,
 }: {
+  id?: string;
   title: string;
-  collapsible?: boolean;
-  defaultOpen?: boolean;
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
-  const expanded = !collapsible || open;
   return (
-    <section className="rounded-lg border border-border-default bg-bg-card">
-      <div
-        className={`flex items-center gap-2 px-3 py-2 ${
-          expanded ? "border-b border-border-default" : ""
-        }`}
-      >
-        {collapsible ? (
-          <button
-            className="flex items-center gap-1.5 cursor-pointer"
-            onClick={() => setOpen((v) => !v)}
-            aria-expanded={open}
-          >
-            <ChevronDown
-              size={13}
-              className={`text-text-tertiary transition-transform ${open ? "" : "-rotate-90"}`}
-            />
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">
-              {title}
-            </h3>
-          </button>
-        ) : (
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">
-            {title}
-          </h3>
-        )}
+    <section
+      id={id}
+      className="scroll-mt-3 rounded-lg border border-border-default bg-bg-card"
+    >
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-border-default">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-text-tertiary">
+          {title}
+        </h3>
       </div>
-      {expanded && <div className="flex flex-col gap-3 p-3">{children}</div>}
+      <div className="flex flex-col gap-3 p-3">{children}</div>
     </section>
   );
 }
@@ -208,6 +202,26 @@ export default function ReadAloudPage() {
     const t = window.setTimeout(() => setSavedFlash(false), 2000);
     return () => window.clearTimeout(t);
   }, [savedFlash]);
+
+  // ── The text page's sections sidebar ──────────────────────────────
+  // A table of contents for the four cards, not a filter: they are one draft,
+  // and the audio card's "paused until saved" note only reads beside the fields
+  // it is about. The hook opens the desktop column by default and always starts
+  // a phone with the drawer closed; the dragged width persists per page.
+  const manageSidebar = useCollapsibleSidebar({
+    storageKey: "read-aloud-manage-width",
+    defaultWidth: 200,
+    minWidth: 150,
+  });
+  const manageScrollRef = useRef<HTMLDivElement | null>(null);
+  const [activeSection, setActiveSection] = useState<string>(MANAGE_SECTIONS[0].id);
+  // Blank space after the last card, sized so that card can sit at the top of
+  // the column too. Only the last card needs it: every other one already has
+  // the rest of the page below it to scroll against.
+  const [tailSpace, setTailSpace] = useState(0);
+  // Set when a click starts a smooth scroll: while it runs the scroll handler
+  // must not fight it, or the highlight flickers through every card passed.
+  const scrollToUntil = useRef(0);
   // Locations overlay (shared manager) — opened from the datasets-view overflow
   // menu, replacing the content area the same way the Cards page does.
   const [showLocations, setShowLocations] = useState(false);
@@ -461,6 +475,7 @@ export default function ReadAloudPage() {
     setMenuOpen(false);
     setError(null);
     setSavedFlash(false);
+    setActiveSection(MANAGE_SECTIONS[0].id);
     setEditing(true);
   };
 
@@ -549,6 +564,61 @@ export default function ReadAloudPage() {
       },
     });
   };
+
+  // ── Section navigation ────────────────────────────────────────────
+  const goToSection = (id: string) => {
+    setActiveSection(id);
+    // A phone's drawer covers the page it navigates; the desktop column stays
+    // open so the list can be used twice in a row.
+    manageSidebar.closeOnSelect();
+    scrollToUntil.current = Date.now() + 600;
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  // Which card's header last passed the top of the scroll column. The column
+  // scrolls inside the page rather than the window, so this compares rects with
+  // its own top, not with 0.
+  const onManageScroll = () => {
+    if (Date.now() < scrollToUntil.current) return;
+    const root = manageScrollRef.current;
+    if (!root) return;
+    const top = root.getBoundingClientRect().top;
+    let current = MANAGE_SECTIONS[0].id;
+    for (const s of MANAGE_SECTIONS) {
+      const el = document.getElementById(s.id);
+      if (el && el.getBoundingClientRect().top - top <= 24) current = s.id;
+    }
+    // The last card may be too short to ever reach the top; at the bottom of
+    // the column it is the one being read.
+    if (root.scrollTop + root.clientHeight >= root.scrollHeight - 8) {
+      current = MANAGE_SECTIONS[MANAGE_SECTIONS.length - 1].id;
+    }
+    setActiveSection(current);
+  };
+
+  // Measure the room the last card needs to reach the top of the column: its
+  // own height is the part of the viewport it cannot cover, so that is exactly
+  // how much blank space it takes. Recomputed when the column is resized or the
+  // audio card grows and shrinks with its clips.
+  useEffect(() => {
+    if (!editing) {
+      setTailSpace(0);
+      return;
+    }
+    const root = manageScrollRef.current;
+    const last = document.getElementById(MANAGE_SECTIONS[MANAGE_SECTIONS.length - 1].id);
+    if (!root || !last) return;
+    const measure = () => {
+      // The column's own bottom padding already contributes scroll range.
+      const padding = 16;
+      setTailSpace(Math.max(0, Math.round(root.clientHeight - last.offsetHeight - padding)));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(root);
+    observer.observe(last);
+    return () => observer.disconnect();
+  }, [editing]);
 
   // Re-transcribe the open attempt with the current model. The same work as the
   // attempts list's per-row button, reached from the detail page's toolbar so
@@ -715,6 +785,19 @@ export default function ReadAloudPage() {
           bar treatment the wiki page uses. While an inline editor is open it hosts
           the Save / Cancel controls instead. */}
       <Toolbar mobile={mobile}>
+        {/* On the text page the bar's first control is the one that opens its
+            table of contents, beside what it opens and out of the way of
+            Save / Cancel at the other end. */}
+        {editing && (
+          <ToolbarButton
+            icon={LayoutGrid}
+            label="Sections"
+            variant="toggleSoft"
+            active={manageSidebar.visible}
+            onClick={manageSidebar.toggle}
+            title={manageSidebar.visible ? "Hide sections" : "Show sections"}
+          />
+        )}
         <div className="flex-1 min-w-0" />
 
         {editing ? (
@@ -960,119 +1043,179 @@ export default function ReadAloudPage() {
           </div>
         </div>
       ) : editing ? (
-        <div className="flex-1 overflow-y-auto min-h-0 min-w-0 p-4 flex flex-col gap-4">
-          {/* Page header: which text this is, and whether the draft is stored.
-              Save no longer closes the page, so the header has to say that it
-              worked — and say the opposite while the draft runs ahead of it. */}
-          <div className="flex flex-wrap items-center gap-2 min-w-0">
-            <h2 className="text-base font-semibold text-text-primary truncate min-w-0">
-              {editText ? title.trim() || "Untitled" : "New text"}
-            </h2>
-            {/* Dirty first: typing within the two-second window must not keep
-                claiming the text is saved. */}
-            {dirty ? (
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-bg-muted text-text-secondary">
-                {editText ? "unsaved changes" : "not saved yet"}
-              </span>
-            ) : savedFlash ? (
-              <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-success-bg text-text-primary">
-                <Check size={10} /> Saved
-              </span>
-            ) : null}
-          </div>
+        // The text page with its table of contents. The sidebar scrolls to a
+        // card rather than filtering the page: the four cards are one draft,
+        // and the audio card's "paused until saved" note only reads beside the
+        // fields it refers to.
+        <div className="relative flex flex-1 min-h-0 overflow-hidden">
+          <CollapsibleSidebar sidebar={manageSidebar}>
+            <nav className="flex flex-col gap-1 p-3 overflow-y-auto min-h-0">
+              <div className="text-xs font-semibold text-text-tertiary uppercase tracking-wide px-2 pt-1 pb-2 mb-1 border-b border-border-light">
+                Sections
+              </div>
+              {MANAGE_SECTIONS.map((s) => {
+                const Icon = s.icon;
+                return (
+                  <button
+                    type="button"
+                    key={s.id}
+                    className={`flex items-center gap-2 px-2 py-1.5 rounded-md text-sm text-left cursor-pointer transition-colors ${
+                      activeSection === s.id
+                        ? "bg-bg-hover text-text-primary font-medium"
+                        : "text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+                    }`}
+                    onClick={() => goToSection(s.id)}
+                  >
+                    <Icon size={15} className="shrink-0" />
+                    <span className="truncate">{s.label}</span>
+                  </button>
+                );
+              })}
+            </nav>
+          </CollapsibleSidebar>
 
-          {error && (
-            <div className="p-2 rounded-md bg-error-bg text-error-text text-xs break-words">{error}</div>
-          )}
-
-          <ManageGroup title="Details" collapsible={mobile}>
-            <div>
-              <label className={labelCls}>Title</label>
-              <input
-                className={fieldCls}
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="e.g. Der Erlkönig — first stanza"
-              />
-            </div>
-            <div>
-              <label className={labelCls}>Note (source, location, …)</label>
-              <input
-                className={fieldCls}
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                placeholder="e.g. Goethe, from a textbook p.42"
-              />
-            </div>
-          </ManageGroup>
-
-          <ManageGroup title="Text to read" collapsible={mobile}>
-            <MdEditor
-              value={content}
-              onChange={setContent}
-              spellCheck={false}
-              shortcutsOpen={false}
-              textareaBgClass="bg-bg-muted"
-            />
-          </ManageGroup>
-
-          <ManageGroup title="Scoring reference" collapsible={mobile}>
-            <p className="text-[11px] text-text-tertiary">
-              <span className="text-text-secondary">Normalized text</span> — numbers and
-              abbreviations spelled out so they match a transcription. Leave it empty to score
-              against the text to read. Editing the passage clears it, because it described the old
-              wording; emptying this box alone does not, since the stored reference is kept while
-              the passage is unchanged. Generating standard audio reads the same reference, so the
-              two always agree.
-            </p>
-            <MdEditor
-              value={normalized}
-              onChange={setNormalized}
-              spellCheck={false}
-              shortcutsOpen={false}
-              textareaBgClass="bg-bg-muted"
-            />
-            {/* Which of the two boxes the scorer will actually read. */}
-            <div className="rounded-md bg-bg-muted px-2.5 py-2">
-              <div className="text-[11px] text-text-secondary">
-                <span className="font-medium">Scoring will read</span>{" "}
-                <span className="text-text-tertiary">
-                  ({normalized.trim() ? "the normalized reference" : "the text to read"})
+          <div
+            ref={manageScrollRef}
+            onScroll={onManageScroll}
+            className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden p-4 flex flex-col gap-4"
+          >
+            {/* Page header: which text this is, and whether the draft is stored.
+                Save no longer closes the page, so the header has to say that it
+                worked — and say the opposite while the draft runs ahead of it. */}
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
+              <h2 className="text-base font-semibold text-text-primary truncate min-w-0">
+                {editText ? title.trim() || "Untitled" : "New text"}
+              </h2>
+              {/* Dirty first: typing within the two-second window must not keep
+                  claiming the text is saved. */}
+              {dirty ? (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-bg-muted text-text-secondary">
+                  {editText ? "unsaved changes" : "not saved yet"}
                 </span>
-              </div>
-              <div className="text-[11px] text-text-primary mt-0.5 break-words">
-                {scoringText ? (
-                  preview(scoringText)
-                ) : (
-                  <span className="text-text-tertiary">
-                    nothing yet — the text to read is empty
-                  </span>
-                )}
-              </div>
+              ) : savedFlash ? (
+                <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-success-bg text-text-primary">
+                  <Check size={10} /> Saved
+                </span>
+              ) : null}
             </div>
-          </ManageGroup>
 
-          {/* The clips belong to the *saved* text: a clip made from an unsaved
-              draft would be stale the moment Save landed. A new text has no row
-              to hang them on yet. Both cases keep the card visible and say why
-              rather than letting a section vanish — the page never changes
-              shape under the cursor. */}
-          {editText && selectedDataset ? (
-            <StandardAudioSection
-              datasetUuid={selectedDataset}
-              textUuid={editText.uuid}
-              disabled={dirty}
-              refreshKey={clipsVersion}
-              onChanged={() => void loadStandardClips(selectedDataset)}
-            />
-          ) : (
-            <ManageGroup title="Standard audio" collapsible={mobile}>
-              <p className="text-[11px] text-text-secondary">
-                Save the text first — a clip is recorded against the text as it is stored, so there
-                is nothing to attach one to yet.
-              </p>
+            {error && (
+              <div className="p-2 rounded-md bg-error-bg text-error-text text-xs break-words">
+                {error}
+              </div>
+            )}
+
+            <ManageGroup id="manage-details" title="Details">
+              <div>
+                <label className={labelCls}>Title</label>
+                <input
+                  className={fieldCls}
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="e.g. Der Erlkönig — first stanza"
+                />
+              </div>
+              <div>
+                <label className={labelCls}>Note (source, location, …)</label>
+                <input
+                  className={fieldCls}
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder="e.g. Goethe, from a textbook p.42"
+                />
+              </div>
             </ManageGroup>
-          )}
+
+            <ManageGroup id="manage-text" title="Text to read">
+              <MdEditor
+                value={content}
+                onChange={setContent}
+                spellCheck={false}
+                shortcutsOpen={false}
+                textareaBgClass="bg-bg-muted"
+              />
+            </ManageGroup>
+
+            <ManageGroup id="manage-scoring" title="Scoring reference">
+              <p className="text-[11px] text-text-tertiary">
+                <span className="text-text-secondary">Normalized text</span> — numbers and
+                abbreviations spelled out so they match a transcription. Leave it empty to score
+                against the text to read. Editing the passage clears it, because it described the
+                old wording; emptying this box alone does not, since the stored reference is kept
+                while the passage is unchanged. Generating standard audio reads the same reference,
+                so the two always agree.
+              </p>
+              {/* Two ways to fill the box below: the app's own prompt through a local
+                  model, or that same prompt on the clipboard for any other LLM.
+                  Both only fill the draft — the gate measures, Save stores. */}
+              <NormalizeActions
+                content={content}
+                baseline={
+                  editText ? editText.normalized_content?.trim() || editText.content.trim() : ""
+                }
+                datasetUuid={selectedDataset}
+                textUuid={editText?.uuid ?? null}
+                candidate={normalized}
+                onCandidate={setNormalized}
+                disabled={saving}
+                refreshKey={clipsVersion}
+              />
+              <MdEditor
+                value={normalized}
+                onChange={setNormalized}
+                spellCheck={false}
+                shortcutsOpen={false}
+                textareaBgClass="bg-bg-muted"
+              />
+              {/* Which of the two boxes the scorer will actually read. */}
+              <div className="rounded-md bg-bg-muted px-2.5 py-2">
+                <div className="text-[11px] text-text-secondary">
+                  <span className="font-medium">Scoring will read</span>{" "}
+                  <span className="text-text-tertiary">
+                    ({normalized.trim() ? "the normalized reference" : "the text to read"})
+                  </span>
+                </div>
+                <div className="text-[11px] text-text-primary mt-0.5 break-words">
+                  {scoringText ? (
+                    preview(scoringText)
+                  ) : (
+                    <span className="text-text-tertiary">
+                      nothing yet — the text to read is empty
+                    </span>
+                  )}
+                </div>
+              </div>
+            </ManageGroup>
+
+            {/* The clips belong to the *saved* text: a clip made from an unsaved
+                draft would be stale the moment Save landed. A new text has no row
+                to hang them on yet. Both cases keep the card visible and say why
+                rather than letting a section vanish — the page never changes
+                shape under the cursor. */}
+            <div id="manage-audio" className="scroll-mt-3">
+              {editText && selectedDataset ? (
+                <StandardAudioSection
+                  datasetUuid={selectedDataset}
+                  textUuid={editText.uuid}
+                  disabled={dirty}
+                  refreshKey={clipsVersion}
+                  onChanged={() => void loadStandardClips(selectedDataset)}
+                />
+              ) : (
+                <ManageGroup title="Standard audio">
+                  <p className="text-[11px] text-text-secondary">
+                    Save the text first — a clip is recorded against the text as it is stored, so
+                    there is nothing to attach one to yet.
+                  </p>
+                </ManageGroup>
+              )}
+            </div>
+
+            {/* Tail room, so the last card can be scrolled to the top rather
+                than stopping at the bottom of the column. Invisible until you
+                scroll into it. */}
+            {tailSpace > 0 && <div aria-hidden style={{ height: tailSpace }} className="shrink-0" />}
+          </div>
         </div>
       ) : attemptsView && activeDataset && activeText ? (
         // The page-level error is where the toolbar's Recognize again reports a

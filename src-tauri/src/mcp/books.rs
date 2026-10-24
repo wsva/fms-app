@@ -151,6 +151,28 @@ struct ReadAloudScoreParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudNormalizeParam {
+    /// The passage to normalize (the text's `content`).
+    content: String,
+    /// Model to run the prompt with (Ollama, or the configured provider). Omit
+    /// or leave empty to get the prompt back on its own.
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    temperature: Option<f32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudNormalizeMeasureParam {
+    dataset_uuid: String,
+    text_uuid: String,
+    /// What scoring reads today: the stored `normalized_content` when there is
+    /// one, the passage otherwise.
+    reference: String,
+    candidate: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudModelDownloadParam {
     /// Catalog id (a HuggingFace repo id). Empty installs the default espeak
     /// phoneme model that `read_aloud_assess` scores against.
@@ -482,6 +504,27 @@ impl DatasetMcpServer {
         let mut v = serde_json::to_value(&summary).map_err(|e| format!("Failed to serialize summary: {}", e))?;
         v["passed"] = serde_json::json!(v.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0) >= 60.0);
         Ok(serde_json::to_string_pretty(&v).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_normalize", description = "Turn a passage into its spoken-form scoring reference (`normalized_content`): numbers, cardinals, dates, times, currency, percentages, units and abbreviations spelled out the way they are read aloud, with nothing else changed. The prompt is the app's own, so a candidate from any provider has the same shape. Pass `model` to run it in-app (Ollama, or the configured provider); omit it to receive the `prompt` alone and run it through an external LLM. Nothing is written: save the candidate with read_aloud_save_text, and gate it first with read_aloud_normalize_measure.")]
+    async fn read_aloud_normalize(&self, Parameters(param): Parameters<ReadAloudNormalizeParam>) -> Result<String, String> {
+        log::info!("[MCP] read_aloud_normalize: model={:?}, {} chars", param.model, param.content.len());
+        let settings = self.app.state::<SettingsState>();
+        let result = datasets::read_aloud::normalize::generate(settings, param.content, param.model, param.temperature).await?;
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_normalize_measure", description = "Gate a candidate normalization against the user's own recordings of one text: the best score the reference in use today achieves (`baseline`) versus the candidate's (`candidate`), over the same transcripts. `attempts` says how many were compared — 0 means the numbers prove nothing and the text has no practice history yet. Nothing is written and nothing is saved. Keep the candidate only when it is strictly higher; equal means the mismatch was not spelling, lower means it reworded the passage.")]
+    async fn read_aloud_normalize_measure(&self, Parameters(param): Parameters<ReadAloudNormalizeMeasureParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let result = datasets::read_aloud::normalize::measure(
+            &settings,
+            &param.dataset_uuid,
+            &param.text_uuid,
+            &param.reference,
+            &param.candidate,
+        )?;
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
     #[tool(name = "read_aloud_assess", description = "Score an attempt across all three axes without persisting anything: accuracy (the WIP 0-100 score, identical to read_aloud_score), fluency (words/min, articulation rate, pauses, longest run — needs `words` timings from model_transcribe_detailed and the WAV), and pronunciation (CTC phoneme GOP against the text's standard audio — the dataset-owned reference clip, never a network call). Each axis degrades honestly: a missing phoneme model, an absent standard clip or an attempt too short to align reports `unavailable_reason` (no_reference / stale_reference / model_missing / too_short) instead of a fabricated score. Use this to preview a result before read_aloud_submit; call read_aloud_standard_audio_list first when no_reference comes back.")]

@@ -16,6 +16,7 @@
 pub(crate) mod assess;
 pub(crate) mod fluency;
 pub(crate) mod gop;
+pub(crate) mod normalize;
 #[cfg(feature = "phoneme")]
 pub(crate) mod phoneme;
 pub(crate) mod standard_audio;

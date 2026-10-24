@@ -51,9 +51,12 @@ instructions: |-
   - NEVER: reword, reorder, correct, translate, add or drop content, or change case beyond what reading aloud implies. Punctuation and capitalisation are already ignored by the metric, so leave them alone - changing them is churn with no score effect.
   - Output the normalized text only, no commentary.
 
+  The app ships this prompt itself: `read_aloud_normalize` with no `model` returns the exact words its **Generate** button sends (and with a `model` it runs them in-app). Prefer that text over composing your own — a candidate has to share the app's shape for the gate below to mean anything.
+
   Gate it before saving:
   - `candidate_best` = highest `score` from `read_aloud_score({ content: candidate, recognized })` over the *same* attempts used for `raw_best`.
   - **Save only if `candidate_best > raw_best`.** Equal means the mismatch was not spelling (leave `normalized_content` untouched - writing it would be churn). Lower means the candidate reworded something - discard it, keep the raw text.
+  - `read_aloud_normalize_measure({ dataset_uuid, text_uuid, reference, candidate })` does all of that in one call: it returns `baseline`, `candidate` and `attempts` (how many transcripts were compared; 0 means nothing was measured). Use it when you want the app's own gate; use the loop above when you want the per-attempt detail.
   - Inspect the winning call's `chunks` / counts (hits/substitutions/deletions/insertions, `wer`, `mer`) so you can report *what* the normalization fixed.
 
   ### Step 3: Save the winner (round-trip the whole row)
