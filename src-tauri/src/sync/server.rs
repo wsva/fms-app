@@ -928,7 +928,7 @@ async fn stt_handler(State(s): State<AppState>, mut multipart: Multipart) -> Res
     let app = s.app.clone();
     let joined = tauri::async_runtime::spawn_blocking(move || {
         let model_state = app.state::<ModelState>();
-        models::transcribe_wav_bytes(&model_state, &wav)
+        models::transcribe::transcribe_wav_bytes(&model_state, &wav)
     })
     .await;
 

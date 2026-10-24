@@ -1299,7 +1299,7 @@ pub async fn dataset_sync_cue_times_word_level(
 
         // Transcribe with word-level timestamps.
         let word_result =
-            crate::models::transcribe_file_word_level(&model_state, &media_path)?;
+            crate::models::transcribe::transcribe_file_word_level(&model_state, &media_path)?;
         let stt_words = match word_result.segments {
             Some(segs) if !segs.is_empty() => segs,
             _ => {

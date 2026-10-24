@@ -82,8 +82,16 @@ src-tauri/src/
 │   └── textsim.rs          # Ratcliff-Obershelp similarity, shared by align + read_aloud
 │
 ├── models/                 # Whole group is `stt`-gated
-│   ├── mod.rs              # STT model management: download, status, transcription via `transcribe-rs`
-│   ├── download.rs         # Streaming model download with progress events
+│   ├── mod.rs              # The `model_*` commands + the group's re-export facade (commands cannot
+│   │                       #   move into a submodule: `generate_handler!` needs their `__cmd__` macro)
+│   ├── state.rs            # `ActiveModel`, `ModelState`, status/download DTOs, default + selected
+│   │                       #   model preferences (what auto-load consults)
+│   ├── engine.rs           # Load/unload/delete/cancel + `ensure_model_loaded`
+│   ├── transcribe.rs       # Text / segment / word-level passes, chunking for long audio, and the
+│   │                       #   guard that lends the model out of `ModelState` for one call
+│   ├── download_stt.rs     # CDN blob download for STT models
+│   ├── download_hf.rs      # HuggingFace catalog download for the non-STT models (OCR/TTS/split/phoneme)
+│   ├── download.rs         # Streaming downloader + hub providers (the transport both of the above use)
 │   ├── catalog.rs          # HuggingFace catalog of non-STT models (OCR, TTS, text-split)
 │   ├── catalog_stt.rs      # STT model catalog
 │   └── index.rs            # Unified `{model_root}/index.json` over every downloaded model

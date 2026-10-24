@@ -1840,7 +1840,7 @@ pub async fn dataset_generate_subtitles(
             },
         );
 
-        let result = crate::models::transcribe_file(&model_state, file_path)?;
+        let result = crate::models::transcribe::transcribe_file(&model_state, file_path)?;
 
         // Mirror the media sub-directory under subtitle/ before writing.
         if let Some(parent) = vtt_path.parent() {
@@ -2002,7 +2002,7 @@ pub async fn dataset_generate_subtitle_single(
         },
     );
 
-    let result = crate::models::transcribe_file(&model_state, &media_path)?;
+    let result = crate::models::transcribe::transcribe_file(&model_state, &media_path)?;
 
     // Mirror the media sub-directory under subtitle/
     let vtt_path = sibling_path(&media_dir, &subtitle_dir, Path::new(&source), "vtt");
