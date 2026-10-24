@@ -57,6 +57,34 @@ pub(crate) struct TtsAudio {
 /// Edge TTS reports offsets in 100 ns ticks (Windows FILETIME units).
 const TICKS_PER_SECOND: f64 = 10_000_000.0;
 
+/// The audio format every caller here depends on.
+///
+/// Set explicitly instead of relying on `SpeakOptions::default()`: in
+/// edge-tts-rust 0.1.7 the default output format became
+/// `webm-24khz-16bit-mono-opus`, while the read-aloud reference cache writes
+/// `*.mp3` and decodes it back with Symphonia, and the preview path hands the
+/// bytes to an `<audio>` element as mp3.
+const MP3_OUTPUT_FORMAT: &str = "audio-24khz-48kbitrate-mono-mp3";
+
+/// The options every entry point uses: the caller's voice and prosody, mp3
+/// output, and **word** boundaries — the reference timeline groups phones by
+/// word, so sentence boundaries alone would be useless to it.
+fn speak_options(
+    voice: impl Into<String>,
+    rate: Option<String>,
+    volume: Option<String>,
+    pitch: Option<String>,
+) -> SpeakOptions {
+    SpeakOptions {
+        voice: voice.into(),
+        rate: rate.unwrap_or_else(|| "+0%".to_string()),
+        volume: volume.unwrap_or_else(|| "+0%".to_string()),
+        pitch: pitch.unwrap_or_else(|| "+0Hz".to_string()),
+        boundary: Boundary::Word,
+        output_format: MP3_OUTPUT_FORMAT.to_string(),
+    }
+}
+
 /// Synthesize text and return the raw audio bytes **and** its word boundaries
 /// (used by the read-aloud reference timeline).
 pub(crate) async fn synthesize_with_boundaries(
@@ -69,17 +97,8 @@ pub(crate) async fn synthesize_with_boundaries(
     log::debug!("edge_tts synthesize_with_boundaries: voice={}, text_len={}", voice, text.len());
     let client = EdgeTtsClient::new().map_err(|e| e.to_string())?;
 
-    let options = SpeakOptions {
-        voice: voice.to_string(),
-        rate: rate.unwrap_or_else(|| "+0%".to_string()),
-        volume: volume.unwrap_or_else(|| "+0%".to_string()),
-        pitch: pitch.unwrap_or_else(|| "+0Hz".to_string()),
-        boundary: Boundary::Word,
-        ..SpeakOptions::default()
-    };
-
     let result = client
-        .synthesize(text, options)
+        .synthesize(text, speak_options(voice, rate, volume, pitch))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -137,17 +156,11 @@ pub async fn edge_tts_synthesize(args: TtsSynthesizeArgs) -> Result<TtsSynthesiz
     log::info!("edge_tts_synthesize: voice={}, output={}", args.voice, args.output_path);
     let client = EdgeTtsClient::new().map_err(|e| e.to_string())?;
 
-    let options = SpeakOptions {
-        voice: args.voice,
-        rate: args.rate.unwrap_or_else(|| "+0%".to_string()),
-        volume: args.volume.unwrap_or_else(|| "+0%".to_string()),
-        pitch: args.pitch.unwrap_or_else(|| "+0Hz".to_string()),
-        boundary: Boundary::Word,
-        ..SpeakOptions::default()
-    };
-
     let result = client
-        .synthesize(&args.text, options)
+        .synthesize(
+            &args.text,
+            speak_options(args.voice, args.rate, args.volume, args.pitch),
+        )
         .await
         .map_err(|e| e.to_string())?;
 
@@ -169,17 +182,11 @@ pub async fn edge_tts_preview(args: TtsSynthesizeArgs) -> Result<TtsPreviewResul
     log::debug!("edge_tts_preview: voice={}, text_len={}", args.voice, args.text.len());
     let client = EdgeTtsClient::new().map_err(|e| e.to_string())?;
 
-    let options = SpeakOptions {
-        voice: args.voice,
-        rate: args.rate.unwrap_or_else(|| "+0%".to_string()),
-        volume: args.volume.unwrap_or_else(|| "+0%".to_string()),
-        pitch: args.pitch.unwrap_or_else(|| "+0Hz".to_string()),
-        boundary: Boundary::Word,
-        ..SpeakOptions::default()
-    };
-
     let result = client
-        .synthesize(&args.text, options)
+        .synthesize(
+            &args.text,
+            speak_options(args.voice, args.rate, args.volume, args.pitch),
+        )
         .await
         .map_err(|e| e.to_string())?;
 

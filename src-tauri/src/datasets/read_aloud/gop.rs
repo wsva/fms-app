@@ -16,7 +16,7 @@
 //! whole numerical core is unit-testable without a model file.
 
 /// Per-frame log-probabilities plus the derived quantities a GOP pass needs
-/// repeatedly. Built once per take.
+/// repeatedly. Built once per attempt.
 pub(crate) struct LogPost {
     frames: Vec<Vec<f32>>,
     /// `max_q log p(q)` per frame — the denominator of every GOP.
@@ -180,7 +180,7 @@ pub(crate) fn forced_align(post: &LogPost, target: &[usize]) -> Option<Vec<Phone
     spans.reverse();
 
     // A phone the aligner never visited cannot be scored. That happens when the
-    // take is far too short for the reference; report it instead of inventing
+    // recording is far too short for the reference; report it instead of inventing
     // a span (which would silently score a word the speaker never reached).
     if spans.len() != target.len() {
         return None;
@@ -251,7 +251,7 @@ pub(crate) fn word_score(post: &LogPost, spans: &[PhoneSpan], tau: f32) -> Optio
     }
 }
 
-/// Roll per-word scores up into one take-level number.
+/// Roll per-word scores up into one attempt-level number.
 ///
 /// Returns `(score, weak_ratio)`. Words worth 3 characters or fewer carry half
 /// weight: "a" and "of" are too short for a phone-level judgement to mean

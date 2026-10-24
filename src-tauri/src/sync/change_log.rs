@@ -204,8 +204,11 @@ impl ChangeClass {
             | "book_sentence_delete"
             | "book_word_save"
             | "book_word_delete"
+            // A standard-audio clip is dataset content (row + wav), keyed by uuid.
             | "read_text_save"
             | "read_text_delete"
+            | "read_standard_audio_save"
+            | "read_standard_audio_delete"
             | "wiki_file_save"
             | "wiki_file_delete"
             | "dictation" => ChangeClass::State,
@@ -340,6 +343,7 @@ pub fn object_id_for(kind: &str, payload: &Value, user_key: &str) -> String {
         "book_sentences_save" => String::new(),
         // Read-aloud texts are editable dataset content, keyed by their uuid.
         "read_text_save" | "read_text_delete" => get("uuid"),
+        "read_standard_audio_save" | "read_standard_audio_delete" => get("uuid"),
         // Attempts are per-user events under `@app`, so the id must carry the
         // owner (the scope is shared by every user), exactly like `card_review`.
         "read_attempt_save" | "read_attempt_delete" => format!("{user_key}:{}", get("uuid")),
@@ -710,6 +714,7 @@ pub fn table_for_kind(kind: &str) -> &'static str {
         "book_sentence_save" | "book_sentences_save" | "book_sentence_delete" => "book_sentences",
         "book_word_save" | "book_word_delete" => "book_sentence_words",
         "read_text_save" | "read_text_delete" => "read_text",
+        "read_standard_audio_save" | "read_standard_audio_delete" => "read_standard_audio",
         "read_attempt_save" | "read_attempt_delete" => "read_attempt_event",
         _ => "row",
     }

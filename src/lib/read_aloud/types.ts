@@ -55,8 +55,8 @@ export interface ReadAttempt {
   /** WIP-based ASR score 0-100 against the reference text. */
   score: number;
   /**
-   * The stored three-axis assessment, when one was computed. Absent for takes
-   * recorded before assessment existed and for takes whose recording is gone.
+   * The stored three-axis assessment, when one was computed. Absent for attempts
+   * recorded before assessment existed and for attempts whose recording is gone.
    * It is the compact form: worst words only, at most 24 pauses.
    */
   metrics?: Assessment | null;
@@ -114,19 +114,25 @@ export interface ReadAloudSubmitResult {
  * `gop.rs`/`assess.rs` report an honest gap instead of a fabricated score.
  */
 export type PronUnavailableReason =
+  /** The text has no standard audio yet: make one (Manage → Standard audio). */
+  | "no_reference"
+  /** The standard audio was made from an earlier version of the text. */
+  | "stale_reference"
   | "model_missing"
   | "model_error"
+  /** Legacy: the reference used to be fetched from Edge TTS while scoring. */
   | "no_network"
+  /** Legacy, as above. */
   | "tts_failed"
   | "too_short";
 
-/** What this take's pipeline could actually measure. */
+/** What this attempt's pipeline could actually measure. */
 export interface AssessmentCapabilities {
   /** The STT model returned per-word timings, so fluency exists. */
   word_timings: boolean;
   /** The phoneme GOP pass ran. */
   gop: boolean;
-  /** A TTS-derived reference phone timeline was available. */
+  /** A dataset-owned standard clip supplied the reference phone timeline. */
   tts_reference: boolean;
 }
 
@@ -225,7 +231,7 @@ export interface WordAssessment {
   pron?: number | null;
 }
 
-/** The whole scored picture for one take. */
+/** The whole scored picture for one attempt. */
 export interface Assessment {
   schema_version: number;
   capabilities: AssessmentCapabilities;
@@ -240,6 +246,43 @@ export interface Assessment {
 
 /** Below this a word's pronunciation is reported as weak. */
 export const WEAK_WORD_SCORE = 0.4;
+
+/**
+ * One reference clip a text owns, read from `read_standard_audio`.
+ *
+ * Scoring measures pronunciation against the **default** clip only. `kind`,
+ * `duration` and `stale` are derived on read (the row stores neither) so they
+ * can never disagree with the wav they describe.
+ */
+export interface ReadStandardAudio {
+  uuid: string;
+  text_uuid: string;
+  /** Free-form origin note: `Edge TTS · <voice>` or `Upload · <file>`. */
+  note: string;
+  /** `tts` when the clip carries word timings, `upload` otherwise. */
+  kind: "tts" | "upload";
+  /** Seconds, decoded from the wav. 0 when the wav is not on this device. */
+  duration: number;
+  /** Absolute path for playback, null when the wav is missing here. */
+  audio_url: string | null;
+  is_default: boolean;
+  /** Made from an earlier version of the text: regenerate before scoring. */
+  stale: boolean;
+  /** Present and not stale — what scoring would read. */
+  usable: boolean;
+  created_at: string;
+}
+
+/** A decoded upload, returned by the probe before anything is stored. */
+export interface AudioProbe {
+  /** Seconds of the whole source. */
+  duration: number;
+  /** Interleaved min/max signed 8-bit pairs, the `WaveformPeaks` layout. */
+  peaks: number[];
+  /** Seconds one min/max pair covers. */
+  seconds_per_pair: number;
+  file_name: string;
+}
 
 /** Score threshold at/above which a reading passes and earns XP. */
 export const PASS_SCORE = 60;

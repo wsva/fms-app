@@ -1,4 +1,4 @@
-//! The single assessment seam: turn one take into one scored picture.
+//! The single assessment seam: turn one attempt into one scored picture.
 //!
 //! Three axes, deliberately independent, deliberately not combined into a
 //! composite:
@@ -7,7 +7,7 @@
 //! |---|---|---|
 //! | accuracy | `asr_metric::score_asr` (WIP × 100) | **no** — byte-identical |
 //! | fluency | energy VAD + STT word timings | new |
-//! | pronunciation | CTC phoneme GOP against a TTS-derived reference | new |
+//! | pronunciation | CTC phoneme GOP against the text's standard audio | new |
 //!
 //! The accuracy number keeps its exact meaning because XP thresholds (60/80),
 //! `best_score`, sync payloads and every stored attempt depend on it. Everything
@@ -48,7 +48,7 @@ pub(crate) const GOP_TAU: f32 = 2.5;
 pub(crate) const MAX_STORED_WEAK_WORDS: usize = 12;
 pub(crate) const MAX_STORED_PAUSES: usize = 24;
 
-/// What this take's pipeline could actually measure. Reported so a caller (and
+/// What this attempt's pipeline could actually measure. Reported so a caller (and
 /// an agent) can tell "pronunciation was fine" from "pronunciation was not
 /// measured".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -59,7 +59,7 @@ pub(crate) struct Capabilities {
     /// GOP ran.
     #[serde(default)]
     pub gop: bool,
-    /// A TTS reference timeline was available.
+    /// A dataset-owned reference clip supplied the phone timeline.
     #[serde(default)]
     pub tts_reference: bool,
 }
@@ -73,11 +73,18 @@ pub(crate) enum PronReason {
     ModelMissing,
     /// The phoneme model exists but could not be loaded or run.
     ModelError,
-    /// The reference timeline needs Edge TTS and there is no connection.
+    /// The text has no standard audio, so there is nothing to compare against.
+    NoReference,
+    /// The standard audio was made from an earlier version of the text, so its
+    /// phone target no longer matches the words being compared.
+    StaleReference,
+    /// Legacy: the reference timeline used to be fetched from Edge TTS while
+    /// scoring. Never emitted now that the dataset owns the clip; kept so
+    /// attempts scored before that change still deserialize.
     NoNetwork,
-    /// The reference audio could not be synthesised or decoded.
+    /// Legacy, as above: the on-demand reference could not be synthesised.
     TtsFailed,
-    /// Fewer frames than reference phones — the take is too short to align.
+    /// Fewer frames than reference phones — the attempt is too short to align.
     TooShort,
 }
 
@@ -146,7 +153,7 @@ pub(crate) struct WordAssessment {
     pub pron: Option<f64>,
 }
 
-/// The whole picture for one take.
+/// The whole picture for one attempt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Assessment {
     #[serde(default)]
@@ -169,7 +176,7 @@ pub(crate) struct Assessment {
 pub(crate) enum PronEvidence<'a> {
     Unavailable(PronReason),
     Measured {
-        /// Learner log-posteriors along the take.
+        /// Learner log-posteriors along the recording.
         post: &'a LogPost,
         /// Per reference word, the phone spans it was aligned to.
         spans: &'a [Vec<PhoneSpan>],

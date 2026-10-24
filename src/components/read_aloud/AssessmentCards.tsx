@@ -64,7 +64,8 @@ export default function AssessmentCards({ assessment }: { assessment: Assessment
           </>
         ) : (
           <p className="text-[11px] text-text-tertiary">
-            Not measured — the loaded speech model gives no word timings.
+            Not measured — the loaded speech model reports no word timings. Load a
+            Parakeet model on the Models page, then recognize the take again.
           </p>
         )}
       </Card>
@@ -96,7 +97,7 @@ export default function AssessmentCards({ assessment }: { assessment: Assessment
 }
 
 /**
- * The pauses of one take as a ribbon across the recording: silence at
+ * The pauses of one attempt as a ribbon across the recording: silence at
  * punctuation is grey, a mid-phrase hesitation is amber (it is the hesitancy
  * signal), and leading/trailing silence is not drawn at all — it is not part of
  * the reading.
@@ -194,20 +195,34 @@ function WeakWords({ words }: { words: Assessment["words"] }) {
 /** Turn a first-class reason into the sentence a learner can act on. */
 function describeReason(reason: PronUnavailableReason | null): string {
   switch (reason) {
+    case "no_reference":
+      return (
+        "this text has no standard audio yet, and that clip is what pronunciation " +
+        "is measured against. Open Manage → Standard audio and generate one with " +
+        "Edge TTS (or upload a recording), then score again."
+      );
+    case "stale_reference":
+      return (
+        "the text's standard audio was made from an earlier version of the text, so " +
+        "it no longer matches the words being compared. Regenerate it in Manage → " +
+        "Standard audio, then score again."
+      );
     case "model_missing":
       return (
-        "no phoneme model is installed. Add one under the models folder " +
-        "(phoneme/<name>/model.onnx + vocab.json) and score again."
+        "no pronunciation model is installed. Download it on the Models page " +
+        "(Pronunciation → Wav2Vec2 Phoneme), then score again."
       );
     case "model_error":
-      return "the phoneme model could not run on this take.";
+      return "the phoneme model could not run on this recording.";
     case "no_network":
-      return "the reference voice clip needs Edge TTS and this device is offline. " +
-        "It is cached per text after the first successful fetch.";
     case "tts_failed":
-      return "the reference voice clip could not be synthesized or decoded.";
+      return (
+        "this attempt was scored by the old flow, which fetched the reference from " +
+        "Edge TTS while scoring. Texts now carry their own standard audio — make " +
+        "one in Manage → Standard audio and score again."
+      );
     case "too_short":
-      return "the take is too short to align against the text.";
+      return "the attempt is too short to align against the text.";
     default:
       return "not measured.";
   }

@@ -104,9 +104,10 @@ pub struct AppSettings {
     /// the hub" ambiguity. Workspace-scoped, not global.
     #[serde(default)]
     pub cluster_id: String,
-    /// Edge TTS voice used to build the canonical pronunciation reference for
-    /// read-aloud scoring (`datasets::read_aloud::tts_ref`). Empty means the
-    /// built-in default — see `read_aloud::DEFAULT_TTS_VOICE`.
+    /// Edge TTS voice a standard-audio generation starts with: the reference
+    /// clip read-aloud pronunciation is measured against
+    /// (`datasets::read_aloud::standard_audio`). Empty means the built-in
+    /// default — see `read_aloud::DEFAULT_TTS_VOICE`.
     #[serde(default)]
     pub read_aloud_tts_voice: String,
 }

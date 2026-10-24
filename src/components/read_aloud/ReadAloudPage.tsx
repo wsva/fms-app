@@ -16,14 +16,23 @@ import {
   Play,
   Columns,
   RefreshCw,
+  Loader2,
   FolderOpen,
   Space,
   Type,
+  AudioLines,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import MdEditor from "@/components/wiki/MdEditor";
-import type { ReadAloudMeta, ReadAttempt, ReadText } from "@/lib/read_aloud/types";
+import type {
+  ReadAloudMeta,
+  ReadAttempt,
+  ReadStandardAudio,
+  ReadText,
+} from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
+import { rerecognizeAttempt } from "@/lib/read_aloud/rerecognize";
+import { groupByText, hasUsableClip, listStandardAudio } from "@/lib/read_aloud/standardAudio";
 import type { RaFontId, RaSpaceId } from "@/lib/read_aloud/fonts";
 import {
   RA_FONT_OPTIONS,
@@ -52,6 +61,7 @@ import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import PracticePanel, { type RecorderCtl } from "./PracticePanel";
 import AttemptsPanel from "./AttemptsPanel";
 import DatasetDialog from "./DatasetDialog";
+import ManageTextDialog from "./ManageTextDialog";
 import LiveTranscript from "./LiveTranscript";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 
@@ -142,6 +152,18 @@ export default function ReadAloudPage() {
   const [editingNormalized, setEditingNormalized] = useState(false);
   const [normalizedDraft, setNormalizedDraft] = useState("");
 
+  // The Manage dialog: everything about the open text that is not the reading
+  // itself (its content, and the standard audio pronunciation is measured
+  // against).
+  const [manageOpen, setManageOpen] = useState(false);
+
+  // Which texts of the open dataset have a usable standard clip, from one
+  // dataset-wide listing. Kept beside the texts rather than on `ReadText` so the
+  // sync payload is untouched.
+  const [clipsByText, setClipsByText] = useState<Map<string, ReadStandardAudio[]>>(
+    () => new Map()
+  );
+
   const [datasetDialog, setDatasetDialog] = useState<DatasetDialogState>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -156,6 +178,8 @@ export default function ReadAloudPage() {
   const handleSelectAttempt = useCallback((a: ReadAttempt | null) => setSelectedAttempt(a), []);
   // Bumped after the toolbar deletes the open attempt so AttemptsPanel reloads.
   const [attemptsRefreshKey, setAttemptsRefreshKey] = useState(0);
+  // True while the toolbar's "Recognize again" re-transcribes the open attempt.
+  const [rerecognizingAttempt, setRerecognizingAttempt] = useState(false);
   // Toggled by the toolbar's "Compare" button: the attempt detail then shows the
   // text and the recognized transcript side by side, sentence by sentence.
   const [compareView, setCompareView] = useState(false);
@@ -280,29 +304,50 @@ export default function ReadAloudPage() {
     }
   }, []);
 
+  // The dataset-wide clip listing, grouped by text: one call badges every row
+  // in the texts list, and the Manage dialog refreshes it when a clip changes.
+  const loadStandardClips = useCallback(async (datasetUuid: string) => {
+    if (!isTauri() || !datasetUuid) {
+      setClipsByText(new Map());
+      return;
+    }
+    try {
+      setClipsByText(groupByText(await listStandardAudio(datasetUuid)));
+    } catch (e) {
+      // A badge is a hint, not the page: never surface this as an error.
+      logError(`load standard audio failed: ${String(e)}`, LOG_MODULE);
+    }
+  }, []);
+
   useEffect(() => {
     loadDatasets();
   }, [loadDatasets]);
 
   useEffect(() => {
     loadTexts(selectedDataset);
-  }, [selectedDataset, loadTexts]);
+    void loadStandardClips(selectedDataset);
+  }, [selectedDataset, loadTexts, loadStandardClips]);
 
   // Toolbar Refresh — reload the dataset list and, when a dataset is open, its
   // texts. Never touches an in-progress editor draft (that lives in local form
   // state), so it is safe to offer at every view level.
   const handleRefresh = useCallback(() => {
     void loadDatasets();
-    if (selectedDataset) void loadTexts(selectedDataset);
+    if (selectedDataset) {
+      void loadTexts(selectedDataset);
+      void loadStandardClips(selectedDataset);
+    }
     setLocRefresh((n) => n + 1);
-  }, [loadDatasets, loadTexts, selectedDataset]);
+  }, [loadDatasets, loadStandardClips, loadTexts, selectedDataset]);
 
-  // The normalized editor and the attempts page are per-text concerns; close
-  // them whenever the selected text changes so they never leak across texts.
+  // The normalized editor, the attempts page and the Manage dialog are per-text
+  // concerns; close them whenever the selected text changes so they never leak
+  // across texts.
   useEffect(() => {
     setEditingNormalized(false);
     setAttemptsView(false);
     setSelectedAttemptUuid(null);
+    setManageOpen(false);
   }, [selectedText]);
 
   // Leaving the attempts page clears any open attempt detail.
@@ -462,6 +507,31 @@ export default function ReadAloudPage() {
         }
       },
     });
+  };
+
+  // Re-transcribe the open attempt with the current model. The same work as the
+  // attempts list's per-row button, reached from the detail page's toolbar so
+  // the reader does not have to navigate back to the list to redo one take.
+  // `rerecognizeAttempt` decides which model; see the note there.
+  const recognizeSelectedAgain = async () => {
+    if (!isTauri() || !selectedAttempt || !selectedDataset) return;
+    const a = selectedAttempt;
+    setRerecognizingAttempt(true);
+    setError(null);
+    try {
+      await rerecognizeAttempt(selectedDataset, a);
+      // Transcript, score and assessment all changed: reload the list (which
+      // re-reports the open attempt upward, so the detail panel and the
+      // breadcrumb both see the new numbers) and the text's best score.
+      setAttemptsRefreshKey((k) => k + 1);
+      await loadTexts(selectedDataset);
+    } catch (e) {
+      const msg = String(e);
+      logError(`recognize again failed: ${msg}`, LOG_MODULE);
+      setError(msg);
+    } finally {
+      setRerecognizingAttempt(false);
+    }
   };
 
   // Delete the attempt currently open in the detail panel. The button lives in
@@ -709,11 +779,21 @@ export default function ReadAloudPage() {
                     </ToolbarMenuItem>
                   ))}
                 </ToolbarSelect>
+                {/* The text's content and the standard audio its pronunciation is
+                    measured against. A text with no clip cannot be scored for
+                    pronunciation at all, so making one is a first-class action. */}
+                <ToolbarButton
+                  icon={AudioLines}
+                  label="Manage"
+                  title="Manage this text and its standard audio"
+                  onClick={() => setManageOpen(true)}
+                />
               </>
             )}
 
-            {/* Attempt detail — its Play / Delete actions live here rather than
-                inside the panel, mirroring how Record lives in the toolbar. */}
+            {/* Attempt detail — its Play / Recognize again / Delete actions
+                live here rather than inside the panel, mirroring how Record
+                lives in the toolbar. */}
             {viewMode === "practice" && activeText && attemptsView && selectedAttempt && (
               <>
                 <ToolbarButton
@@ -724,6 +804,16 @@ export default function ReadAloudPage() {
                   title="Compare the text and the transcript sentence by sentence"
                   onClick={() => setCompareView((v) => !v)}
                 />
+                {selectedAttempt.audio_url && (
+                  <ToolbarButton
+                    icon={rerecognizingAttempt ? Loader2 : RefreshCw}
+                    iconProps={rerecognizingAttempt ? { className: "animate-spin" } : undefined}
+                    label="Recognize again"
+                    title="Recognize again (re-transcribe this recording with the current model and score it again)"
+                    disabled={rerecognizingAttempt}
+                    onClick={() => void recognizeSelectedAgain()}
+                  />
+                )}
                 {selectedAttempt.audio_url && (
                   <ToolbarButton
                     icon={playingAttempt ? Square : Play}
@@ -904,16 +994,25 @@ export default function ReadAloudPage() {
           )}
         </div>
       ) : attemptsView && activeDataset && activeText ? (
-        <AttemptsPanel
-          datasetUuid={activeDataset.uuid}
-          text={activeText}
-          onChanged={() => loadTexts(selectedDataset)}
-          selectedUuid={selectedAttemptUuid}
-          onSelectUuid={setSelectedAttemptUuid}
-          onSelectAttempt={handleSelectAttempt}
-          refreshKey={attemptsRefreshKey}
-          compare={compareView}
-        />
+        // The page-level error is where the toolbar's Recognize again reports a
+        // failure; the panel owns its own row-level errors.
+        <>
+          {error && (
+            <div className="mx-4 mt-4 p-3 bg-error-bg text-error-text rounded-md text-sm break-words">
+              {error}
+            </div>
+          )}
+          <AttemptsPanel
+            datasetUuid={activeDataset.uuid}
+            text={activeText}
+            onChanged={() => loadTexts(selectedDataset)}
+            selectedUuid={selectedAttemptUuid}
+            onSelectUuid={setSelectedAttemptUuid}
+            onSelectAttempt={handleSelectAttempt}
+            refreshKey={attemptsRefreshKey}
+            compare={compareView}
+          />
+        </>
       ) : viewMode === "practice" && activeDataset && activeText ? (
         <PracticePanel
           datasetUuid={activeDataset.uuid}
@@ -945,6 +1044,13 @@ export default function ReadAloudPage() {
                         size={12}
                         className="shrink-0 text-accent-bg"
                         aria-label="Normalized reference set (used for scoring)"
+                      />
+                    )}
+                    {hasUsableClip(clipsByText.get(t.uuid)) && (
+                      <AudioLines
+                        size={12}
+                        className="shrink-0 text-text-tertiary"
+                        aria-label="Standard audio set (pronunciation can be scored)"
                       />
                     )}
                   </span>
@@ -1002,6 +1108,16 @@ export default function ReadAloudPage() {
           text={rec.liveText}
           busy={rec.liveBusy}
           seconds={rec.liveSeconds}
+        />
+      )}
+
+      {manageOpen && activeDataset && activeText && (
+        <ManageTextDialog
+          datasetUuid={activeDataset.uuid}
+          text={activeText}
+          onClose={() => setManageOpen(false)}
+          onEditText={() => startEdit(activeText)}
+          onChanged={() => void loadStandardClips(activeDataset.uuid)}
         />
       )}
 

@@ -30,6 +30,12 @@ pub struct HfModelDef {
     /// repo ships weights only (typical for ONNX exports, e.g. SaT models live
     /// without a tokenizer). `None` means the tokenizer is part of `files`.
     pub tokenizer_repo: Option<&'static str>,
+    /// Optional HuggingFace repo to source `vocab.json` from. Needed by models
+    /// whose own repo ships weights and a *language-pruned* vocabulary while the
+    /// consumer needs the full inventory (the phoneme model reads one
+    /// `token -> id` map for every phone the model can emit). `None` means the
+    /// model does not need a vocabulary file.
+    pub vocab_repo: Option<&'static str>,
     /// Total download size in MB (approximate).
     pub size_mb: u64,
     /// Supported language codes.
@@ -49,6 +55,11 @@ pub struct HfModelFile {
 // Catalog
 // ---------------------------------------------------------------------------
 
+/// The pronunciation model the Models page offers first and that the MCP
+/// download tool installs when no id is given. Named here so the catalog entry,
+/// the read-aloud status payload and the agent tool cannot drift apart.
+pub const DEFAULT_PHONEME_MODEL_ID: &str = "Hochien/wav2vec2-alignment";
+
 /// All available HuggingFace models (non-STT).
 pub const MODELS: &[HfModelDef] = &[
     // ========================================================================
@@ -66,6 +77,7 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "tokenizer.json", size_bytes: 0 },
         ],
         tokenizer_repo: None,
+        vocab_repo: None,
         size_mb: 330,
         languages: &["en"],
     },
@@ -81,6 +93,7 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "tokenizer.json", size_bytes: 0 },
         ],
         tokenizer_repo: None,
+        vocab_repo: None,
         size_mb: 822,
         languages: &["en"],
     },
@@ -96,6 +109,7 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "tokenizer.json", size_bytes: 0 },
         ],
         tokenizer_repo: None,
+        vocab_repo: None,
         size_mb: 330,
         languages: &["en"],
     },
@@ -111,6 +125,7 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "tokenizer.json", size_bytes: 0 },
         ],
         tokenizer_repo: None,
+        vocab_repo: None,
         size_mb: 822,
         languages: &["en"],
     },
@@ -130,6 +145,7 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "model.safetensors.index.json", size_bytes: 0 },
         ],
         tokenizer_repo: None,
+        vocab_repo: None,
         size_mb: 880,
         languages: &["en"],
     },
@@ -145,6 +161,7 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "model.safetensors.index.json", size_bytes: 0 },
         ],
         tokenizer_repo: None,
+        vocab_repo: None,
         size_mb: 880,
         languages: &["en"],
     },
@@ -168,6 +185,7 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "model_optimized.onnx", size_bytes: 427_756_189 },
         ],
         tokenizer_repo: Some("FacebookAI/xlm-roberta-base"),
+        vocab_repo: None,
         size_mb: 430,
         languages: &[],
     },
@@ -182,6 +200,7 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "model_optimized.onnx", size_bytes: 427_946_487 },
         ],
         tokenizer_repo: Some("FacebookAI/xlm-roberta-base"),
+        vocab_repo: None,
         size_mb: 430,
         languages: &[],
     },
@@ -196,7 +215,36 @@ pub const MODELS: &[HfModelDef] = &[
             HfModelFile { path: "model_optimized.onnx", size_bytes: 556_478_056 },
         ],
         tokenizer_repo: Some("FacebookAI/xlm-roberta-base"),
+        vocab_repo: None,
         size_mb: 560,
+        languages: &[],
+    },
+
+    // ========================================================================
+    // Pronunciation — wav2vec2 CTC phoneme model
+    // ========================================================================
+    // The acoustic half of read-aloud pronunciation scoring (GOP): audio in,
+    // per-frame log-posteriors over IPA phones out. Multilingual by
+    // construction — one espeak inventory covers every language the learner
+    // reads in, which is why there is no per-language variant here.
+    //
+    // Two things about this repo are deliberate and load-bearing:
+    //   * `folder` starts with `phoneme/`, so the files land in
+    //     `{model_root}/phoneme/…` (a peer of `candle/`), which is where
+    //     `read_aloud::phoneme::find_model_dir` looks.
+    //   * the per-language `vocab.json` files in that repo are pruned to a single
+    //     language's phones, so the full 392-entry map is fetched from the
+    //     upstream PyTorch repo via `vocab_repo` instead.
+    HfModelDef {
+        id: DEFAULT_PHONEME_MODEL_ID,
+        name: "Wav2Vec2 Phoneme (IPA)",
+        description: "Phone-level model for read-aloud pronunciation scoring. 392 IPA phones, 30+ languages",
+        model_type: "onnx-phoneme",
+        folder: "phoneme/Hochien/wav2vec2-alignment",
+        files: &[HfModelFile { path: "wav2vec2-lv60-espeak-fp16.onnx", size_bytes: 632_239_986 }],
+        tokenizer_repo: None,
+        vocab_repo: Some("facebook/wav2vec2-lv-60-espeak-cv-ft"),
+        size_mb: 603,
         languages: &[],
     },
 ];

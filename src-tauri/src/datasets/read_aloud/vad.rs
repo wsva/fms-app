@@ -1,6 +1,6 @@
 //! Energy voice-activity detection over 16 kHz mono PCM.
 //!
-//! Deliberately not Silero: a read-aloud take is one speaker, one microphone
+//! Deliberately not Silero: a read-aloud recording is one speaker, one microphone
 //! and a handful of seconds, so a frame-RMS threshold with an adaptive noise
 //! floor is enough — and it costs no model download, no extra `ort` session and
 //! no per-platform file handling. It is also *pure*, so the whole detector is
@@ -8,15 +8,15 @@
 //!
 //! Why this exists at all: ASR word timings are the only timing evidence the
 //! stack provides, and they are relative to the *transcript*, not to silence.
-//! A take with a two-second gap between two words produces two word segments
-//! whose `end`/`start` differ — but so does a take with an unnaturally slow
+//! A recording with a two-second gap between two words produces two word segments
+//! whose `end`/`start` differ — but so does a recording with an unnaturally slow
 //! reader. Only an independent look at the waveform can say "the room was
 //! quiet here", which is what a pause is.
 
-/// Sample rate every take is decoded to before anything here sees it.
+/// Sample rate every recording is decoded to before anything here sees it.
 pub(crate) const SAMPLE_RATE: u32 = 16_000;
 
-/// One continuous stretch of speech, in seconds from the start of the take.
+/// One continuous stretch of speech, in seconds from the start of the recording.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Segment {
     pub start: f64,
@@ -33,18 +33,18 @@ impl Segment {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VadConfig {
     /// Frame length in samples. 20 ms is the usual speech-analysis floor and
-    /// keeps a 10-minute take at 30 000 frames.
+    /// keeps a 10-minute recording at 30 000 frames.
     pub frame_samples: usize,
     /// Fraction of frame RMS values treated as the noise floor.
     pub floor_percentile: f64,
     /// Speech threshold as a multiple of the noise floor.
     pub floor_multiplier: f32,
     /// Ceiling on the threshold, as a fraction of the loud percentile. Without
-    /// it a take that is *only* speech has no quiet frames, so the "noise
+    /// it a recording that is *only* speech has no quiet frames, so the "noise
     /// floor" is speech level, `floor_multiplier` lifts the threshold above
-    /// every frame and the whole take reads as silence.
+    /// every frame and the whole recording reads as silence.
     pub max_threshold_ratio: f32,
-    /// Hard floor, so a digitally silent take (floor = 0) detects nothing
+    /// Hard floor, so a digitally silent recording (floor = 0) detects nothing
     /// instead of treating dither as speech.
     pub absolute_floor: f32,
     /// Frames of disagreement required to flip the speech/silence verdict.
@@ -112,7 +112,7 @@ fn frame_rate(cfg: &VadConfig) -> f64 {
     SAMPLE_RATE as f64 / cfg.frame_samples.max(1) as f64
 }
 
-/// Detect speech segments in a 16 kHz mono take.
+/// Detect speech segments in a 16 kHz mono recording.
 ///
 /// The pipeline is: frame RMS → percentile noise floor → threshold with a hard
 /// floor and a loud-level ceiling → per-frame verdict → hysteresis against short
@@ -128,7 +128,7 @@ pub(crate) fn detect(samples: &[f32], cfg: &VadConfig) -> Vec<Segment> {
     let floor = percentile(&rms, cfg.floor_percentile);
     let loud = percentile(&rms, 0.90);
     // Two-sided: above the noise, but never above half the loud level — a
-    // speech-only take has no silence to estimate a floor from.
+    // speech-only recording has no silence to estimate a floor from.
     let threshold = (floor * cfg.floor_multiplier)
         .min(loud * cfg.max_threshold_ratio)
         .max(cfg.absolute_floor);
@@ -174,7 +174,7 @@ pub(crate) fn detect(samples: &[f32], cfg: &VadConfig) -> Vec<Segment> {
         }
     }
 
-    // Pad, clamp into the take, and re-merge in case padding closed a gap.
+    // Pad, clamp into the recording, and re-merge in case padding closed a gap.
     let total = samples.len() as f64 / SAMPLE_RATE as f64;
     let mut padded: Vec<Segment> = Vec::with_capacity(merged.len());
     for span in merged {

@@ -96,7 +96,7 @@ impl Pause {
     }
 }
 
-/// Reading-speed band, from the take's words-per-minute.
+/// Reading-speed band, from the attempt's words-per-minute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RateBand {
@@ -212,7 +212,7 @@ fn ends_phrase(word: Option<&NormWord>) -> bool {
 /// Compute fluency plus the pause list, from waveform segments and word timings.
 ///
 /// Pure: no I/O, no model, no clock. Every division is guarded, so an empty
-/// take, a one-word take and a take the STT returned nothing for all produce
+/// recording, a one-word recording and a recording the STT returned nothing for
 /// numbers instead of `NaN`.
 pub(crate) fn compute(
     duration: f64,

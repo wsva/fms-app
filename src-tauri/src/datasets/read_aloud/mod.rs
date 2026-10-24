@@ -1,23 +1,24 @@
 //! "Read aloud" datasets — a text is shown, the user records themselves reading
-//! it, STT transcribes the take, and the transcript is scored against the
+//! it, STT transcribes the attempt, and the transcript is scored against the
 //! reference text. Passing scores earn XP.
 //!
 //! Storage mirrors the book/dictation dataset layout: each read-aloud dataset is
 //! a self-contained directory under `<datasets_dir>/read_aloud/` with an
-//! `info.json`, a `data.sqlite3` (texts + attempts) and a `media/` folder that
-//! holds every recorded take.
+//! `info.json`, a `data.sqlite3` (texts) and a `media/` folder of standard audio,
+//! while attempts are per-user events in the app DB and recordings are device-local.
 //!
 //! Scoring uses the word-alignment ASR metric from `asr_metric` —
 //! `score = WIP × 100` with H/S/D/I counts and alignment chunks (0-100) — plus
-//! two new axes built on the same take: fluency (VAD + word timings) and
+//! two new axes built on the same attempt: fluency (VAD + word timings) and
 //! pronunciation (CTC phoneme GOP). `assess.rs` is the single seam that turns a
-//! take into that three-axis picture; this file owns storage, sync and commands.
+//! attempt into that three-axis picture; this file owns storage, sync and commands.
 
 pub(crate) mod assess;
 pub(crate) mod fluency;
 pub(crate) mod gop;
 #[cfg(feature = "phoneme")]
 pub(crate) mod phoneme;
+pub(crate) mod standard_audio;
 pub(crate) mod tts_ref;
 pub(crate) mod vad;
 
@@ -29,6 +30,7 @@ use base64::Engine;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tauri::{Emitter, State};
 use uuid::Uuid;
 
@@ -114,8 +116,8 @@ pub struct ReadAttempt {
     /// WIP-based ASR score 0-100 against the reference text.
     pub score: f64,
     /// The stored assessment (accuracy + fluency + pronunciation), when one was
-    /// computed. `None` for takes recorded before assessment existed and for
-    /// takes whose recording is gone. Additive: peers that do not know the key
+    /// computed. `None` for attempts recorded before assessment existed and for
+    /// attempts whose recording is gone. Additive: peers that do not know the key
     /// simply drop it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<Value>,
@@ -130,7 +132,7 @@ pub struct ReadAloudSubmitResult {
     /// submitted transcript.
     pub summary: AsrScoreSummary,
     pub attempt: ReadAttempt,
-    /// Accuracy (unchanged WIP), fluency and pronunciation for this take. The
+    /// Accuracy (unchanged WIP), fluency and pronunciation for this attempt. The
     /// accuracy number is byte-identical to `score` — see `assess.rs`.
     pub assessment: Assessment,
     /// XP awarded for this submission (0 when below threshold or already earned).
@@ -233,6 +235,9 @@ fn open_db(dir: &Path) -> Result<Connection, String> {
     // §3.4: a per-dataset tombstone table (travels with snapshots) so a delete
     // is durable and can collide with a resurrected offline edit.
     crate::sync::change_log::ensure_tombstones(&conn)?;
+    // The standard-audio table is defined in its own module; creating it here
+    // means every dataset opened by any path already has it.
+    standard_audio::ensure_schema(&conn)?;
     Ok(conn)
 }
 
@@ -247,9 +252,9 @@ fn effective_reference(content: &str, normalized: Option<&str>) -> String {
 }
 
 /// Resolve a stored audio path to an absolute path for playback. Two bases are
-/// tried: the per-user workspace audio dir (a new take, stored as a bare file
-/// name) and the dataset dir (a legacy take migrated in place with its original
-/// dataset-relative `media/…` path). A take recorded on another device resolves
+/// tried: the per-user workspace audio dir (a new attempt, stored as a bare file
+/// name) and the dataset dir (a legacy attempt migrated in place with its original
+/// dataset-relative `media/…` path). An attempt recorded on another device resolves
 /// to neither and yields `None` — recordings are device-local (§17).
 fn resolve_audio_url(dataset_dir: &Path, audio_dir: &Path, audio_path: &Option<String>) -> Option<String> {
     let rel = audio_path.as_ref().filter(|p| !p.is_empty())?;
@@ -270,7 +275,7 @@ fn resolve_audio_url(dataset_dir: &Path, audio_dir: &Path, audio_path: &Option<S
 // Attempt events — per-user practice history in the app DB (§17)
 // ============================================================
 //
-// A recorded take is an *event*, not a mutation of the dataset. Rows live in the
+// A recorded attempt is an *event*, not a mutation of the dataset. Rows live in the
 // app DB (`read_attempt_event`), keyed by their own uuid and owned by `user_id`,
 // and the recording itself lives in a per-user workspace dir — never inside the
 // dataset. So practising a read-only adopted base needs no overlay, never
@@ -287,7 +292,7 @@ struct AttemptEvent {
     dataset_uuid: String,
     text_uuid: String,
     /// Device-local recording reference: a bare file name under [`audio_dir`] for
-    /// a new take, or a legacy dataset-relative path for a migrated one.
+    /// a new attempt, or a legacy dataset-relative path for a migrated one.
     audio_path: Option<String>,
     recognized: String,
     score: f64,
@@ -392,8 +397,8 @@ fn open_attempts(settings: &SettingsState, dataset_uuid: &str) -> Result<Attempt
 
 /// Fold this dataset's legacy in-dataset `read_attempt` rows into app-DB events
 /// for the acting user, once per (dataset, user). Only *their own* rows (or the
-/// unowned single-user legacy rows) are seeded, never another user's takes
-/// (§17.5). Stamps are canonicalized so ordering matches new takes.
+/// unowned single-user legacy rows) are seeded, never another user's attempts
+/// (§17.5). Stamps are canonicalized so ordering matches new attempts.
 fn migrate_legacy_attempts(conn: &Connection, me: &str, dataset_uuid: &str) -> Result<(), String> {
     let seeded: bool = conn
         .query_row(
@@ -439,7 +444,7 @@ fn migrate_legacy_attempts(conn: &Connection, me: &str, dataset_uuid: &str) -> R
 }
 
 /// Store one attempt event. `INSERT OR IGNORE` by uuid, so an author receiving
-/// its own echo — or two devices converging on the same take — is a no-op.
+/// its own echo — or two devices converging on the same attempt — is a no-op.
 fn append_attempt_event(conn: &Connection, ev: &AttemptEvent) -> Result<bool, String> {
     let changed = conn
         .execute(
@@ -474,7 +479,7 @@ fn attempt_payload(ev: &AttemptEvent) -> Value {
 /// Hub-side read behind the practice-history backfill (`GET /api/v1/app/state`,
 /// sync-v2.md §17.6 / INV-21): page one identity's attempt events oldest-first so
 /// a device that subscribes after the journal was pruned can still recover its
-/// takes. Paginated by `rowid` (at most `limit` rows after cursor `after`, `0` =
+/// attempts. Paginated by `rowid` (at most `limit` rows after cursor `after`, `0` =
 /// start); the next cursor is `Some` only when the page was full, exactly like
 /// [`crate::datasets::dictation::dictation_rows_for_user`]. Page-stable because an
 /// event is insert-once — its rowid never moves. Rows carry the [`attempt_payload`]
@@ -923,9 +928,10 @@ pub(crate) fn save_text_row(
     Ok(())
 }
 
-/// Delete a text. Per-user attempt events are left in the app DB (orphaned but
-/// harmless — every read joins on `text_uuid`): a content edit never touches
-/// practice data, mirroring how deleting a card leaves its review events.
+/// Delete a text, together with the standard audio it owns. Per-user attempt
+/// events are left in the app DB (orphaned but harmless — every read joins on
+/// `text_uuid`): a content edit never touches practice data, mirroring how
+/// deleting a card leaves its review events.
 #[tauri::command]
 pub async fn read_aloud_delete_text(
     settings: State<'_, SettingsState>,
@@ -936,6 +942,11 @@ pub async fn read_aloud_delete_text(
     let conn = open_db(&dir)?;
     conn.execute("DELETE FROM read_text WHERE uuid = ?1", [&uuid])
         .map_err(|e| e.to_string())?;
+    // The clips belong to the text; their rows and their wavs go with it. A
+    // failure is logged, not fatal: an orphan row is filtered out on read.
+    if let Err(e) = standard_audio::cascade_delete_for_text(&settings, &dataset_uuid, &dir, &uuid) {
+        log::warn!("read_aloud: could not delete the text's standard audio: {}", e);
+    }
     let _ = touch_info(&dir);
     {
         let _ = crate::sync::change_log::commit_change(
@@ -1029,7 +1040,7 @@ fn delete_attempt_inner(settings: &SettingsState, dataset_uuid: &str, uuid: &str
         if let Some(name) = Path::new(&rel).file_name() {
             let _ = fs::remove_file(audio_dir(settings).join(name));
         }
-        // A migrated legacy take still points into the dataset's media dir.
+        // A migrated legacy attempt still points into the dataset's media dir.
         if let Ok(dir) = find_dataset_dir(settings, dataset_uuid) {
             let _ = fs::remove_file(dir.join(&rel));
         }
@@ -1067,7 +1078,7 @@ pub async fn read_aloud_rerecognize(
 }
 
 /// Decode the device-local recording behind an attempt, when it is still here.
-/// A take recorded on another device resolves to nothing, and a decode failure
+/// An attempt recorded on another device resolves to nothing, and a decode failure
 /// is logged rather than surfaced: the transcript can still be updated.
 fn stored_recording(
     settings: &SettingsState,
@@ -1138,9 +1149,14 @@ async fn update_recognized_inner(
     // A missing WAV leaves fluency and pronunciation unmeasured — the score
     // still updates, which is what "recognize again" means.
     let samples = stored_recording(settings, dataset_uuid, &audio_path);
+    let clip = match reference.as_deref() {
+        Some(reference) => load_default_clip(settings, dataset_uuid, &text_uuid, reference),
+        None => standard_audio::DefaultClip::Missing,
+    };
     let metrics = match (summary.as_ref(), reference.as_deref()) {
         (Some(summary), Some(reference)) => {
-            let assessment = assess_take(settings, summary, reference, recognized, &samples, words).await;
+            let assessment =
+                assess_attempt(settings, summary, reference, recognized, &samples, words, &clip).await;
             stored_metrics(Some(assessment.metrics_json()))
         }
         _ => None,
@@ -1177,7 +1193,7 @@ async fn update_recognized_inner(
         created_at: canonical_stamp(&created_at),
     };
     // Re-journal the save for the change log. Peers replay events by uuid with
-    // INSERT OR IGNORE, so an already-delivered take keeps its own copy — the
+    // INSERT OR IGNORE, so an already-delivered attempt keeps its own copy — the
     // right outcome, since re-recognition runs against a device-local recording
     // with a device-local model (§17).
     let _ = crate::sync::change_log::commit_change_as(
@@ -1265,7 +1281,7 @@ fn stored_metrics(raw: Option<String>) -> Option<Value> {
 }
 
 // ============================================================
-// Assessment — the three axes for one take
+// Assessment — the three axes for one attempt
 // ============================================================
 
 /// Pronunciation evidence, gathered before [`assess::assess`] runs.
@@ -1296,8 +1312,9 @@ impl PronRun {
     }
 }
 
-/// The Edge TTS voice the canonical reference is synthesised with.
-fn tts_voice(settings: &SettingsState) -> String {
+/// The Edge TTS voice a generated standard audio uses when nothing else names
+/// one: the voice chosen on the TTS page, else a multilingual default.
+pub(crate) fn tts_voice(settings: &SettingsState) -> String {
     let configured = settings
         .settings
         .lock()
@@ -1312,90 +1329,221 @@ fn tts_voice(settings: &SettingsState) -> String {
     }
 }
 
-/// Cache location for canonical reference renderings: a workspace dir beside
-/// the recordings, never inside a dataset (INV-9).
-fn reference_cache_dir(settings: &SettingsState) -> PathBuf {
-    settings.workspace_subdir(tts_ref::CACHE_DIR, "")
+/// Where the grouped reference target of a standard clip is cached: a workspace
+/// dir beside the recordings, never inside a dataset (INV-9 — scoring is a read
+/// path and must be able to run against a read-only base).
+const PHONE_CACHE_DIR: &str = "read_aloud_phones";
+
+/// Bumped when [`PhoneCache`] changes shape. A mismatch is simply a miss.
+const PHONE_CACHE_VERSION: i64 = 1;
+
+/// The cached half of the pronunciation pass.
+///
+/// What is stored is the **grouped target** — the phone ids of each word — not
+/// the posterior matrix. Nothing downstream of grouping touches the reference
+/// posteriors, so this is a few KB instead of ~392 floats per 20 ms frame, and a
+/// repeat score runs the phoneme model once (the learner) instead of twice.
+#[derive(Serialize, Deserialize)]
+struct PhoneCache {
+    version: i64,
+    /// Identity of the model that produced `groups`.
+    model: String,
+    groups: Vec<Vec<usize>>,
 }
 
-/// Gather pronunciation evidence: build the reference phone timeline from a
-/// canonical TTS rendering, then pin it onto the learner's take.
+/// Identity of an installed model directory: its name plus the file count, total
+/// size and newest mtime. A reinstalled or swapped model therefore invalidates
+/// every cache entry by itself — there is no invalidation logic to get wrong.
+fn model_identity(model_dir: &Path) -> String {
+    let mut files = 0u64;
+    let mut total = 0u64;
+    let mut newest = 0u64;
+    if let Ok(entries) = fs::read_dir(model_dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                files += 1;
+                total += meta.len();
+                let stamp = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                newest = newest.max(stamp);
+            }
+        }
+    }
+    let name = model_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("{name}:{files}:{total}:{newest}")
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// sha256 over the clip's PCM, so a re-crop or a regenerate is a different clip.
+fn clip_digest(samples: &[f32]) -> String {
+    let mut hasher = Sha256::new();
+    for sample in samples {
+        hasher.update(sample.to_bits().to_le_bytes());
+    }
+    hex(&hasher.finalize())
+}
+
+fn phone_cache_key(model: &str, samples: &[f32]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(model.as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(samples.len().to_le_bytes());
+    hasher.update(clip_digest(samples).as_bytes());
+    hex(&hasher.finalize())[..16].to_string()
+}
+
+fn load_phone_cache(dir: &Path, key: &str, model: &str) -> Option<Vec<Vec<usize>>> {
+    let raw = fs::read_to_string(dir.join(format!("{}.json", key))).ok()?;
+    let cache: PhoneCache = serde_json::from_str(&raw).ok()?;
+    if cache.version != PHONE_CACHE_VERSION || cache.model != model {
+        return None;
+    }
+    Some(cache.groups)
+}
+
+fn store_phone_cache(dir: &Path, key: &str, cache: &PhoneCache) {
+    if fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    if let Ok(raw) = serde_json::to_string(cache) {
+        if let Err(e) = fs::write(dir.join(format!("{}.json", key)), raw) {
+            log::warn!("read_aloud: could not cache the reference phones: {}", e);
+        }
+    }
+}
+
+/// Resolve a text's default standard clip, best effort: an unreadable dataset
+/// degrades to "no reference", which is reported, never guessed.
+fn load_default_clip(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    text_uuid: &str,
+    reference: &str,
+) -> standard_audio::DefaultClip {
+    match find_dataset_dir(settings, dataset_uuid)
+        .and_then(|dir| standard_audio::default_for(&dir, text_uuid, reference))
+    {
+        Ok(clip) => clip,
+        Err(e) => {
+            log::warn!("read_aloud: could not read the standard audio: {}", e);
+            standard_audio::DefaultClip::Missing
+        }
+    }
+}
+
+/// The grouped reference target for one clip: from the cache when this exact
+/// clip has been decoded against this exact model before, otherwise by running
+/// the model on the clip and pinning that decode back onto its own posteriors
+/// (which is what gives every phone a span, and therefore a time).
+#[cfg(feature = "phoneme")]
+fn reference_groups(
+    settings: &SettingsState,
+    model_dir: &Path,
+    model: &str,
+    clip: &standard_audio::StoredClip,
+    ref_words: usize,
+) -> Result<Vec<Vec<usize>>, PronReason> {
+    let cache_dir = settings.workspace_subdir(PHONE_CACHE_DIR, "");
+    let key = phone_cache_key(model, &clip.samples);
+    if let Some(groups) = load_phone_cache(&cache_dir, &key, model) {
+        log::debug!("read_aloud reference: phone cache hit for {}", key);
+        return Ok(groups);
+    }
+
+    let decoded = phoneme::with_model(model_dir, |phonemes| {
+        let post = phonemes.posteriors(&clip.samples)?;
+        let phones = phonemes.collapse(&post);
+        Ok((post, phones))
+    });
+    let (clip_post, phones) = match decoded {
+        Ok(value) => value,
+        Err(message) => {
+            log::warn!("read_aloud phoneme model failed on the standard audio: {}", message);
+            return Err(PronReason::ModelError);
+        }
+    };
+    if phones.is_empty() {
+        log::warn!("read_aloud standard audio decoded to no phones");
+        return Err(PronReason::TtsFailed);
+    }
+    let Some(spans) = gop::forced_align(&clip_post, &phones) else {
+        log::warn!("read_aloud standard audio has more phones than frames");
+        return Err(PronReason::TtsFailed);
+    };
+    let frame_secs = tts_ref::frame_seconds(clip_post.len(), clip.seconds());
+    let groups = tts_ref::group_phones(&spans, frame_secs, &clip.boundaries, ref_words, clip.seconds());
+    if tts_ref::flatten(&groups).is_empty() {
+        log::warn!("read_aloud standard audio grouped into no phones");
+        return Err(PronReason::TtsFailed);
+    }
+    store_phone_cache(
+        &cache_dir,
+        &key,
+        &PhoneCache { version: PHONE_CACHE_VERSION, model: model.to_string(), groups: groups.clone() },
+    );
+    Ok(groups)
+}
+
+/// Gather pronunciation evidence: take the phone timeline of the text's standard
+/// audio, then pin it onto the learner's recording.
 ///
 /// Every early return names *why* nothing was measured. No proxy score is ever
-/// substituted — an honest gap is the point.
+/// substituted — an honest gap is the point — and nothing is synthesised here,
+/// so a score never depends on a network request.
 #[cfg(feature = "phoneme")]
 async fn pronunciation_evidence(
     settings: &SettingsState,
-    reference: &str,
     ref_words: usize,
     samples: &[f32],
+    clip: &standard_audio::DefaultClip,
 ) -> PronRun {
     if samples.is_empty() || ref_words == 0 {
         return PronRun::unavailable(PronReason::TooShort);
     }
     let model_root = crate::models::index::model_root();
-    let Some(dir) = phoneme::find_model_dir(&model_root) else {
+    let Some(model_dir) = phoneme::find_model_dir(&model_root) else {
         return PronRun::unavailable(PronReason::ModelMissing);
     };
 
-    let voice = tts_voice(settings);
-    let canonical = match tts_ref::resolve(&reference_cache_dir(settings), reference, &voice).await {
-        Ok(reference) => reference,
-        Err(tts_ref::RefError::NoNetwork) => return PronRun::unavailable(PronReason::NoNetwork),
-        Err(tts_ref::RefError::Failed(message)) => {
-            log::warn!("read_aloud reference unavailable: {}", message);
-            return PronRun::unavailable(PronReason::TtsFailed);
-        }
+    // 1. The reference the dataset owns. A text without one is a message, not a
+    //    silent synthesis: a score must never depend on an HTTP request. A clip
+    //    made from an earlier version of the text is refused for the same reason
+    //    its phone target no longer matches the words being compared.
+    let clip = match clip {
+        standard_audio::DefaultClip::Missing => return PronRun::unavailable(PronReason::NoReference),
+        standard_audio::DefaultClip::Stale => return PronRun::unavailable(PronReason::StaleReference),
+        standard_audio::DefaultClip::Ready(clip) => clip,
     };
 
-    // 1. The reference timeline. Decode the canonical rendering with the same
-    //    model, then pin that decode back onto its own posteriors so each phone
-    //    has a span (and therefore a time) to be grouped by.
-    let decoded = phoneme::with_model(&dir, |model| {
-        let post = model.posteriors(&canonical.samples)?;
-        let phones = model.collapse(&post);
-        Ok((post, phones))
-    });
-    let (reference_post, phones) = match decoded {
-        Ok(value) => value,
-        Err(message) => {
-            log::warn!("read_aloud phoneme model failed on the reference: {}", message);
-            return PronRun::unavailable(PronReason::ModelError);
-        }
+    // 2. The reference timeline, cached per (model, clip).
+    let model = model_identity(&model_dir);
+    let groups = match reference_groups(settings, &model_dir, &model, clip, ref_words) {
+        Ok(groups) => groups,
+        Err(reason) => return PronRun::unavailable(reason),
     };
-    if phones.is_empty() {
-        log::warn!("read_aloud reference decoded to no phones");
-        return PronRun::unavailable(PronReason::TtsFailed);
-    }
-    let Some(reference_spans) = gop::forced_align(&reference_post, &phones) else {
-        log::warn!("read_aloud reference has more phones than frames");
-        return PronRun::unavailable(PronReason::TtsFailed);
-    };
-
-    let frame_secs = tts_ref::frame_seconds(reference_post.len(), canonical.seconds());
-    let groups = tts_ref::group_phones(
-        &reference_spans,
-        frame_secs,
-        &canonical.boundaries,
-        ref_words,
-    );
     let target = tts_ref::flatten(&groups);
-    if target.is_empty() {
-        log::warn!("read_aloud reference grouped into no phones");
-        return PronRun::unavailable(PronReason::TtsFailed);
-    }
 
-    // 2. The learner's posteriors — the same model, so the two sides share one
+    // 3. The learner's posteriors — the same model, so the two sides share one
     //    phone inventory and nothing has to be mapped between them.
-    let post = match phoneme::with_model(&dir, |model| model.posteriors(samples)) {
+    let post = match phoneme::with_model(&model_dir, |model| model.posteriors(samples)) {
         Ok(post) => post,
         Err(message) => {
-            log::warn!("read_aloud phoneme model failed on the take: {}", message);
+            log::warn!("read_aloud phoneme model failed on the recording: {}", message);
             return PronRun::unavailable(PronReason::ModelError);
         }
     };
 
-    // 3. Pin the reference phones onto the take.
+    // 4. Pin the reference phones onto the recording.
     let Some(aligned) = gop::forced_align(&post, &target) else {
         return PronRun::unavailable(PronReason::TooShort);
     };
@@ -1409,9 +1557,9 @@ async fn pronunciation_evidence(
 #[cfg(not(feature = "phoneme"))]
 async fn pronunciation_evidence(
     _settings: &SettingsState,
-    _reference: &str,
     _ref_words: usize,
     _samples: &[f32],
+    _clip: &standard_audio::DefaultClip,
 ) -> PronRun {
     PronRun::unavailable(PronReason::ModelMissing)
 }
@@ -1429,25 +1577,32 @@ fn decode_samples(wav_base64: &str) -> Result<Vec<f32>, String> {
 }
 
 /// The single seam every scoring path goes through: accuracy from the existing
-/// metric, fluency from VAD + word timings, pronunciation from GOP.
-async fn assess_take(
+/// metric, fluency from VAD + word timings, pronunciation from GOP against the
+/// text's standard audio.
+async fn assess_attempt(
     settings: &SettingsState,
     summary: &AsrScoreSummary,
     reference: &str,
     recognized: &str,
     samples: &[f32],
     words: Option<&[TimedWord]>,
+    clip: &standard_audio::DefaultClip,
 ) -> Assessment {
     let ref_words = crate::datasets::asr_metric::normalize_words(reference).len();
-    let pron = pronunciation_evidence(settings, reference, ref_words, samples).await;
+    let pron = pronunciation_evidence(settings, ref_words, samples, clip).await;
     assess::assess(summary, reference, recognized, samples, words, pron.evidence())
 }
 
-/// Score one take without persisting anything: accuracy + fluency +
+/// Score one attempt without persisting anything: accuracy + fluency +
 /// pronunciation. The preview twin of [`read_aloud_submit`].
+///
+/// `dataset_uuid` and `text_uuid` are required because pronunciation reads the
+/// text's standard audio — there is no reference to compare against otherwise.
 #[tauri::command]
 pub async fn read_aloud_assess(
     settings: State<'_, SettingsState>,
+    dataset_uuid: String,
+    text_uuid: String,
     content: String,
     recognized: String,
     wav_base64: String,
@@ -1455,10 +1610,104 @@ pub async fn read_aloud_assess(
 ) -> Result<Assessment, String> {
     let samples = decode_samples(&wav_base64)?;
     let summary = score_asr(&content, &recognized);
-    Ok(assess_take(&settings, &summary, &content, &recognized, &samples, words.as_deref()).await)
+    let clip = load_default_clip(&settings, &dataset_uuid, &text_uuid, &content);
+    Ok(assess_attempt(
+        &settings,
+        &summary,
+        &content,
+        &recognized,
+        &samples,
+        words.as_deref(),
+        &clip,
+    )
+    .await)
 }
 
-/// Submit a recorded take: persist the audio, score it against the reference
+// ---------------------------------------------------------------------------
+// Pronunciation model (phoneme CTC)
+// ---------------------------------------------------------------------------
+
+/// Catalog `model_type` of the read-aloud pronunciation models.
+const PHONEME_TYPE: &str = "onnx-phoneme";
+
+/// One downloadable pronunciation model, shaped for a Models-page card.
+#[cfg(feature = "phoneme")]
+#[derive(Serialize)]
+pub struct PhonemeModelInfo {
+    /// Catalog id — a HuggingFace repo id.
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// Weights *and* vocabulary on disk; a half-finished download reads false.
+    pub downloaded: bool,
+    pub size_mb: u64,
+}
+
+/// Which model the pronunciation scorer would load, plus the catalog behind it.
+#[cfg(feature = "phoneme")]
+#[derive(Serialize)]
+pub struct PhonemeModelStatus {
+    /// Directory [`phoneme::find_model_dir`] resolves to (None → `model_missing`).
+    pub installed_dir: Option<String>,
+    pub models: Vec<PhonemeModelInfo>,
+}
+
+/// The status payload, shared by the command and the MCP tool.
+#[cfg(feature = "phoneme")]
+pub(crate) fn phoneme_model_status() -> PhonemeModelStatus {
+    let models = crate::models::catalog::models_by_type(PHONEME_TYPE)
+        .into_iter()
+        .map(|def| PhonemeModelInfo {
+            id: def.id.to_string(),
+            name: def.name.to_string(),
+            description: def.description.to_string(),
+            downloaded: crate::models::hf_downloaded_on_disk(def),
+            size_mb: def.size_mb,
+        })
+        .collect();
+    let installed_dir = phoneme::find_model_dir(&crate::models::index::model_root())
+        .map(|dir| dir.display().to_string());
+    PhonemeModelStatus { installed_dir, models }
+}
+
+#[cfg(feature = "phoneme")]
+#[tauri::command]
+pub async fn read_aloud_phoneme_model_status() -> Result<PhonemeModelStatus, String> {
+    Ok(phoneme_model_status())
+}
+
+/// Delete a downloaded pronunciation model.
+///
+/// The cached ONNX session is dropped first so scoring can never run against
+/// files that no longer exist; the next attempt simply reports `model_missing`.
+#[cfg(feature = "phoneme")]
+#[tauri::command]
+pub async fn read_aloud_phoneme_model_delete(
+    index: State<'_, crate::models::index::ModelIndexState>,
+    id: String,
+) -> Result<(), String> {
+    let def = crate::models::catalog::find_model(&id)
+        .ok_or_else(|| format!("Unknown pronunciation model: {}", id))?;
+    if def.model_type != PHONEME_TYPE {
+        return Err(format!("'{}' is not a pronunciation model", id));
+    }
+    phoneme::unload();
+
+    let dir = crate::models::hf_model_dir(def);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|e| {
+            format!("Failed to delete model directory {}: {}", dir.display(), e)
+        })?;
+    }
+    let key = crate::models::index::make_key(def.model_type, &id);
+    if let Err(e) = crate::models::index::remove_entry(&index, &key) {
+        log::warn!("Failed to update model index after deleting '{}': {}", id, e);
+    }
+    log::info!("Deleted pronunciation model '{}'", id);
+    Ok(())
+}
+
+/// Submit a recorded attempt: persist the audio, score it against the reference
 /// text, store the attempt, and award scaled XP when the score passes.
 ///
 /// The frontend records + runs STT (via `model_transcribe_detailed`) and passes
@@ -1496,25 +1745,27 @@ pub async fn read_aloud_submit(
     let summary = score_asr(&content, &recognized);
     let score = summary.score;
 
-    // The recorder writes 16 kHz mono; a decode failure must not lose the take,
+    // The recorder writes 16 kHz mono; a decode failure must not lose the attempt,
     // so it degrades to "no fluency" instead of failing the submission.
     let samples = decode_samples(&wav_base64).unwrap_or_else(|e| {
         log::warn!("read_aloud: recording could not be decoded for fluency: {}", e);
         Vec::new()
     });
 
-    let assessment = assess_take(
+    let clip = load_default_clip(&settings, &dataset_uuid, &text_uuid, &content);
+    let assessment = assess_attempt(
         &settings,
         &summary,
         &content,
         &recognized,
         &samples,
         words.as_deref(),
+        &clip,
     )
     .await;
 
     // Persist the recording in the per-user audio dir — never inside the dataset,
-    // so a take stays out of the shared manifest and needs no overlay (§17).
+    // so an attempt stays out of the shared manifest and needs no overlay (§17).
     let attempt_uuid = Uuid::new_v4().to_string();
     let file_name = format!("{}.wav", attempt_uuid);
     let audio_root = audio_dir(&settings);
@@ -1603,11 +1854,14 @@ pub async fn read_aloud_submit(
     })
 }
 
+/// Fixtures shared by this group's tests. A module rather than copies: the
+/// standard-audio tests need the same real dataset the scoring tests build.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests_support {
     use super::*;
 
-    fn temp_settings(tag: &str) -> (SettingsState, PathBuf) {
+    /// A workspace-scoped settings state over a fresh temp dir.
+    pub(crate) fn temp_settings(tag: &str) -> (SettingsState, PathBuf) {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1620,7 +1874,7 @@ mod tests {
     }
 
     /// A real read-aloud dataset with one text, built through the production path.
-    fn dataset_with_text(settings: &SettingsState, content: &str) -> (String, String) {
+    pub(crate) fn dataset_with_text(settings: &SettingsState, content: &str) -> (String, String) {
         let meta = create_dataset(settings, "Practise".into(), String::new()).unwrap();
         let text_uuid = Uuid::new_v4().to_string();
         let now = now_stamp();
@@ -1644,6 +1898,12 @@ mod tests {
         .unwrap();
         (meta.uuid, text_uuid)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_support::{dataset_with_text, temp_settings};
+    use super::*;
 
     fn attempt(text_uuid: &str, user_id: &str, score: f64) -> ReadAttempt {
         ReadAttempt {
@@ -1907,5 +2167,63 @@ mod tests {
         let again = apply_remote_save(&fresh, "", &rows[0], "carol").unwrap();
         assert!(!again);
         assert_eq!(event_count(&fresh), 1);
+    }
+
+    /// The one test that exercises the pronunciation axis against the two things
+    /// it cannot fake: the live Edge TTS service and a real phoneme model file.
+    ///
+    /// A standard clip is generated into a real dataset and then scored against
+    /// itself, so a perfect read of the reference must come back measured and
+    /// near the top of the band. Any "not measured" reason fails the test with
+    /// the reason in the message, which is what makes it useful: it is the check
+    /// that would have caught the 403 that made every card read "the reference
+    /// voice clip could not be synthesized".
+    ///
+    /// Ignored because it needs the network and the 603 MB model download; run
+    /// with `cargo test --offline --features desktop --lib a_real_standard
+    /// -- --ignored --nocapture`.
+    #[cfg(feature = "phoneme")]
+    #[ignore = "needs Edge TTS over the network and the phoneme model install"]
+    #[tokio::test]
+    async fn a_real_standard_clip_scores_the_attempt_that_read_it() {
+        // The binary installs this in `run()`; a test process must ask, since
+        // both rustls providers are compiled in.
+        crate::install_crypto_provider();
+
+        let (settings, _dir) = temp_settings("live-pronunciation");
+        let text = "Guten Tag, wie geht es Ihnen?";
+        let (dataset_uuid, text_uuid) = dataset_with_text(&settings, text);
+        standard_audio::generate(&settings, &dataset_uuid, &text_uuid, &tts_voice(&settings), None)
+            .await
+            .expect("Edge TTS should have produced a standard clip");
+
+        let dir = find_dataset_dir(&settings, &dataset_uuid).unwrap();
+        let resolved = standard_audio::default_for(&dir, &text_uuid, text).unwrap();
+        let standard_audio::DefaultClip::Ready(clip) = &resolved else {
+            panic!("the generated clip did not come back as the default");
+        };
+        println!(
+            "standard clip: {:.2} s, {} word boundaries",
+            clip.seconds(),
+            clip.boundaries.len()
+        );
+
+        // The recording *is* the clip, so the read is by definition perfect.
+        let words = text.split_whitespace().count();
+        let run = pronunciation_evidence(&settings, words, &clip.samples, &resolved).await;
+        let reason = run.reason;
+        assert!(reason.is_none(), "pronunciation not measured: {reason:?}");
+
+        let scores: Vec<f64> = run
+            .spans
+            .iter()
+            .filter_map(|spans| gop::word_score(&run.post, spans, assess::GOP_TAU))
+            .collect();
+        assert!(!scores.is_empty(), "no word was scored");
+        let worst = scores.iter().copied().fold(f64::INFINITY, f64::min);
+        println!("{} words scored, worst {:.2}", scores.len(), worst);
+        // A read that is byte-identical to the canonical rendering cannot be a
+        // poor pronunciation; a low score here means the alignment, not the read.
+        assert!(worst > 0.6, "worst word scored {worst:.2}");
     }
 }

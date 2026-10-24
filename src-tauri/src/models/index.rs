@@ -157,6 +157,26 @@ fn collect_files_recursive(dir: &Path, root: &Path, out: &mut HashMap<String, u6
 // Scan filesystem to rebuild index
 // ---------------------------------------------------------------------------
 
+/// Root a catalog model's `folder` is resolved against, under `root`.
+///
+/// Nearly every entry lives under `{root}/candle/`. The read-aloud phoneme model
+/// is the exception: its consumer
+/// (`datasets::read_aloud::phoneme::find_model_dir`) scans `{root}/phoneme/`, the
+/// same place a hand-installed model goes — so a downloaded model and a
+/// dropped-in one are indistinguishable to the scorer.
+pub fn catalog_models_root(root: &Path, def: &catalog::HfModelDef) -> PathBuf {
+    if def.folder.starts_with("phoneme/") {
+        root.to_path_buf()
+    } else {
+        root.join("candle")
+    }
+}
+
+/// Directory a catalog model's files are stored in, under `root`.
+pub fn catalog_model_dir(root: &Path, def: &catalog::HfModelDef) -> PathBuf {
+    catalog_models_root(root, def).join(def.folder)
+}
+
 /// Scan the model directory and rebuild the index from what's on disk.
 pub fn scan_models(root: &Path) -> ModelIndex {
     let mut index = ModelIndex {
@@ -192,7 +212,7 @@ pub fn scan_models(root: &Path) -> ModelIndex {
 
     // 2. Scan HuggingFace models from catalog (candle-ocr, candle-tts, etc.)
     for def in catalog::MODELS {
-        let model_dir = root.join("candle").join(def.folder);
+        let model_dir = catalog_model_dir(root, def);
         if !model_dir.exists() {
             continue;
         }

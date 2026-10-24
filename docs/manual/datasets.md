@@ -26,7 +26,7 @@ The `info.json` file is what tells FmS the folder is a dataset and what kind it 
 | **Dictation** | Dictation | audio + subtitles + cues |
 | **Cards** | Cards | flashcards and tags |
 | **Book** | Read a Book | chapters, sentences, and per‑sentence audio |
-| **Read Aloud** | Read Aloud | texts and your recorded takes |
+| **Read Aloud** | Read Aloud | texts, their standard audio, and your recorded attempts |
 | **Wiki** | Wiki | Markdown documents |
 
 Whenever datasets are listed — in a practice page's picker, in Datasets Sync, or in the Market — they are grouped into tabs by type, and you work with the tab relevant to what you're doing.

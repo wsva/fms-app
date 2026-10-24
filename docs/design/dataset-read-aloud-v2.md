@@ -30,8 +30,12 @@ Because a source is never shared and never parsed by the app, it lives **entirel
 ├── info.json                 # DatasetInfo, type "read_aloud", format "read_aloud-v2"
 ├── data.sqlite3
 │   ├── read_text             # v1 columns + nullable source_uuid, gen_* (§Lineage)
+│   ├── read_standard_audio   # reference clips per text (§Standard audio)
 │   └── read_attempt          # legacy, migration-read only (unchanged)
-├── media/                    # v1 legacy attempt audio — no new writes
+├── media/
+│   ├── <legacy_uuid>.wav     # v1 attempt audio — read-only, never written
+│   └── <text_uuid>/          # standard audio, one directory per text
+│       └── <audio_uuid>.wav
 └── sources/                  # ← OWNER-LOCAL, EXCLUDED FROM SYNC/PUBLISH
     └── <name>/               # owner-chosen label, e.g. rechtsphilosophie-authority/
         ├── meta.json         # the source's identity + lineage (§Meta) — NOT in the DB
@@ -102,6 +106,31 @@ Because the relation is 1:1, `read_text.source_uuid` is **uniquely constrained**
 
 On a peer that adopted the published dataset, `source_uuid` points at a source dir that does not exist there — that is fine and already an established pattern: a device-local attempt's `audio_path` resolves to `None` on another device (`resolve_audio_url`, `read_aloud.rs:226`). Provenance is informational, never a required join.
 
+## Standard audio (shareable content)
+
+Pronunciation is measured against a clip of the text read by a canonical voice, and that clip belongs to the **dataset**, not to the machine that made it: several clips per text, exactly one of them the default, and the scorer reads only the default. This is v1 shape in one respect — `media/` finally holds something again — and new in another: the clips are a table, because ordering, the default flag and word timings are relational.
+
+```
+read_standard_audio
+├── uuid        PRIMARY KEY
+├── text_uuid   the text the clip reads
+├── note        free-form provenance (origin, voice, how it was cropped) — never parsed
+├── boundaries  TTS word timings, JSON; NULL ⇒ an upload, which has none
+├── text_sha    sha256 of the effective reference the clip was made from
+├── is_default  0/1 — enforced on write, tolerated on read
+└── created_at  tie-breaker for "the earliest remaining"
+```
+
+The row and the file cannot disagree, because the row's identity *is* its path: `media/<text_uuid>/<uuid>.wav`, 16 kHz mono (the phoneme model's input rate, and small). There is no `wav_path`, no `kind` and no `duration` column — the first would be a second copy of the identity, the second is `boundaries IS NULL`, and the third is decoded from the wav when a text's clips are listed. Only what cannot be derived is stored.
+
+Two tolerances, both deliberate. **One default is enforced on write** (the first clip inserted for a text is default; `set_default` clears the others in one transaction; deleting the default promotes the earliest remaining) **and tolerated on read** (`ORDER BY is_default DESC, created_at, rowid`, then the first row whose wav exists) — a sync replay must never fail on a partial unique index, so the invariant is a habit on the write path rather than a constraint the database can refuse. **A missing wav is not an error**: the row is filtered out, so a metadata/file race reads as "no standard audio", never as a broken entry.
+
+`text_sha` is what makes staleness cheap. It covers the *effective* reference (`normalized_content` when non-empty, else `content`), so a clip made before an edit no longer matches and the scorer reports `stale_reference` instead of grading the learner against a phone target for words that are no longer there. There is no invalidation pass and no migration: a comparison, on every score.
+
+Nothing extra is needed to share them. `read_standard_audio_save` / `_delete` journal as dataset-scoped change kinds beside `read_text_save` / `_delete`; the hub's snapshot is a whole `data.sqlite3` copy, which `sanitize_snapshot_db` passes through (it drops only `card_review` and `read_attempt`); and the wavs ride the ordinary file channel, hashed into `compute_manifest` and fetched by hash. Deleting a text cascades — its rows go with it and `media/<text_uuid>/` is removed.
+
+The clips themselves are made in the practice view's **Manage** dialog: *Generate with Edge TTS* (word timings included, so per-word attribution is exact) or *Upload audio* and crop (no timings, so per-word attribution is time-proportional; the aggregate score is unaffected). An upload's crop is the only edit offered — re-cropping means re-picking the file — and no source copy is kept, because an Edge TTS clip is one click to regenerate and an uploaded one still exists wherever the user picked it.
+
 ## The pipeline
 
 One source, run end to end, is short precisely because the app does not extract anything and does not segment anything — and because the four phases below are not a bespoke flow chart, they are the steps of this source's own workflow run, driven by the engine in `workflow/`:
@@ -142,7 +171,7 @@ Any "stale" indicator in the UI is a **derived projection** — compare the curr
 
 The LLM cannot be trusted to honor a length or stay faithful to its input, so both are *measured* rather than assumed — registered as `verify:` check ids in `workflow/verify.rs` and bound to the generate step in the template:
 
-- **`read_aloud_length_in_band`** — the draft falls inside a word-count band appropriate to one recording take.
+- **`read_aloud_length_in_band`** — the draft falls inside a word-count band appropriate to one recording.
 - **`read_aloud_source_fidelity`** — `textsim::similarity_score` between the draft and the concatenated `preprocess/` text clears a floor, which is the drift/hallucination gate a level rewrite needs.
 - A failing check does not block the draft write; it blocks **adopt** and surfaces the reason through `workflow_verify`, so the owner reviews rather than inherits a bad text.
 

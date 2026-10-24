@@ -24,9 +24,12 @@
 //!
 //! ## Model resolution
 //!
-//! `{model_root}/phoneme/<owner>/<repo>/{model.onnx, vocab.json}`. A directory
-//! is a model when it holds both files; the first one found wins. When none is
-//! found the caller reports `model_missing` — see the degradation matrix in
+//! `{model_root}/phoneme/<owner>/<repo>/{*.onnx, vocab.json}`. A directory is a
+//! model when it holds an ONNX file and a vocabulary; the first one found wins.
+//! The Models page downloads one into that exact tree (see the
+//! `Hochien/wav2vec2-alignment` catalog entry), and a hand-dropped directory is
+//! indistinguishable from it. When none is found the caller reports
+//! `model_missing` — see the degradation matrix in
 //! `docs/design/read-aloud-score.md`. There is deliberately no proxy score.
 //!
 //! [`super::assess::PronReason`]: the vocabulary of "why not measured".
@@ -35,22 +38,73 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use half::f16;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
-use ort::value::Tensor;
+use ort::value::{DynTensor, Tensor, TensorElementType, ValueType};
 
 use super::gop::LogPost;
 
 /// 16 kHz mono, the rate the recorder writes and `audio::decode_to_pcm` emits.
 const SAMPLE_RATE: u32 = 16_000;
 
-/// File names a phoneme model directory must contain.
+/// Preferred weights file name. Any `*.onnx` in the directory is accepted — see
+/// [`find_onnx`] — because exports disagree on the name.
 const MODEL_FILE: &str = "model.onnx";
 const VOCAB_FILE: &str = "vocab.json";
+
+/// The ONNX weights in `dir`: `model.onnx` if present, otherwise the first
+/// `*.onnx` file by name.
+///
+/// A model's identity is its directory, not its file name: one export ships
+/// `model_fp16.onnx`, another `wav2vec2-lv60-espeak-fp16.onnx`. A partial
+/// download keeps its own extension (`.part`), so it is never picked up here.
+fn find_onnx(dir: &Path) -> Option<PathBuf> {
+    let preferred = dir.join(MODEL_FILE);
+    if preferred.is_file() {
+        return Some(preferred);
+    }
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .map(|ext| ext.eq_ignore_ascii_case("onnx"))
+                    .unwrap_or(false)
+        })
+        .collect();
+    candidates.sort();
+    candidates.into_iter().next()
+}
+
+/// The element type a graph declares for its audio input.
+///
+/// Half-precision exports convert the *whole* graph, input included, so the
+/// tensor handed to `run` must match or ONNX Runtime rejects it before any
+/// inference happens. Read from the session rather than guessed from the file
+/// name: the name says nothing about what the graph expects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputDtype {
+    F32,
+    F16,
+}
+
+/// The audio input's element type, defaulting to f32 for anything unexpected
+/// (a non-tensor input, or an export that leaves the type undefined).
+fn audio_input_dtype(session: &Session) -> InputDtype {
+    match session.inputs().first().map(|outlet| outlet.dtype()) {
+        Some(ValueType::Tensor { ty: TensorElementType::Float16, .. }) => InputDtype::F16,
+        _ => InputDtype::F32,
+    }
+}
 
 /// An ONNX CTC acoustic model over a phone inventory.
 pub(crate) struct PhonemeModel {
     session: Session,
+    /// Element type of the graph's audio input — see [`audio_input_dtype`].
+    audio_dtype: InputDtype,
     /// `tokens[id]` — the vocabulary in id order, specials included.
     tokens: Vec<String>,
     /// True for `<pad>`/`<s>`/`</s>`/`<unk>`-style entries: they hold CTC
@@ -62,9 +116,10 @@ pub(crate) struct PhonemeModel {
 }
 
 impl PhonemeModel {
-    /// Load `model.onnx` and `vocab.json` from `dir`.
+    /// Load the ONNX weights and `vocab.json` from `dir`.
     pub(crate) fn load(dir: &Path) -> Result<Self, String> {
-        let onnx = dir.join(MODEL_FILE);
+        let onnx = find_onnx(dir)
+            .ok_or_else(|| format!("No ONNX model (*.onnx) found in {}", dir.display()))?;
         let vocab = dir.join(VOCAB_FILE);
 
         let session = Session::builder()
@@ -79,7 +134,14 @@ impl PhonemeModel {
             return Err(format!("Phoneme vocabulary {} is empty", vocab.display()));
         }
 
-        Ok(Self { session, tokens, specials, blank, dir: dir.to_path_buf() })
+        Ok(Self {
+            audio_dtype: audio_input_dtype(&session),
+            session,
+            tokens,
+            specials,
+            blank,
+            dir: dir.to_path_buf(),
+        })
     }
 
     pub(crate) fn dir(&self) -> &Path {
@@ -106,10 +168,7 @@ impl PhonemeModel {
             return Ok(LogPost::new(Vec::new(), self.blank));
         }
 
-        let audio = ndarray::Array2::from_shape_vec((1, samples.len()), samples.to_vec())
-            .map_err(|e| format!("Failed to shape audio input: {}", e))?;
-        let input = Tensor::from_array(audio)
-            .map_err(|e| format!("Failed to build audio tensor: {}", e))?;
+        let input = audio_input(self.audio_dtype, &normalize(samples))?;
 
         let outputs = self
             .session
@@ -218,6 +277,51 @@ fn argmax(row: &[f32]) -> usize {
     best
 }
 
+/// Zero-mean, unit-variance normalisation, per utterance.
+///
+/// wav2vec2-family CTC models expect it: the `Wav2Vec2FeatureExtractor` that
+/// ships with the PyTorch model normalises every recording *before* the network
+/// it, and an ONNX export starts at the network. Without it the activations
+/// saturate — the argmax collapses onto one id for every frame, which would read
+/// as a confidently wrong score rather than as a missing preprocessing step.
+/// Applied per call, so the learner recording and the reference clip are each
+/// normalised against themselves, exactly as the reference pipeline does. The
+/// `1e-7` epsilon is the feature extractor's own.
+fn normalize(samples: &[f32]) -> Vec<f32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    let count = samples.len() as f32;
+    let mean = samples.iter().sum::<f32>() / count;
+    let variance = samples.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / count;
+    let scale = (variance + 1e-7).sqrt();
+    if !scale.is_finite() || scale <= 0.0 {
+        return samples.to_vec();
+    }
+    samples.iter().map(|x| (x - mean) / scale).collect()
+}
+
+/// Build the `[1, samples]` audio tensor in the element type the graph expects.
+fn audio_input(dtype: InputDtype, samples: &[f32]) -> Result<DynTensor, String> {
+    let shape = (1, samples.len());
+    let fail = |e: ort::Error| format!("Failed to build audio tensor: {}", e);
+    match dtype {
+        InputDtype::F16 => {
+            // f32 → f16 round-trip error is ~1e-3 relative, far below the
+            // resolution of the logits GOP compares.
+            let data: Vec<f16> = samples.iter().map(|x| f16::from_f32(*x)).collect();
+            let audio = ndarray::Array2::from_shape_vec(shape, data)
+                .map_err(|e| format!("Failed to shape audio input: {}", e))?;
+            Ok(Tensor::from_array(audio).map_err(fail)?.upcast())
+        }
+        InputDtype::F32 => {
+            let audio = ndarray::Array2::from_shape_vec(shape, samples.to_vec())
+                .map_err(|e| format!("Failed to shape audio input: {}", e))?;
+            Ok(Tensor::from_array(audio).map_err(fail)?.upcast())
+        }
+    }
+}
+
 /// Parse an HF-style `vocab.json` (`token -> id`) into an id-ordered inventory.
 fn read_vocab(path: &Path) -> Result<(Vec<String>, Vec<bool>, usize), String> {
     let raw = std::fs::read_to_string(path)
@@ -256,8 +360,8 @@ fn is_special_token(token: &str) -> bool {
 /// Find the phoneme model directory under `{model_root}/phoneme`.
 ///
 /// Layout is `phoneme/<owner>/<repo>/` (mirroring the `candle/` tree), but a
-/// flat `phoneme/<name>/` is accepted too — the rule is "a directory holding
-/// both `model.onnx` and `vocab.json`".
+/// flat `phoneme/<name>/` is accepted too — the rule is "a directory holding an
+/// ONNX file and `vocab.json`".
 pub(crate) fn find_model_dir(model_root: &Path) -> Option<PathBuf> {
     let base = model_root.join("phoneme");
     find_in(&base, 0)
@@ -267,7 +371,7 @@ fn find_in(dir: &Path, depth: usize) -> Option<PathBuf> {
     if !dir.is_dir() {
         return None;
     }
-    if dir.join(MODEL_FILE).is_file() && dir.join(VOCAB_FILE).is_file() {
+    if find_onnx(dir).is_some() && dir.join(VOCAB_FILE).is_file() {
         return Some(dir.to_path_buf());
     }
     if depth >= 2 {
@@ -310,6 +414,17 @@ pub(crate) fn with_model<T>(
 
     let cached = guard.as_mut().expect("just filled");
     f(&mut cached.model)
+}
+
+/// Drop the cached session.
+///
+/// Called before the model's files are deleted: a cached session holds the ONNX
+/// graph in memory, and letting it outlive its directory would mean scoring
+/// against a model the user believes is gone. The next attempt reloads from disk
+/// (or reports `model_missing`).
+pub(crate) fn unload() {
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    *cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Duration of a sample buffer in seconds, so callers do not repeat the
@@ -421,6 +536,69 @@ mod tests {
         assert_eq!(find_model_dir(&root), Some(model));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn weights_are_found_under_whatever_name_the_export_used() {
+        let root = std::env::temp_dir().join(format!("fms_phoneme_named_{}", std::process::id()));
+        let model = root.join("phoneme").join("Hochien").join("wav2vec2-alignment");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("wav2vec2-lv60-espeak-fp16.onnx"), b"not really onnx").unwrap();
+        std::fs::write(model.join(VOCAB_FILE), b"{}").unwrap();
+
+        assert_eq!(find_model_dir(&root), Some(model.clone()));
+        assert_eq!(find_onnx(&model), Some(model.join("wav2vec2-lv60-espeak-fp16.onnx")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_dir_without_weights_is_not_a_model() {
+        let dir = std::env::temp_dir().join(format!("fms_phoneme_noonnx_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A download in flight leaves a `.part` beside the real name.
+        std::fs::write(dir.join("model.onnx.part"), b"partial").unwrap();
+        std::fs::write(dir.join(VOCAB_FILE), b"{}").unwrap();
+
+        assert!(find_onnx(&dir).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_audio_tensor_carries_the_recording_in_the_asked_for_element_type() {
+        let samples = [-1.5f32, 0.0, 0.25];
+
+        let wide = audio_input(InputDtype::F32, &samples).unwrap();
+        let wide = wide.try_extract_array::<f32>().unwrap();
+        assert_eq!(wide.shape().to_vec(), vec![1, 3]);
+        assert_eq!(wide.iter().copied().collect::<Vec<f32>>(), samples.to_vec());
+
+        // An fp16 export gets an fp16 tensor: a mismatch here is rejected by
+        // ONNX Runtime before any inference runs.
+        let narrow = audio_input(InputDtype::F16, &samples).unwrap();
+        let narrow = narrow.try_extract_array::<f16>().unwrap();
+        assert_eq!(narrow.shape().to_vec(), vec![1, 3]);
+        for (got, want) in narrow.iter().zip(samples) {
+            assert!((got.to_f32() - want).abs() < 1e-3, "{} != {}", got.to_f32(), want);
+        }
+    }
+
+    #[test]
+    fn normalization_centres_and_scales_the_recording() {
+        let out = normalize(&[0.0, 1.0, 2.0, 3.0]);
+        let mean = out.iter().sum::<f32>() / out.len() as f32;
+        let variance = out.iter().map(|x| x * x).sum::<f32>() / out.len() as f32;
+        assert!(mean.abs() < 1e-5, "mean was {}", mean);
+        assert!((variance - 1.0).abs() < 1e-3, "variance was {}", variance);
+    }
+
+    #[test]
+    fn normalization_leaves_silence_at_zero() {
+        // The epsilon makes the scale tiny rather than zero; digital silence must
+        // still map to silence instead of blowing up into noise.
+        assert!(normalize(&[0.0; 64]).iter().all(|x| *x == 0.0));
+        assert!(normalize(&[]).is_empty());
     }
 
     #[test]

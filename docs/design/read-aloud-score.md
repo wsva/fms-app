@@ -1,6 +1,18 @@
 # Read-Aloud Scoring — Accuracy, Fluency, Pronunciation
 
-> Status: **implemented** (accuracy · fluency · pronunciation, with the pronunciation axis inert until a phoneme model is installed — see [Decision log](#decision-log)). Supersedes [read-aloud-score-claude.md](./read-aloud-score-claude.md), which specified a standalone CLI workspace; the scoring design survived, the delivery vehicle did not. The v1 practice loop this extends is described in [dataset-read-aloud.md](./dataset-read-aloud.md).
+> Status: **implemented** (accuracy · fluency · pronunciation, with the pronunciation axis live once its model is downloaded from the Models page — see [Decision log](#decision-log)). Supersedes [read-aloud-score-claude.md](./read-aloud-score-claude.md), which specified a standalone CLI workspace; the scoring design survived, the delivery vehicle did not. The v1 practice loop this extends is described in [dataset-read-aloud.md](./dataset-read-aloud.md).
+
+## Terminology
+
+Three words, one meaning each, used identically in the code, the UI and these docs:
+
+| Term | Means | Lives in |
+|---|---|---|
+| **attempt** | One submission: the recording plus its transcript plus the three-axis assessment | `ReadAttempt`, `read_attempt_event` (app DB) |
+| **recording** | The WAV bytes of an attempt, device-local | `<workspace>/read_aloud_audio/<attempt_uuid>.wav` |
+| **standard audio** | A reference clip the *dataset* owns — what pronunciation is measured against | `read_standard_audio` (dataset DB) + `media/<text_uuid>/<audio_uuid>.wav` |
+
+"The take" was film jargon used only in prose; every identifier already said attempt. It is retired, because in a read-aloud dataset "audio" could plausibly mean either the reference or the reader's own recording — the distinction the three terms above exist to keep.
 
 ## What exists today
 
@@ -24,13 +36,13 @@ Two consequences shape the whole design. Fluency is buildable today for Parakeet
 
 **D2 — Fluency comes from the audio, not from ASR gaps.** Word timestamps are imprecise exactly where pauses live, so a confidence-free gap measurement is worse than useless. Pauses are detected on an energy VAD over the raw PCM, and ASR word times are only used to say *which* words surround each pause, clipped into the VAD segments. A gap that sits inside a VAD speech segment is ASR noise, not a pause.
 
-**D3 — Pronunciation is a CTC phoneme model scored against a TTS-derived phone timeline.** GOP needs the expected phone sequence, and three ways to get one were considered. *Teacher forcing* the STT model is impossible (above). *espeak-ng G2P* is a C library with an NDK build, plus a lexicon per language, plus a phoneme-inventory mapping — a large amount of native build surface for one scoring axis. *Per-word DTW against TTS audio* measures similarity to a specific voice rather than correctness, and does not survive a change of speaker. The chosen route removes both problems: synthesize the reference with Edge TTS, decode it with the same phoneme model, and take the CTC-collapsed decode as the target phone sequence, grouped per word by the TTS boundary times. The target is then independent of the learner (it is what a canonical speaker actually said), needs no G2P, and works for any language Edge TTS speaks. The cost is one network fetch per text, cached — see "Storage and sync".
+**D3 — Pronunciation is a CTC phoneme model scored against a TTS-derived phone timeline.** GOP needs the expected phone sequence, and three ways to get one were considered. *Teacher forcing* the STT model is impossible (above). *espeak-ng G2P* is a C library with an NDK build, plus a lexicon per language, plus a phoneme-inventory mapping — a large amount of native build surface for one scoring axis. *Per-word DTW against TTS audio* measures similarity to a specific voice rather than correctness, and does not survive a change of speaker. The chosen route removes both problems: synthesize the reference with Edge TTS, decode it with the same phoneme model, and take the CTC-collapsed decode as the target phone sequence, grouped per word by the TTS boundary times. The target is then independent of the learner (it is what a canonical speaker actually said), needs no G2P, and works for any language Edge TTS speaks. The cost is one synthesis per text, stored in the dataset and reused until the text changes — see [Standard audio](#standard-audio-the-reference-the-scorer-reads).
 
 **D4 — Derived and capped, in the app database.** An attempt's metrics are recomputed from the recording on demand; only a compact aggregate (~2 KB: rates, counts, pause count, the twelve weakest words, plus the capability flags that produced them) is stored on `read_attempt_event`. Per-frame posteriors, per-phone GOP and full word timing arrays are never persisted: they are large, device-local, and exactly reconstructible from the WAV that is already kept.
 
-**D5 — Unavailable is a state, not a proxy.** If the phoneme model is not installed, the app is offline, or the take is too short to align, `pronunciation.unavailable_reason` says so and the card says "not measured". Substituting ASR word confidence would produce a number that looks like pronunciation and is not, and a plausible fake is worse than an honest blank in a learning tool.
+**D5 — Unavailable is a state, not a proxy.** If the phoneme model is not installed, the text has no standard audio (or the clip predates the current text), or the recording is too short to align, `pronunciation.unavailable_reason` says so and the card says "not measured". Substituting ASR word confidence would produce a number that looks like pronunciation and is not, and a plausible fake is worse than an honest blank in a learning tool.
 
-**D6 — `datasets/read_aloud/` becomes a module directory.** The file is 1569 lines and this work adds five concerns to it (VAD, fluency, GOP, phoneme session, TTS reference). Splitting keeps the pure logic testable without audio or models, which is the property that makes the thresholds safe to change.
+**D6 — `datasets/read_aloud/` becomes a module directory.** The file is 1569 lines and this work adds five concerns to it (VAD, fluency, GOP, phoneme session, TTS reference). Splitting keeps the pure logic testable without audio or models, which is the property that makes the thresholds safe to change. The directory later gained `standard_audio.rs` beside those six.
 
 **D7 — No composite score, no XP change, no protocol bump.** The XP gate stays on accuracy so the ledger's meaning is stable. `metrics_json` is an additive optional column on an already-journalled row, so old peers ignore it and no `PROTOCOL_VERSION` change is needed.
 
@@ -42,9 +54,10 @@ WAV (16 kHz mono, straight from the recorder)
   ├── model_transcribe_detailed ─► text + TimedWord[]   (Parakeet: per word; others: text only)
   └── phoneme model ──────────► per-frame log-posteriors
 reference text
-  ├── normalize_words ────────► norm words + punctuation per word
-  └── Edge TTS reference ─────► canonical MP3 + word boundaries
-        └── phoneme model ───► reference phone sequence, grouped per reference word
+  └── normalize_words ────────► norm words + punctuation per word
+standard audio (the text's default clip)
+  └── phoneme model ──────────► reference phone sequence, grouped per reference word
+        (grouped phones cached in <workspace>/read_aloud_phones/)
                                     │
    CTC forced alignment of that sequence onto the learner's posteriors
                                     ▼
@@ -55,7 +68,7 @@ fluency (word times clipped into VAD segments) ─► pauses, rates
                               Assessment (serde)
 ```
 
-The pure half — normalization, alignment, classification, VAD, pause detection, rate arithmetic, forced alignment and GOP arithmetic — never touches a model or a file. Only `phoneme.rs` (session) and `tts_ref.rs` (network + cache) are effectful, and `assess.rs` is the one function that composes them, so every threshold remains testable against hand-built numbers.
+The pure half — normalization, alignment, classification, VAD, pause detection, rate arithmetic, forced alignment and GOP arithmetic — never touches a model or a file. Only `phoneme.rs` (session), `standard_audio.rs` (the dataset's clips) and the reference-phone cache are effectful, and `assess.rs` is the one function that composes them, so every threshold remains testable against hand-built numbers.
 
 ## Storage and sync
 
@@ -67,9 +80,39 @@ ALTER TABLE read_attempt_event ADD COLUMN metrics_json TEXT
 
 `attempt_payload` adds the field to the journal payload and `apply_remote_save` reads it with the same tolerant `get()` helper it uses for the other keys, so a peer on an older build simply ignores it. Word-level and phone-level arrays stay out of the payload on purpose: the journal is sync traffic, and a per-frame matrix would multiply it for data that is device-local anyway.
 
-The TTS reference is cached in `<workspace>/read_aloud_tts/<voice>-<hash8>.mp3|.json`, beside `read_aloud_audio/`, never inside the dataset directory. Practising must not write into a dataset (that is what keeps an adopted base fork-free and a published dataset clean), and the cache is genuinely device-local: the key is `sha256(effective_reference \x1f voice)`, so it is per text, per voice, and invalidated by editing the text because the hash covers it.
+### Standard audio: the reference the scorer reads
 
-One measured addition to D4: a stored pause costs ~48 bytes (`{"start":12.04,"end":12.31,"kind":"within_phrase"}`) and the aggregates ~520, so `MAX_STORED_PAUSES` is **24**, not 40 — 40 would put a verbose take at ~3 KB and break the row budget. Raising it again needs a narrower pause shape, not a bigger number.
+The reference is no longer synthesised during scoring. It is an asset the **dataset owns**: any number of clips per text, exactly one of them the default, described by a `read_standard_audio` row and stored as `media/<text_uuid>/<audio_uuid>.wav` (16 kHz mono — the phoneme model's input rate). The scorer reads only the default clip, and only from disk.
+
+```sql
+CREATE TABLE IF NOT EXISTS read_standard_audio (
+    uuid       TEXT PRIMARY KEY,
+    text_uuid  TEXT NOT NULL,
+    note       TEXT NOT NULL DEFAULT '',   -- free-form: origin, voice, how it was cropped
+    boundaries TEXT,                       -- TTS word timings; NULL ⇒ an upload (none)
+    text_sha   TEXT NOT NULL DEFAULT '',   -- sha256 of the reference text it was made from
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+The table carries only what cannot be derived. The row's identity *is* its path (so row and file cannot disagree); `boundaries IS NULL` is what makes a clip an upload rather than a synthesis; the duration is decoded from the wav when a text's clips are listed; and `note` is the single free-form field for provenance, never parsed. `text_sha` covers the *effective* reference (`normalized_content` when set, else `content`), which turns staleness into a comparison instead of a migration.
+
+One default is enforced on write (the first insert for a text becomes default; `set_default` clears the others in one transaction; deleting the default promotes the earliest remaining) and tolerated on read (`ORDER BY is_default DESC, created_at, rowid`, then the first row whose wav still exists) — a sync replay must never fail on a partial unique index. A row whose wav is missing is filtered out, so a metadata/file race degrades to "no standard audio", never a broken entry.
+
+Why not keep synthesising on demand into a cache: a score must not depend on an HTTP request, and a clipped or mispronounced TTS rendering must be replaceable by a human reading. The old `<workspace>/read_aloud_tts/` cache is retired; its files are left on disk as derived data.
+
+### Reference-phone cache
+
+Decoding the clip through the phoneme model is the expensive half of the reference pass, and it produces the same answer for every attempt at the same clip with the same model. So the *grouped target* — `Vec<Vec<usize>>`, the phone ids of each word, a few KB — is cached in `<workspace>/read_aloud_phones/<digest>.json`. Nothing downstream touches reference posteriors after grouping, so this is the whole reusable result, and a repeat score runs the model **once** (learner only) instead of twice.
+
+The key is `sha256(model_identity ‖ sha256(clip PCM))`, with `model_identity` the phoneme directory's name plus `model.onnx`'s length and mtime — a re-crop, a regenerate or a different model each self-invalidate, so there is no invalidation logic to get wrong. Workspace, not dataset: scoring is a read path and must never write into a dataset.
+
+### Standard audio and sync
+
+The clips ride the existing dataset channels for free. `read_standard_audio_save` / `_delete` join the dataset-scoped change kinds beside `read_text_save` / `_delete` (object id = uuid, delete → tombstone); the hub's snapshot is a whole `data.sqlite3` copy and `sanitize_snapshot_db` drops only `card_review` + `read_attempt`; and the wavs travel as ordinary files, hashed into `compute_manifest` and fetched by hash. Deleting a text cascades: its rows go with it, and `media/<text_uuid>/` is removed.
+
+One measured addition to D4: a stored pause costs ~48 bytes (`{"start":12.04,"end":12.31,"kind":"within_phrase"}`) and the aggregates ~520, so `MAX_STORED_PAUSES` is **24**, not 40 — 40 would put a verbose attempt at ~3 KB and break the row budget. Raising it again needs a narrower pause shape, not a bigger number.
 
 ## Scoring definitions
 
@@ -84,7 +127,7 @@ One measured addition to D4: a stored pause costs ~48 bytes (`{"start":12.04,"en
 | `speech_rate` | Spoken words ÷ reading span | — |
 | `articulation_rate` | Spoken words ÷ speaking time (reading span minus pauses) | — |
 | pause | Silence ≥ `min_pause` between two VAD segments, or a gap the VAD does not call speech; leading/trailing silence is reported separately and excluded from rates | 0.25 s |
-| VAD | 20 ms frames; noise floor = 10th-percentile frame RMS, ceilinged at half the 90th percentile so a speech-only take is not read as silence; threshold `max(min(3 × floor, 0.5 × loud), 0.004)`; 2-frame hysteresis; ≥ 150 ms speech; ≥ 120 ms gap to split; 40 ms pad | as stated |
+| VAD | 20 ms frames; noise floor = 10th-percentile frame RMS, ceilinged at half the 90th percentile so a speech-only recording is not read as silence; threshold `max(min(3 × floor, 0.5 × loud), 0.004)`; 2-frame hysteresis; ≥ 150 ms speech; ≥ 120 ms gap to split; 40 ms pad | as stated |
 | `long_pause` | Long enough to be a break rather than a breath | 1.0 s |
 | `within_phrase_pause_ratio` | Pauses not aligned with reference punctuation ÷ all pauses | — |
 | `mean_length_of_run` | Words between pauses | — |
@@ -97,17 +140,18 @@ One measured addition to D4: a stored pause costs ~48 bytes (`{"start":12.04,"en
 
 ## Configuration
 
-`FluencyConfig` (`fluency.rs`) holds every fluency threshold in one struct with documented defaults; it is *not* serialized — the assessment stores the numbers it produced, and a tuning change applies to the next take rather than rewriting history. `VadConfig` (`vad.rs`) does the same for the detector. `GOP_TAU` and the band edges are constants in `assess.rs` / `FluencyConfig`, deliberately not settings: they describe the metric, not the material, and a per-user τ would make two learners' scores incomparable.
+`FluencyConfig` (`fluency.rs`) holds every fluency threshold in one struct with documented defaults; it is *not* serialized — the assessment stores the numbers it produced, and a tuning change applies to the next attempt rather than rewriting history. `VadConfig` (`vad.rs`) does the same for the detector. `GOP_TAU` and the band edges are constants in `assess.rs` / `FluencyConfig`, deliberately not settings: they describe the metric, not the material, and a per-user τ would make two learners' scores incomparable.
 
-One setting is user-facing: `read_aloud_tts_voice` (workspace-scoped, empty = `read_aloud::DEFAULT_TTS_VOICE`, `en-US-EmmaMultilingualNeural`), because the reference voice should speak the language you are learning. Nothing here is per dataset — a dataset is shareable content and must not carry its owner's scoring preferences.
+One setting is user-facing: `read_aloud_tts_voice` (workspace-scoped, empty = `read_aloud::DEFAULT_TTS_VOICE`, `en-US-EmmaMultilingualNeural`), because the reference voice should speak the language you are learning — it is the voice a **Generate with Edge TTS** click starts with, and any clip carries the voice it was made with in its `note`. Nothing here is per dataset — a dataset is shareable content and must not carry its owner's scoring preferences; the clip itself is content, and is shared.
 
 ## Commands and MCP surface
 
-- `read_aloud_assess(content, recognized, wav_base64, words?)` — preview: `Assessment` out, nothing persisted. The twin of `read_aloud_score` for the audio side, so an agent can evaluate a take it recorded.
-- `read_aloud_submit(..., words?)` — unchanged contract, plus the `Assessment` in its result and `metrics_json` on the stored attempt. XP and thresholds are untouched.
+- `read_aloud_assess(dataset_uuid, text_uuid, content, recognized, wav_base64, words?)` — preview: `Assessment` out, nothing persisted. The twin of `read_aloud_score` for the audio side, so an agent can evaluate an attempt it recorded. The two uuids are required because pronunciation now needs the text's standard clip.
+- `read_aloud_submit(..., words?)` — unchanged contract, plus the `Assessment` in its result and `metrics_json` on the stored attempt. XP and thresholds are untouched. It loads the text's default clip beside the content.
 - `read_aloud_rerecognize(..., words?)` — recomputes the assessment from the device-local recording, since a new transcript changes accuracy and may change which words line up with which pauses.
-- `model_transcribe_detailed(wav_base64)` — the recorder's final STT call: `{ text, words[], capabilities: { word_timings } }`, so the page knows before rendering whether a fluency card is possible. `model_transcribe` is untouched for the live preview, voice input and every other caller.
+- `model_transcribe_detailed(wav_base64)` — the recorder's final STT call: `{ text, words[], capabilities: { word_timings } }`, so the page knows before rendering whether a fluency card is possible. `model_transcribe` is untouched for the live preview, voice input and every other caller. It resolves the user's *default* model when none is loaded (the idle timeout unloads one), so an attempt is never unassessable just because the model was cold — and it never swaps out a model that is already loaded.
 - `read_aloud_list_attempts` — attempts carry their stored `metrics`, so the history view needs no second call.
+- `read_aloud_standard_audio_list(dataset_uuid, text_uuid?)` / `_generate` / `_import` / `_probe` / `_set_default` / `_delete` — the clips themselves. `_list` without a `text_uuid` returns the whole dataset's clips in one call, which is what badges the texts list; `_generate` synthesises the effective reference through Edge TTS and keeps the word boundaries; `_import` takes a picked file (a path, or base64 with a name on Android where the picker yields a `content://` URI) and stores only `[start, end)`; `_probe` decodes a candidate without storing it so the crop track has peaks. Each clip carries `stale` and `usable`, so a caller can decide without guessing.
 
 `words` is the one piece of evidence that is *not* gathered on the backend: it is the STT output the frontend already produces, passed in the same way `recognized` is. That keeps `read_aloud` free of the `stt`-gated `models` module, and it means a peer replaying the journal needs nothing extra.
 
@@ -115,49 +159,60 @@ Per the agent-friendly rule, all of them return structured JSON and state what i
 
 ## Frontend
 
-`PracticePanel` renders one result as three blocks, side by side on a wide screen and stacked on a phone: Accuracy (the existing badge and XP copy, unchanged), Fluency (correct words/min with a band chip, articulation rate, pause counts, words between pauses), and Pronunciation (score, the three weakest words, or "not measured" plus the reason). `AsrDiff` gains an optional per-reference-word score map so a word that was heard correctly but pronounced weakly gets an amber underline — `ref_index + offset` inside an equal run, so the diff logic is untouched. `AttemptsPanel` shows the same three blocks from `metrics_json` for any stored attempt, plus a pause ribbon drawn from the capped pause list, and its "recognize again" now re-runs `model_transcribe_detailed` so a re-scored attempt keeps its fluency.
+`PracticePanel` renders one result as three blocks, side by side on a wide screen and stacked on a phone: Accuracy (the existing badge and XP copy, unchanged), Fluency (correct words/min with a band chip, articulation rate, pause counts, words between pauses), and Pronunciation (score, the three weakest words, or "not measured" plus the reason). `AsrDiff` gains an optional per-reference-word score map so a word that was heard correctly but pronounced weakly gets an amber underline — `ref_index + offset` inside an equal run, so the diff logic is untouched. `AttemptsPanel` shows the same three blocks from `metrics_json` for any stored attempt, plus a pause ribbon drawn from the capped pause list, and its "recognize again" now re-runs `model_transcribe_detailed` so a re-scored attempt keeps its fluency. The same action sits on the attempt detail page's toolbar beside Play/Delete, and both entry points go through `lib/read_aloud/rerecognize.ts`, so the rule "re-recognition never swaps the active model" has one home rather than two.
+
+The practice toolbar's **Manage** button opens `ManageTextDialog` — the text (title, word count, preview, the normalized-reference note, a way into the inline editor) and its **Standard audio** section (the clip list with its note, duration, Default and Stale badges, Play / Set default / Delete per row, plus *Generate with Edge TTS* and *Upload audio*). Upload shows a trim track: the picked file's peak envelope with two drag handles, the selection shaded, a minimum of 0.3 s, *Use whole clip* and Play-selection. The texts list marks a text that has a usable clip with an `AudioLines` badge, sourced from one dataset-wide `read_aloud_standard_audio_list` call — nothing is added to `ReadText`, so the sync payload is untouched.
 
 ## Degradation matrix
 
 | Condition | Accuracy | Fluency | Pronunciation |
 |---|---|---|---|
-| Parakeet + phoneme model + cached reference | full | full | full |
+| Parakeet + phoneme model + a standard clip | full | full | full |
 | Non-Parakeet STT model | full | hidden (`word_timings: false`) | full (does not need word times) |
 | `phoneme` feature compiled out (`--no-default-features`) | full | full | "not measured — model missing" |
 | Phoneme model not installed | full | full | "not measured — no phoneme model" |
-| Offline, no cached reference | full | full | "not measured — no network" |
-| Take shorter than the alignable minimum | full | pauses only | "not measured — too short" |
+| Text has no standard audio | full | full | "not measured — generate a standard clip for this text first" (`no_reference`) |
+| The clip was made from an earlier version of the text | full | full | "not measured — the clip is stale, regenerate it" (`stale_reference`) |
+| Recording shorter than the alignable minimum | full | pauses only | "not measured — too short" |
 | Silence or no speech detected | score 0, as today | hidden | "not measured" |
 
-The one asymmetry worth stating: pronunciation does not depend on `word_timings`, because the forced alignment produces its own word spans from the reference phone sequence. That is why a Whisper user can still get pronunciation and cannot get fluency.
+The one asymmetry worth stating: pronunciation does not depend on `word_timings`, because the forced alignment produces its own word spans from the reference phone sequence. That is why a Whisper user can still get pronunciation and cannot get fluency. It does depend on the dataset: the clip must exist on this device, which sync delivers with the rest of the dataset's files. An already-synced clip whose wav has not arrived yet reads as "no standard audio", never as a wrong score.
+
+The model that answers is whichever one is *loaded*, which is a live choice on the Models page rather than the persisted default. Loading `whisper-small` and then re-recognizing therefore produces an honest "not measured" for fluency, and the card names the fix (load a Parakeet model) instead of leaving the learner to guess.
 
 ## Known limitations
 
-- A TTS mispronunciation becomes a target error, and the learner is marked down for saying it correctly. Rare, but real, for proper nouns and loanwords.
+- A TTS mispronunciation becomes a target error, and the learner is marked down for saying it correctly. Rare, but real, for proper nouns and loanwords — which is why a clip is now a dataset asset a human reading can replace (D19), rather than something synthesised unseen.
 - GOP on accented speech is unvalidated here. Foreign-accented deviations are precisely what GOP is worst at separating from errors without a large labelled corpus.
 - `τ` and the band table are heuristics. Nothing in this project has teacher ratings, so nothing is calibrated; both are one constant and one table to revise later.
 - Fluency is Parakeet-only, which on a dataset read with a Whisper model means the fluency card never appears.
 - Pronunciation is reported per word; phone-level detail exists in the scoring path but is not surfaced in the UI.
-- The phoneme model is a second download (≈95–100 MB int8). It is not on the critical path — every other feature works without it — and there is **no catalog entry yet**: `phoneme::find_model_dir` looks for `<model_root>/phoneme/**/model.onnx` + `vocab.json`, so an install is a directory drop until a verified export is published. Nothing is fetched automatically, and nothing pretends to have measured pronunciation in the meantime.
-- No recorded fixtures are in the repo. The Phase-0 gate (four takes: clean, error-laden, restarting, deliberately mispronounced) needs a microphone and stays an acceptance step for a real device; the automated surface is the synthetic and hand-built ones below.
+- The phoneme model is a second, optional download (**603 MB**, fp16). It is not on the critical path — every other feature works without it — and it is installed from the Models page's **Pronunciation** section (catalog id `Hochien/wav2vec2-alignment`), which writes into `<model_root>/phoneme/<owner>/<repo>/` beside the hand-dropped layout `phoneme::find_model_dir` scans. The full 392-entry phone inventory is fetched from the upstream PyTorch repo, because the ONNX repo's own `vocab.json` files are pruned per language. Nothing is fetched automatically, and nothing pretends to have measured pronunciation in the meantime. The size is the honest cost of an fp16 wav2vec2-large export; there is no int8 build of this model to point at. The downloaded file was load-tested on Windows: it opens through `ort`, reports 392 classes and one posterior row per 20 ms of audio, and free-decodes a 38 s German recording into 92 plausible IPA phones rather than one saturated id — which is what the normalisation step is there to guarantee.
+- No recorded fixtures are in the repo. The Phase-0 gate (four attempts: clean, error-laden, restarting, deliberately mispronounced) needs a microphone and stays an acceptance step for a real device; the automated surface is the synthetic and hand-built ones below.
+- An uploaded clip has no word timings, so per-word attribution for it is time-proportional across the reference words — approximate, though the aggregate score is unaffected. Generating with Edge TTS is the exact-per-word route.
+- A text with no standard clip cannot be scored for pronunciation at all; the fix is one click in **Manage**, and the card says so.
 
 ## Test surface
 
-Pure functions carry the tests, because they are the parts whose thresholds will be tuned. `cargo test --offline --features desktop --lib` is **286 passed, 0 failed, 1 ignored**; nothing in that number needs a model file, a network connection or a microphone.
+Pure functions carry the tests, because they are the parts whose thresholds will be tuned. `cargo test --offline --features desktop --lib` is **299 passed, 0 failed, 2 ignored**; nothing in that number needs a model file, a network connection or a microphone. The two ignored tests are the ones that reach a real dependency — the `ocr` Hunspell dictionary download, and the pronunciation chain below (Edge TTS plus the installed model) — because neither can be faked convincingly.
 
 | Area | What is asserted |
 |---|---|
 | `asr_metric` | every verdict class, punctuation/case, empty sides, and a WIP-invariance regression across the pre-existing cases |
 | `vad` | silence → no segments; a lone tone burst → one segment; tone–gap–tone → two; a stop-consonant gap stays inside one segment (the loud-level ceiling) |
-| `fluency` | hand-built timing tables for pause counts, classification and every rate; a gap covered by VAD speech is not a pause; the stored-pause cap; single-word / no-pause / all-omitted takes produce no `NaN` and no division by zero |
+| `fluency` | hand-built timing tables for pause counts, classification and every rate; a gap covered by VAD speech is not a pause; the stored-pause cap; single-word / no-pause / all-omitted attempts produce no `NaN` and no division by zero |
 | `gop` | the forced aligner on a hand-built posterior matrix; `exp(gop/τ)` monotone and bounded in `[0,1]` |
-| `assess` | the whole pipeline on a synthetic take with word timings; round-trip through `metrics_json` **and** the size assertion that keeps a stored card under 2 KB |
+| `assess` | the whole pipeline on a synthetic attempt with word timings; round-trip through `metrics_json` **and** the size assertion that keeps a stored card under 2 KB; `no_reference` and `stale_reference` end to end |
+| `standard_audio` | the first insert for a text is the default and a second is not; `set_default` moves it; deleting the default promotes the earliest remaining; two defaults resolve to the earliest; a row whose wav is gone reads as nothing; a stale `text_sha` is reported stale; the clip lands at `media/<text_uuid>/<uuid>.wav` and delete (and a text delete) removes row and file |
+| `tts_ref` | `group_phones` distributes by clip duration when there are no boundaries, instead of collapsing every phone into the last word |
+| `phoneme` | CTC collapse with blanks as separators; model-directory resolution under both layouts; a `.part` leftover is not a model; the audio tensor is built in the element type the graph declares |
+| `read_aloud` (live, ignored) | the whole pronunciation chain against the real service and a real model: a standard clip is generated with Edge TTS (word boundaries included), the model decodes it, forced alignment groups it per word, and the clip's own samples fed back as the recording score near the top of the band (worst word 1.00 over six words) |
 
 Integration was meant to run on four recorded fixtures — clean, word errors, restart plus a long mid-sentence pause, deliberate mispronunciations the STT still transcribes correctly — the last being the only honest check that GOP discriminates. They need a microphone and are not in the repo, so that check remains open (see the decision log).
 
 ## Not in v1
 
-A calibrated composite reading score; a lexicon/G2P fallback so the reference phone sequence works offline; phoneme-level feedback in the UI; published reading-rate norms; streaming or real-time feedback during the take; a catalog entry and one-click download for the phoneme model; and any change to the XP gate.
+A calibrated composite reading score; a lexicon/G2P fallback so the reference phone sequence works offline; phoneme-level feedback in the UI; published reading-rate norms; streaming or real-time feedback during the attempt; a quantized (int8) phoneme export; automatic clip regeneration when a text changes (it is reported stale, one click to fix); per-clip usage statistics, waveform caches for clips, and re-trimming a clip after the fact; and any change to the XP gate.
 
 ## Decision log
 
@@ -167,7 +222,7 @@ Decisions taken while implementing, in the order they became real.
 
 **D9 — `minor` counts as an error for `score`.** It would have been easy to fold near-misses into WIP and make everyone's accuracy rise. That would silently change `best_score`, the XP gate and every stored attempt's comparison basis. The lenient view therefore lives in a *second* number (`lenient_score`), and the plan's WIP-invariance test pins the first one.
 
-**D10 — The VAD needs a loud-level ceiling.** A take with no silence in it has a 10th-percentile frame RMS equal to its speech level, so `floor × 3` lands above every frame and the detector reports nothing. The threshold is therefore `max(min(3 × floor, 0.5 × p90), 0.004)`: above the estimated noise, below half the loud level. Two failing unit tests — not a listening session — produced this.
+**D10 — The VAD needs a loud-level ceiling.** A recording with no silence in it has a 10th-percentile frame RMS equal to its speech level, so `floor × 3` lands above every frame and the detector reports nothing. The threshold is therefore `max(min(3 × floor, 0.5 × p90), 0.004)`: above the estimated noise, below half the loud level. Two failing unit tests — not a listening session — produced this.
 
 **D11 — Fluency rates are computed over the reading span, not the recording.** The recorder keeps running while the learner fumbles for the button, and `duration` includes that. `wcpm` and `speech_rate` use first-word-start → last-word-end; `duration` is still reported, because the pause ribbon needs the coordinate system the recording has.
 
@@ -175,7 +230,19 @@ Decisions taken while implementing, in the order they became real.
 
 **D13 — No catalog entry for the phoneme model yet.** Publishing one requires a verified int8 CTC export with a matching `vocab.json`; none was confirmed. Rather than register a guess, `phoneme::find_model_dir` resolves `<model_root>/phoneme/**/model.onnx` by convention, so an install is a directory drop and the page says exactly that. When a real export is chosen, the catalog entry is additive.
 
-**D14 — The pronunciation axis ships inert.** The Phase-0 gate (a usable ONNX phoneme export) was not cleared, and the plan's own instruction for that case is to stop rather than substitute. So the whole path — TTS reference, forced alignment, GOP, the card, the `read_aloud_assess` tool — is built, compiled and tested, and every take reports `unavailable_reason: "model_missing"` until a model is installed. Nothing is faked, and the two axes that can be measured are unaffected.
+**D14 — The pronunciation axis ships inert.** The Phase-0 gate (a usable ONNX phoneme export) was not cleared, and the plan's own instruction for that case is to stop rather than substitute. So the whole path — TTS reference, forced alignment, GOP, the card, the `read_aloud_assess` tool — is built, compiled and tested, and every attempt reports `unavailable_reason: "model_missing"` until a model is installed. Nothing is faked, and the two axes that can be measured are unaffected.
+
+**D15 — The pronunciation model became a catalog entry, and the loader grew two things it needed.** D13/D14 held only while no export existed. `Hochien/wav2vec2-alignment` is one: an Apache-2.0 ONNX export of `facebook/wav2vec2-lv-60-espeak-cv-ft`, `[batch, samples]` → `[batch, frames, 392]` IPA logits, fp16, with per-language model files. Registering it forced three changes that the directory-drop design had deferred. (1) The catalog stores under `<model_root>/candle/`, but the scorer scans `<model_root>/phoneme/`, so `hf_models_root` special-cases a `phoneme/`-prefixed folder — a downloaded model and a drifted-in one are then indistinguishable, which is the point. (2) The loader required the file to be named `model.onnx`; the export calls it `wav2vec2-lv60-espeak-fp16.onnx`, and exports will keep disagreeing, so a model is now "a directory with an ONNX file and a vocabulary" (`.part` downloads are still never picked up). (3) **`posteriors` now normalises the waveform.** The `Wav2Vec2FeatureExtractor` applies per-utterance zero-mean/unit-variance before the network; an ONNX export starts at the network, so without it every frame's argmax collapses onto one id and the axis would report a confident wrong score rather than a missing step. That is the one preprocessing step whose absence looks like a scoring result.
+
+**D16 — The pronunciation card's `model_missing` copy points at the Models page.** It used to instruct the reader to drop `model.onnx` + `vocab.json` into a folder that nothing in the UI mentioned. The instruction was correct and useless; it now names the section and the model.
+
+**D17 — The audio tensor's element type is read from the session, not guessed from the file name.** `wav2vec2-lv60-espeak-fp16.onnx` is an fp16 *conversion*, and a conversion normally takes the input down with it: handing such a graph an f32 tensor is rejected by ONNX Runtime before any inference, which would have surfaced as `model_error` on a model that is perfectly fine. This export happens to keep its `audio` input at f32 (checked against the real file: 392 classes, 49 posterior rows per second), but the name promises nothing about the graph, so `audio_input_dtype` asks `session.inputs()[0].dtype()` once at load and `posteriors` builds the tensor to match, defaulting to f32 for a non-tensor or undefined input. Both branches are unit-tested: the check earns its place on the day a differently-converted export arrives, and by then the failure would read as a broken model rather than as a wrong dtype.
+
+**D18 — The Edge TTS client is pinned to a version that sends the v2 DRM token, and the output format is set explicitly.** Microsoft tightened `Sec-MS-GEC`: the v1 token (a plain SHA-256 of the 5-minute-rounded Windows tick count, version string `1-…`) is now refused, and `edge-tts-rust` 0.1.3 sends exactly that, so every synthesis — reference timeline, TTS preview, `edge_tts_synthesize` — answered `403 Forbidden`. It reached the UI as "the reference voice clip could not be synthesized or decoded", which was accurate and pointed at nothing the reader could fix. 0.1.7 sends the v2 `CS64-SHA256` digest with a `2-` version string, and the same request then upgrades (`101 Switching Protocols`); the handshake was reproduced by hand before the dependency was touched, because a 403 has three plausible owners (token, clock, egress address) and only the token was ours. The upgrade also flipped `SpeakOptions::default()` to WebM/Opus, so `edge_tts::speak_options` now states the mp3 format for every caller: the synthesised output decodes through Symphonia and the preview names it in an `<audio>` element. That is the general hazard with this dependency — its defaults are the service's, and they move.
+
+**D19 — The reference is dataset-owned standard audio, not a network call during scoring.** D3 put the TTS reference in a device-local cache keyed by text and voice. That made the score depend on an HTTP request the first time, made the reference invisible (and unshareable) to everyone else, and left no way to fix a clipped or mispronounced rendering. It is now an asset of the dataset: `read_standard_audio` rows plus `media/<text_uuid>/<audio_uuid>.wav`, several clips per text with exactly one default, generated by Edge TTS or uploaded and cropped. The network is touched only when a human asks for a clip. A clip made from an earlier version of the text **refuses** rather than re-synthesising: its phone target no longer matches the compared words, and a silent network call behind a score is exactly what this decision removes. The old `read_aloud_tts/` cache is retired; its files are left on disk, being derived data with no destructive path worth writing.
+
+**D20 — The phone cache stores the grouped target, keyed by model identity plus the clip's PCM digest.** The saving the wav2vec2 pass needs is not the posterior matrix (~392 floats × 50/s) but its only downstream use: `groups: Vec<Vec<usize>>`, a few KB, keyed by `sha256(model_identity ‖ sha256(clip PCM))` in `<workspace>/read_aloud_phones/`. A re-crop, a regenerate or a different model each change the key, so invalidation is a property of the name rather than a routine someone must remember to call. Because it lives in the workspace and not the dataset, scoring still never writes into a dataset. Measured effect: a second attempt at the same text runs the phoneme model once, not twice.
 
 Still open, to be settled on a real device:
 

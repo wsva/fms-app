@@ -39,7 +39,7 @@ Details on roles and pairing are in [Using FmS on Multiple Devices](multiple_dev
 
 ## Voice input across the app
 
-FmS supports recording audio from your microphone in more than one place — Read Aloud takes, dictation‑related capture, and system‑wide voice input into text fields. Your preferred **microphone device** is chosen and tested in Settings → Microphone (see [Workspaces, Accounts & Voice settings](workspaces_accounts_settings.md)).
+FmS supports recording audio from your microphone in more than one place — Read Aloud attempts, dictation‑related capture, and system‑wide voice input into text fields. Your preferred **microphone device** is chosen and tested in Settings → Microphone (see [Workspaces, Accounts & Voice settings](workspaces_accounts_settings.md)).
 
 ## Related
 

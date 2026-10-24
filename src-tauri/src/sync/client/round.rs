@@ -204,6 +204,18 @@ pub(crate) async fn apply_change(
             let uuid = str_field("uuid")?;
             crate::datasets::read_aloud::read_aloud_delete_text(settings.clone(), ds, uuid).await.map(|_| true)
         }
+        // A standard clip is dataset content: the row replays here, while its wav
+        // rides the file manifest (so a row may arrive before its audio).
+        "read_standard_audio_save" => crate::datasets::read_aloud::standard_audio::apply_remote_save(
+            settings.inner(),
+            &ds,
+            payload,
+        ),
+        "read_standard_audio_delete" => crate::datasets::read_aloud::standard_audio::apply_remote_delete(
+            settings.inner(),
+            &ds,
+            payload,
+        ),
         // Attempts are per-user events in the app DB, applied by keeping the
         // event the author sent (INSERT OR IGNORE) — never by rewriting the
         // dataset. `@app` passes no dataset, so it is read from the payload.

@@ -13,52 +13,73 @@ import ModelCard from "./components/ModelCard";
 import ModelDetailsDialog from "./components/ModelDetailsDialog";
 import { PageHeader } from "@/components/ui/toolbar";
 
-// Text-split (SaT) model info, mirroring the Rust `TextSplitModelInfo` shape.
-interface TextSplitModelInfo {
+// HF-catalog model info, mirroring the Rust `TextSplitModelInfo` / `PhonemeModelInfo`
+// shapes. `loaded` is absent for the phoneme model: it has no resident session to
+// report, it loads on the next scoring pass and is cached from there.
+interface CatalogModelInfo {
   id: string;
   name: string;
   description: string;
   downloaded: boolean;
-  loaded: boolean;
+  loaded?: boolean;
   size_mb: number;
 }
+
+/** Engine chip text: which catalog family a card belongs to. */
+type CatalogEngine = "textsplit" | "phoneme";
 
 /**
  * Feed an HF-catalog entry to the same card the STT models use. The catalog calls the
  * title `name` and has no engine field, so the two are mapped here rather than the card
  * growing a second markup branch per catalog.
  */
-function asCardModel(m: TextSplitModelInfo): CardModelInfo {
+function asCardModel(m: CatalogModelInfo, engineType: CatalogEngine): CardModelInfo {
   return {
     id: m.id,
     label: m.name,
     description: m.description,
     downloaded: m.downloaded,
-    engine_type: "textsplit",
+    engine_type: engineType,
     size_mb: m.size_mb,
   };
 }
 
 /**
- * Text-split models are loaded by the app on first use, so of the STT card's lifecycle
+ * Catalog models are loaded by the app on first use, so of the STT card's lifecycle
  * only three states mean anything: a download in flight, the weights resident in memory
  * (the card's "active" green, labelled `Loaded` through the badge override), and present
  * on disk doing nothing.
  */
-function textSplitCardStatus(m: TextSplitModelInfo, isDownloading: boolean): ModelStatus {
+function catalogCardStatus(m: CatalogModelInfo, isDownloading: boolean): ModelStatus {
   if (isDownloading) return "Downloading";
   if (m.loaded) return "Running";
   if (m.downloaded) return "Downloaded";
   return "NotDownloaded";
 }
 
-// Download sources for HuggingFace-catalog models (Text Split). The key is
-// sent to `model_download_hf`, which maps it to a backend `HubProvider`.
+// Download sources for HuggingFace-catalog models. The key is sent to
+// `model_download_hf`, which maps it to a backend `HubProvider`.
 const HF_PROVIDERS = [
   { key: "huggingface", label: "Hugging Face" },
   { key: "hf-mirror", label: "HF Mirror" },
   { key: "modelscope", label: "ModelScope" },
 ] as const;
+
+/** Hub picker shown on an undownloaded catalog card. */
+function ProviderSelect({ value, onChange }: { value: string; onChange: (next: string) => void }) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="px-2 py-1 rounded-lg bg-bg-muted border border-border-default text-xs text-text-primary hover:bg-bg-hover transition-colors cursor-pointer"
+      title="Download source hub"
+    >
+      {HF_PROVIDERS.map((p) => (
+        <option key={p.key} value={p.key}>{p.label}</option>
+      ))}
+    </select>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -82,9 +103,15 @@ export default function ModelsPage() {
   // `textsplit` cargo feature is off on the Android thin client). `desktop` is
   // resolved in an effect rather than at render to avoid a hydration mismatch.
   const [desktop, setDesktop] = useState(false);
-  const [textSplitModels, setTextSplitModels] = useState<TextSplitModelInfo[]>([]);
+  const [textSplitModels, setTextSplitModels] = useState<CatalogModelInfo[]>([]);
   const [tsDownloadingId, setTsDownloadingId] = useState<string | null>(null);
   const [tsConfirmDelete, setTsConfirmDelete] = useState<string | null>(null);
+  // Pronunciation (phoneme) model: the read-aloud scorer's acoustic model. Same
+  // catalog mechanics, different directory tree (`{model_root}/phoneme/`).
+  const [phonemeModels, setPhonemeModels] = useState<CatalogModelInfo[]>([]);
+  const [phonemeDir, setPhonemeDir] = useState<string | null>(null);
+  const [phDownloadingId, setPhDownloadingId] = useState<string | null>(null);
+  const [phConfirmDelete, setPhConfirmDelete] = useState<string | null>(null);
   // Per-card download-hub selection (defaults to Hugging Face).
   const [providerByModel, setProviderByModel] = useState<Record<string, string>>({});
 
@@ -127,10 +154,25 @@ export default function ModelsPage() {
     // The `text_split_status` command only exists in the desktop binary.
     if (!isTauri() || isMobileApp()) return;
     try {
-      const res = await invoke<{ models: TextSplitModelInfo[] }>("text_split_status");
+      const res = await invoke<{ models: CatalogModelInfo[] }>("text_split_status");
       setTextSplitModels(res.models);
     } catch (e) {
       logError(`text_split_status failed: ${String(e)}`, "models");
+    }
+  }, []);
+
+  // ---- Pronunciation (phoneme) model status ----
+
+  const fetchPhoneme = useCallback(async () => {
+    if (!isTauri() || isMobileApp()) return;
+    try {
+      const res = await invoke<{ installed_dir: string | null; models: CatalogModelInfo[] }>(
+        "read_aloud_phoneme_model_status"
+      );
+      setPhonemeModels(res.models);
+      setPhonemeDir(res.installed_dir ?? null);
+    } catch (e) {
+      logError(`read_aloud_phoneme_model_status failed: ${String(e)}`, "models");
     }
   }, []);
 
@@ -138,7 +180,8 @@ export default function ModelsPage() {
     if (isMobileApp()) return;
     setDesktop(true);
     fetchTextSplit();
-  }, [fetchTextSplit]);
+    fetchPhoneme();
+  }, [fetchTextSplit, fetchPhoneme]);
 
   // ---- Event listeners ----
 
@@ -149,13 +192,16 @@ export default function ModelsPage() {
     });
     const unlistenChanged = listen("model-status-changed", () => {
       fetchStatus();
-      if (!isMobileApp()) fetchTextSplit();
+      if (!isMobileApp()) {
+        fetchTextSplit();
+        fetchPhoneme();
+      }
     });
     return () => {
       unlistenProgress.then((fn) => fn());
       unlistenChanged.then((fn) => fn());
     };
-  }, [fetchStatus, fetchTextSplit]);
+  }, [fetchStatus, fetchTextSplit, fetchPhoneme]);
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);
 
@@ -218,6 +264,44 @@ export default function ModelsPage() {
     catch (e) { logError(`Text-split download cancel '${id}' failed: ${String(e)}`, "models"); }
   }
 
+  // ---- Pronunciation (phoneme) download / delete ----
+
+  async function handleDownloadPhoneme(id: string, provider: string) {
+    if (!isTauri()) return;
+    setPhDownloadingId(id);
+    setDownloadProgress(null);
+    try {
+      await invoke("model_download_hf", { id, provider });
+    } catch (e) {
+      const detail = String(e);
+      logError(`Phoneme model download '${id}' failed: ${detail}`, "models");
+      await message(`Could not download the model:\n${detail}`, { title: "Models", kind: "error" });
+    } finally {
+      setPhDownloadingId(null);
+      await fetchPhoneme();
+    }
+  }
+
+  async function handleDeletePhoneme(id: string) {
+    if (!isTauri()) return;
+    if (phConfirmDelete !== id) { setPhConfirmDelete(id); return; }
+    setPhConfirmDelete(null);
+    try {
+      await invoke("read_aloud_phoneme_model_delete", { id });
+      await fetchPhoneme();
+    } catch (e) {
+      const detail = String(e);
+      logError(`Phoneme model delete '${id}' failed: ${detail}`, "models");
+      await message(`Could not delete the model:\n${detail}`, { title: "Models", kind: "error" });
+    }
+  }
+
+  async function handleCancelPhoneme(id: string) {
+    if (!isTauri()) return;
+    try { await invoke("model_cancel_download", { version: id }); }
+    catch (e) { logError(`Phoneme download cancel '${id}' failed: ${String(e)}`, "models"); }
+  }
+
   async function handleCancel(modelId: string) {
     if (!isTauri()) return;
     try { await invoke("model_cancel_download", { version: modelId }); }
@@ -277,7 +361,7 @@ export default function ModelsPage() {
   // One download at a time is a backend rule — `model_download` and `model_download_hf`
   // both refuse while anything is in flight — so a card greys out for any card's run,
   // not just its own section's.
-  const anyDownloadInProgress = isDownloadingAny || tsDownloadingId !== null;
+  const anyDownloadInProgress = isDownloadingAny || tsDownloadingId !== null || phDownloadingId !== null;
   const downloadedModels = models.filter((m) => m.downloaded);
   const availableModels = models.filter((m) => !m.downloaded);
 
@@ -398,8 +482,8 @@ export default function ModelsPage() {
                 return (
                   <ModelCard
                     key={model.id}
-                    model={asCardModel(model)}
-                    status={textSplitCardStatus(model, isDownloading)}
+                    model={asCardModel(model, "textsplit")}
+                    status={catalogCardStatus(model, isDownloading)}
                     isDownloading={isDownloading}
                     isDownloadInProgress={anyDownloadInProgress}
                     downloadProgress={downloadProgress}
@@ -409,18 +493,12 @@ export default function ModelsPage() {
                     externalUrl={repoUrl}
                     badge={model.loaded ? <span className={statusBadgeClass("Running")}>Loaded</span> : undefined}
                     providerSelector={!model.downloaded && !isDownloading ? (
-                      <select
+                      <ProviderSelect
                         value={provider}
-                        onChange={(e) =>
-                          setProviderByModel((prev) => ({ ...prev, [model.id]: e.target.value }))
+                        onChange={(next) =>
+                          setProviderByModel((prev) => ({ ...prev, [model.id]: next }))
                         }
-                        className="px-2 py-1 rounded-lg bg-bg-muted border border-border-default text-xs text-text-primary hover:bg-bg-hover transition-colors cursor-pointer"
-                        title="Download source hub"
-                      >
-                        {HF_PROVIDERS.map((p) => (
-                          <option key={p.key} value={p.key}>{p.label}</option>
-                        ))}
-                      </select>
+                      />
                     ) : undefined}
                     onDownload={() => handleDownloadTextSplit(model.id, provider)}
                     onCancel={() => handleCancelTextSplit(model.id)}
@@ -428,6 +506,61 @@ export default function ModelsPage() {
                     onStop={() => {}}
                     onDelete={() => handleDeleteTextSplit(model.id)}
                     onCancelDelete={() => setTsConfirmDelete(null)}
+                  />
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* ─── Pronunciation (phoneme) Model Section — desktop only ─── */}
+        {desktop && phonemeModels.length > 0 && (
+          <section className="mb-6">
+            <div className="flex items-center gap-2 mb-1">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary">Pronunciation</h2>
+            </div>
+            <p className="text-xs text-text-tertiary mb-3">
+              Phone-level acoustic model used by <span className="font-medium">Read Aloud</span> to score how the words
+              sounded, not just whether they were recognised. One IPA inventory covers every language, so the same model
+              serves all of your read-aloud texts. It loads on the first scored take — no Start/Stop needed.
+              {phonemeDir && (
+                <> Installed at <span className="font-mono break-all">{phonemeDir}</span>.</>
+              )}
+            </p>
+
+            <div className="flex flex-col gap-2">
+              {phonemeModels.map((model) => {
+                const isDownloading = phDownloadingId === model.id;
+                const provider = providerByModel[model.id] ?? "huggingface";
+                return (
+                  <ModelCard
+                    key={model.id}
+                    model={asCardModel(model, "phoneme")}
+                    status={catalogCardStatus(model, isDownloading)}
+                    isDownloading={isDownloading}
+                    isDownloadInProgress={anyDownloadInProgress}
+                    downloadProgress={downloadProgress}
+                    modelLoading={false}
+                    confirmDelete={phConfirmDelete === model.id}
+                    autoLoads
+                    externalUrl={`https://huggingface.co/${model.id}`}
+                    badge={phonemeDir && model.downloaded
+                      ? <span className={statusBadgeClass("Running")}>In use</span>
+                      : undefined}
+                    providerSelector={!model.downloaded && !isDownloading ? (
+                      <ProviderSelect
+                        value={provider}
+                        onChange={(next) =>
+                          setProviderByModel((prev) => ({ ...prev, [model.id]: next }))
+                        }
+                      />
+                    ) : undefined}
+                    onDownload={() => handleDownloadPhoneme(model.id, provider)}
+                    onCancel={() => handleCancelPhoneme(model.id)}
+                    onLoad={() => {}}
+                    onStop={() => {}}
+                    onDelete={() => handleDeletePhoneme(model.id)}
+                    onCancelDelete={() => setPhConfirmDelete(null)}
                   />
                 );
               })}

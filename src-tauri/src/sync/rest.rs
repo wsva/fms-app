@@ -1403,6 +1403,24 @@ async fn replay(
             let uuid = extract_str(&ch.payload, "uuid")?;
             datasets::read_aloud::read_aloud_delete_text(settings.clone(), dataset_uuid, uuid).await
         }
+        // A standard clip is dataset content: the row replays here, while its wav
+        // rides the file manifest (so a row may arrive before its audio).
+        "read_standard_audio_save" => {
+            datasets::read_aloud::standard_audio::apply_remote_save(
+                settings.inner(),
+                &dataset_uuid,
+                &ch.payload,
+            )
+            .map(|_| ())
+        }
+        "read_standard_audio_delete" => {
+            datasets::read_aloud::standard_audio::apply_remote_delete(
+                settings.inner(),
+                &dataset_uuid,
+                &ch.payload,
+            )
+            .map(|_| ())
+        }
         "read_attempt_save" => {
             // Per-user practice history: store the event the author sent in the
             // app DB (INSERT OR IGNORE), never a write into the shared dataset.

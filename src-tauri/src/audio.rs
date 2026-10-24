@@ -24,6 +24,26 @@ pub fn decode_to_pcm(path: &Path) -> Result<Vec<f32>, String> {
         hint.with_extension(ext);
     }
 
+    decode_stream(mss, hint)
+}
+
+/// Decode an in-memory container to 16 kHz mono f32 — the same conversion
+/// [`decode_to_pcm`] performs, for audio that arrives as bytes rather than as a
+/// file. No extension hint is available; symphonia probes the header instead.
+///
+/// Used by the read-aloud standard-audio import path, where an Android document
+/// picker returns a `content://` URI that is not a filesystem path.
+pub fn decode_bytes_to_pcm(data: &[u8]) -> Result<Vec<f32>, String> {
+    log::debug!("Decoding {} in-memory bytes", data.len());
+    let source = std::io::Cursor::new(data.to_vec());
+    let mss = MediaSourceStream::new(Box::new(source), Default::default());
+    decode_stream(mss, Hint::new())
+}
+
+/// The shared decoder behind [`decode_to_pcm`] and [`decode_bytes_to_pcm`]:
+/// probe, decode every packet of the first audio track, mix down to mono, then
+/// resample to 16 kHz.
+fn decode_stream(mss: MediaSourceStream, hint: Hint) -> Result<Vec<f32>, String> {
     let fmt_opts = FormatOptions::default();
     let meta_opts = MetadataOptions::default();
 
@@ -362,8 +382,28 @@ pub fn generate_waveform(path: &Path, pixels_per_second: u32) -> Result<Waveform
 
     let samples_per_pixel = (DECODED_SAMPLE_RATE / pps).max(1) as usize;
 
-    let mut data: Vec<i8> = Vec::with_capacity((samples.len() / samples_per_pixel + 1) * 2);
-    for chunk in samples.chunks(samples_per_pixel) {
+    let data = envelope(&samples, samples_per_pixel);
+
+    Ok(WaveformPeaks {
+        version: 2,
+        channels: 1,
+        sample_rate: DECODED_SAMPLE_RATE,
+        samples_per_pixel: samples_per_pixel as u32,
+        bits: 8,
+        data,
+    })
+}
+
+// Note: scale_to_i8 helper below
+
+/// Collapse `samples` into interleaved `[min, max]` signed 8-bit pairs, one pair
+/// per `per_pair` samples — the `WaveformPeaks::data` layout, from samples a
+/// caller already holds. Shared by [`generate_waveform`] and
+/// [`peaks_from_samples`], so both scale identically.
+fn envelope(samples: &[f32], per_pair: usize) -> Vec<i8> {
+    let per_pair = per_pair.max(1);
+    let mut data: Vec<i8> = Vec::with_capacity((samples.len() / per_pair + 1) * 2);
+    for chunk in samples.chunks(per_pair) {
         let mut lo: f32 = 1.0;
         let mut hi: f32 = -1.0;
         for &s in chunk {
@@ -377,18 +417,18 @@ pub fn generate_waveform(path: &Path, pixels_per_second: u32) -> Result<Waveform
         data.push(scale_to_i8(lo));
         data.push(scale_to_i8(hi));
     }
-
-    Ok(WaveformPeaks {
-        version: 2,
-        channels: 1,
-        sample_rate: DECODED_SAMPLE_RATE,
-        samples_per_pixel: samples_per_pixel as u32,
-        bits: 8,
-        data,
-    })
+    data
 }
 
-// Note: scale_to_i8 helper below
+/// Peak envelope of already-decoded 16 kHz mono samples, `columns` wide: returns
+/// the interleaved `[min, max]` signed 8-bit pairs and how many samples each pair
+/// covers. Consumers divide by 128; the caller derives
+/// `seconds_per_pair = pairs_per_sample / DECODED_SAMPLE_RATE`.
+pub fn peaks_from_samples(samples: &[f32], columns: usize) -> (Vec<i8>, usize) {
+    let columns = columns.max(1);
+    let per_pair = samples.len().div_ceil(columns).max(1);
+    (envelope(samples, per_pair), per_pair)
+}
 
 /// Scale a normalised sample (-1.0..=1.0) into audiowaveform's signed 8-bit range.
 fn scale_to_i8(sample: f32) -> i8 {

@@ -5,11 +5,11 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { Play, Trash2, History, ChevronRight, Loader2, RefreshCw } from "lucide-react";
 import type { ReadAttempt, ReadText } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
+import { rerecognizeAttempt } from "@/lib/read_aloud/rerecognize";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 import AssessmentCards, { PauseRibbon } from "@/components/read_aloud/AssessmentCards";
 import { highlightDifferences } from "@/components/read_book/diff";
 import { lcs } from "@/lib/listen/lcs";
-import { arrayBufferToBase64 } from "@/lib/voice-input";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { logError } from "@/lib/logger";
@@ -354,32 +354,15 @@ export default function AttemptsPanel({
 
   // Re-run STT over an existing recording and refresh its transcript + score in
   // place. The recording itself is untouched — only the recognized text changes.
-  // Mirrors the recorder's model-loading guard: ensure a model is loaded before
-  // transcribing. The WAV is device-local, so this is only offered when a.audio_url
-  // resolves on this machine.
+  // The WAV is device-local, so this is only offered when a.audio_url resolves on
+  // this machine. The work itself lives in `rerecognizeAttempt`, shared with the
+  // attempt detail page's toolbar button.
   const recognizeAgain = async (a: ReadAttempt) => {
     if (!isTauri() || !a.audio_url) return;
     setRerecognizing(a.uuid);
     setError(null);
     try {
-      const status = await invoke<{ active_version: string | null }>("model_get_status");
-      if (!status.active_version) await invoke("model_start");
-      const res = await fetch(convertFileSrc(a.audio_url));
-      if (!res.ok) throw new Error(`Could not read the recording (HTTP ${res.status}).`);
-      const wavBase64 = arrayBufferToBase64(await res.arrayBuffer());
-      // Detailed (not plain) transcription: the attempt is re-scored, so it needs
-      // the word timings that fluency is measured from as well as the text.
-      const detailed = await invoke<{
-        text: string;
-        words: { text: string; start: number; end: number }[];
-        capabilities: { word_timings: boolean };
-      }>("model_transcribe_detailed", { wavBase64 });
-      await invoke("read_aloud_rerecognize", {
-        datasetUuid,
-        uuid: a.uuid,
-        recognized: (detailed.text || "").trim(),
-        words: detailed.capabilities?.word_timings ? detailed.words : null,
-      });
+      await rerecognizeAttempt(datasetUuid, a);
       await loadAttempts();
       onChanged?.();
     } catch (e) {
