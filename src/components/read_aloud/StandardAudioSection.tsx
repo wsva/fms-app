@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle, Check, Loader2, Play, Square, Trash2, Upload, Wand2 } from "lucide-react";
@@ -9,6 +9,7 @@ import ConfirmDialog from "@/components/read_book/ConfirmDialog";
 import {
   deleteStandardAudio,
   generateStandardAudio,
+  guessStandardAudioSpan,
   importStandardAudio,
   listStandardAudio,
   probeAudioSource,
@@ -68,6 +69,26 @@ function readFileAsBase64(file: File): Promise<string> {
 }
 
 /**
+ * "de-DE" → "German (Germany)", so the language picker reads as a language
+ * rather than a BCP 47 tag. The runtime falls back to the tag itself.
+ */
+const languageNames = (() => {
+  try {
+    return new Intl.DisplayNames(["en"], { type: "language" });
+  } catch {
+    return null;
+  }
+})();
+
+function localeLabel(locale: string): string {
+  try {
+    return languageNames?.of(locale) || locale;
+  } catch {
+    return locale;
+  }
+}
+
+/**
  * The standard audio of one text: the reference clip its pronunciation is
  * measured against.
  *
@@ -91,6 +112,7 @@ export default function StandardAudioSection({
 
   // Generate
   const [voices, setVoices] = useState<Voice[]>([]);
+  const [lang, setLang] = useState("");
   const [voice, setVoice] = useState("");
   const [voicesFailed, setVoicesFailed] = useState(false);
 
@@ -100,6 +122,12 @@ export default function StandardAudioSection({
   const [cropStart, setCropStart] = useState(0);
   const [cropEnd, setCropEnd] = useState(0);
   const [uploadNote, setUploadNote] = useState("");
+  // What the last span guess found (or why it refused). Cleared whenever a new
+  // file is picked, because it describes that file's text placement.
+  const [guessNote, setGuessNote] = useState<{ kind: "ok" | "warn"; text: string } | null>(null);
+  // Bumped whenever the picked file changes, so a guess that answers late
+  // cannot set the edges of a file it never heard.
+  const guessTokenRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Playback of a stored clip
@@ -139,21 +167,42 @@ export default function StandardAudioSection({
     void (async () => {
       try {
         const list = await invoke<Voice[]>("edge_tts_list_voices");
-        setVoices(
-          [...list].sort((a, b) =>
-            a.locale === b.locale
-              ? a.short_name.localeCompare(b.short_name)
-              : a.locale.localeCompare(b.locale)
-          )
+        const sorted = [...list].sort((a, b) =>
+          a.locale === b.locale
+            ? a.short_name.localeCompare(b.short_name)
+            : a.locale.localeCompare(b.locale)
         );
+        setVoices(sorted);
+        // Open on the configured voice's own language, so the pickers show what
+        // will actually be spoken. An unknown or unset voice leaves both empty:
+        // Generate then sends no voice, exactly as it did before.
         const settings = await invoke<{ read_aloud_tts_voice?: string }>("settings_get");
-        setVoice(settings.read_aloud_tts_voice ?? "");
+        const configured = sorted.find((v) => v.short_name === settings.read_aloud_tts_voice);
+        setLang(configured?.locale ?? "");
+        setVoice(configured?.short_name ?? "");
       } catch (e) {
         logError(`load TTS voices failed: ${String(e)}`, LOG_MODULE);
         setVoicesFailed(true);
       }
     })();
   }, []);
+
+  // The two pickers drive one value: the language narrows the list, and picking
+  // a language without a voice would quietly fall back to the backend's default,
+  // so a language always selects its first voice. The empty language is the
+  // configured voice itself — the same audio as the one picker this replaced.
+  const locales = useMemo(() => {
+    const seen: string[] = [];
+    for (const v of voices) if (!seen.includes(v.locale)) seen.push(v.locale);
+    return seen;
+  }, [voices]);
+
+  const langVoices = lang ? voices.filter((v) => v.locale === lang) : [];
+
+  const chooseLocale = (locale: string) => {
+    setLang(locale);
+    setVoice(locale ? (voices.find((v) => v.locale === locale)?.short_name ?? "") : "");
+  };
 
   const stopAudio = useCallback(() => {
     const el = audioRef.current;
@@ -227,6 +276,8 @@ export default function StandardAudioSection({
         setCropStart(0);
         setCropEnd(probed.duration);
         setUploadNote("");
+        setGuessNote(null);
+        guessTokenRef.current += 1;
       } else {
         // Android: the picker yields a content:// URI, not a path, so the bytes
         // travel as base64 — the same shape the recorder posts WAVs with.
@@ -253,6 +304,8 @@ export default function StandardAudioSection({
       setCropStart(0);
       setCropEnd(probed.duration);
       setUploadNote("");
+      setGuessNote(null);
+      guessTokenRef.current += 1;
     } catch (e) {
       const msg = String(e);
       logError(`probe audio failed: ${msg}`, LOG_MODULE);
@@ -261,6 +314,49 @@ export default function StandardAudioSection({
       setBusy(null);
     }
   }, []);
+
+  // The model listens to the whole file and the text is aligned to what it
+  // heard, so this is for a recording that holds more than the text — the one
+  // case where the edges cannot be found by looking at the waveform.
+  //
+  // A guess outlives the dialog it was started from: picking another file or
+  // closing this one while the model is still listening must not let the late
+  // answer set the edges of whatever is on screen by then.
+  const guessSpan = useCallback(async () => {
+    if (!source) return;
+    const token = ++guessTokenRef.current;
+    setBusy("guess");
+    setError(null);
+    setGuessNote(null);
+    try {
+      const guess = await guessStandardAudioSpan({
+        datasetUuid,
+        textUuid,
+        sourcePath: source.path,
+        sourceBase64: source.base64,
+      });
+      if (token !== guessTokenRef.current) return;
+      setCropStart(guess.start);
+      setCropEnd(guess.end);
+      const percent = Math.round(guess.confidence * 100);
+      setGuessNote({
+        kind: "ok",
+        text:
+          `Heard ${guess.matched_words} of ${guess.reference_words} words (${percent}%) and put the edges on them. ` +
+          (percent < 80
+            ? "That is a loose match, so check both edges before saving."
+            : "Check them before saving."),
+      });
+    } catch (e) {
+      if (token !== guessTokenRef.current) return;
+      const msg = String(e);
+      logError(`guess standard audio span failed: ${msg}`, LOG_MODULE);
+      setGuessNote({ kind: "warn", text: msg });
+    } finally {
+      // A newer pick owns the progress line by now; leave its state alone.
+      if (token === guessTokenRef.current) setBusy(null);
+    }
+  }, [datasetUuid, source, textUuid]);
 
   const saveUpload = useCallback(async () => {
     if (!source) return;
@@ -326,14 +422,15 @@ export default function StandardAudioSection({
     [afterChange, datasetUuid, playingUuid, stopAudio]
   );
 
-  const field =
-    "w-full p-2 rounded-md bg-bg-muted border border-border-default text-text-primary text-sm focus:outline-none focus:border-accent-bg";
-  const smallButton =
-    "inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] bg-bg-muted hover:bg-bg-hover text-text-secondary cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed";
+  // One control height for the whole section: a select sitting beside a button a
+  // few pixels shorter reads as a mistake, and the clip rows inherit the rhythm.
+  const controlHeight = "h-8";
+  const field = `w-full px-2 rounded-md bg-bg-muted border border-border-default text-text-primary text-sm focus:outline-none focus:border-accent-bg ${controlHeight}`;
+  const selectClass = `px-2 rounded-md bg-bg-muted border border-border-default text-text-primary text-xs focus:outline-none focus:border-accent-bg cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${controlHeight}`;
+  const smallButton = `inline-flex items-center gap-1 px-2 rounded-md text-[11px] bg-bg-muted hover:bg-bg-hover text-text-secondary cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${controlHeight}`;
   // Generating is the one action that produces a scorable reference, so it is
   // the only filled button here.
-  const primaryButton =
-    "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium bg-accent-bg text-white hover:opacity-90 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed";
+  const primaryButton = `inline-flex items-center gap-1.5 px-2.5 rounded-md text-[11px] font-medium bg-accent-bg text-white hover:opacity-90 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${controlHeight}`;
   const chip = "text-[10px] px-1.5 py-0.5 rounded-full";
 
   const label = (clip: ReadStandardAudio) =>
@@ -348,27 +445,50 @@ export default function StandardAudioSection({
       ? `Synthesising with ${voiceLabel}…`
       : busy === "probe"
         ? "Reading the file…"
-        : busy === "import"
-          ? "Saving the clip…"
-          : busy
-            ? "Updating the clip…"
-            : null;
+        : busy === "guess"
+          ? "Listening to the file — this takes as long as the recording is long…"
+          : busy === "import"
+            ? "Saving the clip…"
+            : busy
+              ? "Updating the clip…"
+              : null;
 
   const actions = (
     <div className="flex flex-wrap items-center gap-2">
       <select
-        className={`${field} max-w-[240px]`}
-        value={voice}
-        onChange={(e) => setVoice(e.target.value)}
-        disabled={disabled || busy === "generate"}
-        title="Voice the synthesis uses — the one configured on the Edge TTS page by default"
+        className={`${selectClass} max-w-[170px]`}
+        value={lang}
+        onChange={(e) => chooseLocale(e.target.value)}
+        disabled={disabled || busy === "generate" || voices.length === 0}
+        title="Language the synthesis speaks; the voice list follows it"
       >
         <option value="">Configured voice</option>
-        {voices.map((v) => (
-          <option key={v.short_name} value={v.short_name}>
-            {v.locale} · {v.short_name.replace(/Neural$/, "")} ({v.gender})
+        {locales.map((l) => (
+          <option key={l} value={l}>
+            {localeLabel(l)}
           </option>
         ))}
+      </select>
+      <select
+        className={`${selectClass} max-w-[200px]`}
+        value={voice}
+        onChange={(e) => setVoice(e.target.value)}
+        disabled={disabled || busy === "generate" || !lang}
+        title={
+          lang
+            ? "Voice of the chosen language"
+            : "Pick a language first, or leave the voice configured on the Edge TTS page"
+        }
+      >
+        {lang ? (
+          langVoices.map((v) => (
+            <option key={v.short_name} value={v.short_name}>
+              {v.short_name.replace(/Neural$/, "")} ({v.gender})
+            </option>
+          ))
+        ) : (
+          <option value="">the configured voice</option>
+        )}
       </select>
       <button
         className={primaryButton}
@@ -538,7 +658,8 @@ export default function StandardAudioSection({
           <div className="flex flex-col gap-2 mt-1 p-3 rounded-md border border-border-default bg-bg-muted">
             <p className="text-[11px] text-text-secondary">
               New clip from <span className="text-text-primary">{source.fileName}</span> — drag the
-              handles to the part that reads the text.
+              handles to the part that reads the text, or press <span className="text-text-primary">Guess
+              from speech</span> when the file holds more than the text.
               {!source.path && " Preview is unavailable for files picked on mobile."}
             </p>
             <AudioTrimTrack
@@ -551,6 +672,11 @@ export default function StandardAudioSection({
                 setCropEnd(e);
               }}
               audioUrl={source.path}
+              guess={{
+                running: busy === "guess",
+                note: guessNote,
+                run: () => void guessSpan(),
+              }}
             />
             <input
               className={field}
@@ -564,13 +690,15 @@ export default function StandardAudioSection({
                 onClick={() => {
                   setSource(null);
                   setProbe(null);
+                  setGuessNote(null);
+                  guessTokenRef.current += 1;
                 }}
               >
                 Cancel
               </button>
               <button
                 className={primaryButton}
-                disabled={busy === "import"}
+                disabled={busy === "import" || busy === "guess"}
                 onClick={() => void saveUpload()}
               >
                 {busy === "import" ? (

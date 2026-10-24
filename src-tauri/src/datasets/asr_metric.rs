@@ -286,6 +286,23 @@ pub(crate) fn normalize_tokens(text: &str) -> Vec<String> {
     normalize_words(text).into_iter().map(|w| w.norm).collect()
 }
 
+/// The `(reference_index, hypothesis_index)` pairs the two token lists share,
+/// in order.
+///
+/// Used by the standard-audio span guess: the text was read *somewhere* in a
+/// longer recording, and the first and last of these pairs say where. The
+/// hypothesis side is passed in rather than derived from a text, because the
+/// caller needs a token-to-spoken-word mapping and only it has one.
+pub(crate) fn aligned_pairs(reference: &[String], hypothesis: &[String]) -> Vec<(usize, usize)> {
+    align(reference, hypothesis)
+        .into_iter()
+        .filter_map(|op| match op {
+            EditOp::Equal { ref_index, hyp_index } => Some((ref_index, hyp_index)),
+            _ => None,
+        })
+        .collect()
+}
+
 // ============================================================
 // Numbers
 // ============================================================

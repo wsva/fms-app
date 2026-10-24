@@ -44,6 +44,7 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::audio;
+use crate::datasets::asr_metric;
 use crate::edge_tts::{self, TtsWordBoundary};
 use crate::settings::SettingsState;
 
@@ -504,6 +505,212 @@ pub(crate) fn probe(
 }
 
 // ============================================================
+// Span guess (read-only: nothing is written)
+// ============================================================
+
+/// A little air either side of the guessed span. A model's word boundary is a
+/// coarse cut — it can land inside the first consonant — and a reference clip
+/// that clips its first or last sound is a worse reference than one with a
+/// fifth of a second of room around it.
+const GUESS_PAD_BEFORE: f64 = 0.2;
+const GUESS_PAD_AFTER: f64 = 0.3;
+
+/// A guess is only offered when the model heard this much of the text, and at
+/// least [`GUESS_MIN_WORDS`] of it. Below that the "span" would be a fragment
+/// of the reading presented as the whole of it — worse than no guess, because
+/// it looks like an answer.
+const GUESS_MIN_MATCH_RATIO: f64 = 0.5;
+const GUESS_MIN_WORDS: usize = 3;
+
+/// How many words the model may skip — in the text or in the recording — before
+/// a match counts as a different stretch instead of part of the same reading.
+/// Roughly what one badly read sentence costs.
+const GUESS_MAX_GAP: usize = 6;
+
+/// Where a text was read inside a longer recording.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpanGuess {
+    /// Guessed start of the clip, in seconds: padded, clamped, rounded to the
+    /// tenth of a second the crop track can show.
+    pub start: f64,
+    pub end: f64,
+    /// Words of the text the model heard in order, out of `reference_words`.
+    pub matched_words: usize,
+    pub reference_words: usize,
+    /// `matched_words / reference_words`. Well under 1 means the model misheard
+    /// a good deal, so the two edges deserve a look before saving.
+    pub confidence: f64,
+    /// Everything the model heard in the file, so a wrong span can be diagnosed
+    /// rather than only wondered at.
+    pub transcript: String,
+}
+
+/// The longest run of aligned pairs that stays contiguous in both streams.
+///
+/// Alignment alone is not a span: a common word ("the", "a", "und") also
+/// appears before and after the reading, and those stray matches would stretch
+/// the span to cover most of the file. A run breaks where the model skipped
+/// more than [`GUESS_MAX_GAP`] words on either side, so the reading survives as
+/// one run while stray matches fall outside it. Ties go to the earlier run: if
+/// the text really is read twice, the first reading is the one to keep.
+fn densest_run(pairs: &[(usize, usize)]) -> &[(usize, usize)] {
+    let mut best = &pairs[0..0];
+    let mut from = 0;
+    for i in 1..=pairs.len() {
+        let breaks = i == pairs.len()
+            || pairs[i].0.saturating_sub(pairs[i - 1].0) > GUESS_MAX_GAP
+            || pairs[i].1.saturating_sub(pairs[i - 1].1) > GUESS_MAX_GAP;
+        if breaks {
+            if i - from > best.len() {
+                best = &pairs[from..i];
+            }
+            from = i;
+        }
+    }
+    best
+}
+
+fn round_tenth(seconds: f64) -> f64 {
+    (seconds * 10.0).round() / 10.0
+}
+
+/// Turn a model failure into something the user can act on. The two failures
+/// this call actually produces are "no model" and "this model reports no word
+/// timings", and neither is the user's fault as phrased by the model layer.
+#[cfg(feature = "stt")]
+fn guess_error(message: String) -> String {
+    if message.contains("No model is loaded") || message.contains("No model") {
+        "No speech model is loaded, so the file cannot be listened to. Load one on the Models page, then try again — or set the edges by hand.".to_string()
+    } else if message.contains("Word-level timestamps") {
+        format!(
+            "{}, so this guess needs a model that reports word timings (a Parakeet model). Choose one on the Models page, or set the edges by hand.",
+            message.trim_end_matches('.')
+        )
+    } else {
+        message
+    }
+}
+
+/// Find where this text is spoken inside a longer recording.
+///
+/// A text is a *reading* of some part of the file, so the file cannot be cut by
+/// listening for silence: the reading may begin in the middle of a sentence and
+/// the file may hold far more than one text. Instead the model transcribes the
+/// whole file with word timings, that transcript is aligned to the text through
+/// the same preprocessing scoring uses, and the matched words give the span.
+///
+/// Deliberately a suggestion: nothing is written, the edges only move, and
+/// dragging, nudging or typing over them still works afterwards.
+#[cfg(feature = "stt")]
+pub(crate) fn guess_span(
+    model_state: &crate::models::ModelState,
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    text_uuid: &str,
+    source_path: Option<&str>,
+    source_base64: Option<&str>,
+) -> Result<SpanGuess, String> {
+    let dir = find_dataset_dir(settings, dataset_uuid)?;
+    let reference = {
+        let conn = open_db(&dir)?;
+        conn.query_row(
+            "SELECT content, normalized_content FROM read_text WHERE uuid = ?1",
+            [text_uuid],
+            |row| {
+                let content: String = row.get(0)?;
+                Ok(effective_reference(&content, row.get::<_, Option<String>>(1)?.as_deref()))
+            },
+        )
+        .map_err(|_| format!("Text {} not found in dataset", text_uuid))?
+    };
+    let reference_tokens = asr_metric::normalize_tokens(&reference);
+    if reference_tokens.is_empty() {
+        return Err("That text has no words to look for".to_string());
+    }
+
+    let samples = decode_source(source_path, source_base64)?;
+    if samples.is_empty() {
+        return Err("That file decoded to no audio".to_string());
+    }
+    let duration = samples.len() as f64 / audio::DECODED_SAMPLE_RATE as f64;
+
+    log::info!(
+        "[ReadAloud] guessing the span of text {} ({:.0}s) in {:.0}s of audio",
+        text_uuid,
+        reference_tokens.len(),
+        duration
+    );
+    let heard = crate::models::transcribe_samples_word_level(model_state, &samples)
+        .map_err(guess_error)?;
+
+    // The hypothesis is the transcript re-tokenized through the same
+    // preprocessing as the reference, plus a token → spoken-word map, because
+    // only the spoken words carry times.
+    let mut hypothesis: Vec<String> = Vec::new();
+    let mut word_of_token: Vec<usize> = Vec::new();
+    let mut times: Vec<(f32, f32)> = Vec::new();
+    for word in heard.segments.unwrap_or_default() {
+        let tokens = asr_metric::normalize_tokens(&word.text);
+        if tokens.is_empty() {
+            continue;
+        }
+        let index = times.len();
+        times.push((word.start, word.end));
+        for token in tokens {
+            hypothesis.push(token);
+            word_of_token.push(index);
+        }
+    }
+    if hypothesis.is_empty() {
+        return Err("The model heard no words in that file, so there is nothing to match the text against. Check the recording, or set the edges by hand.".to_string());
+    }
+
+    let pairs = asr_metric::aligned_pairs(&reference_tokens, &hypothesis);
+    let run = densest_run(&pairs);
+    let matched = run.len();
+    let needed = (((reference_tokens.len() as f64) * GUESS_MIN_MATCH_RATIO).ceil() as usize)
+        .max(GUESS_MIN_WORDS.min(reference_tokens.len()));
+    if matched < needed {
+        return Err(format!(
+            "The model heard only {} of this text's {} words in that file, which is too little to place the reading. Try a stronger model, or set the edges by hand.",
+            matched,
+            reference_tokens.len()
+        ));
+    }
+
+    // A run that starts or ends well inside the text matches a stretch of the
+    // reading, not the reading: the sentences outside it would fall outside the
+    // clip, so the guess is refused rather than offered as a near miss. A few
+    // words at either end may be misheard — that is what the gap allows.
+    let first_ref = run[0].0;
+    let tail_ref = reference_tokens.len() - 1 - run[matched - 1].0;
+    if first_ref > GUESS_MAX_GAP || tail_ref > GUESS_MAX_GAP {
+        return Err(format!(
+            "The model heard {} of this text's {} words, but not where it starts or ends, so no single clip contains the whole reading. Set the edges by hand.",
+            matched,
+            reference_tokens.len()
+        ));
+    }
+
+    let (heard_start, _) = times[word_of_token[run[0].1]];
+    let (_, heard_end) = times[word_of_token[run[matched - 1].1]];
+    let start = round_tenth((heard_start as f64 - GUESS_PAD_BEFORE).max(0.0));
+    let mut end = round_tenth(((heard_end as f64) + GUESS_PAD_AFTER).min(duration));
+    if end - start < MIN_CLIP_SECS {
+        end = round_tenth((start + MIN_CLIP_SECS).min(duration));
+    }
+
+    Ok(SpanGuess {
+        start,
+        end,
+        matched_words: matched,
+        reference_words: reference_tokens.len(),
+        confidence: (matched as f64 / reference_tokens.len() as f64 * 100.0).round() / 100.0,
+        transcript: heard.text,
+    })
+}
+
+// ============================================================
 // Writes
 // ============================================================
 
@@ -884,6 +1091,49 @@ pub async fn read_aloud_standard_audio_probe(
     )
 }
 
+/// Guess where this text is spoken inside a longer recording, by listening to
+/// the file with the loaded STT model and aligning what it heard to the text.
+///
+/// Writes nothing: the caller gets the two edges to apply to the crop, and can
+/// still drag, nudge or type over them. The whole file is transcribed, so this
+/// costs more the longer the file is.
+#[cfg(feature = "stt")]
+#[tauri::command]
+pub async fn read_aloud_standard_audio_guess(
+    settings: State<'_, SettingsState>,
+    model_state: State<'_, crate::models::ModelState>,
+    dataset_uuid: String,
+    text_uuid: String,
+    source_path: Option<String>,
+    source_base64: Option<String>,
+) -> Result<SpanGuess, String> {
+    guess_span(
+        model_state.inner(),
+        settings.inner(),
+        &dataset_uuid,
+        &text_uuid,
+        source_path.as_deref(),
+        source_base64.as_deref(),
+    )
+}
+
+/// Without the `stt` feature there is no model to listen with; say so instead of
+/// leaving the caller with an unknown command.
+#[cfg(not(feature = "stt"))]
+#[tauri::command]
+pub async fn read_aloud_standard_audio_guess(
+    _settings: State<'_, SettingsState>,
+    _dataset_uuid: String,
+    _text_uuid: String,
+    _source_path: Option<String>,
+    _source_base64: Option<String>,
+) -> Result<SpanGuess, String> {
+    Err(
+        "This build has no speech recognition, so the span cannot be guessed. Set the edges by hand."
+            .to_string(),
+    )
+}
+
 /// Store a picked recording as this text's standard audio, optionally cut to
 /// `[start, end)`. The first clip for a text becomes its default.
 #[tauri::command]
@@ -1149,5 +1399,38 @@ mod tests {
         assert!(list(&settings, &ds, Some(&text)).unwrap().iter().all(|c| c.uuid != "b"));
         let dir = find_dataset_dir(&settings, &ds).unwrap();
         assert!(!clip_path(&dir, &text, "b").exists());
+    }
+
+    // ---- the span guess's only pure part ----
+
+    /// Alignment alone is not a span: words matched far outside the reading
+    /// must not stretch it over the rest of the file.
+    #[test]
+    fn the_span_ignores_matches_far_from_the_reading() {
+        let pairs = vec![(0, 2), (1, 3), (2, 400), (3, 401), (4, 402), (5, 403)];
+        let run = densest_run(&pairs);
+        assert_eq!(run.first(), Some(&(2, 400)));
+        assert_eq!(run.last(), Some(&(5, 403)));
+    }
+
+    /// Read twice? The earlier run wins, so the same file always guesses the
+    /// same span.
+    #[test]
+    fn the_span_keeps_the_first_reading_on_a_tie() {
+        let pairs = vec![(0, 10), (1, 11), (2, 100), (3, 101)];
+        assert_eq!(densest_run(&pairs).first(), Some(&(0, 10)));
+    }
+
+    /// A misheard word or two is normal; it must not split the reading in two
+    /// and hand back the shorter half.
+    #[test]
+    fn a_few_missed_words_do_not_split_the_reading() {
+        let pairs = vec![(0, 0), (1, 1), (2, 2), (7, 7), (8, 8), (9, 9)];
+        assert_eq!(densest_run(&pairs).len(), 6);
+    }
+
+    #[test]
+    fn no_matches_means_no_run() {
+        assert!(densest_run(&[]).is_empty());
     }
 }

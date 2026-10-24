@@ -264,6 +264,18 @@ struct ReadAloudStandardAudioImportParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudStandardAudioGuessParam {
+    dataset_uuid: String,
+    text_uuid: String,
+    /// A filesystem path to the source audio.
+    #[serde(default)]
+    source_path: Option<String>,
+    /// The file's bytes, base64 — for a picker URI that is not a path.
+    #[serde(default)]
+    source_base64: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudStandardAudioProbeParam {
     #[serde(default)]
     source_path: Option<String>,
@@ -684,6 +696,28 @@ impl DatasetMcpServer {
             param.file_name.as_deref(),
         )?;
         Ok(serde_json::to_string_pretty(&probe).unwrap_or_default())
+    }
+
+#[tool(name = "read_aloud_standard_audio_guess", description = "Find where a text is spoken inside a longer recording, by transcribing the file with the loaded STT model and aligning what it heard to the text. Returns `start` and `end` (seconds, padded and clamped to the file), `matched_words` / `reference_words` / `confidence`, and the `transcript` of the whole file. Writes nothing — feed the two edges to read_aloud_standard_audio_import. Only a model that reports word timings can do this (Parakeet); with any other model the call fails with an actionable message. The whole file is transcribed, so it costs more the longer the file is. Takes the same `source_path` / `source_base64` pair as read_aloud_standard_audio_probe. When it refuses (too few matched words, or the text's start or end was not heard), pick the range by hand instead.")]
+async fn read_aloud_standard_audio_guess(
+        &self,
+        Parameters(param): Parameters<ReadAloudStandardAudioGuessParam>,
+    ) -> Result<String, String> {
+        log::info!(
+            "[MCP] read_aloud_standard_audio_guess: text={}",
+            param.text_uuid
+        );
+        let settings = self.app.state::<SettingsState>();
+        let model_state = self.app.state::<crate::models::ModelState>();
+        let guess = datasets::read_aloud::standard_audio::guess_span(
+            model_state.inner(),
+            settings.inner(),
+            &param.dataset_uuid,
+            &param.text_uuid,
+            param.source_path.as_deref(),
+            param.source_base64.as_deref(),
+        )?;
+        Ok(serde_json::to_string_pretty(&guess).unwrap_or_default())
     }
 
     #[tool(name = "read_aloud_standard_audio_set_default", description = "Make one clip the default that pronunciation is measured against. Exactly one clip stays default per text.")]

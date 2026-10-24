@@ -1400,7 +1400,34 @@ pub(crate) fn transcribe_file_word_level(
 ) -> Result<transcribe_rs::TranscriptionResult, String> {
     log::info!("transcribe_file_word_level: {}", file_path.display());
     let samples = crate::audio::decode_to_pcm(file_path)?;
+    transcribe_word_level_samples(state, &samples)
+}
 
+/// Transcribe decoded 16 kHz mono samples with word-level timestamps.
+///
+/// The sample-taking twin of [`transcribe_file_word_level`]: a caller that
+/// already holds the audio (a picked file arrives as a path *or* as bytes)
+/// should not have to write it out to read it back in. Same chunking and
+/// deduplication, same backend support table.
+///
+/// Two things differ, both because this is called from a gesture the user can
+/// repeat: the default model is loaded when nothing is loaded (instead of
+/// failing with "No model is loaded" after an idle unload), and the
+/// transcription lock is taken so a second press cannot find the model taken
+/// out from under the first.
+pub(crate) fn transcribe_samples_word_level(
+    state: &ModelState,
+    samples: &[f32],
+) -> Result<transcribe_rs::TranscriptionResult, String> {
+    ensure_model_loaded(state)?;
+    let _transcribe_guard = state.transcribe_lock.lock().unwrap();
+    transcribe_word_level_samples(state, samples)
+}
+
+fn transcribe_word_level_samples(
+    state: &ModelState,
+    samples: &[f32],
+) -> Result<transcribe_rs::TranscriptionResult, String> {
     let total_duration_secs = samples.len() as f64 / STT_SAMPLE_RATE as f64;
     log::info!("Audio duration: {:.1}s ({:.1} min)", total_duration_secs, total_duration_secs / 60.0);
 

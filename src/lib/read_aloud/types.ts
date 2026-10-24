@@ -284,6 +284,24 @@ export interface AudioProbe {
   file_name: string;
 }
 
+/**
+ * Where a text is spoken inside a longer recording, as guessed by
+ * `read_aloud_standard_audio_guess`. Nothing is stored: both edges are for the
+ * crop, and every other way of moving them still works afterwards.
+ */
+export interface SpanGuess {
+  /** Seconds, already padded and clamped to the file. */
+  start: number;
+  end: number;
+  /** Words of the text the model heard, in order. */
+  matched_words: number;
+  reference_words: number;
+  /** `matched_words / reference_words` (0–1); well under 1 is a loose match. */
+  confidence: number;
+  /** Everything the model heard in the file. */
+  transcript: string;
+}
+
 /** Score threshold at/above which a reading passes and earns XP. */
 export const PASS_SCORE = 60;
 /** Score threshold for the bonus XP tier. */

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
-import type { AudioProbe, ReadStandardAudio } from "./types";
+import type { AudioProbe, ReadStandardAudio, SpanGuess } from "./types";
 
 /**
  * Wrappers for the `read_aloud_standard_audio_*` commands — the reference clips
@@ -49,6 +49,30 @@ export async function probeAudioSource(source: {
     sourcePath: source.sourcePath ?? null,
     sourceBase64: source.sourceBase64 ?? null,
     fileName: source.fileName ?? null,
+  });
+}
+
+/**
+ * Find where this text is spoken inside a longer recording, by listening to the
+ * file with the loaded STT model and aligning what it heard to the text.
+ *
+ * Nothing is written: the two edges are for the crop, and dragging, nudging or
+ * typing over them still works afterwards. The whole file is transcribed, so a
+ * long file costs minutes — the result says how much of the text was heard, and
+ * a caller that gets a refusal should let the user pick the range by hand.
+ */
+export async function guessStandardAudioSpan(params: {
+  datasetUuid: string;
+  textUuid: string;
+  sourcePath?: string;
+  sourceBase64?: string;
+}): Promise<SpanGuess> {
+  requireTauri();
+  return invoke<SpanGuess>("read_aloud_standard_audio_guess", {
+    datasetUuid: params.datasetUuid,
+    textUuid: params.textUuid,
+    sourcePath: params.sourcePath ?? null,
+    sourceBase64: params.sourceBase64 ?? null,
   });
 }
 
