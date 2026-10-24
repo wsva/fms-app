@@ -1,6 +1,7 @@
 "use client";
 
 import type { Assessment, Pause, PronUnavailableReason, RateBand } from "@/lib/read_aloud/types";
+import { GOOD_SCORE, PASS_SCORE } from "@/lib/read_aloud/types";
 
 /**
  * The three-axis result of one take: accuracy (the unchanged WIP score),
@@ -94,6 +95,137 @@ export default function AssessmentCards({ assessment }: { assessment: Assessment
       </Card>
     </div>
   );
+}
+
+export type ScoreAxesSize = "sm" | "md";
+
+/**
+ * The three scores of one take as a single strip: accuracy, fluency,
+ * pronunciation — the same three [`AssessmentCards`] breaks down.
+ *
+ * The attempts list shows it on every card, so a take is scanned by its three
+ * numbers instead of only its accuracy; an attempt with no stored assessment
+ * shows what it can and reads "—" for the rest, never a substitute number.
+ * Tooltips carry the detail the cards carry at full size.
+ */
+export function ScoreAxes({
+  score,
+  metrics,
+  size = "sm",
+  className = "",
+}: {
+  /** Accuracy 0–100 — the one score every attempt has. */
+  score: number;
+  /** Absent for a take recorded before assessment existed, or whose recording
+   *  is gone. */
+  metrics?: Assessment | null;
+  size?: ScoreAxesSize;
+  className?: string;
+}) {
+  const accuracy = metrics?.accuracy;
+  const fluency = metrics?.fluency ?? null;
+  const pronunciation = metrics?.pronunciation ?? null;
+  const pronPercent = pronunciation?.score != null ? pronunciation.score * 100 : null;
+  // A take with no assessment at all has no per-axis reason to give, only the
+  // way to measure one.
+  const unmeasured =
+    "Not measured — this take has no stored assessment (it predates the three-axis " +
+    "score, or its recording is gone). Use Assess again to measure it.";
+
+  const axes: ScoreAxis[] = [
+    {
+      key: "accuracy",
+      label: "Accuracy",
+      value: String(Math.round(score)),
+      unit: "%",
+      tone: percentTone(score),
+      title: accuracy
+        ? `${accuracy.counts.correct} of ${accuracy.counts.ref} words correct · ${Math.round(
+            accuracy.wer * 100
+          )}% WER${accuracy.lenient_score > accuracy.score ? ` · ${Math.round(accuracy.lenient_score)}% lenient` : ""}`
+        : "Share of the text's words the transcript got right.",
+    },
+    {
+      key: "fluency",
+      label: "Fluency",
+      value: fluency ? String(Math.round(fluency.wcpm)) : "—",
+      unit: fluency ? "wcpm" : undefined,
+      tone: fluency ? bandTone(fluency.band) : "text-text-tertiary",
+      title: fluency
+        ? `${Math.round(fluency.wcpm)} correct words per minute (${fluency.band} pace) · ${fluency.pause_count} pause${fluency.pause_count === 1 ? "" : "s"} · reading ${Math.round(fluency.speaking_time)} s of ${Math.round(fluency.duration)} s`
+        : unmeasured,
+    },
+    {
+      key: "pronunciation",
+      label: "Pronunciation",
+      value: pronPercent != null ? String(Math.round(pronPercent)) : "—",
+      unit: pronPercent != null ? "%" : undefined,
+      tone: percentTone(pronPercent),
+      title:
+        pronPercent != null
+          ? `Phoneme accuracy against the text's standard audio · ${Math.round(
+              (pronunciation?.weak_ratio ?? 0) * 100
+            )}% of words weak`
+          : pronunciation?.unavailable_reason
+          ? `Not measured — ${describeReason(pronunciation.unavailable_reason)}`
+          : unmeasured,
+    },
+  ];
+
+  return (
+    <div className={`grid grid-cols-3 gap-1.5 min-w-0 ${className}`}>
+      {axes.map((axis) => (
+        <div
+          key={axis.key}
+          className="flex flex-col gap-0.5 px-2 py-1.5 rounded-lg bg-bg-muted min-w-0"
+          title={axis.title}
+        >
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary truncate">
+            {axis.label}
+          </span>
+          <span className="flex items-baseline gap-0.5 min-w-0">
+            <span
+              className={`font-semibold tabular-nums leading-none ${axis.tone} ${
+                size === "md" ? "text-2xl" : "text-lg"
+              }`}
+            >
+              {axis.value}
+            </span>
+            {axis.unit && (
+              <span className="text-[10px] text-text-tertiary tabular-nums">{axis.unit}</span>
+            )}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+type ScoreAxis = {
+  key: string;
+  label: string;
+  /** Formatted value, or "—" when the axis was not measured. */
+  value: string;
+  unit?: string;
+  tone: string;
+  title: string;
+};
+
+/** Number colour for a 0–100 score: the badge thresholds, as text. */
+function percentTone(value: number | null): string {
+  if (value == null) return "text-text-tertiary";
+  if (value >= GOOD_SCORE) return "text-success-text";
+  if (value >= PASS_SCORE) return "text-warning-text";
+  return "text-error-text";
+}
+
+/** Number colour for a reading pace: on target is the good news. */
+function bandTone(band: RateBand): string {
+  return band === "target"
+    ? "text-success-text"
+    : band === "slow"
+    ? "text-warning-text"
+    : "text-text-secondary";
 }
 
 /**

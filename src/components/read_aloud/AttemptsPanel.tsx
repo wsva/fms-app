@@ -2,12 +2,11 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { Play, Trash2, History, ChevronRight, Loader2, RefreshCw } from "lucide-react";
+import { Play, Trash2, History, ChevronRight, Loader2, Mic, RefreshCw, Award } from "lucide-react";
 import type { ReadAttempt, ReadText } from "@/lib/read_aloud/types";
-import { scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { rerecognizeAttempt } from "@/lib/read_aloud/rerecognize";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
-import AssessmentCards, { PauseRibbon } from "@/components/read_aloud/AssessmentCards";
+import AssessmentCards, { PauseRibbon, ScoreAxes } from "@/components/read_aloud/AssessmentCards";
 import AssessmentLogPanel from "@/components/read_aloud/AssessmentLogPanel";
 import { highlightDifferences } from "@/components/read_book/diff";
 import { lcs } from "@/lib/listen/lcs";
@@ -46,6 +45,12 @@ function playUrl(url?: string | null) {
 function formatWhen(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+/** `m:ss` length of a take, from the duration its assessment recorded. */
+function formatLength(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
 /** Split text into sentences, keeping terminal punctuation with its sentence. */
@@ -294,9 +299,116 @@ function SentenceCompare({ reference, recognized }: { reference: string; recogni
 }
 
 /**
- * A dedicated page listing every recorded attempt at one text. Clicking an
- * attempt opens a detail panel that shows the full recognized text at reading
- * size, plus the stored three-axis assessment when the take has one. Reached
+ * One recorded take, as a card.
+ *
+ * Its three scores are the card's subject — accuracy, fluency and pronunciation
+ * side by side — so the history can be read down the list without opening a
+ * take. The transcript is a two-line excerpt (the detail view is one click
+ * away) and the recording's own actions sit in the header beside it.
+ */
+function AttemptCard({
+  attempt,
+  best,
+  busy,
+  blocked,
+  onOpen,
+  onPlay,
+  onAssess,
+  onDelete,
+}: {
+  attempt: ReadAttempt;
+  /** Highest accuracy in this text's history — the row the others aim at. */
+  best: boolean;
+  /** This take's assessment is the one running. */
+  busy: boolean;
+  /** Any take's assessment is running, so this row's action stands aside. */
+  blocked: boolean;
+  onOpen: () => void;
+  onPlay?: () => void;
+  onAssess?: () => void;
+  onDelete: () => void;
+}) {
+  const length = attempt.metrics?.fluency?.duration;
+
+  return (
+    <li
+      onClick={onOpen}
+      className="flex flex-col gap-2 p-2.5 rounded-xl border border-border-default bg-bg-card hover:bg-bg-hover cursor-pointer transition-colors min-w-0"
+    >
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className="text-[11px] text-text-tertiary tabular-nums truncate">
+          {formatWhen(attempt.created_at)}
+        </span>
+        {length != null && length > 0 && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-bg-muted text-text-tertiary tabular-nums shrink-0">
+            {formatLength(length)}
+          </span>
+        )}
+        {best && (
+          <span
+            className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded-full bg-success-bg text-success-text font-semibold shrink-0"
+            title="Highest accuracy among this text's takes"
+          >
+            <Award size={11} />
+            best
+          </span>
+        )}
+        <div className="flex-1 min-w-0" />
+        {onPlay && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onPlay();
+            }}
+            title="Play recording"
+            className="p-1.5 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-muted cursor-pointer shrink-0"
+          >
+            <Play size={15} />
+          </button>
+        )}
+        {onAssess && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onAssess();
+            }}
+            disabled={blocked}
+            title="Assess again (re-transcribe this recording and score it again)"
+            className="p-1.5 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-muted cursor-pointer shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {busy ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+          </button>
+        )}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          title="Delete attempt"
+          className="p-1.5 rounded-md text-text-tertiary hover:text-error-text hover:bg-bg-muted cursor-pointer shrink-0"
+        >
+          <Trash2 size={15} />
+        </button>
+        <ChevronRight size={16} className="text-text-tertiary shrink-0" />
+      </div>
+
+      {/* The point of the card: all three scores, whatever was measurable. */}
+      <ScoreAxes score={attempt.score} metrics={attempt.metrics} />
+
+      <p
+        className="text-xs text-text-secondary break-words line-clamp-2"
+        title={attempt.recognized}
+      >
+        {attempt.recognized || "(no speech recognized)"}
+      </p>
+    </li>
+  );
+}
+
+/**
+ * A dedicated page listing every recorded attempt at one text. Each card shows
+ * the take's three scores; clicking it opens the detail — the full recognized
+ * text at reading size, plus the stored three-axis assessment in depth. Reached
  * from the practice view's toolbar ("Attempts").
  */
 export default function AttemptsPanel({
@@ -376,6 +488,10 @@ export default function AttemptsPanel({
   };
 
   const selectedAttempt = attempts.find((a) => a.uuid === selectedUuid) ?? null;
+  // Best accuracy in the list rather than `text.best_score`: the rows are
+  // re-scored against the current reference on read, so the stored best can lag
+  // behind the numbers the cards show.
+  const bestScore = attempts.length > 0 ? Math.max(...attempts.map((a) => a.score)) : null;
   // Scoring — and the diff below — uses the normalized reference when set, else
   // the text to read. Mirror that so the highlighting matches the score.
   const reference = text.normalized_content?.trim() ? text.normalized_content : text.content;
@@ -397,21 +513,23 @@ export default function AttemptsPanel({
             {/* Detail panel — the recognized text at normal reading size.
                 Navigation back to the list is via the breadcrumb's "Attempts" crumb;
                 Play / Delete for the open attempt live in the page toolbar. */}
-            <div className="flex items-center gap-3 min-w-0">
-              <span
-                className={`text-2xl font-bold tabular-nums ${scoreBadgeClasses(selectedAttempt.score)}`}
-              >
-                {Math.round(selectedAttempt.score)}%
-              </span>
+            <div className="flex items-center gap-2 min-w-0">
               <span className="text-xs text-text-tertiary tabular-nums">
                 {formatWhen(selectedAttempt.created_at)}
               </span>
+              {selectedAttempt.metrics?.fluency?.duration != null && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-bg-muted text-text-tertiary tabular-nums">
+                  {formatLength(selectedAttempt.metrics.fluency.duration)}
+                </span>
+              )}
             </div>
 
-            {/* The stored assessment, when this take has one. Takes recorded
-                before assessment existed (or whose recording is gone) simply have
-                none — the accuracy number above is still there. */}
-            {selectedAttempt.metrics && (
+            {/* The take's scores. With a stored assessment the cards carry the
+                whole picture — accuracy in depth, then fluency and pronunciation —
+                so nothing is repeated above them. A take recorded before
+                assessment existed has no cards, and then the same three-score
+                strip the list uses says what it has and what is missing. */}
+            {selectedAttempt.metrics ? (
               <section className="flex flex-col gap-2 min-w-0">
                 <AssessmentCards assessment={selectedAttempt.metrics} />
                 <PauseRibbon
@@ -423,6 +541,8 @@ export default function AttemptsPanel({
                   }
                 />
               </section>
+            ) : (
+              <ScoreAxes score={selectedAttempt.score} metrics={null} size="md" />
             )}
 
             {/* Compare mode (toolbar "Compare") pairs the texts sentence by
@@ -440,78 +560,41 @@ export default function AttemptsPanel({
           </>
         ) : (
           <>
-            <section className="flex flex-col gap-1 min-w-0">
+            <section className="flex flex-col gap-0.5 min-w-0">
               <h2 className="text-lg font-semibold text-text-primary break-words flex items-center gap-2">
                 <History size={18} className="text-text-tertiary shrink-0" />
                 Attempts
               </h2>
               <p className="text-xs text-text-tertiary break-words">
-                {text.title || "Untitled"} · {attempts.length} attempt{attempts.length === 1 ? "" : "s"}
+                {text.title || "Untitled"} · {attempts.length} attempt
+                {attempts.length === 1 ? "" : "s"}
+                {bestScore != null && ` · best ${Math.round(bestScore)}%`}
               </p>
             </section>
 
             {attempts.length === 0 ? (
-              <p className="text-xs text-text-tertiary">
-                No attempts yet. Record yourself reading in the practice view.
-              </p>
+              <div className="flex flex-col items-center gap-1.5 p-8 rounded-xl border border-dashed border-border-default text-center">
+                <Mic size={20} className="text-text-tertiary" />
+                <p className="text-sm text-text-secondary">No attempts yet</p>
+                <p className="text-xs text-text-tertiary max-w-sm break-words">
+                  Record yourself reading in the practice view. Every take is scored on
+                  accuracy, fluency and pronunciation, and its three scores line up here.
+                </p>
+              </div>
             ) : (
-              <ul className="flex flex-col gap-1.5">
+              <ul className="flex flex-col gap-2">
                 {attempts.map((a) => (
-                  <li
+                  <AttemptCard
                     key={a.uuid}
-                    onClick={() => onSelectUuid(a.uuid)}
-                    className="flex items-center gap-2 p-2 rounded-lg border border-border-default bg-bg-card hover:bg-bg-hover cursor-pointer transition-colors"
-                  >
-                    <span className={scoreBadgeClasses(a.score)}>{Math.round(a.score)}%</span>
-                    <div className="flex flex-col min-w-0 flex-1">
-                      <span className="text-xs text-text-secondary truncate" title={a.recognized}>
-                        {a.recognized || "(no speech recognized)"}
-                      </span>
-                      <span className="text-[10px] text-text-tertiary tabular-nums">
-                        {formatWhen(a.created_at)}
-                      </span>
-                    </div>
-                    {a.audio_url && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          playUrl(a.audio_url);
-                        }}
-                        title="Play recording"
-                        className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover cursor-pointer shrink-0"
-                      >
-                        <Play size={15} />
-                      </button>
-                    )}
-                    {a.audio_url && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void assessAgain(a);
-                        }}
-                        disabled={rerecognizing !== null}
-                        title="Assess again (re-transcribe this recording and score it again)"
-                        className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover cursor-pointer shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {rerecognizing === a.uuid ? (
-                          <Loader2 size={15} className="animate-spin" />
-                        ) : (
-                          <RefreshCw size={15} />
-                        )}
-                      </button>
-                    )}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteAttempt(a);
-                      }}
-                      title="Delete attempt"
-                      className="p-1 rounded text-text-tertiary hover:text-error-text hover:bg-bg-hover cursor-pointer shrink-0"
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                    <ChevronRight size={16} className="text-text-tertiary shrink-0" />
-                  </li>
+                    attempt={a}
+                    best={attempts.length > 1 && a.score === bestScore}
+                    busy={rerecognizing === a.uuid}
+                    blocked={rerecognizing !== null}
+                    onOpen={() => onSelectUuid(a.uuid)}
+                    onPlay={a.audio_url ? () => playUrl(a.audio_url) : undefined}
+                    onAssess={a.audio_url ? () => void assessAgain(a) : undefined}
+                    onDelete={() => deleteAttempt(a)}
+                  />
                 ))}
               </ul>
             )}

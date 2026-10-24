@@ -45,6 +45,7 @@ The **diff view** lines up the written text against what was recognised from you
 
 Every recording you make is saved as an **attempt**. The **attempts panel** lists your previous attempts for a text so you can:
 
+- Read all three scores — accuracy, fluency and pronunciation — straight off each card, without opening the attempt. A score that could not be measured reads `—`, never a stand‑in number; hover it for the reason.
 - Play back earlier recordings and compare them to now.
 - Watch your scores trend upward as you repeat a passage.
 - **Assess again** an earlier take: it re‑transcribes the recording and recomputes its accuracy, fluency and pronunciation in place. The recording is device‑local, so the action only appears where that recording lives.
