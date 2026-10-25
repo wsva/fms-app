@@ -403,7 +403,9 @@ pub(crate) fn validate_preference(language: &str, voice: &str) -> Result<(), Str
     let language = language_of(language);
     if language.is_empty() {
         return Err(
-            "A preferred voice needs a language key (`de`, `de-DE`, `zh-CN`)".to_string(),
+            "A preferred voice needs a language key. Prefer the language over a region: \
+             `de` covers `de-DE` and `de-AT` datasets, `de-DE` covers only `de-DE` ones."
+                .to_string(),
         );
     }
     let voice = voice.trim();

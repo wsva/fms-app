@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Loader2, Play, Plus, Trash2 } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import type { TtsVoice } from "@/lib/edge_tts/types";
-import { localeLabel, voiceName } from "@/lib/edge_tts/voices";
+import { localeLabel, voiceName, voiceRegion } from "@/lib/edge_tts/voices";
 
 type Props = {
   voices: TtsVoice[];
@@ -30,7 +30,21 @@ const SAMPLE_BY_LANGUAGE: Record<string, string> = {
 };
 
 function sampleFor(locale: string): string {
-  return SAMPLE_BY_LANGUAGE[locale.split("-")[0]] ?? "Hello — this is how I sound.";
+  return SAMPLE_BY_LANGUAGE[languageOf(locale)] ?? "Hello — this is how I sound.";
+}
+
+/**
+ * `de-AT` → `de`.
+ *
+ * A preference is keyed on the language, never on the region: a dataset records
+ * what it is written in, and that is usually just `de`, while Edge only ships
+ * regional locales. `resolve_voice` tries the dataset's exact tag and then this
+ * subtag, so a `de` key serves `de`, `de-DE` and `de-AT` datasets alike, whereas
+ * a `de-DE` key would match none of the plain-`de` ones. The region belongs to
+ * the voice the row points at, not to the row's key.
+ */
+function languageOf(tag: string): string {
+  return tag.split("-")[0].toLowerCase();
 }
 
 /**
@@ -41,6 +55,9 @@ function sampleFor(locale: string): string {
  * listening. Read-aloud then resolves a dataset's language through this map
  * (`VoiceResolution.source == "preference"`), falling back to the
  * language-less read-aloud voice and finally to the built-in default.
+ *
+ * The map is keyed on the language (`de`), not on a voice's locale (`de-DE`):
+ * see `languageOf` for why a regional key loses to the datasets it should win.
  */
 export default function PreferredVoices({ voices, text, previewing, onPreview }: Props) {
   // Language tag → voice short name. Mirrors `tts_voice_by_language`.
@@ -51,17 +68,41 @@ export default function PreferredVoices({ voices, text, previewing, onPreview }:
 
   const languages = useMemo(() => {
     const seen: string[] = [];
-    for (const v of voices) if (!seen.includes(v.locale)) seen.push(v.locale);
+    for (const v of voices) {
+      const language = languageOf(v.locale);
+      if (language && !seen.includes(language)) seen.push(language);
+    }
     return seen.sort();
   }, [voices]);
 
+  /** Every voice that speaks `language`, whatever its region. */
   const voicesOf = useCallback(
-    (locale: string) =>
+    (language: string) =>
       voices
-        .filter((v) => v.locale === locale)
+        .filter((v) => languageOf(v.locale) === languageOf(language))
         .slice()
-        .sort((a, b) => a.short_name.localeCompare(b.short_name)),
+        .sort(
+          (a, b) => a.locale.localeCompare(b.locale) || a.short_name.localeCompare(b.short_name)
+        ),
     [voices]
+  );
+
+  /**
+   * The voice a new row starts on: one from the region most of the language's
+   * voices live in — `de-DE` for German. Sorting alone would pick `de-AT`, so
+   * "Add language" would hand a German learner an Austrian voice by default.
+   */
+  const defaultVoice = useCallback(
+    (language: string) => {
+      const list = voicesOf(language);
+      const counts = new Map<string, number>();
+      for (const v of list) counts.set(v.locale, (counts.get(v.locale) ?? 0) + 1);
+      const dominant = [...counts.entries()].sort(
+        (a, b) => b[1] - a[1] || a[0].localeCompare(b[0])
+      )[0]?.[0];
+      return list.find((v) => v.locale === dominant) ?? list[0];
+    },
+    [voicesOf]
   );
 
   useEffect(() => {
@@ -118,25 +159,33 @@ export default function PreferredVoices({ voices, text, previewing, onPreview }:
     [preferred]
   );
 
+  /** A language already covered, including by a regional key saved earlier. */
+  const covered = (language: string) =>
+    Object.keys(preferred).some((key) => languageOf(key) === language);
+
   const addLanguage = () => {
-    const free = languages.find((l) => !(l in preferred));
+    const free = languages.find((l) => !covered(l));
     if (!free) {
       setError("Every language with voices already has a preferred voice.");
       return;
     }
-    const voice = voicesOf(free)[0];
+    const voice = defaultVoice(free);
     if (voice) void save({ ...preferred, [free]: voice.short_name });
   };
 
   const changeLanguage = (from: string, to: string) => {
     if (to === from) return;
-    const voice = voicesOf(to)[0];
-    if (!voice) return;
     const next = { ...preferred };
     delete next[from];
-    // The old voice does not speak the new language and the backend would
-    // refuse the pair, so moving a row also moves its voice.
-    next[to] = voice.short_name;
+    // Merging onto a language that already has a voice keeps that voice — the
+    // row being moved is the one without a home. Otherwise the old voice does
+    // not speak the new language and the backend would refuse the pair, so the
+    // row takes a voice that does.
+    if (!(to in next)) {
+      const voice = defaultVoice(to);
+      if (!voice) return;
+      next[to] = voice.short_name;
+    }
     void save(next);
   };
 
@@ -217,7 +266,7 @@ export default function PreferredVoices({ voices, text, previewing, onPreview }:
                   {missing && <option value={voice}>{voiceName(voice)} (not listed)</option>}
                   {list.map((v) => (
                     <option key={v.short_name} value={v.short_name}>
-                      {voiceName(v.short_name)} ({v.gender})
+                      {voiceName(v.short_name)} · {voiceRegion(v.short_name)} ({v.gender})
                     </option>
                   ))}
                 </select>

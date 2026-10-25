@@ -34,3 +34,13 @@ export function voiceName(shortName: string): string {
     .replace(/^[^-]+-[^-]+-/, "")
     .replace(/Neural$/, "");
 }
+
+/**
+ * `de-DE-ConradNeural` → `DE`: the region the voice actually speaks.
+ *
+ * A picker grouped by language lists every region at once, so `Conrad (DE)` and
+ * `Conrad (AT)` have to be told apart by something more than their name.
+ */
+export function voiceRegion(shortName: string): string {
+  return (shortName.split("-")[1] ?? "").toUpperCase();
+}
