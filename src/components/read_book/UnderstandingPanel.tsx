@@ -22,6 +22,7 @@ import {
   Loader2,
   Lightbulb,
   Bot,
+  Copy,
 } from "lucide-react";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import UnderstandingModelPicker from "./UnderstandingModelPicker";
@@ -45,6 +46,7 @@ import {
   sourceLabel,
   type QuizAnswer,
 } from "@/lib/read/artifacts";
+import { buildArtifactJobPrompt } from "@/lib/read/agent-prompt";
 import type { CardDatasetSummary } from "@/lib/types";
 
 type Props = { b: ReturnType<typeof useBookData> };
@@ -239,9 +241,38 @@ function GeneratedSection({
   emptyHint: string;
   cta: string;
 }) {
-  const { generating, handleGenerate, handleRequestAgent, handleCancelJob, handleDeleteArtifact, jobs, mobile } = b;
+  const { generating, handleGenerate, handleRequestAgent, handleCancelJob, handleDeleteArtifact, jobs, mobile, bookUUID } = b;
   // The outstanding agent request for this exact scope + kind, if any.
   const job = jobs.find((j) => j.scope_uuid === scopeUuid && j.kind === kind);
+  // FmS cannot call the agent, so the learner carries the request over by hand.
+  // Build the copy/paste prompt from the job row itself (its instructions are the
+  // truth), and pre-fill the existing uuid only when regenerating in place.
+  const agentPrompt = job
+    ? buildArtifactJobPrompt({
+        bookUuid: bookUUID,
+        scopeType: job.scope_type,
+        scopeUuid: job.scope_uuid,
+        kind: job.kind,
+        instructions: job.instructions,
+        existingUuid: artifact?.uuid,
+      })
+    : "";
+  const [copied, setCopied] = useState(false);
+  const [clipFailed, setClipFailed] = useState(false);
+  // A new job (or its disappearance) resets the copy feedback.
+  useEffect(() => {
+    setCopied(false);
+    setClipFailed(false);
+  }, [job?.uuid]);
+  const copyPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(agentPrompt);
+      setCopied(true);
+      setClipFailed(false);
+    } catch {
+      setClipFailed(true);
+    }
+  };
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between gap-2">
@@ -314,6 +345,34 @@ function GeneratedSection({
           </button>
         </div>
       </div>
+      {job && (
+        <div className="flex flex-col gap-1.5 rounded-lg border border-border-default bg-bg-muted p-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-text-secondary">
+              Paste this into your agent so it can fill the request:
+            </span>
+            <button
+              type="button"
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border border-border-default text-text-secondary hover:bg-bg-hover cursor-pointer shrink-0"
+              onClick={() => void copyPrompt()}
+            >
+              {copied ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
+              {copied ? "Copied" : "Copy prompt"}
+            </button>
+          </div>
+          <textarea
+            readOnly
+            value={agentPrompt}
+            onFocus={(e) => e.currentTarget.select()}
+            className="w-full h-40 p-2 rounded-md bg-bg-base border border-border-default text-[11px] text-text-primary font-mono resize-y"
+          />
+          <p className="text-[11px] text-text-tertiary">
+            {clipFailed
+              ? "Could not reach the clipboard — select the text above and copy it."
+              : "Nothing changes until your agent reads this request and delivers the result here."}
+          </p>
+        </div>
+      )}
       {artifact ? (
         <>
           <div className="flex items-center justify-end">
