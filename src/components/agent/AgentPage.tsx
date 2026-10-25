@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Cable, PlugZap, SlidersHorizontal } from "lucide-react";
-import { PageHeader } from "@/components/ui/toolbar";
+import { PageHeader, TabBar, type TabBarItem } from "@/components/ui/toolbar";
 import {
   ensureAgentLoaded,
   ensureSurfaceLoaded,
@@ -14,12 +14,12 @@ import HostingPanel from "./HostingPanel";
 import SurfacePanel from "./SurfacePanel";
 
 const TABS = [
-  { key: "connect", label: "Connect", icon: Cable },
-  { key: "hosting", label: "Hosting", icon: PlugZap },
-  { key: "surface", label: "Surface", icon: SlidersHorizontal },
+  { id: "connect", label: "Connect", icon: Cable },
+  { id: "hosting", label: "Hosting", icon: PlugZap },
+  { id: "surface", label: "Surface", icon: SlidersHorizontal },
 ] as const;
 
-type TabKey = (typeof TABS)[number]["key"];
+type TabKey = (typeof TABS)[number]["id"];
 
 /** Tools → Agent: the configuration surface for both directions of agent
  *  integration.
@@ -51,6 +51,14 @@ export default function AgentPage() {
   if (mobile) return null;
 
   const hosted = hosts?.connected ? hosts.session?.display_name ?? "a host" : null;
+  // The Hosting tab carries the dot a closed dock cannot: an approval request is
+  // waiting, and answering it is the only way the caller proceeds.
+  const tabs: TabBarItem<TabKey>[] = TABS.map(({ id, label, icon }) => ({
+    id,
+    label,
+    icon,
+    dot: id === "hosting" && Boolean(confirm),
+  }));
 
   return (
     <div className="flex flex-1 min-w-0 flex-col h-full bg-bg-base">
@@ -72,26 +80,13 @@ export default function AgentPage() {
 
       {/* Tabs. Related configuration, split by what the user came to do rather
           than by backend module: paste a line, pick a host, govern the surface. */}
-      <div className="flex gap-1 px-4 border-b border-border-default shrink-0">
-        {TABS.map(({ key, label, icon: Icon }) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => setTab(key)}
-            className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
-              tab === key
-                ? "border-accent-bg text-text-primary"
-                : "border-transparent text-text-tertiary hover:text-text-secondary"
-            }`}
-          >
-            <Icon size={15} />
-            {label}
-            {key === "hosting" && confirm && (
-              <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" aria-hidden />
-            )}
-          </button>
-        ))}
-      </div>
+      <TabBar
+        items={tabs}
+        value={tab}
+        onChange={setTab}
+        label="Agent sections"
+        className="shrink-0 px-4"
+      />
 
       <div className="flex-1 overflow-y-auto min-h-0 p-4">
         <div className="max-w-3xl">

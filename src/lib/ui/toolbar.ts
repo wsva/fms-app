@@ -42,8 +42,12 @@
 //   breadcrumb. Render the `Toolbar` on any page with at least one page-level
 //   action and omit it entirely when there are none. Only actionable controls
 //   belong in the toolbar; a non-action status (provider/model badge, spinner)
-//   stays in the header's `badge` slot.
-// ---------------------------------------------------------------------------
+//   stays in the header's `badge` slot. A third row — the underline `TabBar` —
+//   appears only when one page holds several views of the same subject (Agent's
+//   Connect / Hosting / Surface). That is page-level view switching, not an
+//   action row: tabs never replace a `Toolbar`, and a tab is never a button that
+//   does something.
+// ---------------------------------------------------------------------------  
 
 /** Icon size for a labeled toolbar button. */
 export const TB_ICON = 14;
@@ -51,6 +55,9 @@ export const TB_ICON = 14;
 export const TB_ICON_SIZE = 16;
 /** Icon size for an overflow-menu item. */
 export const TB_MENU_ICON = 15;
+/** Icon size inside a `TabBar` item — between a labeled button's 14 and an
+ *  icon-only button's 16, because a tab sits next to its own word. */
+export const TB_TAB_ICON = 15;
 
 // Base box + typography shared by every labeled toolbar action button.
 const base =
@@ -112,3 +119,22 @@ export const tbIconToggle = (active: boolean) =>
 /** Icon-only toggle, subtle highlighted background when active (search). */
 export const tbIconToggleSoft = (active: boolean) =>
   `${iconBase} ${active ? "bg-bg-hover text-text-primary" : ghostColor}`;
+
+// Tab strip: one row of views under a page header, pulled flush over the
+// container's own border by `-mb-px` so the active underline sits on it rather
+// than above it. Padding belongs to the caller (`className`) — the same strip is
+// used flush inside a padded body and edge-to-edge under a header.
+const tabBase =
+  "flex items-center gap-1.5 px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors disabled:opacity-50 disabled:cursor-not-allowed";
+
+/** The strip container: tabs packed left along the bottom border. */
+export const tabBar = "flex gap-1 border-b border-border-default";
+
+/** One strip tab: accent underline when active, muted label that lifts on hover
+ *  when not. Prefer the `TabBar` component over these tokens. */
+export const tabItem = (active: boolean) =>
+  `${tabBase} ${
+    active
+      ? "border-accent-bg text-text-primary"
+      : "border-transparent text-text-tertiary hover:text-text-secondary"
+  }`;

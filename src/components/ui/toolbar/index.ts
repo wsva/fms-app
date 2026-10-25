@@ -5,6 +5,8 @@
 export { Toolbar } from "./Toolbar";
 export { Breadcrumb } from "./Breadcrumb";
 export { PageHeader } from "./PageHeader";
+export { TabBar } from "./TabBar";
+export type { TabBarItem } from "./TabBar";
 export { ToolbarButton } from "./ToolbarButton";
 export type { ToolbarButtonVariant } from "./ToolbarButton";
 export { ToolbarIconButton } from "./ToolbarIconButton";
