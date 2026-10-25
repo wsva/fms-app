@@ -19,7 +19,7 @@ use serde_json::{Map, Value};
 
 /// Every embedded recipe, by the name it is served under. The name is the file
 /// stem, so `get_prompt { name }` matches what a reader of the repo would guess.
-const RECIPES: [(&str, &str); 5] = [
+const RECIPES: [(&str, &str); 6] = [
     (
         "build-dataset-from-media",
         include_str!("../../../docs/design/agent/goose_recipe/build-dataset-from-media.yaml"),
@@ -39,6 +39,10 @@ const RECIPES: [(&str, &str); 5] = [
     (
         "normalize-read-aloud-texts",
         include_str!("../../../docs/design/agent/goose_recipe/normalize-read-aloud-texts.yaml"),
+    ),
+    (
+        "build-read-aloud-from-ebook",
+        include_str!("../../../docs/design/agent/goose_recipe/build-read-aloud-from-ebook.yaml"),
     ),
 ];
 

@@ -30,9 +30,9 @@ type Props = {
 export default function StandardAudioPlayer({ clip, disabled = false }: Props) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
-  // The dataset-wide listing does not decode the wav, so `clip.duration` can be
-  // 0 here; metadata is what fills it in.
-  const [duration, setDuration] = useState(clip.duration > 0 ? clip.duration : 0);
+  // The dataset-wide listing does not decode the wav, so `clip.duration` is
+  // null here; metadata is what fills it in.
+  const [duration, setDuration] = useState(clip.duration ?? 0);
   const [currentTime, setCurrentTime] = useState(0);
 
   const stop = useCallback(() => {

@@ -14,8 +14,10 @@
 //! attempt into that three-axis picture; this file owns storage, sync and commands.
 
 pub(crate) mod assess;
+pub(crate) mod audit;
 pub(crate) mod fluency;
 pub(crate) mod gop;
+pub(crate) mod import;
 pub(crate) mod normalize;
 #[cfg(feature = "phoneme")]
 pub(crate) mod phoneme;
@@ -68,6 +70,11 @@ pub struct ReadAloudMeta {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// Language tag of the texts (`"de"`, `"de-DE"`). Decides which preferred
+    /// voice a generation uses — see `standard_audio::resolve_voice`. Empty on
+    /// datasets created before the field existed.
+    #[serde(default)]
+    pub language: String,
     /// Absolute filesystem path of the dataset directory.
     pub path: String,
     pub created_at: String,
@@ -92,12 +99,102 @@ pub struct ReadText {
     #[serde(default)]
     pub normalized_content: Option<String>,
     /// Best score across all attempts (computed/stored, null if never attempted).
+    #[serde(default)]
     pub best_score: Option<f64>,
     /// Number of recorded attempts (computed on read, not persisted).
     #[serde(default)]
     pub attempt_count: i64,
+    #[serde(default)]
     pub created_at: String,
+    #[serde(default)]
     pub updated_at: String,
+}
+
+/// A text as a caller submits it (`read_aloud_save_text(s)` and the importer).
+///
+/// The server owns identity: a draft may carry a `uuid` to update a row it read
+/// earlier — the normalize recipe round-trips the whole row — and may omit it to
+/// create one. `order_num`, `created_at` and `updated_at` are filled in by
+/// [`TextDraft::into_row`] when the caller leaves them alone, so "what must I
+/// send?" has exactly one answer: `title` and `content`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TextDraft {
+    pub uuid: Option<String>,
+    pub order_num: Option<i64>,
+    pub title: String,
+    pub note: String,
+    pub content: String,
+    pub normalized_content: Option<String>,
+    pub best_score: Option<f64>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+impl TextDraft {
+    /// Fill in what the server owns. `order_num` is only consulted when the
+    /// draft carries none — callers that append pass the running counter.
+    pub(crate) fn into_row(self, dataset_uuid: &str, order_num: i64) -> ReadText {
+        let now = now_row_stamp();
+        let title = if self.title.trim().is_empty() {
+            fallback_title(&self.content)
+        } else {
+            self.title.trim().to_string()
+        };
+        ReadText {
+            uuid: self
+                .uuid
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+            dataset_uuid: dataset_uuid.to_string(),
+            order_num: self.order_num.unwrap_or(order_num),
+            title,
+            note: self.note.trim().to_string(),
+            content: self.content,
+            normalized_content: self
+                .normalized_content
+                .filter(|s| !s.trim().is_empty()),
+            best_score: self.best_score,
+            attempt_count: 0,
+            created_at: self
+                .created_at
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| now.clone()),
+            updated_at: self
+                .updated_at
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(now),
+        }
+    }
+}
+
+/// One row of the summary listing: enough to orient a caller without the content
+/// on the wire. The log re-listed all 382 texts (363 KB each) to answer
+/// questions this shape answers in a few KB.
+#[derive(Clone, Debug, Serialize)]
+pub struct TextSummary {
+    pub uuid: String,
+    pub order_num: i64,
+    pub title: String,
+    /// Characters in `content`, counted by SQLite (not bytes).
+    pub chars: i64,
+    pub attempt_count: i64,
+    pub best_score: Option<f64>,
+    /// The text has at least one standard-audio row — what a generate run would
+    /// otherwise have to derive by cross-referencing two listings.
+    pub has_standard_audio: bool,
+}
+
+/// The partition a bulk save returns. `saved + failed` always equals the number
+/// of drafts submitted, which is what makes a total failure impossible to
+/// misread (the log once recorded `ok=382 fail=0` while persisting nothing).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SaveBatch {
+    pub saved: usize,
+    /// `(caller's index, title, error)`.
+    pub errors: Vec<(usize, String, String)>,
 }
 
 /// One recorded attempt at a text.
@@ -625,6 +722,50 @@ pub(crate) fn apply_remote_delete(
     Ok(deleted > 0)
 }
 
+/// Longest title [`fallback_title`] will cut from a passage.
+const TITLE_MAX_CHARS: usize = 60;
+
+/// A readable title for a draft that carries none: the first non-empty line,
+/// shortened. A list of untitled passages is unusable, and the log's importer
+/// hand-rolled exactly this fallback twice — so it lives here once.
+pub(crate) fn fallback_title(content: &str) -> String {
+    let line = content
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if line.is_empty() {
+        return "Untitled text".to_string();
+    }
+    let mut title: String = line.chars().take(TITLE_MAX_CHARS).collect();
+    if line.chars().count() > TITLE_MAX_CHARS {
+        title.push('…');
+    }
+    title
+}
+
+/// Normalise a caller's language tag to the shape Edge voice locales use
+/// (`de`, `de-DE`, `zh-CN`): trimmed, `_` → `-`, language lowercased, region
+/// uppercased. An empty or malformed tag becomes empty, which reads as "no
+/// language yet" rather than as a language that never matches.
+pub(crate) fn normalize_language(raw: &str) -> String {
+    let tag = raw.trim().replace('_', "-");
+    if tag.is_empty() {
+        return String::new();
+    }
+    let mut parts = tag.split('-').filter(|p| !p.is_empty());
+    let language = parts.next().unwrap_or("").to_lowercase();
+    if language.is_empty() || !language.chars().all(|c| c.is_ascii_alphabetic()) {
+        return String::new();
+    }
+    let rest: Vec<String> = parts.map(|p| p.to_uppercase()).collect();
+    if rest.is_empty() {
+        language
+    } else {
+        format!("{}-{}", language, rest.join("-"))
+    }
+}
+
 /// Build a filesystem-safe directory/file name from a title.
 fn sanitize_name(title: &str) -> String {
     let cleaned: String = title
@@ -679,6 +820,7 @@ pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<ReadAloudMeta> {
                     uuid: info.uuid,
                     name: info.name,
                     description: info.description,
+                    language: info.language,
                     path: path.to_string_lossy().into_owned(),
                     created_at: info.created_at,
                     updated_at: info.updated_at,
@@ -696,14 +838,21 @@ pub async fn read_aloud_create(
     settings: State<'_, SettingsState>,
     name: String,
     description: Option<String>,
+    language: Option<String>,
 ) -> Result<ReadAloudMeta, String> {
-    create_dataset(&settings, name, description.unwrap_or_default())
+    create_dataset(
+        &settings,
+        name,
+        description.unwrap_or_default(),
+        language.unwrap_or_default(),
+    )
 }
 
 pub(crate) fn create_dataset(
     settings: &SettingsState,
     name: String,
     description: String,
+    language: String,
 ) -> Result<ReadAloudMeta, String> {
     if name.trim().is_empty() {
         return Err("Name is required".into());
@@ -727,6 +876,7 @@ pub(crate) fn create_dataset(
         name.clone(),
     );
     info.description = description.clone();
+    info.language = normalize_language(&language);
     write_info(&dst, &info)?;
     open_db(&dst)?;
 
@@ -734,19 +884,24 @@ pub(crate) fn create_dataset(
         uuid,
         name,
         description,
+        language: info.language.clone(),
         path: dst.to_string_lossy().into_owned(),
         created_at: info.created_at.clone(),
         updated_at: info.updated_at,
     })
 }
 
-/// Update a dataset's name and/or description.
+/// Update a dataset's name, description and/or language.
+///
+/// `language` is what a generation uses to pick a preferred voice
+/// (`standard_audio::resolve_voice`); `Some("")` clears it, `None` leaves it.
 #[tauri::command]
 pub async fn read_aloud_update(
     settings: State<'_, SettingsState>,
     uuid: String,
     name: String,
     description: Option<String>,
+    language: Option<String>,
 ) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("Name is required".into());
@@ -756,6 +911,9 @@ pub async fn read_aloud_update(
     info.name = name;
     if let Some(d) = description {
         info.description = d;
+    }
+    if let Some(l) = language {
+        info.language = normalize_language(&l);
     }
     info.updated_at = now_stamp();
     write_info(&dir, &info)
@@ -826,8 +984,25 @@ pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result
         .filter_map(|r| r.ok())
         .collect();
 
-    // Recompute `best_score` + `attempt_count` from *my* stored transcripts with
-    // the current metric, so attempts scored under an older scale never surface.
+    let (count, best) = attempt_stats(&ctx);
+    for text in &mut items {
+        text.attempt_count = count.get(&text.uuid).copied().unwrap_or(0);
+        // Best is mine alone: a text I have never attempted shows no score, even
+        // if the row carried a publisher's cached `best_score`.
+        text.best_score = best.get(&text.uuid).copied();
+    }
+    Ok(items)
+}
+
+/// Attempt count and best score per text, recomputed from *my* stored
+/// transcripts with the current metric so an attempt scored under an older
+/// scale never surfaces. Shared by the full and the summary listings.
+fn attempt_stats(
+    ctx: &AttemptCtx,
+) -> (
+    std::collections::HashMap<String, i64>,
+    std::collections::HashMap<String, f64>,
+) {
     let mut count: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut best: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     if let Ok(mut stmt) = ctx.conn.prepare(
@@ -854,13 +1029,84 @@ pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result
             }
         }
     }
+    (count, best)
+}
+
+/// The listing a caller wants when it is orienting itself rather than reading:
+/// one `chars` number and one audio flag per text, no content. Ordered the same
+/// way as [`list_texts`], so `limit` on this listing and `limit` on a generate
+/// run walk the dataset in the same order.
+pub(crate) fn list_text_summaries(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+) -> Result<Vec<TextSummary>, String> {
+    let ctx = open_attempts(settings, dataset_uuid)?;
+    let mut stmt = ctx
+        .conn
+        .prepare(
+            "SELECT t.uuid, t.order_num, t.title, LENGTH(t.content), \
+                    EXISTS(SELECT 1 FROM read_standard_audio a WHERE a.text_uuid = t.uuid) \
+             FROM read_text t ORDER BY t.order_num, t.created_at",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut items: Vec<TextSummary> = stmt
+        .query_map([], |row| {
+            Ok(TextSummary {
+                uuid: row.get(0)?,
+                order_num: row.get(1)?,
+                title: row.get(2)?,
+                chars: row.get(3)?,
+                attempt_count: 0,
+                best_score: None,
+                has_standard_audio: row.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    let (count, best) = attempt_stats(&ctx);
     for text in &mut items {
         text.attempt_count = count.get(&text.uuid).copied().unwrap_or(0);
-        // Best is mine alone: a text I have never attempted shows no score, even
-        // if the row carried a publisher's cached `best_score`.
         text.best_score = best.get(&text.uuid).copied();
     }
     Ok(items)
+}
+
+/// Read one text. Reading a text used to mean dumping all of them.
+pub(crate) fn get_text(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    uuid: &str,
+) -> Result<ReadText, String> {
+    let ctx = open_attempts(settings, dataset_uuid)?;
+    let mut text = ctx
+        .conn
+        .query_row(
+            "SELECT uuid, dataset_uuid, order_num, title, note, content, normalized_content, \
+                    best_score, created_at, updated_at \
+             FROM read_text WHERE uuid = ?1",
+            [uuid],
+            |row| {
+                Ok(ReadText {
+                    uuid: row.get(0)?,
+                    dataset_uuid: row.get(1)?,
+                    order_num: row.get(2)?,
+                    title: row.get(3)?,
+                    note: row.get(4)?,
+                    content: row.get(5)?,
+                    normalized_content: row.get(6)?,
+                    best_score: row.get(7)?,
+                    attempt_count: 0,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        )
+        .map_err(|_| format!("Text {} not found in this dataset", uuid))?;
+    let (count, best) = attempt_stats(&ctx);
+    text.attempt_count = count.get(uuid).copied().unwrap_or(0);
+    text.best_score = best.get(uuid).copied();
+    Ok(text)
 }
 
 /// Insert or update a text. `best_score`/`attempt_count` are managed by the
@@ -888,8 +1134,61 @@ pub(crate) fn save_text_row(
     dataset_uuid: &str,
     text: &ReadText,
 ) -> Result<(), String> {
+    let batch = save_text_rows(settings, dataset_uuid, std::slice::from_ref(text))?;
+    match batch.errors.into_iter().next() {
+        Some((_, _, error)) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Write a batch of texts over one database connection.
+///
+/// Journaling stays per text, so a bulk save is indistinguishable from the same
+/// edits made one at a time — sync semantics need no new change kind. One bad
+/// row never hides the rows that did land: the outcome is a partition whose
+/// parts sum to the input (see [`SaveBatch`]).
+pub(crate) fn save_text_rows(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    texts: &[ReadText],
+) -> Result<SaveBatch, String> {
     let dir = find_dataset_dir_write(settings, dataset_uuid)?;
     let conn = open_db(&dir)?;
+    let mut batch = SaveBatch::default();
+    for (index, text) in texts.iter().enumerate() {
+        match write_text_row(&conn, settings, dataset_uuid, text) {
+            Ok(()) => batch.saved += 1,
+            Err(e) => batch.errors.push((index, text.title.clone(), e)),
+        }
+    }
+    if batch.saved > 0 {
+        let _ = touch_info(&dir);
+    }
+    Ok(batch)
+}
+
+/// Next free `order_num` in the dataset: appending puts a draft at the end.
+pub(crate) fn next_order_num(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+) -> Result<i64, String> {
+    let dir = find_dataset_dir(settings, dataset_uuid)?;
+    let conn = open_db(&dir)?;
+    conn.query_row(
+        "SELECT COALESCE(MAX(order_num), 0) + 1 FROM read_text",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// The statement every save path runs, on a connection the caller owns.
+fn write_text_row(
+    conn: &Connection,
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    text: &ReadText,
+) -> Result<(), String> {
     conn.execute(
         "INSERT INTO read_text \
          (uuid, dataset_uuid, order_num, title, note, content, normalized_content, best_score, created_at, updated_at) \
@@ -917,7 +1216,6 @@ pub(crate) fn save_text_row(
         ],
     )
     .map_err(|e| e.to_string())?;
-    let _ = touch_info(&dir);
     {
         let _ = crate::sync::change_log::commit_change(
             settings,
@@ -1331,23 +1629,6 @@ impl PronRun {
                 tau: assess::GOP_TAU,
             },
         }
-    }
-}
-
-/// The Edge TTS voice a generated standard audio uses when nothing else names
-/// one: the voice chosen on the TTS page, else a multilingual default.
-pub(crate) fn tts_voice(settings: &SettingsState) -> String {
-    let configured = settings
-        .settings
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .read_aloud_tts_voice
-        .trim()
-        .to_string();
-    if configured.is_empty() {
-        DEFAULT_TTS_VOICE.to_string()
-    } else {
-        configured
     }
 }
 
@@ -2007,7 +2288,7 @@ pub(crate) mod tests_support {
 
     /// A real read-aloud dataset with one text, built through the production path.
     pub(crate) fn dataset_with_text(settings: &SettingsState, content: &str) -> (String, String) {
-        let meta = create_dataset(settings, "Practise".into(), String::new()).unwrap();
+        let meta = create_dataset(settings, "Practise".into(), String::new(), String::new()).unwrap();
         let text_uuid = Uuid::new_v4().to_string();
         let now = now_stamp();
         save_text_row(
@@ -2325,7 +2606,7 @@ mod tests {
         let (settings, _dir) = temp_settings("live-pronunciation");
         let text = "Guten Tag, wie geht es Ihnen?";
         let (dataset_uuid, text_uuid) = dataset_with_text(&settings, text);
-        standard_audio::generate(&settings, &dataset_uuid, &text_uuid, &tts_voice(&settings), None)
+        standard_audio::generate(&settings, &dataset_uuid, &text_uuid, None, None)
             .await
             .expect("Edge TTS should have produced a standard clip");
 

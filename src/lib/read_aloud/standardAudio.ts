@@ -5,6 +5,7 @@ import type {
   ReadStandardAudio,
   SpanGuess,
   StandardAudioAssessment,
+  VoiceResolution,
 } from "./types";
 
 /**
@@ -106,8 +107,28 @@ export async function importStandardAudio(params: {
 }
 
 /**
+ * Which voice a generation for this dataset would speak with, and why.
+ *
+ * Read-only, and the one call that answers "which German voice am I getting?"
+ * before a synthesis is spent on finding out: the dataset's language picks the
+ * preferred voice, `read_aloud_tts_voice` is the language-less fallback, and
+ * the built-in default is last. `voice` opts out by naming a voice.
+ */
+export async function resolveVoice(
+  datasetUuid: string,
+  voice?: string
+): Promise<VoiceResolution> {
+  requireTauri();
+  return invoke<VoiceResolution>("read_aloud_voice_resolve", {
+    datasetUuid,
+    voice: voice ?? null,
+  });
+}
+
+/**
  * Synthesise the text with Edge TTS and store the result as a clip. `voice`
- * empty means "the voice configured on the TTS page".
+ * empty means "whatever this dataset's language resolves to" — the preferred
+ * voice for the language, then the language-less setting, then the default.
  */
 export async function generateStandardAudio(params: {
   datasetUuid: string;

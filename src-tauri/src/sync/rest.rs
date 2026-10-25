@@ -102,7 +102,13 @@ pub fn router(app: AppHandle) -> Router {
 struct StatusResp {
     version: &'static str,
     app_name: &'static str,
+    /// Every dataset of every type, i.e. the same set `dataset_list` returns.
+    /// This used to be `datasets::list_datasets`, which is the dictation listing
+    /// only, so `/status` reported 19 while `dataset_list` reported 66.
     dataset_count: usize,
+    /// The same total, split by `DatasetType`, so a single number is never the
+    /// only answer to "what is here".
+    dataset_counts: std::collections::BTreeMap<&'static str, usize>,
     ok: bool,
     /// Wire protocol version so a follower can refuse `/changes`/`/file`/chat
     /// `after_id` against an older hub (§3.1, §7).
@@ -124,13 +130,20 @@ struct StatusResp {
 
 async fn status(State(st): State<RestState>) -> Response {
     let settings = st.app.state::<SettingsState>();
-    let count = datasets::list_datasets(&settings).len();
+    // Count by scanning every type instead of asking the dictation listing: the
+    // two disagreed because `list_datasets` only walks the dictation roots.
+    let mut dataset_counts = std::collections::BTreeMap::new();
+    for ty in datasets::DatasetType::ALL {
+        dataset_counts.insert(ty.as_str(), datasets::scan_datasets(&settings, ty).len());
+    }
+    let count: usize = dataset_counts.values().sum();
     (
         StatusCode::OK,
         Json(StatusResp {
             version: env!("CARGO_PKG_VERSION"),
             app_name: "FmS",
             dataset_count: count,
+            dataset_counts,
             ok: true,
             protocol_version: crate::sync::PROTOCOL_VERSION,
             role: settings.role(),

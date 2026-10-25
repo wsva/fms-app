@@ -26,16 +26,22 @@ use super::DatasetMcpServer;
 use crate::sync::server::{WebServiceConfig, WebServiceState, WebServiceStatus};
 
 /// Tool-name prefix → the domain submodule that owns it. Longest prefix wins, so
-/// `read_aloud_model_status` lands in `books` and not `models`. Kept in step with
-/// the `mod` list in `mcp/mod.rs`; [`tests::every_tool_has_a_domain`] fails the
-/// build when a new prefix shows up unmapped.
+/// `read_aloud_model_status` lands in `read-aloud` and not `models`. Kept in step
+/// with the `mod` list in `mcp/mod.rs`; [`tests::every_tool_has_a_domain`] fails
+/// the build when a new prefix shows up unmapped.
+///
+/// The domain a tool belongs to and the *file* that implements it are separate
+/// questions: `read_aloud_*` still lives in `mcp/books.rs`, but it is addressed
+/// as the `read-aloud` domain because `fms://docs/domain/{domain}` is the slice
+/// an agent reads before it starts, and "books" is not a word a read-aloud task
+/// begins with.
 const DOMAIN_PREFIXES: [(&str, &str); 27] = [
     ("dataset_", "datasets"),
     ("subtitle_", "datasets"),
     ("dictation_", "dictation"),
     ("card_", "cards"),
     ("book_", "books"),
-    ("read_aloud_", "books"),
+    ("read_aloud_", "read-aloud"),
     ("model_", "models"),
     ("llm_", "ai"),
     ("chat_", "ai"),
@@ -65,11 +71,12 @@ const UNMAPPED: &str = "misc";
 
 /// The order domains are rendered in — the same order as the `mod` list, which
 /// is roughly "content first, infrastructure last".
-const DOMAIN_ORDER: [&str; 12] = [
+const DOMAIN_ORDER: [&str; 13] = [
     "datasets",
     "dictation",
     "cards",
     "books",
+    "read-aloud",
     "models",
     "ai",
     "wiki",
@@ -1004,7 +1011,7 @@ mod tests {
 
     #[test]
     fn longest_prefix_wins() {
-        assert_eq!(domain_for("read_aloud_model_status"), "books");
+        assert_eq!(domain_for("read_aloud_model_status"), "read-aloud");
         assert_eq!(domain_for("model_status"), "models");
         assert_eq!(domain_for("card_dataset_remove_subscriber"), "cards");
         assert_eq!(domain_for("web_service_get_status"), "sync");

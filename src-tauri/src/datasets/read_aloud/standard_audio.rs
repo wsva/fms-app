@@ -46,7 +46,7 @@ use uuid::Uuid;
 use crate::audio;
 use crate::datasets::asr_metric;
 use crate::edge_tts::{self, TtsWordBoundary};
-use crate::settings::SettingsState;
+use crate::settings::{AppSettings, SettingsState};
 
 use super::{effective_reference, find_dataset_dir, find_dataset_dir_write, open_db};
 
@@ -133,9 +133,11 @@ pub struct ReadStandardAudio {
     pub note: String,
     /// `"tts"` when the clip carries word boundaries, `"upload"` otherwise.
     pub kind: String,
-    /// Seconds, decoded from the wav. `0.0` when the wav is missing, and for the
-    /// dataset-wide listing, which does not decode.
-    pub duration: f64,
+    /// Seconds, decoded from the wav. `None` — JSON `null` — when this call did
+    /// not decode it: the dataset-wide listing deliberately does not, and a
+    /// missing wav has nothing to measure. A fabricated `0.0` would read as a
+    /// real measurement, so absence is said out loud.
+    pub duration: Option<f64>,
     /// Absolute path for playback, when the wav is on this device.
     pub audio_url: Option<String>,
     pub is_default: bool,
@@ -332,6 +334,222 @@ fn load_row(conn: &Connection, audio_uuid: &str) -> Result<Option<StandardAudioR
 }
 
 // ============================================================
+// Voice resolution
+// ============================================================
+//
+// One place decides which voice a generation speaks with, and it says why. The
+// log's agent had to guess a voice at step one — and, because `tts_list_voices`
+// is alphabetical, guessed `de-AT-IngridNeural` (Austrian) for a German book.
+// Encoding the choice as an ordered fallback plus a reported `source` is what
+// makes "which German voice am I getting?" answerable instead of archaeological.
+
+/// Which voice a generation will use, and where that choice came from.
+///
+/// `source` is one of `param` (the caller named it), `preference` (the voice
+/// preferred for the dataset's language), `setting` (`read_aloud_tts_voice`,
+/// the language-less fallback agents already set) or `default` (the built-in
+/// multilingual voice).
+#[derive(Clone, Debug, Serialize)]
+pub struct VoiceResolution {
+    pub voice: String,
+    /// Parsed from the short name: `de-DE` for `de-DE-ConradNeural`.
+    pub locale: String,
+    pub source: String,
+    /// The dataset's `info.json` language; empty when it has none.
+    pub dataset_language: String,
+    /// Keys of the configured preference map, so a caller can see what it may
+    /// match without a second `settings_get`.
+    pub languages_with_preference: Vec<String>,
+    /// The chosen voice does not speak the dataset's language. A German book
+    /// with an Austrian narrator is a legitimate choice; an accidental `en-US`
+    /// one is the bug this names.
+    pub warning: Option<String>,
+    /// The dataset has no language at all, so no preference could apply.
+    pub hint: Option<String>,
+}
+
+/// The locale of an Edge voice short name: `de-DE-ConradNeural` → `de-DE`.
+/// Edge's catalogue is fetched, not compiled in, so this is parsed rather than
+/// looked up. `""` for anything that does not have the `xx-YY-` shape.
+pub(crate) fn voice_locale(voice: &str) -> String {
+    let mut parts = voice.trim().split('-');
+    let (language, region) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let shaped = |s: &str| s.len() == 2 && s.chars().all(|c| c.is_ascii_alphabetic());
+    if shaped(language) && shaped(region) {
+        format!("{}-{}", language.to_ascii_lowercase(), region.to_ascii_uppercase())
+    } else {
+        String::new()
+    }
+}
+
+/// The primary subtag of a language tag or locale: `de-DE` → `de`.
+fn language_of(tag: &str) -> String {
+    tag.trim()
+        .split(['-', '_'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+/// Reject a preference that pairs a language with a voice that does not speak
+/// it.
+///
+/// The map is only worth having if every pair is trustworthy: a raw
+/// `settings_set {"tts_voice_by_language": {"de": "en-US-AriaNeural"}}` would be
+/// the log's Austrian trap one layer up. There is no static catalogue to list
+/// from — Edge's voices are fetched — so the message points at the tool that
+/// does list them.
+pub(crate) fn validate_preference(language: &str, voice: &str) -> Result<(), String> {
+    let language = language_of(language);
+    if language.is_empty() {
+        return Err(
+            "A preferred voice needs a language key (`de`, `de-DE`, `zh-CN`)".to_string(),
+        );
+    }
+    let voice = voice.trim();
+    let locale = voice_locale(voice);
+    if locale.is_empty() {
+        return Err(format!(
+            "`{}` is not an Edge TTS voice short name (expected e.g. `de-DE-ConradNeural`)",
+            voice
+        ));
+    }
+    if language_of(&locale) != language {
+        return Err(format!(
+            "`{}` does not speak `{}` (it is `{}`). Call `tts_list_voices {{locale: \"{}\"}}` for the voices that do.",
+            voice, language, locale, language
+        ));
+    }
+    Ok(())
+}
+
+/// Validate every pair of a preference map — what `settings_set` runs before it
+/// writes one.
+pub(crate) fn validate_preferences(map: &std::collections::BTreeMap<String, String>) -> Result<(), String> {
+    for (language, voice) in map {
+        validate_preference(language, voice)?;
+    }
+    Ok(())
+}
+
+/// Decide the voice for one generation: explicit `param` → the language's
+/// `preference` → the language-less `setting` → the built-in `default`.
+///
+/// The `preference` lookup tries the dataset's exact tag first (`de-DE`), then
+/// its primary subtag (`de`), so a user who set one voice for all German is not
+/// overruled by a narrower key they never set.
+pub(crate) fn resolve_voice(
+    settings: &AppSettings,
+    dataset_language: &str,
+    explicit: Option<&str>,
+) -> VoiceResolution {
+    let dataset_language = dataset_language.trim().to_string();
+    let language = language_of(&dataset_language);
+    let mut languages_with_preference: Vec<String> =
+        settings.tts_voice_by_language.keys().cloned().collect();
+    languages_with_preference.sort();
+
+    let choice = explicit
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|voice| (voice.to_string(), "param"))
+        .or_else(|| {
+            if language.is_empty() {
+                return None;
+            }
+            // Exact tag, then primary subtag, both matched case-insensitively
+            // so `de-de` in a hand-edited file still resolves.
+            let mut candidates = vec![dataset_language.to_ascii_lowercase()];
+            if language != dataset_language.to_ascii_lowercase() {
+                candidates.push(language.clone());
+            }
+            candidates.into_iter().find_map(|key| {
+                settings
+                    .tts_voice_by_language
+                    .iter()
+                    .find(|(k, _)| k.trim().to_ascii_lowercase() == key)
+                    .map(|(_, v)| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .map(|voice| (voice, "preference"))
+            })
+        })
+        .or_else(|| {
+            let configured = settings.read_aloud_tts_voice.trim();
+            (!configured.is_empty()).then(|| (configured.to_string(), "setting"))
+        })
+        .unwrap_or_else(|| (super::DEFAULT_TTS_VOICE.to_string(), "default"));
+
+    let locale = voice_locale(&choice.0);
+    let warning = {
+        let speaks = language_of(&locale);
+        (!language.is_empty() && !speaks.is_empty() && speaks != language).then(|| {
+            format!(
+                "{} is a {} voice, but this dataset is {}. Fine on purpose — check that it is.",
+                choice.0, locale, dataset_language
+            )
+        })
+    };
+    let hint = dataset_language.is_empty().then(|| {
+        "This dataset has no language, so no preferred voice can apply. Set one with \
+         `read_aloud_update {language: \"de\"}`, then choose a voice per language on the Edge TTS page."
+            .to_string()
+    });
+    // The default is multilingual, so the reported locale is the voice's own
+    // rather than a claim about what it speaks.
+    VoiceResolution {
+        voice: choice.0,
+        locale,
+        source: choice.1.to_string(),
+        dataset_language,
+        languages_with_preference,
+        warning,
+        hint,
+    }
+}
+
+/// [`resolve_voice`] for a dataset on disk: reads its language first.
+pub(crate) fn resolve_for_dataset(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    explicit: Option<&str>,
+) -> Result<VoiceResolution, String> {
+    let dir = find_dataset_dir(settings, dataset_uuid)?;
+    let language = crate::datasets::info::read_info_opt(&dir)
+        .map(|info| info.language)
+        .unwrap_or_default();
+    let snapshot = snapshot(settings);
+    Ok(resolve_voice(&snapshot, &language, explicit))
+}
+
+/// The current settings, cloned out from under the lock so a caller can reason
+/// about one consistent snapshot while it does work.
+pub(crate) fn snapshot(settings: &SettingsState) -> AppSettings {
+    settings
+        .settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// `(texts with a usable clip, texts)` for a dataset — the pair that turns
+/// "how many are left?" into one subtraction instead of another listing.
+pub(crate) fn audio_totals(settings: &SettingsState, dataset_uuid: &str) -> Result<(i64, i64), String> {
+    let dir = find_dataset_dir(settings, dataset_uuid)?;
+    let conn = open_db(&dir)?;
+    let total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM read_text", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let with_audio: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT text_uuid) FROM read_standard_audio",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok((with_audio, total))
+}
+
+// ============================================================
 // Reads
 // ============================================================
 
@@ -387,10 +605,11 @@ pub(crate) fn list(
         };
         let duration = if decode && exists {
             audio::decode_to_pcm(&path)
+                .ok()
+                .filter(|s| !s.is_empty())
                 .map(|s| s.len() as f64 / audio::DECODED_SAMPLE_RATE as f64)
-                .unwrap_or(0.0)
         } else {
-            0.0
+            None
         };
         out.push(ReadStandardAudio {
             uuid: row.uuid,
@@ -706,13 +925,29 @@ pub(crate) fn guess_span(
 // Writes
 // ============================================================
 
-/// Say the text with a voice and store the result. The note defaults to the
-/// voice, so a text's clip list reads like a list of recordings, not of uuids.
+/// Say the text with a resolved voice and store the result, reporting the clip
+/// and the choice together so a caller can see *which* voice it got. The note
+/// defaults to the voice, so a text's clip list reads like a list of
+/// recordings, not of uuids.
 pub(crate) async fn generate(
     settings: &SettingsState,
     dataset_uuid: &str,
     text_uuid: &str,
-    voice: &str,
+    voice: Option<&str>,
+    note: Option<&str>,
+) -> Result<(ReadStandardAudio, VoiceResolution), String> {
+    let resolved = resolve_for_dataset(settings, dataset_uuid, voice)?;
+    let clip = generate_with(settings, dataset_uuid, text_uuid, &resolved, note).await?;
+    Ok((clip, resolved))
+}
+
+/// [`generate`] with the voice already decided — the one body both the single
+/// tool and the batch runner go through, so a fix to one is a fix to both.
+pub(crate) async fn generate_with(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    text_uuid: &str,
+    resolved: &VoiceResolution,
     note: Option<&str>,
 ) -> Result<ReadStandardAudio, String> {
     let dir = find_dataset_dir_write(settings, dataset_uuid)?;
@@ -732,7 +967,7 @@ pub(crate) async fn generate(
         return Err("That text is empty: there is nothing to say".to_string());
     }
 
-    let voice = if voice.trim().is_empty() { super::DEFAULT_TTS_VOICE } else { voice.trim() };
+    let voice = resolved.voice.as_str();
     log::info!(
         "[ReadAloud] synthesising standard audio for text {} ({} chars, {})",
         text_uuid,
@@ -779,13 +1014,115 @@ pub(crate) async fn generate(
         text_uuid: row.text_uuid,
         note: row.note,
         kind: "tts".to_string(),
-        duration: samples.len() as f64 / audio::DECODED_SAMPLE_RATE as f64,
+        duration: Some(samples.len() as f64 / audio::DECODED_SAMPLE_RATE as f64),
         audio_url: Some(path.to_string_lossy().into_owned()),
         is_default: row.is_default,
         stale: false,
         usable: true,
         created_at: row.created_at,
     })
+}
+
+/// Roughly how fast a text is spoken: 150 words a minute at about five
+/// characters a word. Only used to size a `dry_run`, never to fake a duration.
+const SPEAKING_CHARS_PER_SEC: f64 = 12.5;
+
+/// Bulk generation over `ORDER BY order_num`, through the same body as
+/// [`generate`] — the batch tool adds ordering, `only_missing` and `limit`, not
+/// a second synthesis implementation.
+///
+/// This is what makes the probe path cheap: `limit: 3` speaks exactly the first
+/// three passages in one call so a human can listen before committing to the
+/// rest, and `only_missing` makes a repeat safe. `dry_run` reports what would
+/// happen and writes nothing. Progress is visible by `remaining` decreasing —
+/// no job machinery, no lease.
+pub(crate) async fn generate_all(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    voice: Option<&str>,
+    only_missing: bool,
+    limit: Option<i64>,
+    dry_run: bool,
+) -> Result<Value, String> {
+    let resolved = resolve_for_dataset(settings, dataset_uuid, voice)?;
+    // Bounded per call: a clip takes seconds to synthesise, so an unbounded
+    // batch would outlive any caller's patience. A caller repeats until
+    // `remaining` is 0.
+    let limit = limit.unwrap_or(10).clamp(1, 500);
+    let dir = find_dataset_dir(settings, dataset_uuid)?;
+    let targets: Vec<(String, i64)> = {
+        let conn = open_db(&dir)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.uuid, LENGTH(t.content) FROM read_text t \
+                 WHERE (?1 = 0 OR NOT EXISTS ( \
+                     SELECT 1 FROM read_standard_audio a WHERE a.text_uuid = t.uuid)) \
+                 ORDER BY t.order_num, t.rowid LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![only_missing, limit], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.flatten().collect()
+    };
+    let (with_audio, total) = audio_totals(settings, dataset_uuid)?;
+    let context = |extra: Value| {
+        let mut base = json!({
+            "status": "ok",
+            "voice": resolved.voice,
+            "voice_locale": resolved.locale,
+            "voice_source": resolved.source,
+            "texts_with_audio": with_audio,
+            "texts_total": total,
+        });
+        if let (Value::Object(map), Value::Object(extra)) = (&mut base, extra) {
+            map.extend(extra);
+        }
+        base
+    };
+
+    if dry_run {
+        let chars: i64 = targets.iter().map(|(_, c)| *c).sum();
+        let mut out = context(json!({
+            "dry_run": true,
+            "would_generate": targets.len(),
+            "estimate_seconds": (chars as f64 / SPEAKING_CHARS_PER_SEC).round() as i64,
+            "remaining": total - with_audio,
+        }));
+        if let (Value::Object(map), Some(warning)) = (&mut out, resolved.warning.clone()) {
+            map.insert("voice_warning".into(), json!(warning));
+        }
+        if let (Value::Object(map), Some(hint)) = (&mut out, resolved.hint.clone()) {
+            map.insert("hint".into(), json!(hint));
+        }
+        return Ok(out);
+    }
+
+    let mut generated = 0usize;
+    let mut failed = Vec::new();
+    for (text_uuid, _) in &targets {
+        match generate_with(settings, dataset_uuid, text_uuid, &resolved, None).await {
+            Ok(_) => generated += 1,
+            Err(error) => failed.push(json!({ "text_uuid": text_uuid, "error": error })),
+        }
+    }
+    let (with_audio, total) = audio_totals(settings, dataset_uuid)?;
+    let failed_count = failed.len();
+    let mut out = context(json!({
+        "dry_run": false,
+        "generated": generated,
+        "failed": failed,
+        "failed_count": failed_count,
+        "texts_with_audio": with_audio,
+        "texts_total": total,
+        "remaining": total - with_audio,
+    }));
+    if let (Value::Object(map), Some(warning)) = (&mut out, resolved.warning.clone()) {
+        map.insert("voice_warning".into(), json!(warning));
+    }
+    Ok(out)
 }
 
 /// Store a picked (and cut) recording as this text's standard audio. `start` and
@@ -870,7 +1207,7 @@ pub(crate) fn import(
         text_uuid: row.text_uuid,
         note: row.note,
         kind: "upload".to_string(),
-        duration: clip.len() as f64 / rate,
+        duration: Some(clip.len() as f64 / rate),
         audio_url: Some(path.to_string_lossy().into_owned()),
         is_default: row.is_default,
         stale: false,
@@ -1154,8 +1491,20 @@ pub async fn read_aloud_standard_audio_import(
     )
 }
 
+/// Which voice a generation for this dataset would use, and why. Read-only:
+/// what the read-aloud page renders as its provenance line.
+#[tauri::command]
+pub async fn read_aloud_voice_resolve(
+    settings: State<'_, SettingsState>,
+    dataset_uuid: String,
+    voice: Option<String>,
+) -> Result<VoiceResolution, String> {
+    resolve_for_dataset(&settings, &dataset_uuid, voice.as_deref())
+}
+
 /// Synthesise this text with Edge TTS and store the result as a standard clip.
-/// `voice` defaults to the one configured on the TTS page.
+/// `voice` defaults to the voice preferred for the dataset's language (see
+/// [`resolve_voice`]).
 #[tauri::command]
 pub async fn read_aloud_standard_audio_generate(
     settings: State<'_, SettingsState>,
@@ -1164,11 +1513,11 @@ pub async fn read_aloud_standard_audio_generate(
     voice: Option<String>,
     note: Option<String>,
 ) -> Result<ReadStandardAudio, String> {
-    let voice = voice
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| super::tts_voice(&settings));
-    generate(&settings, &dataset_uuid, &text_uuid, &voice, note.as_deref()).await
+    // The UI already knows the voice it asked for; the resolution is what the
+    // MCP tool reports, so the command keeps returning just the clip and the
+    // frontend's call site needs no change.
+    let (clip, _) = generate(&settings, &dataset_uuid, &text_uuid, voice.as_deref(), note.as_deref()).await?;
+    Ok(clip)
 }
 
 /// Make one clip the default the scorer reads. Exactly one stays default.
@@ -1233,6 +1582,89 @@ mod tests {
         text_digest(text)
     }
 
+    /// The voice rule: the dataset's language decides, and the resolution says
+    /// which layer decided. One test walks the whole precedence chain, because
+    /// the bugs live in the boundaries between the layers rather than inside
+    /// any one of them.
+    #[test]
+    fn the_dataset_language_decides_the_voice_and_the_resolution_says_why() {
+        let mut settings = AppSettings::default();
+        settings.read_aloud_tts_voice = "en-US-AriaNeural".to_string();
+        settings
+            .tts_voice_by_language
+            .insert("de".to_string(), "de-DE-ConradNeural".to_string());
+
+        // A preference for the dataset's language beats the language-less
+        // setting, and reports itself as the reason.
+        let res = resolve_voice(&settings, "de", None);
+        assert_eq!(res.voice, "de-DE-ConradNeural");
+        assert_eq!(res.source, "preference");
+        assert_eq!(res.locale, "de-DE");
+        assert!(res.warning.is_none() && res.hint.is_none());
+
+        // An exact tag beats the bare language it shares a prefix with — a
+        // preference filed under `de-AT` must not be overruled by `de`…
+        settings
+            .tts_voice_by_language
+            .insert("de-AT".to_string(), "de-AT-IngridNeural".to_string());
+        assert_eq!(
+            resolve_voice(&settings, "de-AT", None).voice,
+            "de-AT-IngridNeural"
+        );
+        // …while a dataset that only says `de` still gets the `de` preference,
+        // and a narrower dataset tag falls back to it when the tag is unset.
+        assert_eq!(resolve_voice(&settings, "de", None).voice, "de-DE-ConradNeural");
+        assert_eq!(resolve_voice(&settings, "de-DE", None).voice, "de-DE-ConradNeural");
+
+        // No preference for the language: the language-less setting.
+        let res = resolve_voice(&settings, "fr", None);
+        assert_eq!(res.voice, "en-US-AriaNeural");
+        assert_eq!(res.source, "setting");
+
+        // An explicit voice wins over everything, and a mismatch is still
+        // reported: a German book with an American narrator is a legitimate
+        // choice only when it is a deliberate one.
+        let res = resolve_voice(&settings, "de", Some("en-US-AriaNeural"));
+        assert_eq!(res.source, "param");
+        assert!(res.warning.is_some(), "a language mismatch has to be flagged");
+
+        // No language at all: nothing can match, so the setting applies and the
+        // hint says what is missing.
+        let res = resolve_voice(&settings, "", None);
+        assert_eq!(res.source, "setting");
+        assert!(res.hint.is_some());
+
+        // Nothing configured anywhere: the built-in default.
+        let res = resolve_voice(&AppSettings::default(), "", None);
+        assert_eq!(res.voice, crate::datasets::read_aloud::DEFAULT_TTS_VOICE);
+        assert_eq!(res.source, "default");
+    }
+
+    /// A preference map is only worth having if every pair is trustworthy, so
+    /// the write seam refuses a mismatched one — the log's Austrian trap one
+    /// layer up.
+    #[test]
+    fn a_preference_must_pair_a_language_with_a_voice_that_speaks_it() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("de".to_string(), "de-AT-IngridNeural".to_string());
+        assert!(
+            validate_preferences(&map).is_ok(),
+            "Austrian German is German"
+        );
+
+        map.insert("de".to_string(), "en-US-AriaNeural".to_string());
+        let err = validate_preferences(&map).unwrap_err();
+        assert!(err.contains("does not speak"), "{err}");
+        assert!(
+            err.contains("tts_list_voices"),
+            "the refusal must say where the valid voices are: {err}"
+        );
+
+        // A key that is not a language, and a value that is not a voice.
+        assert!(validate_preference("", "de-DE-ConradNeural").is_err());
+        assert!(validate_preference("de", "Conrad").is_err());
+    }
+
     #[test]
     fn the_first_clip_is_default_and_a_later_one_is_not() {
         let (settings, _dir) = temp_settings("sa-first");
@@ -1248,7 +1680,7 @@ mod tests {
         assert_eq!(clips[0].uuid, "a");
         assert!(clips.iter().all(|c| c.usable && !c.stale));
         // The per-text listing decodes, so a real duration is reported.
-        assert!((clips[0].duration - 0.5).abs() < 1e-6);
+        assert!((clips[0].duration.unwrap() - 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -1352,7 +1784,7 @@ mod tests {
         let clips = list(&settings, &ds, None).unwrap();
         assert_eq!(clips.len(), 1);
         assert!(clips[0].usable);
-        assert_eq!(clips[0].duration, 0.0, "the whole-dataset call does not decode");
+        assert_eq!(clips[0].duration, None, "the whole-dataset call does not decode");
     }
 
     #[test]

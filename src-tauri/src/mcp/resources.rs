@@ -41,9 +41,9 @@ const URI_DATASET_LAYOUT_PREFIX: &str = "fms://datasets/";
 const URI_DATASET_LAYOUT_SUFFIX: &str = "/layout";
 
 /// The families with a hand-written orientation blurb. Chosen because they are
-/// the four whose shape an agent has to know *before* it calls anything: the
+/// the ones whose shape an agent has to know *before* it calls anything: the
 /// others (models, ai, wiki, system, ui, todo) are one tool → one action.
-const DOC_DOMAINS: [&str; 4] = ["datasets", "cards", "workflow", "sync"];
+const DOC_DOMAINS: [&str; 5] = ["datasets", "cards", "workflow", "sync", "read-aloud"];
 
 // ---------------------------------------------------------------------------
 // Listing
@@ -270,7 +270,8 @@ fn principles() -> String {
 
     out.push_str("## Read before you write\n\n");
     out.push_str(
-        "`fms://docs/start` is the full manual. `fms://docs/domain/{datasets,cards,workflow,sync}` \
+        "`fms://docs/start` is the full manual. \
+         `fms://docs/domain/{datasets,cards,workflow,sync,read-aloud}` \
          orients you in one tool family, and `tools/list` has the input schemas. Nothing here \
          needs a credentials step on loopback — the trust zone is decided by where the request \
          came from, and the policy tier of each tool is journaled either way.\n",
@@ -321,6 +322,23 @@ fn domain_blurb(domain: &str) -> &'static str {
              with trust zones, so 'paired' is about identity, not permission. `sync_status` \
              and `sync_diagnose_queue` tell you what is pending; `sync_changes_since` is the \
              incremental read; `web_service_start`/`_stop` control the listener."
+        }
+        "read-aloud" => {
+            "A read-aloud dataset is a set of passages plus optional Edge-TTS clips of them. \
+             Three tables matter: `read_text` (one row per passage, ordered by `order_num`), \
+             `read_attempt` (per-user practice history) and `read_standard_audio` (clips under \
+             `media/<text_uuid>/`). The write shape is the trap: `read_aloud_save_text` takes a \
+             draft — `title` and `content` are the only required fields — and the server assigns \
+             `uuid`, `order_num` and the timestamps, so a caller that invents them is guessing \
+             work the server already did. Bring a whole book with `read_aloud_import_texts` \
+             (`dry_run: true` first: it reports the chunk sizes and speaks nothing), then \
+             `read_aloud_standard_audio_generate` one passage and listen before \
+             `read_aloud_standard_audio_generate_all {limit: 3, only_missing: true}`. The voice \
+             is decided by `read_aloud_voice_resolve` before you synthesise anything: it reports \
+             which voice would be used, why (`voice_source`), and whether the dataset is missing \
+             the `language` that a per-language preference would need. Changing a clip's voice \
+             later means deleting and regenerating it — existing clips keep the voice in their \
+             note."
         }
         _ => "No orientation written for this domain; the tool table tells the whole story.",
     }
@@ -501,6 +519,7 @@ mod tests {
     #[test]
     fn domain_prefix_only_accepts_known_domains() {
         assert_eq!(domain_of("fms://docs/domain/cards"), Some("cards"));
+        assert_eq!(domain_of("fms://docs/domain/read-aloud"), Some("read-aloud"));
         assert_eq!(domain_of("fms://docs/domain/models"), None);
         assert_eq!(domain_of("fms://docs/start"), None);
     }

@@ -11,6 +11,10 @@ export interface ReadAloudMeta {
   uuid: string;
   name: string;
   description: string;
+  /** The language the passages are written in (`"de"`, `"de-DE"`), empty when
+   *  unset. It is what a per-language voice preference is looked up by, so an
+   *  empty value means no preference can apply. */
+  language: string;
   /** Absolute filesystem path of the dataset directory. */
   path: string;
   created_at: string;
@@ -278,8 +282,12 @@ export interface ReadStandardAudio {
   note: string;
   /** `tts` when the clip carries word timings, `upload` otherwise. */
   kind: "tts" | "upload";
-  /** Seconds, decoded from the wav. 0 when the wav is not on this device. */
-  duration: number;
+  /**
+   * Seconds, decoded from the wav — or `null` when nothing decoded it (the
+   * dataset-wide listing deliberately skips that, and the wav may not be on
+   * this device at all). `null` means "not measured", never "zero seconds".
+   */
+  duration: number | null;
   /** Absolute path for playback, null when the wav is missing here. */
   audio_url: string | null;
   is_default: boolean;
@@ -288,6 +296,29 @@ export interface ReadStandardAudio {
   /** Present and not stale — what scoring would read. */
   usable: boolean;
   created_at: string;
+}
+
+/**
+ * Which voice a generation would speak with, and why — `read_aloud_voice_resolve`.
+ *
+ * The provenance is the point: the same clip can come from the caller naming a
+ * voice, from the language's preferred voice, from the language-less setting or
+ * from the built-in default, and only the backend knows which. `source` is one
+ * of `param` | `preference` | `setting` | `default`.
+ */
+export interface VoiceResolution {
+  voice: string;
+  /** Parsed from the short name: `de-DE` for `de-DE-ConradNeural`. */
+  locale: string;
+  source: "param" | "preference" | "setting" | "default";
+  /** The dataset's `info.json` language; empty when it has none. */
+  dataset_language: string;
+  /** Languages a preference is configured for, so the UI can say why not. */
+  languages_with_preference: string[];
+  /** The voice speaks a different language than the dataset. */
+  warning: string | null;
+  /** The dataset has no language, so no preference could apply. */
+  hint: string | null;
 }
 
 /** A decoded upload, returned by the probe before anything is stored. */

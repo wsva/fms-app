@@ -34,10 +34,17 @@ pub(crate) const SYNC_CUE_TIMES_YAML: &str =
 /// The Book library pipeline — create a book, author chapters / sentences, attach
 /// audio, build vocabulary. View / agent-facing (actions name real `book_*` tools).
 pub(crate) const BOOK_YAML: &str = include_str!("templates/book/build_book_library.yaml");
-
 /// The Card dataset pipeline — create a dataset, author cards / tags, build the search
 /// index, sync online. View / agent-facing (actions name real `card_*` tools).
 pub(crate) const CARD_YAML: &str = include_str!("templates/card/setup_card_dataset.yaml");
+
+/// The read-aloud pipeline — import passages from an extracted book, probe one
+/// clip for a human to listen to, then fill in the rest. It is the first
+/// read-aloud template and therefore its category's *primary* workflow, so its
+/// run id is plain `read_aloud-<uuid>`; every step is gated by
+/// `read_aloud_audit`'s checks, which is what lets `workflow_verify` carry it.
+pub(crate) const READ_ALOUD_YAML: &str =
+    include_str!("templates/read_aloud/build_read_aloud_dataset.yaml");
 
 /// Every built-in template, as `(category, id, run_slug, yaml)` quadruples.
 /// `category` is the dataset type the Workflow page tabs on (`dictation` /
@@ -55,5 +62,6 @@ pub(crate) fn all() -> Vec<(&'static str, &'static str, Option<&'static str>, &'
         ("dictation", "sync_dictation_cue_times", Some("sync_cue_times"), SYNC_CUE_TIMES_YAML),
         ("book", "build_book_library", None, BOOK_YAML),
         ("card", "setup_card_dataset", None, CARD_YAML),
+        ("read_aloud", "build_read_aloud_dataset", None, READ_ALOUD_YAML),
     ]
 }

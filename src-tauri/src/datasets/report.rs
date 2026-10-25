@@ -36,9 +36,10 @@ pub(crate) async fn full_report(app: &AppHandle, uuid: &str) -> Result<Value, St
     let settings = app.state::<SettingsState>();
     let (dir, ty) = find_dataset_dir_typed(&settings, uuid)?;
     let info = read_info(&dir)?;
-    // Only dictation has a provider today. Saying so beats returning an empty
-    // `checks` list, which reads as "all clean" instead of "not measured".
-    let dictation = ty == DatasetType::Dictation;
+    // The kinds with a check provider. Saying which kinds have none beats
+    // returning an empty `checks` list, which reads as "all clean" instead of
+    // "not measured".
+    let measured = matches!(ty, DatasetType::Dictation | DatasetType::Read);
 
     let mut report = json!({
         "dataset": {
@@ -50,8 +51,8 @@ pub(crate) async fn full_report(app: &AppHandle, uuid: &str) -> Result<Value, St
             "info": serde_json::to_value(&info).unwrap_or(Value::Null),
         },
         "generated_at": chrono::Utc::now().to_rfc3339(),
-        "audit": audit_section(&settings, uuid, dictation, ty.as_str())?,
-        "workflow": workflow_section(&settings, uuid, dictation, ty.as_str())?,
+        "audit": audit_section(&settings, uuid, measured, ty.as_str())?,
+        "workflow": workflow_section(&settings, uuid, measured, ty.as_str())?,
         "stt_model": stt_section(app).await,
     });
     // Last, because it reads the four sections above: the hint is a projection of
@@ -64,10 +65,10 @@ pub(crate) async fn full_report(app: &AppHandle, uuid: &str) -> Result<Value, St
 fn audit_section(
     settings: &SettingsState,
     uuid: &str,
-    dictation: bool,
+    measured: bool,
     kind: &str,
 ) -> Result<Value, String> {
-    if !dictation {
+    if !measured {
         return Ok(json!({
             "available": false,
             "reason": format!(
@@ -75,8 +76,14 @@ fn audit_section(
             ),
         }));
     }
-    let audit = super::dictation::audit::audit(settings, uuid)?;
-    let mut value = serde_json::to_value(&audit).unwrap_or_else(|_| json!({}));
+    // Each provider has its own `AuditCheck` type, so the JSON conversion is what
+    // the two arms have in common. An audit failure still propagates: a report
+    // that shows no checks because the probe could not run reads as "all clean".
+    let mut value: Value = match kind {
+        "read_aloud" => serde_json::to_value(super::read_aloud::audit::audit(settings, uuid)?),
+        _ => serde_json::to_value(super::dictation::audit::audit(settings, uuid)?),
+    }
+    .map_err(|e| e.to_string())?;
     if let Some(obj) = value.as_object_mut() {
         // Identity already sits under `dataset`; a second copy can only disagree.
         for key in ["dataset_uuid", "path", "info"] {
@@ -182,7 +189,7 @@ fn generalize(detail: &str, source: &str) -> String {
 fn workflow_section(
     settings: &SettingsState,
     uuid: &str,
-    dictation: bool,
+    measured: bool,
     kind: &str,
 ) -> Result<Value, String> {
     let listed = crate::workflow::list_runs(settings, Some(uuid))?;
@@ -201,7 +208,7 @@ fn workflow_section(
         // A run the engine cannot read is still worth reporting: "this dataset
         // carries a broken run" is actionable, an error that sinks the whole
         // report is not.
-        let mut scored = if dictation {
+        let mut scored = if measured {
             crate::workflow::verify(settings, uuid, run_id, false)
         } else {
             crate::workflow::status(settings, Some(uuid), run_id)

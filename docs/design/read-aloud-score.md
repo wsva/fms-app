@@ -146,7 +146,22 @@ One measured addition to D4: a stored pause costs ~48 bytes (`{"start":12.04,"en
 
 `FluencyConfig` (`fluency.rs`) holds every fluency threshold in one struct with documented defaults; it is *not* serialized — the assessment stores the numbers it produced, and a tuning change applies to the next attempt rather than rewriting history. `VadConfig` (`vad.rs`) does the same for the detector. `GOP_TAU` and the band edges are constants in `assess.rs` / `FluencyConfig`, deliberately not settings: they describe the metric, not the material, and a per-user τ would make two learners' scores incomparable.
 
-One setting is user-facing: `read_aloud_tts_voice` (workspace-scoped, empty = `read_aloud::DEFAULT_TTS_VOICE`, `en-US-EmmaMultilingualNeural`), because the reference voice should speak the language you are learning — it is the voice a **Generate with Edge TTS** click starts with, and any clip carries the voice it was made with in its `note`. Nothing here is per dataset — a dataset is shareable content and must not carry its owner's scoring preferences; the clip itself is content, and is shared.
+**Which voice a clip is made in** is decided in one place — `standard_audio::resolve_voice` — and every generation passes through it, so the four layers cannot disagree. First match wins:
+
+| # | Source | `voice_source` |
+|---|---|---|
+| 1 | the `voice` parameter on this one call | `param` |
+| 2 | `tts_voice_by_language[<dataset language>]`, exact tag first (`de-DE`), then the language prefix (`de`) | `preference` |
+| 3 | `read_aloud_tts_voice` (workspace-scoped, empty = `read_aloud::DEFAULT_TTS_VOICE`, `en-US-EmmaMultilingualNeural`) | `setting` |
+| 4 | `DEFAULT_TTS_VOICE` | `default` |
+
+Step 2 is what ties a voice to a *language* instead of the alphabetical order of `tts_list_voices`, which is how a German book once got an Austrian narrator. The map is workspace-scoped for the same reason `read_aloud_tts_voice` is: it is a reading preference that travels with the workspace, not with a dataset. It is edited on the **Edge TTS** page, not on the read-aloud page, because `tts_synthesize` speaks too and that page is where voices are already listed and auditioned.
+
+What *is* per dataset is `DatasetInfo.language` — content metadata, set at `read_aloud_create` / `read_aloud_update`, sync-visible, and the only thing step 2 can key on. A dataset with no `language` reports that fact instead of silently taking the workspace default: `resolve_voice` returns a `hint` saying so, because a missing language is the one failure a preference can never fix.
+
+A resolution also reports one `warning`: when an explicit voice's locale speaks a different language than the dataset. A German book with an Austrian narrator is a legitimate choice and an accidental one is not, so the difference is surfaced rather than refused. Every pair written into `tts_voice_by_language` is validated at the two settings write seams (`SettingsState::save` / `save_workspace`), so `settings_set {"de": "en-US-AriaNeural"}` is rejected with the voice list that would have been valid — the same trap one layer up.
+
+A clip carries the voice it was made with in its `note`, and changing a preference never re-voices an existing clip: the note is the record of what the file says, and the only way to change it is to regenerate.
 
 ## Commands and MCP surface
 

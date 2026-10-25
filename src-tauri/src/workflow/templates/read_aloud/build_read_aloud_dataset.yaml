@@ -1,0 +1,145 @@
+# Build a read-aloud dataset from a book — a workflow.yaml definition.
+# Format: docs/design/workflow/core.md.
+#
+# App BUILT-IN template, baked into the binary via `include_str!` (see
+# `src-tauri/src/workflow/templates.rs`) under the `read_aloud` category and
+# served to the Workflow page and the `workflow_builtin_templates` MCP tool.
+#
+# The dataset itself comes first and is NOT a step here: a run lives inside the
+# dataset (`<dataset>/workflows/<run_id>`), so by the time this pipeline can be
+# opened the directory already exists. `read_aloud_create` mints it, and it is
+# also the call that takes `language` — the tag that decides which preferred
+# voice generation uses. `read_aloud_audit.facts.has_language` reports whether
+# that happened, which is why the first step reads it.
+#
+# The pipeline is: measure the dataset, bring the passages in, make ONE clip and
+# stop for the human to listen, then fill in the rest. That order is the point —
+# a wrong voice or a wrong split is cheapest to fix after one clip, and
+# expensive after three hundred.
+#
+# `verify:` binds read-only check ids from `read_aloud_audit` to the step they
+# concern; `workflow_verify` scores the run against them. `blocks` means
+# "findings here say: not yet", `proves` means "findings here say: what this
+# step claimed is missing, partial or drifted", which is what entitles a
+# `completed` step to be sent back to `ready`.
+#
+# Two checks stay deliberately unbound. `text_empty` has no repairing step (only
+# a human knows what the passage should have said), and `text_duplicate` is a
+# warn that a legitimate dataset can carry on purpose — binding it to `proves`
+# would demote a correct import of a book that quotes itself.
+#
+# `adopt:` is the engine's only upward move: the ids listed there must come back
+# measured AND clean, and `workflow_adopt` then records the step completed
+# without running it, because the outcome it would have produced is already on
+# disk. Both steps ask for it, each with `texts_none` beside it: a per-text check
+# counts offenders over whatever it finds and therefore reads "zero offenders"
+# vacuously on an empty dataset, so without that guard an empty dataset would
+# adopt a green tick over work nobody did.
+
+name: build_read_aloud_dataset
+version: 1
+
+steps:
+  # ── Stage 1: what is already here ───────────────────────────────────────────
+  - id: inspect_source
+    title: Inspect dataset
+    description: >-
+      Read the dataset before touching it: how many passages exist, how many
+      already have standard audio, and whether `language` is set — a dataset
+      with no language can never resolve a preferred voice, so generation falls
+      back to the workspace default. Also reports `text_empty` /
+      `text_duplicate`, which are worth knowing before an import adds more rows.
+    action: read_aloud_audit
+    params:
+      dataset_uuid: "${run.dataset_uuid}"
+    outputs:
+      - texts
+      - texts_with_audio
+      - has_language
+
+  # ── Stage 2: the passages ───────────────────────────────────────────────────
+  - id: import_texts
+    title: Import passages
+    description: >-
+      Segment a source file you extracted yourself into passages and save them in
+      one call: prose is split on blank lines, `#` headings are hard boundaries,
+      paragraphs accumulate to the target size and anything oversized breaks on
+      sentence boundaries. `dry_run: true` first reports the chunk sizes and
+      writes nothing. This tool does not read epub/PDF — the text extraction is
+      the caller's job. Already have the passages as JSON? Pass `format: json`
+      with `[{title, note, content}]`.
+    action: read_aloud_import_texts
+    params:
+      dataset_uuid: "${run.dataset_uuid}"
+      source_path: "C:/path/to/book.txt"   # EDIT: a .txt / .md / .json you extracted
+      dry_run: false
+    depends_on:
+      - inspect_source
+    verify:
+      # The postcondition is "there are passages", and `texts_none` is exactly
+      # that check. It is the one id here that needs no per-text partner.
+      proves: [texts_none]
+    adopt: [texts_none]
+    timeout: 600
+    outputs:
+      - saved
+      - failed
+      - texts_total
+      - order_range
+
+  # ── Stage 3: one clip, then stop for a human ────────────────────────────────
+  - id: probe_audio
+    title: Generate one clip (listen)
+    description: >-
+      Generate exactly ONE clip with the resolved voice and STOP. This step
+      claims no `proves:` binding on purpose: a probe leaves every other passage
+      without audio, so binding `standard_audio_missing` here would demote it the
+      moment it finished. Report `voice`, `voice_locale` and `voice_source`, ask
+      the human to listen, and only continue once they are happy — 300 clips in
+      the wrong voice is 300 clips thrown away.
+    action: read_aloud_standard_audio_generate_all
+    params:
+      dataset_uuid: "${run.dataset_uuid}"
+      only_missing: true
+      limit: 1
+    depends_on:
+      - import_texts
+    verify:
+      blocks: [texts_none]
+    timeout: 300
+    outputs:
+      - voice
+      - voice_locale
+      - voice_source
+      - remaining
+
+  # ── Stage 4: the rest ───────────────────────────────────────────────────────
+  - id: generate_audio
+    title: Generate remaining audio
+    description: >-
+      Generate the missing clips with the same voice, bounded per call. `limit` is
+      a work budget, not a policy: a clip takes about 11 s, so 50 is a call you
+      can wait on. Read `remaining` from the response and run the step again until
+      it is 0 — `workflow_verify` demotes this step back to `ready` while any
+      passage still lacks audio, which is what makes that loop honest instead of a
+      judgement call. Existing clips keep the voice recorded in their note, so
+      changing the preference later only affects what this step has not reached.
+    action: read_aloud_standard_audio_generate_all
+    params:
+      dataset_uuid: "${run.dataset_uuid}"
+      only_missing: true
+      limit: 50
+    depends_on:
+      - probe_audio
+    verify:
+      blocks: [texts_none]
+      proves: [standard_audio_missing]
+    adopt: [texts_none, standard_audio_missing]
+    # 50 clips at ~11 s each is ~9 minutes, above the 300 s default lease.
+    timeout: 1800
+    outputs:
+      - voice
+      - voice_source
+      - generated
+      - failed
+      - remaining

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -100,6 +101,14 @@ pub struct AppSettings {
     /// default — see `read_aloud::DEFAULT_TTS_VOICE`.
     #[serde(default)]
     pub read_aloud_tts_voice: String,
+    /// Preferred Edge TTS voice per *language* (`"de"`, `"de-DE"`, `"zh-CN"` →
+    /// voice short_name): what a read-aloud generation picks for a dataset whose
+    /// `info.json` language matches. `read_aloud_tts_voice` stays as the
+    /// language-less fallback for callers that set one voice for everything.
+    /// Workspace-scoped and validated on write — see
+    /// `read_aloud::standard_audio::resolve_voice`.
+    #[serde(default)]
+    pub tts_voice_by_language: BTreeMap<String, String>,
     /// What the built-in MCP server does with a call it classifies as
     /// destructive (`mcp/policy.rs`). `"permissive"` (the default) journals
     /// every call and denies nothing, so the dock and any already-attached
@@ -139,6 +148,20 @@ fn default_mcp_policy() -> String {
 
 fn default_mcp_enabled() -> bool {
     true
+}
+
+/// A preferred voice must exist and must speak the language it is filed under.
+///
+/// `settings_set {tts_voice_by_language: {"de": "en-US-AriaNeural"}}` would
+/// otherwise be silently accepted and produce a German book read by an English
+/// voice — the "which German voice am I getting?" trap one layer up. There is no
+/// static catalogue to list from (Edge's voices are fetched), so the error
+/// points at the tool that does list them.
+fn validate_voice_preferences(
+    map: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    crate::datasets::read_aloud::standard_audio::validate_preferences(map)
+        .map_err(|e| format!("tts_voice_by_language: {}", e))
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +395,10 @@ pub struct WorkspaceSettings {
     /// preference, and it travels with the rest of a workspace's setup.
     #[serde(default)]
     pub read_aloud_tts_voice: String,
+    /// Preferred voice per language (see `AppSettings::tts_voice_by_language`).
+    /// Workspace-scoped for the same reason.
+    #[serde(default)]
+    pub tts_voice_by_language: BTreeMap<String, String>,
 }
 
 impl Default for WorkspaceSettings {
@@ -384,6 +411,7 @@ impl Default for WorkspaceSettings {
             role: String::new(),
             cluster_id: String::new(),
             read_aloud_tts_voice: String::new(),
+            tts_voice_by_language: BTreeMap::new(),
         }
     }
 }
@@ -397,6 +425,7 @@ impl WorkspaceSettings {
             role: s.role.clone(),
             cluster_id: s.cluster_id.clone(),
             read_aloud_tts_voice: s.read_aloud_tts_voice.clone(),
+            tts_voice_by_language: s.tts_voice_by_language.clone(),
         }
     }
 
@@ -407,6 +436,7 @@ impl WorkspaceSettings {
         s.role = self.role.clone();
         s.cluster_id = self.cluster_id.clone();
         s.read_aloud_tts_voice = self.read_aloud_tts_voice.clone();
+        s.tts_voice_by_language = self.tts_voice_by_language.clone();
     }
 }
 
@@ -433,6 +463,7 @@ impl Default for AppSettings {
             role: String::new(),
             cluster_id: String::new(),
             read_aloud_tts_voice: String::new(),
+            tts_voice_by_language: BTreeMap::new(),
             mcp_policy: default_mcp_policy(),
             mcp_enabled: default_mcp_enabled(),
             agent_fab_visible: false,
@@ -619,6 +650,10 @@ impl SettingsState {
     /// Global fields are always saved to the global path.
     /// Workspace fields are saved to the workspace path (if set) or global path.
     pub fn save(settings: &AppSettings, workspace_dir: Option<&PathBuf>) -> Result<(), String> {
+        // Refuse a preferred voice that does not speak its language before
+        // anything reaches disk: the map is only worth having if every pair is
+        // trustworthy, and `settings_set` is a raw JSON merge otherwise.
+        validate_voice_preferences(&settings.tts_voice_by_language)?;
         // Always save global settings to global path
         let global = GlobalSettings::from_settings(settings);
         Self::save_global(&global)?;
@@ -675,6 +710,7 @@ impl SettingsState {
     
     /// Save only workspace settings to the workspace path.
     fn save_workspace(workspace: &WorkspaceSettings, workspace_dir: Option<&PathBuf>) -> Result<(), String> {
+        validate_voice_preferences(&workspace.tts_voice_by_language)?;
         match workspace_dir {
             Some(ws_dir) => {
                 let path = ws_dir.join("settings.json");

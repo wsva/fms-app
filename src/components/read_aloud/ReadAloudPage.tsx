@@ -1202,6 +1202,20 @@ export default function ReadAloudPage() {
                   disabled={dirty}
                   refreshKey={clipsVersion}
                   onChanged={() => void loadStandardClips(selectedDataset)}
+                  // The language picker on this card is also how a dataset that
+                  // has no language gets one — and without one, no per-language
+                  // voice preference can apply at all.
+                  onLanguageChange={async (language) => {
+                    const meta = datasets.find((d) => d.uuid === selectedDataset);
+                    if (!meta) throw new Error("the dataset is not loaded");
+                    await invoke("read_aloud_update", {
+                      uuid: meta.uuid,
+                      name: meta.name,
+                      description: meta.description,
+                      language,
+                    });
+                    await loadDatasets(meta.uuid);
+                  }}
                 />
               ) : (
                 <ManageGroup title="Standard audio">

@@ -7,11 +7,13 @@
 //! ids exist and how each one is evaluated, because a check needs SQL and the
 //! filesystem and so can live neither in YAML nor in the domain-free engine.
 //!
-//! Today exactly one provider answers, the dictation audit
-//! ([`crate::datasets::dictation::audit`]). Another dataset kind taking part
+//! Today two providers answer: the dictation audit
+//! ([`crate::datasets::dictation::audit`]) and the read-aloud audit
+//! ([`crate::datasets::read_aloud::audit`]). Another dataset kind taking part
 //! means adding a branch to [`check_vocab`] and [`evidence`] — nothing changes in
 //! [`core`], the command twin or the MCP tool, which is the proof that the
-//! mechanism was never dictation-specific.
+//! mechanism was never dictation-specific. `read_aloud` was the first such
+//! addition, and it needed exactly those two edits.
 
 use std::collections::HashMap;
 
@@ -27,18 +29,18 @@ use super::core;
 /// binding layer's call — decided by reading each evaluator:
 /// - `database_missing` looks for one file, so it can report an offender on an
 ///   otherwise-empty dataset (`file_exists`);
-/// - `media_none` reports exactly when the subject collection is empty
-///   (`subject_present`) — the guard that turns a bundle of vacuous zeros into a
-///   real claim;
-/// - every other id counts offenders over the media inventory, so a clean result
-///   on an empty collection proves nothing (`per_subject`).
+/// - `media_none` / `texts_none` report exactly when the subject collection is
+///   empty (`subject_present`) — the guard that turns a bundle of vacuous zeros
+///   into a real claim;
+/// - every other id counts offenders over the media (or text) inventory, so a
+///   clean result on an empty collection proves nothing (`per_subject`).
 ///
 /// Lives here rather than beside `CheckMeta` because `workflow` is desktop-gated
 /// while `datasets` is not: the audit table must not name a core type.
 fn check_kind(id: &str) -> core::CheckKind {
     match id {
         "database_missing" => core::CheckKind::FileExists,
-        "media_none" => core::CheckKind::SubjectPresent,
+        "media_none" | "texts_none" => core::CheckKind::SubjectPresent,
         _ => core::CheckKind::PerSubject,
     }
 }
@@ -46,8 +48,15 @@ fn check_kind(id: &str) -> core::CheckKind {
 /// The validation vocabulary with vacuity classes: every id a `verify:`/`adopt:`
 /// block may name, each tagged how [`core::create_run`] and
 /// [`core::rebind_definition`] need it to enforce the F10 non-vacuity rule.
+///
+/// The ids are namespaced by domain by convention (`texts_*` / `text_*` /
+/// `standard_audio_*` are read-aloud, the rest dictation), because a definition
+/// binds to a bare id and two kinds must not answer to the same name.
 pub(crate) fn check_vocab() -> Vec<(&'static str, core::CheckKind)> {
-    crate::datasets::dictation::audit::check_ids().map(|id| (id, check_kind(id))).collect()
+    crate::datasets::dictation::audit::check_ids()
+        .chain(crate::datasets::read_aloud::audit::check_ids())
+        .map(|id| (id, check_kind(id)))
+        .collect()
 }
 
 /// Measure one dataset as `check id → number of offenders`, where `0` means
@@ -61,19 +70,29 @@ pub(crate) fn evidence(
     dataset_uuid: &str,
 ) -> Result<HashMap<String, usize>, String> {
     let (_dir, ty) = crate::datasets::find_dataset_dir_typed(settings, dataset_uuid)?;
-    if ty != DatasetType::Dictation {
-        return Err(format!(
-            "no check provider for '{}' datasets yet — verification is implemented for dictation \
-             only; inspect this pipeline with workflow_status instead",
-            ty.as_str()
-        ));
-    }
-    let report = crate::datasets::dictation::audit::audit(settings, dataset_uuid)?;
-    Ok(report
-        .checks
-        .into_iter()
-        .map(|c| (c.id.to_string(), c.count))
-        .collect())
+    // Each provider has its own `AuditCheck` type (they must not share one, since
+    // `datasets` is platform-neutral and the reports differ), so the reduction to
+    // `id → count` happens inside each arm.
+    let checks: Vec<(String, usize)> = match ty {
+        DatasetType::Dictation => crate::datasets::dictation::audit::audit(settings, dataset_uuid)?
+            .checks
+            .into_iter()
+            .map(|c| (c.id.to_string(), c.count))
+            .collect(),
+        DatasetType::Read => crate::datasets::read_aloud::audit::audit(settings, dataset_uuid)?
+            .checks
+            .into_iter()
+            .map(|c| (c.id.to_string(), c.count))
+            .collect(),
+        other => {
+            return Err(format!(
+                "no check provider for '{}' datasets yet — verification is implemented for \
+                 dictation and read-aloud; inspect this pipeline with workflow_status instead",
+                other.as_str()
+            ))
+        }
+    };
+    Ok(checks.into_iter().collect())
 }
 
 /// Verify a dataset-scoped run against the current state of its dataset.

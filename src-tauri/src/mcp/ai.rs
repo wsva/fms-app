@@ -36,6 +36,14 @@ struct LlmSetProviderParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct TtsListVoicesParam {
+    /// A language tag or locale (`de`, `de-DE`). Voices that speak it come
+    /// first; the rest are still returned, after them.
+    #[serde(default)]
+    locale: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct TtsSynthesizeParam {
     text: String,
     voice: String,
@@ -133,11 +141,65 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
-    #[tool(name = "tts_list_voices", description = "List all available Edge TTS voices. Returns name, short_name, locale, and gender for each voice.")]
-    async fn tts_list_voices(&self) -> Result<String, String> {
-        log::info!("[MCP] tts_list_voices");
+    #[tool(name = "tts_list_voices", description = "List the available Edge TTS voices (name, short_name, locale, gender). Pass `locale` (`de`, `de-DE`) to sort the voices that speak it first and flag the one preferred for that language as `preferred: true` — without it the list is alphabetical, which is how a German book ends up read by an Austrian voice. Pick a `short_name` from here for read_aloud_standard_audio_generate or settings_set {tts_voice_by_language}.")]
+    async fn tts_list_voices(&self, Parameters(param): Parameters<TtsListVoicesParam>) -> Result<String, String> {
+        log::info!("[MCP] tts_list_voices: locale={:?}", param.locale);
         let voices = edge_tts::edge_tts_list_voices().await?;
-        Ok(serde_json::to_string_pretty(&voices).unwrap_or_default())
+        let Some(locale) = param.locale.map(|l| l.trim().to_string()).filter(|l| !l.is_empty()) else {
+            return Ok(serde_json::to_string_pretty(&voices).unwrap_or_default());
+        };
+        let want = locale.to_ascii_lowercase();
+        let language = want.split('-').next().unwrap_or("").to_string();
+        // What the user prefers for this language, if anything — the same map
+        // `resolve_voice` reads, so "preferred" here means the same thing there.
+        let preferred = {
+            let settings = self.app.state::<SettingsState>();
+            let snapshot = crate::datasets::read_aloud::standard_audio::snapshot(settings.inner());
+            snapshot
+                .tts_voice_by_language
+                .iter()
+                .find(|(k, _)| {
+                    let key = k.trim().to_ascii_lowercase();
+                    key == want || key == language
+                })
+                .map(|(_, v)| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        // Exact locale first, then the bare language, then everything else in
+        // Edge's own order — a stable sort keeps that order intact.
+        let rank = |voice: &edge_tts::TtsVoice| {
+            let loc = voice.locale.to_ascii_lowercase();
+            if loc == want {
+                0
+            } else if loc.split('-').next() == Some(language.as_str()) {
+                1
+            } else {
+                2
+            }
+        };
+        let mut sorted: Vec<(usize, serde_json::Value)> = voices
+            .into_iter()
+            .map(|voice| {
+                let rank = rank(&voice);
+                let is_preferred = preferred.as_deref() == Some(voice.short_name.as_str());
+                let mut value = serde_json::to_value(&voice)
+                    .unwrap_or(serde_json::Value::Null);
+                if let Some(map) = value.as_object_mut() {
+                    map.insert("preferred".into(), serde_json::Value::Bool(is_preferred));
+                }
+                (rank, value)
+            })
+            .collect();
+        sorted.sort_by_key(|(rank, _)| *rank);
+        let ordered: Vec<serde_json::Value> =
+            sorted.into_iter().map(|(_, value)| value).collect();
+        Ok(serde_json::json!({
+            "locale": locale,
+            "preferred": preferred,
+            "total": ordered.len(),
+            "voices": ordered,
+        })
+        .to_string())
     }
 
     #[tool(name = "tts_synthesize", description = "Synthesize text to audio using Edge TTS and save to a file. Pass text, voice (e.g. 'en-US-AriaNeural'), output_path, and optional rate/volume/pitch adjustments.")]

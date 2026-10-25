@@ -102,6 +102,37 @@ When a tool returns an error, the message should tell the agent **what to do nex
 
 **Bad:** `"Model not loaded"`
 
+### 8. A write's success value must prove the write
+
+`{"status": "ok"}` is not evidence. An agent cannot tell a call that persisted
+382 passages from one that persisted nothing, and in practice it does not
+try — the read-aloud log shows a full 382-text upload reporting `ok` while it
+had written zero rows, because the real error came back as a plain string the
+caller's success check did not recognise.
+
+So every write returns something only a real write could produce:
+
+- a count of what now exists — `texts_total`, `media_count`;
+- a count of what is left — `remaining`;
+- or the identity the server assigned — `uuid`, `order_num`.
+
+**Implication:** if the only way to know a write landed is a second read, the
+tool's return value is incomplete.
+
+### 9. A bulk write returns a partition that sums to the input
+
+A bulk call reports `saved` and `failed` (plus `skipped` for input it decided
+not to write), and `saved + failed + skipped == sent` **always**. Per-item
+errors carry the caller's own index so a failure can be mapped back to the item
+that caused it.
+
+This is what makes "partial" a readable answer instead of a lost one: without
+the partition, a batch that lost one row out of 382 looks exactly like a batch
+that lost all of them, and neither looks like success or failure.
+
+**Implication:** every loop-over-items tool takes one call instead of N, and
+returns the same partition shape as its single-item sibling.
+
 ---
 
 ## Implementation Priorities
@@ -127,4 +158,6 @@ A feature is agent-friendly when:
 - [ ] The tool returns structured data the agent can act on
 - [ ] Errors tell the agent how to recover
 - [ ] Destructive operations are reversible (backup/trash)
+- [ ] A write's return value proves the write (a count, or a server-assigned id)
+- [ ] A bulk write returns `saved` / `failed` that sum to the input
 - [ ] The feature is composable with other tools in workflows

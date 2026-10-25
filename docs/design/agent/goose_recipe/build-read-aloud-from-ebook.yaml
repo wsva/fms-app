@@ -1,0 +1,192 @@
+# Run with:
+#   goose run --recipe docs/design/agent/goose_recipe/build-read-aloud-from-ebook.yaml --with-streamable-http-extension http://127.0.0.1:35711/mcp
+# Check with:
+#   goose recipe validate docs/design/agent/goose_recipe/build-read-aloud-from-ebook.yaml
+# Context budget: the fmsapp extension advertises ~180 tools, which is most of the
+# per-turn baseline before anything is said. Narrow it to the tools this recipe
+# actually names by adding `available_tools` under the `fmsapp` extension in
+# %APPDATA%\Block\goose\config\config.yaml:
+#   fmsapp:
+#     enabled: true
+#     type: streamable_http
+#     http_url: http://127.0.0.1:35711/mcp
+#     available_tools:
+#       - read_aloud_list
+#       - read_aloud_create
+#       - read_aloud_update
+#       - read_aloud_audit
+#       - read_aloud_import_texts
+#       - read_aloud_list_texts
+#       - read_aloud_get_text
+#       - read_aloud_save_text
+#       - read_aloud_save_texts
+#       - read_aloud_voice_resolve
+#       - read_aloud_standard_audio_generate
+#       - read_aloud_standard_audio_generate_all
+#       - read_aloud_standard_audio_list
+#       - tts_list_voices
+#       - settings_get
+#       - settings_set
+#       - web_service_get_status
+#       - workflow_builtin_templates
+#       - workflow_list
+#       - workflow_status
+#       - workflow_verify
+#       - workflow_adopt
+#       - workflow_next
+#       - workflow_advance
+#       - workflow_record
+version: 1.0.0
+title: build-read-aloud-from-ebook
+description: Turn a book you extracted yourself into a read-aloud dataset - create it with a language, import the passages in one bounded call, generate ONE reference clip for the user to listen to, then fill in the rest.
+instructions: |-
+  # Build a Read-Aloud Dataset from a Book
+
+  ## Goal
+  Take a book the user provides as text — an extracted `.txt` / `.md`, or a JSON
+  array of passages — and end with a read-aloud dataset whose passages are
+  segmented, ordered, and spoken by a voice the user actually wants. Stop once,
+  in the middle, so a human can listen before you commit to hundreds of clips.
+
+  This recipe is the agent-facing twin of the built-in pipeline
+  `build_read_aloud_dataset`. If the user wants the run recorded on the app's
+  Workflow page, drive that template with the `workflow_*` tools exactly as
+  `build-dictation-dataset.yaml` describes; the steps below are the same work done
+  directly, which is what you want for a one-off import.
+
+  ## Prerequisites
+  - fms-app desktop running; MCP at `http://127.0.0.1:35711/mcp` (see
+    `web_service_get_status` if the port was taken).
+  - **The book as text.** `read_aloud_import_texts` does not read epub or PDF:
+    text extraction is your job, and it is done before step 1. Ask the user for a
+    `.txt`/`.md` path, or write the extracted text to a file yourself.
+  - A dataset uuid from `read_aloud_list`, or permission to create one.
+
+  ## Workflow
+
+  ### Step 0: Which dataset, and what is in it?
+  If the user named no dataset, call `read_aloud_list`; if several fit, ask which
+  one rather than guessing. Then call `read_aloud_audit` with the uuid and read
+  three things:
+  - `facts.has_texts` / `texts` — an existing dataset with 380 passages is a
+    different job from an empty one. **Never re-import into a dataset that already
+    has texts** without asking: the importer appends, so running it twice leaves
+    760 rows and a `text_duplicate` warning.
+  - `facts.has_language` — a dataset with no `language` can never resolve a
+    preferred voice, so generation silently falls back to the workspace default
+    and the user gets, say, an American narrator on a German book. This is the
+    single most expensive mistake in this pipeline, and it is invisible until
+    someone listens.
+  - `facts.has_standard_audio` — non-zero means clips already exist. They keep
+    the voice recorded in their note; changing a preference does not re-voice them.
+
+  ### Step 1: Create the dataset with a language
+  New dataset: `read_aloud_create` with `name`, a one-line `description`, and
+  **`language`** — a tag like `de`, `de-DE`, `zh-CN`, taken from the book, not
+  from the voice list. Existing dataset with no language: `read_aloud_update`
+  with `language`.
+
+  The language is not decoration. Every generation resolves its voice from it:
+  explicit `voice` parameter → the user's preferred voice for this language
+  (`tts_voice_by_language`, set on the app's Edge TTS page) → the workspace
+  default `read_aloud_tts_voice` → the built-in default.
+
+  ### Step 2: Agree on the voice before speaking anything
+  Call `read_aloud_voice_resolve` with the dataset uuid. It answers, without
+  synthesising: which `voice`, its `locale`, and `voice_source` —
+  `param` / `preference` / `setting` / `default`.
+  - `source: "preference"` is what the user wants: their own choice for this
+    language. Say which voice it is and move on.
+  - `source: "default"` or `"setting"` means no preference is set for this
+    language. Tell the user the voice you are about to use and offer two paths:
+    pick one in the app (Edge TTS → Preferred voices), or let you pass `voice:`
+    explicitly. `tts_list_voices {locale: "<language>"}` lists the candidates with
+    the matching ones first and the preferred one flagged — use it instead of
+    guessing from an alphabetical list.
+  - A `warning` means the voice speaks a different language than the dataset. It
+    is a legitimate request and a terrible accident with equal spelling, so
+    confirm it with the user before generating anything.
+  - A `hint` means the dataset has no `language` at all. Go back to step 1.
+
+  ### Step 3: Size the import before writing it
+  Call `read_aloud_import_texts` with `source_path` (or `source_text`) and
+  **`dry_run: true`**. It writes nothing and returns:
+  - `texts` — how many passages you will get;
+  - `chars: {min, median, max}` — the passage sizes. A median far from
+    `chunk.target_chars` means the source has hard boundaries (chapters, headings)
+    that dominate the split, which is usually right; a `max` far above
+    `chunk.max_chars` means one paragraph never broke.
+  - `total_chars` and `estimate_speaking_seconds` — the size of the job, at
+    roughly 12.5 characters per second of speech.
+  - `preview` — the first five titles and excerpts.
+
+  Show the user these numbers **before** the real write: "382 passages, median
+  1,026 characters, about 8 hours of audio". A wrong split caught here costs one
+  call; caught after 382 clips it costs a night.
+
+  Tuning is `chunk: {target_chars, min_chars, max_chars}` (defaults 1100 / 450 /
+  1900). Raise `target_chars` if the user wants longer passages. Never set
+  `min_chars` above `max_chars`.
+
+  ### Step 4: Import
+  Same call with `dry_run: false`. Read the partition, which always sums:
+  `saved + failed == sent`, plus `skipped` for items with blank content.
+  - `failed > 0` → read `errors[]`; each names the index, the title and the field
+    that was wrong. Fix those and save them with `read_aloud_save_texts`; do not
+    re-import the whole book.
+  - Report `texts_total` and `order_range` as the proof the write landed. A
+    successful-looking import that persisted nothing is the failure mode this
+    partition exists to prevent — check the numbers, not the status word.
+
+  Titles come from the payload when it has them, otherwise from the markdown
+  heading, otherwise `<prefix> · <n>`. Pass `title_prefix` (the book's name) so
+  the passage list is readable; `note` defaults to `Imported from <file name>`.
+
+  ### Step 5: One clip, then a human
+  Call `read_aloud_standard_audio_generate_all` with
+  `{dataset_uuid, only_missing: true, limit: 1}` — one clip, no text uuid needed.
+  The response carries `voice`, `voice_locale`, `voice_source`, `generated` and
+  `remaining`.
+  **Stop here and ask the user to listen.** `read_aloud_standard_audio_list`
+  gives the clip's audio URL so the app can play it. This is the whole point of
+  the ordering: a wrong voice or a wrong split is one clip to redo, not three
+  hundred.
+
+  If they want a different voice, pass `voice:` explicitly on the next calls (or
+  they set a preference in the app). Existing clips are not re-voiced —
+  `read_aloud_standard_audio_delete` then regenerate, only if the user asks.
+
+  ### Step 6: The rest
+  `read_aloud_standard_audio_generate_all` with `{only_missing: true, limit: 50}`,
+  repeated until `remaining` is 0. A clip takes about 11 seconds, so 50 is roughly
+  nine minutes — a call you can wait on. Between calls, report progress as
+  "generated N, M remaining" from the response alone; do not re-list 380 texts to
+  find out.
+  - `failed[]` names the passages that did not synthesise, with the error. Retry
+    them once; if they fail again, report them and finish the rest — a few missing
+    clips is not a reason to stall the whole dataset.
+  - `voice_source` on each call is your proof the voice did not change mid-run.
+
+  ### Step 7: Report
+  One paragraph: dataset uuid and name, language, voice and why that voice
+  (`voice_source`), passages (`texts_total`, median size), clips generated /
+  remaining, and any passage that failed with its error. Then name the one next
+  call if anything is open: `read_aloud_standard_audio_generate_all` for leftovers,
+  `read_aloud_save_text` for a passage that needs fixing.
+
+  ## Rules
+  - **The language decides the voice, and it is set once.** Setting it after
+    generating means the clips you already made keep the old voice. Check
+    `facts.has_language` before step 5, not after.
+  - **`dry_run` before every import.** It is the only cheap look at a split.
+  - **Prove writes with counts.** `texts_total`, `saved`, `remaining` — never the
+    status word alone. `saved + failed == sent` always, so a partition that does
+    not add up is a bug you should report rather than paper over.
+  - **Never re-import into a non-empty dataset** without asking; the importer
+    appends and `text_duplicate` is how that shows up later.
+  - **You own text extraction.** No epub/PDF parsing in this pipeline, by design —
+    pass the text, not the container.
+  - **One probe before the bulk.** Always. The stop in step 5 is not optional.
+  - **Stop on error and report it.** Tool messages say what to call next.
+activities: []
+parameters: []

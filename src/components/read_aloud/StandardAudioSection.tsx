@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle, Check, Loader2, Play, Square, Trash2, Upload, Wand2 } from "lucide-react";
-import type { AudioProbe, ReadStandardAudio } from "@/lib/read_aloud/types";
+import type { AudioProbe, ReadStandardAudio, VoiceResolution } from "@/lib/read_aloud/types";
 import ConfirmDialog from "@/components/read_book/ConfirmDialog";
 import {
   deleteStandardAudio,
@@ -13,9 +14,11 @@ import {
   importStandardAudio,
   listStandardAudio,
   probeAudioSource,
+  resolveVoice,
   setDefaultStandardAudio,
 } from "@/lib/read_aloud/standardAudio";
 import { isMobileApp } from "@/lib/platform";
+import { localeLabel, voiceName } from "@/lib/edge_tts/voices";
 import { isTauri } from "@/lib/tauri";
 import { logError } from "@/lib/logger";
 import AudioTrimTrack from "./AudioTrimTrack";
@@ -38,6 +41,10 @@ type Props = {
   textUuid: string;
   /** Called after any clip change, so the page can refresh its badges. */
   onChanged?: () => void;
+  /** Persist the dataset's language. The language picker below is an override
+   *  of the voice *and* a fact about the dataset: a per-language preference can
+   *  only apply once the dataset says which language it holds. */
+  onLanguageChange?: (language: string) => Promise<void> | void;
   /** The page's draft differs from the stored text. Clips describe the stored
    *  text, so every control that would add, replace or delete one is paused;
    *  playing and reading stay live. */
@@ -47,8 +54,10 @@ type Props = {
   refreshKey?: number;
 };
 
-function seconds(value: number): string {
-  if (!(value > 0)) return "—";
+function seconds(value: number | null): string {
+  // `null` is "nobody measured this", which is not the same as zero seconds —
+  // a fabricated `0.0 s` reads as a real measurement.
+  if (value == null || !(value > 0)) return "—";
   return value >= 60
     ? `${Math.floor(value / 60)}:${String(Math.round(value % 60)).padStart(2, "0")}`
     : `${value.toFixed(1)} s`;
@@ -68,25 +77,14 @@ function readFileAsBase64(file: File): Promise<string> {
   });
 }
 
-/**
- * "de-DE" → "German (Germany)", so the language picker reads as a language
- * rather than a BCP 47 tag. The runtime falls back to the tag itself.
- */
-const languageNames = (() => {
-  try {
-    return new Intl.DisplayNames(["en"], { type: "language" });
-  } catch {
-    return null;
-  }
-})();
-
-function localeLabel(locale: string): string {
-  try {
-    return languageNames?.of(locale) || locale;
-  } catch {
-    return locale;
-  }
-}
+/** How the resolved voice was chosen, in the words the line under the button
+ *  uses. Mirrors `VoiceResolution.source`. */
+const SOURCE_LABELS: Record<VoiceResolution["source"], string> = {
+  param: "this call",
+  preference: "preferred",
+  setting: "set on the Edge TTS page",
+  default: "built-in default",
+};
 
 /**
  * The standard audio of one text: the reference clip its pronunciation is
@@ -102,6 +100,7 @@ export default function StandardAudioSection({
   datasetUuid,
   textUuid,
   onChanged,
+  onLanguageChange,
   disabled = false,
   refreshKey = 0,
 }: Props) {
@@ -115,6 +114,13 @@ export default function StandardAudioSection({
   const [lang, setLang] = useState("");
   const [voice, setVoice] = useState("");
   const [voicesFailed, setVoicesFailed] = useState(false);
+  // What a generation with no voice named would speak with, and why. The
+  // pickers open on it; the line under them says where it came from.
+  const [resolved, setResolved] = useState<VoiceResolution | null>(null);
+  // A picker has been touched, so the next generation sends its voice instead
+  // of asking the backend to resolve one.
+  const [override, setOverride] = useState(false);
+  const [langSaving, setLangSaving] = useState(false);
 
   // Upload + crop
   const [source, setSource] = useState<Source | null>(null);
@@ -160,8 +166,23 @@ export default function StandardAudioSection({
     // clips are stale without changing this section's identity.
   }, [refresh, refreshKey]);
 
-  // Voices (network) and the configured default are only needed for the
-  // generate action; a failure must not block the rest of the section.
+  /** Re-read which voice this dataset resolves to. Split from the failure
+   *  handling below: the voice list needs the network, the resolution does not. */
+  const resolve = useCallback(async (): Promise<VoiceResolution | null> => {
+    try {
+      const res = await resolveVoice(datasetUuid);
+      setResolved(res);
+      return res;
+    } catch (e) {
+      // Leave both pickers empty: Generate then sends no voice and the backend
+      // resolves exactly as it would have.
+      logError(`resolve voice failed: ${String(e)}`, LOG_MODULE);
+      return null;
+    }
+  }, [datasetUuid]);
+
+  // Voices (network) and the voice this dataset actually speaks with are only
+  // needed for the generate action; a failure must not block the rest.
   useEffect(() => {
     if (!isTauri()) return;
     void (async () => {
@@ -173,24 +194,26 @@ export default function StandardAudioSection({
             : a.locale.localeCompare(b.locale)
         );
         setVoices(sorted);
-        // Open on the configured voice's own language, so the pickers show what
-        // will actually be spoken. An unknown or unset voice leaves both empty:
-        // Generate then sends no voice, exactly as it did before.
-        const settings = await invoke<{ read_aloud_tts_voice?: string }>("settings_get");
-        const configured = sorted.find((v) => v.short_name === settings.read_aloud_tts_voice);
-        setLang(configured?.locale ?? "");
-        setVoice(configured?.short_name ?? "");
       } catch (e) {
         logError(`load TTS voices failed: ${String(e)}`, LOG_MODULE);
         setVoicesFailed(true);
+        return;
+      }
+      // Open the pickers on the *resolved* voice — the one this dataset's
+      // language prefers — rather than on the language-less setting's own
+      // locale, so the selectors show what will be spoken.
+      const res = await resolve();
+      if (res) {
+        setLang(res.locale);
+        setVoice(res.voice);
       }
     })();
-  }, []);
+  }, [resolve]);
 
   // The two pickers drive one value: the language narrows the list, and picking
   // a language without a voice would quietly fall back to the backend's default,
-  // so a language always selects its first voice. The empty language is the
-  // configured voice itself — the same audio as the one picker this replaced.
+  // so a language always selects its first voice. The empty language means "no
+  // override" — whatever the dataset resolves to is spoken.
   const locales = useMemo(() => {
     const seen: string[] = [];
     for (const v of voices) if (!seen.includes(v.locale)) seen.push(v.locale);
@@ -200,8 +223,32 @@ export default function StandardAudioSection({
   const langVoices = lang ? voices.filter((v) => v.locale === lang) : [];
 
   const chooseLocale = (locale: string) => {
+    setOverride(Boolean(locale));
     setLang(locale);
     setVoice(locale ? (voices.find((v) => v.locale === locale)?.short_name ?? "") : "");
+    if (!locale) return;
+    // The language is the one picker that also writes: a per-language voice
+    // preference is keyed by the dataset's language, so naming it here is a
+    // fact about the dataset rather than a filter on a list.
+    const current = resolved?.dataset_language ?? "";
+    if (locale === current || !onLanguageChange) return;
+    setLangSaving(true);
+    void (async () => {
+      try {
+        await onLanguageChange(locale);
+        // Re-resolve: the preference for the language just named may not be the
+        // first voice the locale happened to list (alphabetical order is how
+        // the Austrian narrator got picked).
+        const res = await resolve();
+        if (res && res.locale === locale) setVoice(res.voice);
+      } catch (e) {
+        const msg = String(e);
+        logError(`save dataset language failed: ${msg}`, LOG_MODULE);
+        setError(msg);
+      } finally {
+        setLangSaving(false);
+      }
+    })();
   };
 
   const stopAudio = useCallback(() => {
@@ -244,8 +291,22 @@ export default function StandardAudioSection({
     setBusy("generate");
     setError(null);
     try {
-      await generateStandardAudio({ datasetUuid, textUuid, voice: voice.trim() || undefined });
+      await generateStandardAudio({
+        datasetUuid,
+        textUuid,
+        // No voice unless a picker was touched: the dataset's language decides,
+        // and naming the voice here would make every clip `param` and freeze
+        // the choice into this page.
+        voice: override ? voice.trim() || undefined : undefined,
+      });
       await afterChange();
+      // A preference may have moved since the section opened; re-read so the
+      // line under the pickers still says what will be spoken next.
+      const res = await resolve();
+      if (res && !override) {
+        setLang(res.locale);
+        setVoice(res.voice);
+      }
     } catch (e) {
       const msg = String(e);
       logError(`generate standard audio failed: ${msg}`, LOG_MODULE);
@@ -253,7 +314,7 @@ export default function StandardAudioSection({
     } finally {
       setBusy(null);
     }
-  }, [afterChange, datasetUuid, textUuid, voice]);
+  }, [afterChange, datasetUuid, override, resolve, textUuid, voice]);
 
   const pickSource = useCallback(async () => {
     setError(null);
@@ -436,7 +497,7 @@ export default function StandardAudioSection({
   const label = (clip: ReadStandardAudio) =>
     clip.note || (clip.kind === "tts" ? "Edge TTS" : "Upload");
   const defaultClip = clips.find((c) => c.is_default) ?? null;
-  const voiceLabel = voice ? voice.replace(/Neural$/, "") : "the configured voice";
+  const voiceLabel = voice ? voiceName(voice) : "the resolved voice";
   // One progress line beats a spinner hidden in an 11px chip: synthesis is a
   // network round trip and the import decodes a file, both slow enough that a
   // second click is tempting.
@@ -453,66 +514,107 @@ export default function StandardAudioSection({
               ? "Updating the clip…"
               : null;
 
-  const actions = (
-    <div className="flex flex-wrap items-center gap-2">
-      <select
-        className={`${selectClass} max-w-[170px]`}
-        value={lang}
-        onChange={(e) => chooseLocale(e.target.value)}
-        disabled={disabled || busy === "generate" || voices.length === 0}
-        title="Language the synthesis speaks; the voice list follows it"
-      >
-        <option value="">Configured voice</option>
-        {locales.map((l) => (
-          <option key={l} value={l}>
-            {localeLabel(l)}
-          </option>
-        ))}
-      </select>
-      <select
-        className={`${selectClass} max-w-[200px]`}
-        value={voice}
-        onChange={(e) => setVoice(e.target.value)}
-        disabled={disabled || busy === "generate" || !lang}
-        title={
-          lang
-            ? "Voice of the chosen language"
-            : "Pick a language first, or leave the voice configured on the Edge TTS page"
-        }
-      >
-        {lang ? (
-          langVoices.map((v) => (
-            <option key={v.short_name} value={v.short_name}>
-              {v.short_name.replace(/Neural$/, "")} ({v.gender})
-            </option>
-          ))
-        ) : (
-          <option value="">the configured voice</option>
-        )}
-      </select>
-      <button
-        className={primaryButton}
-        disabled={disabled || busy === "generate"}
-        onClick={() => void generate()}
-        title="Synthesise this text with Edge TTS. The word timings come with it, so per-word pronunciation is exact."
-      >
-        {busy === "generate" ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
-        Generate with Edge TTS
-      </button>
-      <button
-        className={smallButton}
-        disabled={disabled || busy === "probe"}
-        onClick={() => void pickSource()}
-        title="Use a person reading the text. An uploaded clip has no word timings, so its words are attributed by time — the overall score is unaffected."
-      >
-        {busy === "probe" ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
-        Upload audio
-      </button>
-      {voicesFailed && (
-        <span className="text-[11px] text-text-tertiary">
-          Voice list unavailable offline — the configured voice is used.
+  // Where the voice comes from, said once instead of discovered per clip: this
+  // section shows the resolution, it does not own the setting. The preference
+  // is edited where voices are audited (the Edge TTS page), because
+  // `tts_synthesize` speaks with it too.
+  const provenance = resolved && (
+    <div className="flex flex-col gap-0.5">
+      <div className="flex flex-wrap items-baseline gap-x-1.5 text-[11px]">
+        <span className="text-text-primary">
+          {localeLabel(resolved.dataset_language || resolved.locale)}
         </span>
+        <span className="text-text-tertiary">·</span>
+        <span className="text-text-primary">{voiceName(resolved.voice)}</span>
+        <span className="text-text-tertiary">({SOURCE_LABELS[resolved.source] ?? resolved.source})</span>
+        <button
+          className="text-accent-bg hover:underline cursor-pointer"
+          onClick={() => {
+            // The voice setting lives on the Edge TTS page; a picker here would
+            // read as dataset-local while being global.
+            if (isTauri()) void emit("agent-action", { type: "navigate", tab: "edge-tts" });
+          }}
+          title="Set the voice this language uses on the Edge TTS page"
+        >
+          Change
+        </button>
+        {langSaving && <span className="text-text-tertiary">saving the language…</span>}
+      </div>
+      {resolved.warning && (
+        <span className="text-[10px] text-warning-text">{resolved.warning}</span>
       )}
+      {resolved.hint && (
+        <span className="text-[10px] text-text-tertiary">{resolved.hint}</span>
+      )}
+    </div>
+  );
+
+  const actions = (
+    <div className="flex flex-col gap-1.5">
+      {provenance}
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          className={`${selectClass} max-w-[170px]`}
+          value={lang}
+          onChange={(e) => chooseLocale(e.target.value)}
+          disabled={disabled || busy === "generate" || langSaving || voices.length === 0}
+          title="Language the synthesis speaks; the voice list follows it, and the dataset remembers it"
+        >
+          <option value="">The dataset's voice</option>
+          {locales.map((l) => (
+            <option key={l} value={l}>
+              {localeLabel(l)}
+            </option>
+          ))}
+        </select>
+        <select
+          className={`${selectClass} max-w-[200px]`}
+          value={voice}
+          onChange={(e) => {
+            setOverride(true);
+            setVoice(e.target.value);
+          }}
+          disabled={disabled || busy === "generate" || !lang}
+          title={
+            lang
+              ? "Voice of the chosen language"
+              : "Pick a language first, or leave the voice resolved from the dataset's language"
+          }
+        >
+          {lang ? (
+            langVoices.map((v) => (
+              <option key={v.short_name} value={v.short_name}>
+                {voiceName(v.short_name)} ({v.gender})
+              </option>
+            ))
+          ) : (
+            <option value="">{voice ? voiceName(voice) : "the resolved voice"}</option>
+          )}
+        </select>
+        <button
+          className={primaryButton}
+          disabled={disabled || busy === "generate"}
+          onClick={() => void generate()}
+          title="Synthesise this text with Edge TTS. The word timings come with it, so per-word pronunciation is exact."
+        >
+          {busy === "generate" ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
+          Generate with Edge TTS
+        </button>
+        <button
+          className={smallButton}
+          disabled={disabled || busy === "probe"}
+          onClick={() => void pickSource()}
+          title="Use a person reading the text. An uploaded clip has no word timings, so its words are attributed by time — the overall score is unaffected."
+        >
+          {busy === "probe" ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
+          Upload audio
+        </button>
+        {voicesFailed && (
+          <span className="text-[11px] text-text-tertiary">
+            Voice list unavailable offline — the dataset's resolved voice is used.
+          </span>
+        )}
+      </div>
     </div>
   );
 

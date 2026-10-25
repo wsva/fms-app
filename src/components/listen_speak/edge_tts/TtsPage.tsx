@@ -8,6 +8,7 @@ import { isTauri } from "@/lib/tauri";
 import { type TtsVoice, type TtsSynthesizeResult, type TtsPreviewResult } from "@/lib/edge_tts/types";
 import { PageHeader } from "@/components/ui/toolbar";
 import { reqStr, optStr, useAgentActions } from "@/lib/agent/ui-actions";
+import PreferredVoices from "./PreferredVoices";
 
 // Popular European languages with their locale prefixes
 const EUROPEAN_LANGUAGES: { code: string; label: string; prefix: string }[] = [
@@ -415,6 +416,18 @@ export default function TtsPage() {
                 <audio ref={audioRef} src={audioUrl} controls className="flex-1" />
               </div>
             </div>
+          )}
+
+          {/* The voice each language speaks with. Read-aloud resolves a dataset's
+              language through this map, so setting it here is setting it for
+              every surface that synthesises that language. */}
+          {voices.length > 0 && (
+            <PreferredVoices
+              voices={voices}
+              text={text}
+              previewing={previewLoading}
+              onPreview={(voice, say) => void handlePreview({ text: say, voice })}
+            />
           )}
 
           {/* Empty state */}
