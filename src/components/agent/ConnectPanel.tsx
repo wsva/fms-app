@@ -11,7 +11,7 @@ import { btnGhost, codeBox, hint } from "./styles";
  *  manual an agent fetches. Nothing here writes another product's config file —
  *  FmS hands the line over and the user pastes it. */
 export default function ConnectPanel() {
-  const { manual, manualLoading, hosts, surface, copied } = useAgentControl();
+  const { manual, manualLoading, surface, copied } = useAgentControl();
 
   return (
     <div className="space-y-6">
@@ -66,23 +66,6 @@ export default function ConnectPanel() {
           {surface?.mcp_enabled ?? true
             ? " — the endpoint below answers."
             : " — /mcp and the manual answer 404 until you switch it back on (Surface tab)."}
-        </p>
-        <p className="text-text-secondary">
-          Agent dock:{" "}
-          {hosts?.connected ? (
-            <>
-              hosting <strong>{hosts.session?.display_name ?? hosts.active_id ?? "a host"}</strong>{" "}
-              via <strong>{hosts.session?.transport ?? "?"}</strong>
-              {hosts.session?.mcp_transport ? (
-                <>
-                  , FmS tools over <strong>{hosts.session.mcp_transport}</strong>
-                </>
-              ) : null}
-              .
-            </>
-          ) : (
-            "no host hosted — see the Hosting tab."
-          )}
         </p>
         {manual && !manual.endpoints.running && (
           <p className="text-error-text">{manual.endpoints.note}</p>

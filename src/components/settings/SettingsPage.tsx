@@ -68,14 +68,6 @@ interface GlobalSettings {
   llm_provider: string;
   llm_api_key: string;
   llm_model: string;
-  // The dock's ACP address. No longer editable here — the Connect card is
-  // read-only and `agent_connect` falls back to the built-in default when the
-  // stored value is empty — but they must stay in the payload, because
-  // `settings_set_global` replaces the whole object and dropping a key would
-  // reset it.
-  goose_acp_url: string;
-  goose_acp_secret: string;
-  goose_acp_enabled: boolean;
   pc_url: string;
   pc_token: string;
   // Carried through unchanged on save: the device pairing identity (unused on
@@ -351,10 +343,10 @@ export default function SettingsPage() {
     setCurrentTheme(getStoredTheme());
   }, [fetchSettings]);
 
-  // The Agent page owns `mcp_policy`, `mcp_enabled` and `goose_acp_enabled` now.
-  // Reload when it saves: this page is always mounted, so its copy would
-  // otherwise keep the values read at boot and write them back over the agent
-  // page's edit on the next Save here.
+  // The Agent page owns `mcp_policy` and `mcp_enabled` now. Reload when it
+  // saves: this page is always mounted, so its copy would otherwise keep the
+  // values read at boot and write them back over the agent page's edit on the
+  // next Save here.
   useEffect(() => {
     const onAgentSurface = () => void fetchSettings();
     window.addEventListener(AGENT_SURFACE_SAVED, onAgentSurface);

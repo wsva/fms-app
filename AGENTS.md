@@ -132,8 +132,9 @@ src-tauri/src/
 │   ├── mod.rs
 │   ├── llm.rs              # Ollama: connection check, model list/pull/delete, chat + streaming
 │   ├── chat.rs             # Cross-device chat thread persisted on the PC hub
-│   ├── goose_llm.rs        # Goose SDK LLM bridge — desktop
-│   └── agent_acp.rs        # Goose ACP client over WebSocket to `goose serve` — desktop
+│   └── goose_llm.rs        # Goose SDK LLM bridge — desktop. (An ACP client that dialled
+│                           #   `goose serve` lived beside it and was removed: FmS takes the
+│                           #   attach direction only, so nothing here dials an agent)
 │
 ├── mcp/                    # Built-in MCP server (rmcp), nested at `/mcp` — desktop
 │   ├── mod.rs              # `DatasetMcpServer`, params shared by 2+ domains, `tool_router()`
@@ -156,8 +157,9 @@ src-tauri/src/
 │   ├── ai.rs               # Ollama/cloud chat & model management, provider switch, Edge TTS, cross-device chat (11)
 │   ├── wiki.rs             # wiki dirs, read/write/delete, search, index (9)
 │   ├── sync.rs             # web service, pairing registry, PC scan/connect/pull, incremental sync (15)
-│   ├── system.rs           # settings, auth, logs, OCR, screenshot, app UI control (incl. prefill the dock),
-│   │                       #   the `app_events` timeline, the trash undo loop, MCP audit journal (20)
+│   ├── system.rs           # settings, auth, logs, OCR, screenshot, app UI control (the `app_*` verbs the
+│   │                       #   dock and the shell listen for), the `app_events` timeline, the trash undo
+│   │                       #   loop, MCP audit journal (27)
 │   ├── workflow.rs         # persistent workflow state machine: list/create/status/reap/next/get_definition/
 │   │                       #   advance/record/intervene/verify/adopt/builtin_templates, plus list_actions — the
 │   │                       #   step vocabulary the Workflow page publishes (13)

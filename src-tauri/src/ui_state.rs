@@ -3,9 +3,9 @@
 //! The webview reports a *patch* of its context whenever something meaningful
 //! changes ([`agent_report_ui_state`]); this module caches the merged result so
 //! `app_get_ui_state` can answer an agent synchronously, without a round-trip
-//! into the webview. Living here rather than in `ai::agent_acp` matters: the
-//! cache belongs to whichever agent asks, and a third-party agent attached over
-//! `/mcp` has no ACP client at all.
+//! into the webview. Living here rather than next to any one consumer matters:
+//! the cache belongs to whichever agent asks, and every attached agent reads
+//! the same snapshot.
 //!
 //! Merge semantics are deliberate — a patch key *present with a value* sets,
 //! *present with `null`* clears, *absent* leaves untouched. Pages are

@@ -2203,7 +2203,6 @@ dependencies = [
  "tokenizers",
  "tokio",
  "tokio-stream",
- "tokio-tungstenite",
  "tokio-util",
  "transcribe-cpp",
  "transcribe-rs",

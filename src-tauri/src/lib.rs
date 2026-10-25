@@ -85,8 +85,8 @@ use tauri_plugin_deep_link::DeepLinkExt;
 
 /// Install the process-level rustls `CryptoProvider`.
 ///
-/// Several crates in the tree (reqwest, rmcp, goose-sdk, tokio-tungstenite)
-/// enable *both* the `ring` and `aws-lc-rs` features of rustls through cargo
+/// Several crates in the tree (reqwest, rmcp, goose-sdk) enable *both* the
+/// `ring` and `aws-lc-rs` features of rustls through cargo
 /// feature unification. When that happens rustls cannot auto-select a provider
 /// and panics on the first TLS handshake with "Could not automatically
 /// determine the process-level CryptoProvider". We pin `ring` (already a direct
@@ -512,26 +512,6 @@ pub fn run() {
             ai::chat::chat_send_message,
             ai::chat::chat_resolve_attachment,
             ai::chat::chat_save_attachment,
-            // Goose ACP agent client (desktop only)
-            ai::agent_acp::agent_connect,
-            ai::agent_acp::agent_send_prompt,
-            ai::agent_acp::agent_cancel,
-            ai::agent_acp::agent_respond_permission,
-            ai::agent_acp::agent_disconnect,
-            ai::agent_acp::agent_status,
-            // Hosted-mode host records (ideas.md §8 step 5): the dock dials a
-            // record instead of a hardcoded endpoint, and a host the trust rule
-            // marks as `Confirm` cannot be dialled until the user answers the
-            // confirm dialog.
-            ai::agent_acp::agent_host_register,
-            ai::agent_acp::agent_host_unregister,
-            ai::agent_acp::agent_host_list,
-            ai::agent_acp::agent_host_status,
-            ai::agent_acp::agent_host_connect,
-            ai::agent_acp::agent_host_disconnect,
-            ai::agent_acp::agent_confirm_request,
-            ai::agent_acp::agent_confirm_respond,
-            ai::agent_acp::agent_confirm_status,
             ui_state::agent_report_ui_state,
             ui_state::agent_report_ui_actions,
             ui_state::agent_get_ui_actions,
@@ -569,7 +549,6 @@ pub fn run() {
         .manage(ocr::hyphen::HyphenState::new())
         .manage(textsplit::TextSplitState::new())
         .manage(simple_words::SimpleWordsState::new())
-        .manage(ai::agent_acp::AcpClientState::new())
         .manage(ui_state::UiStateHandle::default())
         .setup(|app| {
             // Anchor all persistent storage on the platform-correct base dir

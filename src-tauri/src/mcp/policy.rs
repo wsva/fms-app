@@ -11,8 +11,8 @@
 //! journalled to the `mcp_audit` table in the app DB, and then either delegated
 //! to the real handler or refused. It ships in **audit mode**: the default
 //! `mcp_policy` is `"permissive"`, which classifies and journals everything and
-//! denies nothing, so the dock and every already-attached agent keep working
-//! while the classification table is proven against real traffic. `"enforce"`
+//! denies nothing, so every already-attached agent keeps working while the
+//! classification table is proven against real traffic. `"enforce"`
 //! additionally refuses the two tiers that cannot be undone.
 //!
 //! # The seam
@@ -26,9 +26,9 @@
 //! # `agent_id`
 //!
 //! Always `"loopback"` today. A per-agent tier needs the connection record from
-//! ideas.md §2 (`agent_host_*`, which now exists but does not identify the
-//! caller), so the column is here so the journal does not have to be migrated
-//! when it does.
+//! ideas.md §2 (which does not exist: the app no longer dials an agent, so an
+//! attached agent cannot be told apart from another local process), so the
+//! column is here so the journal does not have to be migrated when it does.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -126,7 +126,7 @@ fn is_denied(tier: Tier) -> bool {
 
 /// Segments of a tool name that mean "this loses something". Matched on
 /// `_`-separated segment *equality*, not substring: the seven words are the
-/// vocabulary `ai::agent_acp::auto_approve_option` already asks the user about,
+/// vocabulary the app asks the user about when a call is classified destructive,
 /// extended with the ones that turned up in the real tool set (`evict`,
 /// `flatten`, `detach`, `rollback`, `remint`, `purge`, `forget`).
 const DESTRUCTIVE_WORDS: [&str; 14] = [
@@ -169,11 +169,10 @@ const RECOVERABLE: [&str; 15] = [
 
 /// Drives the user's screen. `ui_invoke_action` is listed ahead of the UI action
 /// registry landing so the tier is already right when it does.
-const UI_CONTROL: [&str; 7] = [
+const UI_CONTROL: [&str; 6] = [
     "app_navigate",
     "app_notify",
     "app_open_review",
-    "app_prefill_prompt",
     "app_start_dictation",
     "capture_screenshot",
     "ui_invoke_action",
@@ -183,17 +182,7 @@ const UI_CONTROL: [&str; 7] = [
 /// from [`DESTRUCTIVE_WORDS`], so they are named here. `todo_add`/`todo_complete`
 /// join this list when the TODO domain lands: a todo is the same shape of thing,
 /// work the agent hands to the user instead of doing.
-const HUMAN_HANDOFF: [&str; 5] = [
-    // Points the dock at a program or a machine: the next connect spawns or
-    // dials it. Registering is the decision, not the dial, so it sits here with
-    // the dial itself rather than with the ordinary writes.
-    "agent_host_register",
-    // Spawns a process or reaches another machine, and does so with the user's
-    // copy of their credentials.
-    "agent_host_connect",
-    // Removes what FmS is willing to run; the record cannot be recovered from
-    // the journal.
-    "agent_host_unregister",
+const HUMAN_HANDOFF: [&str; 2] = [
     // Raises the hub's authority epoch, which refuses every follower still
     // presenting the old one. There is no "un-raise".
     "sync_handover_epoch",
@@ -207,11 +196,7 @@ const HUMAN_HANDOFF: [&str; 5] = [
 /// `read_aloud_*` starts with "read", `sync_check_availability` persists the
 /// availability it checks), so this is a list. Anything absent falls through to
 /// [`Tier::Write`] — a new tool is never silently a read.
-const READ_TOOLS: [&str; 81] = [
-    // Hosted-mode records: reading them dials nothing, and an agent that wants
-    // to host has to know whether the user already approved the host.
-    "agent_host_list",
-    "agent_host_status",
+const READ_TOOLS: [&str; 79] = [
     "app_audit_get",
     "app_bootstrap",
     "app_events",

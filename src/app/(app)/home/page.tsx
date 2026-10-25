@@ -130,7 +130,7 @@ export default function Home() {
     setUiContext({ active_tab: activeTab });
   }, [activeTab]);
 
-  // Agent app-control bridge: the goose agent drives the UI through the `app_*`
+  // Agent app-control bridge: an attached agent drives the UI through the `app_*`
   // MCP tools, which emit `agent-action`. Perform the shell-level action here
   // (navigation + toast) and re-emit page-specific intents for the target page.
   useEffect(() => {
@@ -138,9 +138,9 @@ export default function Home() {
       const action = event.payload;
       switch (action.type) {
         case "navigate":
-          // The agent no longer has a dedicated tab (it lives in an always-on
-          // dock). Ignore a legacy `navigate to agent` so in-flight sessions
-          // don't blank the content area.
+          // `agent` is a settings page, not a view an agent should drive, and
+          // honouring it would yank the user off whatever they were reading.
+          // Ignore it so a stale prompt cannot blank the content area.
           if ((action.tab as string) === "agent") break;
           setActiveTab(action.tab);
           break;
@@ -355,11 +355,12 @@ export default function Home() {
 
       {/* Always-accessible agent dock (desktop only) — overlays the content
           area on the right, toggled by the floating Bot button or Ctrl+Space.
+          It is the outbox of the agent→FmS link (notifications, task count),
+          so it only navigates; it never holds a session.
           `booted` is required as well as `!mobile`: the platform is unknown on
           the prerendered first paint, so without it Android would mount the
-          dock for one commit and its effects would call the `agent_*` commands
-          that only exist in the desktop binary. */}
-      {booted && !mobile && <AgentDock />}
+          dock for one commit and its effects would call desktop-only commands. */}
+      {booted && !mobile && <AgentDock onNavigate={(tab) => setActiveTab(tab as TabId)} />}
 
       {/* Agent `app_notify` toast */}
       {toast && (

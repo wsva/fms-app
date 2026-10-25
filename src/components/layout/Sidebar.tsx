@@ -71,7 +71,8 @@ type NavGroup = {
 
 // Navigation structure with groups. Cross Device holds the multi-device /
 // multi-user coordination pages; Tools keeps the local processing utilities
-// plus the Tasks queue the workflow `human` step and the agent feed.
+// plus the Tasks queue the workflow `human` step and an agent's `todo_add`
+// fill in.
 const navGroups: NavGroup[] = [
   {
     id: "cross-device",
@@ -91,9 +92,10 @@ const navGroups: NavGroup[] = [
     tabs: [
       { id: "workflow", label: "Workflow", icon: Workflow },
       { id: "tasks", label: "Tasks", icon: ListTodo },
-      // The agent's configuration surface. The agent *itself* is the dock, which
-      // is not a tab — it is mounted on every screen so a permission request or
-      // a host approval can never be hidden behind navigation.
+      // The agent's configuration surface: how to attach one, and what it may
+      // call. The dock (Bot button / Ctrl+Space) is not a tab — it is mounted on
+      // every screen because it holds the notes an agent pushed while the user
+      // changed pages.
       { id: "agent", label: "Agent", icon: Bot },
       { id: "simple-words", label: "Simple Words", icon: Type },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },

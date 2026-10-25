@@ -29,7 +29,7 @@ use crate::sync::server::{WebServiceConfig, WebServiceState, WebServiceStatus};
 /// `read_aloud_model_status` lands in `books` and not `models`. Kept in step with
 /// the `mod` list in `mcp/mod.rs`; [`tests::every_tool_has_a_domain`] fails the
 /// build when a new prefix shows up unmapped.
-const DOMAIN_PREFIXES: [(&str, &str); 28] = [
+const DOMAIN_PREFIXES: [(&str, &str); 27] = [
     ("dataset_", "datasets"),
     ("subtitle_", "datasets"),
     ("dictation_", "dictation"),
@@ -48,7 +48,6 @@ const DOMAIN_PREFIXES: [(&str, &str); 28] = [
     ("pc_", "sync"),
     ("web_service_", "sync"),
     ("settings_", "system"),
-    ("agent_host_", "system"),
     ("auth_", "system"),
     ("ocr_", "system"),
     ("log_", "system"),
@@ -234,7 +233,6 @@ fn capabilities() -> Value {
         "workflow_engine": cfg!(feature = "desktop"),
         "ocr": cfg!(feature = "desktop"),
         "screen_capture": cfg!(feature = "desktop"),
-        "agent_dock": cfg!(feature = "desktop"),
         // The readable resources, by uri — the uri template for a dataset layout
         // is included as a template, not a literal uri (see `resources.rs`).
         "mcp_resources": super::resources::uris(),
@@ -309,57 +307,21 @@ pub(crate) fn house_rules() -> Value {
     ])
 }
 
-/// Mode 2 is live with `agent_host_*` (ideas.md §8 step 5). One constant, so
-/// the manual, `/agent.json`, `app_bootstrap` and the Connect card flip together
-/// if hosting is ever withdrawn.
-const HOSTED_MODE_AVAILABLE: bool = true;
-
-/// ideas.md §5.0 item 6: the two paths, spelled as calls. The hosted path is
-/// rendered from the router, not asserted: if this build has no `agent_host_*`
-/// tools, the manual says so rather than advertising a door that is not there.
-fn paths(endpoints: &Value, tools: &[Value]) -> Value {
+/// ideas.md §5.0 item 6: the way in, spelled as calls. There is one door —
+/// attach over MCP and drive the app from your own window. FmS used to offer a
+/// second one (it dialled an agent over ACP and hosted the session in its own
+/// dock); that direction was removed, so nothing here advertises it.
+fn paths(endpoints: &Value) -> Value {
     let mcp = endpoints.get("mcp").and_then(|v| v.as_str()).unwrap_or_default();
-    let has = |name: &str| {
-        tools
-            .iter()
-            .any(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
-    };
-    let hosted_ready = HOSTED_MODE_AVAILABLE
-        && has("agent_host_list")
-        && has("agent_host_register")
-        && has("agent_host_connect");
-    let hosted_how = if hosted_ready {
-        "The user registers a host once; the dock then drives it and FmS shows the session. \
-         `agent_host_list` shows the records and, per host, whether dialling it needs the user's \
-         approval. `agent_host_register` adds one: kind \"ws\" for a server the user runs (url \
-         required), kind \"stdio\" for a program FmS spawns (program required, args/env/cwd \
-         optional). `agent_host_connect` opens the session; a stdio host — or a ws host that is not \
-         loopback — is refused until the user answers FmS's confirm dialog, so when that refusal \
-         arrives do not retry blindly: it names the host, and the user approves it in the Connect \
-         card. `agent_host_status` reports the live session (transport, session_id, and whether \
-         fms-app's tools were registered on it) and `agent_host_disconnect` ends it. One host runs \
-         at a time."
-            .to_string()
-    } else {
-        "Not reachable from MCP in this build: this router has no agent_host_* tools, so the dock \
-         only hosts a `goose serve` the user configured by hand."
-            .to_string()
-    };
     json!({
-        "attach_only": {
-            "name": "Mode 1 — attach (your own window)",
+        "attach": {
+            "name": "Attach (your own window)",
             "available": true,
             "how": format!(
                 "Register {} as a streamable-HTTP MCP server in your own client. No credentials on loopback. Every tool works, including the app_* ones that drive the FmS window. A client that speaks stdio MCP only points at this app's executable with `--mcp-bridge` instead — same tools, proxied.",
                 mcp
             ),
-            "trade_off": "FmS sees none of your reasoning: no streamed text, no thoughts, no tool-call cards, no plan, no permission dialog. The user watches your window, not the dock.",
-        },
-        "hosted": {
-            "name": "Mode 2 — hosted in the FmS dock",
-            "available": hosted_ready,
-            "how": hosted_how,
-            "trade_off": "FmS gets your streaming text, thoughts, tool calls and plan, plus its own permission card — that is the point of hosting. The cost is that a hosted session lives inside the app: closing the dock ends it, and a stdio host is a process FmS starts and stops.",
+            "trade_off": "FmS sees none of your reasoning: no streamed text, no thoughts, no tool-call cards, no plan, no permission dialog. The user watches your window — so say what you did with app_notify, and use todo_add when you need the user to act.",
         },
     })
 }
@@ -501,7 +463,7 @@ pub(crate) fn render_json(app: &AppHandle, zone: &str) -> Value {
             "domains": grouped_domains(&tools),
             "index": tools,
         },
-        "paths": paths(&endpoints, &tools),
+        "paths": paths(&endpoints),
         "resources": resources_index(),
         "prompts": prompts_index(),
         "house_rules": house_rules(),
@@ -741,9 +703,9 @@ pub(crate) fn render_markdown_from(body: &Value) -> String {
         out.push_str("\n");
     }
 
-    // 6. the two paths
+    // 6. the way in
     out.push_str("## Connecting\n\n");
-    for key in ["attach_only", "hosted"] {
+    for key in ["attach"] {
         let path = match body.pointer("/paths").and_then(|p| p.get(key)) {
             Some(p) => p,
             None => continue,

@@ -3,7 +3,7 @@
 //
 // Each dictation pipeline step maps to a typed Tauri command twin (the very
 // command this page invokes and the MCP tool wraps), so clicking a graph node's
-// Run button performs the identical core work a goose agent would drive over
+// Run button performs the identical core work an attached agent would drive over
 // `/mcp`. The page pairs this with the `workflow_*` engine command twins
 // (advance -> run -> record) so a run's `state.json` stays in sync.
 //

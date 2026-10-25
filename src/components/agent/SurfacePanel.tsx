@@ -4,9 +4,9 @@ import { useEffect, useState } from "react";
 import { saveSurface, useAgentControl } from "@/lib/agent/control";
 import { btnGhost, hint, inputCls } from "./styles";
 
-/** Tab 3 — the two things here that are still settings: the policy mode that
- *  decides what an attached agent may call, whether the MCP surface is served at
- *  all, and whether the dock connects itself at startup.
+/** Tab 2 — the two things here that are still settings: the policy mode that
+ *  decides what an attached agent may call, and whether the MCP surface is
+ *  served at all.
  *
  *  These live on a page with its own Save rather than in Settings because an
  *  agent under `enforce` is refused the ability to change them: the surface that
@@ -16,7 +16,6 @@ export default function SurfacePanel() {
   const [draft, setDraft] = useState<{
     mcp_policy: string;
     mcp_enabled: boolean;
-    goose_acp_enabled: boolean;
   } | null>(null);
   const [saved, setSaved] = useState(false);
 
@@ -27,7 +26,6 @@ export default function SurfacePanel() {
     setDraft({
       mcp_policy: surface.mcp_policy,
       mcp_enabled: surface.mcp_enabled,
-      goose_acp_enabled: surface.goose_acp_enabled,
     });
   }, [surface]);
 
@@ -35,8 +33,7 @@ export default function SurfacePanel() {
     !!draft &&
     !!surface &&
     (draft.mcp_policy !== surface.mcp_policy ||
-      draft.mcp_enabled !== surface.mcp_enabled ||
-      draft.goose_acp_enabled !== surface.goose_acp_enabled);
+      draft.mcp_enabled !== surface.mcp_enabled);
 
   const patch = (next: Partial<NonNullable<typeof draft>>) => {
     setDraft((prev) => (prev ? { ...prev, ...next } : prev));
@@ -93,22 +90,6 @@ export default function SurfacePanel() {
           <span className="font-medium">Expose the MCP server (agents)</span>
           <span className={`block ${hint}`}>
             Serves <code>/mcp</code> and the generated <code>/agent.md</code> manual. Saving restarts the local web service, because the routes are chosen when the router is built: an agent attached right now loses its tools until the restart returns, and <code>/api/v1/status</code> keeps answering with <code>mcp_enabled: false</code> so a peer can tell why <code>/mcp</code> 404s.
-          </span>
-        </span>
-      </label>
-
-      <label className="flex items-start gap-2 cursor-pointer">
-        <input
-          type="checkbox"
-          className="w-4 h-4 mt-0.5"
-          checked={draft?.goose_acp_enabled ?? false}
-          onChange={(e) => patch({ goose_acp_enabled: e.target.checked })}
-          disabled={!draft}
-        />
-        <span>
-          <span className="font-medium">Connect the dock automatically</span>
-          <span className={`block ${hint}`}>
-            On: the dock dials the host picked on the Hosting tab as soon as FmS starts, so it is already live the first time you open it. Off: it stays disconnected until you press <em>Connect</em> in the panel. Either way the dock itself is always available from the Bot button or Ctrl+Space — this switch only decides whether it connects on its own. The dock is the second way in: it attaches FmS to an agent host, which is the only window where FmS can show an agent&apos;s reasoning, tool calls and permission requests.
           </span>
         </span>
       </label>

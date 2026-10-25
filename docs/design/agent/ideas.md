@@ -6,6 +6,15 @@ This file collects **proposals** for FmS's agent-facing surface. It is not a spe
 - ⚠️ partial — the mechanism exists but is incomplete or undocumented to agents
 - 💡 proposed, not built
 
+> **2026-10-25 — the FmS → agent direction was removed.** FmS no longer dials an
+> agent: `ai/agent_acp.rs`, the `agent_*` and `agent_host_*` commands and MCP
+> tools, the Hosting tab, the approval card and the dock's transcript are gone.
+> What remains is the **attach** direction — an agent pointing at FmS's `/mcp`
+> and running in its own window — plus the dock's outbox (`app_notify` notes and
+> the agent task count). Everything below that describes mode 2, `agent_host_*`,
+> `goose_acp_*` or the ACP client is kept as the record of what was considered
+> and **is not built**; do not re-implement it from this text.
+
 **The scenario being designed for:** a user who is not an AI/agent expert installs some agent product — goose, Claude Code, Codex, OpenCode, WorkBuddy, something that does not exist yet — and types *"connect to FmS and give me a quiz on my due cards"*. They have not read a manual. They do not know what a port number is. Nobody configures anything.
 
 Three commitments follow, and they are the whole document:
@@ -33,10 +42,9 @@ Then the user makes exactly one choice, which is a *rendering* choice, not a con
 | ✅ Open pre-auth probes | [src-tauri/src/sync/rest.rs](../../../src-tauri/src/sync/rest.rs) `status`, `cluster` | `GET /api/v1/status` → `version, app_name, dataset_count, protocol_version, role, cluster_id, machine`; reachable even from the untrusted zone (`zone_guard`) |
 | ✅ Trust zones | `sync/server.rs::zone_guard`, [src-tauri/src/sync/pairing.rs](../../../src-tauri/src/sync/pairing.rs) | Loopback + local `Host` header ⇒ Trusted, **no credentials** — that is the agent path. Tailscale CGNAT likewise trusted |
 | ✅ Human-readable index | `sync/server.rs::index_handler`, `MCP_SECTION_HTML` | The root page already lists endpoints and the MCP tool table — an agent with web fetch can read it today, as HTML prose |
-| ⚠️ ACP client (the dock's backend) | [src-tauri/src/ai/agent_acp.rs](../../../src-tauri/src/ai/agent_acp.rs) `agent_connect` | **WebSocket only**, dialed from `AppSettings.goose_acp_url` + `goose_acp_secret`; registers our MCP URL in `session/new` **only if** `agentCapabilities.mcpCapabilities.http` — otherwise the agent is handed `mcpServers: []` and no tools |
 | ✅ App-control tools | [src-tauri/src/mcp/system.rs](../../../src-tauri/src/mcp/system.rs) `app_navigate`, `app_open_review`, `app_start_dictation`, `app_notify`, `app_get_ui_state` | Emit `agent-action`; performed by the shell bridge in [src/app/(app)/home/page.tsx](../../../src/app/(app)/home/page.tsx) |
-| ✅ Dock UI | [src/components/agent/AgentDock.tsx](../../../src/components/agent/AgentDock.tsx) | Overlay dock, draggable FAB, Ctrl+Space, auto-open on permission, `agent-prefill` extension point. Consumes only `agent-*` events — already agent-neutral |
-| ✅ The Connect card | [src/components/agent/AgentPage.tsx](../../../src/components/agent/AgentPage.tsx) → Connect tab | Status half (bound port, zone, dock state), the pointer sentence, the inline block, and copy-only per-product lines. It replaced the three hand-filled `goose_acp_*` fields; one `goose_acp_enabled` checkbox survives on the Surface tab |
+| ✅ Dock UI | [src/components/agent/AgentDock.tsx](../../../src/components/agent/AgentDock.tsx) | Overlay dock, draggable FAB, Ctrl+Space. It holds what an agent pushed at the user — `app_notify` notes, the open-task count — and navigates; it holds no session, because the agent runs in its own window |
+| ✅ The Connect card | [src/components/agent/AgentPage.tsx](../../../src/components/agent/AgentPage.tsx) → Connect tab | Status half (bound port, zone, `mcp_enabled`), the pointer sentence, the inline block, and copy-only per-product lines. The Surface tab keeps only `mcp_policy` and `mcp_enabled` |
 | ✅ Config write path for agents | `mcp/system.rs::settings_set` | A **patch**, not a whole-object write: only the fields present are touched, so a partial payload is the correct payload. Credentials are write-only (`***` means "leave it alone"), and `settings_get` redacts every secret in `SECRET_FIELDS` while keeping `has_<field>` discoverable |
 | ✅ Recipe / prompt assets | [goose_recipe/](./goose_recipe/), [prompt/](./prompt/) | Goose YAML envelope + portable `instructions:` prose over `dataset_*` tools |
 
@@ -44,9 +52,9 @@ Then the user makes exactly one choice, which is a *rendering* choice, not a con
 
 Everything the *capability* track needed is built (see [control.md](./control.md)); what remains is attachment:
 
-- ⚠️➜💡 **Mode 2 (hosted dock) — `agent_host_register` does not exist.** The dock dials a user-started `goose serve` over WebSocket and nothing else, so hosting an arbitrary ACP agent still needs the transport split (`ws | stdio`) plus a host record and a trust dialog (§3, §8 step 5).
-- 💡 **No stdio↔HTTP bridge.** `rmcp` is compiled without `transport-io` ([src-tauri/Cargo.toml L158](../../../src-tauri/Cargo.toml#L155-L165)), and the app serves MCP over Streamable HTTP only. An agent that speaks stdio MCP — which includes several CLI products, and every ACP agent that does not advertise `mcpCapabilities.http` — therefore gets no tools at all. A thin proxy fixes both classes at once, which is why it is step 5a rather than per-product work.
-- ⚠️ **A single `goose_acp_enabled` checkbox** is the only dialect-setting left on the Settings page; the host list in step 5 removes it.
+- ❌ **Mode 2 (hosted dock) — withdrawn.** It was built (a WebSocket ACP client, `agent_connect`, host records, a permission card, a Hosting tab) and then removed: the cost of owning a second product's conversation — transcription, permission semantics, a trust rule for FmS dialling *out* — was not repaid by what attach mode already gives. §4's comparison table is kept as the record of the trade-off.
+- 💡 **No stdio↔HTTP bridge.** `rmcp` is compiled without `transport-io` ([src-tauri/Cargo.toml L158](../../../src-tauri/Cargo.toml#L155-L165)), and the app serves MCP over Streamable HTTP only. An agent that speaks stdio MCP — which includes several CLI products, and every ACP agent that does not advertise `mcpCapabilities.http` — therefore gets no tools at all. A thin proxy fixes both classes at once, which is why it ranks ahead of any per-product work.
+- ✅ **Nothing left to configure.** The last ACP dial field is gone with the client; Settings holds no agent address at all.
 
 ---
 
@@ -60,12 +68,13 @@ Today the human is the integration point: they must know the URL, the port, the 
    *"Read http://127.0.0.1:35711/agent.md and connect to FmS as it instructs."*
    The address on that card is the **live bound port**, not a guess — which is the whole reason copy-paste beats probing (§6).
 2. Agent `GET`s the manual — generated, live, from the running app.
-3. Manual gives the agent its MCP URL, its trust zone echoed back, the tool index, and **both paths**:
-   - *attach only* → "you have your own UI; here is your MCP config for your product." Done. Mode 1.
-   - *host in the dock* → "call `agent_host_register` with your ACP endpoint (or your launch command), then tell the user to press the Bot button." Mode 2.
-4. In mode 2 the agent calls `agent_host_register`; FmS stores the record, applies the trust rule (§3), and `agent_connect` dials it. The dock then renders *that* agent — same `agent-*` events, same permission cards.
+3. Manual gives the agent its MCP URL, its trust zone echoed back, and the tool index. There is **one path**: *attach* — "you have your own UI; here is your MCP config for your product." Done.
 
-**The config record** (replaces the three `goose_acp_*` scalars), one per agent:
+The *host in the dock* path (steps 4-5 of the original plan: `agent_host_register`, an ACP endpoint or launch command, FmS dialling out and rendering that agent's stream) was built and **removed** — see the banner. Nothing below in this section is implemented.
+
+**The config record** (this is what `goose_acp_*` aimed to become, one per agent) is deleted with the client: `settings.rs` holds no dial target, no host list and no transport.
+
+The proposed shape, kept for the record:
 
 ```
 { id, display_name,
@@ -76,11 +85,11 @@ Today the human is the integration point: they must know the URL, the port, the 
   enabled, last_session }
 ```
 
-Naming: `goose_acp_*` → `agent_host_*`. Keep serde aliases so old `settings.json` still parses — the same technique `pc_token` uses ("Kept only so old persisted settings JSON keeps parsing").
+The naming migration (`goose_acp_*` → `agent_host_*`) is moot: both sets are gone from `settings.json`, and an old file still parses because serde ignores unknown fields.
 
-### 2.1 Resolve the two-representation ambiguity first
+### 2.1 The two-representation ambiguity (resolved by deletion)
 
-`AppSettings` carries `goose_acp_*` **and** `GlobalSettings` carries the same three fields; `GlobalSettings::from_settings(&AppSettings)` derives the projection, and `agent_connect` reads `AppSettings` — while the Settings UI edits the *projection*. So there are two copies of a dial target with one writer and one reader that disagree depending on save order. Whatever gets built here must declare **`AppSettings` as the authority the dialer reads**, and route writes through the new scoped command rather than through raw `settings_set`. This is a prerequisite, not a cleanup.
+`AppSettings` carried `goose_acp_*` **and** `GlobalSettings` carried the same three fields, with one writer and one reader that could disagree depending on save order. The removal deleted both copies, so the ambiguity cannot come back: there is nothing left to dial. If a dial target is ever reintroduced, declare **`AppSettings` as the authority** and route writes through a scoped command rather than raw `settings_set`.
 
 ### 2.2 New commands and their MCP twins
 
@@ -90,16 +99,16 @@ Per the standing parity rule in [AGENTS.md](../../../AGENTS.md) ("Adding a new T
 |---|---|
 | 💡 `app_bootstrap` | Everything an agent needs in one call: identity, version, real endpoints, caller's zone, `capabilities` from `cfg!(feature = …)`, tools-by-domain, resource/prompt index, recommended first calls, current workspace + UI state |
 | 💡 `agent_manual_get` | The same body as `/agent.md`, for an agent already inside MCP |
-| 💡 `agent_host_register` / `_connect` / `_disconnect` / `_status` / `_unregister` | The mode-2 lifecycle, replacing raw `settings_set` writes of the dial target |
-| 💡 `agent_list` | Which agents are attached, which one hosts the dock — feeds the Settings status panel and answers "how do I get back to my own window?" |
+| ❌ `agent_host_register` / `_connect` / `_disconnect` / `_status` / `_unregister` | The mode-2 lifecycle. Built, then removed with the ACP client |
+| 💡 `agent_list` | Which agents are attached, and which one is driving — feeds the Connect status panel and answers "how do I get back to my own window?" |
 
-Why a scoped command instead of documenting `goose_acp_url` in `settings_set`'s description: `settings_set` is a **whole-object read-modify-write**, so a partial payload fails on missing fields, and a scoped command is the only place the trust rule (§3) can be enforced. Also redact secrets from `settings_get`.
+Why a scoped command rather than documenting a dial target in `settings_set`'s description (the reasoning that outlived the feature): `settings_set` is a **patch** today, but a scoped command is still the only place a trust rule could be enforced.
 
 ---
 
 ## 3. Trust: the one thing that must not be zero-config
 
-Data writes are recoverable (trash, not confirm — agent-friendly §3). But `agent_host_register` makes FmS **dial an arbitrary address or spawn an arbitrary process**. That is a security boundary, and `zone_guard`'s "loopback is the agent path" posture covers agents reaching *in*, not FmS reaching *out*.
+Data writes are recoverable (trash, not confirm — agent-friendly §3). The rule below was written for `agent_host_register`, which made FmS **dial an arbitrary address or spawn an arbitrary process** — the one thing that is genuinely not recoverable, and one reason the direction was dropped. It is recorded here because the same reasoning would apply to any future outbound link.
 
 Proposed rule, deliberately a partial exception to "don't block agents":
 
@@ -117,38 +126,40 @@ Keep the interruption to one click and make the refusal actionable ("approve in 
 
 ## 4. Mode 1 vs Mode 2 — a rendering choice, surfaced in the UI
 
-| | Mode 1 — attach (agent's own window) | Mode 2 — hosted (FmS dock) |
+> Historical: mode 2 was built and then removed (see the banner). The table is
+> kept for the trade-off it records, not as a plan.
+
+| | Mode 1 — attach (agent's own window) | Mode 2 — hosted (FmS dock) — *removed* |
 |---|---|---|
 | User's UI | the product's native one (plan mode, diffs, slash commands) | the dock, over the page they were already on |
 | FmS's role | MCP server only | MCP server **+** ACP client |
 | `app_*` control tools | ✅ work — `agent-action` still navigates/toasts | ✅ work |
 | Streaming text, thoughts, tool-call cards, plans | ❌ invisible to FmS | ✅ `agent-message-chunk` / `agent-thought` / `agent-tool-call` / `agent-tool-update` / `agent-plan` |
-| FmS-side permission card + `auto_approve_option` policy | ❌ not exercised | ✅ [agent_acp.rs L562-592](../../../src-tauri/src/ai/agent_acp.rs#L562-L592) |
+| FmS-side permission card + `auto_approve_option` policy | ❌ not exercised | ✅ existed only in the ACP client, deleted with it |
 | Voice prompt | ❌ | ✅ `VoiceMicButton` |
 | Requires the agent to speak ACP | no | **yes** — via stdio or WS |
 | Conversation history lives | in the product | in the product's session; the dock transcript is in-memory `useState` only |
 
-Mode 2 **requires** the transport generalization already identified: `agent_connect` is WebSocket-only (`tokio-tungstenite`), while Claude Code / Codex / OpenCode ACP adapters are spawned stdio processes. Split the transport setup (currently [L195-L209](../../../src-tauri/src/ai/agent_acp.rs#L195-L209)) from the `initialize` → `session/new` sequence — everything after L248 is already transport-agnostic.
+Mode 2 would have **required** a transport generalization the deleted client never had: it was WebSocket-only (`tokio-tungstenite`, also dropped), while Claude Code / Codex / OpenCode ACP adapters are spawned stdio processes. That work is not scheduled.
 
 And the blocker shared by *both* modes and both transports: `rmcp` is compiled without `transport-io` ([src-tauri/Cargo.toml L158](../../../src-tauri/Cargo.toml#L155-L165)), so when an agent does **not** advertise `mcpCapabilities.http` we hand it `mcpServers: []` and it gets no tools at all. A thin stdio↔HTTP bridge sidecar fixes it once for every product. This is worth doing before any per-product work, since it silently degrades mode 1 today.
 
 ### 4.1 The Connect page — copy out, never configure in
 
-The page has exactly two jobs: **let the user copy what an agent needs**, and **show what is currently connected**. It contains no address input. The three `goose_acp_*` fields and the "Test connection" button are deleted.
+The page has exactly two jobs: **let the user copy what an agent needs**, and **show whether the surface is answering**. It contains no address input, and no dial target exists in settings any more.
 
 **The copy half — two payloads, because agents differ in what they can do with one line:**
 
-- **The pointer** (default): `Read http://127.0.0.1:<live port>/agent.md and connect to FmS as it instructs.` One line, works with any agent that has web fetch or a shell, and the manual then teaches everything — including mode 2.
-- **The inline block** (fallback): a self-contained snippet — MCP URL + transport + the mode-2 instruction + the recommended first calls — for agents that **can attach an MCP server but cannot fetch a URL**. Without this the scenario fails silently for that entire class, so ship both, not just the pretty one-liner.
+- **The pointer** (default): `Read http://127.0.0.1:<live port>/agent.md and connect to FmS as it instructs.` One line, works with any agent that has web fetch or a shell, and the manual then teaches everything.
+- **The inline block** (fallback): a self-contained snippet — MCP URL + transport + the recommended first calls — for agents that **can attach an MCP server but cannot fetch a URL**. Without this the scenario fails silently for that entire class, so ship both, not just the pretty one-liner.
 - Optional convenience lines per known product: `claude mcp add --transport http fms <url>`, a Codex `[mcp_servers.fms]` TOML block, an OpenCode `opencode.json` block, a WorkBuddy `~/.workbuddy/mcp.json` block (a plain `url` entry — its loader folds every `url` entry onto HTTP, so the stdio bridge would only add a process) with the trust step in a note. Displayed for copy only — FmS never writes into another product's config files (§6).
 
 **The status half:**
 
-- attached agents — name, transport, capabilities **learned at `initialize`** (never typed), last session
-- which agent hosts the dock, with a **one-gesture switch**: *"Shown in: FmS dock ▾ / Claude Code window"* → `agent_host_disconnect` / `agent_host_register`
-- no address input anywhere; `default_goose_acp_url` survives only as a fallback probe
+- **The status half** is now: is the web service answering, on which port, in which trust zone, and is the MCP surface switched on. There is no "which agent is attached" to report — agents attach themselves and FmS is not told; the closest read is `app_audit_get`, which shows the calls that actually arrived.
+- ❌ ~~attached agents — name, transport, capabilities learned at `initialize`, last session~~ and ~~"which agent hosts the dock" with a one-gesture switch~~ — both were mode 2, both are gone. `default_goose_acp_url` went with them: nothing probes.
 
-**Placement: a Settings section first, not a new tab.** The section already exists ([SettingsPage.tsx "Agent (Goose ACP)"](../../../src/components/settings/SettingsPage.tsx) ~L692-768), is already `!mobile`-gated, and Settings already has the collapsible section sidebar for navigating it. Promoting to a first-class tab costs a Sidebar `TabId`, a shell mount, and `app_navigate`'s `VALID` array (18 → 19) plus its description string — for no functional gain on day one. Note also that once *any* agent is connected, it can bring the user to the card itself via `app_navigate { tab: "settings" }`, so the "user can't find the page" problem largely solves itself after first connect. Promote to a tab only if the card must be reachable mid-workflow before a connection exists.
+**Placement: its own tab under Tools → Agent.** It started as a Settings section ("Agent (Goose ACP)") and outgrew it once the dial fields went away: what is left is two panels with their own Save, and a Settings section that only edits `mcp_policy` would sit oddly beside the pages, models and log sections that own their own state. The Agent page is `!mobile`-gated like the rest of the agent surface, and `app_navigate` refuses to drive it (it is configuration, not a view).
 
 ---
 
@@ -165,7 +176,7 @@ The shared body, **generated** and never `include_str!`, so it cannot state a to
 3. the caller's own trust zone, echoed — "you are loopback, no credentials needed"
 4. `capabilities`: which feature-gated tool families exist in this build
 5. the tool index: count per domain + names, and the recommended first five calls
-6. **the two paths**, spelled as calls: attach-only, and `agent_host_register` for the dock
+6. **the way in**, spelled as a call: attach over MCP. (A second door — FmS dialling an agent — was removed; nothing advertises it.)
 7. the rules that make an agent correct here: datasets are uuid-keyed, prefer trash over destructive confirms, workflow `verify:`/`adopt:` are the per-step read path, `dataset_audit` is subject-only, some tools are desktop-only
 8. error conventions: every error names the valid set and the next call — the `app_navigate` error string already does this and is the model
 9. MCP `resources/list` + `prompts/list` index
@@ -206,7 +217,7 @@ What survives:
 
 - Two distinct preconditions, not one: *can attach an MCP server* and *can fetch a URL*. An agent with the first but not the second is exactly why the Connect card carries the inline block alongside the pointer sentence (§4.1) — otherwise the scenario fails silently for that class. A product with **neither** — a closed GUI, no extension point — cannot be taught; that is a fact about the product, not a gap in this design. The floor for it is deep links, clipboard handoff, and exported prompt files. Declining is a decision.
 - Products with no ACP support are mode 1 forever. Correct outcome, no work.
-- **Rule for future adapters: only build one for a protocol with two or more independent implementations** (ACP, MCP qualify; a single vendor's private SDK does not). Otherwise each product's quirks leak into `agent_acp.rs` as N branches, which is the treadmill C1 exists to avoid.
+- **Rule for future adapters: only build one for a protocol with two or more independent implementations** (ACP, MCP qualified; a single vendor's private SDK does not). The ACP adapter is the worked example of the cost: each product's quirks leak in as N branches, which is the treadmill C1 exists to avoid — and that is what made deleting it the cheaper move.
 - A PTY terminal panel (xterm.js + Rust pty) is the catch-all renderer for TUI-only products: zero per-product code, full native UX, no structured events. Separate decision, recorded here so it is not re-litigated later.
 
 ---
@@ -217,11 +228,11 @@ What survives:
 2. ✅ Preconditions: secrets redacted from `settings_get`; the card, the manual and `app_version` all report the **real bound port**.
 3. ✅ `app_bootstrap` + `initialize` `instructions` — the same generated body, third rendering.
 4. ✅ MCP **resources** (domain docs) and **prompts** (recipes) — which ended the goose-envelope lock-in.
-5. 💡 `agent_host_*` commands + profile list + transport generalization (`stdio | ws`), **and the stdio↔HTTP bridge first** — without the bridge, a hosted stdio agent is given an empty `mcpServers` and can touch nothing, which is a worse first impression than no dock. Delete the last `goose_acp_enabled` field; the card's config inputs become the status half.
-6. 💡 Trust confirm dialog for stdio spawn and non-loopback endpoints.
+5. ❌ ~~`agent_host_*` commands + profile list + transport generalization (`stdio | ws`)~~ — **built and then removed.** What survived from it is the stdio↔HTTP bridge question immediately below, which is about *inbound* attachment and stands on its own.
+6. ❌ ~~Trust confirm dialog for stdio spawn and non-loopback endpoints~~ — with nothing dialling out, there is nothing to confirm. A future stdio↔HTTP *bridge* would spawn a process on the user's behalf and would need this again.
 7. Deferred: mDNS/DNS-SD, PTY panel, concurrent multi-agent dock sessions — and **permanently dropped**: PATH probing and writing other products' config files.
 
-Decide early in step 5: **one active dock host** (simple; the dock is one panel) or concurrent `HashMap<agent_id, Session>` (the current `AcpClientState` holds a single `session_id: Mutex<Option<String>>`). Prefer one active host and make switching cheap — multi-session is a different product.
+The dock question that died with mode 2 (one active host vs concurrent `HashMap<agent_id, Session>`) is closed: the dock holds no session at all now. If a hosted direction ever returns, prefer one active host and make switching cheap — multi-session is a different product.
 
 This is the **attachment** track. The **capability** track — what the agent can do once connected — is sequenced separately in [control.md](./control.md) §8. The two tracks share exactly one hard dependency: control.md's step 2 (`/mcp` policy tiers + redacting secrets from `settings_get`) must land before attach mode is advertised to third-party agents, because §3's trust rule only governs what FmS dials *out* to, not what an attached agent may do *in*.
 

@@ -49,7 +49,7 @@ import type { StepVerdictInfo } from "./WorkflowGraph";
 import type { BookMeta } from "@/lib/read/types";
 import type { CardDatasetSummary } from "@/lib/types";
 import {
-  RefreshCw, Workflow as WorkflowIcon, Play, RotateCcw, SkipForward, Check, Copy, Send, Plus,
+  RefreshCw, Workflow as WorkflowIcon, Play, RotateCcw, SkipForward, Check, Copy, Plus,
   FileJson, Save, Eye, Pencil, FolderOpen, Trash2, X, ListChecks,
   Headphones, BookOpen, Layers, AlertTriangle, ChevronDown, ChevronRight, Info,
   type LucideIcon,
@@ -998,16 +998,6 @@ export default function WorkflowPage() {
     return text;
   };
 
-  const sendToDock = async () => {
-    if (!prompt.trim() || !isTauri()) return;
-    try {
-      await emit("agent-prefill", { text: prompt });
-      setNotice("Prompt sent to the Agent Dock — open it (Ctrl+Space) and send when connected.");
-    } catch (e) {
-      setNotice(`Send failed: ${String(e)}`);
-    }
-  };
-
   const copyPrompt = async () => {
     try {
       await navigator.clipboard.writeText(prompt);
@@ -1518,13 +1508,12 @@ export default function WorkflowPage() {
                     <>
                       <textarea className="w-full h-40 text-[11px] font-mono p-2 rounded-md bg-bg-body border border-border-light text-text-primary focus:border-accent outline-none resize-none" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
                       <div className="flex gap-2">
-                        <button className={`${btnSmPrimary} inline-flex items-center gap-1 flex-1 justify-center`} onClick={sendToDock}><Send size={14} /> Send to Agent Dock</button>
                         <button className={`${btnSmSecondary} inline-flex items-center gap-1`} onClick={copyPrompt}><Copy size={14} /> Copy</button>
                       </div>
                     </>
                   ) : (
                     <p className="text-xs text-text-tertiary leading-relaxed">
-                      Generate a driver prompt from the current graph for goose to run the same steps via MCP. In-app Run and the agent share one implementation.
+                      Generate a driver prompt from the current graph for an attached agent to run the same steps via MCP. In-app Run and the agent share one implementation.
                     </p>
                   )}
                 </section>

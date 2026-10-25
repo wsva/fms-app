@@ -13,7 +13,7 @@ Status legend, as in `ideas.md`: ✅ built · ⚠️ partial · 💡 proposed.
 | Plane | Size | Where |
 |---|---|---|
 | **Data / logic** | ~230 tools | [src-tauri/src/mcp/](../../../src-tauri/src/mcp) — `datasets`, `dictation`, `cards`, `books`, `models`, `ai`, `wiki`, `sync`, `system`, `workflow`, `ui`, `todo` |
-| **UI control** | 2 generic tools + 6 `app_*` verbs | [mcp/ui.rs](../../../src-tauri/src/mcp/ui.rs) `ui_list_actions` / `ui_invoke_action` over the registry the pages publish; [mcp/system.rs](../../../src-tauri/src/mcp/system.rs) `app_navigate`, `app_open_review`, `app_start_dictation`, `app_notify`, `app_get_ui_state`, `app_prefill_prompt` |
+| **UI control** | 2 generic tools + 5 `app_*` verbs | [mcp/ui.rs](../../../src-tauri/src/mcp/ui.rs) `ui_list_actions` / `ui_invoke_action` over the registry the pages publish; [mcp/system.rs](../../../src-tauri/src/mcp/system.rs) `app_navigate`, `app_open_review`, `app_start_dictation`, `app_notify`, `app_get_ui_state` |
 
 The `ui_*` pair removes the "one backend release per button" problem: a page registers its actions at mount (`agent_report_ui_actions`), `ui_invoke_action` drives one through the same `agent-action` channel, and `agent_report_action_result` carries the outcome back so the tool returns it instead of guessing. The hand-written `app_*` verbs remain for the intents that predate the registry. For an exact count and name list, read `/agent.md` — it is generated from the live router, so any number written in prose (including this one) is a snapshot.
 
@@ -34,7 +34,7 @@ The bridge itself already exists and is agent-neutral: the `app_*` tools `emit("
 
 ### 2.1 Navigation and intents — ✅ / ❌
 
-`app_navigate` covers the full tab set and its refusal is already the house pattern for actionable errors (`"unknown tab '{}'. Valid tabs: …"`, plus the special case explaining that the agent has no tab because it lives in a dock). Beyond that there are exactly three intents, each hand-coded with its own param struct. There is no generic "press this control", no way to set a field, no way to read what a control would do.
+`app_navigate` covers the full tab set and its refusal is already the house pattern for actionable errors (`"unknown tab '{}'. Valid tabs: …"`, plus the special case explaining that `agent` is a configuration page and not a view an agent should drive). Beyond that there are exactly three intents, each hand-coded with its own param struct. There is no generic "press this control", no way to set a field, no way to read what a control would do.
 
 ### 2.2 Models — ✅ desktop
 
@@ -73,7 +73,7 @@ One tool per control is the wrong shape: 18 pages × dozens of controls, and eve
 **The pattern already existed twice in this codebase**, so this was an extension of a house idiom rather than an invention:
 
 1. `step-ops.ts` — `KNOWN_COMMANDS` + `getStepOp` map a step id to a command, args and form fields. A frontend registry of executable actions, already used to render a picker.
-2. `agent-prefill` — the UI→agent direction. [WorkflowPage.tsx](../../../src/components/tools/WorkflowPage.tsx) `sendToDock` emits it (L993-1000) to hand a generated prompt to the dock, which prefills its composer.
+2. `agent-prefill` — the UI→agent direction that existed when FmS still dialled an agent: WorkflowPage emitted it to hand a generated prompt to the dock's composer. Both the event and the ACP client behind it were removed on 2026-10-25; the lesson that outlived it is that a *named intent on an event* is a cheaper seam than a command per button, which is what the registry below generalises.
 
 **Implemented shape:**
 
@@ -136,7 +136,7 @@ The dock no longer hardcodes `activeDatasetUuid`: [src/lib/agent/ui-context.ts](
 
 This is the caveat that had to land *with* full app control, not after it. It did.
 
-**What the problem was:** `sync/server.rs::zone_guard` treats loopback (with a local `Host` header) as **Trusted with no credentials at all** — `AuthContext::trusted()`, documented as *"this is the agent path"*. Meanwhile FmS's only approval policy, `ai/agent_acp.rs::auto_approve_option` (the seven-word destructive list `delete|remove|clear|drop|revoke|reset|rebuild`, preferring `allow_once`/`allow_always`), lives **in the ACP client** and therefore only runs in dock mode. A third-party agent in attach mode bypassed it completely — so "control all aspects" from attach mode used to mean *any local process can delete datasets*. A trusted network position is not the same claim as "may destroy".
+**What the problem was:** `sync/server.rs::zone_guard` treats loopback (with a local `Host` header) as **Trusted with no credentials at all** — `AuthContext::trusted()`, documented as *"this is the agent path"*. Meanwhile FmS's only approval policy lived **in the ACP client** (the seven-word destructive list `delete|remove|clear|drop|revoke|reset|rebuild`, preferring `allow_once`/`allow_always`) and therefore only ran in dock mode — so a third-party agent in attach mode bypassed it completely, and "control all aspects" from attach mode used to mean *any local process can delete datasets*. A trusted network position is not the same claim as "may destroy". (The ACP client was removed on 2026-10-25; the policy below lives on `/mcp` and was the part worth keeping.)
 
 **What landed** ([mcp/policy.rs](../../../src-tauri/src/mcp/policy.rs)):
 
@@ -144,13 +144,13 @@ This is the caveat that had to land *with* full app control, not after it. It di
 - Two modes: `permissive` (the default — classify and journal, deny nothing) and `enforce`, which refuses the destructive and human-handoff tiers and additionally refuses a `settings_set` that would loosen `mcp_policy`.
 - The undo loop is closed: `app_trash_list` + `app_restore` over the app trash, and the trash-backed deletes return `trashed_to` — which is what makes the permissive default defensible.
 - Every call is journalled in `mcp_audit`; `app_audit_get` reads it back.
-- ⚠️ Still global, not per-agent: the mode is one setting. Per-agent tiers stored on a host record arrive with hosted mode (`ideas.md` §8 step 5).
+- ⚠️ Still global, not per-agent: the mode is one setting. The per-agent tier idea was going to ride on the hosted-mode host record; with that removed (`ideas.md`), one global mode is the whole of it.
 
 ---
 
 ## 7. Other ideas, small and high-leverage
 
-- ✅ **`app_prefill_prompt { text, send? }`** — exposes the existing `agent-prefill` event as a tool, so a third-party agent can queue work *into* the dock. `send: true` requires a connected dock agent and fails actionably otherwise, so the text is still loaded for the user.
+- ❌ ~~`app_prefill_prompt { text, send? }`~~ — it queued work *into* the dock, so it went with the ACP client. `app_notify` is the remaining push channel: one note to the user, shown as a toast and kept in the dock.
 - ✅ **Keep the `app_navigate` error style everywhere.** Naming the valid set and the next call is what turns a failure into a lesson; it is the cheapest way to teach an agent that has never seen the app.
 - ✅ **`workflow_list_actions`** — the step-action vocabulary from `step-ops.ts`, so authored YAML validates first try (§2.3).
 - 💡 **MCP notifications** later, if `rmcp`'s server surface allows — the alternative to `app_events` polling.
@@ -164,8 +164,8 @@ This is the caveat that had to land *with* full app control, not after it. It di
 3. ✅ **UI action registry**: `ui_list_actions` / `ui_invoke_action`, with the `agent_report_action_result` correlation path (§3).
 4. ✅ **TODO domain** + the `human` workflow step (§4).
 5. ✅ `llm_chat` provider override + `llm_set_provider`; `workflow_list_actions` (§2.2, §2.3).
-6. ✅ `capture_screenshot` without minimizing; `app_events(after=)`; `app_prefill_prompt`; `app_trash_list` / `app_restore`.
-7. Deferred: MCP notifications, per-agent policy tiers, a per-page action authoring UI — and the two attachment-side steps that remain are sequenced in [ideas.md](./ideas.md) §8 (the stdio↔HTTP bridge, then `agent_host_*`).
+6. ✅ `capture_screenshot` without minimizing; `app_events(after=)`; `app_trash_list` / `app_restore`. (`app_prefill_prompt` shipped here too and was later removed with the ACP client.)
+7. Deferred: MCP notifications, a per-page action authoring UI — and the attachment-side work that remains is sequenced in [ideas.md](./ideas.md) §8 (the stdio↔HTTP bridge). Hosted mode and its per-agent tiers are **dropped**.
 
 Track 1 is complete and reported per-tool in `/agent.md`; track 2's remaining work is the attachment side, sequenced in [ideas.md](./ideas.md) §8.
 
@@ -174,7 +174,7 @@ Track 1 is complete and reported per-tool in `/agent.md`; track 2's remaining wo
 ## 9. Open questions
 
 - **Where does the TODO panel live?** Its own tab (defensible: it is user-facing, unlike the agent, which deliberately has no tab), a dock section, or a home widget? A tab costs a `Sidebar` `TabId`, a shell mount, and `app_navigate`'s `VALID` array (18 → 19).
-- **Who sets an agent's policy tier?** Proposed: the first-connect confirm dialog offers `read+write` / `full`, stored on the connection record. Per-agent, not global.
+- **Who sets an agent's policy tier?** Moot while the policy is global. If per-agent tiers ever return, the first-connect confirm dialog would offer `read+write` / `full` and the choice would be stored per agent.
 - **Should `ui_invoke_action` be allowed to trigger destructive UI actions at all?** Alternative: destructive operations must go through data tools, which have trash. Keeps one undo path instead of two.
 - **Does a `human` step block its run?** Blocking is correct for record-then-score pipelines; parallel is correct for "practise these 20 cards while I finish the subtitles". Probably per-step, declared in the YAML.
-- **Mobile scope.** The dock and ACP are desktop-only; todos should be fully mobile (they sync, and the phone is where the learner is), while `ui_*` actions only exist where a webview hosts the registry. Decide explicitly rather than inheriting the desktop gate.
+- **Mobile scope.** The dock and `/mcp` are desktop-only; todos should be fully mobile (they sync, and the phone is where the learner is), while `ui_*` actions only exist where a webview hosts the registry. Decide explicitly rather than inheriting the desktop gate.

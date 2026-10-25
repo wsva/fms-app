@@ -57,7 +57,6 @@ desktop = [
     "dep:image",
     "dep:tauri-plugin-single-instance",
     "dep:goose-sdk",
-    "dep:tokio-tungstenite",
     "dep:serde_yaml",
     "dep:spellbook",
     "server",
@@ -157,10 +156,6 @@ anyhow = { version = "1", optional = true }
 serde_yaml = { version = "0.9", optional = true }
 rmcp = { version = "3.4.1", optional = true, features = ["server", "transport-streamable-http-server", "transport-streamable-http-server-session", "macros", "schemars"] }
 goose-sdk = { version = "0.1.0-alpha.11", features = ["uniffi"], optional = true }
-# WebSocket client for the goose ACP agent (desktop only; connects to a local
-# `goose serve` over ws://). Already in the tree transitively, so the pinned
-# 0.28 resolves from the offline registry cache.
-tokio-tungstenite = { version = "0.28", optional = true }
 # Hunspell dictionaries for the TSV hyphen decisions in `ocr/` (desktop only),
 # parsed in process instead of shelling out to hunspell/nuspell.
 spellbook = { version = "0.4", optional = true }
