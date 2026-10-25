@@ -88,12 +88,13 @@ export default function AgentPage() {
         className="shrink-0 px-4"
       />
 
+      {/* Full width. What this page actually shows is code payloads and status
+          rows — both improve with room, and a measure cap only wrapped them. The
+          prose that does not improve keeps its own limit inside `hint`. */}
       <div className="flex-1 overflow-y-auto min-h-0 p-4">
-        <div className="max-w-3xl">
-          {tab === "connect" && <ConnectPanel />}
-          {tab === "hosting" && <HostingPanel />}
-          {tab === "surface" && <SurfacePanel />}
-        </div>
+        {tab === "connect" && <ConnectPanel />}
+        {tab === "hosting" && <HostingPanel />}
+        {tab === "surface" && <SurfacePanel />}
       </div>
     </div>
   );

@@ -12,4 +12,7 @@ export const codeBox =
 
 export const panelTitle = "text-[1.05em] font-semibold text-text-primary";
 
-export const hint = "text-text-secondary text-sm";
+// The page body is full width, but prose is not: a hint that runs the width of a
+// 1600px window is unreadable, while the code payloads beside it are exactly what
+// wants the room. The cap lives here so every paragraph in every panel obeys it.
+export const hint = "max-w-3xl text-text-secondary text-sm";
