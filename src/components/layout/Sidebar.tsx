@@ -68,7 +68,8 @@ type NavGroup = {
 };
 
 // Navigation structure with groups. Cross Device holds the multi-device /
-// multi-user coordination pages; Tools keeps the local processing utilities.
+// multi-user coordination pages; Tools keeps the local processing utilities
+// plus the Tasks queue the workflow `human` step and the agent feed.
 const navGroups: NavGroup[] = [
   {
     id: "cross-device",
@@ -87,6 +88,7 @@ const navGroups: NavGroup[] = [
     icon: Wrench,
     tabs: [
       { id: "workflow", label: "Workflow", icon: Workflow },
+      { id: "tasks", label: "Tasks", icon: ListTodo },
       { id: "simple-words", label: "Simple Words", icon: Type },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
@@ -99,14 +101,19 @@ const navGroups: NavGroup[] = [
   },
 ];
 
-// Root-level tabs (not in any group)
+// Root-level tabs (not in any group). Wiki belongs here rather than in Tools:
+// it is a content surface like the dataset pages, and it reads better above
+// the Cross Device group than buried under a utility group.
 const rootTabs: TabDef[] = [
   { id: "dictation", label: "Dictation", icon: Headphones },
   { id: "read-book", label: "Read a Book", icon: BookOpen },
   { id: "read-aloud", label: "Read Aloud", icon: MicGlyph },
   { id: "cards", label: "Cards", icon: Layers },
-  { id: "tasks", label: "Tasks", icon: ListTodo },
   { id: "wiki", label: "Wiki", icon: BookOpenText },
+];
+
+// Pinned below the groups, at the bottom of the nav.
+const bottomTabs: TabDef[] = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -410,13 +417,13 @@ export default function Sidebar({
         <div className="w-full border-b border-border-default my-1" />
 
         {/* Root tabs above groups: Dictation, Read a Book, Read Aloud, Cards, Wiki */}
-        {rootTabs.slice(0, 5).map((tab) => renderTab(tab, false))}
+        {rootTabs.map((tab) => renderTab(tab, false))}
 
         {/* Navigation groups */}
         {navGroups.map(renderGroup)}
 
         {/* Settings at bottom of nav */}
-        {rootTabs.slice(5).map((tab) => renderTab(tab, false))}
+        {bottomTabs.map((tab) => renderTab(tab, false))}
       </nav>
 
       {/* Resize handle */}
