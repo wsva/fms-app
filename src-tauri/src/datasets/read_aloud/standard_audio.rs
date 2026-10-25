@@ -121,14 +121,6 @@ impl StandardAudioRow {
             "created_at": self.created_at,
         })
     }
-
-    /// Word timings, or empty for an upload.
-    fn boundary_list(&self) -> Vec<TtsWordBoundary> {
-        self.boundaries
-            .as_deref()
-            .and_then(|raw| serde_json::from_str(raw).ok())
-            .unwrap_or_default()
-    }
 }
 
 /// What the UI and agents see. `kind`, `duration`, `stale` and `usable` are all

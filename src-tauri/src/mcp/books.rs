@@ -539,7 +539,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_assess", description = "Score an attempt across all three axes without persisting anything: accuracy (the WIP 0-100 score, identical to read_aloud_score), fluency (words/min, articulation rate, pauses, longest run — needs `words` timings from model_transcribe_detailed and the WAV), and pronunciation (CTC phoneme GOP against the text's standard audio — the dataset-owned reference clip, never a network call). Each axis degrades honestly: a missing phoneme model, an absent standard clip or an attempt too short to align reports `unavailable_reason` (no_reference / stale_reference / model_missing / too_short) instead of a fabricated score. Use this to preview a result before read_aloud_submit; call read_aloud_standard_audio_list first when no_reference comes back.")]
+    #[tool(name = "read_aloud_assess", description = "Score an attempt across all three axes without persisting anything: accuracy (the WIP 0-100 score, identical to read_aloud_score), fluency (words/min, articulation rate, pauses, longest run — needs `words` timings from model_transcribe_detailed and the WAV), and pronunciation (CTC phoneme GOP against the text's standard audio — the dataset-owned reference clip, never a network call). Each axis degrades honestly: a missing phoneme model, an absent standard clip or an attempt too short to align reports `unavailable_reason` (no_reference / stale_reference / model_missing / too_short) instead of a fabricated score. Use this to preview a result before read_aloud_submit; call read_aloud_standard_audio_list first when no_reference comes back. The result also carries a one-line `headline` (accuracy, pace, pauses, pronunciation) beside the full structure, so an agent can report the attempt without parsing it.")]
     async fn read_aloud_assess(&self, Parameters(param): Parameters<ReadAloudAssessParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_assess: {} chars", param.content.len());
         let settings = self.app.state::<SettingsState>();
@@ -553,7 +553,11 @@ impl DatasetMcpServer {
             timed_words(param.words),
         )
         .await?;
-        Ok(serde_json::to_string_pretty(&assessment).unwrap_or_default())
+        // The structure plus the one line an agent can act on without reading
+        // it — the whole point of `Assessment::headline`.
+        let mut value = assessment.to_value();
+        value["headline"] = serde_json::Value::String(assessment.headline());
+        Ok(serde_json::to_string_pretty(&value).unwrap_or_default())
     }
 
     #[tool(name = "read_aloud_standard_audio_assess", description = "Score a text's own standard audio — the reference clip pronunciation is measured against — through the same three axes a take goes through: the clip is transcribed with the loaded STT model and scored against the reference text (accuracy), paced from its own waveform (fluency, needs word timings from a Parakeet model), and aligned against phones derived from itself (pronunciation). This is a self-test of the reference, not practice: nothing is stored, no XP is awarded, and no attempt is created. A healthy clip reads high on all three; low accuracy means the audio does not say what the text says, which would mark down every correct reading. Call read_aloud_standard_audio_list first if it reports that no clip exists.")]

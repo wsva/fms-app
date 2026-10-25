@@ -232,8 +232,6 @@ pub(crate) struct PhonemeModel {
     /// transitions or padding, they are never a phone.
     specials: Vec<bool>,
     blank: usize,
-    /// Log-softmax denominator cache is not kept: posteriors are consumed once.
-    dir: PathBuf,
 }
 
 impl PhonemeModel {
@@ -256,25 +254,7 @@ impl PhonemeModel {
             tokens,
             specials,
             blank,
-            dir: dir.to_path_buf(),
         })
-    }
-
-    pub(crate) fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    /// The phone inventory in id order (specials included, see [`Self::specials`]).
-    pub(crate) fn tokens(&self) -> &[String] {
-        &self.tokens
-    }
-
-    pub(crate) fn blank(&self) -> usize {
-        self.blank
-    }
-
-    pub(crate) fn is_special(&self, id: usize) -> bool {
-        self.specials.get(id).copied().unwrap_or(true)
     }
 
     /// Run the acoustic model over 16 kHz mono samples and return per-frame
@@ -405,13 +385,6 @@ impl PhonemeModel {
         }
 
         Ok(rows)
-    }
-
-    /// Free-decode: CTC-collapse the posteriors into phone ids, dropping blanks
-    /// and specials. Used to build the *reference* timeline, never to score.
-    pub(crate) fn decode(&mut self, samples: &[f32]) -> Result<Vec<usize>, String> {
-        let post = self.posteriors(samples)?;
-        Ok(self.collapse(&post))
     }
 
     /// CTC best-path collapse over an existing posterior matrix.

@@ -308,9 +308,17 @@ pub(crate) fn aligned_pairs(reference: &[String], hypothesis: &[String]) -> Vec<
 // ============================================================
 
 /// The language a spelled-out number is rendered in.
+///
+/// `De` is deliberately kept without a production caller: scoring runs the
+/// [`NumberPolicy::Digits`] default, and the sanctioned fix for a digit that the
+/// reader said as a word is the text's LLM-normalized reference, not a second
+/// speller. It stays as the hook for a caller that *does* know the reference
+/// language — nothing on a `read_text` row records one — and the spelling
+/// itself is covered by the tests at the bottom of this file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NumLang {
     En,
+    #[allow(dead_code)]
     De,
 }
 
@@ -325,6 +333,9 @@ pub(crate) enum NumLang {
 pub(crate) enum NumberPolicy {
     #[default]
     Digits,
+    /// No production caller, same reason as [`NumLang::De`]: kept as the policy
+    /// hook so a language-aware caller is a one-line change, not a rewrite.
+    #[allow(dead_code)]
     Words(NumLang),
 }
 

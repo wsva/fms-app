@@ -23,12 +23,6 @@ pub(crate) struct Segment {
     pub end: f64,
 }
 
-impl Segment {
-    pub(crate) fn duration(&self) -> f64 {
-        (self.end - self.start).max(0.0)
-    }
-}
-
 /// Every threshold the detector uses, in one place so none hides in a body.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VadConfig {
@@ -190,11 +184,6 @@ pub(crate) fn detect(samples: &[f32], cfg: &VadConfig) -> Vec<Segment> {
     padded
 }
 
-/// Total time spent speaking, in seconds.
-pub(crate) fn speech_total(segments: &[Segment]) -> f64 {
-    segments.iter().map(Segment::duration).sum()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,15 +245,5 @@ mod tests {
         samples.extend(tone(0.4, 0.3));
         let segments = detect(&samples, &VadConfig::default());
         assert_eq!(segments.len(), 1, "a 60 ms gap is inside a word: {:?}", segments);
-    }
-
-    #[test]
-    fn speech_total_sums_segment_durations() {
-        let segments = vec![
-            Segment { start: 0.0, end: 0.5 },
-            Segment { start: 1.0, end: 1.25 },
-        ];
-        assert!((speech_total(&segments) - 0.75).abs() < 1e-9);
-        assert!(speech_total(&[]).abs() < f64::EPSILON);
     }
 }
