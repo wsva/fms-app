@@ -181,7 +181,7 @@ export default function ReadAloudPage() {
   // One page holds everything about a text that is not the reading itself:
   // its title and note, the text, the LLM-normalized reference scoring reads,
   // and the standard audio pronunciation is measured against. `editing` swaps
-  // the content column for that page and the sub-toolbar for Save / Cancel;
+  // the content column for that page and the sub-toolbar for Save / Close;
   // `editText` is the text being edited, or null for a brand-new one.
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState<ReadText | null>(null);
@@ -784,11 +784,11 @@ export default function ReadAloudPage() {
 
       {/* Sub-toolbar: contextual actions for the current view — the same stacked
           bar treatment the wiki page uses. While an inline editor is open it hosts
-          the Save / Cancel controls instead. */}
+          the Save / Close controls instead. */}
       <Toolbar mobile={mobile}>
         {/* On the text page the bar's first control is the one that opens its
             table of contents, beside what it opens and out of the way of
-            Save / Cancel at the other end. */}
+            Save / Close at the other end. */}
         {editing && (
           <ToolbarButton
             icon={LayoutGrid}
@@ -814,8 +814,8 @@ export default function ReadAloudPage() {
             />
             <ToolbarButton
               icon={X}
-              label="Cancel"
-              title="Cancel editing"
+              label="Close"
+              title="Close the editor"
               onClick={cancelEdit}
             />
           </>
@@ -972,7 +972,7 @@ export default function ReadAloudPage() {
         {/* Overflow menu — the three-dot home for occasional actions: Locations
             and Delete (desktop) plus, on a phone, the Add/New actions and Refresh,
             so the visible stacked row keeps only the contextual actions. The menu
-            is hidden while inline-editing a text (Save/Cancel own the bar there). */}
+            is hidden while inline-editing a text (Save/Close own the bar there). */}
         {!editing &&
           (mobile ||
             viewMode === "datasets" ||
@@ -1242,6 +1242,7 @@ export default function ReadAloudPage() {
         <PracticePanel
           datasetUuid={activeDataset.uuid}
           text={activeText}
+          standardAudio={clipsByText.get(activeText.uuid)}
           fontCss={raFontOption(raFont).css}
           spaceCss={raSpaceOption(raSpace).css}
           onScored={() => loadTexts(selectedDataset)}

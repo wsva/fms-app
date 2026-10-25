@@ -3,11 +3,12 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { Play, RotateCcw, Wand2 } from "lucide-react";
-import type { ReadAloudSubmitResult, ReadText } from "@/lib/read_aloud/types";
+import type { ReadAloudSubmitResult, ReadStandardAudio, ReadText } from "@/lib/read_aloud/types";
 import { GOOD_SCORE, PASS_SCORE, scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { useRecorder } from "@/components/read_book/useRecorder";
 import AsrDiff from "@/components/read_aloud/AsrDiff";
 import AssessmentCards from "@/components/read_aloud/AssessmentCards";
+import StandardAudioPlayer from "@/components/read_aloud/StandardAudioPlayer";
 import { isTauri } from "@/lib/tauri";
 import { logError, logInfo } from "@/lib/logger";
 
@@ -34,6 +35,10 @@ type Props = {
   /** Show the LLM-normalized reference instead of the raw text (view toggle
    *  driven from the page toolbar's overflow menu). */
   showNormalized?: boolean;
+  /** Every clip this text owns; the panel plays the default one above the
+   *  passage. Loaded by the page for its list badges, so it is handed down
+   *  rather than fetched again. */
+  standardAudio?: ReadStandardAudio[];
   /** `font-family` for the text to read - one of the Playwrite DE school
    *  scripts, or empty for the interface font. See src/lib/read_aloud/fonts.ts. */
   fontCss?: string;
@@ -61,7 +66,7 @@ function playUrl(url?: string | null) {
  * while the reader is still speaking. The take still ends with the toolbar's
  * Stop, which transcribes the whole recording.
  */
-export default function PracticePanel({ datasetUuid, text, showNormalized = false, fontCss = "", spaceCss = "", onScored, onRecorder }: Props) {
+export default function PracticePanel({ datasetUuid, text, standardAudio, showNormalized = false, fontCss = "", spaceCss = "", onScored, onRecorder }: Props) {
   const [result, setResult] = useState<ReadAloudSubmitResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -120,6 +125,16 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
   const busy = recorder.processing || submitting;
   const score = result?.score ?? null;
 
+  // The clip scoring would read: the default one, or — if its wav is not on
+  // this device — any other clip that can at least be listened to.
+  const defaultClip = useMemo(
+    () =>
+      standardAudio?.find((c) => c.is_default && c.audio_url) ??
+      standardAudio?.find((c) => c.audio_url) ??
+      null,
+    [standardAudio]
+  );
+
   // Reference-word index → GOP score, so the diff can underline words that were
   // heard correctly but pronounced weakly. Only words that were measured appear.
   const pronByRef = useMemo(() => {
@@ -173,6 +188,11 @@ export default function PracticePanel({ datasetUuid, text, showNormalized = fals
             <Wand2 size={12} className="text-accent-bg" /> Showing the normalized reference used for
             scoring
           </p>
+        )}
+        {/* The reference heard before it is read: playing it is learning the
+            pacing, so it sits above the passage rather than behind Manage. */}
+        {defaultClip && (
+          <StandardAudioPlayer key={defaultClip.uuid} clip={defaultClip} disabled={recorder.recording} />
         )}
         {/* The one line the script and the spacing apply to: this is the text
             being read aloud, and nothing else on the page is meant to look

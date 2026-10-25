@@ -12,7 +12,7 @@ Open **Read Aloud** from the sidebar and pick a dataset (and, within it, the tex
 
 ## Practicing a text
 
-For the selected text you'll see the passage and a **record** control:
+For the selected text you'll see the passage and a **record** control. When the text has a **standard audio** clip, a player for it sits directly above the passage — listen first to learn the pacing, then record:
 
 1. Read the passage aloud while recording. A **live recognition** panel at the bottom of the page shows the transcript as you speak, so you can see immediately whether the model is hearing you — and whether it is hearing the right thing.
 2. Stop when finished. FmS transcribes your recording and compares it to the target text.
@@ -64,7 +64,7 @@ You can add your own Read Aloud datasets and texts. A dataset dialog manages the
 - **Scoring reference** — a **normalized reference**: a spelling‑out of numbers and abbreviations, which is what scoring and the generated standard audio read when it is set. Under the box, *Scoring will read* names which of the two the scorer will actually use and shows it, so you never have to guess between them. Two buttons fill the box for you: **Generate with Ollama** asks a local model, and **Copy prompt** copies the exact prompt to paste into ChatGPT or any other LLM — its answer goes back into the box. Either way it is still a draft, stored only when you **Save**; and when the text already has recordings, **Measure** scores what is in the box against them so you can see whether it actually helps.
 - **Standard audio** — the reference clips below.
 
-The first three are one draft: **Save** writes them and leaves you on the page (the header confirms it), **Cancel** discards them. Standard audio is separate — clips take effect immediately.
+The first three are one draft: **Save** writes them and leaves you on the page (the header confirms it), **Close** discards them. Standard audio is separate — clips take effect immediately.
 
 Beside the cards is a **Sections** list. The leftmost button in the toolbar shows and hides it: on a PC it is open to begin with, on a phone it slides in over the page and closes again once you pick something. Choose a section to jump to it — as you scroll, the list marks the card you are reading. It jumps rather than hides, because the cards are one draft: the note on the audio card about saving first only makes sense next to the fields it is about.
 
