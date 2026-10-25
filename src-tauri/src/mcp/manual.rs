@@ -1,7 +1,7 @@
 //! The agent manual: one generator, three renderings (ideas.md §5.0).
 //!
-//! `/agent.md`, `/agent.json`, `app_bootstrap` and the Agent page → Connect tab
-//! are all the *same object* rendered differently. Nothing here is
+//! `/agent.md`, `/agent.json`, `app_bootstrap` and the Agent page's "Attach an
+//! agent" section are all the *same object* rendered differently. Nothing here is
 //! `include_str!`'d and no port or tool name is written down twice: the body is
 //! built from the live [`DatasetMcpServer::tool_router`] registry and from
 //! [`WebServiceState::build_status`], so a tool rename or a port conflict shows

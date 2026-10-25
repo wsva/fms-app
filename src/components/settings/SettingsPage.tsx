@@ -83,6 +83,10 @@ interface GlobalSettings {
   /** Whether `/mcp` and the generated manual are served at all. Chosen when the
    *  router is built, so saving this restarts the local web service. */
   mcp_enabled: boolean;
+  /** Whether the agent dock's floating button is drawn. Carried through
+   *  unchanged: it is owned by the Agent page, and this page writes the whole
+   *  object back. */
+  agent_fab_visible: boolean;
 }
 
 type ModelUnloadTimeout =
@@ -343,10 +347,10 @@ export default function SettingsPage() {
     setCurrentTheme(getStoredTheme());
   }, [fetchSettings]);
 
-  // The Agent page owns `mcp_policy` and `mcp_enabled` now. Reload when it
-  // saves: this page is always mounted, so its copy would otherwise keep the
-  // values read at boot and write them back over the agent page's edit on the
-  // next Save here.
+  // The Agent page owns `mcp_policy`, `mcp_enabled` and `agent_fab_visible` now.
+  // Reload when it saves: this page is always mounted, so its copy would
+  // otherwise keep the values read at boot and write them back over the agent
+  // page's edit on the next Save here.
   useEffect(() => {
     const onAgentSurface = () => void fetchSettings();
     window.addEventListener(AGENT_SURFACE_SAVED, onAgentSurface);

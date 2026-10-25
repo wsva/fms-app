@@ -4,36 +4,41 @@ import { useEffect, useState } from "react";
 import { saveSurface, useAgentControl } from "@/lib/agent/control";
 import { btnGhost, hint, inputCls } from "./styles";
 
-/** Tab 2 — the two things here that are still settings: the policy mode that
- *  decides what an attached agent may call, and whether the MCP surface is
- *  served at all.
+/** Section 2 of the Agent page — what an attached agent may do, whether the MCP
+ *  surface is served at all, and whether the dock gets a floating button.
  *
  *  These live on a page with its own Save rather than in Settings because an
  *  agent under `enforce` is refused the ability to change them: the surface that
- *  governs agents is not the surface they can reach. */
+ *  governs agents is not the surface they can reach. The button switch is
+ *  cosmetic and kept here only so the three dock/MCP switches sit together. */
 export default function SurfacePanel() {
   const { surface, manual, saving, note } = useAgentControl();
   const [draft, setDraft] = useState<{
     mcp_policy: string;
     mcp_enabled: boolean;
+    agent_fab_visible: boolean;
   } | null>(null);
   const [saved, setSaved] = useState(false);
 
   // Seed (and re-seed after every save) from what the backend holds, so the
-  // controls never show an edit that was not written.
+  // controls never show an edit that was not written. Keyed on the values, not
+  // the snapshot object: the store also re-reads on `settings-changed`, and
+  // re-seeding on that identity change would discard an unsaved draft.
   useEffect(() => {
     if (!surface) return;
     setDraft({
       mcp_policy: surface.mcp_policy,
       mcp_enabled: surface.mcp_enabled,
+      agent_fab_visible: surface.agent_fab_visible,
     });
-  }, [surface]);
+  }, [surface?.mcp_policy, surface?.mcp_enabled, surface?.agent_fab_visible]);
 
   const dirty =
     !!draft &&
     !!surface &&
     (draft.mcp_policy !== surface.mcp_policy ||
-      draft.mcp_enabled !== surface.mcp_enabled);
+      draft.mcp_enabled !== surface.mcp_enabled ||
+      draft.agent_fab_visible !== surface.agent_fab_visible);
 
   const patch = (next: Partial<NonNullable<typeof draft>>) => {
     setDraft((prev) => (prev ? { ...prev, ...next } : prev));
@@ -52,7 +57,7 @@ export default function SurfacePanel() {
       <div>
         <h2 className="text-[1.05em] font-semibold text-text-primary mb-1">Agent surface</h2>
         <p className={hint}>
-          What this build exposes to agents, and how much an attached agent may do. Live policy: <strong>{manual?.trust.policy.mode ?? surface?.mcp_policy ?? "unknown"}</strong>.{!draft && " Reading the settings…"}
+          What this build exposes to agents, how much an attached agent may do, and whether the dock carries a floating button. Live policy: <strong>{manual?.trust.policy.mode ?? surface?.mcp_policy ?? "unknown"}</strong>.{!draft && " Reading the settings…"}
         </p>
       </div>
 
@@ -90,6 +95,25 @@ export default function SurfacePanel() {
           <span className="font-medium">Expose the MCP server (agents)</span>
           <span className={`block ${hint}`}>
             Serves <code>/mcp</code> and the generated <code>/agent.md</code> manual. Saving restarts the local web service, because the routes are chosen when the router is built: an agent attached right now loses its tools until the restart returns, and <code>/api/v1/status</code> keeps answering with <code>mcp_enabled: false</code> so a peer can tell why <code>/mcp</code> 404s.
+          </span>
+        </span>
+      </label>
+
+      {/* Presentation, not policy: this one decides only whether the dock has a
+          button. Ctrl+Space still opens the panel, so switching it off hides the
+          button and nothing else. */}
+      <label className="flex items-start gap-2 cursor-pointer">
+        <input
+          type="checkbox"
+          className="w-4 h-4 mt-0.5"
+          checked={draft?.agent_fab_visible ?? false}
+          onChange={(e) => patch({ agent_fab_visible: e.target.checked })}
+          disabled={!draft}
+        />
+        <span>
+          <span className="font-medium">Show the floating agent button</span>
+          <span className={`block ${hint}`}>
+            The draggable Bot button in the corner that opens the dock, where <code>app_notify</code> notes and the open-task count are kept. Off by default — most pages do not need a button over them. The dock itself stays reachable with <kbd className="font-mono text-xs bg-bg-hover px-1 rounded">Ctrl</kbd>+<kbd className="font-mono text-xs bg-bg-hover px-1 rounded">Space</kbd> either way.
           </span>
         </span>
       </label>

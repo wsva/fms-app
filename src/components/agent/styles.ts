@@ -1,5 +1,5 @@
-// Tailwind fragments shared by the Agent page panels. Kept in one place so the
-// three tabs and the approval card cannot drift apart stylistically.
+// Tailwind fragments shared by the two Agent page sections. Kept in one place so
+// they cannot drift apart stylistically.
 
 export const btnGhost =
   "px-3 py-1.5 text-xs rounded-md border border-border-default hover:bg-bg-hover cursor-pointer disabled:cursor-not-allowed disabled:opacity-50";

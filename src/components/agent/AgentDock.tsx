@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * Agent dock — the agent's outbox, always available from the floating Bot
- * button or Ctrl+Space.
+ * Agent dock — the agent's outbox, reachable from Ctrl+Space or from the floating
+ * Bot button.
  *
  * FmS does not dial an agent, so there is no session here to stream. An agent
  * attaches to this app's MCP server and runs in its own window; what it can
@@ -12,6 +12,10 @@
  * holds the trail, and clicking an entry copies it for pasting into the agent's
  * own window. The task queue keeps its page (Tools → Tasks) — the footer only
  * counts what is waiting so it is not silently missed.
+ *
+ * The button is opt-in: `agent_fab_visible` is off by default (Agent page →
+ * Agent surface), because a FAB sits on top of every page. Only the button is
+ * gated — Ctrl+Space always opens the panel, so the trail is never unreachable.
  *
  * Presentation is untouched from when this component spoke ACP: the FAB can be
  * dragged, the panel width is draggable, and both survive a reload.
@@ -23,7 +27,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Bell, Bot, Copy, ListTodo, X } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
-import { copyAgentText, ensureAgentLoaded, useAgentControl } from "@/lib/agent/control";
+import { copyAgentText, ensureAgentLoaded, ensureSurfaceLoaded, useAgentControl } from "@/lib/agent/control";
 import type { AgentAction } from "@/lib/agent/types";
 
 // ---------------------------------------------------------------------------
@@ -79,8 +83,11 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
   const noteSeq = useRef(0);
 
   // ---- MCP surface state, read from the same store the Agent page uses ----
-  const { manual } = useAgentControl();
+  const { manual, surface } = useAgentControl();
   const listening = Boolean(manual?.endpoints.running);
+  // Missing settings read as "no button": the switch is opt-in, so until the
+  // store has the real value the safe default is the one a fresh install gets.
+  const fabVisible = surface?.agent_fab_visible === true;
 
   // ---- Floating toggle button: position + drag state ----
   const [fabPos, setFabPosState] = useState<{ x: number; y: number } | null>(null);
@@ -137,8 +144,10 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
       /* ignore malformed storage, fall back to default corner */
     }
     // The header badge reads the MCP endpoint state, so the manual is needed
-    // here too, not only on the Agent page.
+    // here too, not only on the Agent page. The surface snapshot carries
+    // `agent_fab_visible`, which decides whether the FAB below is drawn at all.
     void ensureAgentLoaded();
+    void ensureSurfaceLoaded();
   }, []);
 
   // Re-clamp when the viewport shrinks (window resize, dev tools dock, etc.)
@@ -316,23 +325,25 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
 
   return (
     <>
-      <button
-        type="button"
-        onClick={handleFabClick}
-        onPointerDown={handleFabPointerDown}
-        onPointerMove={handleFabPointerMove}
-        onPointerUp={handleFabPointerUp}
-        onPointerCancel={handleFabPointerUp}
-        title="Agent — drag to move, click to open/close (Ctrl+Space)"
-        aria-label="Toggle agent panel"
-        className="fixed z-[101] rounded-full bg-accent-bg text-white shadow-lg flex items-center justify-center hover:opacity-90 cursor-grab active:cursor-grabbing select-none touch-none"
-        style={fabStyle}
-      >
-        <Bot size={22} />
-        {unread && (
-          <span className="absolute top-0.5 right-0.5 w-3 h-3 rounded-full bg-yellow-500 border-2 border-bg-card" />
-        )}
-      </button>
+      {fabVisible && (
+        <button
+          type="button"
+          onClick={handleFabClick}
+          onPointerDown={handleFabPointerDown}
+          onPointerMove={handleFabPointerMove}
+          onPointerUp={handleFabPointerUp}
+          onPointerCancel={handleFabPointerUp}
+          title="Agent — drag to move, click to open/close (Ctrl+Space)"
+          aria-label="Toggle agent panel"
+          className="fixed z-[101] rounded-full bg-accent-bg text-white shadow-lg flex items-center justify-center hover:opacity-90 cursor-grab active:cursor-grabbing select-none touch-none"
+          style={fabStyle}
+        >
+          <Bot size={22} />
+          {unread && (
+            <span className="absolute top-0.5 right-0.5 w-3 h-3 rounded-full bg-yellow-500 border-2 border-bg-card" />
+          )}
+        </button>
+      )}
 
       {/* Dock panel — overlays the content area on the right. */}
       {open && (

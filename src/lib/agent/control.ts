@@ -9,12 +9,13 @@
 //
 // Everything here is read back from the backend rather than derived: the port is
 // the one the web service actually bound, the tool count comes from the live
-// router, and the copy payloads are the strings `/agent.md` serves. Two surfaces
-// read this object (the Connect and Surface tabs), so a copy or a save made on
-// one is visible on the other.
+// router, and the copy payloads are the strings `/agent.md` serves. Two sections
+// of one page read this object (Attach an agent, Agent surface), so a copy or a
+// save made on one is visible on the other.
 
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { isMobileApp, isTauri } from "@/lib/platform";
 import { logError } from "@/lib/logger";
 
@@ -53,6 +54,10 @@ export type AgentNote = { kind: "ok" | "err" | "busy"; text: string };
 export interface AgentSurface {
   mcp_policy: string;
   mcp_enabled: boolean;
+  /** Whether the dock's floating Bot button is drawn. Off by default — opt-in
+   *  chrome, not part of the agent surface, but it is the dock's own switch so
+   *  it belongs beside the other two. */
+  agent_fab_visible: boolean;
   raw: Record<string, unknown>;
 }
 
@@ -128,21 +133,49 @@ export async function ensureAgentLoaded(): Promise<void> {
   await refreshAgent();
 }
 
-/** Read the global settings the Surface panel edits (once). */
-export async function ensureSurfaceLoaded(): Promise<void> {
-  if (state.surface || !isTauri()) return;
+/** Read the global settings the Surface panel edits, *and* the switch the dock
+ *  draws its floating button from. Called once on load and again whenever the
+ *  backend says the settings changed. */
+async function readSurface(): Promise<void> {
   try {
     const raw = await invoke<Record<string, unknown>>("settings_get_global");
     set({
       surface: {
         mcp_policy: String(raw.mcp_policy ?? "permissive"),
         mcp_enabled: raw.mcp_enabled !== false,
+        // Absent reads as off: `#[serde(default)]` on the Rust side, and the
+        // button is meant to be opt-in, so silence must mean "no button".
+        agent_fab_visible: raw.agent_fab_visible === true,
         raw,
       },
     });
   } catch (e) {
     logError(`agent: reading the global settings failed — ${reason(e)}`, "settings");
   }
+}
+
+let watchingSettings = false;
+
+/** Mirror writes made elsewhere into this store: the Settings page's Save, or an
+ *  agent's `settings_set`. Without it the dock would keep drawing the button
+ *  after someone switched it off, which reads as the checkbox being ignored. */
+function watchSettingsChanges(): void {
+  if (watchingSettings) return;
+  watchingSettings = true;
+  void listen("settings-changed", () => {
+    void readSurface();
+  }).catch((e) => {
+    logError(`agent: watching the settings failed — ${reason(e)}`, "settings");
+  });
+}
+
+/** Read the global settings the Surface panel edits (once, then on every
+ *  `settings-changed` event). */
+export async function ensureSurfaceLoaded(): Promise<void> {
+  if (!isTauri()) return;
+  watchSettingsChanges();
+  if (state.surface) return;
+  await readSurface();
 }
 
 // ---- Writes ----------------------------------------------------------------
@@ -169,7 +202,7 @@ export async function copyAgentText(key: string, text: string): Promise<void> {
  *  because the status line should report what the service now serves, not the
  *  field we just wrote. */
 export async function saveSurface(
-  patch: Partial<Pick<AgentSurface, "mcp_policy" | "mcp_enabled">>
+  patch: Partial<Pick<AgentSurface, "mcp_policy" | "mcp_enabled" | "agent_fab_visible">>
 ): Promise<boolean> {
   if (!isTauri() || !state.surface) return false;
   set({ saving: true });

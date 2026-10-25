@@ -3,7 +3,7 @@
 import { copyAgentText, refreshAgent, useAgentControl } from "@/lib/agent/control";
 import { btnGhost, codeBox, hint } from "./styles";
 
-/** Tab 1 — how to attach an agent to FmS.
+/** Section 1 of the Agent page — how to attach an agent to FmS.
  *
  *  Read-only by design: the port is the one the web service bound, the tool
  *  count comes from the live router, and every payload below is the string
@@ -65,7 +65,7 @@ export default function ConnectPanel() {
           MCP surface: <strong>{surface?.mcp_enabled ?? true ? "exposed" : "off"}</strong>
           {surface?.mcp_enabled ?? true
             ? " — the endpoint below answers."
-            : " — /mcp and the manual answer 404 until you switch it back on (Surface tab)."}
+            : " — /mcp and the manual answer 404 until you switch it back on (Agent surface, below)."}
         </p>
         {manual && !manual.endpoints.running && (
           <p className="text-error-text">{manual.endpoints.note}</p>

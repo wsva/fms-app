@@ -117,6 +117,12 @@ pub struct AppSettings {
     /// with `mcp_enabled: false`, so a peer can tell *why*.
     #[serde(default = "default_mcp_enabled")]
     pub mcp_enabled: bool,
+    /// Whether the floating Bot button that opens the agent dock is shown. Off
+    /// by default: the dock carries the agent→user half (`app_notify` notes, the
+    /// open-task count), which most users do not need an always-present button
+    /// for. With it off the panel is still reachable from Ctrl+Space.
+    #[serde(default)]
+    pub agent_fab_visible: bool,
 }
 
 fn default_ollama_url() -> String {
@@ -274,6 +280,10 @@ pub struct GlobalSettings {
     /// Whether the MCP surface is exposed (see [`AppSettings::mcp_enabled`]).
     #[serde(default = "default_mcp_enabled")]
     pub mcp_enabled: bool,
+    /// Whether the floating Bot button is shown (see
+    /// [`AppSettings::agent_fab_visible`]).
+    #[serde(default)]
+    pub agent_fab_visible: bool,
 }
 
 impl Default for GlobalSettings {
@@ -294,6 +304,7 @@ impl Default for GlobalSettings {
             onboarding_completed: false,
             mcp_policy: default_mcp_policy(),
             mcp_enabled: default_mcp_enabled(),
+            agent_fab_visible: false,
         }
     }
 }
@@ -315,6 +326,7 @@ impl GlobalSettings {
             onboarding_completed: s.onboarding_completed,
             mcp_policy: s.mcp_policy.clone(),
             mcp_enabled: s.mcp_enabled,
+            agent_fab_visible: s.agent_fab_visible,
         }
     }
 
@@ -335,6 +347,7 @@ impl GlobalSettings {
         // here, so a typo cannot silently widen what an agent may do.
         s.mcp_policy = self.mcp_policy.clone();
         s.mcp_enabled = self.mcp_enabled;
+        s.agent_fab_visible = self.agent_fab_visible;
     }
 }
 
@@ -422,6 +435,7 @@ impl Default for AppSettings {
             read_aloud_tts_voice: String::new(),
             mcp_policy: default_mcp_policy(),
             mcp_enabled: default_mcp_enabled(),
+            agent_fab_visible: false,
         }
     }
 }
