@@ -133,18 +133,26 @@ export default function ConnectPanel() {
         <div>
           <label className="block font-medium mb-1">Config lines</label>
           <p className={`${hint} mb-2`}>{manual?.connect.never}</p>
-          <ul className="space-y-2">
+          <ul className="space-y-4">
             {manual?.connect.snippets.map((s) => (
-              <li key={s.product} className="flex items-start gap-2">
-                <span className="w-24 shrink-0 pt-2 text-sm text-text-secondary">{s.product}</span>
-                <pre className={`flex-1 whitespace-pre-wrap ${codeBox}`}>{s.text}</pre>
-                <button
-                  type="button"
-                  className={btnGhost}
-                  onClick={() => void copyAgentText(s.product, s.text)}
-                >
-                  {copied === s.product ? "Copied" : "Copy"}
-                </button>
+              <li key={s.product} className="space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm text-text-secondary">{s.product}</span>
+                  <button
+                    type="button"
+                    className={btnGhost}
+                    onClick={() => void copyAgentText(s.product, s.text)}
+                  >
+                    {copied === s.product ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                {/* The payload owns the whole width under its product name: a
+                    side-by-side label column made the config lines narrow and the
+                    product names wrap. */}
+                <pre className={`whitespace-pre-wrap ${codeBox}`}>{s.text}</pre>
+                {/* Product-specific footwork the config file alone cannot say —
+                    WorkBuddy loads nothing until the connector is trusted. */}
+                {s.note && <p className={hint}>{s.note}</p>}
               </li>
             ))}
           </ul>

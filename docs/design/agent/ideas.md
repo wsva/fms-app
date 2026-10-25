@@ -140,7 +140,7 @@ The page has exactly two jobs: **let the user copy what an agent needs**, and **
 
 - **The pointer** (default): `Read http://127.0.0.1:<live port>/agent.md and connect to FmS as it instructs.` One line, works with any agent that has web fetch or a shell, and the manual then teaches everything — including mode 2.
 - **The inline block** (fallback): a self-contained snippet — MCP URL + transport + the mode-2 instruction + the recommended first calls — for agents that **can attach an MCP server but cannot fetch a URL**. Without this the scenario fails silently for that entire class, so ship both, not just the pretty one-liner.
-- Optional convenience lines per known product: `claude mcp add --transport http fms <url>`, a Codex `[mcp_servers.fms]` TOML block, an OpenCode `opencode.json` block. Displayed for copy only — FmS never writes into another product's config files (§6).
+- Optional convenience lines per known product: `claude mcp add --transport http fms <url>`, a Codex `[mcp_servers.fms]` TOML block, an OpenCode `opencode.json` block, a WorkBuddy `~/.workbuddy/mcp.json` block that rides the stdio bridge (its remote `type` spelling differs between builds) with the trust step in a note. Displayed for copy only — FmS never writes into another product's config files (§6).
 
 **The status half:**
 

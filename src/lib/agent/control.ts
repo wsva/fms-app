@@ -50,7 +50,7 @@ export interface AgentManual {
     inline_block: string;
     inline_when: string;
     never: string;
-    snippets: { product: string; text: string }[];
+    snippets: { product: string; text: string; note?: string }[];
   };
 }
 

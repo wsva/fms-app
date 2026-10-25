@@ -58,7 +58,7 @@ export default function HostingPanel() {
       {/* The switch: which record the dock shows. Two commands behind one select
           — `agent_host_disconnect` for "FmS only", `agent_host_connect` for a
           record. */}
-      <div className="max-w-md">
+      <div>
         <label className="block font-medium mb-1" htmlFor="dock-host">
           Shown in
         </label>

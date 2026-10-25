@@ -59,7 +59,7 @@ export default function SurfacePanel() {
         </p>
       </div>
 
-      <div className="max-w-md">
+      <div>
         <label className="block font-medium mb-1" htmlFor="mcp-policy">
           Policy mode
         </label>
@@ -81,7 +81,7 @@ export default function SurfacePanel() {
       {/* The MCP surface is a runtime switch, not a build feature. It is baked
           into the router, so saving this restarts the local web service — said
           out loud because an attached agent loses its tools for a moment. */}
-      <label className="flex items-start gap-2 cursor-pointer max-w-2xl">
+      <label className="flex items-start gap-2 cursor-pointer">
         <input
           type="checkbox"
           className="w-4 h-4 mt-0.5"
@@ -97,7 +97,7 @@ export default function SurfacePanel() {
         </span>
       </label>
 
-      <label className="flex items-start gap-2 cursor-pointer max-w-2xl">
+      <label className="flex items-start gap-2 cursor-pointer">
         <input
           type="checkbox"
           className="w-4 h-4 mt-0.5"

@@ -414,10 +414,48 @@ fn connect(endpoints: &Value) -> Value {
                     mcp
                 ),
             },
+            workbuddy_snippet(mcp),
             stdio_snippet(),
         ],
-        "never": "These lines are for the user to copy. FmS does not probe for installed products and does not write ~/.claude.json, ~/.codex/config.toml, opencode.json or any other product's config file — parsing and merging someone else's schema risks corrupting it, and every product changes it (ideas.md §6).",
+        "never": "These lines are for the user to copy. FmS does not probe for installed products and does not write ~/.claude.json, ~/.codex/config.toml, opencode.json, ~/.workbuddy/mcp.json or any other product's config file — parsing and merging someone else's schema risks corrupting it, and every product changes it (ideas.md §6).",
     })
+}
+
+/// Tencent's WorkBuddy: a local server in `~/.workbuddy/mcp.json` is `command` +
+/// `args`, optionally with `env` — the shape every WorkBuddy configuration guide
+/// shows, because it is the one its own docs use.
+///
+/// It rides the stdio bridge rather than the remote form on purpose. WorkBuddy
+/// accepts a remote entry, but the transport `type` it wants is spelled
+/// differently between builds and write-ups (`http`, `streamableHttp`,
+/// `streamable-http`), and a wrong `type` fails as an inert connector with no
+/// useful error. `command` has no type to spell. `FMS_MCP_URL` is pinned to the
+/// live port because the bridge otherwise assumes `DEFAULT_PORT`.
+fn workbuddy_snippet(mcp: &str) -> Value {
+    let (_, exe_json) = bridge_exe();
+    json!({
+        "product": "WorkBuddy",
+        "copy_only": true,
+        "text": format!(
+            "{{\n  \"mcpServers\": {{\n    \"fms\": {{\n      \"command\": {},\n      \"args\": [\"--mcp-bridge\"],\n      \"env\": {{ \"FMS_MCP_URL\": \"{}\" }}\n    }}\n  }}\n}}",
+            exe_json, mcp
+        ),
+        // The step everyone misses: writing the file only registers the
+        // connector. Until it is trusted in WorkBuddy it never loads, and the
+        // failure looks like a config typo.
+        "note": "Merge this into ~/.workbuddy/mcp.json — keep the other entries in mcpServers — or paste it through 连接器 → 自定义连接器 → 配置 MCP. Then click 信任 in 连接器管理: a newly written connector stays inactive until you trust it, and restart WorkBuddy if its tools do not appear.",
+    })
+}
+
+/// This executable, twice: the raw path (TOML/CLI consumers take it verbatim) and
+/// the JSON-escaped string a JSON config file needs. One source, so the two stdio
+/// snippets cannot disagree about where the bridge lives.
+fn bridge_exe() -> (String, String) {
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "<path to the FmS executable>".to_string());
+    let escaped = serde_json::to_string(&exe).unwrap_or_else(|_| format!("\"{}\"", exe));
+    (exe, escaped)
 }
 
 /// The stdio door, generated from the running executable: a client that speaks
@@ -427,9 +465,7 @@ fn connect(endpoints: &Value) -> Value {
 /// TOML single-quoted literals hold the path verbatim, so a Windows path needs
 /// no backslash escaping.
 fn stdio_snippet() -> Value {
-    let exe = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "<path to the FmS executable>".to_string());
+    let (exe, _) = bridge_exe();
     json!({
         "product": "Any stdio-only client",
         "copy_only": true,
@@ -900,6 +936,9 @@ pub(crate) fn render_markdown_from(body: &Value) -> String {
                 snippet.get("product").and_then(|v| v.as_str()).unwrap_or_default(),
                 snippet.get("text").and_then(|v| v.as_str()).unwrap_or_default(),
             ));
+            if let Some(note) = snippet.get("note").and_then(|v| v.as_str()) {
+                out.push_str(&format!("{}\n\n", note));
+            }
         }
     }
     out.push_str(&format!("{}\n", at(body, &["connect", "never"])));
@@ -957,6 +996,23 @@ pub(crate) fn instructions(app: &AppHandle) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The WorkBuddy snippet is JSON that gets pasted *into a JSON file*: one
+    /// unescaped backslash in the executable path and WorkBuddy rejects the whole
+    /// `mcp.json`, taking every connector the user already had with it. Parse the
+    /// payload instead of eyeballing it.
+    #[test]
+    fn workbuddy_snippet_is_valid_json() {
+        let snippet = workbuddy_snippet("http://127.0.0.1:4321/mcp");
+        let text = snippet.get("text").and_then(|v| v.as_str()).expect("text");
+        let parsed: Value = serde_json::from_str(text).expect("the snippet must parse as JSON");
+        let entry = &parsed["mcpServers"]["fms"];
+        assert_eq!(entry["args"][0], "--mcp-bridge");
+        assert_eq!(entry["env"]["FMS_MCP_URL"], "http://127.0.0.1:4321/mcp");
+        assert!(!entry["command"].as_str().unwrap_or_default().is_empty());
+        // The trust step is the one a config file cannot express.
+        assert!(snippet.get("note").is_some());
+    }
 
     /// A tool that lands in `misc` means the prefix table drifted from
     /// `mcp/mod.rs`. Silent bucketing would hide a whole domain from the manual.
