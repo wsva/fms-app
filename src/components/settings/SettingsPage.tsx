@@ -148,7 +148,7 @@ const btnGhost = "px-3 py-1 text-xs rounded-md border border-border-light hover:
 // Component
 // ---------------------------------------------------------------------------
 
-export default function SettingsPage({ onOpenAgent }: { onOpenAgent?: () => void }) {
+export default function SettingsPage() {
   const [globalSettings, setGlobalSettings] = useState<GlobalSettings | null>(null);
   const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings | null>(null);
   const [savingGlobal, setSavingGlobal] = useState(false);
@@ -159,10 +159,7 @@ export default function SettingsPage({ onOpenAgent }: { onOpenAgent?: () => void
   // `isMobileApp()` is false during prerendering (no navigator) and only turns
   // true inside the Android WebView, so reading it while rendering would make
   // the server HTML and the first client render disagree (hydration error).
-  // Defer it to an effect, like Sidebar / DictationPage do. The desktop-only
-  // pointer to the Agent page is hidden with it: every command behind that page
-  // (`agent_manual_get`, `agent_host_*`, `agent_confirm_*`) is absent from the
-  // mobile build.
+  // Defer it to an effect, like Sidebar / DictationPage do.
   const [mobile, setMobile] = useState(false);
 
   useEffect(() => {
@@ -681,31 +678,6 @@ export default function SettingsPage({ onOpenAgent }: { onOpenAgent?: () => void
             description="Where STT models are stored. Shared across all workspaces."
             value={globalSettings?.model_dir ?? ""}
           />
-
-          {/* Agent integration lives on its own page. It is a live surface — a
-              hosted host, a pending approval, a switch that restarts the web
-              service — not something set once like the directories above. The
-              dock stays on every screen either way. */}
-          {!mobile && (
-            <div className="mt-6 pt-6 border-t border-border-light">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="max-w-2xl">
-                  <h3 className="text-lg font-semibold mb-1">Agent integration</h3>
-                  <p className="text-text-secondary text-sm">
-                    Attach an agent to FmS with one copyable line, pick the host the dock
-                    dials, and set the MCP policy — all on the Agent page under Tools. The
-                    dock itself stays available on every screen, and it is where approvals
-                    and permission requests appear.
-                  </p>
-                </div>
-                {onOpenAgent && (
-                  <button type="button" className={btnGhost} onClick={onOpenAgent}>
-                    Open the Agent page
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
 
         </section>
 

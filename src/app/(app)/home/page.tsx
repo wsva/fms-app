@@ -318,7 +318,7 @@ export default function Home() {
           <AgentPage />
         </div>
         <div style={{ display: activeTab === "settings" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <SettingsPage onOpenAgent={() => setActiveTab("agent")} />
+          <SettingsPage />
         </div>
         <div style={{ display: activeTab === "llm-chat" ? "flex" : "none" }} className="flex-1 min-h-0">
           <LLMChatPage />
