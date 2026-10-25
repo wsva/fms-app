@@ -95,6 +95,20 @@ export function useBookData() {
   const [artifacts, setArtifacts] = useState<BookArtifactView[]>([]);
   const [terms, setTerms] = useState<BookTerm[]>([]);
   const [generating, setGenerating] = useState(false);
+  // LLM model used for generation. Empty means "fall back to the app default
+  // configured on the Settings page" (the command resolves it server-side).
+  // Persisted in localStorage under the shared `llm_selected_model` key, the
+  // same one the Chat and OCR pages use.
+  const [understandingModel, setUnderstandingModelState] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    return window.localStorage.getItem("llm_selected_model") || "";
+  });
+  const setUnderstandingModel = useCallback((model: string) => {
+    setUnderstandingModelState(model);
+    if (typeof window === "undefined") return;
+    if (model) window.localStorage.setItem("llm_selected_model", model);
+    else window.localStorage.removeItem("llm_selected_model");
+  }, []);
   const [splitRatio, setSplitRatioState] = useState<number>(() => {
     if (typeof window === "undefined") return 58;
     const raw = window.localStorage.getItem("book-understanding-split");
@@ -838,6 +852,7 @@ export function useBookData() {
           scopeType,
           scopeUuid,
           kind,
+          model: understandingModel.trim() ? understandingModel.trim() : undefined,
         });
         await loadArtifacts();
       } catch (e) {
@@ -845,7 +860,7 @@ export function useBookData() {
       }
       setGenerating(false);
     },
-    [bookUUID, loadArtifacts]
+    [bookUUID, loadArtifacts, understandingModel]
   );
 
   const handleParagraphListen = useCallback(
@@ -932,14 +947,18 @@ export function useBookData() {
       setGenerating(true);
       setError("");
       try {
-        await invoke("book_assess_note", { bookUuid: bookUUID, noteUuid });
+        await invoke("book_assess_note", {
+          bookUuid: bookUUID,
+          noteUuid,
+          model: understandingModel.trim() ? understandingModel.trim() : undefined,
+        });
         await loadArtifacts();
       } catch (e) {
         setError(`Assess failed: ${e}`);
       }
       setGenerating(false);
     },
-    [bookUUID, loadArtifacts]
+    [bookUUID, loadArtifacts, understandingModel]
   );
 
   const handleExtractTerms = useCallback(
@@ -948,14 +967,19 @@ export function useBookData() {
       setGenerating(true);
       setError("");
       try {
-        await invoke("book_extract_terms", { bookUuid: bookUUID, scopeType, scopeUuid });
+        await invoke("book_extract_terms", {
+          bookUuid: bookUUID,
+          scopeType,
+          scopeUuid,
+          model: understandingModel.trim() ? understandingModel.trim() : undefined,
+        });
         await loadTerms();
       } catch (e) {
         setError(`Extract terms failed: ${e}`);
       }
       setGenerating(false);
     },
-    [bookUUID, loadTerms]
+    [bookUUID, loadTerms, understandingModel]
   );
 
   const handleSaveTerm = useCallback(
@@ -1140,6 +1164,8 @@ export function useBookData() {
     chapterArtifacts,
     terms,
     generating,
+    understandingModel,
+    setUnderstandingModel,
     handleGenerate,
     handleParagraphListen,
     handleSaveNote,

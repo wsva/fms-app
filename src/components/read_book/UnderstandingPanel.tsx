@@ -23,6 +23,7 @@ import {
   Lightbulb,
 } from "lucide-react";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
+import UnderstandingModelPicker from "./UnderstandingModelPicker";
 import type { useBookData } from "@/hooks/useBookData";
 import type {
   ArtifactKind,
@@ -64,6 +65,8 @@ export default function UnderstandingPanel({ b }: Props) {
     artifactsByScope,
     saving,
     handleParagraphListen,
+    understandingModel,
+    setUnderstandingModel,
   } = b;
 
   const [tab, setTab] = useState<Tab>("explain");
@@ -101,6 +104,9 @@ export default function UnderstandingPanel({ b }: Props) {
           {saving ? <Loader2 size={16} className="animate-spin" /> : <Volume2 size={16} />}
         </button>
       </div>
+
+      {/* LLM model picker (one line) */}
+      <UnderstandingModelPicker value={understandingModel} onChange={setUnderstandingModel} />
 
       {/* Tabs */}
       <div className="shrink-0 flex items-center gap-1 px-2 py-1.5 border-b border-border-default overflow-x-auto">
