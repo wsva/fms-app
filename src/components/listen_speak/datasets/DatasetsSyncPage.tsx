@@ -11,6 +11,8 @@ import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog,
 import { tbGhost, tbSolid, tbToggle, tbToggleStacked, TB_ICON } from "@/lib/ui/toolbar";
 import { ToolbarButton, PageHeader } from "@/components/ui/toolbar";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useVisiblePolling } from "@/hooks/useVisiblePolling";
+import { usePageRefresh, useIsActiveTab } from "@/lib/refresh/page-refresh";
 import { logError, logInfo } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
@@ -531,6 +533,34 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   }, [marketTypes, marketTag, marketQ]);
 
   // ---- Lifecycle --------------------------------------------------------
+
+  // Nothing about a sync round announces itself: the last-round summary, the
+  // queue depth and the peer's dataset list all move without an event. So this
+  // page re-reads on activation (the shared hook) and then keeps itself honest
+  // with a slow poll while it stays on screen.
+  const refreshAll = useCallback(() => {
+    loadSettings();
+    loadLocalState();
+    loadStatus();
+    loadUploadSurface();
+    fetchPcDatasets();
+    if (marketBranch) loadMarket();
+  }, [loadSettings, loadLocalState, loadStatus, loadUploadSurface, fetchPcDatasets, marketBranch, loadMarket]);
+
+  usePageRefresh("datasets-sync", {
+    refresh: refreshAll,
+    canRefresh: () => !loadingList,
+  });
+
+  const pollActive = useIsActiveTab("datasets-sync");
+  useVisiblePolling(
+    pollActive,
+    () => {
+      loadStatus();
+      if (marketBranch) loadMarket();
+    },
+    20_000
+  );
 
   useEffect(() => {
     setMounted(true);
@@ -2167,23 +2197,6 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
         </div>
 
         <div className="ml-auto flex items-center gap-1 shrink-0">
-          {/* Reload keeps its word too, stacked under the icon on a phone. */}
-          <ToolbarButton
-            icon={RefreshCw}
-            iconProps={{ className: loadingList ? "animate-spin" : undefined }}
-            label="Refresh"
-            stacked={mobile}
-            title="Reload settings, lists and status"
-            disabled={loadingList}
-            onClick={() => {
-              loadSettings();
-              loadLocalState();
-              loadStatus();
-              loadUploadSurface();
-              fetchPcDatasets();
-              if (marketBranch) loadMarket();
-            }}
-          />
           {/* One round moves everything it can in both directions (writeback
               push + pull deltas + step-7 mirror/file drain). Shown for followers
               always (disabled until a hub is configured), and for any Hub with a

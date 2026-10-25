@@ -9,6 +9,7 @@ import {
   Folder, FolderOpen, FileText, BookMarked, FilePlus, FolderPlus, Plus, Trash2,
   Save, CircleHelp, Search, ExternalLink, List,
 } from "lucide-react";
+import { usePageRefresh } from "@/lib/refresh/page-refresh";
 import WikiSearch from "./WikiSearch";
 import MdEditor from "./MdEditor";
 import { insertAround, insertAtLineStart } from "./mdEditorInserts";
@@ -197,8 +198,8 @@ export default function WikiPage() {
   // its own dataset-roots UI; this manages the linked directories behind it.
   const [showLocations, setShowLocations] = useState(false);
   const [locError, setLocError] = useState<string | null>(null);
-  // Bumped by the toolbar Refresh so an open Locations overlay re-reads its own
-  // directory list instead of keeping the one it mounted with.
+  // Bumped by the shared page refresh so an open Locations overlay re-reads its
+  // own directory list instead of keeping the one it mounted with.
   const [locRefresh, setLocRefresh] = useState(0);
 
   // Hub read-only browse + local wiki datasets.
@@ -644,17 +645,6 @@ export default function WikiPage() {
       ? "browse"
       : "datasets";
 
-  // One Refresh button means different things per level, so its caption names the
-  // scope its onClick re-reads here: the linked directories, the hub listing, the
-  // open document, or the local dataset list. Mirrors the Dictation page.
-  const refreshCaption = showLocations
-    ? "Refresh locations"
-    : viewMode === "browse"
-      ? "Refresh listing"
-      : viewMode === "file"
-        ? "Refresh document"
-        : "Refresh datasets";
-
   // Which dataset the breadcrumb refers to — from the open file's source when
   // viewing a file, else the dataset being browsed.
   const activeDatasetUuid =
@@ -737,6 +727,21 @@ export default function WikiPage() {
   // Shared sub-toolbar actions: shown under the breadcrumb for every dataset
   // view, not just while viewing a file's rendered markdown.
   const refreshBrowse = useCallback(() => setBrowseReloadNonce((n) => n + 1), []);
+
+  // Re-read the current level: the hub listing, the open document, or the local
+  // dataset list. Driven by the shared page refresh — there is no toolbar button
+  // — and refused while a draft is open, so it can never discard one.
+  usePageRefresh("wiki", {
+    refresh: () => {
+      if (viewMode === "browse") refreshBrowse();
+      else if (viewMode === "file") {
+        if (selection) void loadSelection(selection, false);
+      } else void loadLocalDatasets();
+      setLocRefresh((n) => n + 1);
+    },
+    canRefresh: () => !editing,
+    events: ["dataset-list-changed"],
+  });
 
   const openPrompt = useCallback((title: string, submit: (name: string) => Promise<void>) => {
     setPromptValue("");
@@ -1137,35 +1142,12 @@ export default function WikiPage() {
                 />
               )}
 
-              {/* Refresh — always available. In hub browse it re-pulls the
-                  listing; on an open file (when not editing) it reloads that
-                  file; otherwise it reloads the local dataset list. Disabled
-                  while editing so a refresh can never discard the draft. The
-                  caption carries the scope of the current level. Inline on
-                  desktop; on a phone it rides in the overflow below. */}
-              {!mobile && (
-                <ToolbarButton
-                  icon={RefreshCw}
-                  iconProps={{ className: (viewMode === "browse" ? browseLoading : isLoading) ? "animate-spin" : "" }}
-                  label={refreshCaption}
-                  title={refreshCaption}
-                  ariaLabel={refreshCaption}
-                  onClick={() => {
-                    if (viewMode === "browse") refreshBrowse();
-                    else if (viewMode === "file") {
-                      if (selection) void loadSelection(selection, false);
-                    } else void loadLocalDatasets();
-                    setLocRefresh((n) => n + 1);
-                  }}
-                  disabled={isLoading || browseLoading || (viewMode === "file" && editing)}
-                />
-              )}
-
               {/* Locations management (datasets view, local/non-hub only) — opens
-                  the shared manager as a full-content overlay, matching Cards. On a
-                  phone the overflow shows at every level and also carries the Add/New
-                  actions and Refresh, so the visible stacked row stays short. */}
-              {mobile || (viewMode === "datasets" && canMutateRoots) ? (
+                  the shared manager as a full-content overlay, matching Cards. The
+                  panel is rendered only where it actually has entries: dropping the
+                  Refresh item would otherwise leave a dead three-dot on browse and
+                  file views. */}
+              {(viewMode === "datasets" && canMutateRoots) || (mobile && viewMode === "browse" && !hubMode) ? (
                 <ToolbarOverflow>
                   {viewMode === "datasets" && canMutateRoots && (
                     <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
@@ -1178,21 +1160,6 @@ export default function WikiPage() {
                   )}
                   {mobile && viewMode === "datasets" && canMutateRoots && !hubMode && (
                     <ToolbarMenuItem icon={Plus} onClick={handleCreateDataset}>New Dataset</ToolbarMenuItem>
-                  )}
-                  {mobile && (
-                    <ToolbarMenuItem
-                      icon={RefreshCw}
-                      disabled={isLoading || browseLoading || (viewMode === "file" && editing)}
-                      onClick={() => {
-                        if (viewMode === "browse") refreshBrowse();
-                        else if (viewMode === "file") {
-                          if (selection) void loadSelection(selection, false);
-                        } else void loadLocalDatasets();
-                        setLocRefresh((n) => n + 1);
-                      }}
-                    >
-                      {refreshCaption}
-                    </ToolbarMenuItem>
                   )}
                 </ToolbarOverflow>
               ) : null}

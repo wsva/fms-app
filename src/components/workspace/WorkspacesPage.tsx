@@ -12,12 +12,12 @@ import {
   Edit2,
   Check,
   X,
-  RefreshCw,
   FolderOpen,
   MonitorCheck,
 } from "lucide-react";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
+import { usePageRefresh } from "@/lib/refresh/page-refresh";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -170,7 +170,9 @@ export default function WorkspacesPage() {
     setMobile(isMobileApp());
   }, []);
 
-  // Refresh when the workspace changes (switch from this page or elsewhere).
+  // Refresh when the workspace changes (switch from this page or elsewhere),
+  // and whenever this page comes back on screen — the shared hook covers tab
+  // activation and app resume, so there is no toolbar button for it any more.
   useEffect(() => {
     if (!isTauri()) return;
     const unlisten = listen("workspace-selected", () => {
@@ -180,6 +182,11 @@ export default function WorkspacesPage() {
       unlisten.then((fn) => fn());
     };
   }, [fetchAll]);
+
+  usePageRefresh("workspaces", {
+    refresh: fetchAll,
+    canRefresh: () => !refreshing,
+  });
 
   async function handleSwitch(ws: Workspace) {
     if (!isTauri() || ws.uuid === currentUuid || refreshing) return;
@@ -262,16 +269,6 @@ export default function WorkspacesPage() {
     </p>
   );
 
-  const refreshButton = (
-    <ToolbarButton
-      icon={RefreshCw}
-      iconProps={{ className: refreshing ? "animate-spin" : undefined }}
-      label="Refresh"
-      onClick={fetchAll}
-      disabled={refreshing}
-    />
-  );
-
   const createButton = (
     <ToolbarButton
       icon={Plus}
@@ -286,7 +283,6 @@ export default function WorkspacesPage() {
       <PageHeader title="Workspaces" />
       <Toolbar>
         <div className="flex-1 min-w-0" />
-        {refreshButton}
         {createButton}
       </Toolbar>
 

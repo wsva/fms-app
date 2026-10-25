@@ -40,6 +40,7 @@ import type {
   ReadText,
 } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
+import { usePageRefresh } from "@/lib/refresh/page-refresh";
 import { rerecognizeAttempt } from "@/lib/read_aloud/rerecognize";
 import { groupByText, hasUsableClip, listStandardAudio } from "@/lib/read_aloud/standardAudio";
 import type { RaFontId, RaSpaceId } from "@/lib/read_aloud/fonts";
@@ -400,9 +401,9 @@ export default function ReadAloudPage() {
     void loadStandardClips(selectedDataset);
   }, [selectedDataset, loadTexts, loadStandardClips]);
 
-  // Toolbar Refresh — reload the dataset list and, when a dataset is open, its
-  // texts. Never touches an in-progress editor draft (that lives in local form
-  // state), so it is safe to offer at every view level.
+  // Re-read everything the current level shows. Driven by the shared page
+  // refresh — there is no toolbar button any more — and never by the editor
+  // draft, which lives in local form state.
   const handleRefresh = useCallback(() => {
     void loadDatasets();
     if (selectedDataset) {
@@ -450,20 +451,12 @@ export default function ReadAloudPage() {
       ? "practice"
       : "texts";
 
-  // One Refresh button means different things per level, so its caption names the
-  // scope it actually re-reads here: the linked directories, the dataset list,
-  // the open dataset's texts, or — once a text is open — the whole of that text,
-  // which the practice, attempts and attempt levels all show. Mirrors the
-  // Dictation page.
+  // One refresh means different things per level, so the view picks the one that
+  // re-reads what is actually on screen: the linked directories, the dataset
+  // list, the open dataset's texts, or — once a text is open — the whole of that
+  // text, which the practice, attempts and attempt levels all show.
   const refreshActiveText = viewMode === "practice" && !showLocations;
-  const refreshCaption = showLocations
-    ? "Refresh locations"
-    : refreshActiveText
-      ? "Refresh"
-      : viewMode === "datasets"
-        ? "Refresh datasets"
-        : "Refresh texts";
-  const handleRefreshClick = refreshActiveText ? handleRefreshText : handleRefresh;
+  const refreshCurrentView = refreshActiveText ? handleRefreshText : handleRefresh;
 
   // Draft differs from the stored text (or, for a new one, from empty fields).
   const dirty =
@@ -471,6 +464,15 @@ export default function ReadAloudPage() {
     note !== (editText?.note ?? "") ||
     content !== (editText?.content ?? "") ||
     normalized !== (editText?.normalized_content ?? "");
+
+  // Keep the current level current without a toolbar button: the shared hook
+  // re-reads on activation, on app resume and on `dataset-list-changed`, and
+  // refuses while the editor holds unsaved changes.
+  usePageRefresh("read-aloud", {
+    refresh: () => refreshCurrentView(),
+    canRefresh: () => !dirty,
+    events: ["dataset-list-changed"],
+  });
 
   // What the scorer actually reads: the normalized reference when one is set,
   // otherwise the text itself. Shown on the page so the two boxes above it are
@@ -972,36 +974,16 @@ export default function ReadAloudPage() {
           </>
         )}
 
-        {/* Refresh — always available; reloads the dataset list and, when a
-            dataset is open, its texts — or, once a text is open, everything
-            about that text: its stored fields, its standard audio and its
-            attempts. The caption carries the scope of the level. Inline on
-            desktop. On a phone it rides in the overflow, except at the datasets
-            root where the bar is otherwise empty — there it shows inline so the
-            action stays one tap instead of hiding behind the three-dot. */}
-        {(!mobile || viewMode === "datasets") && (
-          <ToolbarButton
-            icon={RefreshCw}
-            label={refreshCaption}
-            title={
-              refreshActiveText
-                ? "Reload this text, its standard audio and its attempts"
-                : refreshCaption
-            }
-            ariaLabel={refreshCaption}
-            onClick={handleRefreshClick}
-          />
-        )}
-
         {/* Overflow menu — the three-dot home for occasional actions: Locations
-            and Delete (desktop) plus, on a phone, the Add/New actions and Refresh,
-            so the visible stacked row keeps only the contextual actions. The menu
-            is hidden while inline-editing a text (Save/Close own the bar there). */}
+            and Delete (desktop) plus, on a phone, the Add/New actions, so the
+            visible stacked row keeps only the contextual actions. Rendered only
+            where the menu has entries — the Refresh item that used to keep it
+            alive at every level is gone — and hidden while inline-editing a text
+            (Save/Close own the bar there). */}
         {!editing &&
-          (mobile ||
-            viewMode === "datasets" ||
+          (viewMode === "datasets" ||
             viewMode === "texts" ||
-            (viewMode === "practice" && !attemptsView)) && (
+            (viewMode === "practice" && !!activeText && !attemptsView)) && (
           <ToolbarOverflow open={menuOpen} onOpenChange={setMenuOpen}>
             {viewMode === "datasets" && (
               <>
@@ -1037,11 +1019,6 @@ export default function ReadAloudPage() {
             {viewMode === "practice" && activeText && !attemptsView && (
               <ToolbarMenuItem icon={Trash2} danger onClick={() => deleteText(activeText)}>
                 Delete text
-              </ToolbarMenuItem>
-            )}
-            {mobile && viewMode !== "datasets" && (
-              <ToolbarMenuItem icon={RefreshCw} onClick={handleRefreshClick}>
-                {refreshCaption}
               </ToolbarMenuItem>
             )}
           </ToolbarOverflow>

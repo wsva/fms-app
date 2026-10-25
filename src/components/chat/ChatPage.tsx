@@ -20,7 +20,8 @@ import {
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { logError, logInfo } from "@/lib/logger";
-import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
+import { PageHeader } from "@/components/ui/toolbar";
+import { usePageRefresh } from "@/lib/refresh/page-refresh";
 
 // ── Types (mirror src-tauri/src/chat.rs) ────────────────────────────────────
 
@@ -368,6 +369,10 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
     void reload();
   }, [reload]);
 
+  // Re-read the thread whenever this tab comes back on screen or the app
+  // resumes — the phone's own poll below keeps it fresh while you stay here.
+  usePageRefresh("chat", { refresh: reload });
+
   // Phone: poll while this tab is on screen. Desktop gets pushed events instead.
   useEffect(() => {
     if (!isTauri() || !mobile) return;
@@ -618,16 +623,6 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
   return (
     <div ref={rootRef} className="flex flex-col w-full h-full min-h-0 bg-bg-base">
       <PageHeader title="Cross-Device Chat" />
-      <Toolbar>
-        <div className="flex-1 min-w-0" />
-        <ToolbarButton
-          icon={RefreshCw}
-          iconProps={{ className: loading ? "animate-spin" : undefined }}
-          label="Refresh"
-          onClick={() => void reload()}
-          disabled={loading}
-        />
-      </Toolbar>
 
       {/* Phone precondition / connection errors */}
       {mobile && !pcUrl && (

@@ -5,9 +5,11 @@ import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
-import { Search, Link2, KeyRound, Unplug, RefreshCw, Loader2, Users, ShieldCheck } from "lucide-react";
+import { Search, Link2, KeyRound, Unplug, Loader2, Users, ShieldCheck } from "lucide-react";
 import { logInfo, logError } from "@/lib/logger";
 import { PageHeader } from "@/components/ui/toolbar";
+import { useVisiblePolling } from "@/hooks/useVisiblePolling";
+import { usePageRefresh, useIsActiveTab } from "@/lib/refresh/page-refresh";
 
 // ---------------------------------------------------------------------------
 // Types (mirror the backend commands this page drives)
@@ -318,6 +320,31 @@ export default function DevicesHubPage() {
   }, []);
 
   // ---- Lifecycle --------------------------------------------------------
+
+  // Device and peer state moves without an event — a phone pairs, a laptop
+  // reconnects — so this page re-reads on activation (the shared hook) and then
+  // keeps itself honest with a slow poll while it stays on screen.
+  const refreshAll = useCallback(() => {
+    loadSettings();
+    loadWorkspace();
+    loadStatus();
+    loadDevices();
+  }, [loadSettings, loadWorkspace, loadStatus, loadDevices]);
+
+  usePageRefresh("devices-hub", {
+    refresh: refreshAll,
+    canRefresh: () => !devicesLoading,
+  });
+
+  const pollActive = useIsActiveTab("devices-hub");
+  useVisiblePolling(
+    pollActive,
+    () => {
+      loadStatus();
+      loadDevices();
+    },
+    15_000
+  );
 
   useEffect(() => {
     setMounted(true);
@@ -987,14 +1014,6 @@ export default function DevicesHubPage() {
               <Users size={16} />
               Devices paired to me
             </h2>
-            <button
-              className="inline-flex items-center gap-1 px-3 py-1 text-xs rounded-md border border-border-light hover:bg-bg-hover disabled:opacity-50"
-              onClick={loadDevices}
-              disabled={devicesLoading}
-            >
-              <RefreshCw size={13} className={devicesLoading ? "animate-spin" : undefined} />
-              Refresh
-            </button>
           </div>
           <p className="text-text-secondary text-sm">
             Devices on the LAN/WLAN must pair before they can read or write data — like Bluetooth

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { usePageRefresh } from "@/lib/refresh/page-refresh";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
   Plus,
@@ -82,8 +83,8 @@ export default function CardsPage() {
   // Toolbar "Locations" mode: shows the location management view as an overlay,
   // reached from the overflow menu on the dataset list.
   const [showManage, setShowManage] = useState(false);
-  // Bumped by the toolbar Refresh so an open Locations overlay re-reads its own
-  // directory list instead of keeping the one it mounted with.
+  // Bumped by the shared page refresh so an open Locations overlay re-reads its
+  // own directory list instead of keeping the one it mounted with.
   const [locRefresh, setLocRefresh] = useState(0);
 
   // Overflow (three-dot) menu visibility — Locations currently lives in there.
@@ -201,13 +202,20 @@ export default function CardsPage() {
     }
   }, [loadCards, selectedDatasetUuid]);
 
-  // Toolbar Refresh — always available: reload the dataset list and, when a dataset
-  // is open, its cards (plus the Locations list while that overlay owns the view).
+  // Re-read everything this page shows — used by the shared page refresh.
   const handleRefresh = useCallback(() => {
     void loadDatasets();
     if (selectedDatasetUuid) void loadCards();
     setLocRefresh((n) => n + 1);
   }, [loadDatasets, loadCards, selectedDatasetUuid]);
+
+  // Keep the dataset/card lists current without a toolbar button: the shared
+  // hook re-reads on activation, on app resume and on `dataset-list-changed`.
+  // Dialog drafts are component-local state, so a re-read cannot destroy one.
+  usePageRefresh("cards", {
+    refresh: handleRefresh,
+    events: ["dataset-list-changed"],
+  });
 
   // Load tags when dataset changes
   const loadTags = useCallback(async () => {
@@ -546,15 +554,6 @@ export default function CardsPage() {
         : null;
   const crumbTail = selectedDataset ? selectedDataset.info.name : rootSubView;
 
-  // One Refresh button means different things per level, so its caption names the
-  // scope it actually re-reads here: the linked directories, this dataset's cards, or
-  // the dataset list. Mirrors the Dictation page.
-  const refreshCaption = showManage
-    ? "Refresh locations"
-    : datasetOpen
-      ? "Refresh cards"
-      : "Refresh datasets";
-
   // Familiarity color — theme-aware ramp (see --fam-* in globals.css), so the
   // row tint tracks the active Light/Dark/Solarized/Gruvbox theme instead of a
   // fixed light pastel. Literal class names keep Tailwind's scanner happy.
@@ -704,19 +703,6 @@ export default function CardsPage() {
             )}
           </>
         ))}
-        {/* Refresh — always available at every level (dataset list, inside a dataset,
-            review, and the Locations overlay); reloads the dataset list and, when a
-            dataset is open, its cards. The caption carries the scope of the level.
-            Inline on desktop; on a phone it rides in the overflow below. */}
-        {!mobile && (
-          <ToolbarButton
-            icon={RefreshCw}
-            label={refreshCaption}
-            title={refreshCaption}
-            ariaLabel={refreshCaption}
-            onClick={handleRefresh}
-          />
-        )}
         {/* Search button — present at every level but Review, on the far right
             (just before the overflow menu): inside a dataset it toggles the
             This-dataset / All-datasets row, from the dataset list it opens a cross-dataset
@@ -736,10 +722,14 @@ export default function CardsPage() {
         )}
         {/* Overflow menu — the three-dot home for occasional actions. On desktop it
             shows only at the dataset list and carries Locations (the former Manage
-            toggle), a root-level concern. On a phone it shows at every level and also
-            swallows Add Card / New Dataset and Refresh, so the visible stacked row
-            keeps just the contextual actions. Active state marks the overlay owning. */}
-        {(mobile || (!selectedDatasetUuid && activeTab !== "review")) && (
+            toggle), a root-level concern. On a phone it also swallows Add Card /
+            New Dataset, so the visible stacked row keeps just the contextual
+            actions. Rendered only where it has an entry: the Refresh item that
+            used to keep it alive at every level is gone, and an empty panel would
+            be a dead control. Active state marks the overlay owning. */}
+        {(!selectedDatasetUuid && activeTab !== "review") ||
+        (mobile && selectedDatasetUuid && activeTab !== "review") ||
+        (mobile && !selectedDatasetUuid) ? (
           <ToolbarOverflow open={menuOpen} onOpenChange={setMenuOpen}>
             {!selectedDatasetUuid && activeTab !== "review" && (
               <ToolbarMenuItem
@@ -763,13 +753,8 @@ export default function CardsPage() {
                 New Dataset
               </ToolbarMenuItem>
             )}
-            {mobile && (
-              <ToolbarMenuItem icon={RefreshCw} onClick={handleRefresh}>
-                {refreshCaption}
-              </ToolbarMenuItem>
-            )}
           </ToolbarOverflow>
-        )}
+        ) : null}
       </Toolbar>
 
       {error && (

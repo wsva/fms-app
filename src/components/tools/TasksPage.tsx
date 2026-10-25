@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
-import { Check, Circle, ListTodo, RefreshCw, X } from "lucide-react";
+import { Check, Circle, ListTodo, X } from "lucide-react";
 import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
+import { usePageRefresh } from "@/lib/refresh/page-refresh";
 
 /** Mirror of `src-tauri/src/todo.rs::Todo` (serialized field names). */
 interface Todo {
@@ -69,6 +70,14 @@ export default function TasksPage() {
     void refresh();
   }, [refresh]);
 
+  // The task list is written by workflow runs, agent actions and the user's own
+  // clicks, so it goes stale silently. The shared hook re-reads it whenever this
+  // page becomes the visible tab, the app resumes, or a dataset is imported.
+  usePageRefresh("tasks", {
+    refresh,
+    events: ["dataset-list-changed"],
+  });
+
   const complete = useCallback(
     async (todo: Todo) => {
       if (busy) return;
@@ -126,12 +135,6 @@ export default function TasksPage() {
           label="Open only"
           onClick={() => setHideCompleted((v) => !v)}
           title={hideCompleted ? "Show completed tasks too" : "Hide completed tasks"}
-        />
-        <ToolbarButton
-          icon={RefreshCw}
-          label="Refresh"
-          onClick={() => void refresh()}
-          title="Reload the task list"
         />
       </Toolbar>
 

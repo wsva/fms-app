@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { AlignJustify, AlignLeft, Settings2, Zap, RefreshCw, FolderOpen } from "lucide-react";
+import { AlignJustify, AlignLeft, Settings2, Zap, FolderOpen } from "lucide-react";
 import { useBookData } from "@/hooks/useBookData";
+import { usePageRefresh } from "@/lib/refresh/page-refresh";
 import { Toolbar, Breadcrumb, ToolbarButton, ToolbarOverflow, ToolbarMenuItem } from "@/components/ui/toolbar";
 import { LocationsManager } from "@/components/ui/LocationsManager";
 import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
@@ -18,8 +19,8 @@ export default function ReadBookPage() {
   // the books level, replacing the content area the same way the Cards page does.
   const [showLocations, setShowLocations] = useState(false);
   const [locError, setLocError] = useState<string | null>(null);
-  // Bumped by the toolbar Refresh so an open Locations overlay re-reads its own
-  // directory list instead of keeping the one it mounted with.
+  // Bumped by the shared page refresh so an open Locations overlay re-reads its
+  // own directory list instead of keeping the one it mounted with.
   const [locRefresh, setLocRefresh] = useState(0);
 
   // On a chapter page you are reading a chapter, so the book-level mode toggles
@@ -32,17 +33,17 @@ export default function ReadBookPage() {
   // you are in Manage/Advanced — it is a link back to the library.
   const booksIsCurrent = !b.bookUUID && b.view === "read" && !showLocations;
 
-  // One Refresh button means different things per level, so its caption names the
-  // scope b.refresh() actually re-reads here: the linked directories, the book
-  // list, the open book's chapters, or the open chapter's sentences. Mirrors the
-  // Dictation page.
-  const refreshCaption = showLocations
-    ? "Refresh locations"
-    : !b.bookUUID
-      ? "Refresh books"
-      : onChapterPage
-        ? "Refresh sentences"
-        : "Refresh chapters";
+  // Keep the books/chapters/sentences current without a toolbar button: the
+  // shared hook re-reads on activation, on app resume and on
+  // `dataset-list-changed`, and refuses while a sentence reorder is unsaved.
+  usePageRefresh("read-book", {
+    refresh: () => {
+      b.refresh();
+      setLocRefresh((n) => n + 1);
+    },
+    canRefresh: () => !b.needSave,
+    events: ["dataset-list-changed"],
+  });
 
   return (
     <div className="flex h-full w-full bg-bg-body min-w-0">
@@ -180,28 +181,12 @@ export default function ReadBookPage() {
             </div>
           )}
 
-          {/* Refresh — always available at the far right; reloads the current
-              view (books / chapters / open chapter) from disk. The caption carries
-              the scope of the level. Inline on desktop. On a phone it rides in the
-              overflow, except at the books root where the bar is otherwise empty —
-              there it shows inline so the action stays one tap instead of hiding
-              behind the three-dot. */}
-          {(!mobile || !b.bookUUID) && (
-            <ToolbarButton
-              icon={RefreshCw}
-              label={refreshCaption}
-              title={refreshCaption}
-              ariaLabel={refreshCaption}
-              disabled={b.loading}
-              onClick={() => { b.refresh(); setLocRefresh((n) => n + 1); }}
-            />
-          )}
-
           {/* Locations management (books level) — opens the shared manager as a
               full-content overlay, matching the Cards page pattern. On a phone the
-              overflow also shows at every level and swallows the Manage toggle and
-              Refresh, so the visible stacked row keeps just the read actions. */}
-          {(mobile || !b.bookUUID) && (
+              overflow also swallows the Manage toggle, so the visible stacked row
+              keeps just the read actions. Rendered only where it has an entry: the
+              Refresh item that used to keep it alive on a chapter page is gone. */}
+          {(!b.bookUUID || (mobile && !onChapterPage)) && (
             <ToolbarOverflow>
               {!b.bookUUID && (
                 <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
@@ -214,9 +199,6 @@ export default function ReadBookPage() {
                 >
                   {b.bookUUID ? "Manage Chapters" : "Manage Books"}
                 </ToolbarMenuItem>
-              )}
-              {mobile && b.bookUUID && (
-                <ToolbarMenuItem icon={RefreshCw} disabled={b.loading} onClick={() => { b.refresh(); setLocRefresh((n) => n + 1); }}>{refreshCaption}</ToolbarMenuItem>
               )}
             </ToolbarOverflow>
           )}

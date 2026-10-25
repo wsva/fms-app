@@ -46,6 +46,7 @@ import {
   verdictTitle,
 } from "@/lib/workflow/verify";
 import type { StepVerdictInfo } from "./WorkflowGraph";
+import { usePageRefresh } from "@/lib/refresh/page-refresh";
 import type { BookMeta } from "@/lib/read/types";
 import type { CardDatasetSummary } from "@/lib/types";
 import {
@@ -244,8 +245,6 @@ const toolBtn =
   "flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors shrink-0 text-text-secondary hover:text-text-primary hover:bg-bg-hover disabled:opacity-50 disabled:cursor-not-allowed";
 const toolBtnActive =
   "flex items-center gap-1.5 px-3 py-1 text-sm rounded-md transition-colors shrink-0 bg-accent text-white hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed";
-const iconBtn =
-  "p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors disabled:opacity-30 disabled:cursor-default";
 
 /** Placeholder document shown until the built-in template finishes loading. */
 const EMPTY_DEFINITION: WorkflowDefinition = { name: "workflow", version: 1, steps: [] };
@@ -504,18 +503,6 @@ export default function WorkflowPage() {
     }
   }, [kindDatasets, appendLog]);
 
-  // MCP / sync operations import datasets without going through this page, so
-  // track the `dataset-list-changed` event rather than relying on a manual button.
-  useEffect(() => {
-    if (!isTauri() || !nav.cat) return;
-    const cat = nav.cat;
-    let unlisten: (() => void) | undefined;
-    listen("dataset-list-changed", () => { void loadKindDatasets(cat, true); })
-      .then((fn) => { unlisten = fn; })
-      .catch(() => {});
-    return () => { if (unlisten) unlisten(); };
-  }, [nav.cat, loadKindDatasets]);
-
   // ---- Engine status pull (authoritative once a run exists) ----
   // Dataset-scoped: a run lives inside its dataset's `workflows/` dir, so the
   // dataset uuid selects the store. (Workspace-level editor "jobs" are handled
@@ -761,6 +748,18 @@ export default function WorkflowPage() {
       .catch(() => {});
     return () => { if (unlisten) unlisten(); };
   }, [selectedUuid, pushOutput]);
+
+  // Keep the level on screen current without a Reload button: the dataset list
+  // is re-read from disk and, when a run is open, its engine state is re-pulled.
+  // MCP / sync operations import datasets without going through this page, which
+  // is why the backend's `dataset-list-changed` is one of the triggers too.
+  usePageRefresh("workflow", {
+    refresh: async () => {
+      await refreshKindDatasets();
+      if (selectedUuid && runId) await refreshEngine(runId, selectedUuid);
+    },
+    events: ["dataset-list-changed"],
+  });
 
   // ---- Step context builder for the registry ----
   const buildCtx = useCallback((stepId: string): RunCtx => ({
@@ -1145,21 +1144,11 @@ export default function WorkflowPage() {
         </nav>
 
         {/* Sub-toolbar — the contextual actions of the current level. Going back is
-            the breadcrumb's job, so there is no Back / Forward pair here. The old
-            Reload button lives on as a disk re-scan on the two dataset-listing
-            levels; the workflow level scans one dataset instead. */}
+            the breadcrumb's job, so there is no Back / Forward pair here. There is
+            no Reload either: the page re-reads itself (see `usePageRefresh`), and
+            the workflow level keeps its own Scan / Re-scan because that probes disk
+            rather than refreshing a list. */}
         <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-border-default bg-bg-card">
-          {(viewLevel === "datasets" || viewLevel === "templates") && (
-            <button
-              onClick={() => void refreshKindDatasets()}
-              disabled={loadingDatasets}
-              className={iconBtn}
-              title="Re-read the dataset list from disk"
-            >
-              <RefreshCw size={16} className={loadingDatasets ? "animate-spin" : undefined} />
-            </button>
-          )}
-
           <div className="text-xs text-text-tertiary truncate flex-1 min-w-0">{toolbarLabel}</div>
 
           {isDictation && selectedDataset && (

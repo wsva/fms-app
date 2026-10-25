@@ -675,8 +675,8 @@ export function useBookData() {
 
   // Reload the current view from disk without disturbing navigation: the book
   // list always, the open book's chapters, and — only when no reorder is
-  // pending — the open chapter's sentences (so Refresh never discards unsaved
-  // "Save Order" edits). Powers the toolbar Refresh button.
+  // pending — the open chapter's sentences (so a refresh never discards unsaved
+  // "Save Order" edits). Driven by the shared page refresh, never by a button.
   const refresh = useCallback(async () => {
     await loadBooks();
     if (!isTauri()) return;

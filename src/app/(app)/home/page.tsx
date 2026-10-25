@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -34,7 +34,8 @@ import PdfReaderPage from "@/components/tools/PdfReaderPage";
 import AgentDock from "@/components/agent/AgentDock";
 import type { AgentAction } from "@/lib/agent/types";
 import { setUiContext } from "@/lib/agent/ui-context";
-import { jsonSafeDetail, runUiAction } from "@/lib/agent/ui-actions";
+import { jsonSafeDetail, runUiAction, useAgentActions } from "@/lib/agent/ui-actions";
+import { refreshActivePage, useActiveTabSource } from "@/lib/refresh/page-refresh";
 
 interface Workspace {
   uuid: string;
@@ -72,6 +73,18 @@ export default function Home() {
   // Ephemeral notification banner for the agent's `app_notify` action (the app
   // has no toast system, so the shell renders a self-dismissing one).
   const [toast, setToast] = useState<string | null>(null);
+
+  // One banner, two sources: `app_notify` and the refresh shortcut. A second
+  // message restarts the dismissal instead of letting the first timer clear it.
+  const toastTimer = useRef<number | null>(null);
+  const showToast = useCallback((message: string) => {
+    setToast(message);
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => {
+      toastTimer.current = null;
+      setToast(null);
+    }, 4000);
+  }, []);
 
   useEffect(() => {
     setMobile(isMobileApp());
@@ -176,8 +189,7 @@ export default function Home() {
           break;
         }
         case "notify":
-          setToast(action.message);
-          window.setTimeout(() => setToast(null), 4000);
+          showToast(action.message);
           break;
         case "invoke-action": {
           // The response half of `ui_invoke_action`. The tool is parked on
@@ -211,7 +223,7 @@ export default function Home() {
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, []);
+  }, [showToast]);
 
   // Pairing: ask the PC owner about each request, one at a time. This dialog is
   // the only way a device is ever approved — no bearer secret can replace the
@@ -248,6 +260,47 @@ export default function Home() {
       unlisten.then((fn) => fn());
     };
   }, []);
+
+  // Tell the refresh module which tab is on screen, so a page knows when it
+  // becomes visible. See lib/refresh/page-refresh.tsx for why this is not a
+  // provider: the pages are plain siblings, and one boolean is not worth
+  // re-indenting the shell.
+  useActiveTabSource(activeTab);
+
+  // F5 / Ctrl+R / Cmd+R re-read the page on screen. `preventDefault` is not
+  // politeness: a WebView-level reload remounts every page and destroys state
+  // the app deliberately keeps alive — including dictation answers, which are
+  // never persisted. The page's own guard decides whether a re-read is safe.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      const isRefreshKey =
+        e.key === "F5" ||
+        ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "r");
+      if (!isRefreshKey) return;
+      e.preventDefault();
+      void refreshActivePage("manual").then((outcome) => {
+        if (outcome.status === "blocked") {
+          showToast("Not refreshed: this page has unsaved edits.");
+        } else if (outcome.status === "none") {
+          showToast("Nothing to refresh on this page.");
+        }
+      });
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [showToast]);
+
+  // The same path the keyboard takes, for an agent: refresh is otherwise
+  // UI-only, and every feature is supposed to be reachable through MCP.
+  useAgentActions("shell", [
+    {
+      id: "shell.refresh",
+      label: "Re-read the page on screen from disk",
+      kind: "read",
+      run: () => refreshActivePage("manual"),
+    },
+  ]);
 
   function handleWorkspaceSelect(ws: Workspace) {
     setCurrentWorkspace(ws);

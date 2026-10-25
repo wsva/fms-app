@@ -8,12 +8,13 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore, useLayoutEffect } from "react";
 
 import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui/react";
-import { RefreshCw, Trash2, Target, CheckCircle, FolderOpen, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown, Captions } from "lucide-react";
+import { Trash2, Target, CheckCircle, FolderOpen, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown, Captions } from "lucide-react";
 import CueEditor from "./components/CueEditor";
 import WaveformCanvas from "./components/WaveformCanvas";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 import { FAVORITES_DATASET_UUID, type Cue } from "@/lib/types";
 import { useDictationData } from "@/hooks/useDictationData";
+import { usePageRefresh } from "@/lib/refresh/page-refresh";
 import { isAudio } from "@/lib/listen/utils";
 import { datasetStatusLabel, datasetStatusBadgeClasses, type DatasetStatus } from "@/lib/datasets/types";
 import { tbGhost } from "@/lib/ui/toolbar";
@@ -161,18 +162,21 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
         },
     ]);
 
-    // Pages are kept mounted and toggled via `display`, so the initial dataset
-    // load happens once at app startup. Re-fetch whenever this tab becomes the
-    // active view, otherwise datasets synced/imported elsewhere never show up.
-    const wasActive = useRef(active);
-    const { loadDatasets, loadLocations } = d;
-    useEffect(() => {
-        if (active && !wasActive.current) {
-            loadDatasets();
-            loadLocations();
-        }
-        wasActive.current = active;
-    }, [active, loadDatasets, loadLocations]);
+    // Keep the dataset/media/cue lists current without a toolbar button: the
+    // shared hook re-reads on activation, on app resume and on
+    // `dataset-list-changed`, and refuses while cue edits or media rows are
+    // waiting to be saved. `stateInput` (a half-typed answer) is component state
+    // on an unmounted-never cue row, so it survives the re-read untouched.
+    usePageRefresh("dictation", {
+        refresh: () => {
+            d.loadLocations();
+            d.loadDatasets();
+            d.handleReload();
+            setLocRefresh((n) => n + 1);
+        },
+        canRefresh: () => !d.stateNeedSave && d.mediaDirtyCount === 0,
+        events: ["dataset-list-changed"],
+    });
 
     const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
     // ── Deferred cue-input focus ──
@@ -199,9 +203,9 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
     // replacing the dataset browser the same way the Cards page does.
     const [showLocations, setShowLocations] = useState(false);
     const [locError, setLocError] = useState<string | null>(null);
-    // Bumped by the toolbar Refresh so the open Locations overlay re-reads its own
-    // directory list, not just the page-level copy behind the counts.
-    const [locRefresh, setLocRefresh] = useState(0);
+    // Bumped by the shared page refresh so the open Locations overlay re-reads
+    // its own directory list, not just the page-level copy behind the counts.
+        const [locRefresh, setLocRefresh] = useState(0);
     // Keyboard-shortcut help tip: shown on hover, and also on click (controlled).
     const [helpOpen, setHelpOpen] = useState(false);
     const voiceError = useSyncExternalStore(subscribe, getVoiceError, getVoiceError);
@@ -258,18 +262,6 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
         [datasetsByLocation, d.locations]
     );
     const readyCount = useMemo(() => d.datasets.filter((ds) => ds.status === "ready").length, [d.datasets]);
-
-    // What the single Refresh button re-reads depends on the level you are on,
-    // so the caption names that scope instead of a generic "Refresh": the
-    // linked directories in the Locations overlay, the dataset list at the
-    // root, this dataset's media list, or this media's cues.
-    const refreshCaption = showLocations
-        ? "Refresh locations"
-        : !d.selectedDatasetUuid
-            ? "Refresh datasets"
-            : d.stateMediaUUID
-                ? "Refresh media"
-                : "Refresh dataset";
 
     // Dataset card with a Ready / Not Ready mark; not-ready datasets cannot be
     // selected until their database is generated on the Datasets page.
@@ -531,32 +523,13 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                     </div>
                 )}
 
-                {/* Refresh — always available at every level (locations, media
-                    list, cue view); reloads the location and dataset lists from
-                    disk and, when a dataset is open, bumps the reload token so
-                    its media/subtitles/cues are re-read too (no-op at the root
-                    level — this absorbs the old per-dataset Reload button).
-                    The caption carries the scope of the current level. Inline on
-                    desktop. On a phone it rides in the overflow, except at the
-                    datasets root where the bar is otherwise empty — there it shows
-                    inline so the action stays one tap instead of hiding behind the
-                    three-dot. */}
-                {(!mobile || !d.selectedDatasetUuid) && (
-                    <ToolbarButton icon={RefreshCw} label={refreshCaption} ariaLabel={refreshCaption} title={refreshCaption} disabled={d.stateLoading} onClick={() => { d.loadLocations(); d.loadDatasets(); d.handleReload(); setLocRefresh((n) => n + 1); }} />
-                )}
-
                 {/* Locations management (datasets view) — opens the shared manager
-                    as a full-content overlay, matching the Cards page pattern. On a
-                    phone the overflow also shows at every level and carries Refresh,
-                    so the stacked bar stays short. */}
-                {(mobile || !d.selectedDatasetUuid) && (
+                    as a full-content overlay, matching the Cards page pattern. It
+                    exists only at the datasets root: deeper levels have nothing to
+                    list here, so an overflow would be an empty panel. */}
+                {!d.selectedDatasetUuid && (
                     <ToolbarOverflow>
-                        {!d.selectedDatasetUuid && (
-                            <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
-                        )}
-                        {mobile && d.selectedDatasetUuid && (
-                            <ToolbarMenuItem icon={RefreshCw} disabled={d.stateLoading} onClick={() => { d.loadLocations(); d.loadDatasets(); d.handleReload(); setLocRefresh((n) => n + 1); }}>{refreshCaption}</ToolbarMenuItem>
-                        )}
+                        <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
                     </ToolbarOverflow>
                 )}
 
@@ -836,7 +809,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                                 )}
 
                                 {d.stateCues.map((cue, i) => (
-                                    <div key={i} data-cue-index={i} onMouseDown={(e) => {
+                                    <div key={cue.uuid} data-cue-index={i} onMouseDown={(e) => {
                                         // Suppress browser-native focus on an inactive cue's compact <Input>.
                                         // Without this, mousedown → focus → our onFocus handler updates
                                         // stateFocusedCueUUID first, React flushes the discrete event and
