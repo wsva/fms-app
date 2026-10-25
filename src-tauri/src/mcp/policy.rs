@@ -137,7 +137,7 @@ const DESTRUCTIVE_WORDS: [&str; 14] = [
 /// Tools that carry a destructive word but do not lose anything the user cannot
 /// get back. Each entry is a deliberate decision, not an oversight — the reason
 /// is the tool's own contract.
-const RECOVERABLE: [&str; 15] = [
+const RECOVERABLE: [&str; 17] = [
     // Whole-directory deletes land in the app trash and return `trashed_to`.
     "book_delete",
     "card_dataset_delete",
@@ -145,6 +145,13 @@ const RECOVERABLE: [&str; 15] = [
     "read_aloud_delete",
     "wiki_dataset_delete",
     "wiki_dataset_delete_file",
+    // Derived artifacts are regenerable (`book_generate_artifact`) and every
+    // delete is journalled, so the row is reconstructible; a user note is the
+    // one non-derived kind and it is still recoverable from the journal.
+    "book_delete_artifact",
+    // A glossary term is re-extractable (`book_extract_terms`) and the delete
+    // is journalled, so the definition is reconstructible.
+    "book_delete_term",
     // Soft deletes: the row is marked, not dropped, precisely so sync can carry
     // the tombstone.
     "card_delete",
@@ -196,7 +203,7 @@ const HUMAN_HANDOFF: [&str; 2] = [
 /// `read_aloud_*` starts with "read", `sync_check_availability` persists the
 /// availability it checks), so this is a list. Anything absent falls through to
 /// [`Tier::Write`] — a new tool is never silently a read.
-const READ_TOOLS: [&str; 82] = [
+const READ_TOOLS: [&str; 84] = [
     "app_audit_get",
     "app_bootstrap",
     "app_events",
@@ -205,8 +212,10 @@ const READ_TOOLS: [&str; 82] = [
     "app_version",
     "auth_status",
     "book_list",
+    "book_list_artifacts",
     "book_list_chapters",
     "book_list_sentences",
+    "book_list_terms",
     "book_list_words",
     "card_dataset_list",
     "card_get",

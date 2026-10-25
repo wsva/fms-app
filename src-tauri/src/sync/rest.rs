@@ -1417,6 +1417,27 @@ async fn replay(
             let uuid = extract_str(&ch.payload, "uuid")?;
             datasets::book::book_delete_word(settings.clone(), dataset_uuid, uuid).await
         }
+        "book_artifact_save" => {
+            let artifact: datasets::book_artifacts::BookArtifact =
+                serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
+            datasets::book_artifacts::book_save_artifact(settings.clone(), dataset_uuid, artifact).await
+        }
+        "book_artifact_delete" => {
+            let uuid = extract_str(&ch.payload, "uuid")?;
+            datasets::book_artifacts::book_delete_artifact(settings.clone(), dataset_uuid, uuid).await
+        }
+        "book_term_save" => {
+            let term: datasets::book_artifacts::BookTerm =
+                serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
+            datasets::book_artifacts::book_save_term(settings.clone(), dataset_uuid, term).await.map(|_| ())
+        }
+        "book_term_delete" => {
+            let uuid = extract_str(&ch.payload, "uuid")?;
+            datasets::book_artifacts::book_delete_term(settings.clone(), dataset_uuid, uuid).await
+        }
+        "book_quiz_result_save" => {
+            datasets::book_artifacts::apply_quiz_result_row(settings.inner(), &dataset_uuid, &ch.payload)
+        }
         "read_text_save" => {
             let text: ReadText =
                 serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;

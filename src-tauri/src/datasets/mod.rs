@@ -21,6 +21,7 @@
 
 pub(crate) mod asr_metric;
 pub(crate) mod book;
+pub(crate) mod book_artifacts;
 pub(crate) mod cards;
 pub(crate) mod db;
 pub(crate) mod dictation;

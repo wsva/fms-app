@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Play,
@@ -12,9 +12,10 @@ import {
   Sparkles,
   Loader2,
   Settings2,
+  BookMarked,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
-import type { DrawerState, BookSentenceWord } from "@/lib/read/types";
+import type { DrawerState, BookSentenceWord, BookTerm } from "@/lib/read/types";
 import type { LlmChatResponse } from "@/lib/llm/types";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
@@ -102,6 +103,8 @@ type Props = {
   bgColor: string | null;
   onBgColorChange: (v: string | null) => void;
   bookUUID: string;
+  /** Book glossary, used to badge vocabulary words that are also terms. */
+  terms?: BookTerm[];
   onClose: () => void;
   onClear: () => void;
   onPlay: () => void;
@@ -128,6 +131,7 @@ export default function SentenceDrawer({
   bgColor,
   onBgColorChange,
   bookUUID,
+  terms = [],
   onClose,
   onClear,
   onPlay,
@@ -143,6 +147,14 @@ export default function SentenceDrawer({
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [savingWords, setSavingWords] = useState(false);
+  // Glossary cross-link: a vocabulary word that also appears as a book term gets
+  // a badge; tapping it reveals the term's definition inline.
+  const glossaryMap = useMemo(() => {
+    const m = new Map<string, BookTerm>();
+    for (const t of terms) m.set(t.term.trim().toLowerCase(), t);
+    return m;
+  }, [terms]);
+  const [glossWord, setGlossWord] = useState<string | null>(null);
   const [colorPickerOpen, setColorPickerOpen] = useState(false);
   const [rulesText, setRulesText] = useState(DEFAULT_RULES_TEXT);
   const [showRulesEditor, setShowRulesEditor] = useState(false);
@@ -749,6 +761,19 @@ export default function SentenceDrawer({
                       {w.word_type && (
                         <span className="word-type text-accent bg-accent-bg/15 px-1.5 py-0.5 rounded-sm">{w.word_type}</span>
                       )}
+                      {glossaryMap.has(w.word.trim().toLowerCase()) && (
+                        <button
+                          className="word-type flex items-center gap-0.5 text-text-tertiary hover:text-accent cursor-pointer px-1 py-0.5 rounded-sm"
+                          title={glossaryMap.get(w.word.trim().toLowerCase())!.definition || "In glossary"}
+                          onClick={() =>
+                            setGlossWord((cur) =>
+                              cur === w.word.trim().toLowerCase() ? null : w.word.trim().toLowerCase()
+                            )
+                          }
+                        >
+                          <BookMarked size={10} /> glossary
+                        </button>
+                      )}
                       <button
                         className="text-text-tertiary hover:text-red-500 cursor-pointer p-0.5 rounded-full bg-red-500/10"
                         onClick={() => removeWord(w.uuid)}
@@ -763,6 +788,16 @@ export default function SentenceDrawer({
                   <span className="text-xs text-text-tertiary">No vocabulary yet.</span>
                 )}
               </div>
+              {glossWord && glossaryMap.get(glossWord) && (
+                <div className="text-xs text-text-secondary bg-bg-muted rounded-md p-2 border border-border-default">
+                  <span className="font-semibold text-text-primary">
+                    {glossaryMap.get(glossWord)!.term}
+                  </span>
+                  {glossaryMap.get(glossWord)!.definition
+                    ? ` — ${glossaryMap.get(glossWord)!.definition}`
+                    : " (no definition)"}
+                </div>
+              )}
               <div className="flex flex-row gap-2">
                 <input
                   className="flex-1 px-2 py-1 rounded bg-bg-input border border-border-default text-sm text-text-primary focus:outline-none focus:border-accent"

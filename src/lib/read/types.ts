@@ -71,6 +71,116 @@ export interface AudioWriteResult {
 }
 
 // ---------------------------------------------------------------------------
+// Understanding layer (artifacts, glossary, quiz)
+// ---------------------------------------------------------------------------
+
+/** The `kind` of an understanding artifact. */
+export type ArtifactKind =
+  | "explanation"
+  | "simplification"
+  | "digest"
+  | "argument_map"
+  | "questions"
+  | "note"
+  | "assessment";
+
+/** All artifact kinds, for iteration. */
+export const ARTIFACT_KINDS: ArtifactKind[] = [
+  "explanation",
+  "simplification",
+  "digest",
+  "argument_map",
+  "questions",
+  "note",
+  "assessment",
+];
+
+/** Kinds the LLM generates (regenerated in place, hash-tracked). */
+export const GENERATED_KINDS: ArtifactKind[] = [
+  "explanation",
+  "simplification",
+  "digest",
+  "argument_map",
+  "questions",
+];
+
+/** What an artifact is attached to. */
+export type ArtifactScopeType = "paragraph" | "chapter" | "sentence";
+
+/** A persisted understanding artifact. Mirrors the Rust `BookArtifact`. */
+export interface BookArtifact {
+  uuid: string;
+  book_uuid: string;
+  scope_type: ArtifactScopeType | string;
+  /** break-row uuid / chapter uuid / sentence uuid. */
+  scope_uuid: string;
+  kind: ArtifactKind | string;
+  /** Markdown; for `questions`, a JSON array of `QuizQuestion`. */
+  content: string;
+  /** "ollama" | "agent" | "user". */
+  source: string;
+  model?: string | null;
+  /** assessment -> the note it assesses. */
+  parent_uuid?: string | null;
+  /** FNV-1a hex of the source text at generation time ("" for notes). */
+  content_hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A `BookArtifact` plus the computed staleness flag returned to readers. */
+export interface BookArtifactView extends BookArtifact {
+  /** True when a generated artifact's source text changed since it was made. */
+  stale: boolean;
+}
+
+/** A glossary entry. Mirrors the Rust `BookTerm`. */
+export interface BookTerm {
+  uuid: string;
+  book_uuid: string;
+  term: string;
+  definition: string;
+  /** "ollama" | "agent" | "user". */
+  source: string;
+  model?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A multiple-choice quiz question. */
+export interface QuizMcq {
+  type: "mcq";
+  stem: string;
+  choices: string[];
+  /** Index into `choices` of the correct answer. */
+  correct: number;
+  explanation: string;
+}
+
+/** A Socratic open question, self-graded against `model_answer`. */
+export interface QuizOpen {
+  type: "open";
+  stem: string;
+  model_answer: string;
+  explanation: string;
+}
+
+export type QuizQuestion = QuizMcq | QuizOpen;
+
+/** Response of `book_record_quiz_result`. */
+export interface QuizResultResponse {
+  uuid: string;
+  best_correct: number;
+  best_total: number;
+  xp: {
+    xp_awarded: number;
+    lifetime_xp: number;
+    level: number;
+    is_new: boolean;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Client-side types
 // ---------------------------------------------------------------------------
 

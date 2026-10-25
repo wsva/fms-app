@@ -87,6 +87,8 @@ src-tauri/src/
 │   │   ├── mod.rs          # Card CRUD, tags, SM-2 review, FTS5 search, multi-location discovery
 │   │   └── sync.rs         # Bidirectional card dataset sync (last-write-wins, per-dataset sync_state)
 │   ├── book.rs             # Book chapters/sentences/words and their audio
+│   ├── book_artifacts.rs   # Book "understanding layer": artifacts (explain/simplify/digest/argument_map/
+│   │                       #   questions/note/assessment), glossary terms, quiz→XP results; LLM + Edge-TTS generation
 │   ├── read_aloud.rs       # Read-aloud datasets: recorded takes, STT scoring, XP awards
 │   ├── report.rs           # The whole read-only picture of one dataset in one call: identity,
 │   │                       #   audit, every workflow run scored against it, STT model state,

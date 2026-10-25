@@ -196,6 +196,27 @@ pub(crate) async fn apply_change(
             let uuid = str_field("uuid")?;
             crate::datasets::book::book_delete_word(settings.clone(), ds, uuid).await.map(|_| true)
         }
+        "book_artifact_save" => {
+            let artifact: crate::datasets::book_artifacts::BookArtifact =
+                serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+            crate::datasets::book_artifacts::book_save_artifact(settings.clone(), ds, artifact).await.map(|_| true)
+        }
+        "book_artifact_delete" => {
+            let uuid = str_field("uuid")?;
+            crate::datasets::book_artifacts::book_delete_artifact(settings.clone(), ds, uuid).await.map(|_| true)
+        }
+        "book_term_save" => {
+            let term: crate::datasets::book_artifacts::BookTerm =
+                serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
+            crate::datasets::book_artifacts::book_save_term(settings.clone(), ds, term).await.map(|_| true)
+        }
+        "book_term_delete" => {
+            let uuid = str_field("uuid")?;
+            crate::datasets::book_artifacts::book_delete_term(settings.clone(), ds, uuid).await.map(|_| true)
+        }
+        "book_quiz_result_save" => {
+            crate::datasets::book_artifacts::apply_quiz_result_row(settings.inner(), &ds, &payload).map(|_| true)
+        }
         "read_text_save" => {
             let text: ReadText = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
             crate::datasets::read_aloud::save_text_row(settings.inner(), &ds, &text).map(|_| true)

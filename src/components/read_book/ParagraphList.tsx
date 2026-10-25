@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Play, Copy, Upload, Trash2, Plus, FileDown } from "lucide-react";
+import { Play, Copy, Upload, Trash2, Plus, FileDown, Brain } from "lucide-react";
 import type { Paragraph, SentenceClient } from "@/lib/read/types";
 import { sentenceBgClass } from "./utils";
 
@@ -11,6 +11,11 @@ type Props = {
   viewMode: "line" | "inline";
   saving: boolean;
   mobile?: boolean;
+  /** Understanding split mode is on: show the focus affordance + ring. */
+  understanding?: boolean;
+  /** The focused paragraph's break-row uuid, if any. */
+  focusParagraph?: string | null;
+  onFocusParagraph?: (uuid: string | null) => void;
   onEditSentence: (s: SentenceClient) => void;
   onAddSentence: (para: Paragraph) => void;
   onDeleteParagraph: (para: Paragraph) => void;
@@ -28,6 +33,9 @@ export default function ParagraphList({
   viewMode,
   saving,
   mobile = false,
+  understanding = false,
+  focusParagraph = null,
+  onFocusParagraph,
   onEditSentence,
   onAddSentence,
   onDeleteParagraph,
@@ -44,8 +52,13 @@ export default function ParagraphList({
       {paragraphs.map((para, pi) => (
         <div
           key={pi}
+          data-para-uuid={para.breakSentence?.uuid}
           className={`flex flex-col gap-2 p-3 rounded-lg border border-border-default ${
             pi % 2 === 0 ? "bg-bg-card" : "bg-bg-muted"
+          } ${
+            understanding && focusParagraph && para.breakSentence?.uuid === focusParagraph
+              ? "ring-2 ring-accent/50"
+              : ""
           }`}
         >
           {/* Paragraph badge + actions */}
@@ -54,6 +67,19 @@ export default function ParagraphList({
               ¶ {pi + 1}
             </div>
             <div className="flex flex-row items-center gap-1">
+              {understanding && para.breakSentence && (
+                <button
+                  title="Understand this paragraph"
+                  className={`${iconPad} rounded hover:bg-bg-hover cursor-pointer ${
+                    focusParagraph === para.breakSentence.uuid
+                      ? "text-accent"
+                      : "text-text-secondary"
+                  }`}
+                  onClick={() => onFocusParagraph?.(para.breakSentence!.uuid)}
+                >
+                  <Brain size={16} />
+                </button>
+              )}
               {para.sentences.length > 0 && (
                 <button
                   title="Copy paragraph text"

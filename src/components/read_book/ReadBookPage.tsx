@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { AlignJustify, AlignLeft, Settings2, Zap, FolderOpen } from "lucide-react";
+import { AlignJustify, AlignLeft, Settings2, Zap, FolderOpen, Brain } from "lucide-react";
 import { useBookData } from "@/hooks/useBookData";
 import { usePageRefresh } from "@/lib/refresh/page-refresh";
 import { Toolbar, Breadcrumb, ToolbarButton, ToolbarOverflow, ToolbarMenuItem } from "@/components/ui/toolbar";
@@ -177,6 +177,18 @@ export default function ReadBookPage() {
                 label={b.viewMode === "line" ? "Lines" : "Inline"}
                 title={b.viewMode === "line" ? "Switch to paragraph view" : "Switch to line view"}
                 onClick={() => b.setViewMode((m) => (m === "line" ? "inline" : "line"))}
+              />
+              {/* Understanding split mode: on desktop it splits the reading pane
+                  (content left, panel right); on a phone it opens the same panel
+                  as a slide-in drawer. Clicking while active returns to plain
+                  reading. */}
+              <ToolbarButton
+                variant="toggle"
+                active={b.understanding}
+                icon={Brain}
+                label="Understanding"
+                title="Toggle understanding mode"
+                onClick={b.toggleUnderstanding}
               />
             </div>
           )}

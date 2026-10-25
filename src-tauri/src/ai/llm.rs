@@ -410,6 +410,58 @@ async fn ollama_chat(
     })
 }
 
+/// State-free chat completion for backend features that generate text without a
+/// webview round-trip (e.g. book understanding artifacts). Mirrors [`llm_chat`]'s
+/// provider split — goose-sdk on desktop, Ollama HTTP elsewhere — but reads its
+/// configuration straight from a borrowed [`SettingsState`] instead of a Tauri
+/// `State` guard, so core (non-command) functions can call it. `model` falls back
+/// to the configured `llm_model` when omitted or blank.
+pub async fn llm_complete(
+    settings: &SettingsState,
+    model: Option<String>,
+    messages: Vec<ChatMessage>,
+    temperature: f32,
+) -> Result<LlmChatResponse, String> {
+    let (provider, api_key, base_url, default_model) = {
+        let s = settings.settings.lock().unwrap();
+        (
+            s.llm_provider.clone(),
+            s.llm_api_key.clone(),
+            s.ollama_url.clone(),
+            s.llm_model.clone(),
+        )
+    };
+    let model = model
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or(default_model);
+    if model.trim().is_empty() {
+        return Err(
+            "no LLM model configured — set one on the Settings page or pass an explicit model"
+                .to_string(),
+        );
+    }
+    #[cfg(feature = "desktop")]
+    {
+        crate::ai::goose_llm::chat_once(
+            &provider,
+            &api_key,
+            &base_url,
+            &model,
+            messages,
+            None,
+            temperature,
+        )
+        .await
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        // This build speaks Ollama's HTTP API only; the provider/key are unused.
+        let _ = (&provider, &api_key);
+        ollama_chat(&base_url, &model, messages, temperature).await
+    }
+}
+
 /// Switch the LLM inference provider (and optionally the default model) used by
 /// every LLM feature. Validated against [`LLM_PROVIDERS`] so a typo cannot point
 /// the chat page at a provider that will never answer. Returns the effective

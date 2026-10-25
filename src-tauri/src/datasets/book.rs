@@ -94,7 +94,7 @@ fn book_roots(settings: &SettingsState) -> Vec<PathBuf> {
 }
 
 /// Find a book directory by UUID across all configured locations.
-fn find_book_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
+pub(crate) fn find_book_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
     for root in book_roots(settings) {
         if !root.exists() {
             continue;
@@ -115,7 +115,7 @@ fn find_book_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String
 
 /// Write-resolution: forks a read-only base under the download root into a
 /// writable overlay (dataset-layers.md §6); reads keep using [`find_book_dir`].
-fn find_book_dir_write(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
+pub(crate) fn find_book_dir_write(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
     let dir = find_book_dir(settings, uuid)?;
     if is_under_download_root(settings, &dir) {
         return fork_base_to_overlay(settings, &dir, DatasetType::Book);
@@ -124,7 +124,7 @@ fn find_book_dir_write(settings: &SettingsState, uuid: &str) -> Result<PathBuf, 
 }
 
 /// Open (and initialize) a book's SQLite database.
-fn open_book_db(book_dir: &Path) -> Result<Connection, String> {
+pub(crate) fn open_book_db(book_dir: &Path) -> Result<Connection, String> {
     fs::create_dir_all(book_dir).map_err(|e| e.to_string())?;
     let conn = Connection::open(book_dir.join("data.sqlite3")).map_err(|e| e.to_string())?;
     conn.execute_batch(
@@ -161,17 +161,111 @@ fn open_book_db(book_dir: &Path) -> Result<Connection, String> {
             word_type     TEXT NOT NULL DEFAULT '',
             note          TEXT NOT NULL DEFAULT ''
         );
+
+        CREATE TABLE IF NOT EXISTS book_artifact (
+            uuid         TEXT PRIMARY KEY,
+            book_uuid    TEXT NOT NULL,
+            scope_type   TEXT NOT NULL,
+            scope_uuid   TEXT NOT NULL,
+            kind         TEXT NOT NULL,
+            content      TEXT NOT NULL DEFAULT '',
+            source       TEXT NOT NULL DEFAULT '',
+            model        TEXT,
+            parent_uuid  TEXT,
+            content_hash TEXT NOT NULL DEFAULT '',
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_book_artifact_scope ON book_artifact(scope_type, scope_uuid);
+
+        CREATE TABLE IF NOT EXISTS book_term (
+            uuid       TEXT PRIMARY KEY,
+            book_uuid  TEXT NOT NULL,
+            term       TEXT NOT NULL,
+            definition TEXT NOT NULL DEFAULT '',
+            source     TEXT NOT NULL DEFAULT '',
+            model      TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(book_uuid, term)
+        );
+
+        CREATE TABLE IF NOT EXISTS book_quiz_result (
+            uuid          TEXT PRIMARY KEY,
+            book_uuid     TEXT NOT NULL,
+            artifact_uuid TEXT NOT NULL,
+            user_id       TEXT NOT NULL DEFAULT '',
+            total         INTEGER NOT NULL DEFAULT 0,
+            correct       INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_book_quiz_result_artifact ON book_quiz_result(artifact_uuid);
         ",
     )
     .map_err(|e| e.to_string())?;
     // §3.4: a per-dataset tombstone table (travels with snapshots) so a delete
     // is durable and can collide with a resurrected offline edit.
     crate::sync::change_log::ensure_tombstones(&conn)?;
+    // Every paragraph — including a chapter's last — is terminated by a
+    // `paragraph_break` row so its uuid is a stable anchor for paragraph audio and
+    // understanding artifacts. Idempotent and NOT journaled: each device self-heals
+    // on open (same pattern as read-aloud's idempotent column migration), because
+    // journaling would fork every adopted base and flood the writeback queue.
+    backfill_paragraph_anchors(&conn)?;
     Ok(conn)
 }
 
+/// Append a `paragraph_break` sentinel to any chapter whose sentences are
+/// non-empty and whose highest-`order_num` row is not already a break. Runs on
+/// every db open; a no-op once each chapter ends in a break row.
+fn backfill_paragraph_anchors(conn: &Connection) -> Result<(), String> {
+    // Chapters with at least one sentence whose last row (by order_num) is text.
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.chapter_uuid, MAX(s.order_num) \
+             FROM book_sentence s \
+             GROUP BY s.chapter_uuid",
+        )
+        .map_err(|e| e.to_string())?;
+    let candidates: Vec<(String, i64)> = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    let now = now_stamp();
+    for (chapter_uuid, max_order) in candidates {
+        let last_type: String = conn
+            .query_row(
+                "SELECT sentence_type FROM book_sentence \
+                 WHERE chapter_uuid = ?1 ORDER BY order_num DESC LIMIT 1",
+                [&chapter_uuid],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+        if last_type == "paragraph_break" {
+            continue;
+        }
+        conn.execute(
+            "INSERT INTO book_sentence \
+             (uuid, chapter_uuid, user_id, order_num, content, sentence_type, \
+              audio_path, recognized, bg_color, created_at, updated_at) \
+             VALUES (?1, ?2, '', ?3, '', 'paragraph_break', NULL, NULL, NULL, ?4, ?4)",
+            rusqlite::params![
+                Uuid::new_v4().to_string(),
+                chapter_uuid,
+                max_order + 1,
+                now
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Resolve a stored relative audio path to an absolute path for playback.
-fn resolve_audio_url(book_dir: &Path, audio_path: &Option<String>) -> Option<String> {
+pub(crate) fn resolve_audio_url(book_dir: &Path, audio_path: &Option<String>) -> Option<String> {
     audio_path
         .as_ref()
         .filter(|p| !p.is_empty())
@@ -439,6 +533,14 @@ pub async fn book_delete_chapter(
         [&uuid],
     )
     .map_err(|e| e.to_string())?;
+    // Understanding artifacts die with their anchor: chapter-scoped ones and any
+    // scoped to this chapter's sentences (paragraph breaks included).
+    conn.execute(
+        "DELETE FROM book_artifact WHERE scope_uuid = ?1 OR scope_uuid IN \
+         (SELECT uuid FROM book_sentence WHERE chapter_uuid = ?1)",
+        [&uuid],
+    )
+    .map_err(|e| e.to_string())?;
     conn.execute(
         "DELETE FROM book_sentence WHERE chapter_uuid = ?1",
         [&uuid],
@@ -519,6 +621,12 @@ fn delete_chapter_subtree_tx(tx: &Connection, uuid: &str) -> Result<Vec<String>,
     removed.push(uuid.to_string());
     tx.execute(
         "DELETE FROM book_sentence_word WHERE sentence_uuid IN \
+         (SELECT uuid FROM book_sentence WHERE chapter_uuid = ?1)",
+        [uuid],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM book_artifact WHERE scope_uuid = ?1 OR scope_uuid IN \
          (SELECT uuid FROM book_sentence WHERE chapter_uuid = ?1)",
         [uuid],
     )
@@ -822,7 +930,7 @@ pub(crate) fn list_sentences(
     Ok(items)
 }
 
-fn save_sentence_row(conn: &Connection, s: &BookSentence) -> Result<(), String> {
+pub(crate) fn save_sentence_row(conn: &Connection, s: &BookSentence) -> Result<(), String> {
     conn.execute(
         "INSERT OR REPLACE INTO book_sentence \
          (uuid, chapter_uuid, user_id, order_num, content, sentence_type, \
@@ -916,6 +1024,10 @@ pub async fn book_delete_sentence(
         [&uuid],
     )
     .map_err(|e| e.to_string())?;
+    // A sentence may anchor paragraph-scoped artifacts (a break row) or be scoped
+    // directly; either way they are removed with the row.
+    conn.execute("DELETE FROM book_artifact WHERE scope_uuid = ?1", [&uuid])
+        .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM book_sentence WHERE uuid = ?1", [&uuid])
         .map_err(|e| e.to_string())?;
     {

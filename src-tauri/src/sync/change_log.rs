@@ -204,6 +204,11 @@ impl ChangeClass {
             | "book_sentence_delete"
             | "book_word_save"
             | "book_word_delete"
+            | "book_artifact_save"
+            | "book_artifact_delete"
+            | "book_term_save"
+            | "book_term_delete"
+            | "book_quiz_result_save"
             // A standard-audio clip is dataset content (row + wav), keyed by uuid.
             | "read_text_save"
             | "read_text_delete"
@@ -344,7 +349,10 @@ pub fn object_id_for(kind: &str, payload: &Value, user_key: &str) -> String {
         "card_tag_delete" => get("tag_uuid"),
         "book_chapter_save" | "book_chapter_delete"
         | "book_sentence_save" | "book_sentence_delete"
-        | "book_word_save" | "book_word_delete" => get("uuid"),
+        | "book_word_save" | "book_word_delete"
+        | "book_artifact_save" | "book_artifact_delete"
+        | "book_term_save" | "book_term_delete"
+        | "book_quiz_result_save" => get("uuid"),
         "book_sentences_save" => String::new(),
         // Read-aloud texts are editable dataset content, keyed by their uuid.
         "read_text_save" | "read_text_delete" => get("uuid"),
@@ -721,6 +729,9 @@ pub fn table_for_kind(kind: &str) -> &'static str {
         "book_chapter_save" | "book_chapter_delete" => "book_chapters",
         "book_sentence_save" | "book_sentences_save" | "book_sentence_delete" => "book_sentences",
         "book_word_save" | "book_word_delete" => "book_sentence_words",
+        "book_artifact_save" | "book_artifact_delete" => "book_artifacts",
+        "book_term_save" | "book_term_delete" => "book_terms",
+        "book_quiz_result_save" => "book_quiz_result",
         "read_text_save" | "read_text_delete" => "read_text",
         "read_standard_audio_save" | "read_standard_audio_delete" => "read_standard_audio",
         "read_attempt_save" | "read_attempt_delete" => "read_attempt_event",

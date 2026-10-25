@@ -19,8 +19,16 @@ import type {
   SentenceClient,
   Paragraph,
   DrawerState,
+  ArtifactKind,
+  ArtifactScopeType,
+  BookArtifactView,
+  BookTerm,
+  QuizQuestion,
+  QuizResultResponse,
 } from "@/lib/read/types";
 import { flattenChapters, groupIntoParagraphs, toDbSentence } from "@/lib/read/types";
+import { groupArtifactsByScope } from "@/lib/read/artifacts";
+import type { CardDatasetSummary } from "@/lib/types";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { useRecorder } from "@/components/read_book/useRecorder";
@@ -77,6 +85,76 @@ export function useBookData() {
 
   const flatChapters = useMemo(() => flattenChapters(chaptersFlat), [chaptersFlat]);
   const paragraphs = useMemo(() => groupIntoParagraphs(data), [data]);
+
+  // ── Understanding layer ────────────────────────────────────────
+  // Split-mode toggle, the focused paragraph (its break-row uuid), the mobile
+  // drawer open flag, the loaded artifacts/glossary, and the persisted split.
+  const [understanding, setUnderstanding] = useState(false);
+  const [focusParagraph, setFocusParagraphState] = useState<string | null>(null);
+  const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
+  const [artifacts, setArtifacts] = useState<BookArtifactView[]>([]);
+  const [terms, setTerms] = useState<BookTerm[]>([]);
+  const [generating, setGenerating] = useState(false);
+  const [splitRatio, setSplitRatioState] = useState<number>(() => {
+    if (typeof window === "undefined") return 58;
+    const raw = window.localStorage.getItem("book-understanding-split");
+    const n = raw ? Number(raw) : NaN;
+    if (Number.isFinite(n) && n >= 20 && n <= 80) return n;
+    // No stored preference: give the panel more room on narrower windows.
+    return window.innerWidth < 1400 ? 50 : 58;
+  });
+
+  const artifactsByScope = useMemo(() => groupArtifactsByScope(artifacts), [artifacts]);
+  const chapterArtifacts = useMemo(
+    () => artifacts.filter((a) => a.scope_uuid === chapterUUID),
+    [artifacts, chapterUUID]
+  );
+
+  const loadArtifacts = useCallback(async () => {
+    if (!bookUUID || !chapterUUID || !isTauri()) {
+      setArtifacts([]);
+      return;
+    }
+    try {
+      const rows = await invoke<BookArtifactView[]>("book_list_artifacts", {
+        bookUuid: bookUUID,
+        chapterUuid: chapterUUID,
+      });
+      setArtifacts(rows);
+    } catch (e) {
+      console.error("Failed to load artifacts:", e);
+    }
+  }, [bookUUID, chapterUUID]);
+
+  const loadTerms = useCallback(async () => {
+    if (!bookUUID || !isTauri()) {
+      setTerms([]);
+      return;
+    }
+    try {
+      setTerms(await invoke<BookTerm[]>("book_list_terms", { bookUuid: bookUUID }));
+    } catch (e) {
+      console.error("Failed to load glossary:", e);
+    }
+  }, [bookUUID]);
+
+  // Load artifacts when a chapter opens and drop the previous paragraph focus.
+  useEffect(() => {
+    setFocusParagraphState(null);
+    loadArtifacts();
+  }, [chapterUUID, loadArtifacts]);
+
+  // Load the glossary when a book opens.
+  useEffect(() => {
+    loadTerms();
+  }, [bookUUID, loadTerms]);
+
+  // Editing/adding/deleting sentences can flip artifacts stale (their source
+  // hash no longer matches). While the panel is open, re-read them so the stale
+  // badges stay honest. Idempotent; never writes `data`, so it cannot loop.
+  useEffect(() => {
+    if (understanding) loadArtifacts();
+  }, [data, understanding, loadArtifacts]);
 
   // ── Load chapters when book changes ────────────────────────────
   useEffect(() => {
@@ -706,6 +784,281 @@ export function useBookData() {
     }
   }, [loadBooks, bookUUID, chapterUUID, needSave, updateData]);
 
+  // ── Understanding: mode + focus ────────────────────────────────
+  const setSplitRatio = useCallback((ratio: number) => {
+    const clamped = Math.max(20, Math.min(80, Math.round(ratio)));
+    setSplitRatioState(clamped);
+    try {
+      window.localStorage.setItem("book-understanding-split", String(clamped));
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const setFocusParagraph = useCallback((uuid: string | null) => {
+    setFocusParagraphState(uuid);
+  }, []);
+
+  // Tapping a paragraph focuses it and, on a phone, slides the panel in.
+  const selectParagraph = useCallback(
+    (uuid: string | null) => {
+      setFocusParagraphState(uuid);
+      if (mobile && uuid) setMobilePanelOpen(true);
+    },
+    [mobile]
+  );
+
+  const toggleUnderstanding = useCallback(() => {
+    setUnderstanding((prev) => {
+      const next = !prev;
+      if (next) {
+        // Focus the first paragraph that has an anchor so the panel has a scope.
+        setFocusParagraphState((cur) => {
+          if (cur) return cur;
+          const first = paragraphs.find((p) => p.breakSentence);
+          return first?.breakSentence?.uuid ?? null;
+        });
+        if (mobile) setMobilePanelOpen(true);
+      } else if (mobile) {
+        setMobilePanelOpen(false);
+      }
+      return next;
+    });
+  }, [paragraphs, mobile]);
+
+  // ── Understanding: generation + actions ────────────────────────
+  const handleGenerate = useCallback(
+    async (scopeType: ArtifactScopeType, scopeUuid: string, kind: ArtifactKind) => {
+      if (!isTauri() || !bookUUID) return;
+      setGenerating(true);
+      setError("");
+      try {
+        await invoke("book_generate_artifact", {
+          bookUuid: bookUUID,
+          scopeType,
+          scopeUuid,
+          kind,
+        });
+        await loadArtifacts();
+      } catch (e) {
+        setError(`Generate failed: ${e}`);
+      }
+      setGenerating(false);
+    },
+    [bookUUID, loadArtifacts]
+  );
+
+  const handleParagraphListen = useCallback(
+    async (paragraphUuid: string) => {
+      if (!isTauri() || !bookUUID || !paragraphUuid) return;
+      setSaving(true);
+      setError("");
+      try {
+        const res = await invoke<AudioWriteResult>("book_paragraph_listen", {
+          bookUuid: bookUUID,
+          paragraphUuid,
+        });
+        updateData((d) => {
+          const idx = d.findIndex((s) => s.uuid === paragraphUuid);
+          if (idx !== -1)
+            d[idx] = {
+              ...d[idx],
+              audio_path: res.rel_path,
+              audio_url: res.abs_path,
+              updated_at: nowIso(),
+            };
+        });
+        new Audio(convertFileSrc(res.abs_path)).play();
+      } catch (e) {
+        setError(`Listen failed: ${e}`);
+      }
+      setSaving(false);
+    },
+    [bookUUID, updateData]
+  );
+
+  const handleSaveNote = useCallback(
+    async (scopeType: ArtifactScopeType, scopeUuid: string, content: string) => {
+      if (!isTauri() || !bookUUID || !content.trim()) return;
+      setSaving(true);
+      setError("");
+      const now = nowIso();
+      try {
+        await invoke("book_save_artifact", {
+          bookUuid: bookUUID,
+          artifact: {
+            uuid: "",
+            book_uuid: bookUUID,
+            scope_type: scopeType,
+            scope_uuid: scopeUuid,
+            kind: "note",
+            content,
+            source: "user",
+            model: null,
+            parent_uuid: null,
+            content_hash: "",
+            created_at: now,
+            updated_at: now,
+          },
+        });
+        await loadArtifacts();
+      } catch (e) {
+        setError(`Save note failed: ${e}`);
+      }
+      setSaving(false);
+    },
+    [bookUUID, loadArtifacts]
+  );
+
+  const handleDeleteArtifact = useCallback(
+    async (uuid: string) => {
+      if (!isTauri() || !bookUUID) return;
+      setSaving(true);
+      setError("");
+      try {
+        await invoke("book_delete_artifact", { bookUuid: bookUUID, uuid });
+        await loadArtifacts();
+      } catch (e) {
+        setError(`Delete failed: ${e}`);
+      }
+      setSaving(false);
+    },
+    [bookUUID, loadArtifacts]
+  );
+
+  const handleAssessNote = useCallback(
+    async (noteUuid: string) => {
+      if (!isTauri() || !bookUUID) return;
+      setGenerating(true);
+      setError("");
+      try {
+        await invoke("book_assess_note", { bookUuid: bookUUID, noteUuid });
+        await loadArtifacts();
+      } catch (e) {
+        setError(`Assess failed: ${e}`);
+      }
+      setGenerating(false);
+    },
+    [bookUUID, loadArtifacts]
+  );
+
+  const handleExtractTerms = useCallback(
+    async (scopeType: ArtifactScopeType, scopeUuid: string) => {
+      if (!isTauri() || !bookUUID) return;
+      setGenerating(true);
+      setError("");
+      try {
+        await invoke("book_extract_terms", { bookUuid: bookUUID, scopeType, scopeUuid });
+        await loadTerms();
+      } catch (e) {
+        setError(`Extract terms failed: ${e}`);
+      }
+      setGenerating(false);
+    },
+    [bookUUID, loadTerms]
+  );
+
+  const handleSaveTerm = useCallback(
+    async (term: BookTerm) => {
+      if (!isTauri() || !bookUUID) return;
+      setSaving(true);
+      setError("");
+      try {
+        await invoke("book_save_term", { bookUuid: bookUUID, term });
+        await loadTerms();
+      } catch (e) {
+        setError(`Save term failed: ${e}`);
+      }
+      setSaving(false);
+    },
+    [bookUUID, loadTerms]
+  );
+
+  const handleDeleteTerm = useCallback(
+    async (uuid: string) => {
+      if (!isTauri() || !bookUUID) return;
+      setSaving(true);
+      setError("");
+      try {
+        await invoke("book_delete_term", { bookUuid: bookUUID, uuid });
+        await loadTerms();
+      } catch (e) {
+        setError(`Delete term failed: ${e}`);
+      }
+      setSaving(false);
+    },
+    [bookUUID, loadTerms]
+  );
+
+  const handleQuizFinish = useCallback(
+    async (
+      artifactUuid: string,
+      total: number,
+      correct: number
+    ): Promise<QuizResultResponse | null> => {
+      if (!isTauri() || !bookUUID) return null;
+      setError("");
+      try {
+        return await invoke<QuizResultResponse>("book_record_quiz_result", {
+          bookUuid: bookUUID,
+          artifactUuid,
+          total,
+          correct,
+        });
+      } catch (e) {
+        setError(`Quiz result failed: ${e}`);
+        return null;
+      }
+    },
+    [bookUUID]
+  );
+
+  // Card datasets for the "promote to card" picker.
+  const listCardDatasets = useCallback(async (): Promise<CardDatasetSummary[]> => {
+    if (!isTauri()) return [];
+    try {
+      return await invoke<CardDatasetSummary[]>("card_dataset_list");
+    } catch {
+      return [];
+    }
+  }, []);
+
+  const handlePromoteToCard = useCallback(
+    async (datasetUuid: string, question: QuizQuestion) => {
+      if (!isTauri() || !datasetUuid) return;
+      setSaving(true);
+      setError("");
+      const now = nowIso();
+      const answer =
+        question.type === "mcq"
+          ? `${question.choices[question.correct] ?? ""}\n\n${question.explanation}`.trim()
+          : `${question.model_answer}\n\n${question.explanation}`.trim();
+      try {
+        await invoke("card_save", {
+          datasetUuid,
+          card: {
+            uuid: "",
+            question: question.stem,
+            suggestion: "",
+            answer,
+            note: "",
+            familiarity: 0,
+            question_hash: null,
+            source_card_uuid: null,
+            source_dataset_uuid: bookUUID || null,
+            deleted_at: null,
+            created_at: now,
+            updated_at: now,
+          },
+        });
+      } catch (e) {
+        setError(`Card save failed: ${e}`);
+      }
+      setSaving(false);
+    },
+    [bookUUID]
+  );
+
   return {
     // navigation
     books,
@@ -771,5 +1124,32 @@ export function useBookData() {
     handleDeleteAll,
     handleDeleteBreakOnly,
     handleToggleChapterStatus,
+    // understanding layer
+    understanding,
+    setUnderstanding,
+    toggleUnderstanding,
+    focusParagraph,
+    setFocusParagraph,
+    selectParagraph,
+    mobilePanelOpen,
+    setMobilePanelOpen,
+    splitRatio,
+    setSplitRatio,
+    artifacts,
+    artifactsByScope,
+    chapterArtifacts,
+    terms,
+    generating,
+    handleGenerate,
+    handleParagraphListen,
+    handleSaveNote,
+    handleDeleteArtifact,
+    handleAssessNote,
+    handleExtractTerms,
+    handleSaveTerm,
+    handleDeleteTerm,
+    handleQuizFinish,
+    listCardDatasets,
+    handlePromoteToCard,
   };
 }

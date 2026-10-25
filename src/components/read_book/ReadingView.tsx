@@ -1,10 +1,12 @@
 "use client";
 
-import { BookOpen, Check, Library } from "lucide-react";
+import { useEffect, useRef } from "react";
+import { BookOpen, Check, Library, X } from "lucide-react";
 import type { useBookData } from "@/hooks/useBookData";
 import ParagraphList from "./ParagraphList";
 import SentenceDrawer from "./SentenceDrawer";
 import ConfirmDialog from "./ConfirmDialog";
+import UnderstandingPanel from "./UnderstandingPanel";
 
 type Props = { b: ReturnType<typeof useBookData> };
 
@@ -24,6 +26,59 @@ export default function ReadingView({ b }: Props) {
     deleteTarget, setDeleteTarget, confirmDeleteSentence, setConfirmDeleteSentence,
     editSentence, nextUUID,
   } = b;
+
+  const {
+    understanding, splitRatio, setSplitRatio, focusParagraph, selectParagraph,
+    setFocusParagraph, mobilePanelOpen, setMobilePanelOpen,
+  } = b;
+
+  // Reading-pane scroll container — the scroll-spy root and the split's left column.
+  const leftRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef(false);
+
+  // Scroll-spy: while understanding mode is on (desktop), the paragraph nearest
+  // the top of the reading pane becomes the panel's focus.
+  useEffect(() => {
+    if (!understanding || mobile) return;
+    const root = leftRef.current;
+    if (!root) return;
+    const els = Array.from(root.querySelectorAll<HTMLElement>("[data-para-uuid]"));
+    if (els.length === 0) return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((e) => e.isIntersecting)
+          .sort((a, c) => a.boundingClientRect.top - c.boundingClientRect.top);
+        const uuid = visible[0]?.target.getAttribute("data-para-uuid");
+        if (uuid) setFocusParagraph(uuid);
+      },
+      { root, rootMargin: "-8% 0px -78% 0px", threshold: 0 }
+    );
+    els.forEach((el) => obs.observe(el));
+    return () => obs.disconnect();
+  }, [understanding, mobile, paragraphs, setFocusParagraph]);
+
+  // Drag splitter: turn a pointer x into the left column's percentage width.
+  const onSplitterDown = (e: React.PointerEvent) => {
+    dragging.current = true;
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onSplitterMove = (e: React.PointerEvent) => {
+    if (!dragging.current) return;
+    const row = leftRef.current?.parentElement;
+    if (!row) return;
+    const rect = row.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    setSplitRatio(((e.clientX - rect.left) / rect.width) * 100);
+  };
+  const onSplitterUp = (e: React.PointerEvent) => {
+    dragging.current = false;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+  };
 
   // ── Level 1: books list ────────────────────────────────────────
   if (!bookUUID) {
@@ -98,8 +153,9 @@ export default function ReadingView({ b }: Props) {
   }
 
   // ── Level 3: reading pane ──────────────────────────────────────
-  return (
-    <div className="flex-1 min-w-0 min-h-0 flex flex-col gap-4 overflow-y-auto p-4 pb-[50vh]">
+  // The reading content is shared by the plain pane and the split's left column.
+  const readingContent = (
+    <>
       {/* Error banner */}
       {error && (
         <div className="px-3 py-2 rounded-lg bg-red-500/15 text-red-500 text-sm flex items-center justify-between">
@@ -119,6 +175,9 @@ export default function ReadingView({ b }: Props) {
           viewMode={viewMode}
           saving={saving}
           mobile={mobile}
+          understanding={understanding}
+          focusParagraph={focusParagraph}
+          onFocusParagraph={selectParagraph}
           onEditSentence={b.openEditDrawer}
           onAddSentence={b.openAddDrawer}
           onDeleteParagraph={b.handleDeleteParagraph}
@@ -139,7 +198,12 @@ export default function ReadingView({ b }: Props) {
           </button>
         </div>
       )}
+    </>
+  );
 
+  // Overlays (dialogs + sentence drawer) render the same in every layout.
+  const overlays = (
+    <>
       {/* Delete paragraph dialog */}
       {deleteTarget && (
         <div
@@ -169,6 +233,10 @@ export default function ReadingView({ b }: Props) {
               >
                 Delete paragraph break only
               </button>
+              <p className="text-xs text-text-tertiary">
+                Deleting the break merges this paragraph with the next and removes
+                the paragraph&rsquo;s audio and its generated understanding artifacts.
+              </p>
               <button
                 className="px-3 py-2 rounded-md text-sm text-text-secondary hover:bg-bg-hover cursor-pointer"
                 onClick={() => setDeleteTarget(null)}
@@ -190,6 +258,7 @@ export default function ReadingView({ b }: Props) {
         onBgColorChange={b.setDrawerBgColor}
         hasAudio={!!drawerAudio}
         bookUUID={bookUUID}
+        terms={b.terms}
         saving={saving}
         recording={recorder.recording}
         processing={recorder.processing}
@@ -219,6 +288,72 @@ export default function ReadingView({ b }: Props) {
         }
         onClose={() => setConfirmDeleteSentence(false)}
       />
-    </div>
+    </>
+  );
+
+  return (
+    <>
+      {understanding && !mobile ? (
+        /* Desktop: horizontal split — reading pane left, understanding panel right. */
+        <div className="flex-1 min-w-0 min-h-0 flex flex-row overflow-hidden">
+          <div
+            ref={leftRef}
+            className="min-w-0 overflow-y-auto p-4 pb-[50vh] flex flex-col gap-4"
+            style={{ flexBasis: `${splitRatio}%`, flexGrow: 0, flexShrink: 0 }}
+          >
+            {readingContent}
+          </div>
+          <div
+            className="w-1.5 shrink-0 cursor-col-resize bg-border-default hover:bg-accent/40"
+            onPointerDown={onSplitterDown}
+            onPointerMove={onSplitterMove}
+            onPointerUp={onSplitterUp}
+            onPointerCancel={onSplitterUp}
+          />
+          <div className="min-w-0 flex-1 overflow-hidden flex flex-col">
+            <UnderstandingPanel b={b} />
+          </div>
+        </div>
+      ) : (
+        /* Plain full-width reading pane. */
+        <div
+          ref={leftRef}
+          className="flex-1 min-w-0 min-h-0 flex flex-col gap-4 overflow-y-auto p-4 pb-[50vh]"
+        >
+          {readingContent}
+        </div>
+      )}
+
+      {/* Mobile: the same panel slides in from the right instead of splitting. */}
+      {understanding && mobile && (
+        <>
+          {mobilePanelOpen && (
+            <div
+              className="fixed inset-0 z-40 bg-black/40"
+              onClick={() => setMobilePanelOpen(false)}
+            />
+          )}
+          <div
+            className={`fixed top-0 right-0 z-50 h-full w-[88%] max-w-sm bg-bg-body border-l border-border-default shadow-2xl flex flex-col transform transition-transform ${
+              mobilePanelOpen ? "translate-x-0" : "translate-x-full"
+            }`}
+          >
+            <div className="shrink-0 flex items-center justify-end px-2 py-1 border-b border-border-default">
+              <button
+                className="p-1.5 rounded text-text-secondary hover:bg-bg-hover cursor-pointer"
+                onClick={() => setMobilePanelOpen(false)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0">
+              <UnderstandingPanel b={b} />
+            </div>
+          </div>
+        </>
+      )}
+
+      {overlays}
+    </>
   );
 }

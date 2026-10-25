@@ -83,6 +83,87 @@ struct BookListWordsParam {
     sentence_uuid: String,
 }
 
+// ── Understanding layer: artifacts, glossary, quiz ─────────────────────────
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookListArtifactsParam {
+    book_uuid: String,
+    chapter_uuid: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookArtifactParam {
+    book_uuid: String,
+    artifact: JsonValue,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookDeleteArtifactParam {
+    book_uuid: String,
+    uuid: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookGenerateArtifactParam {
+    book_uuid: String,
+    /// `paragraph` | `chapter` | `sentence`.
+    scope_type: String,
+    /// break-row uuid / chapter uuid / sentence uuid.
+    scope_uuid: String,
+    /// `explanation`|`simplification`|`digest`|`argument_map`|`questions`.
+    kind: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    instructions: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookAssessNoteParam {
+    book_uuid: String,
+    note_uuid: String,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookParagraphListenParam {
+    book_uuid: String,
+    /// The paragraph's `paragraph_break` anchor uuid.
+    paragraph_uuid: String,
+    #[serde(default)]
+    voice: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookTermParam {
+    book_uuid: String,
+    term: JsonValue,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookDeleteTermParam {
+    book_uuid: String,
+    uuid: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookExtractTermsParam {
+    book_uuid: String,
+    scope_type: String,
+    scope_uuid: String,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookRecordQuizResultParam {
+    book_uuid: String,
+    artifact_uuid: String,
+    total: i64,
+    correct: i64,
+}
+
 /// Defaults for flags whose "empty" value is `true` — `#[serde(default)]` on a
 /// `bool` would mean `false`, which is not what an omitted `include_content`
 /// should do.
@@ -624,6 +705,106 @@ impl DatasetMcpServer {
         let settings = self.app.state::<SettingsState>();
         datasets::book::book_delete_word(settings, param.book_uuid, param.uuid).await?;
         Ok(serde_json::json!({"status": "ok", "message": "Word deleted"}).to_string())
+    }
+
+    // ── Understanding layer: artifacts, glossary, quiz ──────────────────────
+
+    #[tool(name = "book_list_artifacts", description = "List understanding artifacts for a chapter (explanations, simplifications, digests, argument maps, quizzes, notes, assessments). Each carries a computed `stale` flag when its source text changed since generation.")]
+    async fn book_list_artifacts(&self, Parameters(param): Parameters<BookListArtifactsParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let artifacts = datasets::book_artifacts::book_list_artifacts(settings, param.book_uuid, param.chapter_uuid).await?;
+        Ok(serde_json::to_string_pretty(&artifacts).unwrap_or_default())
+    }
+
+    #[tool(name = "book_save_artifact", description = "Create or update an artifact. Pass artifact as JSON with fields: uuid (empty to create), scope_type ('paragraph'|'chapter'|'sentence'), scope_uuid, kind ('explanation'|'simplification'|'digest'|'argument_map'|'questions'|'note'|'assessment'), content, source, model?, parent_uuid?, content_hash?.")]
+    async fn book_save_artifact(&self, Parameters(param): Parameters<BookArtifactParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let artifact: datasets::book_artifacts::BookArtifact = serde_json::from_value(param.artifact.into())
+            .map_err(|e| format!("Invalid artifact JSON: {}", e))?;
+        datasets::book_artifacts::book_save_artifact(settings, param.book_uuid, artifact).await?;
+        Ok(serde_json::json!({"status": "ok", "message": "Artifact saved"}).to_string())
+    }
+
+    #[tool(name = "book_delete_artifact", description = "Delete an artifact (a generated explanation/digest/quiz, or a user note). Derived artifacts can be regenerated.")]
+    async fn book_delete_artifact(&self, Parameters(param): Parameters<BookDeleteArtifactParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        datasets::book_artifacts::book_delete_artifact(settings, param.book_uuid, param.uuid).await?;
+        Ok(serde_json::json!({"status": "ok", "message": "Artifact deleted"}).to_string())
+    }
+
+    #[tool(name = "book_generate_artifact", description = "Generate an artifact with the LLM for a scope. kind: 'explanation'|'simplification'|'digest'|'argument_map'|'questions'. scope_type: 'paragraph'|'chapter'|'sentence'. Optional model and instructions (e.g. output language) override defaults.")]
+    async fn book_generate_artifact(&self, Parameters(param): Parameters<BookGenerateArtifactParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let artifact = datasets::book_artifacts::book_generate_artifact(
+            settings,
+            param.book_uuid,
+            param.scope_type,
+            param.scope_uuid,
+            param.kind,
+            param.model,
+            param.instructions,
+        )
+        .await?;
+        Ok(serde_json::to_string_pretty(&artifact).unwrap_or_default())
+    }
+
+    #[tool(name = "book_assess_note", description = "Have the LLM assess a user note, producing an 'assessment' artifact linked to it via parent_uuid.")]
+    async fn book_assess_note(&self, Parameters(param): Parameters<BookAssessNoteParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let artifact = datasets::book_artifacts::book_assess_note(settings, param.book_uuid, param.note_uuid, param.model).await?;
+        Ok(serde_json::to_string_pretty(&artifact).unwrap_or_default())
+    }
+
+    #[tool(name = "book_paragraph_listen", description = "Synthesise a paragraph's text with Edge TTS into the book's media/ and attach it to the paragraph anchor. paragraph_uuid is the 'paragraph_break' row uuid.")]
+    async fn book_paragraph_listen(&self, Parameters(param): Parameters<BookParagraphListenParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let result = datasets::book_artifacts::book_paragraph_listen(settings, param.book_uuid, param.paragraph_uuid, param.voice).await?;
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+    }
+
+    #[tool(name = "book_list_terms", description = "List the book's glossary terms with definitions.")]
+    async fn book_list_terms(&self, Parameters(param): Parameters<BookUuidParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let terms = datasets::book_artifacts::book_list_terms(settings, param.book_uuid).await?;
+        Ok(serde_json::to_string_pretty(&terms).unwrap_or_default())
+    }
+
+    #[tool(name = "book_save_term", description = "Create or update a glossary term. Pass term as JSON with fields: uuid (empty to create), term, definition, source, model?. Upserts on (book, term); a user-edited definition is preserved when source is 'user'.")]
+    async fn book_save_term(&self, Parameters(param): Parameters<BookTermParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let term: datasets::book_artifacts::BookTerm = serde_json::from_value(param.term.into())
+            .map_err(|e| format!("Invalid term JSON: {}", e))?;
+        let saved = datasets::book_artifacts::book_save_term(settings, param.book_uuid, term).await?;
+        Ok(serde_json::to_string_pretty(&saved).unwrap_or_default())
+    }
+
+    #[tool(name = "book_delete_term", description = "Delete a glossary term.")]
+    async fn book_delete_term(&self, Parameters(param): Parameters<BookDeleteTermParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        datasets::book_artifacts::book_delete_term(settings, param.book_uuid, param.uuid).await?;
+        Ok(serde_json::json!({"status": "ok", "message": "Term deleted"}).to_string())
+    }
+
+    #[tool(name = "book_extract_terms", description = "Have the LLM extract recurring philosophical/technical concepts from a scope into the glossary. scope_type: 'paragraph'|'chapter'|'sentence'. Never overwrites user-edited definitions.")]
+    async fn book_extract_terms(&self, Parameters(param): Parameters<BookExtractTermsParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let terms = datasets::book_artifacts::book_extract_terms(settings, param.book_uuid, param.scope_type, param.scope_uuid, param.model).await?;
+        Ok(serde_json::to_string_pretty(&terms).unwrap_or_default())
+    }
+
+    #[tool(name = "book_record_quiz_result", description = "Record a quiz attempt (total/correct) for a 'questions' artifact and award XP for the completion.")]
+    async fn book_record_quiz_result(&self, Parameters(param): Parameters<BookRecordQuizResultParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let result = datasets::book_artifacts::book_record_quiz_result(
+            self.app.clone(),
+            settings,
+            param.book_uuid,
+            param.artifact_uuid,
+            param.total,
+            param.correct,
+        )
+        .await?;
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
     #[tool(name = "read_aloud_list", description = "List all read-aloud datasets. Returns UUID, name, description, path, and timestamps.")]
