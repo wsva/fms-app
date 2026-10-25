@@ -121,7 +121,7 @@ struct ReadAloudDeleteTextParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
-struct ReadAloudListAttemptsParam {
+struct ReadAloudTextRefParam {
     dataset_uuid: String,
     text_uuid: String,
 }
@@ -482,7 +482,7 @@ impl DatasetMcpServer {
     }
 
     #[tool(name = "read_aloud_list_attempts", description = "List all recorded attempts for a text (newest first) with score, transcript, resolved audio URL, and the stored assessment (`metrics`: accuracy counts, fluency, pronunciation, weakest words, pauses) when one was computed. Metrics are absent for takes whose recording is gone or that predate assessment.")]
-    async fn read_aloud_list_attempts(&self, Parameters(param): Parameters<ReadAloudListAttemptsParam>) -> Result<String, String> {
+    async fn read_aloud_list_attempts(&self, Parameters(param): Parameters<ReadAloudTextRefParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         let items = datasets::read_aloud::read_aloud_list_attempts(settings, param.dataset_uuid, param.text_uuid).await?;
         Ok(serde_json::to_string_pretty(&items).unwrap_or_default())
@@ -554,6 +554,25 @@ impl DatasetMcpServer {
         )
         .await?;
         Ok(serde_json::to_string_pretty(&assessment).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_standard_audio_assess", description = "Score a text's own standard audio — the reference clip pronunciation is measured against — through the same three axes a take goes through: the clip is transcribed with the loaded STT model and scored against the reference text (accuracy), paced from its own waveform (fluency, needs word timings from a Parakeet model), and aligned against phones derived from itself (pronunciation). This is a self-test of the reference, not practice: nothing is stored, no XP is awarded, and no attempt is created. A healthy clip reads high on all three; low accuracy means the audio does not say what the text says, which would mark down every correct reading. Call read_aloud_standard_audio_list first if it reports that no clip exists.")]
+    async fn read_aloud_standard_audio_assess(&self, Parameters(param): Parameters<ReadAloudTextRefParam>) -> Result<String, String> {
+        log::info!(
+            "[MCP] read_aloud_standard_audio_assess: dataset={}, text={}",
+            param.dataset_uuid,
+            param.text_uuid
+        );
+        let settings = self.app.state::<SettingsState>();
+        let model_state = self.app.state::<crate::models::ModelState>();
+        let result = datasets::read_aloud::assess_standard_audio(
+            &settings,
+            &model_state,
+            &param.dataset_uuid,
+            &param.text_uuid,
+        )
+        .await?;
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
     #[tool(name = "read_aloud_submit", description = "Submit a reading attempt: stores the (optional) recording, scores the recognized transcript against the reference text with the WIP-based ASR metric, assesses fluency and pronunciation from the WAV, saves the attempt, and awards scaled XP (1 XP at score >= 60, +1 more at >= 80). Pass `words` (from model_transcribe_detailed) to get the fluency axis. Returns the score, the full scoring summary (alignment chunks included), the three-axis `assessment`, the saved attempt (with `metrics`), and XP awarded.")]

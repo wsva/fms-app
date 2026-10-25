@@ -412,6 +412,18 @@ export default function ReadAloudPage() {
     setLocRefresh((n) => n + 1);
   }, [loadDatasets, loadStandardClips, loadTexts, selectedDataset]);
 
+  // Inside a text — the practice pane, the history, one open attempt —
+  // everything on screen is the same subject, so one plain Refresh re-reads all
+  // of it: the dataset's texts (the open one and its best score), the standard
+  // clips behind the audio controls, and the attempt history.
+  const handleRefreshText = useCallback(() => {
+    if (selectedDataset) {
+      void loadTexts(selectedDataset);
+      void loadStandardClips(selectedDataset);
+    }
+    setAttemptsRefreshKey((k) => k + 1);
+  }, [loadStandardClips, loadTexts, selectedDataset]);
+
   // The attempts page is a per-text concern; close it whenever the selected
   // text changes so it never leaks across texts.
   useEffect(() => {
@@ -439,13 +451,19 @@ export default function ReadAloudPage() {
       : "texts";
 
   // One Refresh button means different things per level, so its caption names the
-  // scope handleRefresh actually re-reads here: the linked directories, the dataset
-  // list, or the open dataset's texts. Mirrors the Dictation page.
+  // scope it actually re-reads here: the linked directories, the dataset list,
+  // the open dataset's texts, or — once a text is open — the whole of that text,
+  // which the practice, attempts and attempt levels all show. Mirrors the
+  // Dictation page.
+  const refreshActiveText = viewMode === "practice" && !showLocations;
   const refreshCaption = showLocations
     ? "Refresh locations"
-    : viewMode === "datasets"
-      ? "Refresh datasets"
-      : "Refresh texts";
+    : refreshActiveText
+      ? "Refresh"
+      : viewMode === "datasets"
+        ? "Refresh datasets"
+        : "Refresh texts";
+  const handleRefreshClick = refreshActiveText ? handleRefreshText : handleRefresh;
 
   // Draft differs from the stored text (or, for a new one, from empty fields).
   const dirty =
@@ -955,17 +973,23 @@ export default function ReadAloudPage() {
         )}
 
         {/* Refresh — always available; reloads the dataset list and, when a
-            dataset is open, its texts. The caption carries the scope of the level.
-            Inline on desktop. On a phone it rides in the overflow, except at the
-            datasets root where the bar is otherwise empty — there it shows inline
-            so the action stays one tap instead of hiding behind the three-dot. */}
+            dataset is open, its texts — or, once a text is open, everything
+            about that text: its stored fields, its standard audio and its
+            attempts. The caption carries the scope of the level. Inline on
+            desktop. On a phone it rides in the overflow, except at the datasets
+            root where the bar is otherwise empty — there it shows inline so the
+            action stays one tap instead of hiding behind the three-dot. */}
         {(!mobile || viewMode === "datasets") && (
           <ToolbarButton
             icon={RefreshCw}
             label={refreshCaption}
-            title={refreshCaption}
+            title={
+              refreshActiveText
+                ? "Reload this text, its standard audio and its attempts"
+                : refreshCaption
+            }
             ariaLabel={refreshCaption}
-            onClick={handleRefresh}
+            onClick={handleRefreshClick}
           />
         )}
 
@@ -1016,7 +1040,7 @@ export default function ReadAloudPage() {
               </ToolbarMenuItem>
             )}
             {mobile && viewMode !== "datasets" && (
-              <ToolbarMenuItem icon={RefreshCw} onClick={handleRefresh}>
+              <ToolbarMenuItem icon={RefreshCw} onClick={handleRefreshClick}>
                 {refreshCaption}
               </ToolbarMenuItem>
             )}
@@ -1236,6 +1260,7 @@ export default function ReadAloudPage() {
             onSelectAttempt={handleSelectAttempt}
             refreshKey={attemptsRefreshKey}
             compare={compareView}
+            standardAudioAvailable={hasUsableClip(clipsByText.get(activeText.uuid))}
           />
         </>
       ) : viewMode === "practice" && activeDataset && activeText ? (

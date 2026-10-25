@@ -244,6 +244,23 @@ export interface Assessment {
   pauses: Pause[];
 }
 
+/**
+ * The result of scoring a text's own standard audio: the clip is treated as the
+ * "recording" and scored against the text, so the reference can be checked
+ * before a learner is measured against it. Nothing is stored.
+ */
+export interface StandardAudioAssessment {
+  /** The clip that was scored (the text's default). */
+  clip_uuid: string;
+  /** Seconds of the clip. */
+  duration: number;
+  /** The reference the clip was scored against. */
+  reference: string;
+  /** What the STT model heard in the clip — the "recognized" side. */
+  recognized: string;
+  assessment: Assessment;
+}
+
 /** Below this a word's pronunciation is reported as weak. */
 export const WEAK_WORD_SCORE = 0.4;
 

@@ -22,6 +22,8 @@ The live panel is read‑only: it is there to catch a silent microphone or a mod
 
 The **practice panel** holds the text, the recorder, and the scoring view.
 
+Once a text is open, the toolbar's **Refresh** re‑reads everything about it — its stored fields, its standard audio and its attempt history — and it means the same thing on the attempts page and on one open attempt, so a clip or a recording that changed elsewhere shows up without leaving the page.
+
 ## Standard audio (needed for pronunciation)
 
 Accuracy — how close your words were — needs nothing but the text. **Pronunciation** — whether it *sounded* right — needs something to compare you against: a clip of the text read clearly and correctly. That clip is called the text's **standard audio**, and a text with none cannot be scored for pronunciation at all; the card says so instead of inventing a number.
@@ -52,6 +54,8 @@ Every recording you make is saved as an **attempt**. The **attempts panel** list
 - Navigate between attempts and, where relevant, navigate to the sentences that most need work.
 
 Assessment can take a while (transcription first, then the phoneme model). An **assessment log** docked at the bottom of the attempts page tails each stage as it runs, so the wait is never silent; collapse it to a single line or close it once the run finishes.
+
+Above the history sits a **Standard audio check** card. It scores the text's standard audio itself — the clip your pronunciation is measured against — through the same three axes a take goes through, so you can tell a bad reference from a bad reading. Nothing it produces is stored: no attempt is added and no XP is awarded. Read it as a health check: **accuracy** near 100% means the clip says what the text says, **pronunciation** high means the clip aligns cleanly against itself (a low one points at the phoneme model), and **fluency** paces the clip's own recording. A low accuracy is the finding that matters — that clip would mark down everyone who reads the passage correctly, so regenerate or replace it in **Manage**.
 
 Re‑reading the same passage is encouraged — repetition with feedback is how fluency builds.
 

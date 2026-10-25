@@ -1463,6 +1463,21 @@ fn load_default_clip(
     }
 }
 
+/// Load the reference text: the normalized content when set, else the text to
+/// read. Read-only — practising never writes to the dataset.
+pub(crate) fn text_reference(dir: &Path, text_uuid: &str) -> Result<String, String> {
+    let conn = open_db(dir)?;
+    conn.query_row(
+        "SELECT content, normalized_content FROM read_text WHERE uuid = ?1",
+        [text_uuid],
+        |row| {
+            let content: String = row.get(0)?;
+            Ok(effective_reference(&content, row.get::<_, Option<String>>(1)?.as_deref()))
+        },
+    )
+    .map_err(|_| format!("Text {} not found in dataset", text_uuid))
+}
+
 /// The grouped reference target for one clip: from the cache when this exact
 /// clip has been decoded against this exact model before, otherwise by running
 /// the model on the clip and pinning that decode back onto its own posteriors
@@ -1645,6 +1660,112 @@ pub async fn read_aloud_assess(
     .await)
 }
 
+/// What scoring a text's own standard audio produced: the clip's transcript, the
+/// reference it was scored against, and the same three-axis picture a take gets.
+#[derive(Serialize)]
+pub struct StandardAudioAssessment {
+    pub clip_uuid: String,
+    /// Seconds of the clip.
+    pub duration: f64,
+    pub reference: String,
+    /// What the STT model heard in the clip — the "recognized" side of the score.
+    pub recognized: String,
+    pub assessment: Assessment,
+}
+
+/// Score the text's default standard audio through the same three axes an
+/// attempt goes through. A self-test of the reference, not practice: nothing is
+/// stored, no XP is awarded, and no attempt appears in the history.
+///
+/// A healthy clip reads back with high accuracy (what it says is what the text
+/// says) and a high pronunciation score (it is aligned against phones derived
+/// from itself). A low accuracy is the defect worth catching: the reference
+/// audio does not speak the passage, and every learner reading it correctly
+/// would be marked down for the difference.
+#[cfg(feature = "stt")]
+pub(crate) async fn assess_standard_audio(
+    settings: &SettingsState,
+    model_state: &crate::models::ModelState,
+    dataset_uuid: &str,
+    text_uuid: &str,
+) -> Result<StandardAudioAssessment, String> {
+    let dir = find_dataset_dir(settings, dataset_uuid)?;
+    let reference = text_reference(&dir, text_uuid)?;
+
+    let clip = load_default_clip(settings, dataset_uuid, text_uuid, &reference);
+    let stored = match &clip {
+        standard_audio::DefaultClip::Missing => {
+            return Err("This text has no standard audio on this device. Generate or import one on the Manage page first.".to_string())
+        }
+        standard_audio::DefaultClip::Stale => {
+            return Err("The standard audio was made from an earlier version of the text, so it cannot be scored. Regenerate it on the Manage page.".to_string())
+        }
+        standard_audio::DefaultClip::Ready(stored) => stored,
+    };
+
+    log::info!(
+        "read_aloud standard audio check: clip {} ({:.1}s) against text {}",
+        stored.uuid,
+        stored.seconds(),
+        text_uuid
+    );
+
+    // The clip is the "recording" here, so it is transcribed exactly as a take
+    // is — word timings included when the loaded model can give them, which is
+    // what makes the fluency axis measurable for the reference too.
+    let detailed =
+        crate::models::transcribe::transcribe_samples_detailed(model_state, &stored.samples)?;
+    let words: Vec<TimedWord> = detailed
+        .words
+        .iter()
+        .map(|w| TimedWord { text: w.text.clone(), start: w.start as f64, end: w.end as f64 })
+        .collect();
+
+    let summary = score_asr(&reference, &detailed.text);
+    let assessment = assess_attempt(
+        settings,
+        &summary,
+        &reference,
+        &detailed.text,
+        &stored.samples,
+        (!words.is_empty()).then_some(words.as_slice()),
+        &clip,
+    )
+    .await;
+
+    Ok(StandardAudioAssessment {
+        clip_uuid: stored.uuid.clone(),
+        duration: stored.seconds(),
+        reference,
+        recognized: detailed.text,
+        assessment,
+    })
+}
+
+/// Score the text's own standard audio as a reference self-test.
+#[cfg(feature = "stt")]
+#[tauri::command]
+pub async fn read_aloud_standard_audio_assess(
+    settings: State<'_, SettingsState>,
+    model_state: State<'_, crate::models::ModelState>,
+    dataset_uuid: String,
+    text_uuid: String,
+) -> Result<StandardAudioAssessment, String> {
+    assess_standard_audio(settings.inner(), model_state.inner(), &dataset_uuid, &text_uuid).await
+}
+
+/// Without the `stt` feature there is no model to transcribe the clip with; say
+/// so instead of leaving the caller with an unknown command.
+#[cfg(not(feature = "stt"))]
+#[tauri::command]
+pub async fn read_aloud_standard_audio_assess(
+    _settings: State<'_, SettingsState>,
+    _dataset_uuid: String,
+    _text_uuid: String,
+) -> Result<StandardAudioAssessment, String> {
+    Err("This build has no speech recognition, so the standard audio cannot be scored.".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Pronunciation model (phoneme CTC)
 // ---------------------------------------------------------------------------
@@ -1751,18 +1872,7 @@ pub async fn read_aloud_submit(
     let dir = find_dataset_dir(&settings, &dataset_uuid)?;
 
     // Load the reference text (read-only). Practising never writes to the dataset.
-    let content: String = {
-        let conn = open_db(&dir)?;
-        conn.query_row(
-            "SELECT content, normalized_content FROM read_text WHERE uuid = ?1",
-            [&text_uuid],
-            |row| {
-                let content: String = row.get(0)?;
-                Ok(effective_reference(&content, row.get::<_, Option<String>>(1)?.as_deref()))
-            },
-        )
-        .map_err(|_| format!("Text {} not found in dataset", text_uuid))?
-    };
+    let content = text_reference(&dir, &text_uuid)?;
 
     let summary = score_asr(&content, &recognized);
     let score = summary.score;

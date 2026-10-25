@@ -2,9 +2,20 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { Play, Trash2, History, ChevronRight, Loader2, Mic, RefreshCw, Award } from "lucide-react";
-import type { ReadAttempt, ReadText } from "@/lib/read_aloud/types";
+import {
+  Play,
+  Trash2,
+  History,
+  ChevronRight,
+  Loader2,
+  Mic,
+  RefreshCw,
+  Award,
+  AudioLines,
+} from "lucide-react";
+import type { ReadAttempt, ReadText, StandardAudioAssessment } from "@/lib/read_aloud/types";
 import { rerecognizeAttempt } from "@/lib/read_aloud/rerecognize";
+import { assessStandardAudio } from "@/lib/read_aloud/standardAudio";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 import AssessmentCards, { PauseRibbon, ScoreAxes } from "@/components/read_aloud/AssessmentCards";
 import AssessmentLogPanel from "@/components/read_aloud/AssessmentLogPanel";
@@ -35,6 +46,9 @@ type Props = {
    *  sentence by sentence instead of showing the transcript alone. Toggled by
    *  the page toolbar's "Compare" button. */
   compare?: boolean;
+  /** Whether this text has a usable standard clip on this device, so the
+   *  reference self-test card knows if it has anything to score. */
+  standardAudioAvailable?: boolean;
 };
 
 function playUrl(url?: string | null) {
@@ -420,6 +434,7 @@ export default function AttemptsPanel({
   onSelectAttempt,
   refreshKey,
   compare,
+  standardAudioAvailable = false,
 }: Props) {
   const [attempts, setAttempts] = useState<ReadAttempt[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -427,6 +442,12 @@ export default function AttemptsPanel({
   // The attempt currently being re-recognized (its uuid), so the row can show a
   // spinner and other rows disable while the model runs.
   const [rerecognizing, setRerecognizing] = useState<string | null>(null);
+  // The reference self-test: its last result, whether it is running, and why it
+  // failed. Held here rather than in the card so switching texts clears it
+  // without a remount.
+  const [referenceResult, setReferenceResult] = useState<StandardAudioAssessment | null>(null);
+  const [referenceBusy, setReferenceBusy] = useState(false);
+  const [referenceError, setReferenceError] = useState<string | null>(null);
 
   const loadAttempts = useCallback(async () => {
     if (!isTauri()) return;
@@ -484,6 +505,31 @@ export default function AttemptsPanel({
       setError(msg);
     } finally {
       setRerecognizing(null);
+    }
+  };
+
+  // A different text is a different clip and a different reference, so the last
+  // self-test says nothing about it.
+  useEffect(() => {
+    setReferenceResult(null);
+    setReferenceError(null);
+  }, [text.uuid]);
+
+  // Score the standard audio itself: the clip is transcribed and measured
+  // against the text exactly as a take would be. Nothing is stored — this is a
+  // check on the reference, not practice, and it never enters the list below.
+  const assessReference = async () => {
+    if (!isTauri()) return;
+    setReferenceBusy(true);
+    setReferenceError(null);
+    try {
+      setReferenceResult(await assessStandardAudio(datasetUuid, text.uuid));
+    } catch (e) {
+      const msg = String(e);
+      logError(`standard audio check failed: ${msg}`, LOG_MODULE);
+      setReferenceError(msg);
+    } finally {
+      setReferenceBusy(false);
     }
   };
 
@@ -570,6 +616,69 @@ export default function AttemptsPanel({
                 {attempts.length === 1 ? "" : "s"}
                 {bestScore != null && ` · best ${Math.round(bestScore)}%`}
               </p>
+            </section>
+
+            {/* A card of its own, above the history: this scores the reference
+                clip rather than a take. A clip that does not say what the text
+                says marks down every learner who reads it correctly, so it is
+                worth catching before the numbers below are trusted. Nothing it
+                produces is stored. */}
+            <section className="flex flex-col gap-2 p-3 rounded-xl border border-dashed border-border-default bg-bg-card min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <AudioLines size={16} className="text-text-tertiary shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-sm font-semibold text-text-primary">Standard audio check</h3>
+                  <p className="text-[11px] text-text-tertiary break-words">
+                    Score the reference clip itself — the audio your pronunciation is measured
+                    against. Nothing is saved.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void assessReference()}
+                  disabled={referenceBusy || !standardAudioAvailable}
+                  title={
+                    standardAudioAvailable
+                      ? "Transcribe and score the reference clip"
+                      : "This text has no usable standard audio on this device"
+                  }
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-accent text-white text-xs font-medium cursor-pointer shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {referenceBusy ? (
+                    <Loader2 size={13} className="animate-spin" />
+                  ) : (
+                    <RefreshCw size={13} />
+                  )}
+                  {referenceBusy ? "Scoring…" : referenceResult ? "Score again" : "Score it"}
+                </button>
+              </div>
+
+              {!standardAudioAvailable && (
+                <p className="text-[11px] text-text-tertiary break-words">
+                  No usable standard audio on this device — generate or import one in Manage, then
+                  come back.
+                </p>
+              )}
+
+              {referenceError && (
+                <div className="p-2 rounded-lg bg-error-bg text-error-text text-xs break-words">
+                  {referenceError}
+                </div>
+              )}
+
+              {referenceResult && (
+                <>
+                  <AssessmentCards assessment={referenceResult.assessment} />
+                  <div className="flex flex-col gap-1 min-w-0">
+                    <p className="text-[11px] text-text-tertiary tabular-nums">
+                      {formatLength(referenceResult.duration)} clip · what the model heard:
+                    </p>
+                    <div className="p-3 rounded-lg bg-bg-muted text-text-primary text-sm leading-relaxed break-words">
+                      {referenceResult.recognized || "(no speech recognized)"}
+                    </div>
+                  </div>
+                </>
+              )}
             </section>
 
             {attempts.length === 0 ? (

@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
-import type { AudioProbe, ReadStandardAudio, SpanGuess } from "./types";
+import type {
+  AudioProbe,
+  ReadStandardAudio,
+  SpanGuess,
+  StandardAudioAssessment,
+} from "./types";
 
 /**
  * Wrappers for the `read_aloud_standard_audio_*` commands — the reference clips
@@ -135,6 +140,25 @@ export async function deleteStandardAudio(
 ): Promise<void> {
   requireTauri();
   await invoke("read_aloud_standard_audio_delete", { datasetUuid, uuid });
+}
+
+/**
+ * Score the text's default clip the way a take is scored — accuracy, fluency and
+ * pronunciation — as a self-test of the reference.
+ *
+ * The clip is transcribed and measured against the text, so a clip that does not
+ * say what the text says is caught here rather than marking down every learner
+ * who reads it correctly. Nothing is stored: no attempt, no XP.
+ */
+export async function assessStandardAudio(
+  datasetUuid: string,
+  textUuid: string
+): Promise<StandardAudioAssessment> {
+  requireTauri();
+  return invoke<StandardAudioAssessment>("read_aloud_standard_audio_assess", {
+    datasetUuid,
+    textUuid,
+  });
 }
 
 /** Group clips by text, for the dataset-wide badge lookup. */

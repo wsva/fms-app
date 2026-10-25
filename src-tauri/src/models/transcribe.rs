@@ -29,6 +29,14 @@ const MAX_CHUNK_DURATION_SECS: f64 = 240.0; // 4 minutes
 /// may be missed, so overlap ensures they're captured in at least one chunk.
 const CHUNK_OVERLAP_SECS: f64 = 15.0;
 
+/// A word starting this close to the edge of the already-covered region is the
+/// next chunk's echo of a word the previous chunk already produced.
+const CHUNK_DEDUPE_TOLERANCE_SECS: f64 = 0.5;
+
+/// The same, for segment-level results: a segment boundary is a chunk of speech,
+/// so the echo to forgive is wider.
+const SEGMENT_DEDUPE_TOLERANCE_SECS: f64 = 1.0;
+
 /// Audio sample rate used by decode_to_pcm (16 kHz).
 const STT_SAMPLE_RATE: u32 = 16000;
 
@@ -247,6 +255,11 @@ pub fn transcribe_samples_text(state: &ModelState, samples: &[f32]) -> Result<St
 ///
 /// This is the read-aloud evidence call. `model_transcribe` stays the plain
 /// text call every other caller uses, so nothing existing changes shape.
+///
+/// Long audio is split first: Parakeet is both the only backend that yields
+/// word timings and the only one with an audio-length limit, so this is the one
+/// caller that could otherwise feed it minutes of audio at once. See
+/// [`transcribe_detailed_chunked`].
 pub fn transcribe_samples_detailed(
     state: &ModelState,
     samples: &[f32],
@@ -258,6 +271,18 @@ pub fn transcribe_samples_detailed(
 
     let _transcribe_guard = state.transcribe_lock.lock().unwrap();
     let mut guard = ModelGuard::take(state)?;
+
+    // Past the window the encoder sees audio it was never trained on and the
+    // decode collapses — observed as a whole German take coming back in English
+    // while a sentence-long take of the same text was correct. Split it the same
+    // way the word-level file path already does.
+    if matches!(guard.model(), ActiveModel::Parakeet(_)) {
+        let duration = samples.len() as f64 / STT_SAMPLE_RATE as f64;
+        if duration > MAX_CHUNK_DURATION_SECS {
+            return transcribe_detailed_chunked(guard.model(), samples, duration);
+        }
+    }
+
     transcribe_detailed_pass(guard.model(), samples)
 }
 
@@ -282,6 +307,113 @@ fn transcribe_detailed_pass(
     }
 
     Ok(DetailedTranscript::text_only(model.transcribe_text(samples)?))
+}
+
+/// The word-level detailed pass, split for audio longer than the model's
+/// window.
+///
+/// Same windows, same overlap and same de-duplication as
+/// [`transcribe_word_level_samples`]; the one difference is that the model is
+/// held for the whole loop instead of being handed back between chunks, because
+/// the caller arrived with the guard already taken.
+///
+/// The text is rebuilt from the surviving words rather than joined from each
+/// chunk's own text: it has to stay token-for-token identical to the words the
+/// assessment aligns timings against, and a chunk's text still contains the
+/// overlap words that were just dropped here.
+fn transcribe_detailed_chunked(
+    model: &mut ActiveModel,
+    samples: &[f32],
+    total_duration_secs: f64,
+) -> Result<DetailedTranscript, String> {
+    let windows = long_audio_windows(samples.len());
+    log::info!(
+        "Audio too long (>{:.0}s), splitting into {} chunks of {:.0}s with {:.0}s overlap",
+        MAX_CHUNK_DURATION_SECS,
+        windows.len(),
+        MAX_CHUNK_DURATION_SECS,
+        CHUNK_OVERLAP_SECS
+    );
+
+    let mut words: Vec<TranscriptWord> = Vec::new();
+    let mut covered_until_secs: f64 = 0.0;
+
+    for (index, (start_sample, end_sample)) in windows.iter().copied().enumerate() {
+        let chunk = &samples[start_sample..end_sample];
+        let chunk_duration = chunk.len() as f64 / STT_SAMPLE_RATE as f64;
+        let offset_secs = start_sample as f64 / STT_SAMPLE_RATE as f64;
+
+        log::info!(
+            "Chunk {}: {:.1}s - {:.1}s ({:.1}s of audio, {} samples)",
+            index, offset_secs, offset_secs + chunk_duration, chunk_duration, chunk.len()
+        );
+
+        // `transcribe_words` adds `offset_secs` to every timestamp it reports.
+        let chunk_result = model.transcribe_words(chunk, offset_secs)?;
+
+        for word in chunk_result.segments.unwrap_or_default() {
+            if word.text.trim().is_empty() {
+                continue;
+            }
+            // Already spoken by the previous chunk's tail.
+            if (word.start as f64) < covered_until_secs - CHUNK_DEDUPE_TOLERANCE_SECS {
+                continue;
+            }
+            words.push(TranscriptWord { text: word.text, start: word.start, end: word.end });
+        }
+
+        covered_until_secs =
+            (offset_secs + chunk_duration - CHUNK_OVERLAP_SECS).max(covered_until_secs);
+
+        log::info!(
+            "Chunk {} done: {} total words, covered_until={:.1}s",
+            index, words.len(), covered_until_secs
+        );
+    }
+
+    let text = words
+        .iter()
+        .map(|w| w.text.as_str())
+        .collect::<Vec<&str>>()
+        .join(" ");
+
+    log::info!(
+        "chunked detailed pass complete: {} chunks, {} words, {:.1}s audio",
+        windows.len(),
+        words.len(),
+        total_duration_secs
+    );
+
+    Ok(DetailedTranscript {
+        text,
+        words,
+        capabilities: TranscriptCapabilities { word_timings: true },
+    })
+}
+
+/// The sample ranges long audio is split into.
+///
+/// Every window but the last is `MAX_CHUNK_DURATION_SECS` long and the step is
+/// the duration minus `CHUNK_OVERLAP_SECS`, so consecutive windows share that
+/// much audio and no sample is skipped. The last window is clipped to the end.
+///
+/// Shared by every chunking caller so the same audio is cut, and therefore
+/// transcribed, identically no matter which page asked.
+fn long_audio_windows(total_samples: usize) -> Vec<(usize, usize)> {
+    let chunk_samples = (MAX_CHUNK_DURATION_SECS * STT_SAMPLE_RATE as f64) as usize;
+    let step_samples = ((MAX_CHUNK_DURATION_SECS - CHUNK_OVERLAP_SECS) * STT_SAMPLE_RATE as f64) as usize;
+
+    let mut windows = Vec::new();
+    let mut start = 0usize;
+    while start < total_samples {
+        let end = (start + chunk_samples).min(total_samples);
+        windows.push((start, end));
+        if end >= total_samples {
+            break;
+        }
+        start += step_samples;
+    }
+    windows
 }
 
 /// Transcribe raw 16kHz mono PCM WAV bytes, loading the model first if needed.
@@ -352,32 +484,24 @@ fn transcribe_file_chunked(
     samples: &[f32],
     total_duration_secs: f64,
 ) -> Result<TranscriptionResult, String> {
+    let windows = long_audio_windows(samples.len());
     log::info!(
-        "Splitting into chunks of {:.0}s with {:.0}s overlap",
-        MAX_CHUNK_DURATION_SECS, CHUNK_OVERLAP_SECS
+        "Splitting into {} chunks of {:.0}s with {:.0}s overlap",
+        windows.len(), MAX_CHUNK_DURATION_SECS, CHUNK_OVERLAP_SECS
     );
-
-    let chunk_samples = (MAX_CHUNK_DURATION_SECS * STT_SAMPLE_RATE as f64) as usize;
-    let step_samples = ((MAX_CHUNK_DURATION_SECS - CHUNK_OVERLAP_SECS) * STT_SAMPLE_RATE as f64) as usize;
 
     let mut all_segments: Vec<TranscriptionSegment> = Vec::new();
     let mut combined_text = String::new();
     let mut covered_until_secs: f64 = 0.0;
-    let mut chunk_index = 0;
 
-    loop {
-        let start_sample = chunk_index * step_samples;
-        if start_sample >= samples.len() {
-            break;
-        }
-        let end_sample = (start_sample + chunk_samples).min(samples.len());
+    for (index, (start_sample, end_sample)) in windows.iter().copied().enumerate() {
         let chunk = &samples[start_sample..end_sample];
         let chunk_duration = chunk.len() as f64 / STT_SAMPLE_RATE as f64;
         let offset_secs = start_sample as f64 / STT_SAMPLE_RATE as f64;
 
         log::info!(
             "Chunk {}: {:.1}s - {:.1}s ({:.1}s of audio)",
-            chunk_index, offset_secs, offset_secs + chunk_duration, chunk_duration
+            index, offset_secs, offset_secs + chunk_duration, chunk_duration
         );
 
         // Transcribe this chunk
@@ -389,12 +513,11 @@ fn transcribe_file_chunked(
         }
         combined_text.push_str(&chunk_result.text);
 
-        // Add segments, deduplicating in overlap regions
+        // Add segments, deduplicating in overlap regions. A segment boundary is
+        // a whole chunk of speech rather than a word, hence the wider tolerance.
         if let Some(segments) = chunk_result.segments {
             for seg in segments {
-                // Skip segments that fall in the already-covered region
-                let tolerance = 1.0_f32; // 1 second tolerance for segment boundaries
-                if seg.start < (covered_until_secs as f32) - tolerance {
+                if seg.start < (covered_until_secs as f32) - SEGMENT_DEDUPE_TOLERANCE_SECS as f32 {
                     continue;
                 }
                 all_segments.push(seg);
@@ -406,15 +529,8 @@ fn transcribe_file_chunked(
 
         log::info!(
             "Chunk {} done: {} total segments, covered_until={:.1}s",
-            chunk_index, all_segments.len(), covered_until_secs
+            index, all_segments.len(), covered_until_secs
         );
-
-        chunk_index += 1;
-
-        // If this chunk reached the end of the audio, stop
-        if end_sample >= samples.len() {
-            break;
-        }
     }
 
     let result = TranscriptionResult {
@@ -424,7 +540,7 @@ fn transcribe_file_chunked(
 
     log::info!(
         "transcribe_file complete (chunked): {} chunks, {} segments, {:.1}s audio",
-        chunk_index,
+        windows.len(),
         result.segments.as_ref().map(|s| s.len()).unwrap_or(0),
         total_duration_secs
     );
@@ -504,31 +620,23 @@ fn transcribe_word_level_samples(
     }
 
     // Long audio: split into overlapping chunks
+    let windows = long_audio_windows(samples.len());
     log::info!(
-        "Audio too long (>{:.0}s), splitting into chunks of {:.0}s with {:.0}s overlap",
-        MAX_CHUNK_DURATION_SECS, MAX_CHUNK_DURATION_SECS, CHUNK_OVERLAP_SECS
+        "Audio too long (>{:.0}s), splitting into {} chunks of {:.0}s with {:.0}s overlap",
+        MAX_CHUNK_DURATION_SECS, windows.len(), MAX_CHUNK_DURATION_SECS, CHUNK_OVERLAP_SECS
     );
-
-    let chunk_samples = (MAX_CHUNK_DURATION_SECS * STT_SAMPLE_RATE as f64) as usize;
-    let step_samples = ((MAX_CHUNK_DURATION_SECS - CHUNK_OVERLAP_SECS) * STT_SAMPLE_RATE as f64) as usize;
 
     let mut all_words: Vec<TranscriptionSegment> = Vec::new();
     let mut covered_until_secs: f64 = 0.0;
-    let mut chunk_index = 0;
-    let mut offset_secs: f64 = 0.0;
 
-    loop {
-        let start_sample = chunk_index * step_samples;
-        if start_sample >= samples.len() {
-            break;
-        }
-        let end_sample = (start_sample + chunk_samples).min(samples.len());
+    for (index, (start_sample, end_sample)) in windows.iter().copied().enumerate() {
         let chunk = &samples[start_sample..end_sample];
         let chunk_duration = chunk.len() as f64 / STT_SAMPLE_RATE as f64;
+        let offset_secs = start_sample as f64 / STT_SAMPLE_RATE as f64;
 
         log::info!(
             "Chunk {}: {:.1}s - {:.1}s ({:.1}s of audio, {} samples)",
-            chunk_index, offset_secs, offset_secs + chunk_duration, chunk_duration, chunk.len()
+            index, offset_secs, offset_secs + chunk_duration, chunk_duration, chunk.len()
         );
 
         // Transcribe this chunk
@@ -538,7 +646,7 @@ fn transcribe_word_level_samples(
             for word in words {
                 // Skip words that fall in the already-covered region (deduplication).
                 // Allow a small tolerance to avoid cutting words at the boundary.
-                let tolerance = 0.5_f32; // seconds
+                let tolerance = CHUNK_DEDUPE_TOLERANCE_SECS as f32;
                 if word.start < (covered_until_secs as f32) - tolerance {
                     continue;
                 }
@@ -549,16 +657,7 @@ fn transcribe_word_level_samples(
         // Update covered region: everything up to (chunk_end - overlap) is covered
         covered_until_secs = (offset_secs + chunk_duration - CHUNK_OVERLAP_SECS).max(covered_until_secs);
 
-        log::info!("Chunk {} done: {} total words, covered_until={:.1}s", chunk_index, all_words.len(), covered_until_secs);
-
-        // Move to next chunk
-        chunk_index += 1;
-        offset_secs = (chunk_index * step_samples) as f64 / STT_SAMPLE_RATE as f64;
-
-        // If this chunk reached the end of the audio, stop
-        if end_sample >= samples.len() {
-            break;
-        }
+        log::info!("Chunk {} done: {} total words, covered_until={:.1}s", index, all_words.len(), covered_until_secs);
     }
 
     // Build combined result
@@ -570,7 +669,7 @@ fn transcribe_word_level_samples(
 
     log::info!(
         "transcribe_file_word_level complete: {} chunks, {} words, {:.1}s audio",
-        chunk_index + 1,
+        windows.len(),
         result.segments.as_ref().map(|s| s.len()).unwrap_or(0),
         total_duration_secs
     );
@@ -586,4 +685,56 @@ fn transcribe_word_level_pass(
 ) -> Result<TranscriptionResult, String> {
     let mut guard = ModelGuard::take(state)?;
     guard.model().transcribe_words(samples, time_offset_secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RATE: f64 = STT_SAMPLE_RATE as f64;
+
+    fn samples_for(seconds: f64) -> usize {
+        (seconds * RATE) as usize
+    }
+
+    #[test]
+    fn audio_that_fits_the_window_is_one_chunk() {
+        let total = samples_for(MAX_CHUNK_DURATION_SECS);
+        assert_eq!(long_audio_windows(total), vec![(0, total)]);
+    }
+
+    #[test]
+    fn long_audio_steps_by_the_duration_minus_the_overlap() {
+        let total = samples_for(600.0);
+        let windows = long_audio_windows(total);
+        let step = samples_for(MAX_CHUNK_DURATION_SECS - CHUNK_OVERLAP_SECS);
+
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0], (0, samples_for(MAX_CHUNK_DURATION_SECS)));
+        assert_eq!(windows[1].0, step);
+        assert_eq!(windows[2].0, 2 * step);
+        assert_eq!(windows.last().unwrap().1, total, "the last chunk ends with the audio");
+
+        // Consecutive chunks share exactly the configured overlap.
+        for pair in windows.windows(2) {
+            assert_eq!(pair[0].1 - pair[1].0, samples_for(CHUNK_OVERLAP_SECS));
+        }
+    }
+
+    #[test]
+    fn every_sample_is_covered() {
+        let total = samples_for(1100.0);
+        let windows = long_audio_windows(total);
+
+        assert_eq!(windows.first().unwrap().0, 0);
+        assert_eq!(windows.last().unwrap().1, total);
+        for pair in windows.windows(2) {
+            assert!(pair[1].0 < pair[0].1, "a gap between chunks would drop audio");
+        }
+    }
+
+    #[test]
+    fn no_audio_means_no_chunk() {
+        assert!(long_audio_windows(0).is_empty());
+    }
 }

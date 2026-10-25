@@ -44,8 +44,4 @@ use workflow to normalize text
 convert number to word
 convert abbreviation to full form
 
-
-on read-aloud page, show the default standard audio player above the text
-
-
 use the recognized text of standard audio as scoring reference
