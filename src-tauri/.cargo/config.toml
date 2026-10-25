@@ -1,0 +1,35 @@
+# Cargo config for the Tauri backend.
+#
+# The `[env]` table reaches dependency build scripts, which is the whole point
+# here: the value below changes how transcribe-cpp-sys compiles the C++ it
+# vendors, not how this crate compiles.
+
+[env]
+# ggml (vendored by transcribe-cpp, the Whisper/GGML STT backend) defaults to
+# GGML_NATIVE=ON, and under MSVC that makes ggml's own CMake *probe the build
+# machine* (ggml-cpu/cmake/FindSIMD.cmake) and bake the answer into the object
+# code. A builder whose CPU has AVX-512 therefore produces a binary that dies
+# with STATUS_ILLEGAL_INSTRUCTION (0xC000001D) on every 12th-gen-or-later Intel
+# consumer CPU, where AVX-512 is fused off. That is exactly what v0.1.8 shipped:
+# Windows recorded code 0xc000001d, fault offset 0x16fa66b, on both crashes
+# while loading whisper-small, with nothing after "Loading model" in the log —
+# SIGILL has no message, and a release Tauri binary has no stderr either
+# (`native_log.rs` now closes the second half of that).
+#
+# With NATIVE off, ggml's own option defaults apply instead of a probe: SSE4.2 +
+# AVX + AVX2 + FMA + F16C + BMI2 on, AVX-512* off. No build-machine dependence,
+# so CI and a laptop emit the same instructions. That floor is Haswell (2013) /
+# Excavator (2015); `models::engine::cpp_isa_supported` refuses the GGML backend
+# with an actionable error on an older CPU rather than letting the process die.
+#
+# The other end of the dial is -DTRANSCRIBE_X86_CONSERVATIVE=ON: SSE2 baseline,
+# runs on any x86-64 at all, noticeably slower Whisper. -DGGML_NATIVE=ON is the
+# one value that must never come back.
+TRANSCRIBE_CMAKE_ARGS = "-DGGML_NATIVE=OFF"
+
+# Editing a value in this table does not, on its own, re-configure the C++:
+# a dependency build script's `cargo:rerun-if-env-changed` fires on a change in
+# the process environment, not on a config-file edit. After touching the line
+# above, run `cargo clean -p transcribe-cpp-sys`. CI keeps the same value in
+# .github/workflows/build.yml and names it in the rust-cache key, for the same
+# reason: a restored `target/` would otherwise skip the configure.

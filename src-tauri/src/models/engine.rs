@@ -19,6 +19,51 @@ use crate::models::catalog_stt::{self, EngineType};
 use crate::models::index::{make_key, remove_entry, ModelIndexState};
 use crate::models::state::{auto_load_version, ActiveModel, ModelState, ModelStatus};
 
+/// ggml's CPU backend is compiled for a fixed instruction set (see
+/// `src-tauri/.cargo/config.toml`: SSE4.2 + AVX + AVX2 + FMA + F16C + BMI2).
+/// Loading a model on a CPU without those is not a recoverable error — the first
+/// unsupported kernel raises `STATUS_ILLEGAL_INSTRUCTION` and the process is
+/// simply gone, which is what v0.1.8's Whisper crash looked like from the
+/// outside. Refuse the load instead, with something a user or an agent can act
+/// on.
+#[cfg(all(
+    feature = "desktop",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+fn cpp_isa_supported() -> Result<(), String> {
+    let checks = [
+        ("AVX2", std::is_x86_feature_detected!("avx2")),
+        ("FMA", std::is_x86_feature_detected!("fma")),
+        ("F16C", std::is_x86_feature_detected!("f16c")),
+        ("BMI2", std::is_x86_feature_detected!("bmi2")),
+        ("SSE4.2", std::is_x86_feature_detected!("sse4.2")),
+    ];
+    let missing: Vec<&str> = checks
+        .iter()
+        .filter(|(_, present)| !present)
+        .map(|(name, _)| *name)
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "This CPU does not support {}, which the Whisper (GGML) backend is \
+             compiled for. Use an ONNX model instead — Parakeet, Moonshine or \
+             SenseVoice run on every CPU.",
+            missing.join(" / ")
+        ))
+    }
+}
+
+/// Non-x86 desktops (Apple Silicon, Linux on ARM) never see the x86 build path.
+#[cfg(all(
+    feature = "desktop",
+    not(any(target_arch = "x86", target_arch = "x86_64"))
+))]
+fn cpp_isa_supported() -> Result<(), String> {
+    Ok(())
+}
+
 pub fn load_model_core(state: &ModelState, version: &str) -> Result<String, String> {
     log::info!("Loading model '{}'", version);
     {
@@ -44,6 +89,7 @@ pub fn load_model_core(state: &ModelState, version: &str) -> Result<String, Stri
     let active_model = match def.engine {
         #[cfg(feature = "desktop")]
         EngineType::TranscribeCpp => {
+            cpp_isa_supported()?;
             let model_path = model_dir.join(def.id);
             let model = CppModel::load(&model_path)
                 .map_err(|e| format!("Failed to load Whisper model: {}", e))?;

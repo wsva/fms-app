@@ -191,6 +191,9 @@ src-tauri/src/
 ├── workspace.rs            # Workspace registry, selection, claim/auto-login
 ├── auth.rs                 # OAuth2 login, token storage, workspace identity
 ├── logger.rs               # Rotating file log + in-memory buffer + `log_*` commands
+├── native_log.rs           # The two sinks `log` does not reach: native stderr → log pipe (Windows,
+│                           #   console-less builds only) + a panic hook; see the module doc for why
+│                           #   a GUI release build otherwise dies silently
 ├── db.rs                   # rusqlite wrappers with write-contention logging, adjustment guard
 ├── audio.rs                # Audio decoding via Symphonia
 ├── wiki.rs                 # Wiki documents; own root + `meta.json` linkage (not a dataset type)
@@ -376,5 +379,15 @@ When adding a new Tauri command, simultaneously add the corresponding MCP tool.
 ## External Dependencies
 
 - **transcribe-rs** — Rust ONNX runtime for STT model inference (Parakeet family)
+- **transcribe-cpp** (Whisper/GGML, desktop) — its vendored ggml defaults to
+  `GGML_NATIVE=ON`, which makes ggml's CMake probe the *build* machine's CPU and
+  bake that ISA into the objects. v0.1.8 shipped exactly that: AVX-512 from the
+  CI runner, and `0xC000001D` (STATUS_ILLEGAL_INSTRUCTION) on every 12th-gen+
+  Intel CPU, with no log line because SIGILL has no message. `src-tauri/.cargo/config.toml`
+  pins `GGML_NATIVE=OFF` (AVX2 floor, no AVX-512 path) and
+  `.github/workflows/build.yml` repeats it in `env` + the rust-cache key. After
+  editing that value run `cargo clean -p transcribe-cpp-sys` — cargo does not
+  re-configure a dependency for a config-file `[env]` change. Never set it back
+  to ON, and never "just bump the version": the binary changes, the bug does not.
 - **symphonia** — Audio decoding (all formats) and waveform peak generation (replaces the former `audiowaveform` sidecar)
 - **rusqlite** — SQLite with bundled mode (no system SQLite required)

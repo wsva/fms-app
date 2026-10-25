@@ -42,6 +42,9 @@ mod audio;
 mod auth;
 mod db;
 mod logger;
+/// The stderr + panic sinks the `log` facade does not cover — what makes a
+/// native crash inside the STT stack leave a line in the log.
+mod native_log;
 mod settings;
 mod workspace;
 
@@ -558,6 +561,13 @@ pub fn run() {
             app.state::<models::ModelState>().apply_persisted_default(&persisted_model);
             let log_buffer = logger::init_logger(app.handle().clone());
             app.handle().manage(log_buffer);
+            // Now that there is a log to write to: hand the STT library its sink
+            // (whisper/ggml diagnostics through `log`) and bridge the process's
+            // stderr, which a GUI build otherwise drops. Both must happen before
+            // any model is loaded.
+            #[cfg(feature = "desktop")]
+            transcribe_cpp::init_logging();
+            native_log::install();
             log::info!("Application starting up");
 
             // ── Initialize workspaces ──
@@ -974,6 +984,9 @@ pub fn run() {
             }
             let log_buffer = logger::init_logger(app.handle().clone());
             app.handle().manage(log_buffer);
+            // A panic on mobile has the same problem a native abort has on
+            // desktop: nowhere to report to once the process is gone.
+            native_log::install();
             log::info!("Application starting up (mobile)");
 
             // ── Initialize workspaces ──

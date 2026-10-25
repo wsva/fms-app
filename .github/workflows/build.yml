@@ -76,6 +76,20 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # ggml is compiled from source by transcribe-cpp-sys, and its CMake defaults to
+  # `GGML_NATIVE=ON`: it probes the *build machine's* ISA (FindSIMD.cmake) and
+  # bakes the answer into the objects. That is how v0.1.8 shipped a Whisper
+  # backend that raised 0xC000001D (STATUS_ILLEGAL_INSTRUCTION) on every
+  # 12th-gen-or-later Intel CPU, where AVX-512 is fused off — the runner had it,
+  # the users did not. Pinning NATIVE off drops the probe: AVX2/FMA/F16C/BMI2
+  # (Haswell 2013) is the floor and AVX-512 cannot come back.
+  #
+  # Declared here as well as in src-tauri/.cargo/config.toml, and named in each
+  # cache step's `env-vars`, because `target/` is cached and cargo does NOT
+  # re-fingerprint a build script when a config-file `[env]` value changes: a
+  # stale cache would restore objects from the old configure and the fix would
+  # never reach the linker.
+  TRANSCRIBE_CMAKE_ARGS: "-DGGML_NATIVE=OFF"
 
 jobs:
   # ──────────────────────────────────────────────
@@ -96,6 +110,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          env-vars: TRANSCRIBE_CMAKE_ARGS
 
       - name: Install Linux dependencies
         run: |
@@ -168,6 +183,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          env-vars: TRANSCRIBE_CMAKE_ARGS
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
