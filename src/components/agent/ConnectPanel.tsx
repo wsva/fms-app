@@ -28,11 +28,7 @@ export default function ConnectPanel() {
           </button>
         </div>
         <p className={hint}>
-          FmS runs a Model Context Protocol server on the loopback interface. Copy one line below
-          into any MCP-capable agent and it configures itself: the manual it then reads is generated
-          from this build ({manual ? `${manual.tools.count} tools` : "…"}), so it cannot drift from
-          the tools that actually exist. The endpoint is not editable — it follows the port the
-          service really bound.
+          FmS runs a Model Context Protocol server on the loopback interface. Copy one line below into any MCP-capable agent and it configures itself: the manual it then reads is generated from this build ({manual ? `${manual.tools.count} tools` : "…"}), so it cannot drift from the tools that actually exist. The endpoint is not editable — it follows the port the service really bound.
         </p>
       </div>
 
@@ -97,9 +93,7 @@ export default function ConnectPanel() {
           teaches the rest. */}
       <div>
         <label className="block font-medium mb-1">1 · Paste this sentence (preferred)</label>
-        <p className={`${hint} mb-2`}>
-          {manual?.connect.pointer_when ?? "For any agent that can fetch a URL."}
-        </p>
+        <p className={`${hint} mb-2`}>{manual?.connect.pointer_when ?? "For any agent that can fetch a URL."}</p>
         <div className="flex items-start gap-2">
           <code className={`flex-1 ${codeBox}`}>{manual?.connect.pointer_sentence ?? "—"}</code>
           <button
@@ -118,10 +112,7 @@ export default function ConnectPanel() {
           silently. */}
       <div>
         <label className="block font-medium mb-1">2 · Or paste this block</label>
-        <p className={`${hint} mb-2`}>
-          {manual?.connect.inline_when ??
-            "For an agent that can attach an MCP server but cannot fetch a URL."}
-        </p>
+        <p className={`${hint} mb-2`}>{manual?.connect.inline_when ?? "For an agent that can attach an MCP server but cannot fetch a URL."}</p>
         <div className="flex items-start gap-2">
           <pre className={`flex-1 whitespace-pre-wrap ${codeBox}`}>
             {manual?.connect.inline_block ?? "—"}

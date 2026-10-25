@@ -55,9 +55,7 @@ export default function SurfacePanel() {
       <div>
         <h2 className="text-[1.05em] font-semibold text-text-primary mb-1">Agent surface</h2>
         <p className={hint}>
-          What this build exposes to agents, and how much an attached agent may do. Live policy:{" "}
-          <strong>{manual?.trust.policy.mode ?? surface?.mcp_policy ?? "unknown"}</strong>.
-          {!draft && " Reading the settings…"}
+          What this build exposes to agents, and how much an attached agent may do. Live policy: <strong>{manual?.trust.policy.mode ?? surface?.mcp_policy ?? "unknown"}</strong>.{!draft && " Reading the settings…"}
         </p>
       </div>
 
@@ -66,9 +64,7 @@ export default function SurfacePanel() {
           Policy mode
         </label>
         <p className={`${hint} mb-2`}>
-          <em>permissive</em> classifies and journals every MCP call but refuses nothing.{" "}
-          <em>enforce</em> additionally refuses the destructive and human-handoff tiers, and refuses
-          an agent&apos;s attempt to change this setting.
+          <em>permissive</em> classifies and journals every MCP call but refuses nothing. <em>enforce</em> additionally refuses the destructive and human-handoff tiers, and refuses an agent&apos;s attempt to change this setting.
         </p>
         <select
           id="mcp-policy"
@@ -96,11 +92,7 @@ export default function SurfacePanel() {
         <span>
           <span className="font-medium">Expose the MCP server (agents)</span>
           <span className={`block ${hint}`}>
-            Serves <code>/mcp</code> and the generated <code>/agent.md</code> manual. Saving
-            restarts the local web service, because the routes are chosen when the router is built:
-            an agent attached right now loses its tools until the restart returns, and{" "}
-            <code>/api/v1/status</code> keeps answering with <code>mcp_enabled: false</code> so a
-            peer can tell why <code>/mcp</code> 404s.
+            Serves <code>/mcp</code> and the generated <code>/agent.md</code> manual. Saving restarts the local web service, because the routes are chosen when the router is built: an agent attached right now loses its tools until the restart returns, and <code>/api/v1/status</code> keeps answering with <code>mcp_enabled: false</code> so a peer can tell why <code>/mcp</code> 404s.
           </span>
         </span>
       </label>
@@ -116,9 +108,7 @@ export default function SurfacePanel() {
         <span>
           <span className="font-medium">Show the agent dock</span>
           <span className={`block ${hint}`}>
-            The dock is the second way in: it attaches FmS to an agent host. Slower to set up than
-            attaching an agent to FmS, but it is the only window where FmS can show an agent&apos;s
-            reasoning, tool calls and permission requests. Pick the host on the Hosting tab.
+            The dock is the second way in: it attaches FmS to an agent host. Slower to set up than attaching an agent to FmS, but it is the only window where FmS can show an agent&apos;s reasoning, tool calls and permission requests. Pick the host on the Hosting tab.
           </span>
         </span>
       </label>

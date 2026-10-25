@@ -24,13 +24,7 @@ export default function HostingPanel() {
       <div>
         <h2 className="text-[1.05em] font-semibold text-text-primary mb-1">Host an agent in the dock</h2>
         <p className={hint}>
-          The dock is the second way in: instead of attaching to FmS, it attaches FmS to an agent
-          host — a <code>goose serve</code> you started yourself (<code>ws</code>), or a program FmS
-          spawns and stops (<code>stdio</code>)
-          {surface?.goose_acp_url ? <> (default <code>{surface.goose_acp_url}</code>)</> : null}.
-          It is the only window where FmS can show an agent&apos;s reasoning, tool calls and
-          permission requests — which is also why the dock stays visible on every page and this
-          page never hosts the conversation itself.
+          The dock is the second way in: instead of attaching to FmS, it attaches FmS to an agent host — a <code>goose serve</code> you started yourself (<code>ws</code>), or a program FmS spawns and stops (<code>stdio</code>) {surface?.goose_acp_url ? <> (default <code>{surface.goose_acp_url}</code>)</> : null}. It is the only window where FmS can show an agent&apos;s reasoning, tool calls and permission requests — which is also why the dock stays visible on every page and this page never hosts the conversation itself.
         </p>
       </div>
 
@@ -69,9 +63,7 @@ export default function HostingPanel() {
           Shown in
         </label>
         <p className={`${hint} mb-2`}>
-          The dock hosts one agent at a time. Hosts come from the app&apos;s records — an agent adds
-          them with <code>agent_host_register</code>. Whether dialling one needs your approval is
-          decided in the backend, never here.
+          The dock hosts one agent at a time. Hosts come from the app&apos;s records — an agent adds them with <code>agent_host_register</code>. Whether dialling one needs your approval is decided in the backend, never here.
         </p>
         <select
           id="dock-host"
@@ -90,8 +82,7 @@ export default function HostingPanel() {
         </select>
         {(hosts?.hosts.length ?? 0) === 0 && (
           <p className={`${hint} mt-2`}>
-            No host records yet. Until one exists the dock has nothing to dial — use the copy-only
-            lines on the Connect tab, or have an agent register one.
+            No host records yet. Until one exists the dock has nothing to dial — use the copy-only lines on the Connect tab, or have an agent register one.
           </p>
         )}
       </div>
