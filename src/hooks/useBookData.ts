@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useImmer } from "use-immer";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   BookMeta,
@@ -21,6 +22,7 @@ import type {
   DrawerState,
   ArtifactKind,
   ArtifactScopeType,
+  ArtifactJob,
   BookArtifactView,
   BookTerm,
   QuizQuestion,
@@ -93,6 +95,9 @@ export function useBookData() {
   const [focusParagraph, setFocusParagraphState] = useState<string | null>(null);
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
   const [artifacts, setArtifacts] = useState<BookArtifactView[]>([]);
+  // Outstanding agent-generation requests for this book (the mailbox the "Ask
+  // agent" button writes to). Empty unless a delegation is in flight.
+  const [jobs, setJobs] = useState<ArtifactJob[]>([]);
   const [terms, setTerms] = useState<BookTerm[]>([]);
   const [generating, setGenerating] = useState(false);
   // LLM model used for generation. Empty means "fall back to the app default
@@ -140,6 +145,19 @@ export function useBookData() {
     }
   }, [bookUUID, chapterUUID]);
 
+  // Outstanding agent jobs are book-scoped in the DB; read them for the open book.
+  const loadJobs = useCallback(async () => {
+    if (!bookUUID || !isTauri()) {
+      setJobs([]);
+      return;
+    }
+    try {
+      setJobs(await invoke<ArtifactJob[]>("book_list_artifact_jobs", { bookUuid: bookUUID }));
+    } catch (e) {
+      console.error("Failed to load artifact jobs:", e);
+    }
+  }, [bookUUID]);
+
   const loadTerms = useCallback(async () => {
     if (!bookUUID || !isTauri()) {
       setTerms([]);
@@ -156,7 +174,8 @@ export function useBookData() {
   useEffect(() => {
     setFocusParagraphState(null);
     loadArtifacts();
-  }, [chapterUUID, loadArtifacts]);
+    loadJobs();
+  }, [chapterUUID, loadArtifacts, loadJobs]);
 
   // Load the glossary when a book opens.
   useEffect(() => {
@@ -169,6 +188,21 @@ export function useBookData() {
   useEffect(() => {
     if (understanding) loadArtifacts();
   }, [data, understanding, loadArtifacts]);
+
+  // An attached agent delivers results (and clears the matching job) through
+  // book_save_artifact, which emits `book-artifact-changed`. Reload both so a
+  // delegated explanation shows up in the panel with no user action.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const unlisten = listen<{ book_uuid?: string }>("book-artifact-changed", (e) => {
+      if (e.payload?.book_uuid && e.payload.book_uuid !== bookUUID) return;
+      loadArtifacts();
+      loadJobs();
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, [bookUUID, loadArtifacts, loadJobs]);
 
   // ── Load chapters when book changes ────────────────────────────
   useEffect(() => {
@@ -863,6 +897,43 @@ export function useBookData() {
     [bookUUID, loadArtifacts, understandingModel]
   );
 
+  // Delegate generation to an attached third-party agent instead of the built-in
+  // LLM: write a job to the mailbox. The agent picks it up over MCP and delivers
+  // through book_save_artifact, which clears the job and fires the reload event.
+  const handleRequestAgent = useCallback(
+    async (scopeType: ArtifactScopeType, scopeUuid: string, kind: ArtifactKind) => {
+      if (!isTauri() || !bookUUID) return;
+      setError("");
+      try {
+        await invoke("book_request_artifact", {
+          bookUuid: bookUUID,
+          scopeType,
+          scopeUuid,
+          kind,
+          model: understandingModel.trim() ? understandingModel.trim() : undefined,
+        });
+        await loadJobs();
+      } catch (e) {
+        setError(`Ask agent failed: ${e}`);
+      }
+    },
+    [bookUUID, loadJobs, understandingModel]
+  );
+
+  const handleCancelJob = useCallback(
+    async (uuid: string) => {
+      if (!isTauri() || !bookUUID) return;
+      setError("");
+      try {
+        await invoke("book_cancel_artifact_job", { bookUuid: bookUUID, uuid });
+        await loadJobs();
+      } catch (e) {
+        setError(`Cancel request failed: ${e}`);
+      }
+    },
+    [bookUUID, loadJobs]
+  );
+
   const handleParagraphListen = useCallback(
     async (paragraphUuid: string) => {
       if (!isTauri() || !bookUUID || !paragraphUuid) return;
@@ -1162,11 +1233,14 @@ export function useBookData() {
     artifacts,
     artifactsByScope,
     chapterArtifacts,
+    jobs,
     terms,
     generating,
     understandingModel,
     setUnderstandingModel,
     handleGenerate,
+    handleRequestAgent,
+    handleCancelJob,
     handleParagraphListen,
     handleSaveNote,
     handleDeleteArtifact,

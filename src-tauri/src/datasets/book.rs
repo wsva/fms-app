@@ -182,6 +182,25 @@ pub(crate) fn open_book_db(book_dir: &Path) -> Result<Connection, String> {
         );
         CREATE INDEX IF NOT EXISTS idx_book_artifact_scope ON book_artifact(scope_type, scope_uuid);
 
+        -- Ephemeral mailbox: a request for a third-party agent (attached over MCP)
+        -- to generate an artifact for a scope. Not journaled for sync; a row is
+        -- deleted when the artifact it asks for is written or the request is
+        -- cancelled, so only outstanding work remains.
+        CREATE TABLE IF NOT EXISTS book_artifact_job (
+            uuid         TEXT PRIMARY KEY,
+            book_uuid    TEXT NOT NULL,
+            scope_type   TEXT NOT NULL,
+            scope_uuid   TEXT NOT NULL,
+            kind         TEXT NOT NULL,
+            instructions TEXT NOT NULL DEFAULT '',
+            model        TEXT,
+            status       TEXT NOT NULL DEFAULT 'pending',
+            content_hash TEXT NOT NULL DEFAULT '',
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_book_artifact_job_scope ON book_artifact_job(scope_uuid, kind);
+
         CREATE TABLE IF NOT EXISTS book_term (
             uuid       TEXT PRIMARY KEY,
             book_uuid  TEXT NOT NULL,

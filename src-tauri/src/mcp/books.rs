@@ -104,6 +104,38 @@ struct BookDeleteArtifactParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookRequestArtifactParam {
+    book_uuid: String,
+    /// `paragraph` | `chapter` | `sentence`.
+    scope_type: String,
+    /// break-row uuid / chapter uuid / sentence uuid.
+    scope_uuid: String,
+    /// `explanation`|`simplification`|`digest`|`argument_map`|`questions`.
+    kind: String,
+    /// Free-form guidance for the fulfilling agent (e.g. output language).
+    #[serde(default)]
+    instructions: Option<String>,
+    /// Model hint; the fulfilling agent may ignore it.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookListArtifactJobsParam {
+    book_uuid: String,
+    /// Filter to one status; omit for every outstanding request.
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct BookCancelArtifactJobParam {
+    book_uuid: String,
+    /// The job uuid, from `book_list_artifact_jobs`.
+    uuid: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct BookGenerateArtifactParam {
     book_uuid: String,
     /// `paragraph` | `chapter` | `sentence`.
@@ -721,7 +753,7 @@ impl DatasetMcpServer {
         let settings = self.app.state::<SettingsState>();
         let artifact: datasets::book_artifacts::BookArtifact = serde_json::from_value(param.artifact.into())
             .map_err(|e| format!("Invalid artifact JSON: {}", e))?;
-        datasets::book_artifacts::book_save_artifact(settings, param.book_uuid, artifact).await?;
+        datasets::book_artifacts::book_save_artifact(self.app.clone(), settings, param.book_uuid, artifact).await?;
         Ok(serde_json::json!({"status": "ok", "message": "Artifact saved"}).to_string())
     }
 
@@ -730,6 +762,41 @@ impl DatasetMcpServer {
         let settings = self.app.state::<SettingsState>();
         datasets::book_artifacts::book_delete_artifact(settings, param.book_uuid, param.uuid).await?;
         Ok(serde_json::json!({"status": "ok", "message": "Artifact deleted"}).to_string())
+    }
+
+    #[tool(name = "book_list_artifact_jobs", description = "List outstanding requests for an agent to generate understanding artifacts in a book — the mailbox the Understand panel's 'Ask agent' button writes to. Each job carries scope_type, scope_uuid, kind, optional instructions/model, the source_text to generate from, and a stale flag. Fulfil one by calling book_save_artifact with the same scope_uuid + kind and source 'agent'; that writes the artifact, clears the job and refreshes the user's panel. Optional status filter.")]
+    async fn book_list_artifact_jobs(&self, Parameters(param): Parameters<BookListArtifactJobsParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let jobs = datasets::book_artifacts::book_list_artifact_jobs(settings, param.book_uuid, param.status).await?;
+        Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "count": jobs.len(),
+            "jobs": jobs,
+        }))
+        .unwrap_or_default())
+    }
+
+    #[tool(name = "book_request_artifact", description = "Queue a request for a third-party agent to generate an understanding artifact, instead of the built-in LLM. kind: 'explanation'|'simplification'|'digest'|'argument_map'|'questions'; scope_type: 'paragraph'|'chapter'|'sentence'. Idempotent per (scope, kind). An attached agent picks it up via book_list_artifact_jobs and delivers through book_save_artifact. Returns the job (with the source text).")]
+    async fn book_request_artifact(&self, Parameters(param): Parameters<BookRequestArtifactParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        let job = datasets::book_artifacts::book_request_artifact(
+            self.app.clone(),
+            settings,
+            param.book_uuid,
+            param.scope_type,
+            param.scope_uuid,
+            param.kind,
+            param.instructions,
+            param.model,
+        )
+        .await?;
+        Ok(serde_json::to_string_pretty(&job).unwrap_or_default())
+    }
+
+    #[tool(name = "book_cancel_artifact_job", description = "Cancel an outstanding artifact job (delete it). Use when a request is no longer wanted; an artifact already produced is untouched.")]
+    async fn book_cancel_artifact_job(&self, Parameters(param): Parameters<BookCancelArtifactJobParam>) -> Result<String, String> {
+        let settings = self.app.state::<SettingsState>();
+        datasets::book_artifacts::book_cancel_artifact_job(self.app.clone(), settings, param.book_uuid, param.uuid).await?;
+        Ok(serde_json::json!({"status": "ok", "message": "Job cancelled"}).to_string())
     }
 
     #[tool(name = "book_generate_artifact", description = "Generate an artifact with the LLM for a scope. kind: 'explanation'|'simplification'|'digest'|'argument_map'|'questions'. scope_type: 'paragraph'|'chapter'|'sentence'. Optional model and instructions (e.g. output language) override defaults.")]

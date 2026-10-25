@@ -199,7 +199,7 @@ pub(crate) async fn apply_change(
         "book_artifact_save" => {
             let artifact: crate::datasets::book_artifacts::BookArtifact =
                 serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
-            crate::datasets::book_artifacts::book_save_artifact(settings.clone(), ds, artifact).await.map(|_| true)
+            crate::datasets::book_artifacts::save_artifact_inner(settings, &ds, artifact).map(|_| true)
         }
         "book_artifact_delete" => {
             let uuid = str_field("uuid")?;

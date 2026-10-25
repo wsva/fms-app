@@ -1420,7 +1420,7 @@ async fn replay(
         "book_artifact_save" => {
             let artifact: datasets::book_artifacts::BookArtifact =
                 serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;
-            datasets::book_artifacts::book_save_artifact(settings.clone(), dataset_uuid, artifact).await
+            datasets::book_artifacts::save_artifact_inner(settings, &dataset_uuid, artifact)
         }
         "book_artifact_delete" => {
             let uuid = extract_str(&ch.payload, "uuid")?;

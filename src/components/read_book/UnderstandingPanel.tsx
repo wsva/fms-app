@@ -21,6 +21,7 @@ import {
   X,
   Loader2,
   Lightbulb,
+  Bot,
 } from "lucide-react";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import UnderstandingModelPicker from "./UnderstandingModelPicker";
@@ -238,12 +239,19 @@ function GeneratedSection({
   emptyHint: string;
   cta: string;
 }) {
-  const { generating, handleGenerate, handleDeleteArtifact } = b;
+  const { generating, handleGenerate, handleRequestAgent, handleCancelJob, handleDeleteArtifact, jobs, mobile } = b;
+  // The outstanding agent request for this exact scope + kind, if any.
+  const job = jobs.find((j) => j.scope_uuid === scopeUuid && j.kind === kind);
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 text-xs text-text-tertiary">
-          {artifact ? (
+        <div className="flex items-center gap-1.5 text-xs text-text-tertiary min-w-0">
+          {job ? (
+            <span className="flex items-center gap-1 text-accent truncate">
+              <Loader2 size={12} className="animate-spin shrink-0" /> Waiting for agent…
+              {job.stale && <Wand2 size={12} className="text-amber-500 shrink-0" />}
+            </span>
+          ) : artifact ? (
             <>
               <span>{sourceLabel(artifact.source)}</span>
               {artifact.model && <span className="truncate">· {artifact.model}</span>}
@@ -258,7 +266,16 @@ function GeneratedSection({
           )}
         </div>
         <div className="flex items-center gap-1 shrink-0">
-          {artifact && (
+          {job && (
+            <button
+              title="Cancel agent request"
+              className="p-1.5 rounded text-text-tertiary hover:bg-bg-hover hover:text-red-500 cursor-pointer"
+              onClick={() => handleCancelJob(job.uuid)}
+            >
+              <X size={14} />
+            </button>
+          )}
+          {artifact && !job && (
             <button
               title="Delete"
               disabled={generating}
@@ -266,6 +283,19 @@ function GeneratedSection({
               onClick={() => handleDeleteArtifact(artifact.uuid)}
             >
               <Trash2 size={14} />
+            </button>
+          )}
+          {/* Delegate to an attached third-party agent. Desktop only: agents
+              attach to the desktop MCP server, so a phone job would never be
+              picked up. Hidden while a request is already outstanding. */}
+          {!mobile && !job && (
+            <button
+              title="Ask an attached agent to generate this"
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border border-border-default text-text-secondary hover:bg-bg-hover disabled:opacity-50 cursor-pointer"
+              disabled={generating}
+              onClick={() => handleRequestAgent(scopeType, scopeUuid, kind)}
+            >
+              <Bot size={13} />
             </button>
           )}
           <button
@@ -280,7 +310,7 @@ function GeneratedSection({
             ) : (
               <Lightbulb size={13} />
             )}
-            {artifact ? (artifact.stale ? "Regenerate" : "Regenerate") : cta}
+            {artifact ? "Regenerate" : cta}
           </button>
         </div>
       </div>

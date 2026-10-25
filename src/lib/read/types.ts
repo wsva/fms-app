@@ -138,6 +138,30 @@ export interface BookArtifactView extends BookArtifact {
   stale: boolean;
 }
 
+/** An outstanding request for a third-party agent to generate an artifact.
+ *  Mirrors the Rust `ArtifactJob` (the `book_artifact_job` mailbox). The agent
+ *  discovers jobs over MCP and delivers through `book_save_artifact`, which
+ *  clears the job; the panel refreshes on the `book-artifact-changed` event. */
+export interface ArtifactJob {
+  uuid: string;
+  book_uuid: string;
+  scope_type: ArtifactScopeType | string;
+  scope_uuid: string;
+  kind: ArtifactKind | string;
+  /** Free-form guidance captured at request time (e.g. output language). */
+  instructions: string;
+  /** Model hint from the requester; the fulfilling agent may ignore it. */
+  model?: string | null;
+  /** `pending` today. */
+  status: string;
+  created_at: string;
+  updated_at: string;
+  /** The scope's text at read time, so an agent need not fetch it separately. */
+  source_text: string;
+  /** True when the scope's text changed since the job was requested. */
+  stale: boolean;
+}
+
 /** A glossary entry. Mirrors the Rust `BookTerm`. */
 export interface BookTerm {
   uuid: string;

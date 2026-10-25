@@ -691,17 +691,19 @@ pub async fn book_list_artifacts(
     Ok(views)
 }
 
-/// Insert or update one artifact (the agent/manual write path).
-#[tauri::command]
-pub async fn book_save_artifact(
-    settings: State<'_, SettingsState>,
-    book_uuid: String,
+/// Write one artifact row, clear any matching agent job, and journal the change.
+/// Shared by the [`book_save_artifact`] command (which also emits the refresh
+/// event) and the sync replay path in `sync::client::round`, which has no
+/// `AppHandle` to emit through — a pull refreshes the reader on its own.
+pub(crate) fn save_artifact_inner(
+    settings: &State<'_, SettingsState>,
+    book_uuid: &str,
     artifact: BookArtifact,
 ) -> Result<(), String> {
-    let dir = find_book_dir_write(&settings, &book_uuid)?;
+    let dir = find_book_dir_write(settings, book_uuid)?;
     let conn = open_book_db(&dir)?;
     let mut artifact = artifact;
-    artifact.book_uuid = book_uuid.clone();
+    artifact.book_uuid = book_uuid.to_string();
     if artifact.uuid.trim().is_empty() {
         artifact.uuid = Uuid::new_v4().to_string();
     }
@@ -710,11 +712,37 @@ pub async fn book_save_artifact(
     }
     artifact.updated_at = now_stamp();
     save_artifact_row(&conn, &artifact)?;
+    // The artifact satisfies any pending agent request for the same scope+kind,
+    // whatever produced it (an agent fulfilling a job, or the built-in generator
+    // the user ran instead of waiting). Jobs are ephemeral, so it is deleted.
+    let _ = conn.execute(
+        "DELETE FROM book_artifact_job WHERE book_uuid = ?1 AND scope_uuid = ?2 AND kind = ?3",
+        rusqlite::params![book_uuid, artifact.scope_uuid, artifact.kind],
+    );
     let _ = commit_change(
-        &settings,
+        settings,
         "book_artifact_save",
-        &book_uuid,
+        book_uuid,
         &serde_json::to_value(&artifact).unwrap_or_default(),
+    );
+    Ok(())
+}
+
+/// Insert or update one artifact (the agent/manual write path). Writing an
+/// artifact also clears any outstanding agent job for the same scope + kind and
+/// notifies the webview, so a result an attached agent delivers through this same
+/// path shows up in the Understanding panel without the user reloading.
+#[tauri::command]
+pub async fn book_save_artifact(
+    app: tauri::AppHandle,
+    settings: State<'_, SettingsState>,
+    book_uuid: String,
+    artifact: BookArtifact,
+) -> Result<(), String> {
+    save_artifact_inner(&settings, &book_uuid, artifact)?;
+    let _ = app.emit(
+        "book-artifact-changed",
+        serde_json::json!({ "book_uuid": book_uuid }),
     );
     Ok(())
 }
@@ -735,6 +763,240 @@ pub async fn book_delete_artifact(
         "book_artifact_delete",
         &book_uuid,
         &serde_json::json!({ "uuid": uuid }),
+    );
+    Ok(())
+}
+
+// ============================================================
+// Artifact job mailbox — delegate generation to an attached agent
+// ============================================================
+//
+// FmS never dials an agent, so the Understand panel's buttons cannot *call* a
+// third-party agent (WorkBuddy, goose, …) directly. Instead a button writes a job
+// row here; an agent attached over MCP discovers it with `book_list_artifact_jobs`
+// (which carries the source text), generates with its own model, and delivers
+// through the very same [`book_save_artifact`] every other write path uses — which
+// clears the job and notifies the panel, so the result lands in the same place a
+// built-in generation would. Jobs are ephemeral coordination state: not journaled
+// for sync, and deleted once fulfilled or cancelled.
+
+/// A request for an agent to generate an artifact. Mirrors the
+/// `book_artifact_job` table, enriched on read with the source text and a
+/// staleness flag so an agent can act on it without a second round-trip.
+#[derive(Clone, Debug, Serialize)]
+pub struct ArtifactJob {
+    pub uuid: String,
+    pub book_uuid: String,
+    /// `paragraph` | `chapter` | `sentence`.
+    pub scope_type: String,
+    pub scope_uuid: String,
+    /// `explanation`|`simplification`|`digest`|`argument_map`|`questions`.
+    pub kind: String,
+    /// Free-form guidance captured at request time (e.g. output language).
+    pub instructions: String,
+    /// Model hint from the requester; the agent is free to ignore it.
+    pub model: Option<String>,
+    /// `pending` today; reserved for a future `claimed` without a migration.
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    /// The scope's text at read time, so the agent need not fetch it separately.
+    pub source_text: String,
+    /// True when the scope's text changed since the job was requested.
+    pub stale: bool,
+}
+
+/// The stored row, before it is enriched with the live source text.
+struct JobRow {
+    uuid: String,
+    book_uuid: String,
+    scope_type: String,
+    scope_uuid: String,
+    kind: String,
+    instructions: String,
+    model: Option<String>,
+    status: String,
+    content_hash: String,
+    created_at: String,
+    updated_at: String,
+}
+
+const JOB_COLS: &str = "uuid, book_uuid, scope_type, scope_uuid, kind, instructions, \
+     model, status, content_hash, created_at, updated_at";
+
+fn row_to_job(row: &rusqlite::Row) -> rusqlite::Result<JobRow> {
+    Ok(JobRow {
+        uuid: row.get(0)?,
+        book_uuid: row.get(1)?,
+        scope_type: row.get(2)?,
+        scope_uuid: row.get(3)?,
+        kind: row.get(4)?,
+        instructions: row.get(5)?,
+        model: row.get(6)?,
+        status: row.get(7)?,
+        content_hash: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+/// Attach the live source text and a staleness flag to a stored row.
+fn enrich_job(conn: &Connection, row: JobRow) -> ArtifactJob {
+    let text = source_text(conn, &row.scope_type, &row.scope_uuid).unwrap_or_default();
+    let stale = if row.content_hash.is_empty() || text.is_empty() {
+        false
+    } else {
+        hash_text(&text) != row.content_hash
+    };
+    ArtifactJob {
+        uuid: row.uuid,
+        book_uuid: row.book_uuid,
+        scope_type: row.scope_type,
+        scope_uuid: row.scope_uuid,
+        kind: row.kind,
+        instructions: row.instructions,
+        model: row.model,
+        status: row.status,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        source_text: text,
+        stale,
+    }
+}
+
+/// Request an agent-generated artifact for a scope. Idempotent per (scope, kind):
+/// a second request while one is still open returns the existing job rather than
+/// queueing a duplicate.
+#[tauri::command]
+pub async fn book_request_artifact(
+    app: tauri::AppHandle,
+    settings: State<'_, SettingsState>,
+    book_uuid: String,
+    scope_type: String,
+    scope_uuid: String,
+    kind: String,
+    instructions: Option<String>,
+    model: Option<String>,
+) -> Result<ArtifactJob, String> {
+    if !GENERATED_KINDS.contains(&kind.as_str()) {
+        return Err(format!(
+            "kind '{}' cannot be requested from an agent. Valid kinds: {}",
+            kind,
+            GENERATED_KINDS.join(", ")
+        ));
+    }
+    let dir = find_book_dir_write(&settings, &book_uuid)?;
+    let conn = open_book_db(&dir)?;
+    let text = source_text(&conn, &scope_type, &scope_uuid)?;
+    if text.trim().is_empty() {
+        return Err("this scope has no text to generate from".into());
+    }
+
+    // Reuse an outstanding job for the same scope+kind instead of queueing twice.
+    let existing: Option<JobRow> = conn
+        .query_row(
+            &format!(
+                "SELECT {JOB_COLS} FROM book_artifact_job \
+                 WHERE book_uuid = ?1 AND scope_uuid = ?2 AND kind = ?3 LIMIT 1"
+            ),
+            rusqlite::params![book_uuid, scope_uuid, kind],
+            row_to_job,
+        )
+        .ok();
+    if let Some(row) = existing {
+        return Ok(enrich_job(&conn, row));
+    }
+
+    let uuid = Uuid::new_v4().to_string();
+    let now = now_stamp();
+    conn.execute(
+        "INSERT INTO book_artifact_job \
+         (uuid, book_uuid, scope_type, scope_uuid, kind, instructions, model, status, \
+          content_hash, created_at, updated_at) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9,?9)",
+        rusqlite::params![
+            uuid,
+            book_uuid,
+            scope_type,
+            scope_uuid,
+            kind,
+            instructions.unwrap_or_default(),
+            model,
+            hash_text(&text),
+            now,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    let row = conn
+        .query_row(
+            &format!("SELECT {JOB_COLS} FROM book_artifact_job WHERE uuid = ?1"),
+            [&uuid],
+            row_to_job,
+        )
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "book-artifact-changed",
+        serde_json::json!({ "book_uuid": book_uuid }),
+    );
+    Ok(enrich_job(&conn, row))
+}
+
+/// List a book's artifact jobs. `status` filters to one state; omit it for every
+/// outstanding request, oldest first.
+#[tauri::command]
+pub async fn book_list_artifact_jobs(
+    settings: State<'_, SettingsState>,
+    book_uuid: String,
+    status: Option<String>,
+) -> Result<Vec<ArtifactJob>, String> {
+    let dir = find_book_dir(&settings, &book_uuid)?;
+    let conn = open_book_db(&dir)?;
+    let filter = status.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let (sql, params): (String, Vec<String>) = match filter {
+        Some(s) => (
+            format!(
+                "SELECT {JOB_COLS} FROM book_artifact_job WHERE book_uuid = ?1 AND status = ?2 \
+                 ORDER BY created_at ASC"
+            ),
+            vec![book_uuid.clone(), s.to_string()],
+        ),
+        None => (
+            format!(
+                "SELECT {JOB_COLS} FROM book_artifact_job WHERE book_uuid = ?1 \
+                 ORDER BY created_at ASC"
+            ),
+            vec![book_uuid.clone()],
+        ),
+    };
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows: Vec<JobRow> = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), row_to_job)
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows.into_iter().map(|r| enrich_job(&conn, r)).collect())
+}
+
+/// Cancel an outstanding job (the requester changed their mind, or generated it
+/// locally instead). Deletes the row; jobs are ephemeral, so there is nothing to
+/// undo and nothing to sync.
+#[tauri::command]
+pub async fn book_cancel_artifact_job(
+    app: tauri::AppHandle,
+    settings: State<'_, SettingsState>,
+    book_uuid: String,
+    uuid: String,
+) -> Result<(), String> {
+    let dir = find_book_dir_write(&settings, &book_uuid)?;
+    let conn = open_book_db(&dir)?;
+    conn.execute(
+        "DELETE FROM book_artifact_job WHERE uuid = ?1 AND book_uuid = ?2",
+        rusqlite::params![uuid, book_uuid],
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "book-artifact-changed",
+        serde_json::json!({ "book_uuid": book_uuid }),
     );
     Ok(())
 }
