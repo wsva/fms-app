@@ -14,6 +14,10 @@
 export interface BookMeta {
   uuid: string;
   name: string;
+  /** The info.json language (`"de"`, `"de-DE"`), empty when unset. Seeds the
+   *  read-aloud voice resolution so generated text is narrated in the book's
+   *  own language. */
+  language: string;
   /** Absolute filesystem path of the book directory. */
   path: string;
   created_at: string;

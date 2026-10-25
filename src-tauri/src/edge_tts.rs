@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tauri::State;
 use edge_tts_rust::{EdgeTtsClient, SpeakOptions, Boundary};
+
+use crate::settings::SettingsState;
 
 /// A voice available from Edge TTS.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,4 +198,84 @@ pub async fn edge_tts_preview(args: TtsSynthesizeArgs) -> Result<TtsPreviewResul
     let audio_base64 = general_purpose::STANDARD.encode(&result.audio);
 
     Ok(TtsPreviewResult { audio_base64 })
+}
+
+/// FNV-1a 64 over `text` + a separator + `voice`, as 16 hex chars. A distinct
+/// key per (content, voice): edit the text or change the preferred voice and
+/// the old cache entry simply stops being hit — self-invalidating, no TTL.
+fn tts_cache_key(text: &str, voice: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.bytes().chain(std::iter::once(0x00)).chain(voice.bytes()) {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:016x}", hash)
+}
+
+/// Path of the cached mp3 for this (text, voice) pair under
+/// `<data_root>/tts_cache/` — reused across sessions so "listen again" never
+/// re-hits the Edge TTS network service.
+fn tts_cache_path(text: &str, voice: &str) -> PathBuf {
+    crate::app_paths::data_subdir("tts_cache").join(format!("{}.mp3", tts_cache_key(text, voice)))
+}
+
+/// Resolve the voice for `language` through the same chain the read-aloud
+/// reference uses — explicit `voice` → the language's preferred voice
+/// (`tts_voice_by_language`) → the app default (`resolve_voice`) — and
+/// synthesize `text`, returning `(chosen_voice, mp3_bytes)`. Shared by the
+/// `tts_speak_text` command (in-browser playback) and the `tts_speak` MCP tool
+/// (file output), so "which voice speaks this?" has exactly one answer.
+///
+/// Synthesis is cached to disk by (text, voice): a repeat listen reads the
+/// stored mp3 instead of reaching Edge TTS again.
+pub(crate) async fn speak_resolved(
+    settings: &SettingsState,
+    text: &str,
+    language: &str,
+    voice: Option<&str>,
+) -> Result<(String, Vec<u8>), String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("Nothing to read".to_string());
+    }
+    let resolved = {
+        let app = settings.settings.lock().unwrap();
+        crate::datasets::read_aloud::standard_audio::resolve_voice(&app, language, voice).voice
+    };
+    let cache_path = tts_cache_path(trimmed, &resolved);
+    if let Ok(cached) = std::fs::read(&cache_path) {
+        if !cached.is_empty() {
+            log::debug!("speak_resolved: cache hit voice={}, len={}", resolved, cached.len());
+            return Ok((resolved, cached));
+        }
+    }
+    log::debug!("speak_resolved: synth voice={}, lang={:?}, text_len={}", resolved, language, trimmed.len());
+    let bytes = synthesize_to_bytes(trimmed, &resolved, None, None, None).await?;
+    // Best-effort cache write — a failure here must not break playback.
+    if let Some(dir) = cache_path.parent() {
+        if std::fs::create_dir_all(dir).is_ok() {
+            let _ = std::fs::write(&cache_path, &bytes);
+        }
+    }
+    Ok((resolved, bytes))
+}
+
+/// Speak arbitrary text aloud, returning base64 mp3 for playback in the webview
+/// without writing a file. Used by the Understanding panel's Listen button.
+#[tauri::command]
+pub async fn tts_speak_text(
+    settings: State<'_, SettingsState>,
+    text: String,
+    language: Option<String>,
+    voice: Option<String>,
+) -> Result<TtsPreviewResult, String> {
+    let (_voice, bytes) = speak_resolved(
+        settings.inner(),
+        &text,
+        language.as_deref().unwrap_or(""),
+        voice.as_deref().filter(|v| !v.trim().is_empty()),
+    )
+    .await?;
+    use base64::{Engine as _, engine::general_purpose};
+    Ok(TtsPreviewResult { audio_base64: general_purpose::STANDARD.encode(&bytes) })
 }

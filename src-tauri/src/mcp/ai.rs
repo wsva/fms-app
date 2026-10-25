@@ -57,6 +57,23 @@ struct TtsSynthesizeParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct TtsSpeakParam {
+    /// The text to narrate.
+    text: String,
+    /// Language tag (`de`, `de-DE`) that decides the preferred voice. Empty uses
+    /// the app default.
+    #[serde(default)]
+    language: String,
+    /// Override the resolved voice with this exact `short_name`.
+    #[serde(default)]
+    voice: String,
+    /// Absolute path to write the mp3. Empty resolves + reports the voice only
+    /// (no audio is returned over MCP).
+    #[serde(default)]
+    output_path: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ChatMessagesParam {
     /// Return only messages newer than this `created_at` cursor. Empty returns
     /// the newest page.
@@ -215,6 +232,30 @@ impl DatasetMcpServer {
         };
         let result = edge_tts::edge_tts_synthesize(args).await?;
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+    }
+
+    #[tool(name = "tts_speak", description = "Narrate `text` with Edge TTS, resolving the preferred voice for `language` the same way the read-aloud reference does (explicit `voice` > the language's preferred voice > app default) — so you never guess a voice from an alphabetical list. Pass `output_path` to save the mp3; without it the tool reports the chosen voice without producing audio. Returns {voice, bytes, output_path?}.")]
+    async fn tts_speak(&self, Parameters(param): Parameters<TtsSpeakParam>) -> Result<String, String> {
+        log::info!("[MCP] tts_speak: lang={:?}, text_len={}, out={}", param.language, param.text.len(), param.output_path);
+        let settings = self.app.state::<SettingsState>();
+        let (voice, bytes) = edge_tts::speak_resolved(
+            settings.inner(),
+            &param.text,
+            &param.language,
+            (!param.voice.trim().is_empty()).then(|| param.voice.as_str()),
+        )
+        .await?;
+        let out = if param.output_path.trim().is_empty() {
+            serde_json::json!({
+                "voice": voice,
+                "bytes": bytes.len(),
+                "hint": "Pass output_path to save the mp3; the audio itself is not returned over MCP.",
+            })
+        } else {
+            std::fs::write(&param.output_path, &bytes).map_err(|e| format!("Failed to write file: {e}"))?;
+            serde_json::json!({ "voice": voice, "bytes": bytes.len(), "output_path": param.output_path })
+        };
+        Ok(out.to_string())
     }
 
     #[tool(name = "chat_messages", description = "Read the cross-device chat thread the PC stores for the user's paired devices (phone <-> PC). Returns messages newest-last with their attachments. Pass 'after' (a created_at from an earlier answer) to poll for new messages only.")]

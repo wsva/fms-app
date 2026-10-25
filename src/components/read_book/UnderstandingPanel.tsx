@@ -10,7 +10,7 @@
  * only renders and keeps transient UI state (active tab, quiz answers, pickers).
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Volume2,
   Wand2,
@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import UnderstandingModelPicker from "./UnderstandingModelPicker";
+import SpeakToolbar from "./SpeakToolbar";
 import type { useBookData } from "@/hooks/useBookData";
 import type {
   ArtifactKind,
@@ -46,6 +47,10 @@ import {
 import type { CardDatasetSummary } from "@/lib/types";
 
 type Props = { b: ReturnType<typeof useBookData> };
+
+/** Shared read-aloud language + its setter, passed down so every Listen button
+ *  in the panel stays in sync (one language for the whole chapter). */
+type SpeakCtx = { language: string; onChange: (lang: string) => void };
 
 type Tab = "explain" | "simplify" | "argument" | "quiz" | "notes" | "chapter";
 
@@ -70,6 +75,21 @@ export default function UnderstandingPanel({ b }: Props) {
   } = b;
 
   const [tab, setTab] = useState<Tab>("explain");
+
+  // Read-aloud language for the Listen buttons. "" means "use the book's own
+  // language"; persisted so the choice survives across chapters and books.
+  const [speakLang, setSpeakLangState] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    return window.localStorage.getItem("book-understanding-tts-lang") || "";
+  });
+  const setSpeakLang = useCallback((lang: string) => {
+    setSpeakLangState(lang);
+    if (typeof window !== "undefined") window.localStorage.setItem("book-understanding-tts-lang", lang);
+  }, []);
+  const speak: SpeakCtx = {
+    language: speakLang || b.selectedBook?.language || "",
+    onChange: setSpeakLang,
+  };
 
   const focusedPara = useMemo(
     () => paragraphs.find((p) => p.breakSentence?.uuid === focusParagraph) ?? null,
@@ -129,7 +149,7 @@ export default function UnderstandingPanel({ b }: Props) {
       {/* Body */}
       <div className="flex-1 min-h-0 overflow-y-auto p-3">
         {tab === "chapter" ? (
-          <ChapterTab b={b} />
+          <ChapterTab b={b} speak={speak} />
         ) : !hasParagraph ? (
           <div className="text-sm text-text-tertiary text-center py-8">
             Click a paragraph on the left to understand it.
@@ -137,6 +157,7 @@ export default function UnderstandingPanel({ b }: Props) {
         ) : tab === "explain" ? (
           <GeneratedSection
             b={b}
+            speak={speak}
             kind="explanation"
             scopeType="paragraph"
             scopeUuid={focusParagraph!}
@@ -147,6 +168,7 @@ export default function UnderstandingPanel({ b }: Props) {
         ) : tab === "simplify" ? (
           <GeneratedSection
             b={b}
+            speak={speak}
             kind="simplification"
             scopeType="paragraph"
             scopeUuid={focusParagraph!}
@@ -157,6 +179,7 @@ export default function UnderstandingPanel({ b }: Props) {
         ) : tab === "argument" ? (
           <GeneratedSection
             b={b}
+            speak={speak}
             kind="argument_map"
             scopeType="paragraph"
             scopeUuid={focusParagraph!}
@@ -167,7 +190,7 @@ export default function UnderstandingPanel({ b }: Props) {
         ) : tab === "quiz" ? (
           <QuizTab b={b} artifact={findArtifact(scopeArtifacts, "questions")} scopeUuid={focusParagraph!} />
         ) : (
-          <NotesTab b={b} scopeArtifacts={scopeArtifacts} scopeUuid={focusParagraph!} />
+          <NotesTab b={b} speak={speak} scopeArtifacts={scopeArtifacts} scopeUuid={focusParagraph!} />
         )}
       </div>
     </div>
@@ -198,6 +221,7 @@ function tabStale(b: ReturnType<typeof useBookData>, tab: Tab): boolean {
 
 function GeneratedSection({
   b,
+  speak,
   kind,
   scopeType,
   scopeUuid,
@@ -206,6 +230,7 @@ function GeneratedSection({
   cta,
 }: {
   b: ReturnType<typeof useBookData>;
+  speak: SpeakCtx;
   kind: ArtifactKind;
   scopeType: ArtifactScopeType;
   scopeUuid: string;
@@ -260,9 +285,18 @@ function GeneratedSection({
         </div>
       </div>
       {artifact ? (
-        <div className="rounded-lg border border-border-default bg-bg-card p-3">
-          <MarkdownViewer content={artifact.content} />
-        </div>
+        <>
+          <div className="flex items-center justify-end">
+            <SpeakToolbar
+              text={artifact.content}
+              language={speak.language}
+              onLanguageChange={speak.onChange}
+            />
+          </div>
+          <div className="rounded-lg border border-border-default bg-bg-card p-3">
+            <MarkdownViewer content={artifact.content} />
+          </div>
+        </>
       ) : null}
     </div>
   );
@@ -601,10 +635,12 @@ function QuestionCard({
 
 function NotesTab({
   b,
+  speak,
   scopeArtifacts,
   scopeUuid,
 }: {
   b: ReturnType<typeof useBookData>;
+  speak: SpeakCtx;
   scopeArtifacts?: BookArtifactView[];
   scopeUuid: string;
 }) {
@@ -615,6 +651,10 @@ function NotesTab({
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] font-semibold text-text-tertiary tracking-wider uppercase">New note</span>
+          <SpeakToolbar text={draft} language={speak.language} onLanguageChange={speak.onChange} disabled={saving} />
+        </div>
         <textarea
           className="w-full px-3 py-2 rounded-md bg-bg-input border border-border-default text-sm text-text-primary focus:outline-none focus:border-accent min-h-[80px]"
           placeholder="Write a note about this paragraph…"
@@ -666,6 +706,9 @@ function NotesTab({
                     {assessment ? "Re-assess" : "Assess"}
                   </button>
                   <span className="text-[11px] text-text-tertiary">{n.created_at.slice(0, 10)}</span>
+                  <div className="ml-auto">
+                    <SpeakToolbar text={n.content} language={speak.language} onLanguageChange={speak.onChange} disabled={saving} />
+                  </div>
                 </div>
                 {assessment && (
                   <div className="rounded-md bg-bg-muted p-2 border-l-2 border-accent">
@@ -688,7 +731,7 @@ function NotesTab({
 // Chapter tab: digest + glossary
 // ---------------------------------------------------------------------------
 
-function ChapterTab({ b }: { b: ReturnType<typeof useBookData> }) {
+function ChapterTab({ b, speak }: { b: ReturnType<typeof useBookData>; speak: SpeakCtx }) {
   const {
     chapterUUID,
     currentChapter,
@@ -718,6 +761,7 @@ function ChapterTab({ b }: { b: ReturnType<typeof useBookData> }) {
         </div>
         <GeneratedSection
           b={b}
+          speak={speak}
           kind="digest"
           scopeType="chapter"
           scopeUuid={chapterUUID}
