@@ -64,8 +64,11 @@ pub struct AppSettings {
     /// Empty means the server runs unauthenticated.
     #[serde(default)]
     pub goose_acp_secret: String,
-    /// Whether the Agent (goose ACP) integration is enabled. Legacy: the
-    /// record-level `AgentHost::enabled` is what the dock honours now.
+    /// Whether the dock dials its host at startup — the Agent page's “Connect
+    /// the dock automatically”. It hides nothing (the dock is mounted either
+    /// way) and does not choose the target: that is `AgentHost::enabled`, which
+    /// `agent_connect` reads. This flag only arms the dock's boot-time dial and
+    /// seeds the first host record synthesized by `migrate_agent_hosts`.
     #[serde(default)]
     pub goose_acp_enabled: bool,
     /// Agents the dock can host. `AppSettings` is the authority for these
@@ -378,8 +381,11 @@ pub struct GlobalSettings {
     /// Secret key sent as `X-Secret-Key` when connecting to `goose serve`.
     #[serde(default)]
     pub goose_acp_secret: String,
-    /// Whether the Agent (goose ACP) integration is enabled. Legacy: the
-    /// record-level `AgentHost::enabled` is what the dock honours now.
+    /// Whether the dock dials its host at startup — the Agent page's “Connect
+    /// the dock automatically”. It hides nothing (the dock is mounted either
+    /// way) and does not choose the target: that is `AgentHost::enabled`, which
+    /// `agent_connect` reads. This flag only arms the dock's boot-time dial and
+    /// seeds the first host record synthesized by `migrate_agent_hosts`.
     #[serde(default)]
     pub goose_acp_enabled: bool,
     /// Agent hosts (projection of [`AppSettings::agent_hosts`]).

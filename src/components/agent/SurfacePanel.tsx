@@ -6,7 +6,7 @@ import { btnGhost, hint, inputCls } from "./styles";
 
 /** Tab 3 — the two things here that are still settings: the policy mode that
  *  decides what an attached agent may call, whether the MCP surface is served at
- *  all, and whether the dock exists as a second way in.
+ *  all, and whether the dock connects itself at startup.
  *
  *  These live on a page with its own Save rather than in Settings because an
  *  agent under `enforce` is refused the ability to change them: the surface that
@@ -106,9 +106,9 @@ export default function SurfacePanel() {
           disabled={!draft}
         />
         <span>
-          <span className="font-medium">Show the agent dock</span>
+          <span className="font-medium">Connect the dock automatically</span>
           <span className={`block ${hint}`}>
-            The dock is the second way in: it attaches FmS to an agent host. Slower to set up than attaching an agent to FmS, but it is the only window where FmS can show an agent&apos;s reasoning, tool calls and permission requests. Pick the host on the Hosting tab.
+            On: the dock dials the host picked on the Hosting tab as soon as FmS starts, so it is already live the first time you open it. Off: it stays disconnected until you press <em>Connect</em> in the panel. Either way the dock itself is always available from the Bot button or Ctrl+Space — this switch only decides whether it connects on its own. The dock is the second way in: it attaches FmS to an agent host, which is the only window where FmS can show an agent&apos;s reasoning, tool calls and permission requests.
           </span>
         </span>
       </label>

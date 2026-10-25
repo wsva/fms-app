@@ -725,9 +725,9 @@ export default function AgentDock() {
 
           {!enabled && !status.connected && (
             <div className="px-4 py-2 text-xs text-text-tertiary bg-bg-muted border-b border-border-default">
-              The Agent is disabled. Switch on <em>Show the agent dock</em> on the
-              Agent page (Tools → Agent → Surface), then pick a host on its
-              Hosting tab.
+              The dock does not connect on its own. Press <em>Connect</em> above, or
+              turn on <em>Connect the dock automatically</em> on the Agent page
+              (Tools → Agent → Surface) and pick a host on its Hosting tab.
             </div>
           )}
 
