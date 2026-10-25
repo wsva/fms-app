@@ -72,6 +72,8 @@ The first three are one draft: **Save** writes them and leaves you on the page (
 
 Beside the cards is a **Sections** list. The leftmost button in the toolbar shows and hides it: on a PC it is open to begin with, on a phone it slides in over the page and closes again once you pick something. Choose a section to jump to it — as you scroll, the list marks the card you are reading. It jumps rather than hides, because the cards are one draft: the note on the audio card about saving first only makes sense next to the fields it is about.
 
+A whole book is better delegated than typed: an agent can extract the text, split it, import it and make the standard audio, and [AI Chat & Agents](ai_chat_agents.md#example-build-a-read-aloud-dataset-from-an-ebook) has a prompt that did exactly that — ending with one probe clip for you to approve before the rest.
+
 ## XP
 
 Completing read‑aloud attempts contributes to your progress, and XP earned here (like the other modes) is recorded centrally and can sync across devices when you use a Hub.
