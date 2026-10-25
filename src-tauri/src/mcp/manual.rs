@@ -330,6 +330,12 @@ fn paths(endpoints: &Value) -> Value {
 /// sentence. Both are generated from the same bound port, and both are copy-only
 /// — FmS never writes into another product's config files (§6).
 ///
+/// The Agent page renders only `pointer_sentence` (it dropped the other two as
+/// three copies of one instruction — ideas.md §4.1). The rest stays here because
+/// `/agent.md` is where the pointer leads, so an agent that cannot fetch a URL
+/// still finds the inline block, and a user reading the manual still finds the
+/// per-product lines.
+///
 /// The last entry is the stdio door: a client that cannot take a URL spawns this
 /// executable with `--mcp-bridge`, which proxies to the same endpoint (see
 /// `bridge.rs`).

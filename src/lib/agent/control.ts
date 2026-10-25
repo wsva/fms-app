@@ -35,13 +35,13 @@ export interface AgentManual {
     policy: { mode: string; tiers: string[] };
   };
   tools: { count: number };
+  /** The pointer sentence, plus the line that says when it applies. The payload
+   *  also carries `inline_block`, `inline_when`, `never` and `snippets`; those
+   *  are rendered only in `/agent.md`, which is where a reader who needs them
+   *  ends up, so they are left untyped here. */
   connect: {
     pointer_sentence: string;
     pointer_when: string;
-    inline_block: string;
-    inline_when: string;
-    never: string;
-    snippets: { product: string; text: string; note?: string }[];
   };
 }
 
@@ -181,8 +181,8 @@ export async function ensureSurfaceLoaded(): Promise<void> {
 // ---- Writes ----------------------------------------------------------------
 
 /** Copy-only, by design: FmS never writes another product's config file (see
- *  `manual.connect.never`). The key names the button so only it flips to
- *  "Copied". */
+ *  `manual.connect.never` in `mcp/manual.rs`). The key names the button so only
+ *  it flips to "Copied". */
 export async function copyAgentText(key: string, text: string): Promise<void> {
   if (!text) return;
   try {

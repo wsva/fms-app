@@ -44,7 +44,7 @@ Then the user makes exactly one choice, which is a *rendering* choice, not a con
 | ✅ Human-readable index | `sync/server.rs::index_handler`, `MCP_SECTION_HTML` | The root page already lists endpoints and the MCP tool table — an agent with web fetch can read it today, as HTML prose |
 | ✅ App-control tools | [src-tauri/src/mcp/system.rs](../../../src-tauri/src/mcp/system.rs) `app_navigate`, `app_open_review`, `app_start_dictation`, `app_notify`, `app_get_ui_state` | Emit `agent-action`; performed by the shell bridge in [src/app/(app)/home/page.tsx](../../../src/app/(app)/home/page.tsx) |
 | ✅ Dock UI | [src/components/agent/AgentDock.tsx](../../../src/components/agent/AgentDock.tsx) | Overlay dock, draggable FAB (**off by default**, `agent_fab_visible`, switched on the Agent page), Ctrl+Space. It holds what an agent pushed at the user — `app_notify` notes, the open-task count — and navigates; it holds no session, because the agent runs in its own window |
-| ✅ The Connect card | [src/components/agent/AgentPage.tsx](../../../src/components/agent/AgentPage.tsx) — "Attach an agent" section | Status half (bound port, zone, `mcp_enabled`), the pointer sentence, the inline block, and copy-only per-product lines. The same page's "Agent surface" section below it keeps only `mcp_policy`, `mcp_enabled` and `agent_fab_visible` — one page, no tab bar |
+| ✅ The Connect card | [src/components/agent/AgentPage.tsx](../../../src/components/agent/AgentPage.tsx) — "Attach an agent" section | Status half (bound port, zone, `mcp_enabled`) and the pointer sentence — the page carries nothing else; the inline block and the per-product lines live in `/agent.md`, which is where the pointer leads. The same page's "Agent surface" section below it keeps `mcp_policy`, `mcp_enabled` and `agent_fab_visible` — one page, no tab bar |
 | ✅ Config write path for agents | `mcp/system.rs::settings_set` | A **patch**, not a whole-object write: only the fields present are touched, so a partial payload is the correct payload. Credentials are write-only (`***` means "leave it alone"), and `settings_get` redacts every secret in `SECRET_FIELDS` while keeping `has_<field>` discoverable |
 | ✅ Recipe / prompt assets | [goose_recipe/](./goose_recipe/), [prompt/](./prompt/) | Goose YAML envelope + portable `instructions:` prose over `dataset_*` tools |
 
@@ -148,11 +148,11 @@ And the blocker shared by *both* modes and both transports: `rmcp` is compiled w
 
 The page has exactly two jobs: **let the user copy what an agent needs**, and **show whether the surface is answering**. It contains no address input, and no dial target exists in settings any more.
 
-**The copy half — two payloads, because agents differ in what they can do with one line:**
+**The copy half — one payload on the page.** ~~Two payloads, because agents differ in what they can do with one line.~~ (2026-10-25: the second payload and the per-product lines came off the page — three numbered copies of the same instructions read as a menu. They are still rendered by `/agent.md`, which is where the pointer sentence leads, so nothing was lost; do not add them back to the page.)
 
-- **The pointer** (default): `Read http://127.0.0.1:<live port>/agent.md and connect to FmS as it instructs.` One line, works with any agent that has web fetch or a shell, and the manual then teaches everything.
-- **The inline block** (fallback): a self-contained snippet — MCP URL + transport + the recommended first calls — for agents that **can attach an MCP server but cannot fetch a URL**. Without this the scenario fails silently for that entire class, so ship both, not just the pretty one-liner.
-- Optional convenience lines per known product: `claude mcp add --transport http fms <url>`, a Codex `[mcp_servers.fms]` TOML block, an OpenCode `opencode.json` block, a WorkBuddy `~/.workbuddy/mcp.json` block (a plain `url` entry — its loader folds every `url` entry onto HTTP, so the stdio bridge would only add a process) with the trust step in a note. Displayed for copy only — FmS never writes into another product's config files (§6).
+- **The pointer** (the page's one payload): `Read http://127.0.0.1:<live port>/agent.md and connect to FmS as it instructs.` One line, works with any agent that has web fetch or a shell, and the manual then teaches everything.
+- **The inline block** (manual only): a self-contained snippet — MCP URL + transport + the recommended first calls — for agents that **can attach an MCP server but cannot fetch a URL**. Without it the scenario fails silently for that entire class, so `/agent.md` ships both, not just the pretty one-liner.
+- **Optional convenience lines per known product** (manual only): `claude mcp add --transport http fms <url>`, a Codex `[mcp_servers.fms]` TOML block, an OpenCode `opencode.json` block, a WorkBuddy `~/.workbuddy/mcp.json` block (a plain `url` entry — its loader folds every `url` entry onto HTTP, so the stdio bridge would only add a process) with the trust step in a note. Displayed for copy only — FmS never writes into another product's config files (§6).
 
 **The status half:**
 
@@ -215,7 +215,7 @@ What survives:
 
 ## 7. Limits, stated plainly
 
-- Two distinct preconditions, not one: *can attach an MCP server* and *can fetch a URL*. An agent with the first but not the second is exactly why the Connect card carries the inline block alongside the pointer sentence (§4.1) — otherwise the scenario fails silently for that class. A product with **neither** — a closed GUI, no extension point — cannot be taught; that is a fact about the product, not a gap in this design. The floor for it is deep links, clipboard handoff, and exported prompt files. Declining is a decision.
+- Two distinct preconditions, not one: *can attach an MCP server* and *can fetch a URL*. An agent with the first but not the second is exactly why `/agent.md` carries the inline block alongside the pointer sentence (§4.1) — otherwise the scenario fails silently for that class. A product with **neither** — a closed GUI, no extension point — cannot be taught; that is a fact about the product, not a gap in this design. The floor for it is deep links, clipboard handoff, and exported prompt files. Declining is a decision.
 - Products with no ACP support are mode 1 forever. Correct outcome, no work.
 - **Rule for future adapters: only build one for a protocol with two or more independent implementations** (ACP, MCP qualified; a single vendor's private SDK does not). The ACP adapter is the worked example of the cost: each product's quirks leak in as N branches, which is the treadmill C1 exists to avoid — and that is what made deleting it the cheaper move.
 - A PTY terminal panel (xterm.js + Rust pty) is the catch-all renderer for TUI-only products: zero per-product code, full native UX, no structured events. Separate decision, recorded here so it is not re-litigated later.
@@ -224,7 +224,7 @@ What survives:
 
 ## 8. Sequencing
 
-1. ✅ **The Connect card + generated `/agent.md`, from one source** (§5.0), with both payloads (pointer + inline block).
+1. ✅ **The Connect card + generated `/agent.md`, from one source** (§5.0): the pointer sentence on the card, and the inline block + per-product lines in the manual.
 2. ✅ Preconditions: secrets redacted from `settings_get`; the card, the manual and `app_version` all report the **real bound port**.
 3. ✅ `app_bootstrap` + `initialize` `instructions` — the same generated body, third rendering.
 4. ✅ MCP **resources** (domain docs) and **prompts** (recipes) — which ended the goose-envelope lock-in.
