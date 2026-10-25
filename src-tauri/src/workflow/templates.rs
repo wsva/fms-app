@@ -8,8 +8,9 @@
 //! `seed.ts` (a hand-maintained duplicate that silently drifted from it).
 //!
 //! Templates are grouped by dataset **category** (`dictation` / `book` /
-//! `card`), one directory each under `templates/`, because a given kind of
-//! dataset may grow several workflows over time — `dictation` has two today.
+//! `read_aloud` / `card`), one directory each under `templates/`, because a given
+//! kind of dataset may grow several workflows over time — `dictation` has two
+//! today.
 //! The Workflow page renders one tab per category and lists the templates inside
 //! it; `builtin_templates` reports each template's `category` and `run_slug` so
 //! the page (and an agent) can group them and name their runs identically.
@@ -48,11 +49,12 @@ pub(crate) const READ_ALOUD_YAML: &str =
 
 /// Every built-in template, as `(category, id, run_slug, yaml)` quadruples.
 /// `category` is the dataset type the Workflow page tabs on (`dictation` /
-/// `book` / `card`); `id` is the stable key that picks one within a category (a
-/// category may hold several). `run_slug` names the dataset-scoped run this
-/// template keeps its progress in: `None` is the category's *primary* workflow,
-/// whose run has always been `<category>-<uuid>` and keeps that id so the runs
-/// already on disk stay loadable; `Some(slug)` gives `<category>-<slug>-<uuid>`,
+/// `book` / `read_aloud` / `card`); `id` is the stable key that picks one within
+/// a category (a category may hold several). `run_slug` names the dataset-scoped
+/// run this template keeps its progress in: `None` is the category's *primary*
+/// workflow, whose run has always been `<category>-<uuid>` and keeps that id so
+/// the runs already on disk stay loadable; `Some(slug)` gives
+/// `<category>-<slug>-<uuid>`,
 /// so two workflows over one dataset are two histories. [`super::run_id_for`]
 /// applies the rule, and [`super::builtin_templates`] hands the slug to the page
 /// and to agents instead of making each side re-invent it.

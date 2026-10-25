@@ -14,7 +14,7 @@
 // Every layout/engine helper takes the parsed `steps` as a parameter. The
 // built-in pipelines are no longer duplicated in this repo's frontend either —
 // they ship in the Rust binary grouped by dataset category (`src-tauri/src/
-// workflow/templates/{dictation,book,card}/*.yaml`, served via
+// workflow/templates/{dictation,book,read_aloud,card}/*.yaml`, served via
 // `workflow_builtin_templates`), so the page fetches them at runtime and shows
 // one tab per category instead of importing a seed string.
 // ---------------------------------------------------------------------------

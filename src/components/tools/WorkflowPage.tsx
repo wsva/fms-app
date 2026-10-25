@@ -48,11 +48,12 @@ import {
 import type { StepVerdictInfo } from "./WorkflowGraph";
 import { usePageRefresh } from "@/lib/refresh/page-refresh";
 import type { BookMeta } from "@/lib/read/types";
+import type { ReadAloudMeta } from "@/lib/read_aloud/types";
 import type { CardDatasetSummary } from "@/lib/types";
 import {
   RefreshCw, Workflow as WorkflowIcon, Play, RotateCcw, SkipForward, Check, Copy, Plus,
   FileJson, Save, Eye, Pencil, FolderOpen, Trash2, X, ListChecks,
-  Headphones, BookOpen, Layers, AlertTriangle, ChevronDown, ChevronRight, Info,
+  Headphones, BookOpen, Layers, Mic, AlertTriangle, ChevronDown, ChevronRight, Info,
   type LucideIcon,
 } from "lucide-react";
 
@@ -103,6 +104,21 @@ async function listDatasetsOfKind(cat: WorkflowCategory): Promise<KindDataset[]>
       description: "",
       path: b.path,
       note: "",
+      ready: true,
+    }));
+  }
+  if (cat === "read_aloud") {
+    const res = await invoke<ReadAloudMeta[]>("read_aloud_list");
+    return res.map((d) => ({
+      key: d.uuid,
+      uuid: d.uuid,
+      name: d.name,
+      description: d.description,
+      path: d.path,
+      // Not a count: for this kind the language is what a generation resolves its
+      // voice from, and an empty one is worth seeing before a run rather than
+      // after 300 clips.
+      note: d.language ? `texts in ${d.language}` : "no language",
       ready: true,
     }));
   }
@@ -171,9 +187,9 @@ interface BuiltinTemplate {
 }
 
 /** Dataset kinds the Workflow page offers — one breadcrumb level 1 entry each. */
-type WorkflowCategory = "dictation" | "book" | "card";
+type WorkflowCategory = "dictation" | "book" | "read_aloud" | "card";
 
-const KIND_ORDER: WorkflowCategory[] = ["dictation", "book", "card"];
+const KIND_ORDER: WorkflowCategory[] = ["dictation", "book", "read_aloud", "card"];
 
 const KIND_META: Record<WorkflowCategory, { label: string; blurb: string; icon: LucideIcon }> = {
   dictation: {
@@ -185,6 +201,11 @@ const KIND_META: Record<WorkflowCategory, { label: string; blurb: string; icon: 
     label: "Book",
     blurb: "Create a book, author chapters / sentences, attach audio, build the vocabulary. Agent-facing.",
     icon: BookOpen,
+  },
+  read_aloud: {
+    label: "Read aloud",
+    blurb: "Import passages from a book you extracted, probe one clip for a human to listen to, then fill in the rest. Agent-facing.",
+    icon: Mic,
   },
   card: {
     label: "Card",
@@ -436,7 +457,8 @@ export default function WorkflowPage() {
   };
 
   // Level 3 → 4: pick a workflow. The dictation pipeline is probed right away so
-  // the graph opens on real disk facts; Book / Card stay a read-only preview.
+  // the graph opens on real disk facts; Book / Read aloud / Card stay a read-only
+  // preview.
   const openTemplate = (tpl: BuiltinTemplate) => {
     resetRunView();
     setMode("view");
