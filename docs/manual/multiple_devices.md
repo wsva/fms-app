@@ -105,7 +105,7 @@ If you edit the same item on two devices, the Hub keeps whichever version has th
 **Tools → Cross-Device Chat** is one shared conversation between your own devices (e.g. send yourself a file from your PC to your phone). All chat messages and attachments are stored only on the Hub — a follower never keeps its own separate copy of the history.
 
 - You can send messages and files while the Hub is reachable. If the Hub is offline, the Devices & Hub page will show a count of pending chat messages ("`N` chat message(s) pending") and the send will simply fail until the Hub comes back online — retry then.
-- Attachments are downloaded on demand to the follower's own storage when you open them; they don't take up space until you view or save them.
+- Attachments are downloaded on demand to the follower's own storage when you open them; they don't take up space until you view or save them. **Save** puts a real copy where you can find it: on the phone it lands in the public **Download/FmS** folder (visible in the Files app, openable by any other app), and on a PC it asks where to put it.
 
 ---
 

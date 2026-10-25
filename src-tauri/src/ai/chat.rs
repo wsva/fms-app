@@ -7,7 +7,9 @@
 //!   is its own SQLite file rather than tables in the shared app DB, so a
 //!   thread and its attachments can be backed up or removed as one unit.
 //! * `attachments/` — attachment bytes, named `<attachment uuid>--<name>`.
-//! * `cache/` — on the phone only: attachments downloaded for viewing.
+//! * `cache/` — on the phone only: attachments downloaded for viewing. A save
+//!   from the phone writes a user-visible copy into the public Downloads folder
+//!   (`android_downloads`), since the cache is app-private and unreachable.
 //!
 //! How the two platforms reach that store:
 //!
@@ -29,6 +31,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::settings::SettingsState;
+
+#[cfg(target_os = "android")]
+mod android_downloads;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -735,10 +740,14 @@ async fn copy_local_attachment(
     }
 }
 
-/// Save an attachment. On the hub this is a copy of the local store to the
-/// user's chosen `dest`; on a follower saving means keeping a hub-downloaded
-/// copy in the cache (honouring an explicit `dest` when given) so it survives
-/// going offline (§4).
+/// Save an attachment somewhere the user can actually get at it. On the hub this
+/// is a copy of the local store to the user's chosen `dest`; on a follower with
+/// an explicit `dest` it is a copy of the (possibly just downloaded) bytes there.
+///
+/// With no `dest`, the phone writes a user-visible copy into the public
+/// `Download/FmS/` folder instead of stopping in the app-private cache — a
+/// sandbox copy is not something a file manager can show. A PC follower keeps
+/// the older behaviour and simply keeps the cached copy.
 #[tauri::command]
 #[allow(unused_variables)]
 pub async fn chat_save_attachment(
@@ -746,6 +755,7 @@ pub async fn chat_save_attachment(
     settings: tauri::State<'_, SettingsState>,
     uuid: String,
     filename: Option<String>,
+    mime: Option<String>,
     dest: Option<String>,
 ) -> Result<String, String> {
     #[cfg(feature = "desktop")]
@@ -757,24 +767,36 @@ pub async fn chat_save_attachment(
     if !valid_message_uuid(&uuid) {
         return Err("invalid attachment id".into());
     }
-    if let Some(local) = outbox_attachment(&settings, &uuid) {
-        let path = match dest.filter(|d| !d.trim().is_empty()) {
-            Some(d) => {
-                let _ = std::fs::copy(&local, &d);
-                PathBuf::from(d)
-            }
-            None => local,
-        };
-        return Ok(path.to_string_lossy().into_owned());
-    }
+
+    // The bytes: already staged for an offline send, else downloaded into the
+    // cache. Both are app-private, which is why the phone needs the extra step
+    // below to land a copy the user can open from Files.
     let cache = chat_root(&settings)?.join("cache");
-    let path = match dest.filter(|d| !d.trim().is_empty()) {
-        Some(d) => PathBuf::from(d),
-        None => cache_path(&cache, &uuid, filename.as_deref()),
+    let local = match outbox_attachment(&settings, &uuid) {
+        Some(local) => local,
+        None => {
+            let local = cache_path(&cache, &uuid, filename.as_deref());
+            download_to(&app, &settings, &uuid, &local).await?;
+            prune_cache(&cache, CACHE_KEEP_BYTES);
+            local
+        }
     };
-    download_to(&app, &settings, &uuid, &path).await?;
-    prune_cache(&cache, CACHE_KEEP_BYTES);
-    Ok(path.to_string_lossy().into_owned())
+
+    let dest = dest.filter(|d| !d.trim().is_empty());
+
+    #[cfg(target_os = "android")]
+    if dest.is_none() {
+        let name = sanitize_filename(filename.as_deref().unwrap_or(&uuid));
+        return android_downloads::save(&local, &name, mime.as_deref()).await;
+    }
+
+    match dest {
+        Some(d) => {
+            std::fs::copy(&local, &d).map_err(|e| format!("cannot write {d}: {e}"))?;
+            Ok(d)
+        }
+        None => Ok(local.to_string_lossy().into_owned()),
+    }
 }
 
 // ---------------------------------------------------------------------------

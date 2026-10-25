@@ -21,6 +21,16 @@
     <!-- No phone lacks a mic today, but do not let that become an install filter. -->
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
+    <!-- Saving a Device Chat attachment to the public Downloads folder. Android
+         10 (API 29) and newer write through MediaStore, which needs no
+         permission; API 24-28 write /sdcard/Download/FmS directly and need this
+         runtime permission, requested by MainActivity.requestStoragePermission.
+         maxSdkVersion keeps it off newer installs entirely.
+         NOTE: re-apply after `tauri android init` regenerates this file. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 

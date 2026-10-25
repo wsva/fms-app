@@ -77,6 +77,9 @@ interface SaveState {
   pct: number;
   done?: boolean;
   error?: string;
+  /** Where the copy landed — on the phone this is the Downloads folder, so it
+   *  is worth naming rather than only ticking a check mark. */
+  path?: string;
 }
 
 interface SaveProgressEvent {
@@ -252,7 +255,14 @@ function AttachmentBlock({
           onClick={() => onSave(att)}
           disabled={busy}
           className="inline-flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-text-tertiary hover:text-text-primary hover:bg-bg-hover cursor-pointer disabled:opacity-70 disabled:cursor-default"
-          title={saveState?.error ?? (desktop ? "Save as…" : "Save to this device")}
+          title={
+            saveState?.error ??
+            (saveState?.path
+              ? `Saved to ${saveState.path}`
+              : desktop
+                ? "Save as…"
+                : "Save to Downloads")
+          }
         >
           {saveState?.error ? (
             <CloudOff size={13} className="shrink-0 text-red-400" />
@@ -275,6 +285,13 @@ function AttachmentBlock({
           </button>
         )}
       </div>
+      {/* A tooltip is the whole story on a phone, where there is no hover — so
+          a failed save has to say why in the row itself. */}
+      {saveState?.error && (
+        <p className="max-w-[240px] text-[11px] text-red-400 break-words text-left">
+          {saveState.error}
+        </p>
+      )}
     </div>
   );
 }
@@ -549,7 +566,7 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
 
   // ── Saving attachments ───────────────────────────────────────────────────
 
-  /** Desktop picks a destination; the phone keeps its own copy in the cache. */
+  /** Desktop picks a destination; the phone writes into its Downloads folder. */
   const saveAttachment = useCallback(
     async (att: ChatAttachment) => {
       let dest: string | null = null;
@@ -565,16 +582,21 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
       }
       setSaves((prev) => ({ ...prev, [att.uuid]: { pct: 0 } }));
       try {
-        await invoke<string>("chat_save_attachment", {
+        const path = await invoke<string>("chat_save_attachment", {
           uuid: att.uuid,
           filename: att.filename,
+          mime: att.mime,
           dest,
         });
+        logInfo(`chat: saved ${att.filename} -> ${path}`, "chat");
+        setSaves((prev) => ({ ...prev, [att.uuid]: { pct: 100, done: true, path } }));
       } catch (e) {
         const error = String(e);
         setSaves((prev) => ({ ...prev, [att.uuid]: { pct: 0, error } }));
         logError(`chat: cannot save attachment ${att.filename}: ${error}`, "chat");
-        window.setTimeout(() => clearSave(att.uuid), 5000);
+        // Keep the message up long enough to read it — on a phone this line is
+        // the only place the reason appears.
+        window.setTimeout(() => clearSave(att.uuid), 12000);
       }
     },
     [mobile, clearSave],
