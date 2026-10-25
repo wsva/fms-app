@@ -153,8 +153,8 @@ impl DatasetMcpServer {
 impl ServerHandler for DatasetMcpServer {
     /// `InitializeResult` is built from this, so overriding it is how every
     /// conforming client receives the condensed manual without having to ask
-    /// (ideas.md §5.0: the highest leverage per byte in the whole design). It
-    /// also feeds `discover`. Hand-written rather than macro-generated —
+    /// (integration.md §5.0: the highest leverage per byte in the whole design).
+    /// It also feeds `discover`. Hand-written rather than macro-generated —
     /// `#[tool_handler]` only emits `get_info` when the impl does not have one,
     /// so the default `Implementation::from_build_env()` (crate name + Cargo
     /// version) is replaced by the app's own identity.

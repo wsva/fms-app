@@ -26,8 +26,8 @@
 //! # `agent_id`
 //!
 //! Always `"loopback"` today. A per-agent tier needs the connection record from
-//! ideas.md §2 (which does not exist: the app no longer dials an agent, so an
-//! attached agent cannot be told apart from another local process), so the
+//! integration.md §2 (which does not exist: the app no longer dials an agent, so
+//! an attached agent cannot be told apart from another local process), so the
 //! column is here so the journal does not have to be migrated when it does.
 
 use std::future::Future;

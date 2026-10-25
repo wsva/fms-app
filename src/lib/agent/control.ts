@@ -36,9 +36,9 @@ export interface AgentManual {
   };
   tools: { count: number };
   /** The pointer sentence, plus the line that says when it applies. The payload
-   *  also carries `inline_block`, `inline_when`, `never` and `snippets`; those
-   *  are rendered only in `/agent.md`, which is where a reader who needs them
-   *  ends up, so they are left untyped here. */
+   *  also carries `snippets` (the per-product registration lines, for a human
+   *  adding a second client); those render only in `/agent.md`, so they are left
+   *  untyped here. */
   connect: {
     pointer_sentence: string;
     pointer_when: string;

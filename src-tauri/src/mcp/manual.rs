@@ -1,4 +1,4 @@
-//! The agent manual: one generator, three renderings (ideas.md §5.0).
+//! The agent manual: one generator, three renderings (integration.md §5.0).
 //!
 //! `/agent.md`, `/agent.json`, `app_bootstrap` and the Agent page's "Attach an
 //! agent" section are all the *same object* rendered differently. Nothing here is
@@ -314,7 +314,7 @@ pub(crate) fn house_rules() -> Value {
     ])
 }
 
-/// ideas.md §5.0 item 6: the way in, spelled as calls. There is one door —
+/// integration.md §5.0 item 6: the way in, spelled as calls. There is one door —
 /// attach over MCP and drive the app from your own window. FmS used to offer a
 /// second one (it dialled an agent over ACP and hosted the session in its own
 /// dock); that direction was removed, so nothing here advertises it.
@@ -333,15 +333,24 @@ fn paths(endpoints: &Value) -> Value {
     })
 }
 
-/// ideas.md §5.0 item 10: per-product convenience lines *and* the generic
-/// sentence. Both are generated from the same bound port, and both are copy-only
-/// — FmS never writes into another product's config files (§6).
+/// integration.md §5.0 item 10: the generic pointer sentence the Agent page
+/// copies, and the per-product registration lines. Both are generated from the
+/// same bound port, and both are copy-only — FmS never writes into another
+/// product's config files (§6).
 ///
-/// The Agent page renders only `pointer_sentence` (it dropped the other two as
-/// three copies of one instruction — ideas.md §4.1). The rest stays here because
-/// `/agent.md` is where the pointer leads, so an agent that cannot fetch a URL
-/// still finds the inline block, and a user reading the manual still finds the
-/// per-product lines.
+/// The Agent page renders only `pointer_sentence` (it dropped the rest as copies
+/// of one instruction — integration.md §4.1). The per-product lines stay here
+/// because this document is also the install page a *human* reads when adding a
+/// second client, and a client's registration syntax is the one thing an agent
+/// reading the manual cannot derive: the transport flag, the config key, the
+/// trust step.
+///
+/// Deliberately gone (2026-10-25): `inline_block` / `inline_when` / `never`.
+/// The inline block served "an agent that can attach an MCP server but cannot
+/// fetch a URL" — a class that by definition never opens this document, and
+/// whose body was a digest of the sections above it. `never` stated a rule about
+/// FmS's own behaviour to a reader who cannot act on it. Do not restore either
+/// to `/agent.md`; the pointer sentence above is the whole hand-off.
 ///
 /// The last entry is the stdio door: a client that cannot take a URL spawns this
 /// executable with `--mcp-bridge`, which proxies to the same endpoint (see
@@ -355,16 +364,6 @@ fn connect(endpoints: &Value) -> Value {
     json!({
         "pointer_sentence": format!("Read {} and connect to FmS as it instructs.", manual),
         "pointer_when": "Any agent that can fetch a URL. Preferred: one line, and the manual then teaches everything, including what this build cannot do.",
-        "inline_block": format!(
-            "FmS is running a Model Context Protocol server.\n\
-             url: {mcp}\n\
-             transport: streamable-http\n\
-             auth: none (loopback is trusted)\n\
-             Start with: app_get_ui_state, auth_status, settings_get, dataset_list, then dataset_full_report on the dataset the user is on.\n\
-             Rules: datasets are uuid-keyed; prefer the trash-backed *_delete tools; inside a workflow run read a step with workflow_verify and commit with workflow_adopt; every error names the valid set and the next call.",
-            mcp = mcp
-        ),
-        "inline_when": "An agent that can attach an MCP server but cannot fetch a URL. Without this block the scenario fails silently for that whole class, so it ships alongside the pointer.",
         "snippets": [
             {
                 "product": "Claude Code",
@@ -392,7 +391,6 @@ fn connect(endpoints: &Value) -> Value {
             workbuddy_snippet(mcp),
             stdio_snippet(),
         ],
-        "never": "These lines are for the user to copy. FmS does not probe for installed products and does not write ~/.claude.json, ~/.codex/config.toml, opencode.json, ~/.workbuddy/mcp.json or any other product's config file — parsing and merging someone else's schema risks corrupting it, and every product changes it (ideas.md §6).",
     })
 }
 
@@ -606,7 +604,7 @@ fn at<'a>(v: &'a Value, path: &[&str]) -> &'a str {
 }
 
 /// Render the markdown *from the JSON body*. A separate hand-written template
-/// would be the fourth copy ideas.md §5.0 forbids.
+/// would be the fourth copy integration.md §5.0 forbids.
 pub(crate) fn render_markdown_from(body: &Value) -> String {
     let mut out = String::new();
     let version = at(body, &["identity", "package_version"]);
@@ -885,35 +883,38 @@ pub(crate) fn render_markdown_from(body: &Value) -> String {
         }
     }
 
-    // 11. connect payloads
-    out.push_str("## Telling another agent about this\n\n");
-    out.push_str(&format!(
-        "**Pointer** — {}. {}\n\n```\n{}\n```\n\n**Inline** — {}. \n\n```\n{}\n```\n\n",
-        at(body, &["connect", "pointer_when"]),
-        "Copy this sentence to any agent that can fetch a URL",
-        at(body, &["connect", "pointer_sentence"]),
-        at(body, &["connect", "inline_when"]),
-        at(body, &["connect", "inline_block"]),
-    ));
+    // 11. per-client registration lines. Not addressed to the reader — it is
+    // already attached — but to the human adding a second client, for whom this
+    // document doubles as the install page.
     if let Some(snippets) = body.pointer("/connect/snippets").and_then(|v| v.as_array()) {
-        for snippet in snippets {
-            out.push_str(&format!(
-                "**{}**\n\n```\n{}\n```\n\n",
-                snippet.get("product").and_then(|v| v.as_str()).unwrap_or_default(),
-                snippet.get("text").and_then(|v| v.as_str()).unwrap_or_default(),
-            ));
-            if let Some(note) = snippet.get("note").and_then(|v| v.as_str()) {
-                out.push_str(&format!("{}\n\n", note));
+        if !snippets.is_empty() {
+            out.push_str("## Registering FmS in another client\n\n");
+            out.push_str(
+                "You are attached already, so none of this is needed to use FmS. It is here for a \
+                 *human* adding a second client: each product spells the same registration \
+                 differently, and one of them needs a further step no config file can express. The \
+                 lines are copy-only — FmS does not probe for installed products and never edits \
+                 another product's config file, because merging someone else's schema risks \
+                 corrupting it.\n\n",
+            );
+            for snippet in snippets {
+                out.push_str(&format!(
+                    "**{}**\n\n```\n{}\n```\n\n",
+                    snippet.get("product").and_then(|v| v.as_str()).unwrap_or_default(),
+                    snippet.get("text").and_then(|v| v.as_str()).unwrap_or_default(),
+                ));
+                if let Some(note) = snippet.get("note").and_then(|v| v.as_str()) {
+                    out.push_str(&format!("{}\n\n", note));
+                }
             }
         }
     }
-    out.push_str(&format!("{}\n", at(body, &["connect", "never"])));
 
     out
 }
 
 // ---------------------------------------------------------------------------
-// `initialize` instructions (ideas.md §5.0 items 3–7, condensed)
+// `initialize` instructions (integration.md §5.0 items 3–7, condensed)
 // ---------------------------------------------------------------------------
 
 /// The prose every conforming MCP client receives in `InitializeResult.instructions`
@@ -1044,7 +1045,7 @@ mod tests {
             "house_rules": ["rule one"],
             "errors": { "shape": "shape", "contract": "contract", "therefore": "therefore" },
             "connect": { "pointer_sentence": "point", "pointer_when": "pw",
-                "inline_block": "inline", "inline_when": "iw", "snippets": [], "never": "never" },
+                "snippets": [{ "product": "Codex", "text": "codex mcp add" }] },
         });
         let md = render_markdown_from(&body);
         for needle in [
@@ -1058,8 +1059,8 @@ mod tests {
             "rule one",
             "schemas elsewhere",
             "_[read]_",
-            "point",
-            "inline",
+            "Codex",
+            "codex mcp add",
         ] {
             assert!(md.contains(needle), "markdown is missing {:?}", needle);
         }

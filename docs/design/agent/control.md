@@ -1,8 +1,8 @@
 # Agent Control Plane — controlling *all* aspects of the app
 
-Sibling to [ideas.md](./ideas.md): that file covers how an agent **finds and attaches** to FmS; this one covers what it can **do** once attached, and what is missing for a third-party agent (Codex, Claude Code, goose, WorkBuddy, …) to control the whole app rather than answer one quiz.
+Sibling to [integration.md](./integration.md): that file covers how an agent **finds and attaches** to FmS; this one covers what it can **do** once attached, and what is missing for a third-party agent (Codex, Claude Code, goose, WorkBuddy, …) to control the whole app rather than answer one quiz.
 
-Status legend, as in `ideas.md`: ✅ built · ⚠️ partial · 💡 proposed.
+Status legend, as in `integration.md`: ✅ built · ⚠️ partial · 💡 proposed.
 
 **The requirement being designed against:** an agent should be able to (1) open a page and click a button, (2) use various models, (3) configure and run workflows, (4) generate a TODO list for the user, jump them to the page, and let *them* do it, and (5) everything else a human can do in the UI — which is the standing rule in [../../agent_friendly_design.md](../../agent_friendly_design.md) §1: *"If a human can do it in the UI, an agent must be able to do it through MCP."*
 
@@ -92,7 +92,7 @@ Two tools: `ui_list_actions` (the registry, with schemas) and `ui_invoke_action 
 
 **A favourable consequence of the existing architecture:** pages are display-toggled, not unmounted (`display: none/flex`), so a page registers its actions once at mount and they **survive navigation**. The registry is therefore "everything the app can do right now", not "what the visible page can do" — which is what makes `ui_list_actions` useful as a capability manifest.
 
-**Discovery must not be duplicated:** the registry feeds `ui_list_actions`, the action index in `/agent.md`, and `app_bootstrap` — one source, three renderings (`ideas.md` §5.0). A hand-written list of action ids in a doc would drift on the first rename.
+**Discovery must not be duplicated:** the registry feeds `ui_list_actions`, the action index in `/agent.md`, and `app_bootstrap` — one source, three renderings (`integration.md` §5.0). A hand-written list of action ids in a doc would drift on the first rename.
 
 ---
 
@@ -144,7 +144,7 @@ This is the caveat that had to land *with* full app control, not after it. It di
 - Two modes: `permissive` (the default — classify and journal, deny nothing) and `enforce`, which refuses the destructive and human-handoff tiers and additionally refuses a `settings_set` that would loosen `mcp_policy`.
 - The undo loop is closed: `app_trash_list` + `app_restore` over the app trash, and the trash-backed deletes return `trashed_to` — which is what makes the permissive default defensible.
 - Every call is journalled in `mcp_audit`; `app_audit_get` reads it back.
-- ⚠️ Still global, not per-agent: the mode is one setting. The per-agent tier idea was going to ride on the hosted-mode host record; with that removed (`ideas.md`), one global mode is the whole of it.
+- ⚠️ Still global, not per-agent: the mode is one setting. The per-agent tier idea was going to ride on the hosted-mode host record; with that removed (`integration.md`), one global mode is the whole of it.
 
 ---
 
@@ -165,9 +165,9 @@ This is the caveat that had to land *with* full app control, not after it. It di
 4. ✅ **TODO domain** + the `human` workflow step (§4).
 5. ✅ `llm_chat` provider override + `llm_set_provider`; `workflow_list_actions` (§2.2, §2.3).
 6. ✅ `capture_screenshot` without minimizing; `app_events(after=)`; `app_trash_list` / `app_restore`. (`app_prefill_prompt` shipped here too and was later removed with the ACP client.)
-7. Deferred: MCP notifications, a per-page action authoring UI — and the attachment-side work that remains is sequenced in [ideas.md](./ideas.md) §8 (the stdio↔HTTP bridge). Hosted mode and its per-agent tiers are **dropped**.
+7. Deferred: MCP notifications, a per-page action authoring UI — and the attachment-side work that remains is sequenced in [integration.md](./integration.md) §8 (the stdio↔HTTP bridge). Hosted mode and its per-agent tiers are **dropped**.
 
-Track 1 is complete and reported per-tool in `/agent.md`; track 2's remaining work is the attachment side, sequenced in [ideas.md](./ideas.md) §8.
+Track 1 is complete and reported per-tool in `/agent.md`; track 2's remaining work is the attachment side, sequenced in [integration.md](./integration.md) §8.
 
 ---
 

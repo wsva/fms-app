@@ -11,11 +11,12 @@ import { btnGhost, codeBox, hint } from "./styles";
  *  manual an agent fetches. Nothing here writes another product's config file —
  *  FmS hands the line over and the user pastes it.
  *
- *  One payload, not three. The pointer sentence is the whole instruction: it
- *  leads to `/agent.md`, which is where the longer forms belong (the inline
- *  block for an agent that can attach an MCP server but cannot fetch a URL, and
- *  the per-product config lines). Carrying them here as well made the page two
- *  scrolls of near-identical copy for a reader who only ever needs the first. */
+ *  One payload, not three. The pointer sentence is the whole instruction: this
+ *  page hands over the address, `/agent.md` teaches the rest, and the only thing
+ *  it keeps back is the per-product registration lines — for a human adding a
+ *  second client, not for the agent this page is meant to start. Carrying them
+ *  here as well made the page two scrolls of near-identical copy for a reader who
+ *  only ever needs the first. */
 export default function ConnectPanel() {
   const { manual, manualLoading, surface, copied } = useAgentControl();
 
