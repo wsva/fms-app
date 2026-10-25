@@ -17,6 +17,7 @@ import DevicesHubPage from "@/components/devices/DevicesHubPage";
 import ReadBookPage from "@/components/read_book/ReadBookPage";
 import ReadAloudPage from "@/components/read_aloud/ReadAloudPage";
 import CardsPage from "@/components/cards/CardsPage";
+import TasksPage from "@/components/tools/TasksPage";
 import CardContextMenu from "@/components/cards/CardContextMenu";
 import TtsPage from "@/components/listen_speak/edge_tts/TtsPage";
 import SettingsPage from "@/components/settings/SettingsPage";
@@ -31,6 +32,8 @@ import SplitTextPage from "@/components/tools/SplitTextPage";
 import PdfReaderPage from "@/components/tools/PdfReaderPage";
 import AgentDock from "@/components/agent/AgentDock";
 import type { AgentAction } from "@/lib/agent/types";
+import { setUiContext } from "@/lib/agent/ui-context";
+import { jsonSafeDetail, runUiAction } from "@/lib/agent/ui-actions";
 
 interface Workspace {
   uuid: string;
@@ -119,6 +122,13 @@ export default function Home() {
     };
   }, []);
 
+  // The shell's slice of the agent-visible UI context: which tab is showing.
+  // The pages own the rest (Dictation reports the dataset/media/cue) and merge
+  // into the same backend cache — see `lib/agent/ui-context`.
+  useEffect(() => {
+    setUiContext({ active_tab: activeTab });
+  }, [activeTab]);
+
   // Agent app-control bridge: the goose agent drives the UI through the `app_*`
   // MCP tools, which emit `agent-action`. Perform the shell-level action here
   // (navigation + toast) and re-emit page-specific intents for the target page.
@@ -137,17 +147,64 @@ export default function Home() {
           setActiveTab("cards");
           void emit("agent-open-review", { dataset_uuid: action.dataset_uuid ?? null });
           break;
-        case "start-dictation":
+        case "start-dictation": {
           setActiveTab("dictation");
-          void emit("agent-start-dictation", {
-            dataset_uuid: action.dataset_uuid ?? null,
-            media_uuid: action.media_uuid ?? null,
-          });
+          // Drive the page through the action registry instead of re-emitting an
+          // event: `agent-start-dictation` had no listener, so the dataset and
+          // media an agent named were silently dropped on the floor.
+          const datasetUuid = action.dataset_uuid ?? null;
+          const mediaUuid = action.media_uuid ?? null;
+          void (async () => {
+            try {
+              if (datasetUuid) {
+                await runUiAction("dictation.open-dataset", { dataset_uuid: datasetUuid });
+              }
+              if (mediaUuid) {
+                await runUiAction("dictation.open-media", {
+                  dataset_uuid: datasetUuid,
+                  media_uuid: mediaUuid,
+                });
+              }
+            } catch (e) {
+              // Nothing to report back to: `app_start_dictation` is
+              // fire-and-forget by design. The agent can confirm the effect
+              // with app_get_ui_state, which is what its description says.
+              console.error("agent start-dictation failed:", e);
+            }
+          })();
           break;
+        }
         case "notify":
           setToast(action.message);
           window.setTimeout(() => setToast(null), 4000);
           break;
+        case "invoke-action": {
+          // The response half of `ui_invoke_action`. The tool is parked on
+          // `correlation_id` waiting for this, so every path — success, thrown
+          // error, IPC failure — has to report something or the agent waits out
+          // the full timeout for no reason.
+          const correlationId = action.correlation_id;
+          void (async () => {
+            let ok = false;
+            let detail: unknown = null;
+            try {
+              detail = (await runUiAction(action.id, action.params ?? {})) ?? null;
+              ok = true;
+            } catch (e) {
+              detail = e instanceof Error ? e.message : String(e);
+            }
+            try {
+              await invoke("agent_report_action_result", {
+                correlationId,
+                ok,
+                detail: jsonSafeDetail(detail),
+              });
+            } catch (e) {
+              console.error("agent_report_action_result failed:", e);
+            }
+          })();
+          break;
+        }
       }
     });
     return () => {
@@ -247,6 +304,9 @@ export default function Home() {
         <div style={{ display: activeTab === "cards" ? "flex" : "none" }} className="flex-1 min-h-0">
           <CardsPage />
         </div>
+        <div style={{ display: activeTab === "tasks" ? "flex" : "none" }} className="flex-1 min-h-0">
+          <TasksPage />
+        </div>
         <div style={{ display: activeTab === "edge-tts" ? "flex" : "none" }} className="flex-1 min-h-0">
           <TtsPage />
         </div>
@@ -295,7 +355,7 @@ export default function Home() {
           the prerendered first paint, so without it Android would mount the
           dock for one commit and its effects would call the `agent_*` commands
           that only exist in the desktop binary. */}
-      {booted && !mobile && <AgentDock activeTab={activeTab} />}
+      {booted && !mobile && <AgentDock />}
 
       {/* Agent `app_notify` toast */}
       {toast && (

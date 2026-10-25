@@ -70,8 +70,6 @@ struct AcpInner {
     /// Pending agent→client permission requests, keyed by their JSON-RPC id.
     permission_pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     session_id: Mutex<Option<String>>,
-    /// Last UI-state snapshot reported by the frontend, read by `app_get_ui_state`.
-    ui_state: Mutex<Value>,
 }
 
 #[derive(Clone)]
@@ -95,7 +93,6 @@ impl AcpClientState {
                 pending: Mutex::new(HashMap::new()),
                 permission_pending: Mutex::new(HashMap::new()),
                 session_id: Mutex::new(None),
-                ui_state: Mutex::new(json!({})),
             }),
         }
     }
@@ -106,11 +103,6 @@ impl AcpClientState {
 
     pub fn session_id(&self) -> Option<String> {
         self.inner.session_id.lock().unwrap().clone()
-    }
-
-    /// Cached UI-state snapshot for the `app_get_ui_state` MCP tool.
-    pub fn ui_state(&self) -> Value {
-        self.inner.ui_state.lock().unwrap().clone()
     }
 
     fn status_json(&self) -> Value {
@@ -186,11 +178,15 @@ pub async fn agent_connect(
 
     let (url, secret) = {
         let s = settings.settings.lock().unwrap();
-        (s.goose_acp_url.clone(), s.goose_acp_secret.clone())
+        // Settings → Connect is read-only now, so an empty stored address just
+        // means "never set": probe the documented default rather than failing.
+        let url = if s.goose_acp_url.trim().is_empty() {
+            crate::settings::default_goose_acp_url()
+        } else {
+            s.goose_acp_url.clone()
+        };
+        (url, s.goose_acp_secret.clone())
     };
-    if url.trim().is_empty() {
-        return Err("goose_acp_url is not configured (set it in Settings → Agent)".to_string());
-    }
 
     // Build the WS handshake request so we can attach the X-Secret-Key header.
     let mut request = url
@@ -395,26 +391,6 @@ pub async fn agent_disconnect(app: AppHandle, state: State<'_, AcpClientState>) 
 #[tauri::command]
 pub async fn agent_status(state: State<'_, AcpClientState>) -> Result<Value, String> {
     Ok(state.inner().status_json())
-}
-
-/// Cache the frontend's current UI state so `app_get_ui_state` can answer the
-/// agent synchronously without a round-trip to the webview.
-#[tauri::command]
-pub async fn agent_report_ui_state(
-    state: State<'_, AcpClientState>,
-    active_tab: Option<String>,
-    active_dataset_uuid: Option<String>,
-) -> Result<(), String> {
-    let st = state.inner().clone();
-    let mut ui = st.inner.ui_state.lock().unwrap();
-    if let Some(tab) = active_tab {
-        ui["active_tab"] = json!(tab);
-    }
-    if let Some(uuid) = active_dataset_uuid {
-        ui["active_dataset_uuid"] = json!(uuid);
-    }
-    ui["updated_at"] = json!(chrono::Utc::now().to_rfc3339());
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

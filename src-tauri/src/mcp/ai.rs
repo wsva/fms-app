@@ -23,6 +23,16 @@ struct LlmChatParam {
     messages: Vec<JsonValue>,
     #[serde(default)]
     temperature: Option<f32>,
+    /// Overrides the configured `llm_provider` for this one call.
+    #[serde(default)]
+    provider: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct LlmSetProviderParam {
+    provider: String,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -100,9 +110,9 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "deleted": param.model}).to_string())
     }
 
-    #[tool(name = "llm_chat", description = "Send a chat completion request to Ollama. Pass model name, messages array [{role:'user',content:'...'}], and optional temperature. Returns the assistant response.")]
+    #[tool(name = "llm_chat", description = "Send a chat completion request. Pass model name, messages array [{role:'user',content:'...'}], and optional temperature. Optionally pass `provider` (ollama|openai|anthropic|groq|databricks) to override the saved provider for this call only — the API key still comes from settings. Returns the assistant response.")]
     async fn llm_chat(&self, Parameters(param): Parameters<LlmChatParam>) -> Result<String, String> {
-        log::info!("[MCP] llm_chat: model={}, msgs={}", param.model, param.messages.len());
+        log::info!("[MCP] llm_chat: model={}, msgs={}, provider={:?}", param.model, param.messages.len(), param.provider);
         let settings = self.app.state::<SettingsState>();
         let messages: Vec<ai::llm::ChatMessage> = param.messages.into_iter().map(|m| {
             let m: serde_json::Value = m.into();
@@ -111,7 +121,15 @@ impl DatasetMcpServer {
                 content: m["content"].as_str().unwrap_or("").to_string(),
             }
         }).collect();
-        let result = ai::llm::llm_chat(settings, param.model, messages, param.temperature).await?;
+        let result = ai::llm::llm_chat(settings, param.model, messages, param.temperature, param.provider).await?;
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+    }
+
+    #[tool(name = "llm_set_provider", description = "Switch the LLM inference provider used by every LLM feature (chat page, OCR fix, word generation). Valid providers: ollama, openai, anthropic, groq, databricks. Optionally set the default model in the same call. Returns the effective provider/model and whether an API key is configured — the key itself is never returned and is set on the Settings page. An unknown provider is refused by name.")]
+    async fn llm_set_provider(&self, Parameters(param): Parameters<LlmSetProviderParam>) -> Result<String, String> {
+        log::info!("[MCP] llm_set_provider: provider={} model={:?}", param.provider, param.model);
+        let settings = self.app.state::<SettingsState>();
+        let result = ai::llm::llm_set_provider(self.app.clone(), settings, param.provider, param.model).await?;
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 

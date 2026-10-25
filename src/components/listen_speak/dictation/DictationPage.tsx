@@ -28,6 +28,8 @@ import {
 import { LocationsManager } from "@/components/ui/LocationsManager";
 import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import { subscribe, getVoiceError, clearVoiceError } from "@/lib/voice-input";
+import { setUiContext } from "@/lib/agent/ui-context";
+import { reqNum, reqStr, optStr, useAgentActions } from "@/lib/agent/ui-actions";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
@@ -40,6 +42,124 @@ const COLLAPSED_KEY = "dictation.collapsed";
 
 export default function DictationPage({ active = true }: { active?: boolean }) {
     const d = useDictationData();
+
+    // ── Report this page's slice of the agent-visible UI context ──
+    // The shell reports `active_tab`; this page owns the dataset, the open media
+    // item and the focused cue. Pages stay mounted and are toggled with
+    // `display`, so an inactive page must *clear* its slice instead of leaving a
+    // stale selection for `app_get_ui_state` to report as "what the user is on".
+    const focusedCueIndex = d.stateFocusedCueUUID
+        ? d.stateCues.findIndex((c) => c.uuid === d.stateFocusedCueUUID)
+        : -1;
+    useEffect(() => {
+        setUiContext(
+            active
+                ? {
+                    active_dataset_uuid: d.selectedDatasetUuid || null,
+                    active_media_uuid: d.stateMediaUUID || null,
+                    cue_index: focusedCueIndex >= 0 ? focusedCueIndex : null,
+                }
+                : { active_dataset_uuid: null, active_media_uuid: null, cue_index: null },
+        );
+    }, [active, d.selectedDatasetUuid, d.stateMediaUUID, focusedCueIndex]);
+
+    // ── Agent-drivable actions ──
+    // Registered for as long as this page is mounted; `ui_list_actions` reports
+    // them and `ui_invoke_action` runs them. They only ever set this page's own
+    // selection state, so an agent cannot reach anywhere a click could not. The
+    // errors name the loaded set, because that is the only list this page can
+    // honestly vouch for — the media and cue lists belong to whichever dataset
+    // is open.
+    useAgentActions("dictation", [
+        {
+            id: "dictation.open-dataset",
+            label: "Open a dictation dataset so its media list shows.",
+            kind: "read",
+            params_schema: {
+                dataset_uuid: {
+                    type: "string",
+                    description: "The dataset uuid, from dataset_list or app_get_ui_state.",
+                    required: true,
+                },
+            },
+            run: (params) => {
+                const uuid = reqStr("dictation.open-dataset", params, "dataset_uuid");
+                const found = d.datasets.find((x) => x.info.uuid === uuid);
+                if (!found) {
+                    throw new Error(
+                        `no dictation dataset with uuid '${uuid}' is loaded on this page. Loaded: ${
+                            d.datasets.map((x) => `${x.info.name} (${x.info.uuid})`).join(", ") ||
+                            "(none yet — the list may still be loading; retry once)"
+                        }. dataset_list has the full set across every kind.`
+                    );
+                }
+                d.setSelectedDatasetUuid(uuid);
+                return { opened: uuid, name: found.info.name, read_only: !!found.is_read_only };
+            },
+        },
+        {
+            id: "dictation.open-media",
+            label: "Open one media item (its cues, player and waveform) inside the open dataset.",
+            kind: "read",
+            params_schema: {
+                media_uuid: {
+                    type: "string",
+                    description: "The media item's uuid.",
+                    required: true,
+                },
+                dataset_uuid: {
+                    type: "string",
+                    description: "Open this dataset first, when the item is not in the one already open.",
+                },
+            },
+            run: (params) => {
+                const id = "dictation.open-media";
+                const mediaUuid = reqStr(id, params, "media_uuid");
+                const datasetUuid = optStr(id, params, "dataset_uuid");
+                if (datasetUuid) d.setSelectedDatasetUuid(datasetUuid);
+                // Only check membership against a list this page already has:
+                // when the dataset was just switched, the media list reloads
+                // asynchronously and would read as empty here.
+                const sameDataset = !datasetUuid || datasetUuid === d.selectedDatasetUuid;
+                if (sameDataset && d.mediaList.length > 0) {
+                    const found = d.mediaList.find((m) => m.uuid === mediaUuid);
+                    if (!found) {
+                        throw new Error(
+                            `no media item '${mediaUuid}' in the open dataset. It has: ${
+                                d.mediaList.map((m) => `${m.title || "(untitled)"} (${m.uuid})`).join(", ")
+                            }`
+                        );
+                    }
+                }
+                d.setStateMediaUUID(mediaUuid);
+                return { opened: mediaUuid, dataset_uuid: datasetUuid ?? d.selectedDatasetUuid };
+            },
+        },
+        {
+            id: "dictation.focus-cue",
+            label: "Move the focus to one cue of the open media item and scroll it into view.",
+            kind: "read",
+            params_schema: {
+                index: {
+                    type: "number",
+                    description: "Zero-based cue index, matching cue_index in app_get_ui_state.",
+                    required: true,
+                },
+            },
+            run: (params) => {
+                const index = reqNum("dictation.focus-cue", params, "index");
+                const cue = d.stateCues[index];
+                if (!cue) {
+                    throw new Error(
+                        `cue index ${index} is out of range: the open media item has ${d.stateCues.length} cue(s), indexed 0..${Math.max(d.stateCues.length - 1, 0)}.`
+                    );
+                }
+                d.setStateFocusedCueUUID(cue.uuid);
+                requestFocusCue(cue.uuid);
+                return { focused: index, cue_uuid: cue.uuid, total: d.stateCues.length };
+            },
+        },
+    ]);
 
     // Pages are kept mounted and toggled via `display`, so the initial dataset
     // load happens once at app startup. Re-fetch whenever this tab becomes the

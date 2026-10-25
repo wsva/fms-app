@@ -12,17 +12,26 @@ use std::time::Instant;
 #[cfg(windows)]
 const CANCELLED: &str = "__ocr_screenshot_cancelled__";
 
-/// Minimize the app window, capture the screen (region on Windows via the
-/// native snipping overlay, full-screen elsewhere), restore the window, and
-/// return the result as a `data:image/png;base64,...` URL.
+/// Capture the screen as a `data:image/png;base64,...` URL.
+///
+/// `minimize` decides *what* is captured, so it is a behavioural switch, not a
+/// cosmetic one:
+///
+/// - `false` (default) leaves the window where it is and grabs the primary
+///   monitor as rendered. That is the unattended path — an agent can pair it
+///   with `ocr_recognize` to read the screen, which no other tool exposes.
+/// - `true` hides the app window first, so what is captured is the desktop
+///   underneath it. On Windows that opens the native snipping overlay, which
+///   needs a human to drag out a region — the OCR page passes `true` for
+///   exactly that.
 #[tauri::command]
-pub async fn capture_screenshot(app: AppHandle) -> Result<String, String> {
+pub async fn capture_screenshot(app: AppHandle, minimize: Option<bool>) -> Result<String, String> {
     let window = app
         .get_webview_window("main")
         .or_else(|| app.webview_windows().into_values().next())
         .ok_or_else(|| "No application window found".to_string())?;
 
-    capture_impl(window).await
+    capture_impl(window, minimize.unwrap_or(false)).await
 }
 
 fn encode_png_base64(png: Vec<u8>) -> String {
@@ -31,11 +40,52 @@ fn encode_png_base64(png: Vec<u8>) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Windows: native snipping tool (`ms-screenclip:`) + clipboard image
+// Shared: whole primary monitor as PNG bytes
+// ---------------------------------------------------------------------------
+
+/// Grab the primary monitor (falling back to the first one) as PNG bytes. This
+/// is the unattended capture on every platform, and the minimising capture off
+/// Windows. Blocking — callers run it on `spawn_blocking`.
+fn grab_screen_png() -> Result<Vec<u8>, String> {
+    use xcap::Monitor;
+
+    let monitors = Monitor::all().map_err(|e| format!("Failed to enumerate monitors: {}", e))?;
+    let monitor = monitors
+        .iter()
+        .find(|m| m.is_primary().unwrap_or(false))
+        .or_else(|| monitors.first())
+        .ok_or_else(|| "No monitor found".to_string())?;
+
+    let image = monitor
+        .capture_image()
+        .map_err(|e| format!("Screen capture failed: {}", e))?;
+
+    let mut png: Vec<u8> = Vec::new();
+    {
+        let mut cursor = std::io::Cursor::new(&mut png);
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .map_err(|e| format!("PNG encode failed: {}", e))?;
+    }
+    Ok(png)
+}
+
+// ---------------------------------------------------------------------------
+// Windows: unattended grab, or the snipping-tool region pick + clipboard image
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-async fn capture_impl(window: WebviewWindow) -> Result<String, String> {
+async fn capture_impl(window: WebviewWindow, minimize: bool) -> Result<String, String> {
+    if !minimize {
+        // Unattended: no window hide and no snipping overlay. The overlay needs a
+        // human to drag out a region, so opening it here would park an agent's
+        // call for a minute and then fail.
+        let png = tokio::task::spawn_blocking(grab_screen_png)
+            .await
+            .map_err(|e| format!("Capture task failed: {}", e))??;
+        return Ok(encode_png_base64(png));
+    }
+
     // Minimize our window so the snip overlay captures the desktop, not the app.
     window.minimize().map_err(|e| e.to_string())?;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -103,38 +153,21 @@ async fn capture_impl(window: WebviewWindow) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 #[cfg(not(windows))]
-async fn capture_impl(window: WebviewWindow) -> Result<String, String> {
-    window.minimize().map_err(|e| e.to_string())?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+async fn capture_impl(window: WebviewWindow, minimize: bool) -> Result<String, String> {
+    if minimize {
+        window.minimize().map_err(|e| e.to_string())?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
 
-    let result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        use xcap::Monitor;
+    let result = tokio::task::spawn_blocking(grab_screen_png)
+        .await
+        .map_err(|e| format!("Capture task failed: {}", e))?;
 
-        let monitors = Monitor::all().map_err(|e| format!("Failed to enumerate monitors: {}", e))?;
-        let monitor = monitors
-            .iter()
-            .find(|m| m.is_primary().unwrap_or(false))
-            .or_else(|| monitors.first())
-            .ok_or_else(|| "No monitor found".to_string())?;
-
-        let image = monitor
-            .capture_image()
-            .map_err(|e| format!("Screen capture failed: {}", e))?;
-
-        let mut png: Vec<u8> = Vec::new();
-        {
-            let mut cursor = std::io::Cursor::new(&mut png);
-            image::DynamicImage::ImageRgba8(image)
-                .write_to(&mut cursor, image::ImageFormat::Png)
-                .map_err(|e| format!("PNG encode failed: {}", e))?;
-        }
-        Ok(png)
-    })
-    .await
-    .map_err(|e| format!("Capture task failed: {}", e))?;
-
-    let _ = window.unminimize();
-    let _ = window.set_focus();
+    // Restore only what we hid: an unattended capture must not steal focus back.
+    if minimize {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 
     result.map(encode_png_base64)
 }

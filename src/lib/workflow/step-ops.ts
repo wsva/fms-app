@@ -417,6 +417,55 @@ export const KNOWN_COMMANDS: string[] = Array.from(
   ),
 );
 
+/** One step op as an agent-readable row: what the step is called, which command
+ *  it dispatches, and which form fields a definition may carry. This is the
+ *  shape {@link stepOpDocs} publishes for `workflow_list_actions`, so Rust can
+ *  describe authored YAML without keeping a second copy of this registry. */
+export interface StepOpDoc {
+  id: string;
+  run_label: string;
+  /** The Tauri command `run` resolves to. Absent for an agent-only node. */
+  run_command?: string;
+  /** The command `clear` resolves to, when the step has a destructive counterpart. */
+  clear_command?: string;
+  /** Whether the page re-probes dataset facts after a run. */
+  reload_after: boolean;
+  fields: {
+    name: string;
+    label: string;
+    type: FieldType;
+    placeholder?: string;
+    /** The closed value set, when the field is a `select`/`radios`. */
+    options?: string[];
+    inline?: boolean;
+  }[];
+}
+
+/** Every step op as an agent-readable row, sorted by id so the published
+ *  snapshot is stable across reloads. Commands are resolved through
+ *  {@link ENUM_CTX}, i.e. statically — nothing here is dispatched. */
+export function stepOpDocs(): StepOpDoc[] {
+  const docs = Object.entries(STEP_OPS).map(([id, op]): StepOpDoc => {
+    const doc: StepOpDoc = {
+      id,
+      run_label: op.runLabel ?? "Run",
+      reload_after: !!op.reloadAfter,
+      fields: op.formFields.map((f) => ({
+        name: f.name,
+        label: f.label,
+        type: f.type,
+        placeholder: f.placeholder,
+        options: f.options?.length ? f.options.map((o) => o.value) : undefined,
+        inline: f.inline,
+      })),
+    };
+    if (op.run) doc.run_command = op.run(ENUM_CTX).command;
+    if (op.clear) doc.clear_command = op.clear(ENUM_CTX).command;
+    return doc;
+  });
+  return docs.sort((a, b) => a.id.localeCompare(b.id));
+}
+
 /** The set of step ids known to be runnable in-app. */
 export function isRunnableStepId(id: string): boolean {
   return !!STEP_OPS[id]?.run;

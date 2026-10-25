@@ -7,6 +7,7 @@ import { Volume2, Loader2, Play } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import { type TtsVoice, type TtsSynthesizeResult, type TtsPreviewResult } from "@/lib/edge_tts/types";
 import { PageHeader } from "@/components/ui/toolbar";
+import { reqStr, optStr, useAgentActions } from "@/lib/agent/ui-actions";
 
 // Popular European languages with their locale prefixes
 const EUROPEAN_LANGUAGES: { code: string; label: string; prefix: string }[] = [
@@ -70,18 +71,44 @@ export default function TtsPage() {
 
   // ---- Preview audio (fetch and play without saving) ----
 
-  async function handlePreview() {
-    if (!text.trim() || !selectedVoice || previewLoading) return;
+  // Overrides let the agent action speak text/voice it names instead of whatever
+  // the form currently holds; the button passes none and reads the inputs as before.
+  // Returns an outcome (rather than only setting `error`) so a caller can report
+  // success or the failure reason back instead of guessing.
+  async function handlePreview(overrides?: {
+    text?: string;
+    voice?: string;
+    rate?: string;
+    volume?: string;
+    pitch?: string;
+  }): Promise<{ ok: boolean; voice: string; chars: number; error?: string }> {
+    const sayText = (overrides?.text ?? text).trim();
+    const sayVoice = overrides?.voice ?? selectedVoice;
+    const sayRate = overrides?.rate ?? rate;
+    const sayVolume = overrides?.volume ?? volume;
+    const sayPitch = overrides?.pitch ?? pitch;
+    if (!sayText || !sayVoice || previewLoading) {
+      return {
+        ok: false,
+        voice: sayVoice,
+        chars: sayText.length,
+        error: !sayText
+          ? "empty text"
+          : !sayVoice
+            ? "no voice selected"
+            : "a preview is already loading",
+      };
+    }
     setError("");
     setPreviewLoading(true);
     try {
       const result = await invoke<TtsPreviewResult>("edge_tts_preview", {
         args: {
-          text: text.trim(),
-          voice: selectedVoice,
-          rate,
-          volume,
-          pitch,
+          text: sayText,
+          voice: sayVoice,
+          rate: sayRate,
+          volume: sayVolume,
+          pitch: sayPitch,
           output_path: "", // not used for preview
         },
       });
@@ -99,8 +126,11 @@ export default function TtsPage() {
       // Play the audio
       const audio = new Audio(url);
       audio.play();
+      return { ok: true, voice: sayVoice, chars: sayText.length };
     } catch (e) {
-      setError(`Preview failed: ${e instanceof Error ? e.message : String(e)}`);
+      const detail = `Preview failed: ${e instanceof Error ? e.message : String(e)}`;
+      setError(detail);
+      return { ok: false, voice: sayVoice, chars: sayText.length, error: detail };
     } finally {
       setPreviewLoading(false);
     }
@@ -147,6 +177,83 @@ export default function TtsPage() {
   }
 
   // ---- Render ----
+
+  // ── Agent-drivable actions ──
+  // Speaking through the app is the one thing here an agent cannot do with a data
+  // tool: the sound comes out of the webview. Saving to a file stays in the UI
+  // (handleGenerate opens a save dialog), and there is no MCP tts domain, so the
+  // agent path is play-aloud + discover voices.
+  useAgentActions("edge-tts", [
+    {
+      id: "edge-tts.list-voices",
+      label: "List the Edge TTS voices loaded on this page, optionally filtered to one language.",
+      kind: "read",
+      params_schema: {
+        language: {
+          type: "string",
+          description:
+            "Optional language code (en, de, fr, es, it) or locale prefix (e.g. 'en-'). Omit for every voice.",
+        },
+      },
+      run: (params) => {
+        const lang = optStr("edge-tts.list-voices", params, "language");
+        let list = voices;
+        if (lang) {
+          const meta = EUROPEAN_LANGUAGES.find(
+            (l) => l.code === lang || l.label.toLowerCase() === lang.toLowerCase()
+          );
+          const prefix = meta ? meta.prefix : lang.endsWith("-") ? lang : `${lang}-`;
+          list = voices.filter((v) => v.locale.startsWith(prefix));
+        }
+        const shown = 40;
+        return {
+          count: list.length,
+          truncated: list.length > shown,
+          voices: list.slice(0, shown).map((v) => ({
+            short_name: v.short_name,
+            locale: v.locale,
+            gender: v.gender,
+          })),
+        };
+      },
+    },
+    {
+      id: "edge-tts.speak",
+      label:
+        "Synthesize text with an Edge TTS voice and play it aloud through the app. No file is written.",
+      kind: "read",
+      params_schema: {
+        text: { type: "string", description: "The text to speak.", required: true },
+        voice: {
+          type: "string",
+          description:
+            "A voice short_name from edge-tts.list-voices. Omit to use the voice currently selected on the page.",
+        },
+        rate: { type: "string", description: "Speed adjust, e.g. '+0%', '-25%', '+50%'. Defaults to the page's setting." },
+        volume: { type: "string", description: "Volume adjust, e.g. '+0%', '+50%'. Defaults to the page's setting." },
+        pitch: { type: "string", description: "Pitch adjust, e.g. '+0Hz', '+25Hz'. Defaults to the page's setting." },
+      },
+      run: async (params) => {
+        const id = "edge-tts.speak";
+        const sayText = reqStr(id, params, "text");
+        const voice = optStr(id, params, "voice");
+        if (voice && !voices.some((v) => v.short_name === voice)) {
+          throw new Error(
+            `no voice '${voice}' is loaded. Use edge-tts.list-voices for the valid short_names (or omit voice to use the page's current selection).`
+          );
+        }
+        const res = await handlePreview({
+          text: sayText,
+          voice,
+          rate: optStr(id, params, "rate"),
+          volume: optStr(id, params, "volume"),
+          pitch: optStr(id, params, "pitch"),
+        });
+        if (!res.ok) throw new Error(res.error ?? "preview failed");
+        return res;
+      },
+    },
+  ]);
 
   return (
     <main className="flex-1 flex flex-col h-full">
@@ -261,7 +368,7 @@ export default function TtsPage() {
           <div className="flex items-center gap-3">
             <button
               className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-bg-muted border border-border-default text-sm font-medium hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              onClick={handlePreview}
+              onClick={() => handlePreview()}
               disabled={!text.trim() || !selectedVoice || previewLoading}
             >
               {previewLoading ? (

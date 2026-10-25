@@ -230,6 +230,13 @@ pub struct Step {
     /// [`Step::DEFAULT_MAX_INTERRUPTS`] when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_interrupts: Option<u32>,
+    /// For a `human` step only: whether the run blocks here until the learner
+    /// completes the generated todo (`true`, the default) or continues past it in
+    /// parallel (`false`). Every other action ignores it. The binding layer reads
+    /// it off the `advance` result to decide whether to park or auto-complete the
+    /// step (see `workflow::advance`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<bool>,
 }
 
 impl Step {
@@ -652,6 +659,7 @@ pub(crate) fn advance(
         "action": step.action,
         "description": step.description,
         "params": step.params,
+        "wait": step.wait,
         "inputs": inputs,
         "declared_outputs": step.outputs,
         "lease_secs": step.lease_secs(),

@@ -119,6 +119,7 @@ pub(crate) async fn generate(
         model.trim().to_string(),
         messages,
         Some(temperature.unwrap_or(DEFAULT_TEMPERATURE)),
+        None,
     )
     .await?;
     let candidate = clean_candidate(&response.content);

@@ -108,4 +108,14 @@ export type AgentAction =
       dataset_uuid?: string | null;
       media_uuid?: string | null;
     }
-  | { type: "notify"; message: string };
+  | { type: "notify"; message: string }
+  /** Run one action from the registry in `lib/agent/ui-actions`, then report the
+   *  outcome back through `agent_report_action_result` so `ui_invoke_action` can
+   *  answer the agent with the page's own result. `correlation_id` ties the two
+   *  halves together; without it the tool could only say "emitted". */
+  | {
+      type: "invoke-action";
+      id: string;
+      params?: Record<string, unknown> | null;
+      correlation_id: string;
+    };

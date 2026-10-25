@@ -211,7 +211,11 @@ impl ChangeClass {
             | "read_standard_audio_delete"
             | "wiki_file_save"
             | "wiki_file_delete"
-            | "dictation" => ChangeClass::State,
+            | "dictation"
+            // A todo is per-user app data whose row mutates in place (open ->
+            // completed/dismissed), so it coalesces to the latest edit like any
+            // other state row.
+            | "todo" => ChangeClass::State,
             // counter: XP is enqueued as an amount delta (§3.6).
             "xp" => ChangeClass::Counter,
             // append-only: a card review is one stored *result* per rating (an
@@ -257,6 +261,7 @@ pub const APP_SCOPE_KINDS: &[&str] = &[
     "card_review",
     "read_attempt_save",
     "read_attempt_delete",
+    "todo",
 ];
 
 /// Whether `kind` mutates per-user app data and therefore journals under
@@ -353,6 +358,9 @@ pub fn object_id_for(kind: &str, payload: &Value, user_key: &str) -> String {
         // unique per award: an empty one would collide with every other pending
         // delta in the pull-side guard and silently suppress inbound XP rows.
         "xp" => format!("{user_key}:{}", get("reference_id")),
+        // A todo is per-user app data keyed by its uuid; fold the owner in so the
+        // shared `@app` scope can't let one user's row contest another's.
+        "todo" => format!("{user_key}:{}", get("uuid")),
         _ => get("uuid"),
     }
 }

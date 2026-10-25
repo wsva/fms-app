@@ -164,14 +164,15 @@ tokio-tungstenite = { version = "0.28", optional = true }
 # Hunspell dictionaries for the TSV hyphen decisions in `ocr/` (desktop only),
 # parsed in process instead of shelling out to hunspell/nuspell.
 spellbook = { version = "0.4", optional = true }
+# Screen capture for the unattended path (`capture_screenshot` with
+# minimize=false), on every desktop platform. Windows' interactive region pick
+# does not use it — that goes through `ms-screenclip:` (see capture.rs).
+xcap = { version = "0.9", optional = true }
 
-# Windows: native snipping via `ms-screenclip:` + clipboard image read.
+# Windows: native snipping via `ms-screenclip:` + clipboard image read, for the
+# interactive region pick.
 [target.'cfg(windows)'.dependencies]
 arboard = { version = "3", optional = true }
-
-# macOS/Linux: cross-platform full-screen capture (region crop happens in-app).
-[target.'cfg(not(windows))'.dependencies]
-xcap = { version = "0.9", optional = true }
 
 # Android: read SAF `content://` URIs picked by the file dialog through the
 # ContentResolver (the OS gives no plain filesystem path for them). Both crates

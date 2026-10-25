@@ -363,8 +363,110 @@ pub(crate) fn advance(
     agent_id: Option<String>,
 ) -> Result<Value, String> {
     let scope = run_scope(settings, dataset_uuid, run_id)?;
-    core::advance(&scope.base, run_id, step_id, agent_id)
-        .map(|value| bind_subject(value, scope.dataset_uuid.as_deref()))
+    let claimed = core::advance(&scope.base, run_id, step_id, agent_id)
+        .map(|value| bind_subject(value, scope.dataset_uuid.as_deref()))?;
+    // A `human` step is not work the agent does: it is a hand-off to the learner.
+    // Park it as a todo (which syncs to their phone) instead of handing back an
+    // action to execute. Everything else is returned exactly as the core claimed it.
+    if claimed.get("action").and_then(|a| a.as_str()) == Some("human") {
+        return human_step(settings, dataset_uuid, run_id, step_id, claimed);
+    }
+    Ok(claimed)
+}
+
+/// Turn a claimed `human` step into a learner todo and hand back the todo id.
+///
+/// `wait: true` (the default) leaves the step `running` under its lease: the run
+/// blocks here until the learner completes the todo, at which point
+/// [`crate::todo::set_status_inner`] records the step and the run resumes on its
+/// own — no agent polling. `wait: false` records the step completed immediately
+/// so dependents proceed in parallel, and leaves the todo as a practice item the
+/// learner can do whenever; completing it later is then bookkeeping only.
+fn human_step(
+    settings: &SettingsState,
+    dataset_uuid: Option<&str>,
+    run_id: &str,
+    step_id: &str,
+    claimed: Value,
+) -> Result<Value, String> {
+    let params = claimed.get("params").cloned().unwrap_or_else(|| json!({}));
+    let wait = claimed.get("wait").and_then(|w| w.as_bool()).unwrap_or(true);
+    let claim_id = claimed
+        .get("claim_id")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+    let field = |k: &str| params.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let title = {
+        let t = field("title");
+        if t.is_empty() {
+            format!("Workflow step '{step_id}' needs you")
+        } else {
+            t
+        }
+    };
+    let detail = field("detail");
+    let target = params.get("target").cloned().unwrap_or(Value::Null);
+
+    let todo_uuid = uuid::Uuid::new_v4().to_string();
+    let user_key = crate::auth::workspace_identity(settings);
+    crate::todo::upsert_inner(
+        settings,
+        &user_key,
+        &todo_uuid,
+        &title,
+        &detail,
+        &target,
+        crate::todo::PRIORITY_NORMAL,
+        None,
+        Some(run_id),
+        Some(step_id),
+        crate::todo::STATUS_OPEN,
+        None,
+        None,
+    )?;
+
+    if wait {
+        return Ok(json!({
+            "run_id": run_id,
+            "step": step_id,
+            "status": "running",
+            "action": "human",
+            "wait": true,
+            "todo_uuid": todo_uuid,
+            "hint": "This step is a hand-off to the learner, so it is parked as a todo and the run \
+                     waits here. When the learner completes it (todo_complete, or tapping it in the \
+                     Tasks tab), this step is recorded and the run resumes on its own — do not \
+                     workflow_record it yourself and do not poll for it.",
+        }));
+    }
+
+    // Non-blocking: record the step completed now so its dependents become ready,
+    // and leave the todo outstanding as parallel practice. The learner completing
+    // it later finds the step already resolved (a benign no-op).
+    let record_detail = json!({
+        "outputs": { "todo_uuid": todo_uuid },
+        "reason": "non-blocking human step: todo created, run continues",
+    });
+    let recorded = record(
+        settings,
+        dataset_uuid,
+        run_id,
+        step_id,
+        "completed",
+        Some(record_detail),
+        claim_id.as_deref(),
+    )?;
+    Ok(json!({
+        "run_id": run_id,
+        "step": step_id,
+        "status": "completed",
+        "action": "human",
+        "wait": false,
+        "todo_uuid": todo_uuid,
+        "recorded": recorded,
+        "hint": "This step needs a human but does not block: a todo was created for the learner and \
+                 the run already continued past it. Completing the todo is bookkeeping only.",
+    }))
 }
 
 pub(crate) fn record(

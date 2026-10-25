@@ -118,6 +118,24 @@ fn is_cloud_provider(provider: &str) -> bool {
     !provider.is_empty() && provider != "ollama"
 }
 
+/// The providers `llm_chat`/`llm_set_provider` accept, kept in one place so the
+/// validation error and the Settings UI agree on the set.
+pub const LLM_PROVIDERS: [&str; 5] = ["ollama", "openai", "anthropic", "groq", "databricks"];
+
+/// Clamp a provider name to the known set, or reject it by name.
+fn normalize_provider(p: &str) -> Result<String, String> {
+    let p = p.trim().to_lowercase();
+    if LLM_PROVIDERS.contains(&p.as_str()) {
+        Ok(p)
+    } else {
+        Err(format!(
+            "unknown LLM provider '{}'. Valid providers: {}",
+            p,
+            LLM_PROVIDERS.join(", ")
+        ))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -247,19 +265,28 @@ pub async fn llm_delete_model(state: State<'_, SettingsState>, model: String) ->
 /// local Ollama via a declarative provider). On other platforms it falls back to
 /// the Ollama HTTP API. The signature and response shape are unchanged, so all
 /// callers (chat page, OCR fix, word generation) keep working.
+///
+/// `provider` overrides the configured `llm_provider` for this one call (the
+/// caller already names the `model`), so an agent can try a different backend
+/// without changing the user's setting. It falls back to the saved provider when
+/// omitted. The API key and base URL always come from settings.
 #[tauri::command]
 pub async fn llm_chat(
     state: State<'_, SettingsState>,
     model: String,
     messages: Vec<ChatMessage>,
     temperature: Option<f32>,
+    provider: Option<String>,
 ) -> Result<LlmChatResponse, String> {
     let temperature = temperature.unwrap_or(0.7);
     #[cfg(feature = "desktop")]
     {
-        let (provider, api_key, base_url) = get_llm_config(&state);
+        let (mut effective_provider, api_key, base_url) = get_llm_config(&state);
+        if let Some(p) = provider.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            effective_provider = normalize_provider(p)?;
+        }
         crate::ai::goose_llm::chat_once(
-            &provider,
+            &effective_provider,
             &api_key,
             &base_url,
             &model,
@@ -271,6 +298,15 @@ pub async fn llm_chat(
     }
     #[cfg(not(feature = "desktop"))]
     {
+        // This build speaks Ollama's HTTP API only; a cloud provider override is
+        // desktop-only, so refuse it by name rather than silently using Ollama.
+        if let Some(p) = provider.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            if p != "ollama" {
+                return Err(format!(
+                    "provider '{p}' is unavailable on this platform — only 'ollama' is supported here; provider overrides run in the desktop build"
+                ));
+            }
+        }
         let base_url = get_ollama_url(&state);
         ollama_chat(&base_url, &model, messages, temperature).await
     }
@@ -372,4 +408,46 @@ async fn ollama_chat(
         prompt_tokens: chat_resp.prompt_eval_count.unwrap_or(0),
         completion_tokens: chat_resp.eval_count.unwrap_or(0),
     })
+}
+
+/// Switch the LLM inference provider (and optionally the default model) used by
+/// every LLM feature. Validated against [`LLM_PROVIDERS`] so a typo cannot point
+/// the chat page at a provider that will never answer. Returns the effective
+/// provider/model and whether an API key is configured; the key itself is never
+/// returned — it is entered on the Settings page.
+#[tauri::command]
+pub async fn llm_set_provider(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+    provider: String,
+    model: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let provider = normalize_provider(&provider)?;
+    let ws_dir = state.workspace_dir.lock().unwrap().clone();
+    let updated = {
+        let mut s = state.settings.lock().unwrap();
+        s.llm_provider = provider;
+        if let Some(m) = model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+            s.llm_model = m.to_string();
+        }
+        s.clone()
+    };
+    SettingsState::save(&updated, ws_dir.as_ref())?;
+    log::info!(
+        "[LLM] provider set to {} (model '{}')",
+        updated.llm_provider,
+        updated.llm_model
+    );
+    let _ = app.emit("settings-changed", ());
+    let needs_key = updated.llm_provider != "ollama" && updated.llm_api_key.trim().is_empty();
+    Ok(serde_json::json!({
+        "provider": updated.llm_provider,
+        "model": updated.llm_model,
+        "has_api_key": !updated.llm_api_key.trim().is_empty(),
+        "note": if needs_key {
+            "no API key is configured for this cloud provider — llm_chat will fail until one is set on the Settings page"
+        } else {
+            "provider updated"
+        },
+    }))
 }

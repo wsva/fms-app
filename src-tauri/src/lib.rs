@@ -49,6 +49,9 @@ mod workspace;
 // reads across card datasets, XP lives in the app-level SQLite.
 mod simple_words;
 mod xp;
+/// Agent TODO domain — user-facing tasks an agent or the workflow `human` step
+/// leaves for the learner. Not desktop-gated: todos are cleared on mobile too.
+mod todo;
 
 // Voice synthesis (all platforms).
 mod edge_tts;
@@ -56,8 +59,19 @@ mod edge_tts;
 // Desktop-only utilities.
 #[cfg(feature = "desktop")]
 mod capture;
+/// The app trash, read back: `app_trash_list` / `app_restore`. The *writer*
+/// (`datasets::media::move_to_trash`) is cross-platform, but the only readers
+/// are the MCP tools, so the module is not.
+#[cfg(feature = "desktop")]
+mod trash;
 #[cfg(feature = "desktop")]
 mod ocr;
+/// What the user is currently looking at, cached for agents: the webview
+/// reports a context patch and the UI action registry, `app_get_ui_state` and
+/// `ui_*` read them back. Desktop-only because both readers (the MCP server and
+/// the agent dock) are.
+#[cfg(feature = "desktop")]
+mod ui_state;
 /// Vendored SaT sentence segmentation ("Split Text"). Gated on the `textsplit`
 /// feature (a subset of `desktop`), which also turns on `ort`/`tokenizers`.
 #[cfg(feature = "textsplit")]
@@ -281,6 +295,7 @@ pub fn run() {
             ai::llm::llm_delete_model,
             ai::llm::llm_chat,
             ai::llm::llm_chat_stream,
+            ai::llm::llm_set_provider,
             edge_tts::edge_tts_list_voices,
             edge_tts::edge_tts_synthesize,
             edge_tts::edge_tts_preview,
@@ -348,6 +363,10 @@ pub fn run() {
             xp::xp_award_dictation_media,
             xp::xp_award_reading_sentence,
             xp::xp_award_reading_chapter,
+            todo::todo_add,
+            todo::todo_list,
+            todo::todo_complete,
+            todo::todo_dismiss,
             models::index::model_index_get,
             models::index::model_index_refresh,
             capture::capture_screenshot,
@@ -485,7 +504,18 @@ pub fn run() {
             ai::agent_acp::agent_respond_permission,
             ai::agent_acp::agent_disconnect,
             ai::agent_acp::agent_status,
-            ai::agent_acp::agent_report_ui_state,
+            ui_state::agent_report_ui_state,
+            ui_state::agent_report_ui_actions,
+            ui_state::agent_get_ui_actions,
+            ui_state::agent_report_action_result,
+            // The Workflow page publishes the step-op vocabulary (step ids, form
+            // fields, commands) so `workflow_list_actions` and the agent manual
+            // describe authored YAML without Rust keeping a second copy.
+            ui_state::agent_report_workflow_actions,
+            // The generated agent manual, for the Settings → Connect card. The
+            // card, `/agent.md`, `/agent.json` and the `app_bootstrap` tool all
+            // render one body (see `mcp/manual.rs`), so none of them can drift.
+            mcp::agent_manual_get,
             // Workflow engine command twins (desktop only) — the Workflow page
             // drives the same crate::workflow::* core fns the workflow_* MCP
             // tools call, so in-app Run and a goose agent stay in sync.
@@ -512,6 +542,7 @@ pub fn run() {
         .manage(textsplit::TextSplitState::new())
         .manage(simple_words::SimpleWordsState::new())
         .manage(ai::agent_acp::AcpClientState::new())
+        .manage(ui_state::UiStateHandle::default())
         .setup(|app| {
             // Anchor all persistent storage on the platform-correct base dir
             // (app-private on Android/iOS) before anything reads a path or
@@ -723,6 +754,7 @@ macro_rules! mobile_invoke_handler {
             ai::llm::llm_delete_model,
             ai::llm::llm_chat,
             ai::llm::llm_chat_stream,
+            ai::llm::llm_set_provider,
             edge_tts::edge_tts_list_voices,
             edge_tts::edge_tts_synthesize,
             edge_tts::edge_tts_preview,
@@ -773,6 +805,10 @@ macro_rules! mobile_invoke_handler {
             xp::xp_award_dictation_media,
             xp::xp_award_reading_sentence,
             xp::xp_award_reading_chapter,
+            todo::todo_add,
+            todo::todo_list,
+            todo::todo_complete,
+            todo::todo_dismiss,
             logger::log_get_history,
             logger::log_clear,
             logger::log_frontend_message,

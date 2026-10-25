@@ -15,6 +15,7 @@ import {
   BookOpen,
   BookOpenText,
   Layers,
+  ListTodo,
   ScanText,
   FileText,
   FileType,
@@ -36,6 +37,7 @@ export type TabId =
   | "read-book"
   | "read-aloud"
   | "cards"
+  | "tasks"
   | "workflow"
   | "datasets-sync"
   | "devices-hub"
@@ -103,6 +105,7 @@ const rootTabs: TabDef[] = [
   { id: "read-book", label: "Read a Book", icon: BookOpen },
   { id: "read-aloud", label: "Read Aloud", icon: MicGlyph },
   { id: "cards", label: "Cards", icon: Layers },
+  { id: "tasks", label: "Tasks", icon: ListTodo },
   { id: "wiki", label: "Wiki", icon: BookOpenText },
   { id: "settings", label: "Settings", icon: Settings },
 ];
@@ -115,6 +118,7 @@ const MOBILE_VISIBLE_TABS: TabId[] = [
   "read-book",
   "read-aloud",
   "cards",
+  "tasks",
   "wiki",
   "chat",
   "workspaces",

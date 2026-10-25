@@ -215,7 +215,10 @@ export function useOcr() {
     if (!isTauri()) return;
     setError("");
     try {
-      const dataUrl = await invoke<string>("capture_screenshot");
+      // minimize: the user is snipping a region of whatever is under the app, so
+      // the window has to get out of the way. (The command defaults to false —
+      // that default belongs to the unattended MCP path, not to this button.)
+      const dataUrl = await invoke<string>("capture_screenshot", { minimize: true });
       setSourceImage(dataUrl);
     } catch (e) {
       const msg = errorMessage(e);

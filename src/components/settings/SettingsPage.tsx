@@ -68,6 +68,11 @@ interface GlobalSettings {
   llm_provider: string;
   llm_api_key: string;
   llm_model: string;
+  // The dock's ACP address. No longer editable here — the Connect card is
+  // read-only and `agent_connect` falls back to the built-in default when the
+  // stored value is empty — but they must stay in the payload, because
+  // `settings_set_global` replaces the whole object and dropping a key would
+  // reset it.
   goose_acp_url: string;
   goose_acp_secret: string;
   goose_acp_enabled: boolean;
@@ -81,6 +86,34 @@ interface GlobalSettings {
   model_dir: string;
   model_unload_timeout: ModelUnloadTimeout;
   onboarding_completed: boolean;
+  /** "permissive" | "enforce" — see `mcp/policy.rs`. */
+  mcp_policy: string;
+}
+
+// The generated agent manual (`agent_manual_get` → `mcp/manual.rs::render_json`).
+// Only the fields the Connect card renders are typed; the body carries much more
+// (the full tool index, house rules, workflow templates) for `/agent.json`.
+interface AgentManual {
+  endpoints: {
+    running: boolean;
+    port: number;
+    mcp: string;
+    manual_markdown: string;
+    note: string;
+  };
+  trust: {
+    zone: string;
+    policy: { mode: string; tiers: string[] };
+  };
+  tools: { count: number };
+  connect: {
+    pointer_sentence: string;
+    pointer_when: string;
+    inline_block: string;
+    inline_when: string;
+    never: string;
+    snippets: { product: string; text: string }[];
+  };
 }
 
 type ModelUnloadTimeout =
@@ -146,12 +179,24 @@ export default function SettingsPage() {
   const [agentTest, setAgentTest] = useState<{ kind: "ok" | "err" | "busy"; text: string } | null>(null);
   const [currentTheme, setCurrentTheme] = useState<ThemeId>("light");
 
+  // ---- Connect card (desktop only) ----
+  // Everything the card shows is read back from the backend rather than
+  // assembled here: the port is the one the web service actually bound, the tool
+  // count comes from the live router, and the copy payloads are the same strings
+  // `/agent.md` serves. One generator, so the card cannot disagree with the
+  // manual an agent fetches.
+  const [manual, setManual] = useState<AgentManual | null>(null);
+  const [manualLoading, setManualLoading] = useState(false);
+  const [dockConnected, setDockConnected] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
+
   // ---- Platform (mobile vs desktop) ----
   // `isMobileApp()` is false during prerendering (no navigator) and only turns
   // true inside the Android WebView, so reading it while rendering would make
   // the server HTML and the first client render disagree (hydration error).
   // Defer it to an effect, like Sidebar / DictationPage do. The desktop-only
-  // Agent (Goose ACP) section is hidden with it.
+  // "Connect an agent" card is hidden with it — and so is the command that
+  // feeds it, `agent_manual_get`, which does not exist in the mobile build.
   const [mobile, setMobile] = useState(false);
 
   useEffect(() => {
@@ -343,6 +388,47 @@ export default function SettingsPage() {
     setCurrentTheme(getStoredTheme());
   }, [fetchSettings]);
 
+  // ---- Connect card data ----
+
+  const loadAgentManual = useCallback(async () => {
+    if (!isTauri() || mobile) return;
+    setManualLoading(true);
+    try {
+      const [m, s] = await Promise.all([
+        invoke<AgentManual>("agent_manual_get"),
+        // The dock half of the status line: is an ACP host attached right now?
+        invoke<{ connected?: boolean }>("agent_status").catch(() => ({ connected: false })),
+      ]);
+      setManual(m);
+      setDockConnected(!!s.connected);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logError(`settings: reading the agent manual failed — ${msg}`, "settings");
+    } finally {
+      setManualLoading(false);
+    }
+  }, [mobile]);
+
+  useEffect(() => {
+    loadAgentManual();
+  }, [loadAgentManual]);
+
+  // Copy-only, by design: FmS never writes another product's config file (see
+  // `manual.connect.never`). The key names the button so only it flips to
+  // "Copied".
+  async function copyPayload(key: string, text: string) {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(key);
+      setTimeout(() => setCopied((c) => (c === key ? null : c)), 2000);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logError(`settings: copying to the clipboard failed — ${msg}`, "settings");
+      setCopied(null);
+    }
+  }
+
   // ---- Theme change ----
 
   function handleThemeChange(theme: ThemeId) {
@@ -373,19 +459,20 @@ export default function SettingsPage() {
     }
   }
 
-  // Persist the current URL/secret, then attempt an ACP connect and report the
-  // outcome inline. `agent_connect` is idempotent, so this doubles as a status
-  // probe when already connected.
+  // Probe the dock's ACP host and report the outcome inline. `agent_connect` is
+  // idempotent, so this doubles as a status refresh when already connected. It no
+  // longer saves pending settings first: the address is not editable here, so
+  // there is nothing to persist and a "test" button that writes is a surprise.
   async function handleTestAgent() {
-    if (!isTauri() || !globalSettings) return;
+    if (!isTauri()) return;
     setAgentTest({ kind: "busy", text: "Connecting…" });
     try {
-      await invoke("settings_set_global", { global: globalSettings });
       const status = await invoke<{
         connected: boolean;
         session_id?: string | null;
         mcp_registered?: boolean;
       }>("agent_connect");
+      setDockConnected(status.connected);
       if (status.connected) {
         setAgentTest({
           kind: "ok",
@@ -689,21 +776,182 @@ export default function SettingsPage() {
             value={globalSettings?.model_dir ?? ""}
           />
 
-          {/* ── Agent (Goose ACP) — desktop only ─────────────────── */}
+          {/* ── Connect an agent — desktop only ────────────────────── */}
           {!mobile && (
             <div className="mt-6 pt-6 border-t border-border-light">
-              <h3 className="text-lg font-semibold mb-1">Agent (Goose ACP)</h3>
+              <div className="flex items-start justify-between gap-3 mb-1">
+                <h3 className="text-lg font-semibold">Connect an agent</h3>
+                <button
+                  type="button"
+                  className={btnGhost}
+                  onClick={loadAgentManual}
+                  disabled={manualLoading}
+                >
+                  {manualLoading ? "Reading…" : "Refresh"}
+                </button>
+              </div>
               <p className="text-text-secondary text-sm mb-4">
-                Connect to a running <code>goose serve</code> over the Agent Client Protocol so the
-                agent can drive FmS with natural messages. Desktop only. The app offers its
-                built-in MCP tools to goose automatically on connect when goose supports HTTP MCP;
-                otherwise register the fms-app extension in goose pointing at the loopback server.
+                FmS runs a Model Context Protocol server on the loopback interface.
+                Copy one line below into any MCP-capable agent and it configures
+                itself: the manual it then reads is generated from this build
+                ({manual ? `${manual.tools.count} tools` : "…"}), so it cannot drift
+                from the tools that actually exist. The endpoint is not editable —
+                it follows the port the service really bound.
               </p>
 
-              <label className="flex items-center gap-2 mb-4 cursor-pointer">
+              {/* Status half: everything read back, nothing inferred. */}
+              <div className="mb-5 rounded-md border border-border-light p-3 text-sm space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className={manual?.endpoints.running ? "text-green-500" : "text-error-text"}
+                    aria-hidden
+                  >
+                    ●
+                  </span>
+                  <span className="font-medium">
+                    {manual
+                      ? manual.endpoints.running
+                        ? `Web service running on port ${manual.endpoints.port}`
+                        : "Web service stopped"
+                      : "Web service status unknown"}
+                  </span>
+                </div>
+                <p className="text-text-secondary">
+                  MCP endpoint: <code>{manual?.endpoints.mcp ?? "—"}</code>
+                </p>
+                <p className="text-text-secondary">
+                  Manual: <code>{manual?.endpoints.manual_markdown ?? "—"}</code>
+                </p>
+                <p className="text-text-secondary">
+                  This page sits in the <strong>{manual?.trust.zone ?? "unknown"}</strong>{" "}
+                  trust zone
+                  {manual?.trust.zone === "loopback"
+                    ? " — a local agent needs no credentials at all."
+                    : "."}
+                </p>
+                <p className="text-text-secondary">
+                  Agent dock:{" "}
+                  {dockConnected ? "a host is connected." : "no host connected."}
+                </p>
+                {manual && !manual.endpoints.running && (
+                  <p className="text-error-text">{manual.endpoints.note}</p>
+                )}
+              </div>
+
+              {/* Payload A — the pointer sentence. One line, and the manual it
+                  points at teaches the rest. */}
+              <div className="mb-4">
+                <label className="block font-medium mb-1">
+                  1 · Paste this sentence (preferred)
+                </label>
+                <p className="text-text-secondary text-sm mb-2">
+                  {manual?.connect.pointer_when ??
+                    "For any agent that can fetch a URL."}
+                </p>
+                <div className="flex items-start gap-2">
+                  <code className="flex-1 px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary text-sm break-all">
+                    {manual?.connect.pointer_sentence ?? "—"}
+                  </code>
+                  <button
+                    type="button"
+                    className={btnGhost}
+                    onClick={() =>
+                      copyPayload("pointer", manual?.connect.pointer_sentence ?? "")
+                    }
+                    disabled={!manual}
+                  >
+                    {copied === "pointer" ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Payload B — the inline block. "Can attach MCP" is not the same
+                  as "can fetch a URL", and without this the whole second class
+                  of agents fails silently. */}
+              <div className="mb-4">
+                <label className="block font-medium mb-1">
+                  2 · Or paste this block
+                </label>
+                <p className="text-text-secondary text-sm mb-2">
+                  {manual?.connect.inline_when ??
+                    "For an agent that can attach an MCP server but cannot fetch a URL."}
+                </p>
+                <div className="flex items-start gap-2">
+                  <pre className="flex-1 px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary text-xs whitespace-pre-wrap break-all">
+                    {manual?.connect.inline_block ?? "—"}
+                  </pre>
+                  <button
+                    type="button"
+                    className={btnGhost}
+                    onClick={() =>
+                      copyPayload("inline", manual?.connect.inline_block ?? "")
+                    }
+                    disabled={!manual}
+                  >
+                    {copied === "inline" ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Per-product config lines, still copy-only. */}
+              {(manual?.connect.snippets.length ?? 0) > 0 && (
+                <div className="mb-4">
+                  <label className="block font-medium mb-1">Config lines</label>
+                  <p className="text-text-secondary text-sm mb-2">
+                    {manual?.connect.never}
+                  </p>
+                  <ul className="space-y-2">
+                    {manual?.connect.snippets.map((s) => (
+                      <li key={s.product} className="flex items-start gap-2">
+                        <span className="w-24 shrink-0 pt-2 text-sm text-text-secondary">
+                          {s.product}
+                        </span>
+                        <pre className="flex-1 px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary text-xs whitespace-pre-wrap break-all">
+                          {s.text}
+                        </pre>
+                        <button
+                          type="button"
+                          className={btnGhost}
+                          onClick={() => copyPayload(s.product, s.text)}
+                        >
+                          {copied === s.product ? "Copied" : "Copy"}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* The two things here that are still settings. The policy mode
+                  belongs on this page precisely because an agent under
+                  "enforce" is refused the ability to change it itself. */}
+              <div className="mb-4 max-w-md">
+                <label className="block font-medium mb-1" htmlFor="mcp-policy">
+                  Agent policy mode
+                </label>
+                <p className="text-text-secondary text-sm mb-2">
+                  <em>permissive</em> classifies and journals every MCP call but
+                  refuses nothing. <em>enforce</em> additionally refuses the
+                  destructive and human-handoff tiers, and refuses an
+                  agent&apos;s attempt to change this setting. Live mode:{" "}
+                  <strong>{manual?.trust.policy.mode ?? "unknown"}</strong>.
+                  Takes effect when you save.
+                </p>
+                <select
+                  id="mcp-policy"
+                  className="w-full px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
+                  value={globalSettings?.mcp_policy ?? "permissive"}
+                  onChange={(e) => updateGlobalField("mcp_policy", e.target.value)}
+                >
+                  <option value="permissive">permissive — journal only</option>
+                  <option value="enforce">enforce — refuse destructive tools</option>
+                </select>
+              </div>
+
+              <label className="flex items-start gap-2 mb-4 cursor-pointer max-w-2xl">
                 <input
                   type="checkbox"
-                  className="w-4 h-4"
+                  className="w-4 h-4 mt-0.5"
                   checked={globalSettings?.goose_acp_enabled ?? false}
                   onChange={(e) => {
                     setGlobalSettings((prev) =>
@@ -712,38 +960,20 @@ export default function SettingsPage() {
                     setSavedGlobal(false);
                   }}
                 />
-                <span className="font-medium">Enable Agent integration</span>
+                <span>
+                  <span className="font-medium">Show the agent dock</span>
+                  <span className="block text-text-secondary text-sm">
+                    The dock is the second way in: instead of attaching to FmS, it
+                    attaches FmS to a <code>goose serve</code> you started yourself
+                    {globalSettings?.goose_acp_url
+                      ? <> (at <code>{globalSettings.goose_acp_url}</code>)</>
+                      : null}
+                    . Slower to set up, but it is the only window where FmS can
+                    show an agent&apos;s reasoning, tool calls and permission
+                    requests.
+                  </span>
+                </span>
               </label>
-
-              <div className="mb-4">
-                <label className="block font-medium mb-1">ACP WebSocket URL</label>
-                <p className="text-text-secondary text-sm mb-2">
-                  The <code>goose serve</code> ACP endpoint. Default: ws://127.0.0.1:3284/acp
-                </p>
-                <input
-                  type="text"
-                  className="w-full max-w-md px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
-                  value={globalSettings?.goose_acp_url ?? "ws://127.0.0.1:3284/acp"}
-                  onChange={(e) => updateGlobalField("goose_acp_url", e.target.value)}
-                  placeholder="ws://127.0.0.1:3284/acp"
-                />
-              </div>
-
-              <div className="mb-4">
-                <label className="block font-medium mb-1">Secret Key</label>
-                <p className="text-text-secondary text-sm mb-2">
-                  Sent as the <code>X-Secret-Key</code> header; must match goose&apos;s
-                  <code> GOOSE_SERVER__SECRET_KEY</code>. Leave empty if unauthenticated.
-                </p>
-                <input
-                  type="password"
-                  className="w-full max-w-md px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
-                  value={globalSettings?.goose_acp_secret ?? ""}
-                  onChange={(e) => updateGlobalField("goose_acp_secret", e.target.value)}
-                  placeholder="goose server secret key"
-                  autoComplete="off"
-                />
-              </div>
 
               <div className="flex items-center gap-3">
                 <button
@@ -752,7 +982,7 @@ export default function SettingsPage() {
                   onClick={handleTestAgent}
                   disabled={agentTest?.kind === "busy"}
                 >
-                  {agentTest?.kind === "busy" ? "Connecting…" : "Test connection"}
+                  {agentTest?.kind === "busy" ? "Connecting…" : "Test dock connection"}
                 </button>
                 {agentTest && agentTest.kind !== "busy" && (
                   <span

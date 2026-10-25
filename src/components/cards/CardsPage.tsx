@@ -46,6 +46,7 @@ import {
 } from "@/components/ui/toolbar";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import { useCardEditor } from "./CardEditorContext";
+import { oneOf, reqStr, optStr, useAgentActions } from "@/lib/agent/ui-actions";
 
 type TabId = "cards" | "review" | "tags";
 
@@ -299,6 +300,112 @@ export default function CardsPage() {
     };
   }, []);
 
+  // ── Agent-drivable actions ──
+  // The same three things the toolbar offers, reached generically: open a
+  // dataset, start a review session, search across all of them. `start-review`
+  // is the registry twin of the `agent-open-review` handler above — one body
+  // would be nicer, but that handler is an event listener for a legacy tool and
+  // this one has to return a result, so they stay side by side.
+  useAgentActions("cards", [
+    {
+      id: "cards.select-dataset",
+      label: "Open a card dataset and show its cards.",
+      kind: "read",
+      params_schema: {
+        dataset_uuid: {
+          type: "string",
+          description: "The card dataset uuid, from dataset_list.",
+          required: true,
+        },
+      },
+      run: (params) => {
+        const uuid = reqStr("cards.select-dataset", params, "dataset_uuid");
+        const found = datasets.find((x) => x.info.uuid === uuid);
+        if (!found) {
+          throw new Error(
+            `no card dataset with uuid '${uuid}' is loaded on this page. Loaded: ${
+              datasets.map((x) => `${x.info.name} (${x.info.uuid})`).join(", ") ||
+              "(none yet — the list may still be loading; retry once)"
+            }. dataset_list has the full set across every kind.`
+          );
+        }
+        setSearchOpen(false);
+        setSelectedDatasetUuid(uuid);
+        setActiveTab("cards");
+        return { opened: uuid, name: found.info.name };
+      },
+    },
+    {
+      id: "cards.start-review",
+      label:
+        "Put this page into the interactive review/quiz panel. Grading still happens in the UI, so this only starts the session.",
+      kind: "read",
+      params_schema: {
+        dataset_uuid: {
+          type: "string",
+          description:
+            "Draw only from this card dataset. Omit to draw from every dataset that has cards due.",
+        },
+      },
+      run: (params) => {
+        const uuid = optStr("cards.start-review", params, "dataset_uuid");
+        if (uuid && !datasets.some((x) => x.info.uuid === uuid)) {
+          throw new Error(
+            `no card dataset with uuid '${uuid}'. Loaded: ${
+              datasets.map((x) => `${x.info.name} (${x.info.uuid})`).join(", ") || "(none)"
+            }`
+          );
+        }
+        setReviewScope(uuid ?? "");
+        if (uuid) setSelectedDatasetUuid(uuid);
+        setActiveTab("review");
+        return {
+          started: true,
+          scope: uuid ?? "all-datasets",
+          note: "The review-load effect draws the first due card. Read the queue with card_test_next (or card_test_next_all for an unscoped session); grading stays in the UI.",
+        };
+      },
+    },
+    {
+      id: "cards.search",
+      label: "Search every card dataset (full text, or questions only) and show the hits in the search panel.",
+      kind: "read",
+      params_schema: {
+        query: { type: "string", description: "The search text.", required: true },
+        mode: {
+          type: "string",
+          description: "fulltext (default) matches question, answer and note; question matches questions only.",
+          enum: ["fulltext", "question"],
+        },
+      },
+      run: async (params) => {
+        const id = "cards.search";
+        const query = reqStr(id, params, "query");
+        const mode = oneOf(id, params, "mode", ["fulltext", "question"] as const, "fulltext");
+        setSearchOpen(true);
+        setSearchScope("all");
+        setActiveTab("cards");
+        setGlobalSearchQuery(query);
+        setSearchMode(mode);
+        const hits = await handleGlobalSearch(query, mode);
+        const shown = 10;
+        return {
+          query,
+          mode,
+          count: hits.length,
+          truncated: hits.length > shown,
+          hits: hits.slice(0, shown).map((h) => ({
+            dataset_uuid: h.dataset_uuid,
+            dataset_name: h.dataset_name,
+            card_uuid: h.card_uuid,
+            question: h.question,
+            answer: h.answer,
+          })),
+        };
+      },
+    },
+  ]);
+
   // Submit review
   const submitReview = useCallback(
     async (quality: number) => {
@@ -372,20 +479,30 @@ export default function CardsPage() {
     }
   }
 
-  // Global FTS search across all datasets
-  async function handleGlobalSearch() {
-    if (!globalSearchQuery.trim()) {
+  // Global FTS search across all datasets. The overrides exist for the
+  // agent-driven action, which cannot wait a render for its own `setState` to
+  // land; callers that pass nothing read the inputs exactly as before. Returns
+  // the hits so a caller can report them instead of reading state back.
+  async function handleGlobalSearch(
+    queryOverride?: string,
+    modeOverride?: "question" | "fulltext"
+  ) {
+    const query = (queryOverride ?? globalSearchQuery).trim();
+    const mode = modeOverride ?? searchMode;
+    if (!query) {
       setGlobalSearchResults([]);
-      return;
+      return [] as typeof globalSearchResults;
     }
     setSearching(true);
     try {
       const results = await invoke<
         { dataset_uuid: string; dataset_name: string; card_uuid: string; question: string; answer: string; note: string; location: string }[]
-      >("card_search", { query: globalSearchQuery, mode: searchMode });
+      >("card_search", { query, mode });
       setGlobalSearchResults(results);
+      return results;
     } catch (e) {
       setError(`Search failed: ${e}`);
+      return [] as typeof globalSearchResults;
     } finally {
       setSearching(false);
     }
@@ -747,7 +864,7 @@ export default function CardsPage() {
                 <option value="question">Questions only</option>
               </select>
               <button
-                onClick={handleGlobalSearch}
+                onClick={() => handleGlobalSearch()}
                 disabled={searching}
                 className="px-4 py-2 rounded-lg border border-border-default text-sm hover:bg-mid-gray/20 disabled:opacity-50"
               >

@@ -1440,6 +1440,9 @@ async fn replay(
             let rel = extract_str(&ch.payload, "rel_path")?;
             datasets::wiki::delete_file(settings.inner(), &dataset_uuid, &rel)
         }
+        // Per-user app data: a todo replays into the app DB attributed to the
+        // enforced identity, never a payload-supplied user_key.
+        "todo" => crate::todo::apply_remote(settings.inner(), write_identity, &ch.payload),
         other => Err(format!("unknown change kind: {}", other)),
     }
 }

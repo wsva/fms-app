@@ -110,6 +110,15 @@ pub struct AppSettings {
     /// default — see `read_aloud::DEFAULT_TTS_VOICE`.
     #[serde(default)]
     pub read_aloud_tts_voice: String,
+    /// What the built-in MCP server does with a call it classifies as
+    /// destructive (`mcp/policy.rs`). `"permissive"` (the default) journals
+    /// every call and denies nothing, so the dock and any already-attached
+    /// agent keep working; `"enforce"` refuses destructive calls outright.
+    /// Trust zones decide *who may talk to us*; this decides *what they may
+    /// do* — a loopback peer is trusted with no credentials at all, which is
+    /// not the same claim as "may destroy".
+    #[serde(default = "default_mcp_policy")]
+    pub mcp_policy: String,
 }
 
 fn default_ollama_url() -> String {
@@ -120,8 +129,108 @@ fn default_llm_provider() -> String {
     "ollama".to_string()
 }
 
-fn default_goose_acp_url() -> String {
+/// The ACP endpoint the agent dock probes. `pub(crate)` because the Settings
+/// page no longer edits the address (the Connect card is read-only), so this is
+/// the dock's only fallback when a stored value is empty.
+pub(crate) fn default_goose_acp_url() -> String {
     "ws://127.0.0.1:3284/acp".to_string()
+}
+
+fn default_mcp_policy() -> String {
+    "permissive".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Agent-safe views of the settings
+// ---------------------------------------------------------------------------
+
+/// Placeholder substituted for a secret that *is* set. An empty secret stays
+/// empty, so a reader can still tell "unset" from "hidden".
+pub const REDACTED: &str = "***";
+
+/// Credential-bearing fields. `settings_get` (an MCP tool, reachable by any
+/// process in the loopback trust zone) must never return these verbatim.
+/// `device_seed` is the Ed25519 keypair this device pairs with — leaking it
+/// lets a caller impersonate the device to every peer that trusts it.
+pub const SECRET_FIELDS: [&str; 4] = [
+    "llm_api_key",
+    "goose_acp_secret",
+    "pc_token",
+    "device_seed",
+];
+
+/// Fields the app derives itself and therefore refuses to accept from a caller.
+/// Writing `device_seed`/`device_id` would silently re-key the device out from
+/// under every pairing it has.
+pub const DERIVED_FIELDS: [&str; 2] = ["device_seed", "device_id"];
+
+impl AppSettings {
+    /// A JSON view safe to hand to an agent: every set secret replaced by
+    /// [`REDACTED`], plus a `has_<field>` boolean for each so the *presence* of
+    /// a credential stays discoverable even though its value does not.
+    pub fn redacted_json(&self) -> serde_json::Value {
+        let mut value = match serde_json::to_value(self) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => return serde_json::json!({}),
+        };
+        for field in SECRET_FIELDS {
+            let set = value
+                .get(field)
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty());
+            value.insert(format!("has_{}", field), serde_json::json!(set));
+            if set {
+                value.insert(field.to_string(), serde_json::json!(REDACTED));
+            }
+        }
+        serde_json::Value::Object(value)
+    }
+
+    /// Merge a caller-supplied partial object onto these settings.
+    ///
+    /// Field-by-field rather than a whole-object deserialize, because the
+    /// caller typically got its payload from [`Self::redacted_json`]: absent
+    /// keys must keep their current value, and a key carrying [`REDACTED`] must
+    /// be *skipped*, not written — otherwise echoing a redacted read back would
+    /// overwrite the real secret with `***`.
+    ///
+    /// Returns `(updated, skipped)` field names. Unknown keys and derived
+    /// fields are reported in `skipped` rather than silently dropped, so a
+    /// caller learns its write did not land.
+    pub fn merge_json(&mut self, patch: serde_json::Value) -> Result<(Vec<String>, Vec<String>), String> {
+        let patch = patch
+            .as_object()
+            .ok_or_else(|| "settings must be a JSON object of fields to update".to_string())?;
+
+        let mut current = serde_json::to_value(&self)
+            .map_err(|e| format!("cannot read current settings: {}", e))?;
+        let map = current
+            .as_object_mut()
+            .ok_or_else(|| "internal: settings did not serialize to an object".to_string())?;
+
+        let mut updated = Vec::new();
+        let mut skipped = Vec::new();
+        for (key, value) in patch {
+            if !map.contains_key(key) || DERIVED_FIELDS.contains(&key.as_str()) {
+                skipped.push(key.clone());
+                continue;
+            }
+            if value.as_str() == Some(REDACTED) {
+                // A redacted read echoed back — leave the real value alone.
+                skipped.push(key.clone());
+                continue;
+            }
+            map.insert(key.clone(), value.clone());
+            updated.push(key.clone());
+        }
+
+        // Round-trip through serde so a wrongly-typed value is rejected here,
+        // with the field name, instead of corrupting the saved file.
+        let merged: AppSettings = serde_json::from_value(current)
+            .map_err(|e| format!("invalid settings value: {}", e))?;
+        *self = merged;
+        Ok((updated, skipped))
+    }
 }
 
 /// Global-only settings that are NOT workspace-scoped.
@@ -173,6 +282,13 @@ pub struct GlobalSettings {
     /// Whether the user has completed onboarding.
     #[serde(default)]
     pub onboarding_completed: bool,
+    /// MCP policy mode: `permissive` (journal only) or `enforce` (also refuse the
+    /// destructive and human-handoff tiers). Global, like the rest of the agent
+    /// surface — and deliberately *not* writable by an agent under `enforce`
+    /// (see `mcp/policy.rs::escalates_policy`), which is why it lives on the
+    /// Settings page.
+    #[serde(default = "default_mcp_policy")]
+    pub mcp_policy: String,
 }
 
 impl Default for GlobalSettings {
@@ -194,6 +310,7 @@ impl Default for GlobalSettings {
             model_dir: data_dir.join("models").to_string_lossy().into_owned(),
             model_unload_timeout: ModelUnloadTimeout::default(),
             onboarding_completed: false,
+            mcp_policy: default_mcp_policy(),
         }
     }
 }
@@ -216,6 +333,7 @@ impl GlobalSettings {
             model_dir: s.model_dir.clone(),
             model_unload_timeout: s.model_unload_timeout,
             onboarding_completed: s.onboarding_completed,
+            mcp_policy: s.mcp_policy.clone(),
         }
     }
 
@@ -235,6 +353,9 @@ impl GlobalSettings {
         s.model_dir = self.model_dir.clone();
         s.model_unload_timeout = self.model_unload_timeout;
         s.onboarding_completed = self.onboarding_completed;
+        // An unrecognised string is normalised at the enforcement seam, not
+        // here, so a typo cannot silently widen what an agent may do.
+        s.mcp_policy = self.mcp_policy.clone();
     }
 }
 
@@ -323,6 +444,7 @@ impl Default for AppSettings {
             role: String::new(),
             cluster_id: String::new(),
             read_aloud_tts_voice: String::new(),
+            mcp_policy: default_mcp_policy(),
         }
     }
 }

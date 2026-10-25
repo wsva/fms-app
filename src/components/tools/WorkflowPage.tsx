@@ -33,6 +33,8 @@ import {
   withDeclaredOutputs,
 } from "@/lib/workflow/steps";
 import { getStepOp, KNOWN_COMMANDS, type FormField, type RunCtx, type StepOp } from "@/lib/workflow/step-ops";
+import { reqStr, useAgentActions } from "@/lib/agent/ui-actions";
+import { publishWorkflowActions } from "@/lib/agent/workflow-actions";
 import {
   type VerifyReport,
   checksById,
@@ -311,6 +313,9 @@ export default function WorkflowPage() {
 
   useEffect(() => {
     setMounted(true);
+    // Publish the step-op vocabulary so `workflow_list_actions` (and the agent
+    // manual) can describe an authored step without Rust keeping a copy.
+    void publishWorkflowActions();
   }, []);
 
   // Which breadcrumb level the content area renders. Derived from how many of the
@@ -976,9 +981,11 @@ export default function WorkflowPage() {
     }
   };
 
-  // ---- Agent prompt (unchanged behavior) ----
-  const generatePrompt = () => {
-    if (!facts) return;
+  // ---- Agent prompt ----
+  // Returns the built text (or null when no dataset is open) so the agent action
+  // below can report it; the Generate button ignores the return exactly as before.
+  const generatePrompt = (): string | null => {
+    if (!facts) return null;
     const text = buildPrompt({
       datasetName: selectedName,
       datasetUuid: selectedUuid,
@@ -988,6 +995,7 @@ export default function WorkflowPage() {
       definition: { name: definition.name, version: definition.version },
     });
     setPrompt(text);
+    return text;
   };
 
   const sendToDock = async () => {
@@ -1008,6 +1016,55 @@ export default function WorkflowPage() {
       setNotice("Copy failed.");
     }
   };
+
+  // ── Agent-drivable actions ──
+  // Navigation into a category, and reading the app's own suggested next-step
+  // prompt. Running steps stays with the workflow_* data tools — they carry the
+  // lease and the audit trail — so these two are the page-only affordances.
+  useAgentActions("workflow", [
+    {
+      id: "workflow.open-category",
+      label: "Navigate this page to a workflow category's dataset list.",
+      kind: "read",
+      params_schema: {
+        category: {
+          type: "string",
+          description: "The workflow category to open.",
+          required: true,
+          enum: [...KIND_ORDER],
+        },
+      },
+      run: (params) => {
+        const cat = reqStr("workflow.open-category", params, "category");
+        if (!(KIND_ORDER as string[]).includes(cat)) {
+          throw new Error(
+            `'${cat}' is not a workflow category. Valid: ${KIND_ORDER.join(", ")}.`
+          );
+        }
+        openKind(cat as WorkflowCategory);
+        return {
+          category: cat,
+          label: KIND_META[cat as WorkflowCategory].label,
+          note: "The dataset list loads asynchronously. Use dataset_list for this kind's datasets, then open one in the UI (or drive it with the workflow_* tools).",
+        };
+      },
+    },
+    {
+      id: "workflow.generate-prompt",
+      label:
+        "Build the app's suggested agent prompt for the workflow dataset/run currently open on this page, and show it in the Agent prompt panel.",
+      kind: "read",
+      run: () => {
+        const text = generatePrompt();
+        if (text == null) {
+          throw new Error(
+            "no workflow dataset is open on this page, so there is no run to describe. Open one first (workflow.open-category, then pick a dataset and template), or drive the run directly with the workflow_* tools."
+          );
+        }
+        return { chars: text.length, prompt: text };
+      },
+    },
+  ]);
 
   const sel = selectedId ? stepById(selectedId, steps) : undefined;
   const selOp = sel ? getStepOp(sel.id, sel.action) : undefined;

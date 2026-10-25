@@ -10,6 +10,8 @@ import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
 // ── Types ───────────────────────────────────────────────────────────────────
 
 interface LogEntry {
+  /** Live-buffer cursor (what `app_events` polls with); 0 for file archive rows. */
+  seq: number;
   timestamp: string;
   level: string;
   message: string;

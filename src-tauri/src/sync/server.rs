@@ -323,6 +323,8 @@ fn build_router(app: AppHandle, config: WebServiceConfig) -> Router {
 
     let mut r = Router::new()
         .route("/", get(index_handler))
+        .route("/agent.md", get(agent_md_handler))
+        .route("/agent.json", get(agent_json_handler))
         .nest_service("/mcp", mcp_service);
 
     if enable_stt {
@@ -355,6 +357,51 @@ fn build_router(app: AppHandle, config: WebServiceConfig) -> Router {
         // Outermost guard: applied last so it wraps every route, including the
         // nested REST router. Trust zones are decided from the TCP peer addr.
         .layer(middleware::from_fn_with_state(state, zone_guard))
+}
+
+// ---------------------------------------------------------------------------
+// Agent manual routes (`/agent.md`, `/agent.json`)
+// ---------------------------------------------------------------------------
+
+/// Name the zone a peer is in, in the vocabulary the manual uses. The three
+/// answers match `zone_guard`'s three branches, so what the manual says about
+/// the reader is what the guard actually did with it.
+fn zone_label(peer: Option<std::net::IpAddr>) -> &'static str {
+    match peer {
+        Some(ip) if ip.is_loopback() => "loopback",
+        Some(ip) if zone_trusted(ip) => "trusted-network",
+        _ => "untrusted",
+    }
+}
+
+fn peer_zone(req: &Request) -> &'static str {
+    zone_label(
+        req.extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0.ip()),
+    )
+}
+
+/// `GET /agent.md` — the manual an agent is pointed at by the Connect card's
+/// one-line sentence. Generated, never a checked-in file: it is built from the
+/// live tool registry and the port this service actually bound, so it cannot
+/// describe a tool that does not exist or an address that does not answer.
+async fn agent_md_handler(State(st): State<AppState>, req: Request) -> Response {
+    let zone = peer_zone(&req);
+    let body = crate::mcp::manual_markdown(&st.app, zone);
+    (
+        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+/// `GET /agent.json` — the same body, machine-readable. This is what
+/// `app_bootstrap` returns, so an agent that can call a tool and an agent that
+/// can only fetch a URL learn exactly the same thing.
+async fn agent_json_handler(State(st): State<AppState>, req: Request) -> Response {
+    let zone = peer_zone(&req);
+    Json(crate::mcp::manual_json(&st.app, zone)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -433,9 +480,15 @@ async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) ->
     // requires a valid per-device Ed25519 signature. `/cluster` joins `/status`
     // as a pre-pairing "who am I talking to" probe (sync-v2.md §7); it exposes
     // nothing `/status` does not already (cluster_id, role, features).
+    // `/agent.md` + `/agent.json` are here for the same reason: they are
+    // protocol information about *how to talk to us*, not data — no dataset
+    // content, no settings, no credentials. An unpaired peer that reads them
+    // learns the MCP URL and the tool index, and still cannot call a tool.
     if path == "/api/v1/status"
         || path == "/api/v1/cluster"
         || path.starts_with("/api/v1/pair/")
+        || path == "/agent.md"
+        || path == "/agent.json"
     {
         req.extensions_mut().insert(sync::pairing::AuthContext::trusted());
         return next.run(req).await;
@@ -860,7 +913,7 @@ Connect AI agents via Streamable HTTP at <code>/mcp</code>. Built with <strong>r
 <div class="tool-item"><div class="name">ocr_recognize</div><div class="desc">Tesseract OCR on base64 image</div></div>
 <div class="tool-item"><div class="name">ocr_recognize_tsv</div><div class="desc">Tesseract TSV OCR, paragraphs rebuilt in Rust</div></div>
 <div class="tool-item"><div class="name">ocr_list_languages</div><div class="desc">List installed Tesseract languages</div></div>
-<div class="tool-item"><div class="name">capture_screenshot</div><div class="desc">Capture screen via native snipping tool</div></div>
+<div class="tool-item"><div class="name">capture_screenshot</div><div class="desc">Screen capture (unattended, or snip with minimize)</div></div>
 <div class="tool-item"><div class="name">web_service_get_status</div><div class="desc">Get web service status and URLs</div></div>
 <div class="tool-item"><div class="name">web_service_start</div><div class="desc">Start web service with config</div></div>
 <div class="tool-item"><div class="name">web_service_stop</div><div class="desc">Stop the web service</div></div>

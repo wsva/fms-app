@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use log::{Level, Log, Metadata, Record};
@@ -14,7 +15,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 /// Maximum number of log entries kept in the ring buffer.
-const MAX_BUFFER_SIZE: usize = 1000;
+pub const MAX_BUFFER_SIZE: usize = 1000;
 
 /// Rotate the log file into the `.1` backup once it exceeds this size.
 const MAX_LOG_FILE_BYTES: u64 = 5 * 1024 * 1024;
@@ -22,6 +23,11 @@ const MAX_LOG_FILE_BYTES: u64 = 5 * 1024 * 1024;
 /// A single log entry sent to the frontend.
 #[derive(Clone, Serialize)]
 pub struct LogEntry {
+    /// Monotonic cursor, assigned when the entry enters the live buffer, and the
+    /// page key `app_events` polls with. `0` means "not on the live timeline":
+    /// entries parsed back out of the log file are ordered by the buffer's own
+    /// arrival order, which a file that outlives the process cannot promise.
+    pub seq: u64,
     pub timestamp: String,
     pub level: String,
     pub message: String,
@@ -36,6 +42,9 @@ pub struct LogBuffer {
     /// Lazily-opened append handle for the persistent log file, with the
     /// number of bytes in the current (unrotated) file.
     log_file: Arc<Mutex<Option<(std::fs::File, u64)>>>,
+    /// Last cursor handed out. Starts at 0 so the first entry is `seq` 1 and
+    /// `after=0` means "everything still buffered".
+    next_seq: Arc<AtomicU64>,
 }
 
 impl LogBuffer {
@@ -44,6 +53,7 @@ impl LogBuffer {
             entries: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_BUFFER_SIZE))),
             app: Arc::new(Mutex::new(None)),
             log_file: Arc::new(Mutex::new(None)),
+            next_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -56,7 +66,11 @@ impl LogBuffer {
 
     /// Buffer, persist to file, and emit an entry. Single path shared by the
     /// backend `log::` macros and the frontend log command.
-    pub fn record(&self, entry: LogEntry) {
+    ///
+    /// The cursor is assigned here rather than at each construction site, so an
+    /// entry cannot reach the buffer without one.
+    pub fn record(&self, mut entry: LogEntry) {
+        entry.seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let mut buf = self.entries.lock().unwrap();
         if buf.len() >= MAX_BUFFER_SIZE {
             buf.pop_front();
@@ -86,6 +100,30 @@ impl LogBuffer {
     pub fn get_history(&self) -> Vec<LogEntry> {
         let buf = self.entries.lock().unwrap();
         buf.iter().cloned().collect()
+    }
+
+    /// Entries newer than the `after` cursor (`None` = all of them) that `keep`
+    /// accepts, keeping the newest `limit`. Also returns the cursor of the oldest
+    /// entry still buffered, which is how the caller learns that events it had
+    /// not read yet were evicted under it.
+    pub fn query(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+        keep: impl Fn(&LogEntry) -> bool,
+    ) -> (Vec<LogEntry>, Option<u64>) {
+        let buf = self.entries.lock().unwrap();
+        let oldest = buf.front().map(|e| e.seq);
+        let mut out: Vec<LogEntry> = buf
+            .iter()
+            .filter(|e| after.is_none_or(|a| e.seq > a))
+            .filter(|e| keep(e))
+            .cloned()
+            .collect();
+        if out.len() > limit {
+            out.drain(..out.len() - limit);
+        }
+        (out, oldest)
     }
 
     /// Clear all buffered log entries. The log file is deliberately left
@@ -194,6 +232,8 @@ fn parse_log_line(line: &str) -> Option<LogEntry> {
     let module = open[..close].to_string();
     let message = open[close + 1..].strip_prefix(' ').unwrap_or("").to_string();
     Some(LogEntry {
+        // Archive entries carry no live cursor — see `LogEntry::seq`.
+        seq: 0,
         timestamp: line[..23].to_string(),
         level: level.to_string(),
         message,
@@ -219,6 +259,7 @@ impl Log for AppLogger {
 
         let now = chrono::Local::now();
         let entry = LogEntry {
+            seq: 0,
             timestamp: now.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
             level: record.level().to_string(),
             message: format!("{}", record.args()),
@@ -289,6 +330,7 @@ pub fn log_frontend_message(
 ) {
     let now = chrono::Local::now();
     let entry = LogEntry {
+        seq: 0,
         timestamp: now.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
         level: level.unwrap_or_else(|| "INFO".to_string()),
         message,
@@ -297,4 +339,63 @@ pub fn log_frontend_message(
 
     // Buffer, persist, and emit for real-time display
     buffer.record(entry);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Push entries straight into the ring, bypassing `record` — which would
+    /// append to the real log file on disk.
+    fn buffer_with(seqs: &[u64]) -> LogBuffer {
+        let buffer = LogBuffer::new();
+        let mut buf = buffer.entries.lock().unwrap();
+        for seq in seqs {
+            buf.push_back(LogEntry {
+                seq: *seq,
+                timestamp: String::new(),
+                level: "INFO".to_string(),
+                message: format!("e{}", seq),
+                module: "test".to_string(),
+            });
+        }
+        drop(buf);
+        buffer
+    }
+
+    fn seqs(entries: &[LogEntry]) -> Vec<u64> {
+        entries.iter().map(|e| e.seq).collect()
+    }
+
+    /// The `after=` contract `app_events` documents: strictly newer, newest
+    /// `limit` kept, and the oldest buffered seq reported back.
+    #[test]
+    fn query_pages_by_cursor_and_keeps_the_newest() {
+        let buffer = buffer_with(&[1, 2, 3, 4, 5]);
+        let all = |_: &LogEntry| true;
+
+        let (entries, oldest) = buffer.query(None, 100, all);
+        assert_eq!(seqs(&entries), vec![1, 2, 3, 4, 5]);
+        assert_eq!(oldest, Some(1));
+
+        let (entries, _) = buffer.query(Some(3), 100, all);
+        assert_eq!(seqs(&entries), vec![4, 5]);
+
+        // `limit` trims the old end, not the new one: a poll that falls behind
+        // still ends on the newest event, and the cursor moves forward.
+        let (entries, _) = buffer.query(Some(3), 1, all);
+        assert_eq!(seqs(&entries), vec![5]);
+
+        assert!(buffer.query(Some(5), 100, all).0.is_empty());
+    }
+
+    /// A filter must not be able to resurrect an evicted entry, and a buffer
+    /// that lost its head still reports where it now starts.
+    #[test]
+    fn query_filters_after_the_cursor_and_reports_the_oldest_retained() {
+        let buffer = buffer_with(&[7, 8, 9]);
+        let (entries, oldest) = buffer.query(Some(2), 100, |e| e.seq == 8);
+        assert_eq!(seqs(&entries), vec![8]);
+        assert_eq!(oldest, Some(7));
+    }
 }

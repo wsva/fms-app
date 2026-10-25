@@ -6,10 +6,11 @@
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::Manager;
 
 use crate::settings::SettingsState;
+use crate::ui_state::UiStateHandle;
 
 use super::{DatasetMcpServer, JsonValue};
 
@@ -322,5 +323,41 @@ impl DatasetMcpServer {
             Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_default(),
             Err(e) => format!("{{\"error\": \"{e}\"}}"),
         }
+    }
+
+    #[tool(name = "workflow_list_actions", description = "List the step vocabulary an authored workflow.yaml may name: every step id the app can actually run, the Tauri `run_command`/`clear_command` it dispatches, its form fields (name, type, placeholder, closed `options` set) and whether the page re-probes the dataset afterwards, plus the flat `commands` list a custom step's `action:` may take. Call this BEFORE writing a definition so ids and field names validate first try instead of guessing — workflow_validate rejects unknown step ids and adopt:/verify: names. The vocabulary is published by the running app's Workflow page (a frontend registry, so Rust keeps no copy); an empty registry means that page has not been opened this session, and the error says how to make it appear. Read-only.")]
+    async fn workflow_list_actions(&self) -> Result<String, String> {
+        log::info!("[MCP] workflow_list_actions");
+        let ui = self.app.state::<UiStateHandle>();
+        let snapshot = ui.workflow_actions();
+        let actions = snapshot
+            .get("actions")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        if actions.is_empty() {
+            return Err("the workflow step vocabulary has not been published yet — the Workflow \
+                        tab reports it when the page mounts. Call app_navigate with tab=\"workflow\" \
+                        and retry. Until then, workflow_builtin_templates returns definitions that \
+                        already name valid steps; you can copy their action names."
+                .to_string());
+        }
+
+        let mut step_ids: Vec<String> = actions
+            .iter()
+            .filter_map(|a| a.get("id").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        step_ids.sort();
+
+        ok(&json!({
+            "status": "ok",
+            "count": actions.len(),
+            "step_ids": step_ids,
+            "commands": snapshot.get("commands").cloned().unwrap_or(Value::Null),
+            "actions": actions,
+            "published_at": snapshot.get("updated_at").cloned().unwrap_or(Value::Null),
+            "note": "`run_command`/`clear_command` are the in-app dispatch; a custom step may instead name any entry of `commands` as its `action:`. Only the dictation category has in-app runnable steps; book/card templates name MCP tools directly.",
+        }))
     }
 }

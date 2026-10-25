@@ -30,9 +30,9 @@ import {
 } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
+import { isAgentHost } from "@/lib/agent/host";
 import { startRecording, stopRecording, type VoiceState } from "@/lib/voice-input";
 import { VoiceMicButton } from "@/components/voice/VoiceMicButton";
-import type { TabId } from "@/components/layout/Sidebar";
 import type {
   AgentStatus,
   AgentMessageChunk,
@@ -87,24 +87,7 @@ const FAB_POS_KEY = "agent.fabPos";
 // drag and suppresses the click-to-open handler on pointerup.
 const FAB_DRAG_THRESHOLD = 4;
 
-/**
- * True when this build actually hosts the agent backend.
- *
- * `ai/agent_acp.rs` is gated behind the Rust `desktop` feature and is absent
- * from the Android binary, so invoking any `agent_*` command on the phone fails
- * with "Command agent_status not found". The shell does not mount this dock on
- * mobile, but it renders the desktop layout for the first commit (the platform
- * is only knowable after mount, see the `mobile` state below), so effects can
- * still fire once on Android — hence every agent IPC call is gated here too.
- *
- * Safe to call from effects and handlers only: `isMobileApp()` falls back to
- * `false` during prerendering, so using it while rendering would break hydration.
- */
-function isAgentHost(): boolean {
-  return isTauri() && !isMobileApp();
-}
-
-export default function AgentDock({ activeTab }: { activeTab: TabId }) {
+export default function AgentDock() {
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState<AgentStatus>({ connected: false });
@@ -114,6 +97,10 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
   const [permission, setPermission] = useState<AgentPermissionRequest | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
   const [voiceError, setVoiceError] = useState("");
+  // A prefilled prompt that asked to be dispatched (app_prefill_prompt with
+  // send=true). Held here until the dock can actually send it — see the effect
+  // after handleSend.
+  const [pendingSend, setPendingSend] = useState<string | null>(null);
 
   // ---- Dock presentation state ----
   const [mobile, setMobile] = useState(false);
@@ -394,14 +381,6 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
     if (!status.connected) connectAttempted.current = false;
   }, [status.connected]);
 
-  // ---- Report UI state so app_get_ui_state can answer the agent ----
-  // Ungated by dock visibility: the shell's real active tab is what the agent
-  // needs to know, wherever the user currently is.
-  useEffect(() => {
-    if (!isAgentHost()) return;
-    invoke("agent_report_ui_state", { activeTab, activeDatasetUuid: null }).catch(() => {});
-  }, [activeTab]);
-
   // ---- Event listeners (registered once) ----
   useEffect(() => {
     if (!isAgentHost()) return;
@@ -417,9 +396,14 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
     reg<AgentStatus>("agent-status", (p) => setStatus(p));
     // Another page (e.g. the Workflow page) hands us a reviewed prompt: load it
     // into the input and bring the dock forward, but let the user do the send.
-    reg<{ text: string }>("agent-prefill", (p) => {
-      if (p?.text) setInput(p.text);
+    // `send` (set by the app_prefill_prompt MCP tool) asks for the dispatch too;
+    // it is deferred because the dock may still be connecting and because
+    // handleSend reads `input` from a closure the setInput above cannot reach.
+    reg<{ text: string; send?: boolean }>("agent-prefill", (p) => {
+      if (!p?.text) return;
+      setInput(p.text);
       setOpen(true, false);
+      if (p.send) setPendingSend(p.text);
     });
     reg<AgentMessageChunk>("agent-message-chunk", (p) => {
       appendStream("agent", p.text);
@@ -503,8 +487,10 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
   }, [appendStream, markAgentOutput, setOpen]);
 
   // ---- Send prompt ----
-  const handleSend = useCallback(async () => {
-    const text = input.trim();
+  // `override` lets a caller dispatch text that is not in `input` yet (the
+  // prefilled prompt), without waiting a render for setInput to land.
+  const handleSend = useCallback(async (override?: string) => {
+    const text = (override ?? input).trim();
     if (!text || busy || !isAgentHost() || !status.connected) return;
     reopenedThisTurn.current = false;
     setBlocks((prev) => [...prev, { kind: "user", text }]);
@@ -518,6 +504,21 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
       setBusy(false);
     }
   }, [input, busy, status.connected]);
+
+  // A prefilled prompt that asked to be dispatched. Deferred rather than sent on
+  // arrival: the dock may still be connecting, and the whole point of the
+  // prefill is that the text survives that. Dropped if the user starts editing
+  // the text, because their words win over the caller's.
+  useEffect(() => {
+    if (!pendingSend) return;
+    if (input.trim() !== pendingSend.trim()) {
+      setPendingSend(null);
+      return;
+    }
+    if (!status.connected || busy) return;
+    setPendingSend(null);
+    void handleSend(pendingSend);
+  }, [pendingSend, input, status.connected, busy, handleSend]);
 
   const handleCancel = useCallback(async () => {
     if (!isAgentHost()) return;
@@ -777,7 +778,7 @@ export default function AgentDock({ activeTab }: { activeTab: TabId }) {
                 <button
                   type="button"
                   className="inline-flex items-center justify-center p-2.5 rounded-lg border border-transparent bg-accent-bg text-white hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
-                  onClick={handleSend}
+                  onClick={() => void handleSend()}
                   disabled={!input.trim() || !status.connected || busy}
                 >
                   <Send size={18} />

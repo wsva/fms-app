@@ -12,6 +12,7 @@ import { type CardModelInfo, type ModelVersionInfo, type DownloadProgress, type 
 import ModelCard from "./components/ModelCard";
 import ModelDetailsDialog from "./components/ModelDetailsDialog";
 import { PageHeader } from "@/components/ui/toolbar";
+import { reqStr, useAgentActions } from "@/lib/agent/ui-actions";
 
 // HF-catalog model info, mirroring the Rust `TextSplitModelInfo` / `PhonemeModelInfo`
 // shapes. `loaded` is absent for the phoneme model: it has no resident session to
@@ -364,6 +365,90 @@ export default function ModelsPage() {
   const anyDownloadInProgress = isDownloadingAny || tsDownloadingId !== null || phDownloadingId !== null;
   const downloadedModels = models.filter((m) => m.downloaded);
   const availableModels = models.filter((m) => !m.downloaded);
+
+  // ── Agent-drivable actions ──
+  // Loading and defaulting an STT model are the two lifecycle moves an agent
+  // would drive (downloads stay in the UI: they are long, cancellable, and the
+  // progress panel is the only honest view of them). Both surface their own
+  // result rather than the dialogs the click handlers show, so a failure comes
+  // back to the caller instead of a modal nobody is watching.
+  useAgentActions("models", [
+    {
+      id: "models.load",
+      label:
+        "Select and start a downloaded STT model so transcription uses it. Fails if the model is not downloaded yet.",
+      kind: "mutate",
+      params_schema: {
+        model_id: {
+          type: "string",
+          description: "The model id, from model_get_status / the downloaded list.",
+          required: true,
+        },
+      },
+      run: async (params) => {
+        const id = reqStr("models.load", params, "model_id");
+        const found = models.find((m) => m.id === id);
+        if (!found) {
+          throw new Error(
+            `no model with id '${id}'. Downloaded: ${
+              downloadedModels.map((m) => `${m.label} (${m.id})`).join(", ") || "(none)"
+            }. model_get_status lists the full catalog.`
+          );
+        }
+        if (!found.downloaded) {
+          throw new Error(
+            `model '${id}' (${found.label}) is not downloaded yet; download it first (model_download).`
+          );
+        }
+        // handleStart swallows its errors into console.error, so read the status
+        // back afterwards and report what actually happened.
+        await handleStart(id);
+        const res = await invoke<{ active_version: string | null; active_status: ModelStatus }>(
+          "model_get_status"
+        );
+        return {
+          model_id: id,
+          label: found.label,
+          active_version: res.active_version,
+          active_status: res.active_status,
+        };
+      },
+    },
+    {
+      id: "models.set-default",
+      label:
+        "Mark a downloaded STT model as the app's default, loaded automatically when transcription is needed and nothing is resident.",
+      kind: "mutate",
+      params_schema: {
+        model_id: {
+          type: "string",
+          description: "The model id to make the default.",
+          required: true,
+        },
+      },
+      run: async (params) => {
+        const id = reqStr("models.set-default", params, "model_id");
+        const found = models.find((m) => m.id === id);
+        if (!found) {
+          throw new Error(
+            `no model with id '${id}'. Downloaded: ${
+              downloadedModels.map((m) => `${m.label} (${m.id})`).join(", ") || "(none)"
+            }.`
+          );
+        }
+        if (!found.downloaded) {
+          throw new Error(
+            `model '${id}' (${found.label}) is not downloaded yet; download it before setting it as default.`
+          );
+        }
+        // Not handleSetDefault: that shows a dialog on failure, which an agent
+        // cannot read. Invoke directly so the rejection propagates as the result.
+        await invoke("model_set_default", { version: id });
+        setDefaultVersion(id);
+        return { default_version: id, label: found.label };
+      },
+    },
+  ]);
 
   function getModelStatus(modelId: string): ModelStatus {
     if (activeVersion === modelId && isModelRunning) return "Running";

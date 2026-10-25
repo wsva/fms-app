@@ -137,7 +137,15 @@ src-tauri/src/
 │
 ├── mcp/                    # Built-in MCP server (rmcp), nested at `/mcp` — desktop
 │   ├── mod.rs              # `DatasetMcpServer`, params shared by 2+ domains, `tool_router()`
-│   │                       #   merging the domain routers, `ServerHandler` impl, `create_mcp_service()`
+│   │                       #   merging the domain routers, the `ServerHandler` impl (tools + resources +
+│   │                       #   prompts), `create_mcp_service()`
+│   ├── policy.rs           # Not a domain: the tier classification + `mcp_audit` journal every route
+│   │                       #   is wrapped in by `tool_router()`. Unknown names default to `write`, so a
+│   │                       #   new tool is never silently a read — add it to the right list here
+│   ├── manual.rs           # Not a domain either: the generated agent manual. One body, three renderings —
+│   │                       #   `/agent.md`, `/agent.json`, `app_bootstrap`/`agent_manual_get` and
+│   │                       #   `get_info().instructions`. The tool index is read off the live router, so
+│   │                       #   there is no hand-written tool list to keep in step
 │   ├── datasets.rs         # dataset discovery/CRUD + subtitle & waveform pipeline (26 tools)
 │   │                       #   `dataset_audit` is subject-only — per-step reading is `workflow_verify`/`workflow_adopt`;
 │   │                       #   `dataset_full_report` composes audit + runs + model state for one call
@@ -145,12 +153,26 @@ src-tauri/src/
 │   ├── cards.rs            # card CRUD, tags, FTS5 search, SM-2 review, online sync (24)
 │   ├── books.rs            # book chapters/sentences/words + read-aloud texts & scoring (24)
 │   ├── models.rs           # STT model status/download/load/default/delete/transcribe (7)
-│   ├── ai.rs               # Ollama chat & model management, Edge TTS, cross-device chat (10)
+│   ├── ai.rs               # Ollama/cloud chat & model management, provider switch, Edge TTS, cross-device chat (11)
 │   ├── wiki.rs             # wiki dirs, read/write/delete, search, index (9)
 │   ├── sync.rs             # web service, pairing registry, PC scan/connect/pull, incremental sync (15)
-│   ├── system.rs           # settings, auth, logs, OCR, screenshot, app UI control (15)
-│   └── workflow.rs         # persistent workflow state machine: list/create/status/get_definition/next/advance/
-│   │                       #   record/intervene/verify/adopt/builtin_templates (11)
+│   ├── system.rs           # settings, auth, logs, OCR, screenshot, app UI control (incl. prefill the dock),
+│   │                       #   the `app_events` timeline, the trash undo loop, MCP audit journal (20)
+│   ├── workflow.rs         # persistent workflow state machine: list/create/status/reap/next/get_definition/
+│   │                       #   advance/record/intervene/verify/adopt/builtin_templates, plus list_actions — the
+│   │                       #   step vocabulary the Workflow page publishes (13)
+│   ├── ui.rs               # generic UI action registry: list/invoke the actions the frontend published via
+│   │                       #   `agent_report_ui_actions`; `ui_invoke_action` correlates back through
+│   │                       #   `agent_report_action_result` (2)
+│   ├── todo.rs             # agent TODO domain: add/list/complete/dismiss the user-facing tasks the `tasks`
+│   │                       #   tab shows; completing a workflow `human` step's todo resumes that run (4)
+│   ├── resources.rs        # MCP *resources* (not a tool domain): `fms://status`, `fms://docs/start`,
+│   │                       #   `fms://docs/principles`, `fms://docs/domain/{datasets,cards,workflow,sync}`,
+│   │                       #   `fms://workflows/templates`, and the `fms://datasets/{uuid}/layout`
+│   │                       #   template — every body derived at read time from the tool registry
+│   └── prompts.rs          # MCP *prompts* (not a tool domain): the `docs/design/agent/goose_recipe/*.yaml`
+│                           #   recipes, `include_str!`-embedded and parsed on demand, so the recipe files
+│                           #   stay the source of truth and any MCP client gets them without goose
 │
 ├── workflow/              # Persistent workflow state machine (file-based, resumable DAG) — desktop
 │   ├── mod.rs             # group root: the `run_base()` storage seam + re-export the run-scoped API
@@ -173,9 +195,19 @@ src-tauri/src/
 ├── audio.rs                # Audio decoding via Symphonia
 ├── wiki.rs                 # Wiki documents; own root + `meta.json` linkage (not a dataset type)
 ├── xp.rs                   # XP ledger in the app-level SQLite
+├── todo.rs                 # Agent TODO list in the app-level SQLite: user-facing tasks an agent or a
+│                           #   workflow `human` step leaves for the learner; workspace-scoped, syncs via
+│                           #   `@app` writeback, and completing one resumes the waiting workflow run
 ├── simple_words.rs         # "Known simple" words sourced from selected card datasets
 ├── edge_tts.rs             # Edge TTS voices + synthesis
+├── ui_state.rs             # What the user is looking at, cached for agents: the webview reports a
+│                           #   context patch (`agent_report_ui_state`) and its action registry
+│                           #   (`agent_report_ui_actions`), which `app_get_ui_state` reads back
+│                           #   without a webview round-trip — desktop
 ├── capture.rs              # Screenshot / clipboard image capture — desktop
+├── trash.rs                # The app trash read back: `app_trash_list` / `app_restore` over
+│                           #   `<data_root>/trash/<timestamp>_<name>`. The writer is
+│                           #   `datasets::media::move_to_trash`; this is the undo side — desktop
 └── ocr/                    # Tesseract OCR — desktop
     ├── mod.rs              # Path discovery, plain-text recognition (`ocr_recognize`), language list,
     │                       #   TSV recognition and the `ocr_hyphen_dictionary_*` commands
@@ -330,6 +362,16 @@ When adding a new Tauri command, simultaneously add the corresponding MCP tool.
    duplicate, so a collision costs you a tool with no compile error
 4. A parameter struct used by two domains belongs in `mcp/mod.rs` as `pub(crate) struct`, imported
    via `use super::{...}`
+5. Decide its **policy tier** in `mcp/policy.rs`. Reads go in `READ_TOOLS`; anything that deletes
+   but is undoable (app trash, soft delete, re-downloadable, derived index) goes in `RECOVERABLE`;
+   screen-driving tools go in `UI_CONTROL`. Unlisted names fall through to `write`, and a
+   `#[cfg(test)]` guard fails the build if a name carrying a destructive word
+   (`delete`, `remove`, `clear`, …) lands anywhere but `destructive` without being listed in
+   `RECOVERABLE` with a reason. Under `mcp_policy = "enforce"` the destructive and human-handoff
+   tiers are refused; the default `"permissive"` only journals
+6. The manual picks the tool up by itself — `mcp/manual.rs` reads the router, never a list. A new
+   *domain* does need its name prefix added to `DOMAIN_PREFIXES` there, and a `#[cfg(test)]` guard
+   fails the build (with the offending name) until it is
 
 ## External Dependencies
 
