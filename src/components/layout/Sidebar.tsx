@@ -6,6 +6,7 @@ import { useAuth } from "@/hooks/useAuth";
 import LoginModal from "@/components/auth/LoginModal";
 import {
   Box,
+  Bot,
   Settings,
   Headphones,
   MessageSquare,
@@ -52,6 +53,7 @@ export type TabId =
   | "wiki"
   | "workspaces"
   | "logs"
+  | "agent"
   | "settings";
 
 type TabDef = {
@@ -89,6 +91,10 @@ const navGroups: NavGroup[] = [
     tabs: [
       { id: "workflow", label: "Workflow", icon: Workflow },
       { id: "tasks", label: "Tasks", icon: ListTodo },
+      // The agent's configuration surface. The agent *itself* is the dock, which
+      // is not a tab — it is mounted on every screen so a permission request or
+      // a host approval can never be hidden behind navigation.
+      { id: "agent", label: "Agent", icon: Bot },
       { id: "simple-words", label: "Simple Words", icon: Type },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
       { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },

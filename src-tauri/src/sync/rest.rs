@@ -116,9 +116,9 @@ struct StatusResp {
     /// *which* PC it is. Empty if the OS did not report one.
     machine: String,
     /// Whether `/mcp` (and the `/agent.md` manual that describes it) is served.
-    /// The user can switch it off on the Settings page; this field is how a peer
-    /// distinguishes "404 because the surface is off" from "404 because the
-    /// address is wrong".
+    /// The user can switch it off on the Agent page (Tools → Agent → Surface);
+    /// this field is how a peer distinguishes "404 because the surface is off"
+    /// from "404 because the address is wrong".
     mcp_enabled: bool,
 }
 

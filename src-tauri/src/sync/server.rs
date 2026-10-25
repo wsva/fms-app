@@ -329,7 +329,7 @@ pub async fn restart_after_mcp_toggle(app: &AppHandle) -> Result<(), String> {
     }
     log::error!("[WebService] could not restart after the MCP switch: {}", last);
     Err(format!(
-        "the MCP surface was switched, but the local web service could not be restarted ({}). Start it again from the Settings page.",
+        "the MCP surface was switched, but the local web service could not be restarted ({}). Restart FmS — the service starts with the app.",
         last
     ))
 }

@@ -413,7 +413,7 @@ pub struct GlobalSettings {
     /// destructive and human-handoff tiers). Global, like the rest of the agent
     /// surface — and deliberately *not* writable by an agent under `enforce`
     /// (see `mcp/policy.rs::escalates_policy`), which is why it lives on the
-    /// Settings page.
+    /// Agent page (Tools → Agent → Surface), not in Settings.
     #[serde(default = "default_mcp_policy")]
     pub mcp_policy: String,
     /// Whether the MCP surface is exposed (see [`AppSettings::mcp_enabled`]).

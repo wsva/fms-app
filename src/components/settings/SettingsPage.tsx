@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import {
   ChevronDown,
@@ -22,6 +21,7 @@ import {
 import MicTestPanel from "@/components/voice/MicTestPanel";
 import { isMobileApp } from "@/lib/platform";
 import { logError, logInfo } from "@/lib/logger";
+import { AGENT_SURFACE_SAVED } from "@/lib/agent/control";
 import {
   DEFAULT_NAV_CONFIG,
   MAX_BAR_MENUS,
@@ -39,12 +39,6 @@ import {
   type MicDevice,
 } from "@/lib/voice-input";
 import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
-import type {
-  AgentConfirmRequest,
-  AgentHostList,
-  AgentStatus,
-} from "@/lib/agent/types";
-
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -97,32 +91,6 @@ interface GlobalSettings {
   /** Whether `/mcp` and the generated manual are served at all. Chosen when the
    *  router is built, so saving this restarts the local web service. */
   mcp_enabled: boolean;
-}
-
-// The generated agent manual (`agent_manual_get` → `mcp/manual.rs::render_json`).
-// Only the fields the Connect card renders are typed; the body carries much more
-// (the full tool index, house rules, workflow templates) for `/agent.json`.
-interface AgentManual {
-  endpoints: {
-    running: boolean;
-    port: number;
-    mcp: string;
-    manual_markdown: string;
-    note: string;
-  };
-  trust: {
-    zone: string;
-    policy: { mode: string; tiers: string[] };
-  };
-  tools: { count: number };
-  connect: {
-    pointer_sentence: string;
-    pointer_when: string;
-    inline_block: string;
-    inline_when: string;
-    never: string;
-    snippets: { product: string; text: string }[];
-  };
 }
 
 type ModelUnloadTimeout =
@@ -180,39 +148,21 @@ const btnGhost = "px-3 py-1 text-xs rounded-md border border-border-light hover:
 // Component
 // ---------------------------------------------------------------------------
 
-export default function SettingsPage() {
+export default function SettingsPage({ onOpenAgent }: { onOpenAgent?: () => void }) {
   const [globalSettings, setGlobalSettings] = useState<GlobalSettings | null>(null);
   const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings | null>(null);
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [savedGlobal, setSavedGlobal] = useState(false);
-  const [agentTest, setAgentTest] = useState<{ kind: "ok" | "err" | "busy"; text: string } | null>(null);
   const [currentTheme, setCurrentTheme] = useState<ThemeId>("light");
-
-  // ---- Connect card (desktop only) ----
-  // Everything the card shows is read back from the backend rather than
-  // assembled here: the port is the one the web service actually bound, the tool
-  // count comes from the live router, and the copy payloads are the same strings
-  // `/agent.md` serves. One generator, so the card cannot disagree with the
-  // manual an agent fetches.
-  const [manual, setManual] = useState<AgentManual | null>(null);
-  const [manualLoading, setManualLoading] = useState(false);
-  const [dockConnected, setDockConnected] = useState(false);
-  // The host records themselves (id, kind, endpoint, approval rule), so the
-  // switch offers what the backend would actually dial rather than a free-text
-  // address.
-  const [dockHosts, setDockHosts] = useState<AgentHostList | null>(null);
-  // A host the Rust trust rule marked `needs_confirmation`: shown inline until
-  // the user answers it, because approving is what unblocks the connect.
-  const [confirm, setConfirm] = useState<AgentConfirmRequest | null>(null);
-  const [copied, setCopied] = useState<string | null>(null);
 
   // ---- Platform (mobile vs desktop) ----
   // `isMobileApp()` is false during prerendering (no navigator) and only turns
   // true inside the Android WebView, so reading it while rendering would make
   // the server HTML and the first client render disagree (hydration error).
   // Defer it to an effect, like Sidebar / DictationPage do. The desktop-only
-  // "Connect an agent" card is hidden with it — and so is the command that
-  // feeds it, `agent_manual_get`, which does not exist in the mobile build.
+  // pointer to the Agent page is hidden with it: every command behind that page
+  // (`agent_manual_get`, `agent_host_*`, `agent_confirm_*`) is absent from the
+  // mobile build.
   const [mobile, setMobile] = useState(false);
 
   useEffect(() => {
@@ -404,71 +354,15 @@ export default function SettingsPage() {
     setCurrentTheme(getStoredTheme());
   }, [fetchSettings]);
 
-  // ---- Connect card data ----
-  const loadAgentManual = useCallback(async () => {
-    if (!isTauri() || mobile) return;
-    setManualLoading(true);
-    try {
-      const [m, list] = await Promise.all([
-        invoke<AgentManual>("agent_manual_get"),
-        // The dock half of the status line: which host records exist, which one
-        // is active, and whether a session is live right now.
-        invoke<AgentHostList>("agent_host_list").catch(() => null),
-      ]);
-      setManual(m);
-      setDockHosts(list);
-      setDockConnected(!!list?.connected);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      logError(`settings: reading the agent manual failed — ${msg}`, "settings");
-    } finally {
-      setManualLoading(false);
-    }
-  }, [mobile]);
-
+  // The Agent page owns `mcp_policy`, `mcp_enabled` and `goose_acp_enabled` now.
+  // Reload when it saves: this page is always mounted, so its copy would
+  // otherwise keep the values read at boot and write them back over the agent
+  // page's edit on the next Save here.
   useEffect(() => {
-    loadAgentManual();
-  }, [loadAgentManual]);
-
-  // A confirm request can originate outside this card: an agent calling
-  // `agent_host_connect` over MCP is refused, and the backend emits the ask so
-  // the user has something to answer. Listening is what makes that refusal
-  // actionable instead of a dead end — the caller retries after the answer.
-  useEffect(() => {
-    if (!isTauri() || mobile) return;
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    listen<AgentConfirmRequest>("agent-confirm-request", (e) => {
-      setConfirm(e.payload);
-      setAgentTest({
-        kind: "busy",
-        text: `Waiting for your approval of ${e.payload.display_name}.`,
-      });
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlisten = fn;
-    });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [mobile]);
-
-  // Copy-only, by design: FmS never writes another product's config file (see
-  // `manual.connect.never`). The key names the button so only it flips to
-  // "Copied".
-  async function copyPayload(key: string, text: string) {
-    if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(key);
-      setTimeout(() => setCopied((c) => (c === key ? null : c)), 2000);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      logError(`settings: copying to the clipboard failed — ${msg}`, "settings");
-      setCopied(null);
-    }
-  }
+    const onAgentSurface = () => void fetchSettings();
+    window.addEventListener(AGENT_SURFACE_SAVED, onAgentSurface);
+    return () => window.removeEventListener(AGENT_SURFACE_SAVED, onAgentSurface);
+  }, [fetchSettings]);
 
   // ---- Theme change ----
 
@@ -497,100 +391,6 @@ export default function SettingsPage() {
       console.error("Failed to save global settings:", e);
     } finally {
       setSavingGlobal(false);
-    }
-  }
-
-  // Probe the dock's ACP host and report the outcome inline. `agent_connect` is
-  // idempotent, so this doubles as a status refresh when already connected. It no
-  // longer saves pending settings first: the address is not editable here, so
-  // there is nothing to persist and a "test" button that writes is a surprise.
-  async function handleTestAgent() {
-    if (!isTauri()) return;
-    setAgentTest({ kind: "busy", text: "Connecting…" });
-    try {
-      const status = await invoke<{
-        connected: boolean;
-        session_id?: string | null;
-        mcp_registered?: boolean;
-      }>("agent_connect");
-      setDockConnected(status.connected);
-      if (status.connected) {
-        setAgentTest({
-          kind: "ok",
-          text: `Connected (session ${status.session_id ?? "?"})${
-            status.mcp_registered ? " · FmS tools registered" : ""
-          }.`,
-        });
-      } else {
-        setAgentTest({ kind: "err", text: "Not connected." });
-      }
-    } catch (e) {
-      setAgentTest({ kind: "err", text: e instanceof Error ? e.message : String(e) });
-    }
-  }
-
-  // The switch on the Connect card. Two commands, one decision: a host the Rust
-  // trust rule marks `needs_confirmation` is asked about first (the inline
-  // `confirm` card), and the approval it records is what unblocks the connect.
-  // No address is accepted here — the records are the only dial targets.
-  async function handleShowInDock(hostId: string) {
-    if (!isTauri()) return;
-    setAgentTest({ kind: "busy", text: hostId ? "Connecting…" : "Disconnecting…" });
-    try {
-      if (!hostId) {
-        await invoke("agent_host_disconnect");
-        setDockConnected(false);
-        setAgentTest({ kind: "ok", text: "No agent hosted — FmS is on its own." });
-        await loadAgentManual();
-        return;
-      }
-      const host = dockHosts?.hosts.find((h) => h.id === hostId);
-      if (host?.needs_confirmation && !host.approved) {
-        const req = await invoke<{ state: string; host?: AgentConfirmRequest }>(
-          "agent_confirm_request",
-          { id: hostId }
-        );
-        if (req.state === "pending" && req.host) {
-          setConfirm(req.host);
-          setAgentTest({ kind: "busy", text: "Waiting for your approval…" });
-          return;
-        }
-      }
-      await connectHostInDock(hostId);
-    } catch (e) {
-      setAgentTest({ kind: "err", text: e instanceof Error ? e.message : String(e) });
-    }
-  }
-
-  async function connectHostInDock(hostId: string) {
-    const status = await invoke<AgentStatus>("agent_host_connect", { id: hostId });
-    setDockConnected(status.connected);
-    setAgentTest({
-      kind: status.connected ? "ok" : "err",
-      text: status.connected
-        ? `Hosting ${status.display_name ?? hostId} over ${status.transport ?? "?"} — session ${
-            status.session_id ?? "?"
-          }${status.mcp_transport ? `, FmS tools over ${status.mcp_transport}` : ""}.`
-        : "Not connected.",
-    });
-    await loadAgentManual();
-  }
-
-  async function answerConfirm(approve: boolean) {
-    if (!confirm) return;
-    const host = confirm;
-    setConfirm(null);
-    setAgentTest({ kind: "busy", text: approve ? "Connecting…" : "Cancelling…" });
-    try {
-      await invoke("agent_confirm_respond", { hostId: host.host_id, approve });
-      if (!approve) {
-        setAgentTest({ kind: "err", text: `${host.display_name} stays unhosted.` });
-        await loadAgentManual();
-        return;
-      }
-      await connectHostInDock(host.host_id);
-    } catch (e) {
-      setAgentTest({ kind: "err", text: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -882,351 +682,31 @@ export default function SettingsPage() {
             value={globalSettings?.model_dir ?? ""}
           />
 
-          {/* ── Connect an agent — desktop only ────────────────────── */}
+          {/* Agent integration lives on its own page. It is a live surface — a
+              hosted host, a pending approval, a switch that restarts the web
+              service — not something set once like the directories above. The
+              dock stays on every screen either way. */}
           {!mobile && (
             <div className="mt-6 pt-6 border-t border-border-light">
-              <div className="flex items-start justify-between gap-3 mb-1">
-                <h3 className="text-lg font-semibold">Connect an agent</h3>
-                <button
-                  type="button"
-                  className={btnGhost}
-                  onClick={loadAgentManual}
-                  disabled={manualLoading}
-                >
-                  {manualLoading ? "Reading…" : "Refresh"}
-                </button>
-              </div>
-              <p className="text-text-secondary text-sm mb-4">
-                FmS runs a Model Context Protocol server on the loopback interface.
-                Copy one line below into any MCP-capable agent and it configures
-                itself: the manual it then reads is generated from this build
-                ({manual ? `${manual.tools.count} tools` : "…"}), so it cannot drift
-                from the tools that actually exist. The endpoint is not editable —
-                it follows the port the service really bound.
-              </p>
-
-              {/* Status half: everything read back, nothing inferred. */}
-              <div className="mb-5 rounded-md border border-border-light p-3 text-sm space-y-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span
-                    className={manual?.endpoints.running ? "text-green-500" : "text-error-text"}
-                    aria-hidden
-                  >
-                    ●
-                  </span>
-                  <span className="font-medium">
-                    {manual
-                      ? manual.endpoints.running
-                        ? `Web service running on port ${manual.endpoints.port}`
-                        : "Web service stopped"
-                      : "Web service status unknown"}
-                  </span>
-                </div>
-                <p className="text-text-secondary">
-                  MCP endpoint: <code>{manual?.endpoints.mcp ?? "—"}</code>
-                </p>
-                <p className="text-text-secondary">
-                  Manual: <code>{manual?.endpoints.manual_markdown ?? "—"}</code>
-                </p>
-                <p className="text-text-secondary">
-                  This page sits in the <strong>{manual?.trust.zone ?? "unknown"}</strong>{" "}
-                  trust zone
-                  {manual?.trust.zone === "loopback"
-                    ? " — a local agent needs no credentials at all."
-                    : "."}
-                </p>
-                <p className="text-text-secondary">
-                  MCP surface:{" "}
-                  <strong>
-                    {globalSettings?.mcp_enabled ?? true ? "exposed" : "off"}
-                  </strong>
-                  {(globalSettings?.mcp_enabled ?? true)
-                    ? " — the endpoint below answers."
-                    : " — /mcp and the manual answer 404 until you switch it back on."}
-                </p>
-                <p className="text-text-secondary">
-                  Agent dock:{" "}
-                  {dockConnected ? (
-                    <>
-                      hosting{" "}
-                      <strong>
-                        {dockHosts?.session?.display_name ?? dockHosts?.active_id ?? "a host"}
-                      </strong>{" "}
-                      via <strong>{dockHosts?.session?.transport ?? "?"}</strong>
-                      {dockHosts?.session?.mcp_transport ? (
-                        <>
-                          , FmS tools over <strong>{dockHosts.session.mcp_transport}</strong>
-                        </>
-                      ) : null}
-                      .
-                    </>
-                  ) : (
-                    "no host hosted."
-                  )}
-                </p>
-                {manual && !manual.endpoints.running && (
-                  <p className="text-error-text">{manual.endpoints.note}</p>
-                )}
-              </div>
-
-              {/* The switch: which record the dock shows. Two commands behind
-                  one select — `agent_host_disconnect` for "FmS only",
-                  `agent_host_connect` for a record — because a free-text address
-                  is exactly what the records replaced. */}
-              <div className="mb-5 max-w-md">
-                <label className="block font-medium mb-1" htmlFor="dock-host">
-                  Shown in
-                </label>
-                <p className="text-text-secondary text-sm mb-2">
-                  The dock hosts one agent at a time: either a server you run
-                  yourself (<code>ws</code>) or a program FmS starts and stops
-                  (<code>stdio</code>). Hosts come from the app&apos;s records — an
-                  agent adds them with <code>agent_host_register</code>. Whether
-                  dialling one needs your approval is decided in the backend, never
-                  here.
-                </p>
-                <select
-                  id="dock-host"
-                  className="w-full px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
-                  value={dockConnected ? dockHosts?.session?.host_id ?? "" : ""}
-                  onChange={(e) => void handleShowInDock(e.target.value)}
-                  disabled={agentTest?.kind === "busy"}
-                >
-                  <option value="">FmS only — no agent hosted</option>
-                  {(dockHosts?.hosts ?? []).map((h) => (
-                    <option key={h.id} value={h.id}>
-                      {h.display_name} ({h.kind})
-                      {h.needs_confirmation && !h.approved ? " — needs your approval" : ""}
-                    </option>
-                  ))}
-                </select>
-                {(dockHosts?.hosts.length ?? 0) === 0 && (
-                  <p className="text-text-secondary text-sm mt-2">
-                    No host records yet. Until one exists the dock has nothing to
-                    dial — use the copy-only lines above (Mode 1), or have an agent
-                    register one.
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="max-w-2xl">
+                  <h3 className="text-lg font-semibold mb-1">Agent integration</h3>
+                  <p className="text-text-secondary text-sm">
+                    Attach an agent to FmS with one copyable line, pick the host the dock
+                    dials, and set the MCP policy — all on the Agent page under Tools. The
+                    dock itself stays available on every screen, and it is where approvals
+                    and permission requests appear.
                   </p>
-                )}
-              </div>
-
-              {/* The confirm dialog, inline. Same content the `agent-confirm-request`
-                  event carries, shown here because the Connect card is where the
-                  user acts on it. */}
-              {confirm && (
-                <div className="mb-5 rounded-md border border-accent-bg/40 bg-accent-bg/10 p-3 text-sm space-y-2">
-                  <p className="font-medium">Host {confirm.display_name}?</p>
-                  <p className="text-text-secondary">
-                    {confirm.reason}: <code>{confirm.endpoint}</code>
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      className={btnGhost}
-                      onClick={() => void answerConfirm(true)}
-                    >
-                      Approve and connect
-                    </button>
-                    <button
-                      type="button"
-                      className={btnGhost}
-                      onClick={() => void answerConfirm(false)}
-                    >
-                      Cancel
-                    </button>
-                  </div>
                 </div>
-              )}
-
-              {/* Payload A — the pointer sentence. One line, and the manual it
-                  points at teaches the rest. */}
-              <div className="mb-4">
-                <label className="block font-medium mb-1">
-                  1 · Paste this sentence (preferred)
-                </label>
-                <p className="text-text-secondary text-sm mb-2">
-                  {manual?.connect.pointer_when ??
-                    "For any agent that can fetch a URL."}
-                </p>
-                <div className="flex items-start gap-2">
-                  <code className="flex-1 px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary text-sm break-all">
-                    {manual?.connect.pointer_sentence ?? "—"}
-                  </code>
-                  <button
-                    type="button"
-                    className={btnGhost}
-                    onClick={() =>
-                      copyPayload("pointer", manual?.connect.pointer_sentence ?? "")
-                    }
-                    disabled={!manual}
-                  >
-                    {copied === "pointer" ? "Copied" : "Copy"}
+                {onOpenAgent && (
+                  <button type="button" className={btnGhost} onClick={onOpenAgent}>
+                    Open the Agent page
                   </button>
-                </div>
-              </div>
-
-              {/* Payload B — the inline block. "Can attach MCP" is not the same
-                  as "can fetch a URL", and without this the whole second class
-                  of agents fails silently. */}
-              <div className="mb-4">
-                <label className="block font-medium mb-1">
-                  2 · Or paste this block
-                </label>
-                <p className="text-text-secondary text-sm mb-2">
-                  {manual?.connect.inline_when ??
-                    "For an agent that can attach an MCP server but cannot fetch a URL."}
-                </p>
-                <div className="flex items-start gap-2">
-                  <pre className="flex-1 px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary text-xs whitespace-pre-wrap break-all">
-                    {manual?.connect.inline_block ?? "—"}
-                  </pre>
-                  <button
-                    type="button"
-                    className={btnGhost}
-                    onClick={() =>
-                      copyPayload("inline", manual?.connect.inline_block ?? "")
-                    }
-                    disabled={!manual}
-                  >
-                    {copied === "inline" ? "Copied" : "Copy"}
-                  </button>
-                </div>
-              </div>
-
-              {/* Per-product config lines, still copy-only. */}
-              {(manual?.connect.snippets.length ?? 0) > 0 && (
-                <div className="mb-4">
-                  <label className="block font-medium mb-1">Config lines</label>
-                  <p className="text-text-secondary text-sm mb-2">
-                    {manual?.connect.never}
-                  </p>
-                  <ul className="space-y-2">
-                    {manual?.connect.snippets.map((s) => (
-                      <li key={s.product} className="flex items-start gap-2">
-                        <span className="w-24 shrink-0 pt-2 text-sm text-text-secondary">
-                          {s.product}
-                        </span>
-                        <pre className="flex-1 px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary text-xs whitespace-pre-wrap break-all">
-                          {s.text}
-                        </pre>
-                        <button
-                          type="button"
-                          className={btnGhost}
-                          onClick={() => copyPayload(s.product, s.text)}
-                        >
-                          {copied === s.product ? "Copied" : "Copy"}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              {/* The two things here that are still settings. The policy mode
-                  belongs on this page precisely because an agent under
-                  "enforce" is refused the ability to change it itself. */}
-              <div className="mb-4 max-w-md">
-                <label className="block font-medium mb-1" htmlFor="mcp-policy">
-                  Agent policy mode
-                </label>
-                <p className="text-text-secondary text-sm mb-2">
-                  <em>permissive</em> classifies and journals every MCP call but
-                  refuses nothing. <em>enforce</em> additionally refuses the
-                  destructive and human-handoff tiers, and refuses an
-                  agent&apos;s attempt to change this setting. Live mode:{" "}
-                  <strong>{manual?.trust.policy.mode ?? "unknown"}</strong>.
-                  Takes effect when you save.
-                </p>
-                <select
-                  id="mcp-policy"
-                  className="w-full px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
-                  value={globalSettings?.mcp_policy ?? "permissive"}
-                  onChange={(e) => updateGlobalField("mcp_policy", e.target.value)}
-                >
-                  <option value="permissive">permissive — journal only</option>
-                  <option value="enforce">enforce — refuse destructive tools</option>
-                </select>
-              </div>
-
-              {/* P3: the MCP surface is a runtime switch, not a build feature.
-                  It is baked into the router, so saving this restarts the local
-                  web service — said out loud because an attached agent loses its
-                  tools for a moment. */}
-              <label className="flex items-start gap-2 mb-4 cursor-pointer max-w-2xl">
-                <input
-                  type="checkbox"
-                  className="w-4 h-4 mt-0.5"
-                  checked={globalSettings?.mcp_enabled ?? true}
-                  onChange={(e) => {
-                    setGlobalSettings((prev) =>
-                      prev ? { ...prev, mcp_enabled: e.target.checked } : prev
-                    );
-                    setSavedGlobal(false);
-                  }}
-                />
-                <span>
-                  <span className="font-medium">Expose the MCP server (agents)</span>
-                  <span className="block text-text-secondary text-sm">
-                    Serves <code>/mcp</code> and the generated <code>/agent.md</code>{" "}
-                    manual. Saving restarts the local web service, because the
-                    routes are chosen when the router is built: an agent attached
-                    right now loses its tools until the restart returns, and
-                    <code>/api/v1/status</code> keeps answering with{" "}
-                    <code>mcp_enabled: false</code> so a peer can tell why{" "}
-                    <code>/mcp</code> 404s. Under <em>enforce</em> an agent cannot
-                    flip this itself.
-                  </span>
-                </span>
-              </label>
-
-              <label className="flex items-start gap-2 mb-4 cursor-pointer max-w-2xl">
-                <input
-                  type="checkbox"
-                  className="w-4 h-4 mt-0.5"
-                  checked={globalSettings?.goose_acp_enabled ?? false}
-                  onChange={(e) => {
-                    setGlobalSettings((prev) =>
-                      prev ? { ...prev, goose_acp_enabled: e.target.checked } : prev
-                    );
-                    setSavedGlobal(false);
-                  }}
-                />
-                <span>
-                  <span className="font-medium">Show the agent dock</span>
-                  <span className="block text-text-secondary text-sm">
-                    The dock is the second way in: instead of attaching to FmS, it
-                    attaches FmS to an agent host — a <code>goose serve</code> you
-                    started yourself, or a program FmS spawns
-                    {globalSettings?.goose_acp_url
-                      ? <> (at <code>{globalSettings.goose_acp_url}</code>)</>
-                      : null}
-                    . Slower to set up, but it is the only window where FmS can
-                    show an agent&apos;s reasoning, tool calls and permission
-                    requests.
-                  </span>
-                </span>
-              </label>
-
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  className={btnGhost}
-                  onClick={handleTestAgent}
-                  disabled={agentTest?.kind === "busy"}
-                >
-                  {agentTest?.kind === "busy" ? "Connecting…" : "Test dock connection"}
-                </button>
-                {agentTest && agentTest.kind !== "busy" && (
-                  <span
-                    className={`text-sm ${
-                      agentTest.kind === "ok" ? "text-green-500" : "text-error-text"
-                    }`}
-                  >
-                    {agentTest.text}
-                  </span>
                 )}
               </div>
             </div>
           )}
+
         </section>
 
         {/* ── Workspace Settings section ─────────────────────────── */}

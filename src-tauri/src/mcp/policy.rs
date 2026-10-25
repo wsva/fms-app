@@ -464,7 +464,8 @@ pub(crate) fn audit_query(
 /// Fields of `settings_set` that would change the policy governing the caller.
 /// An agent that can rewrite its own leash has no leash, so under `"enforce"`
 /// these are refused whatever tier the tool itself sits in — the user makes this
-/// change from the Settings page.
+/// change on the Agent page (Tools → Agent → Surface), which an attached agent
+/// has no write path to.
 ///
 /// `mcp_enabled` is the same escalation one level up: turning the server off is
 /// how an agent would silence the journal and the rest of the tool set, and
@@ -496,7 +497,8 @@ fn deny_message(tool: &str, tier: Tier, escalation: Option<&str>) -> String {
             "`{}` was refused because it writes `{}`, {}. An agent that can rewrite its own \
              surface has none. Nothing was changed.\n\
              \n\
-             Ask the user to make this change themselves on the Settings page. Every other \
+             Ask the user to make this change themselves on the Agent page \
+             (Tools → Agent → Surface). Every other \
              settings field is still writable through `settings_set`.\n\
              \n\
              The attempt was recorded in the audit journal (`app_audit_get`).",

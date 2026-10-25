@@ -32,6 +32,8 @@ import {
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { isAgentHost } from "@/lib/agent/host";
+import { AGENT_SURFACE_SAVED, useAgentControl } from "@/lib/agent/control";
+import AgentConfirmCard from "./AgentConfirmCard";
 import { startRecording, stopRecording, type VoiceState } from "@/lib/voice-input";
 import { VoiceMicButton } from "@/components/voice/VoiceMicButton";
 import type {
@@ -144,6 +146,16 @@ export default function AgentDock() {
     if (v) setUnread(false);
     if (persist) localStorage.setItem(DOCK_OPEN_KEY, v ? "1" : "0");
   }, []);
+
+  // The host-approval ask ("host this one?") is shared state in
+  // lib/agent/control, not this component's: an agent calling
+  // `agent_host_connect` over MCP raises it while the user may be on any tab,
+  // and this dock is the one surface always mounted. Same rule as a tool
+  // permission — a pending ask brings the dock forward.
+  const { confirm: hostConfirm } = useAgentControl();
+  useEffect(() => {
+    if (hostConfirm) setOpen(true, false);
+  }, [hostConfirm, setOpen]);
 
   // ---- Load persisted presentation state + platform flag ----
   useEffect(() => {
@@ -344,6 +356,15 @@ export default function AgentDock() {
       console.error("agent: failed to read status/settings", e);
     }
   }, []);
+
+  // The Agent page saves `goose_acp_enabled` / `mcp_enabled` on its own page
+  // (Settings no longer edits them). Reload when it does, so the dock appears or
+  // adopts the new surface immediately instead of after a restart.
+  useEffect(() => {
+    const onSaved = () => void refreshStatus();
+    window.addEventListener(AGENT_SURFACE_SAVED, onSaved);
+    return () => window.removeEventListener(AGENT_SURFACE_SAVED, onSaved);
+  }, [refreshStatus]);
 
   const doConnect = useCallback(async () => {
     if (!isAgentHost() || connecting) return;
@@ -629,7 +650,7 @@ export default function AgentDock() {
         style={fabStyle}
       >
         <Bot size={22} />
-        {(unread || busy || permission) && (
+        {(unread || busy || permission || hostConfirm) && (
           <span className="absolute top-0.5 right-0.5 w-3 h-3 rounded-full bg-yellow-500 border-2 border-bg-card" />
         )}
       </button>
@@ -693,10 +714,20 @@ export default function AgentDock() {
             </button>
           </div>
 
+          {/* A host the Rust trust rule wants approved before dialling. The same
+              card the Agent page's Hosting tab renders, from the same store, so
+              answering in either place clears it in both. */}
+          {hostConfirm && (
+            <div className="p-3 border-b border-border-default">
+              <AgentConfirmCard compact />
+            </div>
+          )}
+
           {!enabled && !status.connected && (
             <div className="px-4 py-2 text-xs text-text-tertiary bg-bg-muted border-b border-border-default">
-              The Agent is disabled. Enable it and set the goose ACP URL/secret in
-              Settings → Agent (Goose ACP), then start <code>goose serve</code>.
+              The Agent is disabled. Switch on <em>Show the agent dock</em> on the
+              Agent page (Tools → Agent → Surface), then pick a host on its
+              Hosting tab.
             </div>
           )}
 
