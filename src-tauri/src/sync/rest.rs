@@ -115,6 +115,11 @@ struct StatusResp {
     /// Hostname of this machine, so a scanned candidate can be labelled with
     /// *which* PC it is. Empty if the OS did not report one.
     machine: String,
+    /// Whether `/mcp` (and the `/agent.md` manual that describes it) is served.
+    /// The user can switch it off on the Settings page; this field is how a peer
+    /// distinguishes "404 because the surface is off" from "404 because the
+    /// address is wrong".
+    mcp_enabled: bool,
 }
 
 async fn status(State(st): State<RestState>) -> Response {
@@ -131,6 +136,11 @@ async fn status(State(st): State<RestState>) -> Response {
             role: settings.role(),
             cluster_id: settings.cluster_id(),
             machine: crate::sync::machine_name(),
+            mcp_enabled: settings
+                .settings
+                .lock()
+                .map(|s| s.mcp_enabled)
+                .unwrap_or(true),
         }),
     )
         .into_response()

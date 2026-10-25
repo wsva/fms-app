@@ -26,8 +26,10 @@ use crate::models::{self, ModelState};
 use crate::settings::SettingsState;
 use crate::sync;
 
-/// Default port the web server binds to.
-const DEFAULT_PORT: u16 = 35711;
+/// Default port the web server binds to. `pub(crate)` because `mcp/bridge.rs`
+/// needs it as the fallback target when `FMS_MCP_URL` is unset — one constant,
+/// so the proxy cannot drift from the thing it proxies to.
+pub(crate) const DEFAULT_PORT: u16 = 35711;
 
 /// Default UDP port for the LAN/Tailscale discovery beacon + probe.
 const DISCOVERY_PORT: u16 = 35712;
@@ -294,6 +296,44 @@ pub async fn web_service_stop(
     Ok(state.build_status())
 }
 
+/// Rebuild the router after `mcp_enabled` changed. The MCP routes are chosen at
+/// build time, so a toggle only takes effect on a new listener; a service that
+/// was stopped stays stopped rather than being started behind the user's back.
+///
+/// The old listener is shut down first and the rebind is retried for about a
+/// second: graceful shutdown is asynchronous and the port is not shareable, so
+/// the first attempt can still race the previous accept loop on Windows.
+pub async fn restart_after_mcp_toggle(app: &AppHandle) -> Result<(), String> {
+    let Some(state) = app.try_state::<WebServiceState>() else {
+        return Ok(());
+    };
+    if !state.running.load(Ordering::SeqCst) {
+        log::info!("[WebService] mcp_enabled changed while stopped; leaving it stopped");
+        return Ok(());
+    }
+    let config = state.config.lock().unwrap().clone();
+    log::info!("[WebService] mcp_enabled changed; rebuilding the router");
+    state.stop_inner();
+    let mut last = String::new();
+    for _ in 0..20 {
+        match state.start_inner(app.clone(), config.clone()).await {
+            Ok(_) => {
+                log::info!("[WebService] router rebuilt after the MCP switch");
+                return Ok(());
+            }
+            Err(e) => {
+                last = e;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    log::error!("[WebService] could not restart after the MCP switch: {}", last);
+    Err(format!(
+        "the MCP surface was switched, but the local web service could not be restarted ({}). Start it again from the Settings page.",
+        last
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -308,6 +348,14 @@ fn build_router(app: AppHandle, config: WebServiceConfig) -> Router {
     let enable_stt = config.stt;
     let enable_dataset = config.dataset;
     let enable_tts = config.tts;
+    // The agent surface is a runtime setting, not a build feature: `/mcp`, and
+    // the generated manual that points at it, are registered here or not at all.
+    // `/api/v1/status` stays reachable either way and reports the flag, so a
+    // peer that gets a 404 knows why it did.
+    let enable_mcp = app
+        .try_state::<SettingsState>()
+        .map(|s| s.settings.lock().map(|v| v.mcp_enabled).unwrap_or(true))
+        .unwrap_or(true);
     let state = AppState {
         app: app.clone(),
         config: Arc::new(config),
@@ -318,14 +366,20 @@ fn build_router(app: AppHandle, config: WebServiceConfig) -> Router {
     // applied below.
     let rest_router = sync::rest::router(app.clone());
 
-    // MCP server (always enabled when web service is running)
-    let mcp_service = crate::mcp::create_mcp_service(app);
+    let mut r = Router::new().route("/", get(index_handler));
 
-    let mut r = Router::new()
-        .route("/", get(index_handler))
-        .route("/agent.md", get(agent_md_handler))
-        .route("/agent.json", get(agent_json_handler))
-        .nest_service("/mcp", mcp_service);
+    if enable_mcp {
+        // MCP server + the two manual routes that describe it. Registering the
+        // manual while `/mcp` is off would advertise a door that is not there.
+        let mcp_service = crate::mcp::create_mcp_service(app);
+        r = r
+            .route("/agent.md", get(agent_md_handler))
+            .route("/agent.json", get(agent_json_handler))
+            .nest_service("/mcp", mcp_service);
+        log::info!("[WebService] MCP surface enabled (/mcp, /agent.md, /agent.json)");
+    } else {
+        log::info!("[WebService] MCP surface disabled by mcp_enabled=false; /mcp 404s");
+    }
 
     if enable_stt {
         r = r.route("/stt", get(stt_form).post(stt_handler));

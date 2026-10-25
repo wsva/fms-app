@@ -26,6 +26,7 @@ import {
   Wrench,
   Brain,
   ListChecks,
+  Terminal,
   X,
 } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
@@ -44,6 +45,7 @@ import type {
   AgentPermissionRequest,
   AgentDone,
   AgentError,
+  AgentLog,
 } from "@/lib/agent/types";
 
 // ---------------------------------------------------------------------------
@@ -87,6 +89,11 @@ const FAB_POS_KEY = "agent.fabPos";
 // drag and suppresses the click-to-open handler on pointerup.
 const FAB_DRAG_THRESHOLD = 4;
 
+// stderr from a spawned ACP host (`agent-log`). A stdio host is a process FmS
+// starts, so its failures arrive as text, not as exceptions; the last 200 lines
+// are kept for the turn and shown greyed out under the conversation.
+const MAX_HOST_LOG = 200;
+
 export default function AgentDock() {
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [input, setInput] = useState("");
@@ -101,6 +108,8 @@ export default function AgentDock() {
   // send=true). Held here until the dock can actually send it — see the effect
   // after handleSend.
   const [pendingSend, setPendingSend] = useState<string | null>(null);
+  // Host stderr for the current turn, capped at MAX_HOST_LOG lines.
+  const [hostLog, setHostLog] = useState<AgentLog[]>([]);
 
   // ---- Dock presentation state ----
   const [mobile, setMobile] = useState(false);
@@ -394,6 +403,14 @@ export default function AgentDock() {
     };
 
     reg<AgentStatus>("agent-status", (p) => setStatus(p));
+    // A spawned host's stderr, line by line. Kept per turn (cleared on send) so
+    // the log explains *this* run rather than accumulating for the session.
+    reg<AgentLog>("agent-log", (p) =>
+      setHostLog((prev) => {
+        const next = [...prev, p];
+        return next.length > MAX_HOST_LOG ? next.slice(-MAX_HOST_LOG) : next;
+      })
+    );
     // Another page (e.g. the Workflow page) hands us a reviewed prompt: load it
     // into the input and bring the dock forward, but let the user do the send.
     // `send` (set by the app_prefill_prompt MCP tool) asks for the dispatch too;
@@ -494,6 +511,7 @@ export default function AgentDock() {
     if (!text || busy || !isAgentHost() || !status.connected) return;
     reopenedThisTurn.current = false;
     setBlocks((prev) => [...prev, { kind: "user", text }]);
+    setHostLog([]);
     setInput("");
     setBusy(true);
     try {
@@ -698,6 +716,19 @@ export default function AgentDock() {
             {blocks.map((b, i) => (
               <BlockView key={i} block={b} streaming={busy && i === blocks.length - 1} />
             ))}
+
+            {/* Host stderr for this turn. Grey, capped, scrollable — it explains
+                why a spawned host went quiet without competing with the answer. */}
+            {hostLog.length > 0 && (
+              <details className="text-xs text-text-tertiary" open>
+                <summary className="cursor-pointer select-none flex items-center gap-1.5">
+                  <Terminal size={12} /> Host log ({hostLog.length})
+                </summary>
+                <pre className="mt-1 max-h-40 overflow-auto px-3 py-2 rounded-lg bg-bg-card border border-border-default font-mono whitespace-pre-wrap break-words">
+                  {hostLog.map((l) => `${l.source}: ${l.text}`).join("\n")}
+                </pre>
+              </details>
+            )}
 
             {/* Permission prompt */}
             {permission && (

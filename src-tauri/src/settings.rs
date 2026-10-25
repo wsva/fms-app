@@ -64,9 +64,15 @@ pub struct AppSettings {
     /// Empty means the server runs unauthenticated.
     #[serde(default)]
     pub goose_acp_secret: String,
-    /// Whether the Agent (goose ACP) integration is enabled.
+    /// Whether the Agent (goose ACP) integration is enabled. Legacy: the
+    /// record-level `AgentHost::enabled` is what the dock honours now.
     #[serde(default)]
     pub goose_acp_enabled: bool,
+    /// Agents the dock can host. `AppSettings` is the authority for these
+    /// records — [`GlobalSettings`] is a projection, and an empty list is
+    /// migrated at load from `goose_acp_url`.
+    #[serde(default)]
+    pub agent_hosts: Vec<AgentHost>,
     /// Snapshot server base URL of the machine we sync datasets *from*
     /// (e.g. `http://192.168.1.20:35711`). Global, not workspace-scoped. Filled
     /// by `pc_discover` or the manual field on the Datasets Sync page, and left
@@ -119,6 +125,14 @@ pub struct AppSettings {
     /// not the same claim as "may destroy".
     #[serde(default = "default_mcp_policy")]
     pub mcp_policy: String,
+    /// Whether the built-in MCP server (and the generated `/agent.md` /
+    /// `/agent.json`) is exposed at all. A **runtime** switch, not a cargo
+    /// feature: flipping it rebuilds the web service's router, so a build that
+    /// wants no agent surface does not need a second feature matrix. Off means
+    /// `/mcp` and the manual routes 404 while `/api/v1/status` still answers
+    /// with `mcp_enabled: false`, so a peer can tell *why*.
+    #[serde(default = "default_mcp_enabled")]
+    pub mcp_enabled: bool,
 }
 
 fn default_ollama_url() -> String {
@@ -138,6 +152,71 @@ pub(crate) fn default_goose_acp_url() -> String {
 
 fn default_mcp_policy() -> String {
     "permissive".to_string()
+}
+
+fn default_mcp_enabled() -> bool {
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Agent host records (ideas.md §8 step 5)
+// ---------------------------------------------------------------------------
+
+/// How the dock reaches one agent. Serialized inside the record, so the variant
+/// survives a settings round-trip.
+///
+/// A `Ws` arm carries only the URL: the secret stays in
+/// [`AppSettings::goose_acp_secret`] (already in [`SECRET_FIELDS`]), so a host
+/// record never contains a credential and needs no second redaction path.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentTransport {
+    Ws {
+        url: String,
+    },
+    Stdio {
+        program: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+}
+
+/// One agent the dock can host: a `goose serve` socket, or a program it spawns
+/// and speaks ACP to over stdio. `id` is stable and user-invisible;
+/// `display_name` is what the Connect card shows.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct AgentHost {
+    pub id: String,
+    pub display_name: String,
+    pub transport: AgentTransport,
+    /// Only enabled hosts are offered as the dial target; a disabled one stays
+    /// in the list so its command and name are not lost.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Last `sessionId` this host reported. Advisory: every connect creates a
+    /// fresh session, this is only what the status card echoes back.
+    #[serde(default)]
+    pub last_session: Option<String>,
+}
+
+impl AgentHost {
+    /// The record the legacy `goose_acp_*` fields describe. Used by the
+    /// load-time migration and as the fallback dial target.
+    pub fn goose_ws(url: &str, enabled: bool) -> Self {
+        Self {
+            id: "goose".to_string(),
+            display_name: "Goose".to_string(),
+            transport: AgentTransport::Ws {
+                url: url.to_string(),
+            },
+            enabled,
+            last_session: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +310,50 @@ impl AppSettings {
         *self = merged;
         Ok((updated, skipped))
     }
+
+    /// The host the dock dials: the first enabled record, else the first
+    /// record, else a synthesized goose WS host from the legacy fields — so a
+    /// settings file written before records existed still connects.
+    pub fn active_agent_host(&self) -> AgentHost {
+        if let Some(host) = self.agent_hosts.iter().find(|h| h.enabled) {
+            return host.clone();
+        }
+        if let Some(host) = self.agent_hosts.first() {
+            return host.clone();
+        }
+        AgentHost::goose_ws(&self.goose_acp_url_or_default(), self.goose_acp_enabled)
+    }
+
+    /// The legacy address, normalised: empty means "never set", which probes
+    /// the documented default rather than failing.
+    pub fn goose_acp_url_or_default(&self) -> String {
+        if self.goose_acp_url.trim().is_empty() {
+            default_goose_acp_url()
+        } else {
+            self.goose_acp_url.clone()
+        }
+    }
+
+    pub fn agent_host(&self, id: &str) -> Option<&AgentHost> {
+        self.agent_hosts.iter().find(|h| h.id == id)
+    }
+
+    /// Insert or replace a record by id. Enabling one host disables the rest:
+    /// the dock hosts exactly one session at a time, so "enabled" *is* the
+    /// active selection rather than an independent flag.
+    pub fn upsert_agent_host(&mut self, host: AgentHost) {
+        if host.enabled {
+            for other in self.agent_hosts.iter_mut() {
+                if other.id != host.id {
+                    other.enabled = false;
+                }
+            }
+        }
+        match self.agent_hosts.iter_mut().find(|h| h.id == host.id) {
+            Some(slot) => *slot = host,
+            None => self.agent_hosts.push(host),
+        }
+    }
 }
 
 /// Global-only settings that are NOT workspace-scoped.
@@ -255,9 +378,13 @@ pub struct GlobalSettings {
     /// Secret key sent as `X-Secret-Key` when connecting to `goose serve`.
     #[serde(default)]
     pub goose_acp_secret: String,
-    /// Whether the Agent (goose ACP) integration is enabled.
+    /// Whether the Agent (goose ACP) integration is enabled. Legacy: the
+    /// record-level `AgentHost::enabled` is what the dock honours now.
     #[serde(default)]
     pub goose_acp_enabled: bool,
+    /// Agent hosts (projection of [`AppSettings::agent_hosts`]).
+    #[serde(default)]
+    pub agent_hosts: Vec<AgentHost>,
     /// PC snapshot server base URL (global fallback / remembered value).
     #[serde(default)]
     pub pc_url: String,
@@ -289,6 +416,9 @@ pub struct GlobalSettings {
     /// Settings page.
     #[serde(default = "default_mcp_policy")]
     pub mcp_policy: String,
+    /// Whether the MCP surface is exposed (see [`AppSettings::mcp_enabled`]).
+    #[serde(default = "default_mcp_enabled")]
+    pub mcp_enabled: bool,
 }
 
 impl Default for GlobalSettings {
@@ -302,6 +432,7 @@ impl Default for GlobalSettings {
             goose_acp_url: default_goose_acp_url(),
             goose_acp_secret: String::new(),
             goose_acp_enabled: false,
+            agent_hosts: Vec::new(),
             pc_url: String::new(),
             pc_token: String::new(),
             device_id: String::new(),
@@ -311,6 +442,7 @@ impl Default for GlobalSettings {
             model_unload_timeout: ModelUnloadTimeout::default(),
             onboarding_completed: false,
             mcp_policy: default_mcp_policy(),
+            mcp_enabled: default_mcp_enabled(),
         }
     }
 }
@@ -325,6 +457,7 @@ impl GlobalSettings {
             goose_acp_url: s.goose_acp_url.clone(),
             goose_acp_secret: s.goose_acp_secret.clone(),
             goose_acp_enabled: s.goose_acp_enabled,
+            agent_hosts: s.agent_hosts.clone(),
             pc_url: s.pc_url.clone(),
             pc_token: s.pc_token.clone(),
             device_id: s.device_id.clone(),
@@ -334,6 +467,7 @@ impl GlobalSettings {
             model_unload_timeout: s.model_unload_timeout,
             onboarding_completed: s.onboarding_completed,
             mcp_policy: s.mcp_policy.clone(),
+            mcp_enabled: s.mcp_enabled,
         }
     }
 
@@ -345,6 +479,12 @@ impl GlobalSettings {
         s.goose_acp_url = self.goose_acp_url.clone();
         s.goose_acp_secret = self.goose_acp_secret.clone();
         s.goose_acp_enabled = self.goose_acp_enabled;
+        // Records live in `AppSettings`; only overwrite when the global layer
+        // actually has some, so loading first the global file and then a
+        // workspace file cannot wipe the workspace's hosts.
+        if !self.agent_hosts.is_empty() {
+            s.agent_hosts = self.agent_hosts.clone();
+        }
         s.pc_url = self.pc_url.clone();
         s.pc_token = self.pc_token.clone();
         s.device_id = self.device_id.clone();
@@ -356,6 +496,7 @@ impl GlobalSettings {
         // An unrecognised string is normalised at the enforcement seam, not
         // here, so a typo cannot silently widen what an agent may do.
         s.mcp_policy = self.mcp_policy.clone();
+        s.mcp_enabled = self.mcp_enabled;
     }
 }
 
@@ -437,6 +578,7 @@ impl Default for AppSettings {
             goose_acp_url: default_goose_acp_url(),
             goose_acp_secret: String::new(),
             goose_acp_enabled: false,
+            agent_hosts: Vec::new(),
             pc_url: String::new(),
             pc_token: String::new(),
             device_id: String::new(),
@@ -445,6 +587,7 @@ impl Default for AppSettings {
             cluster_id: String::new(),
             read_aloud_tts_voice: String::new(),
             mcp_policy: default_mcp_policy(),
+            mcp_enabled: default_mcp_enabled(),
         }
     }
 }
@@ -481,6 +624,7 @@ impl SettingsState {
         } else {
             log::info!("[Settings] No settings found in workspace directory, using current settings");
         }
+        self.migrate_agent_hosts();
     }
 
     /// Re-read settings from disk using the (now-initialized) base directories
@@ -492,6 +636,33 @@ impl SettingsState {
         let settings = Self::load(ws_dir.as_ref()).unwrap_or_default();
         *self.settings.lock().unwrap() = settings;
         log::info!("[Settings] Reloaded settings after app_paths::init");
+        self.migrate_agent_hosts();
+    }
+
+    /// One-time load migration for agent host records (ideas.md §8 step 5): a
+    /// settings file written before records existed has only `goose_acp_url`.
+    /// Synthesize the single WS host that field implies and write it back, so
+    /// the record the user sees is the one the dock dials. Runs after
+    /// `app_paths::init` (via `reload` / `set_workspace_dir`), so it cannot
+    /// write to the pre-init placeholder path.
+    fn migrate_agent_hosts(&self) {
+        let mut s = self.settings.lock().unwrap().clone();
+        if !s.agent_hosts.is_empty() {
+            return;
+        }
+        s.agent_hosts
+            .push(AgentHost::goose_ws(&s.goose_acp_url_or_default(), s.goose_acp_enabled));
+        let ws_dir = self.workspace_dir.lock().unwrap().clone();
+        match SettingsState::save(&s, ws_dir.as_ref()) {
+            Ok(()) => {
+                log::info!(
+                    "[Settings] migrated agent_hosts: 1 ws host for '{}'",
+                    s.goose_acp_url_or_default()
+                );
+                *self.settings.lock().unwrap() = s;
+            }
+            Err(e) => log::warn!("[Settings] agent_hosts migration not persisted: {}", e),
+        }
     }
 
     fn config_path(workspace_dir: Option<&PathBuf>) -> PathBuf {
@@ -745,12 +916,20 @@ pub async fn settings_set(
     let ws_dir = state.workspace_dir.lock().unwrap().clone();
     SettingsState::save(&settings, ws_dir.as_ref())?;
     log::info!("[Settings] Settings updated");
-    {
+    let mcp_flipped = {
         let mut s = state.settings.lock().unwrap();
+        let flipped = s.mcp_enabled != settings.mcp_enabled;
         *s = settings;
-    }
+        flipped
+    };
     // Emit event so other pages can react to settings changes
     let _ = app.emit("settings-changed", ());
+    if mcp_flipped {
+        // The MCP routes are baked into the router at build time, so the surface
+        // only changes once the listener is rebuilt.
+        #[cfg(feature = "desktop")]
+        crate::sync::server::restart_after_mcp_toggle(&app).await?;
+    }
     Ok(())
 }
 
@@ -816,12 +995,19 @@ pub async fn settings_set_global(
     log::info!("[Settings] Global settings updated");
     
     // Update in-memory state
-    {
+    let mcp_flipped = {
         let mut s = state.settings.lock().unwrap();
+        let before = s.mcp_enabled;
         global.apply_to(&mut *s);
-    }
+        s.mcp_enabled != before
+    };
     
     let _ = app.emit("settings-changed", ());
+    if mcp_flipped {
+        // Desktop only: the thin client runs no web service to rebuild.
+        #[cfg(feature = "desktop")]
+        crate::sync::server::restart_after_mcp_toggle(&app).await?;
+    }
     Ok(())
 }
 
@@ -952,4 +1138,105 @@ pub async fn settings_forget_hub(
     *state.settings.lock().unwrap() = s.clone();
     let _ = app.emit("settings-changed", ());
     Ok(s)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod agent_host_tests {
+    use super::*;
+
+    fn stdio_host(id: &str) -> AgentHost {
+        AgentHost {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            transport: AgentTransport::Stdio {
+                program: "codex-acp".to_string(),
+                args: vec!["--stdio".to_string()],
+                env: std::collections::BTreeMap::from([("K".to_string(), "V".to_string())]),
+                cwd: Some("/tmp".to_string()),
+            },
+            enabled: true,
+            last_session: None,
+        }
+    }
+
+    /// The record is persisted as JSON, so the tag has to survive a round trip
+    /// in both directions — otherwise a host silently changes transport kind at
+    /// the next app start.
+    #[test]
+    fn transport_round_trips_through_json() {
+        let ws = AgentTransport::Ws {
+            url: "ws://127.0.0.1:3284/acp".to_string(),
+        };
+        let text = serde_json::to_string(&ws).unwrap();
+        assert!(text.contains("\"kind\":\"ws\""), "got {}", text);
+        assert_eq!(serde_json::from_str::<AgentTransport>(&text).unwrap(), ws);
+
+        let stdio = serde_json::to_string(&stdio_host("codex").transport).unwrap();
+        assert!(stdio.contains("\"kind\":\"stdio\""), "got {}", stdio);
+        let back: AgentTransport = serde_json::from_str(&stdio).unwrap();
+        assert_eq!(back, stdio_host("codex").transport);
+    }
+
+    /// A settings file written before records existed has no `agent_hosts`; the
+    /// key must parse as empty rather than failing the whole load.
+    #[test]
+    fn missing_hosts_field_still_parses() {
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("agent_hosts");
+        let parsed: AppSettings = serde_json::from_value(value).unwrap();
+        assert!(parsed.agent_hosts.is_empty());
+    }
+
+    /// "Enabled" is the dock's active selection, not an independent flag: the
+    /// dock hosts one session at a time.
+    #[test]
+    fn enabling_one_host_disables_the_others() {
+        let mut s = AppSettings::default();
+        s.upsert_agent_host(AgentHost::goose_ws("ws://127.0.0.1:3284/acp", true));
+        s.upsert_agent_host(stdio_host("codex"));
+        assert!(!s.agent_host("goose").unwrap().enabled);
+        assert!(s.agent_host("codex").unwrap().enabled);
+        assert_eq!(s.agent_hosts.len(), 2);
+        // Re-registering the same id replaces it instead of appending.
+        s.upsert_agent_host(stdio_host("codex"));
+        assert_eq!(s.agent_hosts.len(), 2);
+    }
+
+    /// Before any record exists, the legacy `goose_acp_url` still has to dial —
+    /// and an empty stored address means "never set", not "connect to nothing".
+    #[test]
+    fn active_host_falls_back_to_the_legacy_address() {
+        let mut s = AppSettings::default();
+        s.goose_acp_url = "ws://10.0.0.5:3284/acp".to_string();
+        let active = s.active_agent_host();
+        assert_eq!(active.id, "goose");
+        assert_eq!(
+            active.transport,
+            AgentTransport::Ws {
+                url: "ws://10.0.0.5:3284/acp".to_string()
+            }
+        );
+
+        s.goose_acp_url = String::new();
+        assert_eq!(
+            s.active_agent_host().transport,
+            AgentTransport::Ws {
+                url: default_goose_acp_url()
+            }
+        );
+    }
+
+    /// A record, once present, wins over the legacy fields — that is the whole
+    /// point of the migration.
+    #[test]
+    fn a_record_wins_over_the_legacy_fields() {
+        let mut s = AppSettings::default();
+        s.goose_acp_url = "ws://10.0.0.5:3284/acp".to_string();
+        s.upsert_agent_host(stdio_host("codex"));
+        assert_eq!(s.active_agent_host().id, "codex");
+    }
 }

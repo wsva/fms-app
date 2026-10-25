@@ -27,27 +27,26 @@ Then the user makes exactly one choice, which is a *rendering* choice, not a con
 
 | Surface | Where | Notes |
 |---|---|---|
-| ✅ MCP server | [src-tauri/src/mcp/mod.rs](../../../src-tauri/src/mcp/mod.rs) — `rmcp` 3.4, Streamable HTTP | ~100 tools across 10 domain submodules, merged by `DatasetMcpServer::tool_router()` |
+| ✅ MCP server | [src-tauri/src/mcp/mod.rs](../../../src-tauri/src/mcp/mod.rs) — `rmcp` 3.4, Streamable HTTP | ~230 tools across 12 domain submodules, merged by `DatasetMcpServer::tool_router()` (the live count and names are rendered into `/agent.md`, never written by hand) |
+| ✅ MCP resources + prompts | `mcp/resources.rs`, `mcp/prompts.rs` | `fms://status`, `fms://docs/{start,principles,domain/*}`, `fms://workflows/templates`, `fms://datasets/{uuid}/layout`; the prompts are the [goose_recipe/](./goose_recipe/) YAML recipes, parsed on demand |
 | ✅ Auto-started endpoint | [src-tauri/src/sync/server.rs](../../../src-tauri/src/sync/server.rs) `build_router` → `.nest_service("/mcp", …)`, `DEFAULT_PORT` 35711 | Runs on app launch with no user action; real bound port via `WebServiceState::build_status().port` |
 | ✅ Open pre-auth probes | [src-tauri/src/sync/rest.rs](../../../src-tauri/src/sync/rest.rs) `status`, `cluster` | `GET /api/v1/status` → `version, app_name, dataset_count, protocol_version, role, cluster_id, machine`; reachable even from the untrusted zone (`zone_guard`) |
 | ✅ Trust zones | `sync/server.rs::zone_guard`, [src-tauri/src/sync/pairing.rs](../../../src-tauri/src/sync/pairing.rs) | Loopback + local `Host` header ⇒ Trusted, **no credentials** — that is the agent path. Tailscale CGNAT likewise trusted |
 | ✅ Human-readable index | `sync/server.rs::index_handler`, `MCP_SECTION_HTML` | The root page already lists endpoints and the MCP tool table — an agent with web fetch can read it today, as HTML prose |
-| ⚠️ ACP client (the dock's backend) | [src-tauri/src/ai/agent_acp.rs](../../../src-tauri/src/ai/agent_acp.rs) `agent_connect` | **WebSocket only**, dialed from `AppSettings.goose_acp_url` + `goose_acp_secret`; registers our MCP URL in `session/new` **only if** `agentCapabilities.mcpCapabilities.http` |
+| ⚠️ ACP client (the dock's backend) | [src-tauri/src/ai/agent_acp.rs](../../../src-tauri/src/ai/agent_acp.rs) `agent_connect` | **WebSocket only**, dialed from `AppSettings.goose_acp_url` + `goose_acp_secret`; registers our MCP URL in `session/new` **only if** `agentCapabilities.mcpCapabilities.http` — otherwise the agent is handed `mcpServers: []` and no tools |
 | ✅ App-control tools | [src-tauri/src/mcp/system.rs](../../../src-tauri/src/mcp/system.rs) `app_navigate`, `app_open_review`, `app_start_dictation`, `app_notify`, `app_get_ui_state` | Emit `agent-action`; performed by the shell bridge in [src/app/(app)/home/page.tsx](../../../src/app/(app)/home/page.tsx) |
 | ✅ Dock UI | [src/components/agent/AgentDock.tsx](../../../src/components/agent/AgentDock.tsx) | Overlay dock, draggable FAB, Ctrl+Space, auto-open on permission, `agent-prefill` extension point. Consumes only `agent-*` events — already agent-neutral |
-| ✅ Settings UI to delete | [src/components/settings/SettingsPage.tsx](../../../src/components/settings/SettingsPage.tsx) "Agent (Goose ACP)" section | `goose_acp_url`, `goose_acp_secret`, `goose_acp_enabled` + "Test connection" |
-| ⚠️ Config write path for agents | `mcp/system.rs::settings_set` | Deserializes a **whole `AppSettings` object**, and `AppSettings` *does* carry `goose_acp_url/secret/enabled` ([src-tauri/src/settings.rs](../../../src-tauri/src/settings.rs) L60-69). So an agent can already write the dock's dial target — but the tool description lists only the directory/model fields, so **no agent knows this is possible** |
+| ✅ The Connect card | [src/components/settings/SettingsPage.tsx](../../../src/components/settings/SettingsPage.tsx) "Connect an agent" | Status half (bound port, zone, dock state), the pointer sentence, the inline block, and copy-only per-product lines. It replaced the three hand-filled `goose_acp_*` fields; one `goose_acp_enabled` checkbox survives until step 5 replaces it with the host list |
+| ✅ Config write path for agents | `mcp/system.rs::settings_set` | A **patch**, not a whole-object write: only the fields present are touched, so a partial payload is the correct payload. Credentials are write-only (`***` means "leave it alone"), and `settings_get` redacts every secret in `SECRET_FIELDS` while keeping `has_<field>` discoverable |
 | ✅ Recipe / prompt assets | [goose_recipe/](./goose_recipe/), [prompt/](./prompt/) | Goose YAML envelope + portable `instructions:` prose over `dataset_*` tools |
 
-### 1.1 The gaps that block the scenario
+### 1.1 What is still missing
 
-- ⚠️➜💡 **No MCP resources, no MCP prompts.** `list_resources` / `read_resource` / `list_prompts` / `get_prompt` have **zero implementations** under [src-tauri/src/mcp/](../../../src-tauri/src/mcp). MCP defines three server primitives; we serve one. Resources and prompts *are* the protocol's "let the server teach the client" mechanisms — this is the single largest missing piece, and it is not an integration gap, it is an unused feature of a protocol we already speak.
-- 💡 No `initialize` `instructions` — MCP's server-supplied usage note that every conforming client receives automatically at handshake.
-- 💡 No machine-readable manual: no `/agent.md`, no `/.well-known/agent.json`, no content negotiation on `/` (agents truncate HTML).
-- 💡 No `app_bootstrap`: nothing tells an agent, in one call, what this app is, what is compiled in, and what to call first.
-- ⚠️ `app_get_ui_state.active_dataset_uuid` is **always null** — the dock hardcodes `activeDatasetUuid: null` ([AgentDock.tsx L402](../../../src/components/agent/AgentDock.tsx#L400-L403)). An agent can learn the tab but never the selected dataset.
-- 💡 Feature gates are invisible. The crate builds under `default = ["stt"]` / `desktop = [...]`, so **the tool surface genuinely differs per build**, and an agent has no way to know which build it is talking to before a call fails.
-- ⚠️ **`settings_get` returns the entire `AppSettings` verbatim** — including `goose_acp_secret` and `llm_api_key`. Any loopback MCP caller reads them. Fix before widening the config-write path.
+Everything the *capability* track needed is built (see [control.md](./control.md)); what remains is attachment:
+
+- ⚠️➜💡 **Mode 2 (hosted dock) — `agent_host_register` does not exist.** The dock dials a user-started `goose serve` over WebSocket and nothing else, so hosting an arbitrary ACP agent still needs the transport split (`ws | stdio`) plus a host record and a trust dialog (§3, §8 step 5).
+- 💡 **No stdio↔HTTP bridge.** `rmcp` is compiled without `transport-io` ([src-tauri/Cargo.toml L158](../../../src-tauri/Cargo.toml#L155-L165)), and the app serves MCP over Streamable HTTP only. An agent that speaks stdio MCP — which includes several CLI products, and every ACP agent that does not advertise `mcpCapabilities.http` — therefore gets no tools at all. A thin proxy fixes both classes at once, which is why it is step 5a rather than per-product work.
+- ⚠️ **A single `goose_acp_enabled` checkbox** is the only dialect-setting left on the Settings page; the host list in step 5 removes it.
 
 ---
 
@@ -214,11 +213,11 @@ What survives:
 
 ## 8. Sequencing
 
-1. 💡 **The Connect card + generated `/agent.md`, from one source** (§5.0), with both payloads (pointer + inline block). No transport work, no trust dialog, no discovery subsystem — and this step alone delivers the scenario for every agent that can attach HTTP MCP. It replaces the whole of §6's removed list.
-2. ⚠️ Preconditions: redact secrets from `settings_get`; declare `AppSettings` authoritative for the dial record; report the **real bound port** in the card, the manual, and `app_version`.
-3. 💡 `app_bootstrap` + `initialize` `instructions` — the same generated body, third rendering.
-4. 💡 MCP **resources** (domain docs) and **prompts** (recipes) — biggest capability gain for existing clients, and it ends the goose-envelope lock-in.
-5. 💡 `agent_host_*` commands + profile list + transport generalization (`stdio | ws`) + the stdio↔HTTP MCP bridge. Delete the three Settings fields; the card's config inputs become the status half.
+1. ✅ **The Connect card + generated `/agent.md`, from one source** (§5.0), with both payloads (pointer + inline block).
+2. ✅ Preconditions: secrets redacted from `settings_get`; the card, the manual and `app_version` all report the **real bound port**.
+3. ✅ `app_bootstrap` + `initialize` `instructions` — the same generated body, third rendering.
+4. ✅ MCP **resources** (domain docs) and **prompts** (recipes) — which ended the goose-envelope lock-in.
+5. 💡 `agent_host_*` commands + profile list + transport generalization (`stdio | ws`), **and the stdio↔HTTP bridge first** — without the bridge, a hosted stdio agent is given an empty `mcpServers` and can touch nothing, which is a worse first impression than no dock. Delete the last `goose_acp_enabled` field; the card's config inputs become the status half.
 6. 💡 Trust confirm dialog for stdio spawn and non-loopback endpoints.
 7. Deferred: mDNS/DNS-SD, PTY panel, concurrent multi-agent dock sessions — and **permanently dropped**: PATH probing and writing other products' config files.
 

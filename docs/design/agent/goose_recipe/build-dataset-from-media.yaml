@@ -1,4 +1,4 @@
-﻿version: 1.0.0
+version: 1.0.0
 title: build-dataset-from-media
 description: Build a complete dataset from media files only - generate subtitles, database, waveforms, adjust timestamps, and align to book/transcript references.
 instructions: |-

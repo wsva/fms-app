@@ -65,6 +65,10 @@ mod resources;
 // Not a tool domain either: the MCP *prompts* — the goose recipes embedded from
 // `docs/design/agent/goose_recipe/*.yaml`.
 mod prompts;
+// Not a tool domain either: the stdio ↔ HTTP proxy the executable enters with
+// `--mcp-bridge`, which is how a stdio-only agent (and an ACP agent without
+// `mcpCapabilities.http`) reaches this server's tools at all.
+pub(crate) mod bridge;
 
 // ---------------------------------------------------------------------------
 // MCP server state — shared across all connections

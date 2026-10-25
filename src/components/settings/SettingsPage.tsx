@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import {
   ChevronDown,
@@ -38,6 +39,11 @@ import {
   type MicDevice,
 } from "@/lib/voice-input";
 import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
+import type {
+  AgentConfirmRequest,
+  AgentHostList,
+  AgentStatus,
+} from "@/lib/agent/types";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -88,6 +94,9 @@ interface GlobalSettings {
   onboarding_completed: boolean;
   /** "permissive" | "enforce" — see `mcp/policy.rs`. */
   mcp_policy: string;
+  /** Whether `/mcp` and the generated manual are served at all. Chosen when the
+   *  router is built, so saving this restarts the local web service. */
+  mcp_enabled: boolean;
 }
 
 // The generated agent manual (`agent_manual_get` → `mcp/manual.rs::render_json`).
@@ -188,6 +197,13 @@ export default function SettingsPage() {
   const [manual, setManual] = useState<AgentManual | null>(null);
   const [manualLoading, setManualLoading] = useState(false);
   const [dockConnected, setDockConnected] = useState(false);
+  // The host records themselves (id, kind, endpoint, approval rule), so the
+  // switch offers what the backend would actually dial rather than a free-text
+  // address.
+  const [dockHosts, setDockHosts] = useState<AgentHostList | null>(null);
+  // A host the Rust trust rule marked `needs_confirmation`: shown inline until
+  // the user answers it, because approving is what unblocks the connect.
+  const [confirm, setConfirm] = useState<AgentConfirmRequest | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
   // ---- Platform (mobile vs desktop) ----
@@ -389,18 +405,19 @@ export default function SettingsPage() {
   }, [fetchSettings]);
 
   // ---- Connect card data ----
-
   const loadAgentManual = useCallback(async () => {
     if (!isTauri() || mobile) return;
     setManualLoading(true);
     try {
-      const [m, s] = await Promise.all([
+      const [m, list] = await Promise.all([
         invoke<AgentManual>("agent_manual_get"),
-        // The dock half of the status line: is an ACP host attached right now?
-        invoke<{ connected?: boolean }>("agent_status").catch(() => ({ connected: false })),
+        // The dock half of the status line: which host records exist, which one
+        // is active, and whether a session is live right now.
+        invoke<AgentHostList>("agent_host_list").catch(() => null),
       ]);
       setManual(m);
-      setDockConnected(!!s.connected);
+      setDockHosts(list);
+      setDockConnected(!!list?.connected);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logError(`settings: reading the agent manual failed — ${msg}`, "settings");
@@ -412,6 +429,30 @@ export default function SettingsPage() {
   useEffect(() => {
     loadAgentManual();
   }, [loadAgentManual]);
+
+  // A confirm request can originate outside this card: an agent calling
+  // `agent_host_connect` over MCP is refused, and the backend emits the ask so
+  // the user has something to answer. Listening is what makes that refusal
+  // actionable instead of a dead end — the caller retries after the answer.
+  useEffect(() => {
+    if (!isTauri() || mobile) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<AgentConfirmRequest>("agent-confirm-request", (e) => {
+      setConfirm(e.payload);
+      setAgentTest({
+        kind: "busy",
+        text: `Waiting for your approval of ${e.payload.display_name}.`,
+      });
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [mobile]);
 
   // Copy-only, by design: FmS never writes another product's config file (see
   // `manual.connect.never`). The key names the button so only it flips to
@@ -483,6 +524,71 @@ export default function SettingsPage() {
       } else {
         setAgentTest({ kind: "err", text: "Not connected." });
       }
+    } catch (e) {
+      setAgentTest({ kind: "err", text: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  // The switch on the Connect card. Two commands, one decision: a host the Rust
+  // trust rule marks `needs_confirmation` is asked about first (the inline
+  // `confirm` card), and the approval it records is what unblocks the connect.
+  // No address is accepted here — the records are the only dial targets.
+  async function handleShowInDock(hostId: string) {
+    if (!isTauri()) return;
+    setAgentTest({ kind: "busy", text: hostId ? "Connecting…" : "Disconnecting…" });
+    try {
+      if (!hostId) {
+        await invoke("agent_host_disconnect");
+        setDockConnected(false);
+        setAgentTest({ kind: "ok", text: "No agent hosted — FmS is on its own." });
+        await loadAgentManual();
+        return;
+      }
+      const host = dockHosts?.hosts.find((h) => h.id === hostId);
+      if (host?.needs_confirmation && !host.approved) {
+        const req = await invoke<{ state: string; host?: AgentConfirmRequest }>(
+          "agent_confirm_request",
+          { id: hostId }
+        );
+        if (req.state === "pending" && req.host) {
+          setConfirm(req.host);
+          setAgentTest({ kind: "busy", text: "Waiting for your approval…" });
+          return;
+        }
+      }
+      await connectHostInDock(hostId);
+    } catch (e) {
+      setAgentTest({ kind: "err", text: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  async function connectHostInDock(hostId: string) {
+    const status = await invoke<AgentStatus>("agent_host_connect", { id: hostId });
+    setDockConnected(status.connected);
+    setAgentTest({
+      kind: status.connected ? "ok" : "err",
+      text: status.connected
+        ? `Hosting ${status.display_name ?? hostId} over ${status.transport ?? "?"} — session ${
+            status.session_id ?? "?"
+          }${status.mcp_transport ? `, FmS tools over ${status.mcp_transport}` : ""}.`
+        : "Not connected.",
+    });
+    await loadAgentManual();
+  }
+
+  async function answerConfirm(approve: boolean) {
+    if (!confirm) return;
+    const host = confirm;
+    setConfirm(null);
+    setAgentTest({ kind: "busy", text: approve ? "Connecting…" : "Cancelling…" });
+    try {
+      await invoke("agent_confirm_respond", { hostId: host.host_id, approve });
+      if (!approve) {
+        setAgentTest({ kind: "err", text: `${host.display_name} stays unhosted.` });
+        await loadAgentManual();
+        return;
+      }
+      await connectHostInDock(host.host_id);
     } catch (e) {
       setAgentTest({ kind: "err", text: e instanceof Error ? e.message : String(e) });
     }
@@ -830,13 +936,106 @@ export default function SettingsPage() {
                     : "."}
                 </p>
                 <p className="text-text-secondary">
+                  MCP surface:{" "}
+                  <strong>
+                    {globalSettings?.mcp_enabled ?? true ? "exposed" : "off"}
+                  </strong>
+                  {(globalSettings?.mcp_enabled ?? true)
+                    ? " — the endpoint below answers."
+                    : " — /mcp and the manual answer 404 until you switch it back on."}
+                </p>
+                <p className="text-text-secondary">
                   Agent dock:{" "}
-                  {dockConnected ? "a host is connected." : "no host connected."}
+                  {dockConnected ? (
+                    <>
+                      hosting{" "}
+                      <strong>
+                        {dockHosts?.session?.display_name ?? dockHosts?.active_id ?? "a host"}
+                      </strong>{" "}
+                      via <strong>{dockHosts?.session?.transport ?? "?"}</strong>
+                      {dockHosts?.session?.mcp_transport ? (
+                        <>
+                          , FmS tools over <strong>{dockHosts.session.mcp_transport}</strong>
+                        </>
+                      ) : null}
+                      .
+                    </>
+                  ) : (
+                    "no host hosted."
+                  )}
                 </p>
                 {manual && !manual.endpoints.running && (
                   <p className="text-error-text">{manual.endpoints.note}</p>
                 )}
               </div>
+
+              {/* The switch: which record the dock shows. Two commands behind
+                  one select — `agent_host_disconnect` for "FmS only",
+                  `agent_host_connect` for a record — because a free-text address
+                  is exactly what the records replaced. */}
+              <div className="mb-5 max-w-md">
+                <label className="block font-medium mb-1" htmlFor="dock-host">
+                  Shown in
+                </label>
+                <p className="text-text-secondary text-sm mb-2">
+                  The dock hosts one agent at a time: either a server you run
+                  yourself (<code>ws</code>) or a program FmS starts and stops
+                  (<code>stdio</code>). Hosts come from the app&apos;s records — an
+                  agent adds them with <code>agent_host_register</code>. Whether
+                  dialling one needs your approval is decided in the backend, never
+                  here.
+                </p>
+                <select
+                  id="dock-host"
+                  className="w-full px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
+                  value={dockConnected ? dockHosts?.session?.host_id ?? "" : ""}
+                  onChange={(e) => void handleShowInDock(e.target.value)}
+                  disabled={agentTest?.kind === "busy"}
+                >
+                  <option value="">FmS only — no agent hosted</option>
+                  {(dockHosts?.hosts ?? []).map((h) => (
+                    <option key={h.id} value={h.id}>
+                      {h.display_name} ({h.kind})
+                      {h.needs_confirmation && !h.approved ? " — needs your approval" : ""}
+                    </option>
+                  ))}
+                </select>
+                {(dockHosts?.hosts.length ?? 0) === 0 && (
+                  <p className="text-text-secondary text-sm mt-2">
+                    No host records yet. Until one exists the dock has nothing to
+                    dial — use the copy-only lines above (Mode 1), or have an agent
+                    register one.
+                  </p>
+                )}
+              </div>
+
+              {/* The confirm dialog, inline. Same content the `agent-confirm-request`
+                  event carries, shown here because the Connect card is where the
+                  user acts on it. */}
+              {confirm && (
+                <div className="mb-5 rounded-md border border-accent-bg/40 bg-accent-bg/10 p-3 text-sm space-y-2">
+                  <p className="font-medium">Host {confirm.display_name}?</p>
+                  <p className="text-text-secondary">
+                    {confirm.reason}: <code>{confirm.endpoint}</code>
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className={btnGhost}
+                      onClick={() => void answerConfirm(true)}
+                    >
+                      Approve and connect
+                    </button>
+                    <button
+                      type="button"
+                      className={btnGhost}
+                      onClick={() => void answerConfirm(false)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Payload A — the pointer sentence. One line, and the manual it
                   points at teaches the rest. */}
@@ -948,6 +1147,37 @@ export default function SettingsPage() {
                 </select>
               </div>
 
+              {/* P3: the MCP surface is a runtime switch, not a build feature.
+                  It is baked into the router, so saving this restarts the local
+                  web service — said out loud because an attached agent loses its
+                  tools for a moment. */}
+              <label className="flex items-start gap-2 mb-4 cursor-pointer max-w-2xl">
+                <input
+                  type="checkbox"
+                  className="w-4 h-4 mt-0.5"
+                  checked={globalSettings?.mcp_enabled ?? true}
+                  onChange={(e) => {
+                    setGlobalSettings((prev) =>
+                      prev ? { ...prev, mcp_enabled: e.target.checked } : prev
+                    );
+                    setSavedGlobal(false);
+                  }}
+                />
+                <span>
+                  <span className="font-medium">Expose the MCP server (agents)</span>
+                  <span className="block text-text-secondary text-sm">
+                    Serves <code>/mcp</code> and the generated <code>/agent.md</code>{" "}
+                    manual. Saving restarts the local web service, because the
+                    routes are chosen when the router is built: an agent attached
+                    right now loses its tools until the restart returns, and
+                    <code>/api/v1/status</code> keeps answering with{" "}
+                    <code>mcp_enabled: false</code> so a peer can tell why{" "}
+                    <code>/mcp</code> 404s. Under <em>enforce</em> an agent cannot
+                    flip this itself.
+                  </span>
+                </span>
+              </label>
+
               <label className="flex items-start gap-2 mb-4 cursor-pointer max-w-2xl">
                 <input
                   type="checkbox"
@@ -964,7 +1194,8 @@ export default function SettingsPage() {
                   <span className="font-medium">Show the agent dock</span>
                   <span className="block text-text-secondary text-sm">
                     The dock is the second way in: instead of attaching to FmS, it
-                    attaches FmS to a <code>goose serve</code> you started yourself
+                    attaches FmS to an agent host — a <code>goose serve</code> you
+                    started yourself, or a program FmS spawns
                     {globalSettings?.goose_acp_url
                       ? <> (at <code>{globalSettings.goose_acp_url}</code>)</>
                       : null}

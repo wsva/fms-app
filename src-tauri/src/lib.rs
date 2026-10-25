@@ -181,6 +181,17 @@ fn app_build_version() -> BuildVersion {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_crypto_provider();
+
+    // `--mcp-bridge` makes this executable a stdio ↔ HTTP proxy for the MCP
+    // server the running app hosts (see `mcp/bridge.rs`). It is checked before
+    // anything Tauri-shaped happens: no window, no state, no single-instance
+    // plugin — stdout/stdin are the protocol channel. An ACP stdio entry, or a
+    // client that only accepts a command, points at this same executable with
+    // that one argument.
+    if std::env::args().skip(1).any(|a| a == "--mcp-bridge") {
+        std::process::exit(crate::mcp::bridge::main_blocking());
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -508,6 +519,19 @@ pub fn run() {
             ai::agent_acp::agent_respond_permission,
             ai::agent_acp::agent_disconnect,
             ai::agent_acp::agent_status,
+            // Hosted-mode host records (ideas.md §8 step 5): the dock dials a
+            // record instead of a hardcoded endpoint, and a host the trust rule
+            // marks as `Confirm` cannot be dialled until the user answers the
+            // confirm dialog.
+            ai::agent_acp::agent_host_register,
+            ai::agent_acp::agent_host_unregister,
+            ai::agent_acp::agent_host_list,
+            ai::agent_acp::agent_host_status,
+            ai::agent_acp::agent_host_connect,
+            ai::agent_acp::agent_host_disconnect,
+            ai::agent_acp::agent_confirm_request,
+            ai::agent_acp::agent_confirm_respond,
+            ai::agent_acp::agent_confirm_status,
             ui_state::agent_report_ui_state,
             ui_state::agent_report_ui_actions,
             ui_state::agent_get_ui_actions,

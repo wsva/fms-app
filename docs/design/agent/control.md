@@ -12,10 +12,10 @@ Status legend, as in `ideas.md`: ✅ built · ⚠️ partial · 💡 proposed.
 
 | Plane | Size | Where |
 |---|---|---|
-| **Data / logic** | ~100 tools | [src-tauri/src/mcp/](../../../src-tauri/src/mcp) — `datasets`, `dictation`, `cards`, `books`, `models`, `ai`, `wiki`, `sync`, `system`, `workflow` |
-| **UI control** | **6 verbs** | [mcp/system.rs](../../../src-tauri/src/mcp/system.rs) L280-378: `app_version`, `app_navigate`, `app_open_review`, `app_start_dictation`, `app_notify`, `app_get_ui_state` |
+| **Data / logic** | ~230 tools | [src-tauri/src/mcp/](../../../src-tauri/src/mcp) — `datasets`, `dictation`, `cards`, `books`, `models`, `ai`, `wiki`, `sync`, `system`, `workflow`, `ui`, `todo` |
+| **UI control** | 2 generic tools + 6 `app_*` verbs | [mcp/ui.rs](../../../src-tauri/src/mcp/ui.rs) `ui_list_actions` / `ui_invoke_action` over the registry the pages publish; [mcp/system.rs](../../../src-tauri/src/mcp/system.rs) `app_navigate`, `app_open_review`, `app_start_dictation`, `app_notify`, `app_get_ui_state`, `app_prefill_prompt` |
 
-There are **no `ui_*` tools at all**. Every UI capability today is a hand-written verb in Rust, which means each new controllable button costs a backend release. That asymmetry is the whole problem, and §3 is the fix.
+The `ui_*` pair removes the "one backend release per button" problem: a page registers its actions at mount (`agent_report_ui_actions`), `ui_invoke_action` drives one through the same `agent-action` channel, and `agent_report_action_result` carries the outcome back so the tool returns it instead of guessing. The hand-written `app_*` verbs remain for the intents that predate the registry. For an exact count and name list, read `/agent.md` — it is generated from the live router, so any number written in prose (including this one) is a snapshot.
 
 The bridge itself already exists and is agent-neutral: the `app_*` tools `emit("agent-action", …)` and the shell performs the action in [src/app/(app)/home/page.tsx](../../../src/app/(app)/home/page.tsx) L122-130 (`navigate` / `open-review` / `start-dictation` / `notify`). Adding control means adding *verbs to that channel*, not building a channel.
 
@@ -25,58 +25,57 @@ The bridge itself already exists and is agent-neutral: the `app_*` tools `emit("
 
 | # | Requirement | Status | Notes |
 |---|---|---|---|
-| 1a | Open a page | ✅ | `app_navigate`, 18 valid tabs, error names the valid set |
-| 1b | Click a button | ❌ | 3 intent verbs only (`open_review`, `start_dictation`, `notify`) |
-| 2 | Use various models | ⚠️ | STT / SaT / TTS / OCR complete; **LLM is Ollama-only** |
-| 3 | Configure and run workflows | ✅ | 12 tools, incl. authoring new YAML pipelines |
-| 4 | TODO for the user + jump to page | ❌ | the concept does not exist; nearest neighbour is `chat_send` |
-| 5 | Everything else | ⚠️ | see §5-§7 |
+| 1a | Open a page | ✅ | `app_navigate`, the full tab set, error names the valid set |
+| 1b | Click a button | ✅ | `ui_list_actions` / `ui_invoke_action` over the page registry, plus the three original intent verbs |
+| 2 | Use various models | ✅ desktop · ⚠️ mobile | STT / SaT / TTS / OCR complete; LLM is multi-provider on desktop (§2.2) |
+| 3 | Configure and run workflows | ✅ | 13 tools, incl. authoring new YAML pipelines and `workflow_list_actions` |
+| 4 | TODO for the user + jump to page | ✅ | `todo_add`/`_list`/`_complete`/`_dismiss`; completing a `human` step's todo resumes that run |
+| 5 | Everything else | ⚠️ | see §2.2 (cloud model listing) and §7 |
 
 ### 2.1 Navigation and intents — ✅ / ❌
 
 `app_navigate` covers the full tab set and its refusal is already the house pattern for actionable errors (`"unknown tab '{}'. Valid tabs: …"`, plus the special case explaining that the agent has no tab because it lives in a dock). Beyond that there are exactly three intents, each hand-coded with its own param struct. There is no generic "press this control", no way to set a field, no way to read what a control would do.
 
-### 2.2 Models — ⚠️ LLM only
+### 2.2 Models — ✅ desktop
 
 - ✅ **STT**, full lifecycle: `model_status` (carries an actionable `hint`, and tells a pipeline-driven agent *not* to call it because `dataset_full_report` already reports `stt_model`), `model_download`, `model_load`, `model_set_default`, `model_unload`, `model_delete`, `model_transcribe`.
 - ✅ **Text segmentation**: `text_split`, `text_split_unload` (SaT, `textsplit`-gated).
 - ✅ **TTS**: `tts_list_voices`, `tts_synthesize` (Edge).
 - ✅ **OCR**: `ocr_recognize`, `ocr_recognize_tsv`, `ocr_hyphen_dictionary_status/download/delete`, language list.
-- ⚠️ **LLM**: `llm_check_connection`, `llm_list_models`, `llm_pull_model`, `llm_delete_model`, `llm_chat` — **all Ollama**. Yet [settings.rs](../../../src-tauri/src/settings.rs) already carries `llm_provider` (`ollama | openai | anthropic | groq | databricks`), `llm_api_key`, `llm_model`. The provider dimension exists in config and is absent from the tool surface, and `settings_set`'s description enumerates only the directory/model fields — so an agent cannot discover it either.
-
-💡 Fix: `llm_chat` accepts a `provider` / `model` override, plus a scoped `llm_set_provider`. **Precondition:** `settings_get` currently serializes the entire `AppSettings`, including `llm_api_key` and `goose_acp_secret` — redact before exposing provider configuration to third-party agents (also `ideas.md` §8 step 2).
+- ✅ **LLM, multi-provider on desktop**: [ai/llm.rs](../../../src-tauri/src/ai/llm.rs) validates against `LLM_PROVIDERS` (`ollama | openai | anthropic | groq | databricks`), `llm_chat` takes a per-call `provider` override, `llm_set_provider` switches the saved default, and the desktop path routes every call through the `goose_llm` provider layer. `settings_get` redacts credentials (`SECRET_FIELDS` → `***` plus `has_<field>`), so an agent can read the *shape* of the config without reading the keys.
+- ⚠️ **Remaining, all small**: `llm_list_models` / `llm_pull_model` / `llm_delete_model` are Ollama-only because the other providers have no local model store — their descriptions should say that rather than fail obliquely. `llm_chat_stream` uses only the saved provider (no per-call override), so an agent that overrides `llm_chat` should not expect the stream to follow.
+- On the non-desktop build the whole LLM surface is Ollama-only by design ([`llm_chat` L299-312](../../../src-tauri/src/ai/llm.rs#L299-L312)); a cloud `provider` override there is refused by name instead of being silently ignored.
 
 Reframe worth keeping in mind: the agent *is* an LLM. "Use various models" almost always means letting the agent dispatch **app work** to a chosen model — a cheap one for text normalization, a strong one for read-aloud scoring — not replacing the agent's own inference.
 
 ### 2.3 Workflows — ✅ the strongest part of the surface
 
-Twelve tools in [mcp/workflow.rs](../../../src-tauri/src/mcp/workflow.rs): `workflow_list`, `_create`, `_status`, `_reap`, `_next`, `_get_definition`, `_advance`, `_record`, `_intervene`, `_verify`, `_adopt`, `_builtin_templates`. (`AGENTS.md` still lists eleven — `workflow_reap` is undocumented there; fix the drift.)
+Thirteen tools in [mcp/workflow.rs](../../../src-tauri/src/mcp/workflow.rs): `workflow_list`, `_create`, `_status`, `_reap`, `_next`, `_get_definition`, `_advance`, `_record`, `_intervene`, `_verify`, `_adopt`, `_builtin_templates`, `_list_actions`.
 
 `workflow_create` **takes a YAML definition**, so an agent can author a brand-new pipeline, not merely run a template — validated by `workflow/core/validate.rs` (unique ids, existing refs, acyclic, `verify:`/`adopt:` ids registered). Execution is lease-based single-flight (`workflow_advance` → perform → `workflow_record`, with `claim_id` protecting against a reaped claim clobbering a live one), and `workflow_verify` joins live probes to each step's `verify:` binding so a probe can retract a claim but never promote one.
 
-Two real gaps:
+The step-action vocabulary is no longer a guess: `workflow_list_actions` publishes the ids and commands the Workflow page registered (from `src/lib/workflow/step-ops.ts`), and validation refuses an invented id by name.
 
-- 💡 **The action vocabulary is invisible to the agent.** A step's `action` must resolve to a real command, but that vocabulary lives in the *frontend* registry [src/lib/workflow/step-ops.ts](../../../src/lib/workflow/step-ops.ts) (`KNOWN_COMMANDS`, `getStepOp`) — which also powers the Workflow page's "Add step" dropdown. An agent authoring YAML has to guess. Expose it over MCP (or fold it into `app_bootstrap`), generated from one source per `ideas.md` §5.0.
+One real gap:
+
 - ⚠️ **`verify:` providers exist for dictation only** — `workflow_verify` explicitly errors for other dataset kinds. Coverage gap, not a defect.
 
-### 2.4 Human tasks — ❌
+### 2.4 Human tasks — ✅
 
-No task surface exists. The nearest neighbours are all agent-facing or state-only: workflow steps (executed by tools), card review due lists, dictation progress, the XP ledger.
-
-But the app already has the *idea* of handing work to the human — `chat_send`'s own description says: *"Use it to hand something to the user's phone: a reminder, a generated file, the result of a longer job."* That is an unstructured, non-actionable TODO. §4 makes it structured and actionable.
+`todo_add`, `todo_list`, `todo_complete`, `todo_dismiss` in [mcp/todo.rs](../../../src-tauri/src/mcp/todo.rs), backed by the app-level SQLite table and workspace-scoped exactly like dictation progress — so a todo an agent leaves on the desktop appears on the phone. Following an item replays the same `agent-action` payload `app_navigate` emits, and a workflow `human` step enqueues a todo instead of invoking a tool; completing it resumes the waiting run.
 
 ---
 
-## 3. 💡 UI action registry — the fix for "click a button"
+## 3. ✅ UI action registry — the fix for "click a button"
 
-One tool per control is the wrong shape: 18 pages × dozens of controls, and every new button needs a Rust release. Register the actions in the UI, invoke them generically.
+One tool per control is the wrong shape: 18 pages × dozens of controls, and every new button needs a Rust release. The registry inverts it — pages publish what they can do, and two generic tools drive the published set.
 
-**The pattern already exists twice in this codebase**, so this is an extension of a house idiom rather than an invention:
+**The pattern already existed twice in this codebase**, so this was an extension of a house idiom rather than an invention:
 
 1. `step-ops.ts` — `KNOWN_COMMANDS` + `getStepOp` map a step id to a command, args and form fields. A frontend registry of executable actions, already used to render a picker.
 2. `agent-prefill` — the UI→agent direction. [WorkflowPage.tsx](../../../src/components/tools/WorkflowPage.tsx) `sendToDock` emits it (L993-1000) to hand a generated prompt to the dock, which prefills its composer.
 
-**Proposed shape:**
+**Implemented shape:**
 
 ```
 # registered by each page at mount
@@ -84,12 +83,12 @@ One tool per control is the wrong shape: 18 pages × dozens of controls, and eve
   params_schema: {…}, when: <availability predicate> }
 ```
 
-Two tools: `ui_list_actions` (the registry, with schemas) and `ui_invoke_action { id, params }`, routed over the **existing** `agent-action` channel and the existing shell bridge. Nothing new in transport, and the `kind` field feeds the policy tiers in §6.
+Two tools: `ui_list_actions` (the registry, with schemas) and `ui_invoke_action { id, params }`, both in [mcp/ui.rs](../../../src-tauri/src/mcp/ui.rs), routed over the **existing** `agent-action` channel and the existing shell bridge. Nothing new in transport, and the `kind` field feeds the policy tiers in §6.
 
-**Two constraints to design around, both already visible in the code:**
+**The two constraints, and how they were resolved:**
 
-- **`agent-action` is fire-and-forget.** `app_get_ui_state` works around this by caching UI state in Rust (`agent_report_ui_state` writes, the tool reads). Start with *observe, don't return*: invoke, then read the effect back through existing read tools (`app_get_ui_state`, `dataset_get`, `workflow_status`). Add a correlation-id response path — a `agent_action_result` command the webview calls, with a Rust-side timeout — only for actions whose outcome genuinely cannot be observed.
-- **The registry only exists after the webview mounts.** `ui_list_actions` before mount returns empty, which is indistinguishable from "no actions". It must return an actionable message ("the UI is not mounted yet; `app_get_ui_state` reports whether it is") rather than `[]`.
+- **`agent-action` is fire-and-forget.** `agent_report_action_result` is the correlation path: the page reports the outcome, `ui_invoke_action` returns it with a timeout. Where the effect is observable (`app_get_ui_state`, `dataset_get`, `workflow_status`), reading it back is still the cheaper answer.
+- **The registry only exists after the webview mounts.** `ui_list_actions` before mount returns an actionable message ("the UI is not mounted yet; …") rather than `[]`, because the two are indistinguishable to an agent.
 
 **A favourable consequence of the existing architecture:** pages are display-toggled, not unmounted (`display: none/flex`), so a page registers its actions once at mount and they **survive navigation**. The registry is therefore "everything the app can do right now", not "what the visible page can do" — which is what makes `ui_list_actions` useful as a capability manifest.
 
@@ -97,7 +96,7 @@ Two tools: `ui_list_actions` (the registry, with schemas) and `ui_invoke_action 
 
 ---
 
-## 4. 💡 TODO domain — human-in-the-loop as a first-class step
+## 4. ✅ TODO domain — human-in-the-loop as a first-class step
 
 **The model: a TODO item is a pending `agent-action` with a human in the loop.** That framing matters because it means no new navigation machinery — the item's target is the exact payload `app_navigate` / `app_open_review` / `app_start_dictation` already emit.
 
@@ -117,62 +116,58 @@ Two tools: `ui_list_actions` (the registry, with schemas) and `ui_invoke_action 
 
 ---
 
-## 5. 💡 Reading the app: context, screen, and events
+## 5. ✅ Reading the app: context, screen, and events
 
-### 5.1 `app_get_ui_state` cannot see the dataset — fix first
+### 5.1 ✅ `app_get_ui_state` reports the dataset
 
-`active_dataset_uuid` is **always null**: the dock hardcodes it ([AgentDock.tsx](../../../src/components/agent/AgentDock.tsx) L400-403, `agent_report_ui_state({ activeTab, activeDatasetUuid: null })`). So an agent knows the *tab name* and nothing else about what the user is looking at. That single hardcode caps every "do something with what I'm on" request — the most common thing a user will actually say.
+The dock no longer hardcodes `activeDatasetUuid`: [src/lib/agent/ui-context.ts](../../../src/lib/agent/ui-context.ts) is a module singleton that merges context patches and forwards the delta (debounced 200 ms), so each component claims only the keys it owns — Dictation reports the dataset, media and cue; the shell reports the tab. Wire contract: a key present with a value sets it, present with `null` clears it, absent leaves it untouched. The reported set is `{ active_tab, active_dataset_uuid, active_media_uuid, cue_index, selection, scroll }`.
 
-Extend the report to `{ tab, dataset_uuid, media_uuid, cue_index, selection, scroll }`. Smallest change on this list, largest unlock; do it before anything else.
+### 5.2 ✅ A see-then-act loop
 
-### 5.2 Screenshots are not a UI-inspection tool today
+`capture_screenshot { minimize }` defaults to `minimize=false`: the app window is left alone and the primary monitor is captured as it looks, so the returned `data:image/png;base64` URL shows the app's own UI and feeds straight into `ocr_recognize`. `minimize=true` still exists for capturing the desktop underneath, and its description warns that on Windows it opens the native snip overlay — which parks an agent until a human drags a region.
 
-`capture_screenshot` exists and returns a `data:image/png;base64` URL — but its description says it **minimizes the app window** first (native snipping tool on Windows, full-screen elsewhere). So it cannot show the agent the app's own UI. Capturing without minimizing, paired with the existing `ocr_recognize`, would give a see-then-act loop for state that no read tool exposes. Low priority, but it is the only way to verify rendered output.
+### 5.3 ✅ One event timeline instead of per-domain polling
 
-### 5.3 One event timeline instead of per-domain polling
-
-Agents poll today: `chat_messages(after=…)`, `workflow_status`, `dataset_full_report`. 💡 `app_events(after=cursor)` over the existing in-memory `LogBuffer` (which `log_*` tools already read) gives one timeline. The `after=` cursor convention is established by `chat_messages`.
+`app_events { after, limit? }` reads the same in-memory ring the `log_*` tools use, so one cursor follows subtitle passes, sync pushes and workflow steps together. `evicted_since_cursor` is non-zero when the caller fell behind the 1000-entry ring, and `log_read_file_history` is the archive — which is what makes the cursor safe to use instead of polling each domain in turn.
 
 ---
 
-## 6. 💡 Policy — the prerequisite for broad control
+## 6. ✅ Policy — the prerequisite for broad control
 
-This is the caveat that must land *with* full app control, not after it.
+This is the caveat that had to land *with* full app control, not after it. It did.
 
-**The problem, precisely:** `sync/server.rs::zone_guard` treats loopback (with a local `Host` header) as **Trusted with no credentials at all** — `AuthContext::trusted()`, documented as *"this is the agent path"*. Meanwhile FmS's only approval policy, `ai/agent_acp.rs::auto_approve_option` (the seven-word destructive list `delete|remove|clear|drop|revoke|reset|rebuild`, preferring `allow_once`/`allow_always`), lives **in the ACP client** and therefore only runs in dock mode. A third-party agent in attach mode bypasses it completely.
+**What the problem was:** `sync/server.rs::zone_guard` treats loopback (with a local `Host` header) as **Trusted with no credentials at all** — `AuthContext::trusted()`, documented as *"this is the agent path"*. Meanwhile FmS's only approval policy, `ai/agent_acp.rs::auto_approve_option` (the seven-word destructive list `delete|remove|clear|drop|revoke|reset|rebuild`, preferring `allow_once`/`allow_always`), lives **in the ACP client** and therefore only runs in dock mode. A third-party agent in attach mode bypassed it completely — so "control all aspects" from attach mode used to mean *any local process can delete datasets*. A trusted network position is not the same claim as "may destroy".
 
-So today, "control all aspects" from attach mode means: **any local process can delete datasets.** A trusted network position is not the same claim as "may destroy".
+**What landed** ([mcp/policy.rs](../../../src-tauri/src/mcp/policy.rs)):
 
-**Proposal:**
-
-- Enforce policy **on `/mcp`**, not in the dock. Tiers: `read` · `write` · `destructive` · `ui-control` · `human-handoff`. The registry's `kind` field (§3) and the tool names supply the classification.
-- Per-agent, from the connection record in `ideas.md` §2 — not global. Default `read + write`; `destructive` and process-spawn require the confirm dialog (`ideas.md` §3).
-- Additive to `AuthContext`, not a replacement: the trust zone answers *who may talk to us*, the policy answers *what they may do*.
-- 💡 Close the undo loop: trash already exists for datasets and books, and `agent_friendly_design.md` §3 anticipates *"a future `restore_from_trash` tool"*. `app_trash_list` + `app_restore` let an agent recover its own mistakes — which is what makes a permissive default defensible.
-- Journal every destructive call with the agent id. The workflow engine's append-only `events.jsonl` is the precedent for the format.
+- Policy is enforced **on `/mcp`**, not in the dock. Five tiers — `read`, `write`, `destructive`, `ui-control`, `human-handoff` — and `tool_router()` wraps every route, so a new tool is never silently a read. A `#[cfg(test)]` guard fails the build when a destructive-sounding name is left unclassified.
+- Two modes: `permissive` (the default — classify and journal, deny nothing) and `enforce`, which refuses the destructive and human-handoff tiers and additionally refuses a `settings_set` that would loosen `mcp_policy`.
+- The undo loop is closed: `app_trash_list` + `app_restore` over the app trash, and the trash-backed deletes return `trashed_to` — which is what makes the permissive default defensible.
+- Every call is journalled in `mcp_audit`; `app_audit_get` reads it back.
+- ⚠️ Still global, not per-agent: the mode is one setting. Per-agent tiers stored on a host record arrive with hosted mode (`ideas.md` §8 step 5).
 
 ---
 
 ## 7. Other ideas, small and high-leverage
 
-- 💡 **`app_prefill_prompt { text, send? }`** — expose the existing `agent-prefill` event as an MCP tool, so a third-party agent can queue work *into the dock*. Makes the dock a shared scratchpad between agents, for free.
+- ✅ **`app_prefill_prompt { text, send? }`** — exposes the existing `agent-prefill` event as a tool, so a third-party agent can queue work *into* the dock. `send: true` requires a connected dock agent and fails actionably otherwise, so the text is still loaded for the user.
 - ✅ **Keep the `app_navigate` error style everywhere.** Naming the valid set and the next call is what turns a failure into a lesson; it is the cheapest way to teach an agent that has never seen the app.
-- 💡 **`workflow_list_actions`** (or fold into `app_bootstrap`) — the step-action vocabulary from `step-ops.ts`, so authored YAML validates first try (§2.3).
+- ✅ **`workflow_list_actions`** — the step-action vocabulary from `step-ops.ts`, so authored YAML validates first try (§2.3).
 - 💡 **MCP notifications** later, if `rmcp`'s server surface allows — the alternative to `app_events` polling.
 
 ---
 
 ## 8. Sequencing
 
-1. 💡 **`active_dataset_uuid` + extended `ui_state` report** (§5.1). Tiny; unblocks every context-aware request.
-2. 💡 **`/mcp` policy tiers + redact secrets from `settings_get`** (§6). Safety prerequisite — must not follow broad control.
-3. 💡 **UI action registry**: `ui_list_actions` / `ui_invoke_action`, observe-don't-return (§3).
-4. 💡 **TODO domain** + the `human` workflow step (§4).
-5. 💡 `llm_chat` provider/model override; workflow action vocabulary (§2.2, §2.3).
-6. 💡 `capture_screenshot` without minimizing; `app_events(after=)`; `app_prefill_prompt`; `app_trash_list` / `app_restore`.
-7. Deferred: correlation-id action results, MCP notifications, the visual see-then-act loop, per-page action authoring UI.
+1. ✅ **`active_dataset_uuid` + extended `ui_state` report** (§5.1).
+2. ✅ **`/mcp` policy tiers + redact secrets from `settings_get`** (§6).
+3. ✅ **UI action registry**: `ui_list_actions` / `ui_invoke_action`, with the `agent_report_action_result` correlation path (§3).
+4. ✅ **TODO domain** + the `human` workflow step (§4).
+5. ✅ `llm_chat` provider override + `llm_set_provider`; `workflow_list_actions` (§2.2, §2.3).
+6. ✅ `capture_screenshot` without minimizing; `app_events(after=)`; `app_prefill_prompt`; `app_trash_list` / `app_restore`.
+7. Deferred: MCP notifications, per-agent policy tiers, a per-page action authoring UI — and the two attachment-side steps that remain are sequenced in [ideas.md](./ideas.md) §8 (the stdio↔HTTP bridge, then `agent_host_*`).
 
-Steps 1-2 are small and independent; 3-4 are the substantive features and can be built in parallel by different people since they touch different layers (registry = frontend + two tools; todo = new domain + DB table + panel).
+Track 1 is complete and reported per-tool in `/agent.md`; track 2's remaining work is the attachment side, sequenced in [ideas.md](./ideas.md) §8.
 
 ---
 

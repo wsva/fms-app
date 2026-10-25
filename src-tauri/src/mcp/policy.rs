@@ -26,8 +26,9 @@
 //! # `agent_id`
 //!
 //! Always `"loopback"` today. A per-agent tier needs the connection record from
-//! ideas.md §2 (`agent_host_register`), which does not exist yet — the column is
-//! here so the journal does not have to be migrated when it does.
+//! ideas.md §2 (`agent_host_*`, which now exists but does not identify the
+//! caller), so the column is here so the journal does not have to be migrated
+//! when it does.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -54,7 +55,7 @@ type BoxToolFuture<'s> =
 pub(crate) const PERMISSIVE: &str = "permissive";
 pub(crate) const ENFORCE: &str = "enforce";
 
-/// Placeholder until `agent_host_register` exists. See the module docs.
+/// Placeholder until a caller carries an identity. See the module docs.
 const AGENT_ID: &str = "loopback";
 
 /// Rows kept in `mcp_audit`. Pruned in place so a long-running hub does not grow
@@ -182,7 +183,17 @@ const UI_CONTROL: [&str; 7] = [
 /// from [`DESTRUCTIVE_WORDS`], so they are named here. `todo_add`/`todo_complete`
 /// join this list when the TODO domain lands: a todo is the same shape of thing,
 /// work the agent hands to the user instead of doing.
-const HUMAN_HANDOFF: [&str; 2] = [
+const HUMAN_HANDOFF: [&str; 5] = [
+    // Points the dock at a program or a machine: the next connect spawns or
+    // dials it. Registering is the decision, not the dial, so it sits here with
+    // the dial itself rather than with the ordinary writes.
+    "agent_host_register",
+    // Spawns a process or reaches another machine, and does so with the user's
+    // copy of their credentials.
+    "agent_host_connect",
+    // Removes what FmS is willing to run; the record cannot be recovered from
+    // the journal.
+    "agent_host_unregister",
     // Raises the hub's authority epoch, which refuses every follower still
     // presenting the old one. There is no "un-raise".
     "sync_handover_epoch",
@@ -196,7 +207,11 @@ const HUMAN_HANDOFF: [&str; 2] = [
 /// `read_aloud_*` starts with "read", `sync_check_availability` persists the
 /// availability it checks), so this is a list. Anything absent falls through to
 /// [`Tier::Write`] — a new tool is never silently a read.
-const READ_TOOLS: [&str; 79] = [
+const READ_TOOLS: [&str; 81] = [
+    // Hosted-mode records: reading them dials nothing, and an agent that wants
+    // to host has to know whether the user already approved the host.
+    "agent_host_list",
+    "agent_host_status",
     "app_audit_get",
     "app_bootstrap",
     "app_events",
@@ -450,7 +465,18 @@ pub(crate) fn audit_query(
 /// An agent that can rewrite its own leash has no leash, so under `"enforce"`
 /// these are refused whatever tier the tool itself sits in — the user makes this
 /// change from the Settings page.
-const SELF_GOVERNING_SETTINGS: [&str; 1] = ["mcp_policy"];
+///
+/// `mcp_enabled` is the same escalation one level up: turning the server off is
+/// how an agent would silence the journal and the rest of the tool set, and
+/// turning it on again is a decision about what this machine exposes.
+const SELF_GOVERNING_SETTINGS: [&str; 2] = ["mcp_policy", "mcp_enabled"];
+
+fn escalation_reason(field: &str) -> &'static str {
+    match field {
+        "mcp_enabled" => "whether this server's MCP surface exists at all",
+        _ => "the setting that decides what this server refuses",
+    }
+}
 
 /// `Some(field)` when this call would loosen the caller's own policy.
 fn escalates_policy(tool: &str, arguments: Option<&JsonObject>) -> Option<&'static str> {
@@ -467,15 +493,16 @@ fn escalates_policy(tool: &str, arguments: Option<&JsonObject>) -> Option<&'stat
 fn deny_message(tool: &str, tier: Tier, escalation: Option<&str>) -> String {
     if let Some(field) = escalation {
         return format!(
-            "`{}` was refused because it writes `{}`, the setting that decides what this server \
-             refuses — an agent that can rewrite its own policy has no policy. Nothing was \
-             changed.\n\
+            "`{}` was refused because it writes `{}`, {}. An agent that can rewrite its own \
+             surface has none. Nothing was changed.\n\
              \n\
              Ask the user to make this change themselves on the Settings page. Every other \
              settings field is still writable through `settings_set`.\n\
              \n\
              The attempt was recorded in the audit journal (`app_audit_get`).",
-            tool, field
+            tool,
+            field,
+            escalation_reason(field)
         );
     }
     let what = match tier {

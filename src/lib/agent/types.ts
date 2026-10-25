@@ -10,11 +10,65 @@ import type { TabId } from "@/components/layout/Sidebar";
 export interface AgentStatus {
   connected: boolean;
   session_id?: string | null;
+  /** The host record the live session belongs to (null before records existed). */
+  host_id?: string | null;
+  /** That record's display name, for the dock header and the Connect card. */
+  display_name?: string | null;
+  /** Which carrier the session runs on: a websocket and a spawned child are
+   *  different trust propositions, so the UI always says which one it is. */
+  transport?: AgentTransportKind | null;
   /** Present on `agent_connect`: whether the fms-app MCP server was registered
-   *  with the session (goose advertised http MCP capability). */
+   *  with the session (the agent advertised http MCP capability). */
   mcp_registered?: boolean;
-  /** The loopback MCP url offered to goose, when registered. */
+  /** The loopback MCP url offered to the agent, when registered. */
   mcp_url?: string;
+  /** `http` when the agent took the url, `stdio` when it was handed the bridge. */
+  mcp_transport?: string | null;
+}
+
+export type AgentTransportKind = "ws" | "stdio";
+
+/** One agent host record (`AppSettings::agent_hosts`), plus the app's own dial
+ *  rule. `needs_confirmation` is decided in Rust — never re-derived here — so the
+ *  Connect card cannot disagree with the dialler. */
+export interface AgentHost {
+  id: string;
+  display_name: string;
+  enabled: boolean;
+  kind: AgentTransportKind;
+  /** ws: `host:port`; stdio: the program. Safe to show: no credentials. */
+  endpoint: string;
+  /** stdio always, ws only when it is not loopback. */
+  needs_confirmation: boolean;
+  /** The user has already answered the confirm dialog this session. */
+  approved: boolean;
+  last_session?: string | null;
+}
+
+/** `agent_host_list` — the records plus the live session folded in. */
+export interface AgentHostList {
+  hosts: AgentHost[];
+  /** The record `agent_host_connect` dials when asked without an id. */
+  active_id: string;
+  connected: boolean;
+  session?: AgentStatus;
+}
+
+/** `agent-confirm-request` payload / `agent_confirm_request` result: the host the
+ *  user is being asked to approve, and why. */
+export interface AgentConfirmRequest {
+  host_id: string;
+  display_name: string;
+  kind: AgentTransportKind;
+  endpoint: string;
+  reason: string;
+}
+
+/** `agent-log` — one stderr line from a spawned ACP host, forwarded so a stdio
+ *  host that dies is visible in the dock instead of failing silently. */
+export interface AgentLog {
+  source: string;
+  text: string;
 }
 
 /** `agent-message-chunk` — a streamed agent text delta. */

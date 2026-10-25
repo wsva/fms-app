@@ -29,7 +29,7 @@ use crate::sync::server::{WebServiceConfig, WebServiceState, WebServiceStatus};
 /// `read_aloud_model_status` lands in `books` and not `models`. Kept in step with
 /// the `mod` list in `mcp/mod.rs`; [`tests::every_tool_has_a_domain`] fails the
 /// build when a new prefix shows up unmapped.
-const DOMAIN_PREFIXES: [(&str, &str); 27] = [
+const DOMAIN_PREFIXES: [(&str, &str); 28] = [
     ("dataset_", "datasets"),
     ("subtitle_", "datasets"),
     ("dictation_", "dictation"),
@@ -48,6 +48,7 @@ const DOMAIN_PREFIXES: [(&str, &str); 27] = [
     ("pc_", "sync"),
     ("web_service_", "sync"),
     ("settings_", "system"),
+    ("agent_host_", "system"),
     ("auth_", "system"),
     ("ocr_", "system"),
     ("log_", "system"),
@@ -286,7 +287,7 @@ fn trust(app: &AppHandle) -> Value {
             },
             "tiers": ["read", "write", "destructive", "ui-control", "human-handoff"],
             "journal": "Every call is appended to the mcp_audit table; read it back with app_audit_get.",
-            "escalation": "Under \"enforce\", settings_set refuses a patch that writes mcp_policy — an agent that can loosen its own policy has none.",
+            "escalation": "Under \"enforce\", settings_set refuses a patch that writes mcp_policy or mcp_enabled — an agent that can loosen, or switch off, its own surface has none.",
         },
     })
 }
@@ -308,26 +309,57 @@ pub(crate) fn house_rules() -> Value {
     ])
 }
 
-/// ideas.md §5.0 item 6: the two paths, spelled as calls. Mode 2 is stated as
-/// *not yet available* because `agent_host_register` is deferred to phase 8 —
-/// a manual that advertises an unimplemented path is worse than one that says so.
-fn paths(endpoints: &Value) -> Value {
+/// Mode 2 is live with `agent_host_*` (ideas.md §8 step 5). One constant, so
+/// the manual, `/agent.json`, `app_bootstrap` and the Connect card flip together
+/// if hosting is ever withdrawn.
+const HOSTED_MODE_AVAILABLE: bool = true;
+
+/// ideas.md §5.0 item 6: the two paths, spelled as calls. The hosted path is
+/// rendered from the router, not asserted: if this build has no `agent_host_*`
+/// tools, the manual says so rather than advertising a door that is not there.
+fn paths(endpoints: &Value, tools: &[Value]) -> Value {
     let mcp = endpoints.get("mcp").and_then(|v| v.as_str()).unwrap_or_default();
+    let has = |name: &str| {
+        tools
+            .iter()
+            .any(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
+    };
+    let hosted_ready = HOSTED_MODE_AVAILABLE
+        && has("agent_host_list")
+        && has("agent_host_register")
+        && has("agent_host_connect");
+    let hosted_how = if hosted_ready {
+        "The user registers a host once; the dock then drives it and FmS shows the session. \
+         `agent_host_list` shows the records and, per host, whether dialling it needs the user's \
+         approval. `agent_host_register` adds one: kind \"ws\" for a server the user runs (url \
+         required), kind \"stdio\" for a program FmS spawns (program required, args/env/cwd \
+         optional). `agent_host_connect` opens the session; a stdio host — or a ws host that is not \
+         loopback — is refused until the user answers FmS's confirm dialog, so when that refusal \
+         arrives do not retry blindly: it names the host, and the user approves it in the Connect \
+         card. `agent_host_status` reports the live session (transport, session_id, and whether \
+         fms-app's tools were registered on it) and `agent_host_disconnect` ends it. One host runs \
+         at a time."
+            .to_string()
+    } else {
+        "Not reachable from MCP in this build: this router has no agent_host_* tools, so the dock \
+         only hosts a `goose serve` the user configured by hand."
+            .to_string()
+    };
     json!({
         "attach_only": {
             "name": "Mode 1 — attach (your own window)",
             "available": true,
             "how": format!(
-                "Register {} as a streamable-HTTP MCP server in your own client. No credentials on loopback. Every tool works, including the app_* ones that drive the FmS window.",
+                "Register {} as a streamable-HTTP MCP server in your own client. No credentials on loopback. Every tool works, including the app_* ones that drive the FmS window. A client that speaks stdio MCP only points at this app's executable with `--mcp-bridge` instead — same tools, proxied.",
                 mcp
             ),
             "trade_off": "FmS sees none of your reasoning: no streamed text, no thoughts, no tool-call cards, no plan, no permission dialog. The user watches your window, not the dock.",
         },
         "hosted": {
             "name": "Mode 2 — hosted in the FmS dock",
-            "available": false,
-            "how": "Not reachable from MCP yet. The dock speaks ACP to a `goose serve` the user started themselves; hosting an arbitrary MCP agent in it needs agent_host_register, which is not implemented.",
-            "trade_off": "Would give FmS your streaming text, thoughts, tool calls and plan, plus its own permission card. Until then, attach-only.",
+            "available": hosted_ready,
+            "how": hosted_how,
+            "trade_off": "FmS gets your streaming text, thoughts, tool calls and plan, plus its own permission card — that is the point of hosting. The cost is that a hosted session lives inside the app: closing the dock ends it, and a stdio host is a process FmS starts and stops.",
         },
     })
 }
@@ -335,6 +367,10 @@ fn paths(endpoints: &Value) -> Value {
 /// ideas.md §5.0 item 10: per-product convenience lines *and* the generic
 /// sentence. Both are generated from the same bound port, and both are copy-only
 /// — FmS never writes into another product's config files (§6).
+///
+/// The last entry is the stdio door: a client that cannot take a URL spawns this
+/// executable with `--mcp-bridge`, which proxies to the same endpoint (see
+/// `bridge.rs`).
 fn connect(endpoints: &Value) -> Value {
     let mcp = endpoints.get("mcp").and_then(|v| v.as_str()).unwrap_or_default();
     let manual = endpoints
@@ -363,10 +399,12 @@ fn connect(endpoints: &Value) -> Value {
             {
                 "product": "Codex",
                 "copy_only": true,
-                "text": format!(
-                    "[mcp_servers.fms]\nurl = \"{}\"\ntransport = \"streamable-http\"",
-                    mcp
-                ),
+                // `codex mcp add --url` writes only `url = "…"` into config.toml.
+                // The TOML block this used to emit also carried
+                // `transport = "streamable-http"`, which Codex accepts but does
+                // not need: a `url` implies streamable HTTP (verified against
+                // codex-cli 0.164). The CLI form is also one line to paste.
+                "text": format!("codex mcp add fms --url {}", mcp),
             },
             {
                 "product": "OpenCode",
@@ -376,8 +414,29 @@ fn connect(endpoints: &Value) -> Value {
                     mcp
                 ),
             },
+            stdio_snippet(),
         ],
         "never": "These lines are for the user to copy. FmS does not probe for installed products and does not write ~/.claude.json, ~/.codex/config.toml, opencode.json or any other product's config file — parsing and merging someone else's schema risks corrupting it, and every product changes it (ideas.md §6).",
+    })
+}
+
+/// The stdio door, generated from the running executable: a client that speaks
+/// stdio MCP only spawns FmS with `--mcp-bridge` and gets the same tools, each
+/// message proxied to the live HTTP endpoint (`bridge.rs`).
+///
+/// TOML single-quoted literals hold the path verbatim, so a Windows path needs
+/// no backslash escaping.
+fn stdio_snippet() -> Value {
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "<path to the FmS executable>".to_string());
+    json!({
+        "product": "Any stdio-only client",
+        "copy_only": true,
+        "text": format!(
+            "[mcp_servers.fms]\ncommand = '{}'\nargs = [\"--mcp-bridge\"]",
+            exe
+        ),
     })
 }
 
@@ -415,7 +474,7 @@ pub(crate) fn render_json(app: &AppHandle, zone: &str) -> Value {
             "domains": grouped_domains(&tools),
             "index": tools,
         },
-        "paths": paths(&endpoints),
+        "paths": paths(&endpoints, &tools),
         "resources": resources_index(),
         "prompts": prompts_index(),
         "house_rules": house_rules(),

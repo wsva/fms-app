@@ -174,9 +174,45 @@ struct TextSplitParam {
     split_on_input_newlines: Option<bool>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct AgentHostStatusParam {
+    /// Host id to report. Omit to describe the active host.
+    #[serde(default)]
+    id: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct AgentHostRegisterParam {
+    /// Stable id. Omit to derive one from display_name.
+    #[serde(default)]
+    id: Option<String>,
+    /// What the Connect card shows, e.g. "Goose" or "Codex".
+    display_name: String,
+    /// "ws" (a server the user runs) or "stdio" (a program FmS spawns).
+    kind: String,
+    /// ws only: the ACP endpoint, e.g. ws://127.0.0.1:3284/acp.
+    #[serde(default)]
+    url: Option<String>,
+    /// stdio only: the command to run.
+    #[serde(default)]
+    program: Option<String>,
+    /// stdio only: command arguments.
+    #[serde(default)]
+    args: Vec<String>,
+    /// stdio only: extra environment variables.
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
+    /// stdio only: working directory.
+    #[serde(default)]
+    cwd: Option<String>,
+    /// Make this the host the dock dials (disables the others).
+    #[serde(default)]
+    enabled: bool,
+}
+
 #[tool_router(router = system_router, vis = "pub(crate)")]
 impl DatasetMcpServer {
-    #[tool(name = "settings_get", description = "Get the current app settings: the directory fields (model_dir, recordings_dir, datasets_dir, books_dir), model preferences (selected_model, model_unload_timeout, onboarding_completed), LLM configuration (ollama_url, llm_provider, llm_model), the agent dock's dial target (goose_acp_url, goose_acp_enabled), this device's sync identity (pc_url, role, cluster_id) and the MCP policy mode (mcp_policy: \"permissive\" journals every tool call and denies nothing, \"enforce\" also refuses destructive ones — see app_audit_get). Credentials (llm_api_key, goose_acp_secret, pc_token, device_seed) are never returned: a set one reads as \"***\" with a matching has_<field>=true, an unset one reads as \"\". Pass this object straight back to settings_set — the placeholders are recognised and skipped, not written.")]
+    #[tool(name = "settings_get", description = "Get the current app settings: the directory fields (model_dir, recordings_dir, datasets_dir, books_dir), model preferences (selected_model, model_unload_timeout, onboarding_completed), LLM configuration (ollama_url, llm_provider, llm_model), the agent dock's dial target (goose_acp_url, goose_acp_enabled) and its host records (agent_hosts), this device's sync identity (pc_url, role, cluster_id), the MCP policy mode (mcp_policy: \"permissive\" journals every tool call and denies nothing, \"enforce\" also refuses destructive ones — see app_audit_get) and whether the MCP surface is exposed at all (mcp_enabled). Credentials (llm_api_key, goose_acp_secret, pc_token, device_seed) are never returned: a set one reads as \"***\" with a matching has_<field>=true, an unset one reads as \"\". Pass this object straight back to settings_set — the placeholders are recognised and skipped, not written.")]
     async fn settings_get(&self) -> String {
         log::info!("[MCP] settings_get");
         let state = self.app.state::<SettingsState>();
@@ -184,7 +220,7 @@ impl DatasetMcpServer {
         serde_json::to_string_pretty(&settings.redacted_json()).unwrap_or_default()
     }
 
-    #[tool(name = "settings_set", description = "Update app settings. Pass a JSON object holding ONLY the fields to change; everything else keeps its current value, so a partial object is correct and a full settings_get payload echoed back is harmless. Writable: model_dir, recordings_dir, datasets_dir, books_dir, selected_model, model_unload_timeout, onboarding_completed, ollama_url, llm_provider, llm_model, llm_api_key, goose_acp_url, goose_acp_secret, goose_acp_enabled, pc_url, role, read_aloud_tts_voice, mcp_policy. Credentials are write-only — set one by passing its real value; \"***\" means 'leave it alone'. device_seed and device_id are derived by the app and always refused. mcp_policy is refused too while the policy is \"enforce\", because an agent that can loosen its own leash has none — ask the user to change it on the Settings page. The response names what was updated and what was skipped (with the reason), so a no-op write is never silent.")]
+    #[tool(name = "settings_set", description = "Update app settings. Pass a JSON object holding ONLY the fields to change; everything else keeps its current value, so a partial object is correct and a full settings_get payload echoed back is harmless. Writable: model_dir, recordings_dir, datasets_dir, books_dir, selected_model, model_unload_timeout, onboarding_completed, ollama_url, llm_provider, llm_model, llm_api_key, goose_acp_url, goose_acp_secret, goose_acp_enabled, pc_url, role, read_aloud_tts_voice, mcp_policy, mcp_enabled. Credentials are write-only — set one by passing its real value; \"***\" means 'leave it alone'. device_seed and device_id are derived by the app and always refused. mcp_policy and mcp_enabled are refused too while the policy is \"enforce\", because an agent that can loosen — or switch off — its own surface has none; ask the user to change them on the Settings page. Flipping mcp_enabled restarts the local web service, so /mcp and /agent.md start or stop answering. The response names what was updated and what was skipped (with the reason), so a no-op write is never silent.")]
     async fn settings_set(&self, Parameters(param): Parameters<SettingsSetParam>) -> Result<String, String> {
         log::info!("[MCP] settings_set");
         let state = self.app.state::<SettingsState>();
@@ -201,11 +237,16 @@ impl DatasetMcpServer {
         }
         let ws_dir = state.workspace_dir.lock().unwrap().clone();
         crate::settings::SettingsState::save(&new_settings, ws_dir.as_ref())?;
-        {
+        let mcp_flipped = {
             let mut s = state.settings.lock().unwrap();
+            let flipped = s.mcp_enabled != new_settings.mcp_enabled;
             *s = new_settings;
-        }
+            flipped
+        };
         let _ = self.app.emit("settings-changed", ());
+        if mcp_flipped {
+            crate::sync::server::restart_after_mcp_toggle(&self.app).await?;
+        }
         Ok(serde_json::json!({
             "status": "ok",
             "updated": updated,
@@ -213,6 +254,74 @@ impl DatasetMcpServer {
             "message": "Settings updated",
         })
         .to_string())
+    }
+
+    #[tool(name = "agent_host_list", description = "List the agents the dock can host, plus the rule that governs dialling each: one entry per record with {id, display_name, enabled, transport, kind, endpoint, needs_confirmation, approved, last_session}, and the live session folded in as `session`. `needs_confirmation` is the app's decision, not a suggestion: a stdio host is an arbitrary program and always needs the user's approval, a ws host only when it is not loopback. Use this before agent_host_connect so you know whether the dial will be refused.")]
+    async fn agent_host_list(&self) -> String {
+        log::info!("[MCP] agent_host_list");
+        serde_json::to_string_pretty(&crate::ai::agent_acp::hosts_payload(&self.app))
+            .unwrap_or_default()
+    }
+
+    #[tool(name = "agent_host_status", description = "Status of the dock's hosted session and of one agent host record: {connected, host_id, display_name, transport, session_id, mcp_registered, mcp_url, mcp_transport, active_id, host}. `host` repeats the record's dial rule (kind, endpoint, needs_confirmation, approved). Call it after agent_host_connect to confirm which transport carried the session and whether the fms-app tools were registered on it.")]
+    async fn agent_host_status(&self, Parameters(param): Parameters<AgentHostStatusParam>) -> String {
+        log::info!("[MCP] agent_host_status: id={:?}", param.id);
+        serde_json::to_string_pretty(&crate::ai::agent_acp::host_status_payload(
+            &self.app,
+            param.id.as_deref(),
+        ))
+        .unwrap_or_default()
+    }
+
+    #[tool(name = "agent_host_register", description = "Register (or replace) an agent host record so the dock can host it. kind=\"ws\" needs `url`; kind=\"stdio\" needs `program` (plus optional args, env, cwd). Omit `id` to derive one from display_name. enabled=true makes it the host the dock dials and disables the others — the dock hosts one session at a time. Registering does NOT dial anything and does NOT approve it: a stdio host (or a non-loopback ws host) still needs the user to answer the confirm dialog before agent_host_connect will succeed. This tool is classified human-handoff because it points the app at a program or a machine, so it is refused under mcp_policy=\"enforce\".")]
+    async fn agent_host_register(&self, Parameters(param): Parameters<AgentHostRegisterParam>) -> Result<String, String> {
+        log::info!("[MCP] agent_host_register: {}", param.display_name);
+        let transport = match param.kind.trim().to_ascii_lowercase().as_str() {
+            "ws" | "websocket" => crate::settings::AgentTransport::Ws {
+                url: param.url.clone().unwrap_or_default(),
+            },
+            "stdio" => crate::settings::AgentTransport::Stdio {
+                program: param.program.clone().unwrap_or_default(),
+                args: param.args.clone(),
+                env: param.env.clone(),
+                cwd: param.cwd.clone(),
+            },
+            other => {
+                return Err(format!(
+                    "unknown kind '{}'. Use \"ws\" (a server the user runs) or \"stdio\" (a program FmS spawns).",
+                    other
+                ))
+            }
+        };
+        let host = crate::settings::AgentHost {
+            id: param.id.clone().unwrap_or_default(),
+            display_name: param.display_name.clone(),
+            transport,
+            enabled: param.enabled,
+            last_session: None,
+        };
+        let out = crate::ai::agent_acp::register_host(&self.app, host)?;
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
+    }
+
+    #[tool(name = "agent_host_unregister", description = "Remove an agent host record. If it is the host currently running, the session is closed first — a removed record must not keep running behind the user's back. Known ids are listed by agent_host_list. Classified human-handoff: removing a record changes what FmS is willing to run or dial, so it is refused under mcp_policy=\"enforce\".")]
+    async fn agent_host_unregister(&self, Parameters(param): Parameters<AgentHostStatusParam>) -> Result<String, String> {
+        log::info!("[MCP] agent_host_unregister: id={:?}", param.id);
+        let id = param
+            .id
+            .ok_or_else(|| "agent_host_unregister needs an `id`; agent_host_list lists them".to_string())?;
+        let out = crate::ai::agent_acp::unregister_host(&self.app, &id)?;
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
+    }
+
+    #[tool(name = "agent_host_connect", description = "Connect the dock to a registered agent host (server/client ACP handshake, session/new, MCP registration) and return the session status. Refused when the host's `needs_confirmation` is true and the user has not approved it — the refusal raises the confirm dialog in the app itself, so the recovery is: tell the user to approve it in the Connect card (Settings → Connect an agent), then call this again. Nothing is dialled by a refused call. One session at a time: a connected dock is returned as-is, and agent_host_disconnect ends it. Classified human-handoff because it dials outward or spawns a process, so mcp_policy=\"enforce\" refuses it.")]
+    async fn agent_host_connect(&self, Parameters(param): Parameters<AgentHostStatusParam>) -> Result<String, String> {
+        log::info!("[MCP] agent_host_connect: id={:?}", param.id);
+        let id = param
+            .id
+            .ok_or_else(|| "agent_host_connect needs an `id`; agent_host_list lists them".to_string())?;
+        let status = crate::ai::agent_acp::connect_host(&self.app, &id).await?;
+        Ok(serde_json::to_string_pretty(&status).unwrap_or_default())
     }
 
     #[tool(name = "auth_status", description = "Get the currently logged-in user. Returns null if not logged in. Use auth_login to log in.")]
