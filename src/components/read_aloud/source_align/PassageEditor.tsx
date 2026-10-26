@@ -8,13 +8,12 @@ import SpanTrack from "./SpanTrack";
 import { MIN_SPAN, clock, clockShort, confidenceTone, percent, roundMs } from "./format";
 
 /**
- * One passage, open at full size: the audio at the top, the text underneath.
+ * One passage, open at full size: the audio in a card on top, the text in a
+ * second card underneath — the same two-panel shape as the queue beside them,
+ * with a gap instead of a handle: the audio card is as tall as its contents and
+ * only the text scrolls.
  *
- * The pane is a column of two bands — what the recording is and where the span
- * sits, then the text on its own ground — so the waveform never scrolls out of
- * reach however long the passage turns out to be.
- *
- * The first band closes with one bar, directly under the two edges everything
+ * The audio card closes with one bar, directly under the two edges everything
  * in it acts on: the transport on the left, and on the right the verbs —
  * Re-guess, and Save, or the Delete clip that has to come first, since a clip
  * holds the seconds its wav was cut from and a save never overwrites one.
@@ -300,10 +299,12 @@ export default function PassageEditor({
   };
 
   return (
-    <section className="rounded-xl border border-border-default bg-bg-card flex flex-col min-w-0 min-h-0 overflow-hidden">
-      {/* The audio band. It does not scroll: the waveform and the two edges
-          stay in reach however long the passage below turns out to be. */}
-      <div className="shrink-0 px-4 py-3 flex flex-col gap-3 border-b border-border-default">
+    <div className="flex flex-col gap-3 min-w-0 min-h-0">
+      {/* The audio, in its own card — a sibling of the queue on the other side
+          of the seam, and of the text card below it. Nothing in here scrolls:
+          the waveform and the two edges have to stay in reach, so the card is
+          only ever as tall as what it holds. */}
+      <section className="shrink-0 rounded-xl border border-border-default bg-bg-card px-4 py-3 flex flex-col gap-3 min-w-0 overflow-hidden">
         <div className="flex items-start gap-2 flex-wrap">
           <h2 className="text-base font-medium text-text-primary min-w-0 break-words">
             {proposal.title || "Untitled"}
@@ -470,18 +471,20 @@ export default function PassageEditor({
             <SaveClipButton proposal={proposal} busy={busy} saving={saving} onSave={onSave} />
           </span>
         </div>
-      </div>
+      </section>
 
-      {/* The text, on its own ground: a rounded card on the pane's surface, so
-          the passage reads as a thing of its own instead of as part of the audio
-          above it. The band scrolls; the card grows with the text. */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
-        <div className="rounded-lg border border-border-default bg-bg-muted px-3 py-2.5">
+      {/* The text, in the second card: the same shape as the audio card and as
+          the queue beside it, separated by a gap rather than a border so the
+          two read as siblings. It takes whatever height is left and scrolls
+          inside itself — no handle between the cards, because the audio card is
+          already as tall as its own contents. */}
+      <section className="flex-1 min-h-0 rounded-xl border border-border-default bg-bg-muted flex flex-col min-w-0 overflow-hidden">
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
           <p className="text-sm leading-relaxed text-text-primary whitespace-pre-wrap break-words">
             {proposal.content}
           </p>
         </div>
-      </div>
-    </section>
+      </section>
+    </div>
   );
 }
