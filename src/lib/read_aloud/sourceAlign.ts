@@ -109,7 +109,6 @@ export interface AlignPreview {
 }
 
 export type AlignProposalStatus = "proposed" | "refused";
-export type AlignProposalState = "pending" | "accepted" | "rejected";
 
 /**
  * The standard audio a text already owns.
@@ -136,7 +135,6 @@ export interface AlignProposal {
   title: string;
   content: string;
   status: AlignProposalStatus;
-  state: AlignProposalState;
   /** Why it was refused. Empty for a placed span — its match is the confidence. */
   note: string;
   source_uuid: string | null;
@@ -148,8 +146,6 @@ export interface AlignProposal {
   confidence: number;
   matched_words: number;
   reference_words: number;
-  /** Set by `apply`: the standard-audio uuid now holding this span. */
-  applied_uuid: string | null;
   /** The standard audio the text already has, if any — the reason Save is off. */
   clip: AlignClip | null;
   /** `null` for a refusal, or when this device no longer holds the cache. */
@@ -157,13 +153,13 @@ export interface AlignProposal {
 }
 
 export interface AlignCounts {
-  proposed: number;
+  /** Spans the model placed — `status === "proposed"`. */
+  placed: number;
   refused: number;
-  accepted: number;
-  rejected: number;
-  applied: number;
   /** Placed with no clip yet — what a save would still store. */
-  open: number;
+  unsaved: number;
+  /** Texts that own a clip, whatever the proposal says. */
+  saved: number;
 }
 
 export interface AlignProposals {
@@ -174,10 +170,10 @@ export interface AlignProposals {
   counts: AlignCounts;
 }
 
-export interface AlignDecideResult {
+export interface AlignMoveSpanResult {
   status: string;
+  /** `0` when the span did not move (a nudge that rounded to the same ms). */
   changed: number;
-  state: AlignProposalState;
   counts: AlignCounts;
 }
 
@@ -224,7 +220,6 @@ export interface AlignApplyResult {
   skipped_count: number;
   /** Spans still waiting to be saved; repeat until 0. */
   remaining: number;
-  clips_cut?: number;
   counts?: AlignCounts;
 }
 
@@ -324,29 +319,24 @@ export async function listAlignProposals(datasetUuid: string): Promise<AlignProp
 }
 
 /**
- * Move one proposal's span by hand (the 10 ms nudges), or set its state.
+ * Move one placed span by hand (the 10 ms nudges).
  *
- * `start`/`end` need a `textUuid` and must be given together. A nudge is a
- * judgement, not a write: `applyAlignProposals` is what stores a clip. Moving a
- * span that was already saved clears its `applied_uuid`, because the clip on
- * disk still holds the old seconds.
+ * A nudge only rewrites the span in `proposals.json`; `applyAlignProposals` is
+ * what stores a clip. A text that already has a clip keeps it until that clip is
+ * deleted — nothing here touches it.
  */
-export async function decideAlignProposals(params: {
-  datasetUuid: string;
-  state: AlignProposalState;
-  textUuid?: string;
-  minConfidence?: number;
-  start?: number;
-  end?: number;
-}): Promise<AlignDecideResult> {
+export async function moveAlignSpan(
+  datasetUuid: string,
+  textUuid: string,
+  start: number,
+  end: number
+): Promise<AlignMoveSpanResult> {
   requireTauri();
-  return invoke<AlignDecideResult>("read_aloud_align_decide", {
-    datasetUuid: params.datasetUuid,
-    textUuid: params.textUuid ?? null,
-    state: params.state,
-    minConfidence: params.minConfidence ?? null,
-    start: params.start ?? null,
-    end: params.end ?? null,
+  return invoke<AlignMoveSpanResult>("read_aloud_align_move_span", {
+    datasetUuid,
+    textUuid,
+    start,
+    end,
   });
 }
 

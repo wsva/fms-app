@@ -14,6 +14,28 @@ import type { AlignClip, AlignProposal } from "@/lib/read_aloud/sourceAlign";
  * whose click would silently do nothing.
  */
 
+export type SaveBlocker = "busy" | "refused" | "has-clip";
+
+/**
+ * Why this row's span cannot become a clip right now, or `null` when it can.
+ *
+ * One function for every surface that asks: the button's own `disabled`, the
+ * title that explains it, the Save-all count and the Unsaved filter. When they
+ * each wrote the condition out themselves they could disagree — a row counted
+ * but not clickable, or the other way round.
+ */
+export function saveBlocker(proposal: AlignProposal, busy: boolean): SaveBlocker | null {
+  if (proposal.status === "refused") return "refused";
+  if (proposal.clip != null) return "has-clip";
+  if (busy) return "busy";
+  return null;
+}
+
+/** True when this row's span could still become a clip (the Unsaved filter, Save all). */
+export function canSave(proposal: AlignProposal): boolean {
+  return saveBlocker(proposal, false) === null;
+}
+
 export function ClipChip({ clip }: { clip: AlignClip }) {
   const kind = clip.kind === "align" ? "cut from a recording" : clip.kind === "tts" ? "generated" : "uploaded";
   return (
@@ -33,7 +55,8 @@ const BUTTON =
 
 /**
  * Store this passage's span. Off while there is nothing to store — a refusal, or
- * a text whose clip has to go first — and the title says which.
+ * a text whose clip has to go first — and while another run holds the page; the
+ * title says which.
  */
 export function SaveClipButton({
   proposal,
@@ -46,17 +69,16 @@ export function SaveClipButton({
   saving: boolean;
   onSave: () => void;
 }) {
-  const blocked = proposal.clip != null;
-  const refused = proposal.status === "refused";
+  const blocker = saveBlocker(proposal, busy);
   return (
     <button
       type="button"
       onClick={onSave}
-      disabled={busy || blocked || refused}
+      disabled={blocker !== null}
       title={
-        refused
+        blocker === "refused"
           ? "The guess refused this passage — there is no span to save"
-          : blocked
+          : blocker === "has-clip"
             ? "This text already has a clip — delete it first"
             : saving
               ? "Saving this span…"

@@ -89,7 +89,13 @@ src-tauri/src/
 │   ├── book.rs             # Book chapters/sentences/words and their audio
 │   ├── book_artifacts.rs   # Book "understanding layer": artifacts (explain/simplify/digest/argument_map/
 │   │                       #   questions/note/assessment), glossary terms, quiz→XP results; LLM + Edge-TTS generation
-│   ├── read_aloud.rs       # Read-aloud datasets: recorded takes, STT scoring, XP awards
+│   ├── read_aloud/         # Read-aloud datasets: recorded takes, STT scoring, XP awards
+│   │   ├── mod.rs          # Dataset dir + DB, sync, the command wrappers, shared path helpers
+│   │   ├── source_align/   # Align page: recording folder → word timings → spans → clips
+│   │   │                   #   (`index` register/peaks, `place` the matcher, `proposals` the
+│   │   │                   #   span file + review view, `writes` apply; commands in `mod.rs`)
+│   │   └── …               # assess, audit, edges, fluency, gop, import, normalize,
+│   │                       #   phoneme, standard_audio, tts_ref, vad
 │   ├── report.rs           # The whole read-only picture of one dataset in one call: identity,
 │   │                       #   audit, every workflow run scored against it, STT model state,
 │   │                       #   actionable hint (`dataset_full_report`) — desktop

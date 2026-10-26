@@ -349,19 +349,29 @@ export interface AudioProbe {
 }
 
 /**
- * Where a text is spoken inside a longer recording, as guessed by
- * `read_aloud_standard_audio_guess`. Nothing is stored: both edges are for the
- * crop, and every other way of moving them still works afterwards.
+ * Where a text was read inside a longer recording: the shape every guesser
+ * answers with, so a caller never has to know which path placed the span.
  */
-export interface SpanGuess {
+export interface PlacedSpan {
+  /** The dataset's own recording, when the file is one of them. */
+  source_uuid: string | null;
+  source_name: string;
   /** Seconds, already padded and clamped to the file. */
   start: number;
   end: number;
-  /** Words of the text the model heard, in order. */
-  matched_words: number;
-  reference_words: number;
-  /** `matched_words / reference_words` (0–1); well under 1 is a loose match. */
+  /** `matched / reference` (0-1); well under 1 is a loose match. */
   confidence: number;
+  /** Words of the text the model heard, in order. */
+  matched: number;
+  reference: number;
+}
+
+/**
+ * What `read_aloud_standard_audio_guess` answers: the span, plus what the model
+ * heard in the file. Nothing is stored: both edges are for the crop, and every
+ * other way of moving them still works afterwards.
+ */
+export interface SpanGuess extends PlacedSpan {
   /** Everything the model heard in the file. */
   transcript: string;
 }

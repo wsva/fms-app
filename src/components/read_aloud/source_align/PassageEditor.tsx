@@ -175,15 +175,13 @@ function ChapterMap({
       {siblings.map((proposal) => {
         if (proposal.status === "refused" || !(proposal.end > proposal.start)) return null;
         const isCurrent = proposal.text_uuid === current;
+        // Three tones: the passage you are on, one that already owns a clip, and
+        // one whose span is only in `proposals.json`.
         const tone = isCurrent
           ? "bg-accent-bg ring-1 ring-accent-bg"
-          : proposal.applied_uuid
+          : proposal.clip
             ? "bg-accent-bg/60"
-            : proposal.state === "accepted"
-              ? "bg-accent-bg/40"
-              : proposal.state === "rejected"
-                ? "bg-text-tertiary/30"
-                : "bg-text-tertiary/20 hover:bg-text-tertiary/40";
+            : "bg-text-tertiary/20 hover:bg-text-tertiary/40";
         return (
           <button
             key={proposal.text_uuid}

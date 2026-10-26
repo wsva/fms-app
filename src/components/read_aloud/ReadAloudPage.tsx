@@ -1087,10 +1087,10 @@ export default function ReadAloudPage() {
                 {/* The dataset's bulk tools are occasional, and they act on the
                     whole dataset rather than on the row under the cursor, so
                     they live behind the dots and open a page of their own. The
-                    label is the job, not the page: what it does is cut one clip
-                    per text out of an audiobook. */}
+                    label is the job, not the page — what it does is cut one clip
+                    per text out of an audiobook, and the page it opens says so. */}
                 <ToolbarMenuItem icon={AudioLines} onClick={() => setAdvancedView(true)}>
-                  Init Standard Audios from Audiobook
+                  Init Audios
                 </ToolbarMenuItem>
                 <ToolbarMenuItem
                   icon={Trash2}

@@ -411,7 +411,7 @@ export default function StandardAudioSection({
       setGuessNote({
         kind: "ok",
         text:
-          `Heard ${guess.matched_words} of ${guess.reference_words} words (${percent}%) and put the edges on them. ` +
+          `Heard ${guess.matched} of ${guess.reference} words (${percent}%) and put the edges on them. ` +
           (percent < 80
             ? "That is a loose match, so check both edges before saving."
             : "Check them before saving."),

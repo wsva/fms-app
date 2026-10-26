@@ -51,6 +51,8 @@ Rows journal through the common `commit_change` choke point as `read_text_save` 
 
 Every command has an MCP twin in `mcp/books.rs` (11 `read_aloud_*` tools). `read_aloud_score` is the pure preview — reference text and transcript in, structured `AsrScoreSummary` + `passed` out — so an agent can judge a transcript without touching storage, and `read_aloud_submit` returns the summary inside its result. The chunks make an agent's feedback loop as informative as the UI's: it can tell the learner *which* words were misread, skipped, or added.
 
+The align plane has its own note, [read-aloud-align.md](./read-aloud-align.md): a folder of recordings in, one span per text out, and the rules that follow from that (a span is the truth, a clip is a cache of it, and a save never overwrites one).
+
 ## Frontend
 
 `src/components/read_aloud/`: `ReadAloudPage` (dataset selector, text list with score badges, management), `PracticePanel` (record → transcribe → submit, result, attempt history with playback), `TextEditor` and `DatasetDialog` (modals). The diff under a result is `AsrDiff`, a pure renderer for backend chunks — substituted and inserted words go red with the reference word in the tooltip, skipped words render struck through. The older client-side LCS highlighter (`read_book/diff.tsx`, with its fake-space "missing" placeholder) now serves only the book `SentenceDrawer`; unifying it onto `asr_metric` chunks is an open follow-up.

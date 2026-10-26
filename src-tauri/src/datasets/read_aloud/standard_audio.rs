@@ -64,6 +64,7 @@ use crate::datasets::asr_metric;
 use crate::edge_tts::{self, TtsWordBoundary};
 use crate::settings::{AppSettings, SettingsState};
 
+use super::source_align::source_identity;
 use super::{edges, effective_reference, find_dataset_dir, find_dataset_dir_write, open_db};
 
 /// Columns of the waveform a probe returns. Roughly one per two pixels at the
@@ -935,21 +936,32 @@ pub(crate) const GUESS_MIN_WORDS: usize = 3;
 /// Roughly what one badly read sentence costs.
 pub(crate) const GUESS_MAX_GAP: usize = 6;
 
-/// Where a text was read inside a longer recording.
+/// Where a text was read inside a longer recording: the shape every guesser
+/// answers with, so a caller never has to know which path placed the span.
 #[derive(Debug, Clone, Serialize)]
-pub struct SpanGuess {
-    /// Guessed start of the clip, in seconds: padded, clamped, rounded to the
-    /// tenth of a second the crop track can show.
+pub struct PlacedSpan {
+    /// The registered recording this span is in, when the file is one of the
+    /// dataset's own — a file the caller handed over may name none.
+    pub source_uuid: Option<String>,
+    pub source_name: String,
+    /// Seconds, already padded and clamped to the file.
     pub start: f64,
     pub end: f64,
-    /// Words of the text the model heard in order, out of `reference_words`.
-    pub matched_words: usize,
-    pub reference_words: usize,
-    /// `matched_words / reference_words`. Well under 1 means the model misheard
-    /// a good deal, so the two edges deserve a look before saving.
+    /// `matched / reference` (0-1). Well under 1 means a loose match, so both
+    /// edges deserve a look before the span is saved.
     pub confidence: f64,
-    /// Everything the model heard in the file, so a wrong span can be diagnosed
-    /// rather than only wondered at.
+    /// Words of the text the model heard, in order.
+    pub matched: usize,
+    pub reference: usize,
+}
+
+/// The `read_aloud_standard_audio_guess` payload: the span, plus everything the
+/// model heard in the file, so a wrong one can be diagnosed rather than only
+/// wondered at.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpanGuess {
+    #[serde(flatten)]
+    pub span: PlacedSpan,
     pub transcript: String,
 }
 
@@ -980,6 +992,21 @@ pub(crate) fn densest_run(pairs: &[(usize, usize)]) -> &[(usize, usize)] {
 
 pub(crate) fn round_tenth(seconds: f64) -> f64 {
     (seconds * 10.0).round() / 10.0
+}
+
+/// The file a guess names: the path's own name, or a stand-in for bytes handed
+/// over by the mobile picker, which knows the name but does not pass it here.
+fn source_name_of(source_path: Option<&str>, source_base64: Option<&str>) -> String {
+    if let Some(path) = source_path.map(str::trim).filter(|s| !s.is_empty()) {
+        return Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+    }
+    if source_base64.map(str::trim).is_some_and(|s| !s.is_empty()) {
+        return "uploaded audio".to_string();
+    }
+    String::new()
 }
 
 /// Turn a model failure into something the user can act on. The two failures
@@ -1119,11 +1146,15 @@ pub(crate) fn guess_span(
     }
 
     Ok(SpanGuess {
-        start,
-        end,
-        matched_words: matched,
-        reference_words: reference_tokens.len(),
-        confidence: (matched as f64 / reference_tokens.len() as f64 * 100.0).round() / 100.0,
+        span: PlacedSpan {
+            source_uuid: source_identity(&dir, source_path).map(|(uuid, _)| uuid),
+            source_name: source_name_of(source_path, source_base64),
+            start,
+            end,
+            confidence: (matched as f64 / reference_tokens.len() as f64 * 100.0).round() / 100.0,
+            matched,
+            reference: reference_tokens.len(),
+        },
         transcript: heard.text,
     })
 }

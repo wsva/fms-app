@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { AlertTriangle, Save, Search, Wand2, X } from "lucide-react";
 import type { AlignProposal } from "@/lib/read_aloud/sourceAlign";
-import { ClipChip } from "./ClipActions";
+import { ClipChip, canSave } from "./ClipActions";
 import { clock, confidenceTone, percent } from "./format";
 
 /**
@@ -25,11 +25,6 @@ export const QUEUE_FILTERS: { id: QueueFilter; label: string }[] = [
   { id: "saved", label: "Saved" },
   { id: "refused", label: "Refused" },
 ];
-
-/** True when this row's span could still become a clip. */
-export function canSave(proposal: AlignProposal): boolean {
-  return proposal.status === "proposed" && proposal.clip == null;
-}
 
 export function matchesFilter(proposal: AlignProposal, filter: QueueFilter): boolean {
   switch (filter) {
