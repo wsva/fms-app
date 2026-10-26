@@ -31,7 +31,7 @@ import { COARSE_STEP, CONTEXT_PAD, MIN_SPAN, NUDGE_STEP, clock, errorText, round
  * The standard-audio page: a folder of recordings in, one clip per text out.
  *
  * Three tabs, in the order the work is done. **Source Audios** is the folder,
- * one line per recording with its two verbs — listen, read what came back — and
+ * one row per recording with its two verbs — listen, read what came back — and
  * the transcript on the right, because "did it hear this right?" is answered by
  * the words and their times, not by a number. **Review** is the work: the queue
  * on the left, one passage open beside it with its waveform, its typed edges

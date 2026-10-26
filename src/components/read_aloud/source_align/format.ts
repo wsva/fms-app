@@ -44,6 +44,21 @@ export function clockShort(seconds: number): string {
     : `${minutes}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 }
 
+/**
+ * `00:12:34.567` — the transcript table's clock.
+ *
+ * Hours are always present, so the two ends of a row can be compared by eye
+ * without counting colons, and the column does not change width at the
+ * hour mark.
+ */
+export function clockHms(seconds: number): string {
+  const s = Math.max(0, seconds);
+  const hours = Math.floor(s / 3600);
+  const minutes = Math.floor((s % 3600) / 60);
+  const rest = (s % 60).toFixed(3).padStart(6, "0");
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${rest}`;
+}
+
 /** A percentage as the page prints it: whole numbers, never `86.5 %`. */
 export function percent(value: number): number {
   return Math.round(value * 100);
