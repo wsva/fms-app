@@ -7,6 +7,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import {
   applyAlignProposals,
   decideAlignProposals,
+  guessAlignSpanOne,
   guessAlignSpans,
   listAlignProposals,
   readAlignTranscript,
@@ -25,6 +26,7 @@ import CutTab from "./CutTab";
 import PassageEditor from "./PassageEditor";
 import PassageQueue, { QUEUE_FILTERS, matchesFilter, type QueueFilter } from "./PassageQueue";
 import SourceAudiosTab from "./SourceAudiosTab";
+import { Splitter, useSplitWidth } from "./Splitter";
 import { COARSE_STEP, CONTEXT_PAD, MIN_SPAN, NUDGE_STEP, clock, errorText, roundMs } from "./format";
 
 /**
@@ -52,6 +54,14 @@ const APPLY_BATCH = 10;
 
 /** How long a burst of nudges waits before it becomes one rewrite of the file. */
 const NUDGE_COMMIT_MS = 300;
+
+/** The Review seam: the rail as it was, and neither side becomes a sliver. */
+const REVIEW_SPLIT = {
+  storageKey: "read-aloud:review:split",
+  initial: 300,
+  leftMin: 240,
+  rightMin: 420,
+};
 
 type Note = { kind: "ok" | "warn"; text: string };
 
@@ -89,12 +99,17 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   /** The file being listened to right now; its row shows the spinner. */
   const [listeningUuid, setListeningUuid] = useState<string | null>(null);
+  /** The text being re-guessed right now; its row shows the spinner. */
+  const [guessingText, setGuessingText] = useState<string | null>(null);
   /** The "listen again?" question, which is the one destructive-shaped click here. */
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [filter, setFilter] = useState<QueueFilter>("all");
   const [search, setSearch] = useState("");
   /** Which edge the arrow keys move; the fields show it. */
   const [activeEdge, setActiveEdge] = useState<"start" | "end">("start");
+
+  // The seam between the rail and the passage, remembered like the other tab's.
+  const reviewSplit = useSplitWidth(REVIEW_SPLIT);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const boundsRef = useRef<{ from: number; to: number } | null>(null);
@@ -446,10 +461,39 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
       setTab("review");
       setNote({
         kind: result.refused > 0 ? "warn" : "ok",
-        text: `${result.proposed} of ${result.passages} passages placed (mean ${Math.round(
+        text: `${result.proposed} of ${result.passages} texts placed (mean ${Math.round(
           result.mean_confidence * 100
         )}%), ${result.refused} refused.`,
       });
+    });
+
+  /**
+   * Re-place one text.
+   *
+   * The whole-set guess rewrites every row, so it is the wrong tool for fixing
+   * one: it would replace the edges that were just nudged elsewhere. This one
+   * starts where the span before it ends, keeps that span, and replaces only
+   * this row of `proposals.json`.
+   */
+  const guessOne = (textUuid: string) =>
+    pipeline("reguessing", async () => {
+      setGuessingText(textUuid);
+      try {
+        const result = await guessAlignSpanOne(datasetUuid, textUuid);
+        await refresh(true);
+        setSelected(textUuid);
+        const title = spans.find((p) => p.text_uuid === textUuid)?.title || "This text";
+        setNote({
+          kind: result.placed && result.note === "" ? "ok" : "warn",
+          text: result.placed
+            ? `${title}: ${clock(result.start)} → ${clock(result.end)} in ${result.source_name}${
+                result.note === "" ? "." : ` — ${result.note}`
+              }`
+            : `${title} was not placed: ${result.note}`,
+        });
+      } finally {
+        setGuessingText(null);
+      }
     });
 
   const decide = (proposal: AlignProposal, state: AlignProposalState) => {
@@ -577,15 +621,8 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   const sources = index?.sources ?? [];
   const spans = proposals?.proposals ?? [];
   const counts = proposals?.counts ?? null;
-  const passagesTotal = proposals?.passages_total ?? 0;
   const transcribed = index?.transcribed ?? 0;
   const words = useMemo(() => sources.reduce((sum, s) => sum + (s.words ?? 0), 0), [sources]);
-  const placed = spans.filter((p) => p.status === "proposed").length;
-  const meanConfidence = useMemo(() => {
-    const proposed = spans.filter((p) => p.status === "proposed");
-    if (proposed.length === 0) return null;
-    return proposed.reduce((sum, p) => sum + p.confidence, 0) / proposed.length;
-  }, [spans]);
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -645,7 +682,6 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   ).length;
 
   const openCount = counts?.open ?? 0;
-  const refused = counts?.refused ?? 0;
   const pending = spans.filter((p) => p.status === "proposed" && p.state === "pending").length;
 
   // The selection follows the rows: a filter that hides it, a re-guess that
@@ -659,10 +695,10 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
     sources.length === 0
       ? "Pick the folder that holds the audiobook's files — Source Audios tab."
       : transcribed === 0
-        ? "Transcribe one recording on the Source Audios tab, then place the passages."
+        ? "Transcribe one recording on the Source Audios tab, then guess."
         : spans.length === 0
-          ? "Every recording is transcribed — place the passages from the Source Audios tab."
-          : "Select a passage in the queue.";
+          ? "Every recording is transcribed — press Guess for all."
+          : "Select a text in the queue.";
 
   // ---- keyboard -----------------------------------------------------------
 
@@ -744,10 +780,10 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   const tabHint =
     tab === "review"
       ? spans.length === 0
-        ? "Nothing placed yet: open Source Audios, listen to the files, then place the passages."
-        : "Space play · A accept · R reject · ← → nudge the highlighted edge (Shift 100 ms) · ↑ ↓ passage · Esc stop"
+        ? "Nothing placed yet: press Guess for all to walk the texts along the recordings."
+        : "Space play · A accept · R reject · ← → nudge the highlighted edge (Shift 100 ms) · ↑ ↓ text · Esc stop"
       : tab === "sources"
-        ? "Listen to each file once, read what came back on the right, then place the passages."
+        ? "Listen to each file once, read what came back on the right, then judge the texts on Review."
         : "Accept spans in Review, then cut them into this dataset here.";
   const busyText =
     busy === "picking"
@@ -757,12 +793,14 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
         : busy === "listening"
           ? "Listening to this file…"
           : busy === "guessing"
-            ? "Placing every passage…"
-            : busy === "deciding"
-              ? "Saving the verdict…"
-              : busy === "cutting"
-                ? "Cutting the accepted spans…"
-                : "";
+            ? "Placing every text…"
+            : busy === "reguessing"
+              ? "Placing this text again…"
+              : busy === "deciding"
+                ? "Saving the verdict…"
+                : busy === "cutting"
+                  ? "Cutting the accepted spans…"
+                  : "";
 
   return (
     <div className="flex-1 min-h-0 flex flex-col">
@@ -794,7 +832,11 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
 
       {tab === "review" ? (
         <div className="flex-1 min-h-0 overflow-y-auto p-4 lg:overflow-hidden">
-          <div className="grid gap-4 lg:h-full lg:min-h-0 lg:grid-cols-[280px_minmax(0,1fr)]">
+          <div
+            ref={reviewSplit.containerRef}
+            className="flex flex-col gap-3 lg:grid lg:h-full lg:min-h-0 lg:gap-0"
+            style={reviewSplit.columns}
+          >
             <PassageQueue
               proposals={spans}
               visible={visible}
@@ -805,6 +847,19 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
               onSearch={setSearch}
               selected={selected}
               onSelect={setSelected}
+              onGuessAll={guess}
+              onReguess={guessOne}
+              reguessing={guessingText}
+              busy={busy != null}
+              canGuess={transcribed > 0}
+            />
+
+            <Splitter
+              width={reviewSplit.width}
+              label="Resize the text list and the passage"
+              onChange={reviewSplit.resize}
+              onCommit={reviewSplit.commit}
+              onReset={reviewSplit.reset}
             />
 
             <PassageEditor
@@ -850,10 +905,6 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
             words={words}
             busy={busy}
             listeningUuid={listeningUuid}
-            passagesTotal={passagesTotal}
-            placed={placed}
-            refused={refused}
-            meanConfidence={meanConfidence}
             selected={sourceSel}
             transcript={transcript}
             transcriptBusy={transcriptBusy}
@@ -867,7 +918,6 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
             onOpenResult={(sourceUuid: string) => {
               void openTranscript(sourceUuid);
             }}
-            onGuess={guess}
           />
         </div>
       ) : (

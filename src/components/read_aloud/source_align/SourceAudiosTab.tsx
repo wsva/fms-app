@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Check,
   FileText,
@@ -9,10 +9,10 @@ import {
   ScanText,
   Search,
   Square,
-  Wand2,
 } from "lucide-react";
 import type { AlignSource, AlignTranscript } from "@/lib/read_aloud/sourceAlign";
-import { clockHms, clockShort, percent } from "./format";
+import { clockHms, clockShort } from "./format";
+import { Splitter, useSplitWidth } from "./Splitter";
 
 /**
  * The recordings side of the page: the folder, one row per file, and what the
@@ -32,7 +32,6 @@ const CARD_BODY = "px-4 py-3 flex flex-col gap-2.5";
 const ACTION =
   "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed";
 const NEUTRAL = `${ACTION} bg-bg-muted text-text-secondary hover:bg-bg-hover`;
-const PRIMARY = `${ACTION} bg-accent-bg text-white`;
 /** The per-row verbs: small, but they say what they do. */
 const ROW_BUTTON =
   "inline-flex items-center gap-1 px-2 py-1 rounded-md border border-border-default text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent";
@@ -40,126 +39,13 @@ const ROW_BUTTON =
 /** How many transcript rows render at once; the rest wait behind one click. */
 const ROWS_PER_PAGE = 1000;
 
-/** The two columns' seam: how wide the list starts, and how far either side can go. */
-// `split` rather than `left-width`: the stored number now only exists because
-// someone dragged, and the default it overrides changed with it.
-const LEFT_WIDTH_KEY = "read-aloud:source-audios:split";
-/** Used only when there is no room to measure — a container that has not laid out yet. */
-const LEFT_WIDTH_FALLBACK = 420;
-const LEFT_WIDTH_MIN = 260;
-/** Room the transcript keeps whatever happens — it is the side being read. */
-const RIGHT_WIDTH_MIN = 320;
-const HANDLE_WIDTH = 12;
-
-/**
- * An even split.
- *
- * Neither side is the point of the page at first sight — the list and the
- * transcript are read together — so the seam starts, and returns on a
- * double-click, midway.
- */
-function evenWidth(container: number): number {
-  return container > 0 ? Math.round((container - HANDLE_WIDTH) / 2) : LEFT_WIDTH_FALLBACK;
-}
-
-/**
- * Keep both sides usable.
- *
- * Without a floor on each, a drag can leave a column so thin that its content is
- * a sliver, and the state that follows is a page that looks broken rather than
- * resized.
- */
-function clampWidth(next: number, container: number): number {
-  const room = container > 0 ? container - RIGHT_WIDTH_MIN - HANDLE_WIDTH : LEFT_WIDTH_FALLBACK;
-  const max = Math.max(LEFT_WIDTH_MIN, room);
-  return Math.round(Math.min(Math.max(next, LEFT_WIDTH_MIN), max));
-}
-
-/**
- * The seam between the list and the transcript.
- *
- * How much room the file names and the timestamps each deserve is a taste, not
- * a rule, so the seam moves: drag it, or use the arrow keys when it has focus,
- * and a double-click puts it back in the middle.
- */
-function Splitter({
-  width,
-  onChange,
-  onCommit,
-  onReset,
-}: {
-  width: number;
-  onChange: (next: number) => void;
-  onCommit: (width: number) => void;
-  onReset: () => void;
-}) {
-  const drag = useRef<{ x: number; from: number; to: number } | null>(null);
-
-  const stop = () => {
-    drag.current = null;
-    // Both were set on the body for the length of the drag, so the pointer keeps
-    // its shape over the two panes and nothing under it gets selected.
-    document.body.style.userSelect = "";
-    document.body.style.cursor = "";
-  };
-
-  // A drag that outlives the seam — the tab is switched from under it — would
-  // otherwise leave the whole window in col-resize.
-  useEffect(
-    () => () => {
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
-    },
-    []
-  );
-
-  return (
-    <div
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="Resize the audios list and the transcript"
-      aria-valuenow={Math.round(width)}
-      aria-valuemin={LEFT_WIDTH_MIN}
-      tabIndex={0}
-      title="Drag to resize · double-click to reset"
-      className="group hidden lg:flex items-center justify-center touch-none cursor-col-resize outline-none"
-      onPointerDown={(event) => {
-        if (event.button !== 0) return;
-        event.preventDefault();
-        event.currentTarget.setPointerCapture(event.pointerId);
-        drag.current = { x: event.clientX, from: width, to: width };
-        document.body.style.userSelect = "none";
-        document.body.style.cursor = "col-resize";
-      }}
-      onPointerMove={(event) => {
-        const start = drag.current;
-        if (!start) return;
-        start.to = start.from + (event.clientX - start.x);
-        onChange(start.to);
-      }}
-      onPointerUp={(event) => {
-        const start = drag.current;
-        if (!start) return;
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-          event.currentTarget.releasePointerCapture(event.pointerId);
-        }
-        stop();
-        onCommit(start.to);
-      }}
-      onPointerCancel={stop}
-      onDoubleClick={onReset}
-      onKeyDown={(event) => {
-        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-        event.preventDefault();
-        const next = width + (event.key === "ArrowLeft" ? -24 : 24);
-        onChange(next);
-        onCommit(next);
-      }}
-    >
-      <span className="h-12 w-[3px] rounded-full bg-border-default transition-colors group-hover:bg-accent-bg group-focus-visible:bg-accent-bg" />
-    </div>
-  );
-}
+/** This tab's seam: even to start, and neither side becomes a sliver. */
+const SPLIT = {
+  storageKey: "read-aloud:source-audios:split",
+  initial: "even" as const,
+  leftMin: 260,
+  rightMin: 320,
+};
 
 type Props = {
   mobile: boolean;
@@ -170,10 +56,6 @@ type Props = {
   busy: string | null;
   /** The file being listened to right now, so its row shows the spinner. */
   listeningUuid: string | null;
-  passagesTotal: number;
-  placed: number;
-  refused: number;
-  meanConfidence: number | null;
   /** The file whose result is on the right. */
   selected: string | null;
   transcript: AlignTranscript | null;
@@ -184,7 +66,6 @@ type Props = {
   onTranscribeFile: (sourceUuid: string) => void;
   onStop: () => void;
   onOpenResult: (sourceUuid: string) => void;
-  onGuess: () => void;
 };
 
 export default function SourceAudiosTab({
@@ -195,10 +76,6 @@ export default function SourceAudiosTab({
   words,
   busy,
   listeningUuid,
-  passagesTotal,
-  placed,
-  refused,
-  meanConfidence,
   selected,
   transcript,
   transcriptBusy,
@@ -208,75 +85,20 @@ export default function SourceAudiosTab({
   onTranscribeFile,
   onStop,
   onOpenResult,
-  onGuess,
 }: Props) {
   const busyLabel = busy != null;
   const transcribing = busy === "transcribing";
-  const guessing = busy === "guessing";
   const allDone = sources.length > 0 && transcribed === sources.length;
   const selectedSource = sources.find((s) => s.uuid === selected) ?? null;
 
-  // The seam between the columns is a taste, so it is remembered per device —
-  // and it lives here rather than in the workspace because this is the only
-  // view that has two columns to divide.
-  const gridRef = useRef<HTMLDivElement | null>(null);
-  const [leftWidth, setLeftWidth] = useState(LEFT_WIDTH_FALLBACK);
-
-  useEffect(() => {
-    const stored = Number(window.localStorage.getItem(LEFT_WIDTH_KEY));
-    // Chosen once is chosen: a remembered seam wins over the even split, which
-    // is only the shape of a page that has never been dragged.
-    const container = gridRef.current?.clientWidth ?? 0;
-    const wanted = Number.isFinite(stored) && stored > 0 ? stored : evenWidth(container);
-    // A window that is already narrow must not open with the transcript squeezed
-    // below its floor — and a container that has not been laid out yet (width 0)
-    // must not be read as "very narrow".
-    setLeftWidth(container > 0 ? clampWidth(wanted, container) : wanted);
-  }, []);
-
-  // Whatever takes the room away — the window, the sidebar, the page's own
-  // padding — the floor is re-applied to the width already chosen rather than
-  // the width being thrown away.
-  useEffect(() => {
-    const node = gridRef.current;
-    if (!node || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      const container = node.clientWidth;
-      // A view hidden by the shell reports 0; it has no width to divide yet.
-      if (container <= 0) return;
-      setLeftWidth((current) => clampWidth(current, container));
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-
-  const resizeLeft = (next: number) =>
-    setLeftWidth(clampWidth(next, gridRef.current?.clientWidth ?? 0));
-
-  /** Written on release rather than on every pointer move of a drag. */
-  const rememberLeft = (next: number) => {
-    try {
-      window.localStorage.setItem(
-        LEFT_WIDTH_KEY,
-        String(clampWidth(next, gridRef.current?.clientWidth ?? 0))
-      );
-    } catch {
-      // Storage off: the seam still works, it just forgets between visits.
-    }
-  };
-
-  /** The double-click: back to half each. */
-  const resetLeft = () => {
-    const next = evenWidth(gridRef.current?.clientWidth ?? 0);
-    resizeLeft(next);
-    rememberLeft(next);
-  };
+  // The seam between the columns is a taste, so it is remembered per device.
+  const { containerRef, width, columns, resize, commit, reset } = useSplitWidth(SPLIT);
 
   return (
     <div
-      ref={gridRef}
+      ref={containerRef}
       className="flex flex-col gap-3 lg:h-full lg:min-h-0 lg:grid lg:gap-0"
-      style={{ gridTemplateColumns: `${leftWidth}px ${HANDLE_WIDTH}px minmax(0, 1fr)` }}
+      style={columns}
     >
       {/* ---- left: the list, and the two verbs on every row ---------- */}
       <div className="flex flex-col gap-3 lg:min-h-0">
@@ -425,54 +247,14 @@ export default function SourceAudiosTab({
             </span>
           </div>
         </section>
-
-        <section className={`${CARD} shrink-0`}>
-          <div className={CARD_HEAD}>
-            <h3 className="text-xs font-semibold text-text-primary">Place passages</h3>
-            <span className="ml-auto text-[10px] text-text-tertiary tabular-nums">
-              {placed}/{passagesTotal}
-            </span>
-          </div>
-          <div className={CARD_BODY}>
-            {placed > 0 && (
-              <p className="text-[11px] text-text-secondary tabular-nums">
-                {placed} of {passagesTotal} placed
-                {meanConfidence == null ? "" : ` · mean ${percent(meanConfidence)}%`}
-                {refused > 0 ? ` · ${refused} refused` : ""}
-              </p>
-            )}
-            <div className="flex items-center gap-2 flex-wrap">
-              <button
-                type="button"
-                onClick={onGuess}
-                disabled={busyLabel || transcribed === 0}
-                className={placed > 0 ? NEUTRAL : PRIMARY}
-                title={
-                  transcribed === 0
-                    ? "Listen to at least one file first"
-                    : "Place every passage along the recordings, in order"
-                }
-              >
-                {guessing ? (
-                  <Loader2 size={12} className="animate-spin" />
-                ) : (
-                  <Wand2 size={12} />
-                )}
-                {guessing ? "Placing…" : placed > 0 ? "Re-guess" : "Guess all"}
-              </button>
-              <span className="text-[10px] text-text-tertiary">
-                Walks the passages in reading order; nothing is written to media/.
-              </span>
-            </div>
-          </div>
-        </section>
       </div>
 
       <Splitter
-        width={leftWidth}
-        onChange={resizeLeft}
-        onCommit={rememberLeft}
-        onReset={resetLeft}
+        width={width}
+        label="Resize the audios list and the transcript"
+        onChange={resize}
+        onCommit={commit}
+        onReset={reset}
       />
 
       {/* ---- right: what the model heard ---------------------------- */}

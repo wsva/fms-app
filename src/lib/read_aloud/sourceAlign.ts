@@ -159,6 +159,25 @@ export interface AlignDecideResult {
   counts: AlignCounts;
 }
 
+/** One text re-placed, with the row it ended up with. */
+export interface AlignGuessOneResult {
+  status: string;
+  text_uuid: string;
+  /** `false` when the guess refused: the row is now a refusal. */
+  placed: boolean;
+  source_uuid: string | null;
+  source_name: string;
+  start: number;
+  end: number;
+  confidence: number;
+  matched_words: number;
+  reference_words: number;
+  /** Empty when the span is sure; otherwise why it is not, or a refusal's reason. */
+  note: string;
+  counts: AlignCounts;
+  generated_at: string;
+}
+
 export interface AlignApplyFailure {
   text_uuid: string;
   error: string;
@@ -238,6 +257,26 @@ export async function readAlignTranscript(
 export async function guessAlignSpans(datasetUuid: string): Promise<AlignGuessResult> {
   requireTauri();
   return invoke<AlignGuessResult>("read_aloud_align_guess", { datasetUuid });
+}
+
+/**
+ * Place one passage again, leaving every other span in the file alone.
+ *
+ * The whole-set guess rewrites the file, so re-running it to fix one text
+ * would also overwrite the edges you had just nudged elsewhere. This one reads
+ * the span of the text before it out of the file, starts where that span ends,
+ * and replaces only its own row.
+ *
+ * A text that has never been placed is an error rather than a new row at the
+ * end of the list: the order of the file is the reading order, and appending
+ * would break it.
+ */
+export async function guessAlignSpanOne(
+  datasetUuid: string,
+  textUuid: string
+): Promise<AlignGuessOneResult> {
+  requireTauri();
+  return invoke<AlignGuessOneResult>("read_aloud_align_guess_one", { datasetUuid, textUuid });
 }
 
 /**

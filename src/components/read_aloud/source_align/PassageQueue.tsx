@@ -1,17 +1,20 @@
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
-import { AlertTriangle, Check, Search, Upload, X } from "lucide-react";
+import { AlertTriangle, Check, Loader2, RotateCcw, Search, Upload, Wand2, X } from "lucide-react";
 import type { AlignProposal } from "@/lib/read_aloud/sourceAlign";
 import { clock, confidenceTone, percent } from "./format";
 
 /**
- * The queue: every passage in reading order, narrowed by what you still have to
+ * The queue: every text in reading order, narrowed by what you still have to
  * decide.
  *
- * It is a list to walk, not a form — one line per passage, a filter, and nothing
- * else. The batch verdicts and the accepted set live on the Cut tab, so this
- * rail stays narrow enough to sit beside the passage being worked on.
+ * It is a list to walk, not a form — one line per text, a filter, and nothing
+ * else. The verbs live here because a span is judged next to its neighbours:
+ * "guess for all" re-places the whole set in order, and "re-guess" re-places
+ * one text without touching the edges already nudged on any other. The batch
+ * verdicts and the accepted set live on the Cut tab, so this rail stays narrow
+ * enough to sit beside the passage being worked on.
  */
 
 export type QueueFilter = "all" | "review" | "accepted" | "rejected" | "refused" | "stored";
@@ -91,6 +94,16 @@ type Props = {
   onSearch: (value: string) => void;
   selected: string | null;
   onSelect: (textUuid: string) => void;
+  /** Place every text along the recordings again, in reading order. */
+  onGuessAll: () => void;
+  /** Place one text again, leaving every other span in the file alone. */
+  onReguess: (textUuid: string) => void;
+  /** The text being re-guessed right now, so its row shows the spinner. */
+  reguessing: string | null;
+  /** A run of any kind is in flight: the queue's buttons step aside for it. */
+  busy: boolean;
+  /** Nothing to guess against until at least one recording is transcribed. */
+  canGuess: boolean;
 };
 
 export default function PassageQueue({
@@ -103,6 +116,11 @@ export default function PassageQueue({
   onSearch,
   selected,
   onSelect,
+  onGuessAll,
+  onReguess,
+  reguessing,
+  busy,
+  canGuess,
 }: Props) {
   const rowsRef = useRef<Record<string, HTMLButtonElement | null>>({});
   const ordinal = useMemo(() => {
@@ -119,14 +137,31 @@ export default function PassageQueue({
   return (
     <section className="rounded-xl border border-border-default bg-bg-card flex flex-col min-w-0 min-h-0 overflow-hidden max-h-[38vh] lg:max-h-none">
       <div className="shrink-0 px-2 py-2 border-b border-border-default flex flex-col gap-1.5">
-        <div className="flex items-baseline justify-between gap-2 px-1">
-          <h2 className="text-xs font-semibold text-text-primary">Passages</h2>
-          <span className="text-[10px] text-text-tertiary tabular-nums">
+        <div className="flex items-center gap-2 px-1">
+          <h2 className="text-xs font-semibold text-text-primary">Texts</h2>
+          <span className="ml-auto text-[10px] text-text-tertiary tabular-nums">
             {visible.length === proposals.length
               ? proposals.length
               : `${visible.length} of ${proposals.length}`}
           </span>
         </div>
+
+        {/* One pass over the whole set: the order is the reading order, so it
+            is also the only way to place texts that have never been placed. */}
+        <button
+          type="button"
+          onClick={onGuessAll}
+          disabled={busy || !canGuess}
+          className="inline-flex items-center justify-center gap-1.5 px-2 py-1 rounded-md text-[11px] bg-accent-bg text-white hover:bg-accent-bg/90 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+          title={
+            canGuess
+              ? "Place every text along the recordings again, in reading order"
+              : "Listen to at least one recording first — Source Audios tab"
+          }
+        >
+          <Wand2 size={11} />
+          Guess for all
+        </button>
 
         <div className="flex flex-wrap gap-1">
           {QUEUE_FILTERS.map((option) => {
@@ -142,7 +177,7 @@ export default function PassageQueue({
                     ? "bg-accent-bg/15 text-accent-bg"
                     : "bg-bg-muted text-text-secondary hover:bg-bg-hover"
                 }`}
-                title={`${option.label}: ${filterCounts[option.id]} passage${
+                title={`${option.label}: ${filterCounts[option.id]} text${
                   filterCounts[option.id] === 1 ? "" : "s"
                 }`}
               >
@@ -159,14 +194,14 @@ export default function PassageQueue({
             value={search}
             onChange={(e) => onSearch(e.target.value)}
             placeholder="Filter by title or text"
-            aria-label="Filter passages by title or text"
+            aria-label="Filter texts by title or text"
             className="min-w-0 flex-1 bg-transparent text-[11px] text-text-primary focus:outline-none placeholder:text-text-tertiary"
           />
           {search !== "" && (
             <button
               type="button"
               onClick={() => onSearch("")}
-              aria-label="Clear the passage filter"
+              aria-label="Clear the text filter"
               className="shrink-0 text-text-tertiary hover:text-text-secondary cursor-pointer"
             >
               <X size={11} />
@@ -186,42 +221,69 @@ export default function PassageQueue({
           visible.map((proposal) => {
             const refused = proposal.status === "refused";
             const active = proposal.text_uuid === selected;
+            const working = reguessing === proposal.text_uuid;
             return (
-              <button
+              // The row is a box with two buttons in it rather than one button
+              // with another inside: a button cannot nest a button.
+              <div
                 key={proposal.text_uuid}
-                type="button"
-                ref={(node) => {
-                  rowsRef.current[proposal.text_uuid] = node;
-                }}
-                onClick={() => onSelect(proposal.text_uuid)}
-                aria-current={active ? "true" : undefined}
-                className={`w-full text-left flex items-center gap-2 pl-2 pr-2 py-1.5 border-l-2 cursor-pointer ${
-                  active
-                    ? "border-accent-bg bg-bg-muted"
-                    : "border-transparent hover:bg-bg-hover"
+                className={`flex items-center border-l-2 ${
+                  active ? "border-accent-bg bg-bg-muted" : "border-transparent hover:bg-bg-hover"
                 }`}
               >
-                <span className="w-6 shrink-0 text-right text-[10px] text-text-tertiary tabular-nums">
-                  {ordinal.get(proposal.text_uuid) ?? ""}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block text-xs text-text-primary truncate">
-                    {proposal.title || "Untitled"}
+                <button
+                  type="button"
+                  ref={(node) => {
+                    rowsRef.current[proposal.text_uuid] = node;
+                  }}
+                  onClick={() => onSelect(proposal.text_uuid)}
+                  aria-current={active ? "true" : undefined}
+                  className="min-w-0 flex-1 text-left flex items-center gap-2 pl-2 pr-1 py-1.5 cursor-pointer"
+                >
+                  <span className="w-6 shrink-0 text-right text-[10px] text-text-tertiary tabular-nums">
+                    {ordinal.get(proposal.text_uuid) ?? ""}
                   </span>
-                  <span className="block text-[10px] text-text-tertiary tabular-nums">
-                    {refused ? "no span" : clock(proposal.start)}
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-xs text-text-primary truncate">
+                      {proposal.title || "Untitled"}
+                    </span>
+                    <span className="block text-[10px] text-text-tertiary tabular-nums">
+                      {refused ? "no span" : clock(proposal.start)}
+                    </span>
                   </span>
-                </span>
-                {!refused && (
-                  <span
-                    className={`shrink-0 text-[10px] tabular-nums ${confidenceTone(proposal.confidence)}`}
-                    title="How much of the passage was heard, in order"
-                  >
-                    {percent(proposal.confidence)}%
-                  </span>
-                )}
-                <StateMark proposal={proposal} />
-              </button>
+                  {!refused && (
+                    <span
+                      className={`shrink-0 text-[10px] tabular-nums ${confidenceTone(proposal.confidence)}`}
+                      title="How much of the passage was heard, in order"
+                    >
+                      {percent(proposal.confidence)}%
+                    </span>
+                  )}
+                  <StateMark proposal={proposal} />
+                </button>
+
+                {/* Re-places this text alone: the spans of its neighbours,
+                    hand-nudged or not, are read but never rewritten. */}
+                <button
+                  type="button"
+                  onClick={() => onReguess(proposal.text_uuid)}
+                  disabled={busy || !canGuess}
+                  aria-label={`Guess ${proposal.title || "this text"} again`}
+                  title={
+                    canGuess
+                      ? "Guess this text again — the other texts keep their spans"
+                      : "Listen to at least one recording first — Source Audios tab"
+                  }
+                  className="shrink-0 mr-1 inline-flex items-center gap-1 px-1.5 py-1 rounded-md border border-border-default text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                >
+                  {working ? (
+                    <Loader2 size={10} className="animate-spin" />
+                  ) : (
+                    <RotateCcw size={10} />
+                  )}
+                  Re-guess
+                </button>
+              </div>
             );
           })
         )}

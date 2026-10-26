@@ -735,17 +735,48 @@ fn round_ms(seconds: f64) -> f64 {
     (seconds * 1000.0).round() / 1000.0
 }
 
-/// Walk every passage along one token stream and write the proposals.
-///
-/// The cursor only moves forward, which is the whole trick: it is *known* the
-/// texts are the recordings read in order, so a passage cannot be inside an
-/// earlier one, and the search never has to consider the part of the book it has
-/// already assigned. Re-running is therefore idempotent — same stream, same
-/// cursor path, same spans — except where a transcript changed under it.
+/// The reading both guesses share: the recorded material on one side, the
+/// reference texts on the other.
 #[cfg(feature = "stt")]
-pub(crate) fn run(settings: &SettingsState, dataset_uuid: &str) -> Result<Value, String> {
-    let dir = find_dataset_dir_write(settings, dataset_uuid)?;
-    let index = load_index(&dir);
+struct Prepared {
+    index: SourceIndex,
+    transcripts: Vec<Option<SourceTranscript>>,
+    /// Every heard token, in playing order, across every transcribed file.
+    stream: Vec<String>,
+    /// For each stream token: the recording it came from, and its word's
+    /// `[start, end)` in that recording.
+    at: Vec<(usize, f64, f64)>,
+    /// `(text uuid, reference text)` in `order_num` — reading order.
+    texts: Vec<(String, String)>,
+}
+
+#[cfg(feature = "stt")]
+impl Prepared {
+    fn source_position(&self, uuid: &str) -> Option<usize> {
+        self.index.sources.iter().position(|source| source.uuid == uuid)
+    }
+
+    /// Where the stream resumes after `end` of `source`.
+    ///
+    /// The bulk guess knows this exactly — it holds the token index it stopped
+    /// on — but a one-passage run starts from a stored span, so that span's end
+    /// time is the only handle it has. Landing a word early costs nothing: an
+    /// unmatched prefix is skipped by the alignment.
+    fn cursor_after(&self, source: usize, end: f64) -> Option<usize> {
+        self.at.iter().position(|(position, _, word_end)| {
+            *position > source || (*position == source && *word_end >= end - 1e-6)
+        })
+    }
+}
+
+/// Read the recordings and the texts a guess walks.
+///
+/// Every refusal about *missing* input lives here, so a single passage cannot
+/// be answered differently from a bulk run: same registrations, same caches,
+/// same reading order.
+#[cfg(feature = "stt")]
+fn prepare(dir: &Path) -> Result<Prepared, String> {
+    let index = load_index(dir);
     if index.sources.is_empty() {
         return Err("No recordings are registered: pick the folder that holds them first.".to_string());
     }
@@ -753,7 +784,7 @@ pub(crate) fn run(settings: &SettingsState, dataset_uuid: &str) -> Result<Value,
     let transcripts: Vec<Option<SourceTranscript>> = index
         .sources
         .iter()
-        .map(|source| read_json(&transcript_path(&dir, &source.uuid)))
+        .map(|source| read_json(&transcript_path(dir, &source.uuid)))
         .collect();
     if transcripts.iter().all(Option::is_none) {
         return Err(
@@ -779,7 +810,7 @@ pub(crate) fn run(settings: &SettingsState, dataset_uuid: &str) -> Result<Value,
     }
 
     let texts: Vec<(String, String)> = {
-        let conn = open_db(&dir)?;
+        let conn = open_db(dir)?;
         let mut stmt = conn
             .prepare("SELECT uuid, content, normalized_content FROM read_text ORDER BY order_num, rowid")
             .map_err(|e| e.to_string())?;
@@ -802,21 +833,155 @@ pub(crate) fn run(settings: &SettingsState, dataset_uuid: &str) -> Result<Value,
         return Err("This dataset has no texts to place.".to_string());
     }
 
-    let previous = load_proposals(&dir);
-    let mut proposals: Vec<Proposal> = Vec::with_capacity(texts.len());
-    let mut cursor = 0usize;
-    let mut previous_end: Option<(usize, f64)> = None;
+    Ok(Prepared { index, transcripts, stream, at, texts })
+}
 
-    for (text_uuid, reference) in &texts {
+/// How many of a text's tokens must be heard, in order, before the placement is
+/// worth a span. A short text cannot be held to a percentage of itself.
+#[cfg(feature = "stt")]
+fn need_for(tokens: &[String]) -> usize {
+    (((tokens.len() as f64) * GUESS_MIN_MATCH_RATIO).ceil() as usize)
+        .max(GUESS_MIN_WORDS.min(tokens.len()))
+}
+
+/// A placed (or refused) passage, and the floor the *next* passage in reading
+/// order must not start before.
+#[cfg(feature = "stt")]
+struct Placed {
+    proposal: Proposal,
+    floor: Option<(usize, f64)>,
+}
+
+/// Turn a found run into a proposal: the padded span, both edges snapped to the
+/// quietest frame nearby, clamped against the passage before it, and carrying
+/// the verdict a previous run gave the same span — so a re-run does not throw
+/// away forty acceptances because one transcript was corrected.
+#[cfg(feature = "stt")]
+fn span_proposal(
+    prepared: &Prepared,
+    text_uuid: &str,
+    tokens: &[String],
+    found: &Found,
+    floor: Option<(usize, f64)>,
+    previous: &ProposalSet,
+) -> Placed {
+    let (first_source, first_start, _) = prepared.at[found.from];
+    let (last_source, _, last_end) = prepared.at[found.to];
+    if first_source != last_source {
+        let mut refusal = Proposal::refusal(
+            text_uuid,
+            format!(
+                "This passage is read across the boundary between {} and {}. Crop it by hand from the two files.",
+                prepared.index.sources[first_source].file_name,
+                prepared.index.sources[last_source].file_name
+            ),
+        );
+        refusal.matched_words = found.matched;
+        refusal.reference_words = tokens.len();
+        return Placed {
+            proposal: refusal,
+            floor: Some((last_source, last_end)),
+        };
+    }
+
+    let Some(transcript) = prepared.transcripts[first_source].as_ref() else {
+        return Placed {
+            proposal: Proposal::refusal(
+                text_uuid,
+                "The recording this passage matched has no cached transcript.".to_string(),
+            ),
+            floor: None,
+        };
+    };
+    let clamped = floor
+        .filter(|(source, _)| *source == first_source)
+        .map(|(_, end)| end);
+    let (start, end) = span_edges(first_start, last_end, transcript.duration, clamped);
+    let peaks = decode_peaks(&transcript.peaks);
+    let start = round_ms(snap_quiet(
+        &peaks,
+        transcript.peak_seconds,
+        start,
+        0.0,
+        end - MIN_SPAN_SECS,
+    ));
+    let end = round_ms(snap_quiet(
+        &peaks,
+        transcript.peak_seconds,
+        end,
+        start + MIN_SPAN_SECS,
+        transcript.duration,
+    ));
+    let confidence = (found.matched as f64 / tokens.len() as f64 * 100.0).round() / 100.0;
+    let source_uuid = prepared.index.sources[first_source].uuid.clone();
+
+    // A span that did not move keeps the verdict it already had; a span that
+    // moved is a new question and goes back to pending.
+    let carried = previous
+        .proposals
+        .iter()
+        .find(|p| {
+            p.text_uuid == text_uuid
+                && p.status == "proposed"
+                && p.source_uuid.as_deref() == Some(source_uuid.as_str())
+                && (p.start - start).abs() <= 0.05
+                && (p.end - end).abs() <= 0.05
+        })
+        .map(|p| (p.state.clone(), p.applied_uuid.clone()))
+        .unwrap_or_else(|| ("pending".to_string(), None));
+
+    Placed {
+        proposal: Proposal {
+            text_uuid: text_uuid.to_string(),
+            source_uuid: Some(source_uuid),
+            source_name: transcript.file_name.clone(),
+            start,
+            end,
+            confidence,
+            matched_words: found.matched,
+            reference_words: tokens.len(),
+            status: "proposed".to_string(),
+            note: if confidence >= 0.95 {
+                String::new()
+            } else {
+                format!(
+                    "The model heard {} of {} words; check both edges.",
+                    found.matched,
+                    tokens.len()
+                )
+            },
+            state: carried.0,
+            applied_uuid: carried.1,
+        },
+        floor: Some((first_source, end)),
+    }
+}
+
+/// Walk every passage along one token stream and write the proposals.
+///
+/// The cursor only moves forward, which is the whole trick: it is *known* the
+/// texts are the recordings read in order, so a passage cannot be inside an
+/// earlier one, and the search never has to consider the part of the book it has
+/// already assigned. Re-running is therefore idempotent — same stream, same
+/// cursor path, same spans — except where a transcript changed under it.
+#[cfg(feature = "stt")]
+pub(crate) fn run(settings: &SettingsState, dataset_uuid: &str) -> Result<Value, String> {
+    let dir = find_dataset_dir_write(settings, dataset_uuid)?;
+    let prepared = prepare(&dir)?;
+    let previous = load_proposals(&dir);
+    let mut proposals: Vec<Proposal> = Vec::with_capacity(prepared.texts.len());
+    let mut cursor = 0usize;
+    let mut floor: Option<(usize, f64)> = None;
+
+    for (text_uuid, reference) in &prepared.texts {
         let tokens = asr_metric::normalize_tokens(reference);
         if tokens.is_empty() {
             proposals.push(Proposal::refusal(text_uuid, "That text has no words to look for.".to_string()));
             continue;
         }
-        let need = (((tokens.len() as f64) * GUESS_MIN_MATCH_RATIO).ceil() as usize)
-            .max(GUESS_MIN_WORDS.min(tokens.len()));
+        let need = need_for(&tokens);
 
-        let Some(found) = find_run(&tokens, &stream, cursor, need) else {
+        let Some(found) = find_run(&tokens, &prepared.stream, cursor, need) else {
             proposals.push(Proposal::refusal(
                 text_uuid,
                 "There is no recording left after the previous passage, so this one was not looked for. Check the file order and length.".to_string(),
@@ -840,84 +1005,11 @@ pub(crate) fn run(settings: &SettingsState, dataset_uuid: &str) -> Result<Value,
             continue;
         }
 
-        let (first_source, first_start, _) = at[found.from];
-        let (last_source, _, last_end) = at[found.to];
-        if first_source != last_source {
-            let mut refusal = Proposal::refusal(
-                text_uuid,
-                format!(
-                    "This passage is read across the boundary between {} and {}. Crop it by hand from the two files.",
-                    index.sources[first_source].file_name, index.sources[last_source].file_name
-                ),
-            );
-            refusal.matched_words = found.matched;
-            refusal.reference_words = tokens.len();
-            proposals.push(refusal);
-            cursor = found.to + 1;
-            previous_end = Some((last_source, last_end));
-            continue;
+        let placed = span_proposal(&prepared, text_uuid, &tokens, &found, floor, &previous);
+        if let Some(next) = placed.floor {
+            floor = Some(next);
         }
-
-        let Some(transcript) = transcripts[first_source].as_ref() else {
-            proposals.push(Proposal::refusal(
-                text_uuid,
-                "The recording this passage matched has no cached transcript.".to_string(),
-            ));
-            continue;
-        };
-        let clamped = previous_end.filter(|(source, _)| *source == first_source).map(|(_, end)| end);
-        let (start, end) = span_edges(first_start, last_end, transcript.duration, clamped);
-        let peaks = decode_peaks(&transcript.peaks);
-        let start = round_ms(snap_quiet(&peaks, transcript.peak_seconds, start, 0.0, end - MIN_SPAN_SECS));
-        let end = round_ms(snap_quiet(
-            &peaks,
-            transcript.peak_seconds,
-            end,
-            start + MIN_SPAN_SECS,
-            transcript.duration,
-        ));
-        let confidence = (found.matched as f64 / tokens.len() as f64 * 100.0).round() / 100.0;
-
-        // A span that did not move keeps the verdict it already had, so a
-        // re-run after one corrected transcript does not throw away forty
-        // acceptances; a span that moved is a new question and goes back to
-        // pending.
-        let carried = previous
-            .proposals
-            .iter()
-            .find(|p| {
-                p.text_uuid == *text_uuid
-                    && p.status == "proposed"
-                    && p.source_uuid.as_deref() == Some(index.sources[first_source].uuid.as_str())
-                    && (p.start - start).abs() <= 0.05
-                    && (p.end - end).abs() <= 0.05
-            })
-            .map(|p| (p.state.clone(), p.applied_uuid.clone()))
-            .unwrap_or_else(|| ("pending".to_string(), None));
-
-        proposals.push(Proposal {
-            text_uuid: text_uuid.clone(),
-            source_uuid: Some(index.sources[first_source].uuid.clone()),
-            source_name: transcript.file_name.clone(),
-            start,
-            end,
-            confidence,
-            matched_words: found.matched,
-            reference_words: tokens.len(),
-            status: "proposed".to_string(),
-            note: if confidence >= 0.95 {
-                String::new()
-            } else {
-                format!(
-                    "The model heard {} of {} words; check both edges.",
-                    found.matched,
-                    tokens.len()
-                )
-            },
-            state: carried.0,
-            applied_uuid: carried.1,
-        });
-        previous_end = Some((first_source, end));
+        proposals.push(placed.proposal);
         cursor = found.to + 1;
     }
 
@@ -946,14 +1038,136 @@ pub(crate) fn run(settings: &SettingsState, dataset_uuid: &str) -> Result<Value,
         "proposed": proposed,
         "refused": refused,
         "mean_confidence": mean_confidence,
-        "unused_words": stream.len().saturating_sub(cursor),
-        "sources": index.sources.len(),
+        "unused_words": prepared.stream.len().saturating_sub(cursor),
+        "sources": prepared.index.sources.len(),
         "generated_at": set.generated_at,
     }))
 }
 
 #[cfg(not(feature = "stt"))]
 pub(crate) fn run(_settings: &SettingsState, _dataset_uuid: &str) -> Result<Value, String> {
+    Err("This build has no speech recognition, so the spans cannot be guessed.".to_string())
+}
+
+/// Re-place one passage, leaving every other row exactly as it is.
+///
+/// The bulk guess is the right tool for a set that has never been placed and
+/// the wrong one for a single row: it rewrites the whole file, so a span
+/// somebody nudged by hand would be replaced by the model's opinion of it. This
+/// walks only the requested text — from the end of the nearest passage before it
+/// that has a span, along the same stream the bulk guess reads — and replaces
+/// that one row. Everything else, verdicts included, is untouched.
+#[cfg(feature = "stt")]
+pub(crate) fn run_one(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    text_uuid: &str,
+) -> Result<Value, String> {
+    let dir = find_dataset_dir_write(settings, dataset_uuid)?;
+    let prepared = prepare(&dir)?;
+    let mut set = load_proposals(&dir);
+
+    let position = prepared
+        .texts
+        .iter()
+        .position(|(uuid, _)| uuid == text_uuid)
+        .ok_or_else(|| format!("No text with id {text_uuid} is in this dataset — reload the list."))?;
+    if !set.proposals.iter().any(|p| p.text_uuid == text_uuid) {
+        return Err(
+            "This text has never been placed, so there is nothing to re-place: guess for all first."
+                .to_string(),
+        );
+    }
+
+    // Where to start looking: the end of the nearest earlier passage that has a
+    // span. Reading order is the only order the guess knows, and it is the one
+    // the recordings follow.
+    let mut cursor = 0usize;
+    let mut floor: Option<(usize, f64)> = None;
+    for (uuid, _) in prepared.texts[..position].iter().rev() {
+        let Some(row) = set
+            .proposals
+            .iter()
+            .find(|p| p.text_uuid == *uuid && p.status == "proposed")
+        else {
+            continue;
+        };
+        let Some(source) = row
+            .source_uuid
+            .as_deref()
+            .and_then(|uuid| prepared.source_position(uuid))
+        else {
+            continue;
+        };
+        cursor = prepared.cursor_after(source, row.end).unwrap_or(prepared.stream.len());
+        floor = Some((source, row.end));
+        break;
+    }
+
+    let tokens = asr_metric::normalize_tokens(&prepared.texts[position].1);
+    if tokens.is_empty() {
+        return Err("That text has no words to look for, so it cannot be placed.".to_string());
+    }
+    let need = need_for(&tokens);
+
+    // The two ways to come up empty are written as refusals, not errors: the row
+    // exists, and the answer to "why is it still not placed?" belongs on it.
+    let placed = match find_run(&tokens, &prepared.stream, cursor, need) {
+        None => Placed {
+            proposal: Proposal::refusal(
+                text_uuid,
+                "There is no recording left after the previous passage, so this one was not looked for. Check the file order and length.".to_string(),
+            ),
+            floor: None,
+        },
+        Some(found) if found.matched < need => {
+            let mut refusal = Proposal::refusal(
+                text_uuid,
+                format!(
+                    "The model heard only {} of this text's {} words in the recordings, which is too little to place the reading. Try a stronger model, or set the edges by hand.",
+                    found.matched,
+                    tokens.len()
+                ),
+            );
+            refusal.matched_words = found.matched;
+            refusal.reference_words = tokens.len();
+            Placed { proposal: refusal, floor: None }
+        }
+        Some(found) => span_proposal(&prepared, text_uuid, &tokens, &found, floor, &set),
+    };
+
+    // Replace the row in place: the set's order is the queue's order, and
+    // nothing else about it changes.
+    if let Some(slot) = set.proposals.iter_mut().find(|p| p.text_uuid == text_uuid) {
+        *slot = placed.proposal.clone();
+    }
+    set.generated_at = crate::datasets::now_row_stamp();
+    write_json(&proposals_path(&dir), &set)?;
+
+    let proposal = &placed.proposal;
+    Ok(json!({
+        "status": "ok",
+        "text_uuid": proposal.text_uuid,
+        "placed": proposal.status == "proposed",
+        "source_uuid": proposal.source_uuid,
+        "source_name": proposal.source_name,
+        "start": proposal.start,
+        "end": proposal.end,
+        "confidence": proposal.confidence,
+        "matched_words": proposal.matched_words,
+        "reference_words": proposal.reference_words,
+        "note": proposal.note,
+        "counts": counts(&set),
+        "generated_at": set.generated_at,
+    }))
+}
+
+#[cfg(not(feature = "stt"))]
+pub(crate) fn run_one(
+    _settings: &SettingsState,
+    _dataset_uuid: &str,
+    _text_uuid: &str,
+) -> Result<Value, String> {
     Err("This build has no speech recognition, so the spans cannot be guessed.".to_string())
 }
 
@@ -1418,6 +1632,16 @@ pub async fn read_aloud_align_guess(
     dataset_uuid: String,
 ) -> Result<Value, String> {
     run(&settings, &dataset_uuid)
+}
+
+/// Re-place one passage, leaving every other row of the proposal set untouched.
+#[tauri::command]
+pub async fn read_aloud_align_guess_one(
+    settings: State<'_, SettingsState>,
+    dataset_uuid: String,
+    text_uuid: String,
+) -> Result<Value, String> {
+    run_one(&settings, &dataset_uuid, &text_uuid)
 }
 
 /// The proposals with their texts and a thumbnail of the audio around each span.

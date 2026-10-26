@@ -621,6 +621,13 @@ struct ReadAloudAlignTranscriptParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudAlignGuessOneParam {
+    dataset_uuid: String,
+    /// The text to re-place; it must already have a row in the proposal set.
+    text_uuid: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudAlignDecideParam {
     dataset_uuid: String,
     /// The passage to decide. Omit when using `min_confidence`.
@@ -1554,6 +1561,25 @@ async fn read_aloud_standard_audio_guess(
         log::info!("[MCP] read_aloud_align_guess: dataset={}", param.dataset_uuid);
         let settings = self.app.state::<SettingsState>();
         let out = datasets::read_aloud::source_align::run(settings.inner(), &param.dataset_uuid)?;
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_align_guess_one", description = "Re-place ONE text of the dataset, leaving every other proposal exactly as it is — the row's span, its verdict and its applied clip. Uses the same stream and the same reading order as `read_aloud_align_guess`, but starts the search at the end of the nearest earlier text that has a span, and writes only this text's row, so a span a human nudged by hand on a neighbour survives. Answers `{text_uuid, placed, source_name, start, end, confidence, matched_words, reference_words, note, counts}`; `placed:false` means the text was refused again and `note` says why. Use it after re-transcribing a single recording, or to retry a refusal; use `read_aloud_align_guess` for a set that has never been placed.")]
+    async fn read_aloud_align_guess_one(
+        &self,
+        Parameters(param): Parameters<ReadAloudAlignGuessOneParam>,
+    ) -> Result<String, String> {
+        log::info!(
+            "[MCP] read_aloud_align_guess_one: dataset={} text={}",
+            param.dataset_uuid,
+            param.text_uuid
+        );
+        let settings = self.app.state::<SettingsState>();
+        let out = datasets::read_aloud::source_align::run_one(
+            settings.inner(),
+            &param.dataset_uuid,
+            &param.text_uuid,
+        )?;
         Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
     }
 
