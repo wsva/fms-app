@@ -60,6 +60,31 @@ export interface AlignTranscribeResult extends AlignSourceIndex {
   words?: number;
 }
 
+/** One word of a cached transcript, at millisecond precision. */
+export interface AlignTranscriptWord {
+  start: number;
+  end: number;
+  /**
+   * The word after scoring's normalization (lowercased, numbers spelled out).
+   * That is the shape the aligner matched, so it is the shape shown: the
+   * model's original casing is not kept.
+   */
+  text: string;
+}
+
+/** One recording's cache: what the model heard, and when it heard it. */
+export interface AlignTranscript {
+  status: string;
+  source_uuid: string;
+  file_name: string;
+  path: string;
+  duration: number;
+  /** Seconds one peak pair covers in the cache. */
+  peak_seconds: number;
+  word_count: number;
+  words: AlignTranscriptWord[];
+}
+
 export interface AlignGuessResult {
   status: string;
   passages: number;
@@ -184,6 +209,21 @@ export async function transcribeAlignSource(
     datasetUuid,
     sourceUuid: sourceUuid ?? null,
   });
+}
+
+/**
+ * One recording's cached transcript, word by word.
+ *
+ * Read-only and free — the cache is already on disk. This is what the guess
+ * actually compared, so it answers "why is this passage at that second?"
+ * better than any number in the queue does.
+ */
+export async function readAlignTranscript(
+  datasetUuid: string,
+  sourceUuid: string
+): Promise<AlignTranscript> {
+  requireTauri();
+  return invoke<AlignTranscript>("read_aloud_align_transcript", { datasetUuid, sourceUuid });
 }
 
 /**

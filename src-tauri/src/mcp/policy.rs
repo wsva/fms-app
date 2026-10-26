@@ -203,7 +203,7 @@ const HUMAN_HANDOFF: [&str; 2] = [
 /// `read_aloud_*` starts with "read", `sync_check_availability` persists the
 /// availability it checks), so this is a list. Anything absent falls through to
 /// [`Tier::Write`] — a new tool is never silently a read.
-const READ_TOOLS: [&str; 86] = [
+const READ_TOOLS: [&str; 87] = [
     "app_audit_get",
     "app_bootstrap",
     "app_events",
@@ -259,6 +259,7 @@ const READ_TOOLS: [&str; 86] = [
     "pairing_list_devices",
     "pc_sync_status",
     "read_aloud_align_proposals",
+    "read_aloud_align_transcript",
     "read_aloud_audit",
     "read_aloud_get_text",
     "read_aloud_list",

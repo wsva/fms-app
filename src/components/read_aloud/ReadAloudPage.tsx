@@ -228,9 +228,9 @@ export default function ReadAloudPage() {
   // Locations overlay (shared manager) — opened from the datasets-view overflow
   // menu, replacing the content area the same way the Cards page does.
   const [showLocations, setShowLocations] = useState(false);
-  // The dataset's Advanced page: aligning every text to a folder of recordings.
-  // An overlay on the level rather than a deeper one — it belongs to the
-  // dataset, not to a text, and it is reached from the texts view's menu.
+  // The dataset's standard-audio page: aligning every text to a folder of
+  // recordings. An overlay on the level rather than a deeper one — it belongs
+  // to the dataset, not to a text, and it is reached from the texts view's menu.
   const [advancedView, setAdvancedView] = useState(false);
   // Bumped by the toolbar Refresh so an open Locations overlay re-reads its own
   // directory list instead of keeping the one it mounted with.
@@ -451,8 +451,8 @@ export default function ReadAloudPage() {
 
   // Wiki-style view modes derived from the selection: no dataset → the dataset
   // list, a dataset but no text → its text list, a text → the practice pane.
-  // The Advanced page is the one mode that is not derived — it is opened and
-  // closed explicitly — so it wins over the selection while it is open.
+  // The standard-audio page is the one mode that is not derived — it is opened
+  // and closed explicitly — so it wins over the selection while it is open.
   const viewMode: "datasets" | "texts" | "practice" | "advanced" =
     advancedView && activeDataset
       ? "advanced"
@@ -490,7 +490,7 @@ export default function ReadAloudPage() {
   // never a guess about which one wins.
   const scoringText = normalized.trim() || content.trim();
 
-  // Choosing another dataset (or deleting the open one) leaves the Advanced
+  // Choosing another dataset (or deleting the open one) leaves the standard-audio
   // page: its sources and proposals belong to the dataset it was opened on.
   useEffect(() => {
     setAdvancedView(false);
@@ -776,7 +776,7 @@ export default function ReadAloudPage() {
         {!editing && viewMode === "advanced" && (
           <>
             <Breadcrumb.Sep />
-            <Breadcrumb.Current grow={false}>Advanced</Breadcrumb.Current>
+            <Breadcrumb.Current grow={false}>Standard audios</Breadcrumb.Current>
           </>
         )}
         {editing ? (
@@ -1041,9 +1041,11 @@ export default function ReadAloudPage() {
                 )}
                 {/* The dataset's bulk tools are occasional, and they act on the
                     whole dataset rather than on the row under the cursor, so
-                    they live behind the dots and open a page of their own. */}
-                <ToolbarMenuItem icon={Wand2} onClick={() => setAdvancedView(true)}>
-                  Advanced
+                    they live behind the dots and open a page of their own. The
+                    label is the job, not the page: what it does is cut one clip
+                    per text out of an audiobook. */}
+                <ToolbarMenuItem icon={AudioLines} onClick={() => setAdvancedView(true)}>
+                  Init Standard Audios from Audiobook
                 </ToolbarMenuItem>
                 <ToolbarMenuItem
                   icon={Trash2}
@@ -1067,7 +1069,7 @@ export default function ReadAloudPage() {
       </Toolbar>
 
       {/* Content — while editing this is the inline text form; otherwise the
-          practice pane (own scroll), the Advanced page, or the dataset/text
+          practice pane (own scroll), the standard-audio page, or the dataset/text
           lists. The Locations overlay replaces all of them while open (Cards-page
           pattern). */}
       {showLocations ? (

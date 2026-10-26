@@ -614,6 +614,13 @@ struct ReadAloudAlignTranscribeParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudAlignTranscriptParam {
+    dataset_uuid: String,
+    /// The recording whose cached transcript to read.
+    source_uuid: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudAlignDecideParam {
     dataset_uuid: String,
     /// The passage to decide. Omit when using `min_confidence`.
@@ -1516,6 +1523,25 @@ async fn read_aloud_standard_audio_guess(
             settings.inner(),
             &param.dataset_uuid,
             param.source_uuid.as_deref(),
+        )?;
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_align_transcript", description = "One recording's cached transcript: what the model heard, word by word with millisecond times. Read-only and free (the cache is already on disk), and it is the honest answer to \"why was this passage placed here?\" — the aligner compared exactly these tokens. `text` is each word after scoring's normalization (lowercased, numbers spelled out), which is the shape the matcher sees. Returns `{source_uuid, file_name, path, duration, peak_seconds, word_count, words: [{start, end, text}]}`. A file with no transcript fails with a message telling the caller to run read_aloud_align_transcribe first. Nothing here is a verdict: accept spans with read_aloud_align_decide.")]
+    async fn read_aloud_align_transcript(
+        &self,
+        Parameters(param): Parameters<ReadAloudAlignTranscriptParam>,
+    ) -> Result<String, String> {
+        log::info!(
+            "[MCP] read_aloud_align_transcript: dataset={}, source={}",
+            param.dataset_uuid,
+            param.source_uuid
+        );
+        let settings = self.app.state::<SettingsState>();
+        let out = datasets::read_aloud::source_align::transcript(
+            settings.inner(),
+            &param.dataset_uuid,
+            &param.source_uuid,
         )?;
         Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
     }

@@ -1318,6 +1318,58 @@ pub(crate) fn apply(settings: &SettingsState, dataset_uuid: &str, limit: Option<
     }))
 }
 
+/// One recording's cached transcript: what the model heard, word by word.
+///
+/// This is the page's result pane, and the answer to "why was this passage
+/// placed here?" — the alignment compared exactly these tokens, at these
+/// times. Read-only, and free: the cache is already on disk.
+///
+/// Each word carries the tokens after scoring's normalization (lowercased,
+/// numbers spelled out), because that is the shape the matcher sees; the
+/// original spelling is not kept.
+pub(crate) fn transcript(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    source_uuid: &str,
+) -> Result<Value, String> {
+    let dir = find_dataset_dir(settings, dataset_uuid)?;
+    let index = load_index(&dir);
+    let source = index
+        .sources
+        .iter()
+        .find(|s| s.uuid == source_uuid)
+        .ok_or_else(|| {
+            format!("No recording with id {source_uuid} is registered — pick the folder again.")
+        })?;
+    let cache: SourceTranscript = read_json(&transcript_path(&dir, source_uuid)).ok_or_else(|| {
+        format!(
+            "{} has no transcript yet — listen to it first.",
+            source.file_name
+        )
+    })?;
+    let words: Vec<Value> = cache
+        .words
+        .iter()
+        .map(|word| {
+            json!({
+                "start": round_ms(word.start),
+                "end": round_ms(word.end),
+                "text": word.tokens.join(" "),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "status": "ok",
+        "source_uuid": source.uuid,
+        "file_name": source.file_name,
+        "path": source.path,
+        "duration": round_ms(cache.duration),
+        "peak_seconds": cache.peak_seconds,
+        "word_count": words.len(),
+        "words": words,
+    }))
+}
+
 // ============================================================
 // Commands
 // ============================================================
@@ -1375,6 +1427,16 @@ pub async fn read_aloud_align_proposals(
     dataset_uuid: String,
 ) -> Result<Value, String> {
     list(&settings, &dataset_uuid)
+}
+
+/// One recording's cached transcript, for the result pane.
+#[tauri::command]
+pub async fn read_aloud_align_transcript(
+    settings: State<'_, SettingsState>,
+    dataset_uuid: String,
+    source_uuid: String,
+) -> Result<Value, String> {
+    transcript(&settings, &dataset_uuid, &source_uuid)
 }
 
 /// Accept or reject one proposal, or every proposal at or above a confidence.

@@ -259,7 +259,7 @@ export default function PassageEditor({
             <Wand2 size={20} className="text-text-tertiary" />
             <p className="text-sm text-text-secondary max-w-[420px]">{emptyHint}</p>
             <p className="text-[11px] text-text-tertiary max-w-[420px]">
-              The Recordings tab listens to each file once and places the passages; this tab is
+              The Source Audios tab listens to each file once and places the passages; this tab is
               where they are judged and cut from.
             </p>
           </div>

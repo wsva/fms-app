@@ -9,29 +9,34 @@ import {
   decideAlignProposals,
   guessAlignSpans,
   listAlignProposals,
+  readAlignTranscript,
   registerAlignSources,
   transcribeAlignSource,
   type AlignProposal,
   type AlignProposalState,
   type AlignProposals,
   type AlignSourceIndex,
+  type AlignTranscript,
 } from "@/lib/read_aloud/sourceAlign";
 import { FolderOpen, ListChecks, Scissors } from "lucide-react";
 import { TabBar, type TabBarItem } from "@/components/ui/toolbar";
+import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
 import CutTab from "./CutTab";
 import PassageEditor from "./PassageEditor";
 import PassageQueue, { QUEUE_FILTERS, matchesFilter, type QueueFilter } from "./PassageQueue";
-import RecordingsTab from "./RecordingsTab";
+import SourceAudiosTab from "./SourceAudiosTab";
 import { COARSE_STEP, CONTEXT_PAD, MIN_SPAN, NUDGE_STEP, clock, errorText, roundMs } from "./format";
 
 /**
- * The Advanced page: a folder of recordings in, one clip per text out.
+ * The standard-audio page: a folder of recordings in, one clip per text out.
  *
- * Three tabs, because the job is three jobs. **Review** is the work: the queue
+ * Three tabs, in the order the work is done. **Source Audios** is the folder,
+ * one line per recording with its two verbs — listen, read what came back — and
+ * the transcript on the right, because "did it hear this right?" is answered by
+ * the words and their times, not by a number. **Review** is the work: the queue
  * on the left, one passage open beside it with its waveform, its typed edges
- * and its verdict. **Recordings** is everything that has to happen before a
- * passage can be judged — the folder, one transcript per file, the guess.
- * **Cut** is the accepted set, the batch verdicts and the apply.
+ * and its verdict. **Cut** is the accepted set, the batch verdicts and the
+ * apply.
  *
  * The panel this replaced put all of it on one page, so forty rows of buttons
  * sat under four pipeline chips and a context rail, and none of it could be
@@ -50,8 +55,8 @@ const NUDGE_COMMIT_MS = 300;
 
 type Note = { kind: "ok" | "warn"; text: string };
 
-/** The three jobs, one per tab. */
-type TabId = "review" | "recordings" | "cut";
+/** The three jobs, one per tab, in the order they are done. */
+type TabId = "sources" | "review" | "cut";
 
 type Props = {
   datasetUuid: string;
@@ -75,7 +80,17 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   /** Nudged spans, by text uuid, until the write is acknowledged. */
   const [edits, setEdits] = useState<Record<string, { start: number; end: number }>>({});
   const [selected, setSelected] = useState<string | null>(null);
-  const [tab, setTab] = useState<TabId>("review");
+  const [tab, setTab] = useState<TabId>("sources");
+  /** The recording whose result is in the right pane of the Source Audios tab. */
+  const [sourceSel, setSourceSel] = useState<string | null>(null);
+  /** That recording's cached transcript, read on demand. */
+  const [transcript, setTranscript] = useState<AlignTranscript | null>(null);
+  const [transcriptBusy, setTranscriptBusy] = useState(false);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
+  /** The file being listened to right now; its row shows the spinner. */
+  const [listeningUuid, setListeningUuid] = useState<string | null>(null);
+  /** The "listen again?" question, which is the one destructive-shaped click here. */
+  const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [filter, setFilter] = useState<QueueFilter>("all");
   const [search, setSearch] = useState("");
   /** Which edge the arrow keys move; the fields show it. */
@@ -89,6 +104,8 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   const proposalsRef = useRef<AlignProposals | null>(null);
   const timersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const pendingRef = useRef<Record<string, { start: number; end: number }>>({});
+  /** Which transcript request is the current one, so a slow answer can be dropped. */
+  const transcriptSeq = useRef(0);
 
   useEffect(() => {
     loopRef.current = loop;
@@ -227,7 +244,11 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
     setError(null);
     setEdits({});
     setSelected(null);
-    setTab("review");
+    setTab("sources");
+    setSourceSel(null);
+    setTranscript(null);
+    setTranscriptError(null);
+    setListeningUuid(null);
     setFilter("all");
     setSearch("");
     setPlayhead(null);
@@ -302,6 +323,11 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
       const sources = await registerAlignSources(datasetUuid, picked);
       setIndex(sources);
       setSelected(null);
+      // Another folder is another set of files: the result on the right would
+      // be from a file this dataset no longer has.
+      setSourceSel(null);
+      setTranscript(null);
+      setTranscriptError(null);
       setNote({
         kind: "ok",
         text: `${sources.source_count} recording${
@@ -335,19 +361,79 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
       }
     });
 
+  /**
+   * Read one recording's transcript into the right pane.
+   *
+   * A read, not a pipeline step: it takes no lock (the file is already on
+   * disk), and two fast clicks must not paint the first answer last, hence the
+   * sequence number.
+   */
+  const openTranscript = async (sourceUuid: string) => {
+    const seq = ++transcriptSeq.current;
+    setSourceSel(sourceUuid);
+    setTranscript(null);
+    setTranscriptError(null);
+    setTranscriptBusy(true);
+    try {
+      const result = await readAlignTranscript(datasetUuid, sourceUuid);
+      if (seq === transcriptSeq.current) setTranscript(result);
+    } catch (e) {
+      if (seq === transcriptSeq.current) setTranscriptError(errorText(e));
+    } finally {
+      if (seq === transcriptSeq.current) setTranscriptBusy(false);
+    }
+  };
+
   const transcribeOne = (sourceUuid: string) => {
+    const file = sources.find((s) => s.uuid === sourceUuid);
+    if (!file) return;
     // A re-listen replaces the word timings the spans were placed against, so
-    // the note has to say that a re-guess is what puts them back in order.
+    // it is asked for rather than assumed: the same click on the same row
+    // usually means "show me" more often than "do it again".
+    if (file.words != null) {
+      setConfirm({
+        title: "Listen again?",
+        message: (
+          <>
+            <span className="text-text-primary">{file.file_name}</span> already has a transcript
+            of {(file.words ?? 0).toLocaleString()} words. Listening again replaces it, and the
+            passages already placed from this file keep the spans they were given — place the
+            passages again afterwards.
+          </>
+        ),
+        confirmLabel: "Listen again",
+        danger: false,
+        onConfirm: () => {
+          void listenTo(sourceUuid);
+        },
+      });
+      return;
+    }
+    void listenTo(sourceUuid);
+  };
+
+  /**
+   * One file per call, because a chapter is minutes of model time and nothing
+   * should hold a request open that long. The result is opened on the right as
+   * soon as it lands: the answer to "listen" is the words, not a toast.
+   */
+  const listenTo = (sourceUuid: string) => {
     const repeat = sources.find((s) => s.uuid === sourceUuid)?.words != null;
     return pipeline("listening", async () => {
-      const result = await transcribeAlignSource(datasetUuid, sourceUuid);
-      setIndex(result);
-      setNote({
-        kind: "ok",
-        text: `Heard ${result.words ?? 0} words in ${result.file_name ?? ""} (${clock(
-          result.duration ?? 0
-        )})${repeat ? " — re-guess to re-place this file's passages." : "."}`,
-      });
+      setListeningUuid(sourceUuid);
+      try {
+        const result = await transcribeAlignSource(datasetUuid, sourceUuid);
+        setIndex(result);
+        await openTranscript(sourceUuid);
+        setNote({
+          kind: "ok",
+          text: `Heard ${result.words ?? 0} words in ${result.file_name ?? ""} (${clock(
+            result.duration ?? 0
+          )})${repeat ? " — re-guess to re-place this file's passages." : "."}`,
+        });
+      } finally {
+        setListeningUuid(null);
+      }
     });
   };
 
@@ -571,11 +657,11 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
 
   const emptyHint =
     sources.length === 0
-      ? "Pick the folder that holds the audiobook's files — Recordings tab."
+      ? "Pick the folder that holds the audiobook's files — Source Audios tab."
       : transcribed === 0
-        ? "Transcribe one recording on the Recordings tab, then place the passages."
+        ? "Transcribe one recording on the Source Audios tab, then place the passages."
         : spans.length === 0
-          ? "Every recording is transcribed — place the passages from the Recordings tab."
+          ? "Every recording is transcribed — place the passages from the Source Audios tab."
           : "Select a passage in the queue.";
 
   // ---- keyboard -----------------------------------------------------------
@@ -648,8 +734,8 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   });
 
   const tabItems: TabBarItem<TabId>[] = [
+    { id: "sources", label: "Source Audios", icon: FolderOpen, count: sources.length },
     { id: "review", label: "Review", icon: ListChecks, count: pending },
-    { id: "recordings", label: "Recordings", icon: FolderOpen, count: sources.length },
     { id: "cut", label: "Cut", icon: Scissors, count: openCount },
   ];
 
@@ -658,10 +744,10 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   const tabHint =
     tab === "review"
       ? spans.length === 0
-        ? "Nothing placed yet: open Recordings, listen to the files, then place the passages."
+        ? "Nothing placed yet: open Source Audios, listen to the files, then place the passages."
         : "Space play · A accept · R reject · ← → nudge the highlighted edge (Shift 100 ms) · ↑ ↓ passage · Esc stop"
-      : tab === "recordings"
-        ? "Pick the folder, listen to each file once, then place the passages along them."
+      : tab === "sources"
+        ? "Listen to each file once, read what came back on the right, then place the passages."
         : "Accept spans in Review, then cut them into this dataset here.";
   const busyText =
     busy === "picking"
@@ -754,50 +840,60 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
             />
           </div>
         </div>
+      ) : tab === "sources" ? (
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 lg:overflow-hidden">
+          <SourceAudiosTab
+            mobile={mobile}
+            directory={index?.directory ?? ""}
+            sources={sources}
+            transcribed={transcribed}
+            words={words}
+            busy={busy}
+            listeningUuid={listeningUuid}
+            passagesTotal={passagesTotal}
+            placed={placed}
+            refused={refused}
+            meanConfidence={meanConfidence}
+            selected={sourceSel}
+            transcript={transcript}
+            transcriptBusy={transcriptBusy}
+            transcriptError={transcriptError}
+            onPick={pickFolder}
+            onTranscribeAll={transcribeAll}
+            onTranscribeFile={transcribeOne}
+            onStop={() => {
+              stopRef.current = true;
+            }}
+            onOpenResult={(sourceUuid: string) => {
+              void openTranscript(sourceUuid);
+            }}
+            onGuess={guess}
+          />
+        </div>
       ) : (
         <div className="flex-1 min-h-0 overflow-y-auto p-4">
-          {tab === "recordings" ? (
-            <RecordingsTab
-              mobile={mobile}
-              directory={index?.directory ?? ""}
-              sources={sources}
-              transcribed={transcribed}
-              words={words}
-              busy={busy}
-              passagesTotal={passagesTotal}
-              placed={placed}
-              refused={refused}
-              meanConfidence={meanConfidence}
-              onPick={pickFolder}
-              onTranscribeAll={transcribeAll}
-              onTranscribeFile={transcribeOne}
-              onStop={() => {
-                stopRef.current = true;
-              }}
-              onGuess={guess}
-            />
-          ) : (
-            <CutTab
-              proposals={spans}
-              counts={counts}
-              busy={busy}
-              threshold={threshold}
-              thresholdDraft={thresholdDraft}
-              onThresholdDraft={setThresholdDraft}
-              onThresholdCommit={commitThreshold}
-              acceptAllCount={acceptAllCount}
-              rejectAllCount={rejectAllCount}
-              onDecideMany={decideMany}
-              onApply={applyAccepted}
-              onOpen={(textUuid: string) => {
-                setSelected(textUuid);
-                setTab("review");
-              }}
-              onReject={(proposal) => decide(proposal, "rejected")}
-            />
-          )}
+          <CutTab
+            proposals={spans}
+            counts={counts}
+            busy={busy}
+            threshold={threshold}
+            thresholdDraft={thresholdDraft}
+            onThresholdDraft={setThresholdDraft}
+            onThresholdCommit={commitThreshold}
+            acceptAllCount={acceptAllCount}
+            rejectAllCount={rejectAllCount}
+            onDecideMany={decideMany}
+            onApply={applyAccepted}
+            onOpen={(textUuid: string) => {
+              setSelected(textUuid);
+              setTab("review");
+            }}
+            onReject={(proposal) => decide(proposal, "rejected")}
+          />
         </div>
       )}
+
+      <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
     </div>
   );
 }
