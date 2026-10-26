@@ -598,6 +598,49 @@ struct ReadAloudStandardAudioProbeParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudAlignSourcesParam {
+    dataset_uuid: String,
+    /// The folder that holds the recordings. Omit to list what is registered.
+    #[serde(default)]
+    directory: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudAlignTranscribeParam {
+    dataset_uuid: String,
+    /// One recording to transcribe. Omit for the first one still missing.
+    #[serde(default)]
+    source_uuid: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudAlignDecideParam {
+    dataset_uuid: String,
+    /// The passage to decide. Omit when using `min_confidence`.
+    #[serde(default)]
+    text_uuid: Option<String>,
+    /// `accepted`, `rejected` or `pending`.
+    state: String,
+    /// Decide every proposal at or above this confidence (0-1).
+    #[serde(default)]
+    min_confidence: Option<f64>,
+    /// New span start in seconds, for correcting one passage by hand.
+    #[serde(default)]
+    start: Option<f64>,
+    /// New span end in seconds; give both or neither.
+    #[serde(default)]
+    end: Option<f64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudAlignApplyParam {
+    dataset_uuid: String,
+    /// How many accepted spans this call cuts (default 10).
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudStandardAudioUuidParam {
     dataset_uuid: String,
     uuid: String,
@@ -1439,5 +1482,106 @@ async fn read_aloud_standard_audio_guess(
             &param.uuid,
         )?;
         Ok(serde_json::json!({"status": "ok", "message": "Standard audio deleted"}).to_string())
+    }
+
+    #[tool(name = "read_aloud_align_sources", description = "Register the folder that holds this dataset's source recordings (an audiobook's chapter files), which is the bulk answer to read_aloud_standard_audio_guess: the recordings live OUTSIDE the dataset and each holds many passages, so transcribing them once beats guessing per text. The scan accepts mp3/m4a/m4b/aac/wav/flac/ogg/oga/opus/wma/mp4/mkv, natural-sorts the names (ch2 before ch10) and records size+mtime; a file whose size or mtime changed loses its cached transcript. Omit `directory` to list what is registered. Returns `{sources: [{uuid, file_name, path, size, modified_ms, duration, words}], source_count, transcribed, pending_transcription}`. Next: read_aloud_align_transcribe.")]
+    async fn read_aloud_align_sources(
+        &self,
+        Parameters(param): Parameters<ReadAloudAlignSourcesParam>,
+    ) -> Result<String, String> {
+        log::info!("[MCP] read_aloud_align_sources: dataset={}", param.dataset_uuid);
+        let settings = self.app.state::<SettingsState>();
+        let out = datasets::read_aloud::source_align::register(
+            settings.inner(),
+            &param.dataset_uuid,
+            param.directory.as_deref(),
+        )?;
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_align_transcribe", description = "Cache ONE registered recording's word timings and 20 ms peak envelope. One file per call on purpose: a chapter is minutes of model time and no caller waits for a batch — repeat until `remaining` is 0, which is the progress bar (the cache is saved after every file, so an interruption resumes). Omit `source_uuid` to transcribe the first file still missing; pass one to retry a specific file. Returns the source list plus `{done, remaining, source_uuid, file_name, duration, words}`. Needs a model that reports word timings (Parakeet). A file longer than two hours is refused with a message rather than decoded into memory. This costs the transcription once — every later guess for the whole dataset is free.")]
+    async fn read_aloud_align_transcribe(
+        &self,
+        Parameters(param): Parameters<ReadAloudAlignTranscribeParam>,
+    ) -> Result<String, String> {
+        log::info!(
+            "[MCP] read_aloud_align_transcribe: dataset={}, source={:?}",
+            param.dataset_uuid,
+            param.source_uuid
+        );
+        let settings = self.app.state::<SettingsState>();
+        let model_state = self.app.state::<crate::models::ModelState>();
+        let out = datasets::read_aloud::source_align::transcribe(
+            model_state.inner(),
+            settings.inner(),
+            &param.dataset_uuid,
+            param.source_uuid.as_deref(),
+        )?;
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_align_guess", description = "Place EVERY passage of the dataset along the transcribed recordings in one ordered pass, and write the result as proposals. The texts are assumed to be the recordings read in order (that is what an audiobook dataset is), so a monotonic cursor walks the passages in `order_num` over one global token stream: O(texts) alignments instead of O(texts × files) full-file transcriptions. Each proposal is padded either side, snapped to the quietest 20 ms frame within ±150 ms, and clamped so it never overlaps the passage before it; it carries `start`/`end` (ms precision), `confidence` and a note. A passage the model could not place is reported as `refused` with a reason (too few words heard, no recording left, or read across two files) — never as a guess. Re-running keeps the accept/reject verdicts of spans that did not move. Nothing is written to media/; next: read_aloud_align_proposals, then read_aloud_align_decide.")]
+    async fn read_aloud_align_guess(
+        &self,
+        Parameters(param): Parameters<ReadAloudDatasetOnlyParam>,
+    ) -> Result<String, String> {
+        log::info!("[MCP] read_aloud_align_guess: dataset={}", param.dataset_uuid);
+        let settings = self.app.state::<SettingsState>();
+        let out = datasets::read_aloud::source_align::run(settings.inner(), &param.dataset_uuid)?;
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_align_proposals", description = "Read the alignment proposals joined with the passages they are for. Read-only. Each row carries `text_uuid`, `title`, `content`, `status` (proposed|refused), `state` (pending|accepted|rejected), `note`, `source_uuid`, `source_name`, `source_path` (for playback), `start`/`end` in seconds at millisecond precision, `confidence`, `matched_words`/`reference_words`, `applied_uuid`, and a `preview` of the surrounding audio ({start, peak_seconds, peaks} as interleaved min/max i8 pairs) so a human can look before accepting. Also returns `generated_at`, `passages_total` and `counts`. IMPORTANT: an agent may present these numbers, but only a human can hear the clip — do not accept a span on the caller's behalf unless they asked for it.")]
+    async fn read_aloud_align_proposals(
+        &self,
+        Parameters(param): Parameters<ReadAloudDatasetOnlyParam>,
+    ) -> Result<String, String> {
+        log::info!("[MCP] read_aloud_align_proposals: dataset={}", param.dataset_uuid);
+        let settings = self.app.state::<SettingsState>();
+        let out = datasets::read_aloud::source_align::list(settings.inner(), &param.dataset_uuid)?;
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_align_decide", description = "Accept, reject or re-open alignment proposals. Pass `text_uuid` to decide one passage, or `min_confidence` (0-1) to decide every proposal at or above it in one call — the usual shape is `min_confidence: 0.95, state: \"accepted\"` for the confident bulk, then a human decides the rest one by one. Only rows with `status: proposed` can be decided; a refusal has no span and answers with its reason. Pass `start` and `end` (seconds) together with a `text_uuid` to correct a span by hand — the panel's 10 ms nudges use that — and note that a span already cut into the dataset is refused instead of silently duplicated. Returns `{changed, state, counts}`. Accepting writes no audio: nothing is cut until read_aloud_align_apply, so a batch can be narrowed before any crop is made.")]
+    async fn read_aloud_align_decide(
+        &self,
+        Parameters(param): Parameters<ReadAloudAlignDecideParam>,
+    ) -> Result<String, String> {
+        log::info!(
+            "[MCP] read_aloud_align_decide: dataset={}, text={:?}, state={}",
+            param.dataset_uuid,
+            param.text_uuid,
+            param.state
+        );
+        let settings = self.app.state::<SettingsState>();
+        let out = datasets::read_aloud::source_align::decide(
+            settings.inner(),
+            &param.dataset_uuid,
+            param.text_uuid.as_deref(),
+            &param.state,
+            param.min_confidence,
+            param.start,
+            param.end,
+        )?;
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_align_apply", description = "Cut the accepted spans into standard audio: each recording is decoded ONCE and every accepted span from it is sliced out and stored as that text's clip (the first clip becomes the text's default). `limit` (default 10) bounds the call; repeat until `remaining` is 0. Returns `{applied, failed: [{text_uuid, error}], failed_count, remaining, counts}`. This is what makes the bulk path cheap — N passages from one file cost one decode, where read_aloud_standard_audio_import would decode the file N times. Only rows in state `accepted` are cut, and a row already applied is skipped.")]
+    async fn read_aloud_align_apply(
+        &self,
+        Parameters(param): Parameters<ReadAloudAlignApplyParam>,
+    ) -> Result<String, String> {
+        log::info!(
+            "[MCP] read_aloud_align_apply: dataset={}, limit={:?}",
+            param.dataset_uuid,
+            param.limit
+        );
+        let settings = self.app.state::<SettingsState>();
+        let out = datasets::read_aloud::source_align::apply(
+            settings.inner(),
+            &param.dataset_uuid,
+            param.limit,
+        )?;
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
     }
 }

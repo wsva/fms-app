@@ -24,7 +24,33 @@ pub fn decode_to_pcm(path: &Path) -> Result<Vec<f32>, String> {
         hint.with_extension(ext);
     }
 
-    decode_stream(mss, hint)
+    decode_stream(mss, hint, None)
+}
+
+/// Decode a file like [`decode_to_pcm`], refusing once it runs past
+/// `max_seconds` of audio.
+///
+/// The bound is checked while packets are still arriving, so an over-long book
+/// chapter is rejected after a moment instead of after several gigabytes of
+/// f32 have been collected. Callers use it for bulk work where a single
+/// enormous file would otherwise take the whole process down.
+pub fn decode_to_pcm_capped(path: &Path, max_seconds: f64) -> Result<Vec<f32>, String> {
+    log::debug!(
+        "Decoding audio file (max {} s): {}",
+        max_seconds.round(),
+        path.display()
+    );
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    decode_stream(mss, hint, Some(max_seconds))
 }
 
 /// Decode an in-memory container to 16 kHz mono f32 — the same conversion
@@ -37,13 +63,20 @@ pub fn decode_bytes_to_pcm(data: &[u8]) -> Result<Vec<f32>, String> {
     log::debug!("Decoding {} in-memory bytes", data.len());
     let source = std::io::Cursor::new(data.to_vec());
     let mss = MediaSourceStream::new(Box::new(source), Default::default());
-    decode_stream(mss, Hint::new())
+    decode_stream(mss, Hint::new(), None)
 }
 
 /// The shared decoder behind [`decode_to_pcm`] and [`decode_bytes_to_pcm`]:
 /// probe, decode every packet of the first audio track, mix down to mono, then
 /// resample to 16 kHz.
-fn decode_stream(mss: MediaSourceStream, hint: Hint) -> Result<Vec<f32>, String> {
+///
+/// `max_seconds` bounds how much audio may be collected; it is enforced per
+/// packet so the refusal costs one packet's worth of memory, not one file's.
+fn decode_stream(
+    mss: MediaSourceStream,
+    hint: Hint,
+    max_seconds: Option<f64>,
+) -> Result<Vec<f32>, String> {
     let fmt_opts = FormatOptions::default();
     let meta_opts = MetadataOptions::default();
 
@@ -105,6 +138,18 @@ fn decode_stream(mss: MediaSourceStream, hint: Hint) -> Result<Vec<f32>, String>
         let mut sb = SampleBuffer::<f32>::new(duration, spec);
         sb.copy_interleaved_ref(decoded);
         all_samples.extend_from_slice(sb.samples());
+
+        if let Some(max) = max_seconds {
+            if sample_rate > 0 && channels > 0 {
+                let seconds = all_samples.len() as f64 / channels as f64 / sample_rate as f64;
+                if seconds > max {
+                    return Err(format!(
+                        "Recording is longer than the {} minute limit — split it into chapter files.",
+                        (max / 60.0).round().max(1.0)
+                    ));
+                }
+            }
+        }
     }
 
     if sample_rate == 0 {

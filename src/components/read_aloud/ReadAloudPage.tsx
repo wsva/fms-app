@@ -29,6 +29,7 @@ import {
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import MdEditor from "@/components/wiki/MdEditor";
 import NormalizeActions from "./NormalizeActions";
+import SourceAlignPanel from "./SourceAlignPanel";
 import {
   CollapsibleSidebar,
   useCollapsibleSidebar,
@@ -1266,6 +1267,19 @@ export default function ReadAloudPage() {
         />
       ) : viewMode === "texts" ? (
         <div className="flex-1 overflow-y-auto min-h-0 min-w-0 p-4 flex flex-col gap-1">
+          {/* Bulk span guessing sits above the list it fills, so a cut shows up
+              as the clip badges on the rows below. */}
+          {selectedDataset && (
+            <div className="pb-2">
+              <SourceAlignPanel
+                datasetUuid={selectedDataset}
+                onApplied={() => {
+                  void loadStandardClips(selectedDataset);
+                  void loadTexts(selectedDataset);
+                }}
+              />
+            </div>
+          )}
           {texts.length === 0 ? (
             <p className="text-text-secondary">
               No texts yet. Add one with the New Text button.

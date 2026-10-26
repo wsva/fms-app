@@ -21,6 +21,7 @@ pub(crate) mod import;
 pub(crate) mod normalize;
 #[cfg(feature = "phoneme")]
 pub(crate) mod phoneme;
+pub(crate) mod source_align;
 pub(crate) mod standard_audio;
 pub(crate) mod tts_ref;
 pub(crate) mod vad;

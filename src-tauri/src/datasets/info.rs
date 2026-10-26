@@ -62,13 +62,24 @@ pub(crate) const FORMAT_BOOK: &str = "book-v1";
 pub(crate) const FORMAT_READ_ALOUD: &str = "read_aloud-v1";
 pub(crate) const FORMAT_WIKI: &str = "wiki-v1";
 
-/// A derived, per-copy, rebuildable SQLite index — never hashed, never shipped,
-/// never addressable as content. Both kinds now answer to one file name, at
-/// deliberately different levels, because each sits where its query pattern needs
-/// it: [`cards::FTS_DB`](super::cards::FTS_DB) is one per *location* (a card
-/// search spans every dataset in it), [`wiki::FTS_DB`](super::wiki::FTS_DB) is one
-/// per wiki *dataset* (a search covers that dir's files). They can never collide,
-/// since a location root is not a dataset dir.
+/// The read-aloud alignment cache's directory name, relative to a dataset root.
+/// It holds the registered source recordings, one cached transcript per
+/// recording and the proposed spans — every byte of it regenerable from the
+/// dataset's texts plus a directory the user names, so it is derived.
+pub(crate) const READ_ALOUD_ALIGN_DIR: &str = "align";
+
+/// A derived, per-copy, rebuildable index — never hashed, never shipped,
+/// never addressable as content. Both SQLite kinds answer to one file name, at
+/// deliberately different levels, because each sits where its query pattern
+/// needs it: [`cards::FTS_DB`](super::cards::FTS_DB) is one per *location* (a
+/// card search spans every dataset in it), [`wiki::FTS_DB`](super::wiki::FTS_DB)
+/// is one per wiki *dataset* (a search covers that dir's files). They can never
+/// collide, since a location root is not a dataset dir.
+///
+/// The read-aloud alignment cache is the third kind, and is excluded by prefix
+/// rather than by name: it is a whole directory of JSON whose value is a
+/// device's own minutes of transcription. Shipping it would move a derived
+/// cache between machines and, worse, imply the recordings live in the dataset.
 ///
 /// The rule is shared even though the topology is not: this is the single place
 /// that names what to exclude, so adding an index is one line here instead of a
@@ -76,13 +87,15 @@ pub(crate) const FORMAT_WIKI: &str = "wiki-v1";
 /// The consts are listed rather than the literal, so renaming either one fails to
 /// compile here instead of silently narrowing the exclusion.
 ///
-/// Matches the root-level name only (and its WAL/SHM sidecars), which is where
-/// both are opened. A nested file that happens to share a name stays content:
-/// excluding it would silently drop real data from the hash.
+/// The SQLite names match at the root level only (and their WAL/SHM sidecars),
+/// which is where both are opened. A nested file that happens to share a name
+/// stays content: excluding it would silently drop real data from the hash.
 pub(crate) fn is_derived_index(rel: &str) -> bool {
-    [super::cards::FTS_DB, super::wiki::FTS_DB]
-    .iter()
-    .any(|db| rel == *db || rel.starts_with(&format!("{db}-")))
+    rel.strip_prefix(READ_ALOUD_ALIGN_DIR)
+        .is_some_and(|rest| rest.starts_with('/'))
+        || [super::cards::FTS_DB, super::wiki::FTS_DB]
+            .iter()
+            .any(|db| rel == *db || rel.starts_with(&format!("{db}-")))
 }
 
 /// The app-owned "Favorites" dataset. Identified by this reserved id instead of a
@@ -441,7 +454,14 @@ mod tests {
     /// and real content must not.
     #[test]
     fn derived_indexes_are_recognised_by_name() {
-        for rel in ["fts5.sqlite3", "fts5.sqlite3-wal", "fts5.sqlite3-shm"] {
+        for rel in [
+            "fts5.sqlite3",
+            "fts5.sqlite3-wal",
+            "fts5.sqlite3-shm",
+            "align/sources.json",
+            "align/proposals.json",
+            "align/0f2ab4cd.json",
+        ] {
             assert!(is_derived_index(rel), "{rel} should be excluded");
         }
         for rel in [
@@ -453,6 +473,8 @@ mod tests {
             "search.sqlite3",        // the card index's retired name
             "search.sqlite3.bak",
             "fts5.sqlite",
+            "aligned.json",          // the prefix is a directory, not a word
+            "media/align/notes.txt", // nested under another folder, still content
         ] {
             assert!(!is_derived_index(rel), "{rel} should be hashed");
         }

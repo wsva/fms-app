@@ -211,6 +211,25 @@ fn text_digest(reference: &str) -> String {
         .collect()
 }
 
+/// The text's effective reference — what a clip is made from and what
+/// [`text_digest`] is taken of. Spelled once so a caller in another module
+/// cannot drift from what "the text" means.
+pub(crate) fn text_reference(dir: &Path, text_uuid: &str) -> Result<String, String> {
+    let conn = open_db(dir)?;
+    conn.query_row(
+        "SELECT content, normalized_content FROM read_text WHERE uuid = ?1",
+        [text_uuid],
+        |row| {
+            let content: String = row.get(0)?;
+            Ok(effective_reference(
+                &content,
+                row.get::<_, Option<String>>(1)?.as_deref(),
+            ))
+        },
+    )
+    .map_err(|_| format!("Text {} not found in dataset", text_uuid))
+}
+
 pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS read_standard_audio (
@@ -725,20 +744,20 @@ pub(crate) fn probe(
 /// coarse cut — it can land inside the first consonant — and a reference clip
 /// that clips its first or last sound is a worse reference than one with a
 /// fifth of a second of room around it.
-const GUESS_PAD_BEFORE: f64 = 0.2;
-const GUESS_PAD_AFTER: f64 = 0.3;
+pub(crate) const GUESS_PAD_BEFORE: f64 = 0.2;
+pub(crate) const GUESS_PAD_AFTER: f64 = 0.3;
 
 /// A guess is only offered when the model heard this much of the text, and at
 /// least [`GUESS_MIN_WORDS`] of it. Below that the "span" would be a fragment
 /// of the reading presented as the whole of it — worse than no guess, because
 /// it looks like an answer.
-const GUESS_MIN_MATCH_RATIO: f64 = 0.5;
-const GUESS_MIN_WORDS: usize = 3;
+pub(crate) const GUESS_MIN_MATCH_RATIO: f64 = 0.5;
+pub(crate) const GUESS_MIN_WORDS: usize = 3;
 
 /// How many words the model may skip — in the text or in the recording — before
 /// a match counts as a different stretch instead of part of the same reading.
 /// Roughly what one badly read sentence costs.
-const GUESS_MAX_GAP: usize = 6;
+pub(crate) const GUESS_MAX_GAP: usize = 6;
 
 /// Where a text was read inside a longer recording.
 #[derive(Debug, Clone, Serialize)]
@@ -766,7 +785,7 @@ pub struct SpanGuess {
 /// more than [`GUESS_MAX_GAP`] words on either side, so the reading survives as
 /// one run while stray matches fall outside it. Ties go to the earlier run: if
 /// the text really is read twice, the first reading is the one to keep.
-fn densest_run(pairs: &[(usize, usize)]) -> &[(usize, usize)] {
+pub(crate) fn densest_run(pairs: &[(usize, usize)]) -> &[(usize, usize)] {
     let mut best = &pairs[0..0];
     let mut from = 0;
     for i in 1..=pairs.len() {
@@ -783,7 +802,7 @@ fn densest_run(pairs: &[(usize, usize)]) -> &[(usize, usize)] {
     best
 }
 
-fn round_tenth(seconds: f64) -> f64 {
+pub(crate) fn round_tenth(seconds: f64) -> f64 {
     (seconds * 10.0).round() / 10.0
 }
 
@@ -791,7 +810,7 @@ fn round_tenth(seconds: f64) -> f64 {
 /// this call actually produces are "no model" and "this model reports no word
 /// timings", and neither is the user's fault as phrased by the model layer.
 #[cfg(feature = "stt")]
-fn guess_error(message: String) -> String {
+pub(crate) fn guess_error(message: String) -> String {
     if message.contains("No model is loaded") || message.contains("No model") {
         "No speech model is loaded, so the file cannot be listened to. Load one on the Models page, then try again — or set the edges by hand.".to_string()
     } else if message.contains("Word-level timestamps") {
@@ -824,18 +843,7 @@ pub(crate) fn guess_span(
     source_base64: Option<&str>,
 ) -> Result<SpanGuess, String> {
     let dir = find_dataset_dir(settings, dataset_uuid)?;
-    let reference = {
-        let conn = open_db(&dir)?;
-        conn.query_row(
-            "SELECT content, normalized_content FROM read_text WHERE uuid = ?1",
-            [text_uuid],
-            |row| {
-                let content: String = row.get(0)?;
-                Ok(effective_reference(&content, row.get::<_, Option<String>>(1)?.as_deref()))
-            },
-        )
-        .map_err(|_| format!("Text {} not found in dataset", text_uuid))?
-    };
+    let reference = text_reference(&dir, text_uuid)?;
     let reference_tokens = asr_metric::normalize_tokens(&reference);
     if reference_tokens.is_empty() {
         return Err("That text has no words to look for".to_string());
@@ -953,18 +961,7 @@ pub(crate) async fn generate_with(
     note: Option<&str>,
 ) -> Result<ReadStandardAudio, String> {
     let dir = find_dataset_dir_write(settings, dataset_uuid)?;
-    let reference = {
-        let conn = open_db(&dir)?;
-        conn.query_row(
-            "SELECT content, normalized_content FROM read_text WHERE uuid = ?1",
-            [text_uuid],
-            |row| {
-                let content: String = row.get(0)?;
-                Ok(effective_reference(&content, row.get::<_, Option<String>>(1)?.as_deref()))
-            },
-        )
-        .map_err(|_| format!("Text {} not found in dataset", text_uuid))?
-    };
+    let reference = text_reference(&dir, text_uuid)?;
     if reference.trim().is_empty() {
         return Err("That text is empty: there is nothing to say".to_string());
     }
@@ -1127,6 +1124,61 @@ pub(crate) async fn generate_all(
     Ok(out)
 }
 
+/// Write a decoded clip and its row — the one body an upload, a synthesis and
+/// a source-alignment crop all go through, so the wav layout, the one-default
+/// rule and the journal entry are spelled once.
+///
+/// The row carries no word timings, which is how `kind` stays derivable: only a
+/// TTS clip knows where its words are.
+pub(crate) fn store_samples(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    dir: &Path,
+    text_uuid: &str,
+    reference: &str,
+    clip: &[f32],
+    note: &str,
+) -> Result<ReadStandardAudio, String> {
+    let audio_uuid = Uuid::new_v4().to_string();
+    let path = clip_path(dir, text_uuid, &audio_uuid);
+    audio::write_wav(&path, clip, audio::DECODED_SAMPLE_RATE, 1)?;
+
+    let conn = open_db(dir)?;
+    ensure_schema(&conn)?;
+    let row = StandardAudioRow {
+        uuid: audio_uuid.clone(),
+        text_uuid: text_uuid.to_string(),
+        note: {
+            let trimmed = note.trim();
+            if trimmed.is_empty() {
+                "Upload".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        },
+        boundaries: None,
+        text_sha: text_digest(reference),
+        is_default: row_count(&conn, text_uuid)? == 0,
+        created_at: super::now_row_stamp(),
+    };
+    write_row(&conn, &row, false)?;
+    let _ = super::touch_info(dir);
+    journal(settings, "read_standard_audio_save", dataset_uuid, &row);
+
+    Ok(ReadStandardAudio {
+        uuid: row.uuid,
+        text_uuid: row.text_uuid,
+        note: row.note,
+        kind: "upload".to_string(),
+        duration: Some(clip.len() as f64 / audio::DECODED_SAMPLE_RATE as f64),
+        audio_url: Some(path.to_string_lossy().into_owned()),
+        is_default: row.is_default,
+        stale: false,
+        usable: true,
+        created_at: row.created_at,
+    })
+}
+
 /// Store a picked (and cut) recording as this text's standard audio. `start` and
 /// `end` are seconds into the source; `None` means the whole thing.
 #[allow(clippy::too_many_arguments)]
@@ -1142,18 +1194,7 @@ pub(crate) fn import(
     end: Option<f64>,
 ) -> Result<ReadStandardAudio, String> {
     let dir = find_dataset_dir_write(settings, dataset_uuid)?;
-    let reference = {
-        let conn = open_db(&dir)?;
-        conn.query_row(
-            "SELECT content, normalized_content FROM read_text WHERE uuid = ?1",
-            [text_uuid],
-            |row| {
-                let content: String = row.get(0)?;
-                Ok(effective_reference(&content, row.get::<_, Option<String>>(1)?.as_deref()))
-            },
-        )
-        .map_err(|_| format!("Text {} not found in dataset", text_uuid))?
-    };
+    let reference = text_reference(&dir, text_uuid)?;
 
     let samples = decode_source(source_path, source_base64)?;
     if samples.is_empty() {
@@ -1174,48 +1215,27 @@ pub(crate) fn import(
     let last = ((to * rate).round() as usize).min(samples.len());
     let clip = &samples[first.min(last)..last];
 
-    let audio_uuid = Uuid::new_v4().to_string();
-    let path = clip_path(&dir, text_uuid, &audio_uuid);
-    audio::write_wav(&path, clip, audio::DECODED_SAMPLE_RATE, 1)?;
+    let note = note
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            file_name
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(|n| format!("Upload · {}", n))
+        })
+        .unwrap_or_else(|| "Upload".to_string());
 
-    let conn = open_db(&dir)?;
-    ensure_schema(&conn)?;
-    let row = StandardAudioRow {
-        uuid: audio_uuid.clone(),
-        text_uuid: text_uuid.to_string(),
-        note: note
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .or_else(|| {
-                file_name
-                    .map(str::trim)
-                    .filter(|n| !n.is_empty())
-                    .map(|n| format!("Upload · {}", n))
-            })
-            .unwrap_or_else(|| "Upload".to_string()),
-        // An upload has no word timings, which is how `kind` stays derivable.
-        boundaries: None,
-        text_sha: text_digest(&reference),
-        is_default: row_count(&conn, text_uuid)? == 0,
-        created_at: super::now_row_stamp(),
-    };
-    write_row(&conn, &row, false)?;
-    let _ = super::touch_info(&dir);
-    journal(settings, "read_standard_audio_save", dataset_uuid, &row);
-
-    Ok(ReadStandardAudio {
-        uuid: row.uuid,
-        text_uuid: row.text_uuid,
-        note: row.note,
-        kind: "upload".to_string(),
-        duration: Some(clip.len() as f64 / rate),
-        audio_url: Some(path.to_string_lossy().into_owned()),
-        is_default: row.is_default,
-        stale: false,
-        usable: true,
-        created_at: row.created_at,
-    })
+    store_samples(
+        settings,
+        dataset_uuid,
+        &dir,
+        text_uuid,
+        &reference,
+        clip,
+        &note,
+    )
 }
 
 /// Move the default marker. One transaction, so the read path can never observe
