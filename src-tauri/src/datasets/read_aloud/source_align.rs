@@ -1081,8 +1081,8 @@ struct Placed {
     floor: Option<(usize, f64)>,
 }
 
-/// Turn a found run into a proposal: the padded span, both edges snapped to the
-/// quietest frame nearby, clamped against the passage before it, and carrying
+/// Turn a found run into a proposal: the padded span, both edges placed in the
+/// pause they belong to, clamped against the passage before it, and carrying
 /// the verdict a previous run gave the same span — so a re-run does not throw
 /// away forty acceptances because one transcript was corrected.
 #[cfg(feature = "stt")]
@@ -1125,10 +1125,12 @@ fn span_proposal(
     let clamped = floor
         .filter(|(source, _)| *source == first_source)
         .map(|(_, end)| end);
-    // The pads are the fallback; where a pause meets the word, the edge goes
-    // into the middle of it instead, so two neighbouring clips divide the
-    // silence rather than leaving half of it to neither. The bounds are what
-    // keeps a clip off its neighbour and off the minimum length.
+    // The pads are the fallback; where a real pause belongs to the edge, the cut
+    // goes into the middle of it instead, so two neighbouring clips divide the
+    // silence rather than leaving half of it to neither. The pause can be most of
+    // a second from the word: the model glues a signature to the number after it
+    // and runs a word's end past its audio. The bounds are what keeps a clip off
+    // its neighbour and off the minimum length.
     let peaks = decode_peaks(&transcript.peaks);
     let loudness = edges::loudness_from_envelope(&peaks);
     let start = round_ms(edges::place_edge(

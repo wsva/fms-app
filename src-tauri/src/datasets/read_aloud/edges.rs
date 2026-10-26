@@ -6,13 +6,23 @@
 //! sounds equally right.
 //!
 //! This module answers the question with the waveform instead of the transcript.
-//! It finds the pause that meets an edge ([`pause_beside`]) and puts the cut in
-//! the **middle of that pause**, so two neighbouring clips share it rather than
-//! one of them taking all of it because the model's timestamp happened to land
-//! at one end. The share has a ceiling, because the middle of a long pause is a
-//! long silence to listen to: a one-line mail behind a two-second pause would
-//! otherwise open with a second of nothing, and the point of the middle is
+//! It finds the pause that belongs to an edge ([`pause_beside`]) and puts the cut
+//! in the **middle of that pause**, so two neighbouring clips share it rather
+//! than one of them taking all of it because the model's timestamp happened to
+//! land at one end. The share has a ceiling, because the middle of a long pause
+//! is a long silence to listen to: a one-line mail behind a two-second pause
+//! would otherwise open with a second of nothing, and the point of the middle is
 //! fairness, not dead air.
+//!
+//! The pause is not looked for right at the timestamp. A model's word boundary is
+//! only approximately where the word is — it glues a signature to the number that
+//! follows it ("… Rothner" + "18" became one 2.5 s word) and runs a word's end
+//! half a second past its audio — so the gap that separates two passages is often
+//! most of a second from the edge, while a micro-gap *inside* the passage sits
+//! right next to it. Searching outward from the edge for the first quiet frame
+//! therefore picks the wrong gap, or none at all. The search reaches
+//! [`SEARCH_REACH_SECS`] into the passage and takes the **longest** pause it
+//! finds, which is the one the narrator left between passages.
 //!
 //! Everything here is pure over a loudness track — one level per 20 ms frame —
 //! so the bulk guess, which only has a cached peak envelope, and the single-file
@@ -25,10 +35,15 @@ use super::vad;
 /// uses, so both guesses look at the audio with the same resolution.
 pub(crate) const EDGE_FRAME_SECS: f64 = 0.02;
 
-/// How far from an edge a pause is looked for. A model's word boundary can land
-/// inside the first or last consonant, so the pause is not always exactly where
-/// the timestamp says; half a syllable of tolerance is enough to find it.
+/// How far past an edge (into its own passage) a pause may start and still be
+/// searched for: a word boundary that lands half a syllable late must still find
+/// the pause behind it.
 const SNAP_WINDOW_SECS: f64 = 0.15;
+
+/// How far from an edge a pause may be and still belong to it. A model's
+/// word boundaries are loose (see the module doc), so the gap that separates two
+/// passages can be most of a second away from the edge the transcript implies.
+const SEARCH_REACH_SECS: f64 = 1.0;
 
 /// How much of a pause one clip takes at one edge. Half is the whole point: the
 /// pause belongs to both neighbours, so the cut goes in the middle of it.
@@ -36,13 +51,16 @@ const PAUSE_SHARE: f64 = 0.5;
 
 /// The longest pause share a head may take. Measured on a narrated book, the
 /// pause in front of a passage is 0.44 s at the median and 1.1 s at the ninth
-/// decile, so an uncapped middle would open most clips with half a second of
-/// room and the slow ones with well over one — dead air, not context.
-const MAX_LEAD_SECS: f64 = 0.5;
+/// decile, so a middle that is not capped at all would open the slow clips with
+/// well over half a second of room, and the slowest with more — dead air, not
+/// context. One second of quiet is already long; the cap sits at the ninth
+/// decile's half so that an ordinary pause is reached in full and only a real
+/// silence is truncated.
+const MAX_LEAD_SECS: f64 = 0.8;
 
 /// The same for a tail, a little longer because a decay into silence reads as
 /// the end of the phrase and a hard cut does not.
-const MAX_TAIL_SECS: f64 = 0.6;
+const MAX_TAIL_SECS: f64 = 0.9;
 
 /// Which way an edge faces — into the passage it belongs to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -72,9 +90,15 @@ pub(crate) fn loudness_from_envelope(peaks: &[i8]) -> Vec<f32> {
         .collect()
 }
 
-/// The pause that meets one edge: `(start, end)` in seconds of the run of quiet
-/// frames the edge sits in, or `None` when there is no pause within
-/// [`SNAP_WINDOW_SECS`] or the "pause" is not one.
+/// The pause that belongs to one edge: `(start, end)` in seconds of the longest
+/// run of quiet frames within [`SEARCH_REACH_SECS`] of it, or `None` when there
+/// is no such run or the "pause" is not one.
+///
+/// The longest run wins over the nearest one on purpose: a passage is full of
+/// 20 ms holes (between two consonants, between a word and its punctuation) and
+/// a transcript edge can land inside the passage, so the nearest quiet frames are
+/// usually not a pause at all. The gap the narrator left between two passages is
+/// the deep one, and it is the one both neighbours should divide.
 ///
 /// A run only counts when speech is on the far side of it, away from the edge.
 /// Without that check a track that reads as silence everywhere — a music bed, a
@@ -95,53 +119,53 @@ pub(crate) fn pause_beside(
         return None;
     }
 
-    let centre = (edge / frame_secs).round() as isize;
-    let reach = (SNAP_WINDOW_SECS / frame_secs).round() as isize;
-    // The edge faces the passage, so its own side of the timestamp is searched
-    // first: the pause is in front of it, not behind it.
-    let mut quiet: Option<usize> = None;
-    'search: for offset in 0..=reach {
-        let candidates = match side {
-            Side::Head => [centre - offset, centre + offset],
-            Side::Tail => [centre + offset, centre - offset],
+    let edge_frame = (edge / frame_secs).round() as isize;
+    let near = (SNAP_WINDOW_SECS / frame_secs).round() as isize;
+    let far = (SEARCH_REACH_SECS / frame_secs).round() as isize;
+    // The window lies on the passage's side of the edge, with a little slack on
+    // the other side: the pause is in front of a head and behind a tail, not the
+    // other way round.
+    let (window_start, window_end) = match side {
+        Side::Head => (edge_frame - far, edge_frame + near),
+        Side::Tail => (edge_frame - near, edge_frame + far),
+    };
+
+    let mut longest: Option<(usize, usize)> = None;
+    let mut frame = 0;
+    while frame < speech.len() {
+        if speech[frame] {
+            frame += 1;
+            continue;
+        }
+        let start = frame;
+        while frame < speech.len() && !speech[frame] {
+            frame += 1;
+        }
+        let end = frame;
+        if (end as isize) <= window_start || (start as isize) >= window_end {
+            continue;
+        }
+        let anchored = match side {
+            Side::Head => end < speech.len() && speech[end],
+            Side::Tail => start > 0 && speech[start - 1],
         };
-        for candidate in candidates {
-            if candidate >= 0 && (candidate as usize) < speech.len() && !speech[candidate as usize] {
-                quiet = Some(candidate as usize);
-                break 'search;
-            }
+        if !anchored || ((end - start) as f64 * frame_secs) < cfg.min_silence_secs {
+            continue;
+        }
+        if longest.is_none_or(|(s, e)| end - start > e - s) {
+            longest = Some((start, end));
         }
     }
-    let frame = quiet?;
-
-    let mut start = frame;
-    while start > 0 && !speech[start - 1] {
-        start -= 1;
-    }
-    let mut end = frame + 1;
-    while end < speech.len() && !speech[end] {
-        end += 1;
-    }
-
-    let anchored = match side {
-        Side::Head => end < speech.len() && speech[end],
-        Side::Tail => start > 0 && speech[start - 1],
-    };
-    if !anchored {
-        return None;
-    }
-    if ((end - start) as f64 * frame_secs) < cfg.min_silence_secs {
-        return None;
-    }
-    Some((start as f64 * frame_secs, end as f64 * frame_secs))
+    longest.map(|(start, end)| (start as f64 * frame_secs, end as f64 * frame_secs))
 }
 
-/// One edge, in seconds: the middle of the pause it meets, but never more than
-/// [`MAX_LEAD_SECS`]/[`MAX_TAIL_SECS`] away from the word — and clamped to
+/// One edge, in seconds: the middle of the pause it belongs to — never taking
+/// more than [`MAX_LEAD_SECS`]/[`MAX_TAIL_SECS`] of that pause — clamped to
 /// `[low, high]`.
 ///
-/// With no pause (speech runs into the word) `pad` is taken into the audio, as
-/// before; the caller's bounds are what keeps that from eating its neighbour.
+/// With no pause within reach (speech runs into the word) `pad` is taken into the
+/// audio, as before; the caller's bounds are what keeps that from eating its
+/// neighbour.
 pub(crate) fn place_edge(
     loudness: &[f32],
     frame_secs: f64,
@@ -200,10 +224,47 @@ mod tests {
     #[test]
     fn a_long_pause_is_shared_up_to_the_ceiling() {
         // Two seconds of quiet behind a short mail: half of it would be a second
-        // of dead air, so the share stops at half a second.
+        // of dead air, so the share stops at the ceiling.
         let loudness = track(&[(SPEECH, 1.0), (QUIET, 2.0), (SPEECH, 1.0)]);
         let cut = place_edge(&loudness, EDGE_FRAME_SECS, 3.0, 0.2, Side::Head, 0.0, 10.0);
-        assert!((cut - 2.5).abs() < 1e-6, "cut: {cut}");
+        assert!((cut - 2.2).abs() < 1e-6, "cut: {cut}");
+    }
+
+    #[test]
+    fn the_pause_that_separates_passages_wins_over_a_micro_gap() {
+        // The real shape of a misheard boundary: "… Rothner" ends, 1.08 s of
+        // quiet, a click, 0.18 s of quiet, and "18" — which the model glued to
+        // the signature, so its word starts 0.47 s *inside* the passage. The
+        // nearest quiet frames are the micro-gap; the pause that belongs to this
+        // edge is the long one behind the previous passage's last word.
+        let loudness = track(&[
+            (SPEECH, 1.0),
+            (QUIET, 1.08),
+            (SPEECH, 0.26),
+            (QUIET, 0.18),
+            (SPEECH, 0.82),
+            (QUIET, 0.02),
+            (SPEECH, 1.0),
+        ]);
+        let edge = 1.0 + 1.08 + 0.26 + 0.18 + 0.47;
+        let cut = place_edge(&loudness, EDGE_FRAME_SECS, edge, 0.2, Side::Head, 0.0, 10.0);
+        assert!((cut - 1.54).abs() < 1e-6, "cut: {cut}");
+    }
+
+    #[test]
+    fn the_tail_finds_the_pause_after_the_words_the_model_swallowed() {
+        // The mirror case: the text's own sign-off was glued to the next text, so
+        // the last matched word is one group earlier and a 0.12 s gap sits right
+        // next to it. The 1.36 s pause after the sign-off is the real tail.
+        let loudness = track(&[
+            (SPEECH, 1.0),
+            (QUIET, 0.12),
+            (SPEECH, 0.68),
+            (QUIET, 1.36),
+            (SPEECH, 1.0),
+        ]);
+        let cut = place_edge(&loudness, EDGE_FRAME_SECS, 1.0, 0.3, Side::Tail, 0.0, 10.0);
+        assert!((cut - 2.48).abs() < 1e-6, "cut: {cut}");
     }
 
     #[test]
@@ -214,13 +275,14 @@ mod tests {
     }
 
     #[test]
-    fn speech_running_into_the_word_falls_back_to_the_pad() {
-        let loudness = track(&[(SPEECH, 1.0), (QUIET, 0.6), (SPEECH, 1.0)]);
-        // The edge is halfway through the pause, further than the window allows.
-        let cut = place_edge(&loudness, EDGE_FRAME_SECS, 1.9, 0.2, Side::Head, 0.0, 10.0);
-        assert!((cut - 1.7).abs() < 1e-6, "cut: {cut}");
+    fn no_pause_within_reach_falls_back_to_the_pad() {
+        // The only pause is 1.5 s behind the edge, further than the search
+        // reaches: that gap separates some other pair of passages.
+        let loudness = track(&[(SPEECH, 1.0), (QUIET, 0.5), (SPEECH, 3.0)]);
+        let cut = place_edge(&loudness, EDGE_FRAME_SECS, 4.0, 0.2, Side::Head, 0.0, 10.0);
+        assert!((cut - 3.8).abs() < 1e-6, "cut: {cut}");
 
-        // No pause anywhere near: the pad goes into the audio, as it always did.
+        // No pause anywhere: the pad goes into the audio, as it always did.
         let flat = track(&[(SPEECH, 3.0)]);
         let cut = place_edge(&flat, EDGE_FRAME_SECS, 1.5, 0.2, Side::Head, 0.0, 10.0);
         assert!((cut - 1.3).abs() < 1e-6, "cut: {cut}");

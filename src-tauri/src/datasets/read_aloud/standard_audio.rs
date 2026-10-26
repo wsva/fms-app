@@ -916,8 +916,9 @@ pub(crate) fn guess_span(
     let (heard_start, _) = times[word_of_token[run[0].1]];
     let (_, heard_end) = times[word_of_token[run[matched - 1].1]];
     // The word boundaries are where the reading is; where the *clip* starts is
-    // the middle of the pause in front of that word, so a neighbouring clip and
-    // this one share the silence instead of one of them owning it.
+    // the middle of the pause that belongs to that word, so a neighbouring clip
+    // and this one share the silence instead of one of them owning it. That pause
+    // can be most of a second away, because the model's word times are loose.
     let loudness = edges::loudness_from_samples(&samples, edges::EDGE_FRAME_SECS);
     let start = round_tenth(edges::place_edge(
         &loudness,
