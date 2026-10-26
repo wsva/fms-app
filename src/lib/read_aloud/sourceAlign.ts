@@ -137,7 +137,7 @@ export interface AlignProposal {
   content: string;
   status: AlignProposalStatus;
   state: AlignProposalState;
-  /** Why it was refused, or what to look at when it is unsure. */
+  /** Why it was refused. Empty for a placed span — its match is the confidence. */
   note: string;
   source_uuid: string | null;
   source_name: string;
@@ -194,7 +194,7 @@ export interface AlignGuessOneResult {
   confidence: number;
   matched_words: number;
   reference_words: number;
-  /** Empty when the span is sure; otherwise why it is not, or a refusal's reason. */
+  /** A refusal's reason; empty when the span was placed. */
   note: string;
   counts: AlignCounts;
   generated_at: string;

@@ -221,7 +221,9 @@ struct Proposal {
     reference_words: usize,
     /// `"proposed"` when there is a span, `"refused"` when there is not.
     status: String,
-    /// Why it was refused, or what to look at when it is unsure.
+    /// Why it was refused. A placed span carries none: its match is already the
+    /// percentage beside the title, and restating that as prose was noise on
+    /// every loose match.
     #[serde(default)]
     note: String,
     /// `"pending"`, `"accepted"` or `"rejected"`.
@@ -1226,15 +1228,9 @@ fn span_proposal(
             matched_words: found.matched,
             reference_words: tokens.len(),
             status: "proposed".to_string(),
-            note: if confidence >= 0.95 {
-                String::new()
-            } else {
-                format!(
-                    "The model heard {} of {} words; check both edges.",
-                    found.matched,
-                    tokens.len()
-                )
-            },
+            // `confidence` already says how much of the passage was heard, so a
+            // placed span has nothing to explain; `note` is a refusal's reason.
+            note: String::new(),
             state: carried.0,
             applied_uuid: carried.1,
         },
@@ -1628,7 +1624,14 @@ pub(crate) fn list(settings: &SettingsState, dataset_uuid: &str) -> Result<Value
             content,
             status: proposal.status.clone(),
             state: proposal.state.clone(),
-            note: proposal.note.clone(),
+            // Files written by an older build still carry the "heard N of M
+            // words; check both edges" hint. Dropping it here clears it from
+            // the page without waiting for a re-guess to rewrite the file.
+            note: if proposal.is_placed() {
+                String::new()
+            } else {
+                proposal.note.clone()
+            },
             source_uuid: proposal.source_uuid.clone(),
             source_name: proposal.source_name.clone(),
             source_path: source.map(|s| s.path.clone()).unwrap_or_default(),

@@ -40,15 +40,15 @@ import { COARSE_STEP, CONTEXT_PAD, MIN_SPAN, NUDGE_STEP, clock, errorText, round
  * row per recording with its two verbs — listen, read what came back — and the
  * transcript on the right, because "did it hear this right?" is answered by the
  * words and their times, not by a number. **Texts** is the work: the queue on
- * the left, one passage open beside it with its waveform and its typed edges,
- * and the two verbs each row owns — place it again, and save (or delete) the
- * one clip it is allowed to have.
+ * the left — one line per text, no verbs — and one passage open beside it with
+ * its waveform, its typed edges, and the verbs that act on them in a bar under
+ * the edges: place it again, and save (or delete) the one clip it is allowed.
  *
  * There is no verdict to give: a placed span is the answer, and saving it writes
  * a row that names the recording and the seconds it covers. A save never
  * overwrites a clip, so a text that already has standard audio is skipped until
- * that clip is deleted here — which is why every row carries a delete as well as
- * a save.
+ * that clip is deleted here — which is why the bar carries a delete beside the
+ * save.
  *
  * State and every `read_aloud_align_*` call live here; the views are renderers.
  */

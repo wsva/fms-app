@@ -10,15 +10,14 @@ import { MIN_SPAN, clock, clockShort, confidenceTone, percent, roundMs } from ".
 /**
  * One passage, open at full size: the audio at the top, the text underneath.
  *
- * The pane is a fixed column of three bands — what the recording is and where
- * the span sits, the text itself on its own ground, and the transport — so the
- * waveform never scrolls out of reach while a long passage is read, and the
- * play button sits under the text where the eye is when the reading ends.
+ * The pane is a column of two bands — what the recording is and where the span
+ * sits, then the text on its own ground — so the waveform never scrolls out of
+ * reach however long the passage turns out to be.
  *
- * The verbs that act on this text close the first band, directly under the two
- * edges they change: Re-guess, and Save — or the Delete clip that has to come
- * first, since a clip holds the seconds its wav was cut from and a save never
- * overwrites one.
+ * The first band closes with one bar, directly under the two edges everything
+ * in it acts on: the transport on the left, and on the right the verbs —
+ * Re-guess, and Save, or the Delete clip that has to come first, since a clip
+ * holds the seconds its wav was cut from and a save never overwrites one.
  */
 
 type Edge = "start" | "end";
@@ -409,76 +408,79 @@ export default function PassageEditor({
           </>
         )}
 
-        {/* The verbs close this band, directly under the two edges they act on:
-            a span is only worth saving or re-placing while its times are in
-            sight. A refused passage keeps Re-guess here too — that is the one
-            thing it can do — and its Save explains why it is off. */}
-        <div className="flex items-center gap-1.5 justify-end">
-          <button
-            type="button"
-            onClick={onReguess}
-            disabled={busy || !canGuess}
-            title={
-              canGuess
-                ? "Guess this text again — the other texts keep their spans"
-                : "Listen to at least one recording first — Source Audios tab"
-            }
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-border-default bg-bg-muted text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-          >
-            {reguessing ? (
-              <Loader2 size={11} className="animate-spin" />
-            ) : (
-              <RotateCcw size={11} />
-            )}
-            Re-guess
-          </button>
-          <DeleteClipButton clip={proposal.clip} busy={busy} onDelete={onDeleteClip} />
-          <SaveClipButton proposal={proposal} busy={busy} saving={saving} onSave={onSave} />
-        </div>
-      </div>
-
-      {/* The text, on its own ground — a different surface, so the eye can tell
-          what is heard from what is read, and it scrolls instead of the audio. */}
-      <div className="flex-1 min-h-0 overflow-y-auto bg-bg-muted px-4 py-3 flex flex-col gap-2">
-        <p className="text-sm leading-relaxed text-text-primary whitespace-pre-wrap break-words">
-          {proposal.content}
-        </p>
+        {/* The edges above are read-only for a reason, and the button that
+            unlocks them is in the bar just below — so the reason is stated
+            here, where the locked fields and the way out are in sight at once. */}
         {blocked && (
           <p className="text-[11px] text-text-secondary">
             This text already has standard audio, so its span is locked. Delete the clip to cut
             this one instead.
           </p>
         )}
-        {proposal.note && !refused && (
-          <p className="text-[11px] text-text-tertiary">{proposal.note}</p>
-        )}
+
+        {/* One bar closes the band, directly under the two edges everything in
+            it acts on: the transport on the left, the verbs that decide whether
+            this span becomes (or has to give way to) a clip on the right. Above
+            the text, so none of them has to be scrolled for. A refused passage
+            keeps Re-guess here — that is the one thing it can do — and its Save
+            explains why it is off. */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => onPlay(false)}
+            disabled={!proposal.source_path}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-bg-muted text-text-secondary text-[11px] hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            title={playing ? "Stop (Space)" : "Play this span (Space)"}
+          >
+            {playing ? <Square size={11} /> : <Play size={11} />}
+            {playing ? "Stop" : "Play span"}
+          </button>
+          <button
+            type="button"
+            onClick={() => onPlay(true)}
+            disabled={!proposal.source_path}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-bg-muted text-text-secondary text-[11px] hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Play half a second each side, to hear the edge in context"
+          >
+            ±0.5 s
+          </button>
+          <span className="text-[10px] text-text-tertiary tabular-nums">
+            {(span.end - span.start).toFixed(3)} s
+          </span>
+          <span className="ml-auto flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={onReguess}
+              disabled={busy || !canGuess}
+              title={
+                canGuess
+                  ? "Guess this text again — the other texts keep their spans"
+                  : "Listen to at least one recording first — Source Audios tab"
+              }
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-border-default bg-bg-muted text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+            >
+              {reguessing ? (
+                <Loader2 size={11} className="animate-spin" />
+              ) : (
+                <RotateCcw size={11} />
+              )}
+              Re-guess
+            </button>
+            <DeleteClipButton clip={proposal.clip} busy={busy} onDelete={onDeleteClip} />
+            <SaveClipButton proposal={proposal} busy={busy} saving={saving} onSave={onSave} />
+          </span>
+        </div>
       </div>
 
-      {/* Under the text, where the reading ends: the transport, and how long
-          the span is. The verbs are up top, beside the edges they change. */}
-      <div className="shrink-0 px-4 py-2 border-t border-border-default flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => onPlay(false)}
-          disabled={!proposal.source_path}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-bg-muted text-text-secondary text-[11px] hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-          title={playing ? "Stop (Space)" : "Play this span (Space)"}
-        >
-          {playing ? <Square size={11} /> : <Play size={11} />}
-          {playing ? "Stop" : "Play span"}
-        </button>
-        <button
-          type="button"
-          onClick={() => onPlay(true)}
-          disabled={!proposal.source_path}
-          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-bg-muted text-text-secondary text-[11px] hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Play half a second each side, to hear the edge in context"
-        >
-          ±0.5 s
-        </button>
-        <span className="text-[10px] text-text-tertiary tabular-nums">
-          {(span.end - span.start).toFixed(3)} s
-        </span>
+      {/* The text, on its own ground: a rounded card on the pane's surface, so
+          the passage reads as a thing of its own instead of as part of the audio
+          above it. The band scrolls; the card grows with the text. */}
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
+        <div className="rounded-lg border border-border-default bg-bg-muted px-3 py-2.5">
+          <p className="text-sm leading-relaxed text-text-primary whitespace-pre-wrap break-words">
+            {proposal.content}
+          </p>
+        </div>
       </div>
     </section>
   );
