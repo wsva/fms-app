@@ -16,6 +16,7 @@ import {
   History,
   Play,
   Columns,
+  ChevronLeft,
   RefreshCw,
   Loader2,
   FolderOpen,
@@ -29,7 +30,7 @@ import {
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import MdEditor from "@/components/wiki/MdEditor";
 import NormalizeActions from "./NormalizeActions";
-import SourceAlignPanel from "./SourceAlignPanel";
+import SourceAlignWorkspace from "./source_align/SourceAlignWorkspace";
 import {
   CollapsibleSidebar,
   useCollapsibleSidebar,
@@ -227,6 +228,10 @@ export default function ReadAloudPage() {
   // Locations overlay (shared manager) — opened from the datasets-view overflow
   // menu, replacing the content area the same way the Cards page does.
   const [showLocations, setShowLocations] = useState(false);
+  // The dataset's Advanced page: aligning every text to a folder of recordings.
+  // An overlay on the level rather than a deeper one — it belongs to the
+  // dataset, not to a text, and it is reached from the texts view's menu.
+  const [advancedView, setAdvancedView] = useState(false);
   // Bumped by the toolbar Refresh so an open Locations overlay re-reads its own
   // directory list instead of keeping the one it mounted with.
   const [locRefresh, setLocRefresh] = useState(0);
@@ -446,11 +451,16 @@ export default function ReadAloudPage() {
 
   // Wiki-style view modes derived from the selection: no dataset → the dataset
   // list, a dataset but no text → its text list, a text → the practice pane.
-  const viewMode: "datasets" | "texts" | "practice" = !activeDataset
-    ? "datasets"
-    : activeText
-      ? "practice"
-      : "texts";
+  // The Advanced page is the one mode that is not derived — it is opened and
+  // closed explicitly — so it wins over the selection while it is open.
+  const viewMode: "datasets" | "texts" | "practice" | "advanced" =
+    advancedView && activeDataset
+      ? "advanced"
+      : !activeDataset
+        ? "datasets"
+        : activeText
+          ? "practice"
+          : "texts";
 
   // One refresh means different things per level, so the view picks the one that
   // re-reads what is actually on screen: the linked directories, the dataset
@@ -480,11 +490,21 @@ export default function ReadAloudPage() {
   // never a guess about which one wins.
   const scoringText = normalized.trim() || content.trim();
 
+  // Choosing another dataset (or deleting the open one) leaves the Advanced
+  // page: its sources and proposals belong to the dataset it was opened on.
+  useEffect(() => {
+    setAdvancedView(false);
+  }, [selectedDataset]);
+
   const goDatasets = () => {
+    setAdvancedView(false);
     setSelectedDataset("");
     setSelectedText(null);
   };
-  const goTexts = () => setSelectedText(null);
+  const goTexts = () => {
+    setAdvancedView(false);
+    setSelectedText(null);
+  };
 
   // ── Editor lifecycle ──────────────────────────────────────────────
   const startEdit = (t: ReadText | null) => {
@@ -743,14 +763,20 @@ export default function ReadAloudPage() {
               </span>
             ) : (
               <Breadcrumb.Link
-                variant={viewMode === "practice" ? "link" : "current"}
-                truncate={viewMode === "practice"}
+                variant={viewMode === "texts" ? "current" : "link"}
+                truncate={viewMode !== "texts"}
                 title={activeDataset.name}
                 onClick={goTexts}
               >
                 {activeDataset.name}
               </Breadcrumb.Link>
             )}
+          </>
+        )}
+        {!editing && viewMode === "advanced" && (
+          <>
+            <Breadcrumb.Sep />
+            <Breadcrumb.Current grow={false}>Advanced</Breadcrumb.Current>
           </>
         )}
         {editing ? (
@@ -818,6 +844,14 @@ export default function ReadAloudPage() {
             active={manageSidebar.visible}
             onClick={manageSidebar.toggle}
             title={manageSidebar.visible ? "Hide sections" : "Show sections"}
+          />
+        )}
+        {!editing && viewMode === "advanced" && (
+          <ToolbarButton
+            icon={ChevronLeft}
+            label="Texts"
+            title="Back to the texts list"
+            onClick={goTexts}
           />
         )}
         <div className="flex-1 min-w-0" />
@@ -1005,6 +1039,12 @@ export default function ReadAloudPage() {
                     New Text
                   </ToolbarMenuItem>
                 )}
+                {/* The dataset's bulk tools are occasional, and they act on the
+                    whole dataset rather than on the row under the cursor, so
+                    they live behind the dots and open a page of their own. */}
+                <ToolbarMenuItem icon={Wand2} onClick={() => setAdvancedView(true)}>
+                  Advanced
+                </ToolbarMenuItem>
                 <ToolbarMenuItem
                   icon={Trash2}
                   danger
@@ -1027,8 +1067,9 @@ export default function ReadAloudPage() {
       </Toolbar>
 
       {/* Content — while editing this is the inline text form; otherwise the
-          practice pane (own scroll) or the dataset/text lists. The Locations
-          overlay replaces all of them while open (Cards-page pattern). */}
+          practice pane (own scroll), the Advanced page, or the dataset/text
+          lists. The Locations overlay replaces all of them while open (Cards-page
+          pattern). */}
       {showLocations ? (
         <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
           {error && (
@@ -1265,21 +1306,22 @@ export default function ReadAloudPage() {
           onScored={() => loadTexts(selectedDataset)}
           onRecorder={handleRecorder}
         />
+      ) : viewMode === "advanced" ? (
+        // A page of its own, and a workspace rather than a fold: the pipeline
+        // runs across the top and the three zones below it scroll separately.
+        <div className="flex-1 min-h-0 min-w-0 flex flex-col">
+          {selectedDataset && (
+            <SourceAlignWorkspace
+              datasetUuid={selectedDataset}
+              onApplied={() => {
+                void loadStandardClips(selectedDataset);
+                void loadTexts(selectedDataset);
+              }}
+            />
+          )}
+        </div>
       ) : viewMode === "texts" ? (
         <div className="flex-1 overflow-y-auto min-h-0 min-w-0 p-4 flex flex-col gap-1">
-          {/* Bulk span guessing sits above the list it fills, so a cut shows up
-              as the clip badges on the rows below. */}
-          {selectedDataset && (
-            <div className="pb-2">
-              <SourceAlignPanel
-                datasetUuid={selectedDataset}
-                onApplied={() => {
-                  void loadStandardClips(selectedDataset);
-                  void loadTexts(selectedDataset);
-                }}
-              />
-            </div>
-          )}
           {texts.length === 0 ? (
             <p className="text-text-secondary">
               No texts yet. Add one with the New Text button.
