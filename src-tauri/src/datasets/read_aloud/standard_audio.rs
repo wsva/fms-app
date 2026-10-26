@@ -48,7 +48,7 @@ use crate::datasets::asr_metric;
 use crate::edge_tts::{self, TtsWordBoundary};
 use crate::settings::{AppSettings, SettingsState};
 
-use super::{effective_reference, find_dataset_dir, find_dataset_dir_write, open_db};
+use super::{edges, effective_reference, find_dataset_dir, find_dataset_dir_write, open_db};
 
 /// Columns of the waveform a probe returns. Roughly one per two pixels at the
 /// dialog's width, so the trim track can draw without resampling.
@@ -915,8 +915,28 @@ pub(crate) fn guess_span(
 
     let (heard_start, _) = times[word_of_token[run[0].1]];
     let (_, heard_end) = times[word_of_token[run[matched - 1].1]];
-    let start = round_tenth((heard_start as f64 - GUESS_PAD_BEFORE).max(0.0));
-    let mut end = round_tenth(((heard_end as f64) + GUESS_PAD_AFTER).min(duration));
+    // The word boundaries are where the reading is; where the *clip* starts is
+    // the middle of the pause in front of that word, so a neighbouring clip and
+    // this one share the silence instead of one of them owning it.
+    let loudness = edges::loudness_from_samples(&samples, edges::EDGE_FRAME_SECS);
+    let start = round_tenth(edges::place_edge(
+        &loudness,
+        edges::EDGE_FRAME_SECS,
+        heard_start as f64,
+        GUESS_PAD_BEFORE,
+        edges::Side::Head,
+        0.0,
+        duration,
+    ));
+    let mut end = round_tenth(edges::place_edge(
+        &loudness,
+        edges::EDGE_FRAME_SECS,
+        heard_end as f64,
+        GUESS_PAD_AFTER,
+        edges::Side::Tail,
+        start + MIN_CLIP_SECS,
+        duration,
+    ));
     if end - start < MIN_CLIP_SECS {
         end = round_tenth((start + MIN_CLIP_SECS).min(duration));
     }

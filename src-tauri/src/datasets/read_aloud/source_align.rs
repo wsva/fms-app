@@ -81,7 +81,7 @@ use super::standard_audio::{
     text_reference, GUESS_MAX_GAP, GUESS_MIN_MATCH_RATIO, GUESS_MIN_WORDS, GUESS_PAD_AFTER,
     GUESS_PAD_BEFORE,
 };
-use super::{find_dataset_dir, find_dataset_dir_write, open_db};
+use super::{edges, find_dataset_dir, find_dataset_dir_write, open_db};
 
 // ============================================================
 // Constants
@@ -103,11 +103,6 @@ const MAX_SOURCE_SECS: f64 = 7200.0;
 /// Width of one peak-envelope bucket. Short enough that a syllable boundary is
 /// visible at the crop edges, long enough that ten hours is 1.8M pairs.
 const PEAK_SECONDS: f64 = 0.02;
-
-/// How far either edge may travel to land on a quiet bucket. A model's word
-/// boundary can land inside a consonant; the quietest 20 ms nearby is a better
-/// cut than the boundary itself.
-const SNAP_WINDOW_SECS: f64 = 0.15;
 
 /// How far from its predicted position a passage is looked for. The tight value
 /// is the common case and also what keeps a five-word one-liner from being
@@ -343,38 +338,6 @@ fn envelope(samples: &[f32]) -> (Vec<i8>, f64) {
     let columns = samples.len().div_ceil(wanted).max(1);
     let (peaks, per_pair) = audio::peaks_from_samples(samples, columns);
     (peaks, per_pair as f64 / audio::DECODED_SAMPLE_RATE as f64)
-}
-
-/// The quietest bucket within [`SNAP_WINDOW_SECS`] of `seconds`, clamped to
-/// `[low, high]`. Ties go to the bucket nearest `seconds`, so a flat stretch of
-/// silence does not push the edge to a window corner.
-fn snap_quiet(peaks: &[i8], peak_seconds: f64, seconds: f64, low: f64, high: f64) -> f64 {
-    if peaks.len() < 2 || !(peak_seconds > 0.0) {
-        return seconds;
-    }
-    let pairs = peaks.len() / 2;
-    let centre = (seconds / peak_seconds).round() as i64;
-    let reach = (SNAP_WINDOW_SECS / peak_seconds).round() as i64;
-    let mut best: Option<(i64, i64, i64)> = None; // (loudness, distance, bucket)
-    for offset in -reach..=reach {
-        let bucket = centre + offset;
-        if bucket < 0 || bucket as usize >= pairs {
-            continue;
-        }
-        let index = bucket as usize * 2;
-        let loudness = (peaks[index] as i32).abs().max((peaks[index + 1] as i32).abs());
-        let candidate = (loudness as i64, offset.abs(), bucket);
-        if best
-            .map(|b| (candidate.0, candidate.1) < (b.0, b.1))
-            .unwrap_or(true)
-        {
-            best = Some(candidate);
-        }
-    }
-    let Some((_, _, bucket)) = best else {
-        return seconds;
-    };
-    (bucket as f64 * peak_seconds).clamp(low, high.max(low))
 }
 
 /// A window of the peak envelope around a span: the thumbnail beside one
@@ -870,19 +833,6 @@ fn walk_from_cursor(stream: &[String], texts: &[Vec<String>]) -> Vec<Guess> {
     slots
 }
 
-/// The padded span of a passage, before the silence snap: `[start, end)` in
-/// seconds, never overlapping the passage before it and never shorter than
-/// [`MIN_SPAN_SECS`].
-fn span_edges(first_start: f64, last_end: f64, duration: f64, previous_end: Option<f64>) -> (f64, f64) {
-    let mut start = (first_start - GUESS_PAD_BEFORE).max(previous_end.unwrap_or(0.0));
-    let mut end = (last_end + GUESS_PAD_AFTER).min(duration);
-    if end - start < MIN_SPAN_SECS {
-        end = (start + MIN_SPAN_SECS).min(duration);
-        start = (end - MIN_SPAN_SECS).max(previous_end.unwrap_or(0.0));
-    }
-    (start.max(0.0), end.max(0.0))
-}
-
 fn round_ms(seconds: f64) -> f64 {
     (seconds * 1000.0).round() / 1000.0
 }
@@ -1175,22 +1125,33 @@ fn span_proposal(
     let clamped = floor
         .filter(|(source, _)| *source == first_source)
         .map(|(_, end)| end);
-    let (start, end) = span_edges(first_start, last_end, transcript.duration, clamped);
+    // The pads are the fallback; where a pause meets the word, the edge goes
+    // into the middle of it instead, so two neighbouring clips divide the
+    // silence rather than leaving half of it to neither. The bounds are what
+    // keeps a clip off its neighbour and off the minimum length.
     let peaks = decode_peaks(&transcript.peaks);
-    let start = round_ms(snap_quiet(
-        &peaks,
+    let loudness = edges::loudness_from_envelope(&peaks);
+    let start = round_ms(edges::place_edge(
+        &loudness,
         transcript.peak_seconds,
-        start,
-        0.0,
-        end - MIN_SPAN_SECS,
+        first_start,
+        GUESS_PAD_BEFORE,
+        edges::Side::Head,
+        clamped.unwrap_or(0.0),
+        transcript.duration,
     ));
-    let end = round_ms(snap_quiet(
-        &peaks,
+    let mut end = round_ms(edges::place_edge(
+        &loudness,
         transcript.peak_seconds,
-        end,
+        last_end,
+        GUESS_PAD_AFTER,
+        edges::Side::Tail,
         start + MIN_SPAN_SECS,
         transcript.duration,
     ));
+    if end - start < MIN_SPAN_SECS {
+        end = round_ms((start + MIN_SPAN_SECS).min(transcript.duration));
+    }
     let confidence = (found.matched as f64 / tokens.len() as f64 * 100.0).round() / 100.0;
     let source_uuid = prepared.index.sources[first_source].uuid.clone();
 
@@ -2034,43 +1995,36 @@ mod tests {
         assert_eq!(decode_peaks(&encode_peaks(&peaks)), peaks);
     }
 
-    /// An edge moves to the quietest 20 ms bucket nearby, not to the model's
-    /// word boundary, which can sit inside a consonant.
-    #[test]
-    fn edges_snap_to_the_quietest_bucket() {
-        let mut peaks = vec![100i8; 40];
-        peaks[10] = 0; // bucket 5, both halves quiet
-        peaks[11] = 0;
-        let snapped = snap_quiet(&peaks, 0.02, 0.10, 0.0, 10.0);
-        assert!((snapped - 0.10).abs() < 1e-9, "snapped to {snapped}");
-    }
-
-    /// The snap still respects the neighbouring edge and the recording's bounds.
-    #[test]
-    fn snap_respects_the_clamp() {
-        let mut peaks = vec![100i8; 40];
-        peaks[10] = 0;
-        peaks[11] = 0;
-        let snapped = snap_quiet(&peaks, 0.02, 0.10, 0.12, 10.0);
-        assert!((snapped - 0.12).abs() < 1e-9, "snapped to {snapped}");
-    }
-
     /// Padding, the minimum length, and the monotonic clamp — the three ways a
-    /// span can be the wrong size.
+    /// span can be the wrong size. Where an edge lands inside the pause it
+    /// meets is `edges`' question; the bounds this call site hands it are what
+    /// keeps two clips apart.
     #[test]
-    fn span_edges_pad_clamp_and_never_overlap() {
-        let (start, end) = span_edges(10.0, 12.0, 100.0, None);
-        assert!((start - 9.8).abs() < 1e-9);
-        assert!((end - 12.3).abs() < 1e-9);
+    fn a_span_is_padded_and_never_overlaps_the_one_before() {
+        let loud = vec![100i8; 20_000];
+        let loudness = edges::loudness_from_envelope(&loud);
+        let start = round_ms(edges::place_edge(
+            &loudness,
+            edges::EDGE_FRAME_SECS,
+            10.0,
+            GUESS_PAD_BEFORE,
+            edges::Side::Head,
+            0.0,
+            100.0,
+        ));
+        assert!((start - 9.8).abs() < 1e-9, "start {start}");
 
-        let (start, _) = span_edges(10.0, 12.0, 100.0, Some(10.5));
+        // The previous passage ends at 10.5, so this one may not start before it.
+        let start = round_ms(edges::place_edge(
+            &loudness,
+            edges::EDGE_FRAME_SECS,
+            10.0,
+            GUESS_PAD_BEFORE,
+            edges::Side::Head,
+            10.5,
+            100.0,
+        ));
         assert!((start - 10.5).abs() < 1e-9, "start {start} overlaps the previous passage");
-
-        let (start, end) = span_edges(1.0, 99.95, 100.0, None);
-        assert!(end <= 100.0 && start < end);
-
-        let (start, end) = span_edges(0.0, 0.0, 100.0, None);
-        assert!(end - start >= MIN_SPAN_SECS - 1e-9, "{start}..{end} is too short");
     }
 
     /// Milli precision, so a typed 12.345 s is stored as 12.345 s.

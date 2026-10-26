@@ -15,6 +15,7 @@
 
 pub(crate) mod assess;
 pub(crate) mod audit;
+pub(crate) mod edges;
 pub(crate) mod fluency;
 pub(crate) mod gop;
 pub(crate) mod import;

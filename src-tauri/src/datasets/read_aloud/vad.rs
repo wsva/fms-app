@@ -67,7 +67,7 @@ impl Default for VadConfig {
     }
 }
 
-fn frame_rms(frame: &[f32]) -> f32 {
+pub(crate) fn frame_rms(frame: &[f32]) -> f32 {
     if frame.is_empty() {
         return 0.0;
     }
@@ -106,29 +106,30 @@ fn frame_rate(cfg: &VadConfig) -> f64 {
     SAMPLE_RATE as f64 / cfg.frame_samples.max(1) as f64
 }
 
-/// Detect speech segments in a 16 kHz mono recording.
+/// The speech/silence verdict per frame of an already-computed loudness track.
 ///
-/// The pipeline is: frame RMS → percentile noise floor → threshold with a hard
-/// floor and a loud-level ceiling → per-frame verdict → hysteresis against short
-/// runs → merge close segments → pad. Every stage is expressed in the config, so
-/// a caller tuning one of them cannot accidentally change another.
-pub(crate) fn detect(samples: &[f32], cfg: &VadConfig) -> Vec<Segment> {
-    let frame = cfg.frame_samples.max(1);
-    if samples.is_empty() || samples.len() < frame {
+/// `loudness` is one level per frame in any consistent unit — frame RMS for a
+/// decoded recording, the peak magnitude for a cached envelope — and
+/// `frame_secs` says how much time one value covers, so the short-burst and
+/// bridging rules keep their meaning whatever the frame is. Only the frame size
+/// may differ between callers; the threshold, the ceiling and the hysteresis are
+/// the same ones [`detect`] applies, so a caller that has a loudness track and
+/// not the samples gets the same answer as one that has the samples.
+pub(crate) fn speech_frames(loudness: &[f32], frame_secs: f64, cfg: &VadConfig) -> Vec<bool> {
+    if loudness.is_empty() || !(frame_secs > 0.0) {
         return Vec::new();
     }
 
-    let rms: Vec<f32> = samples.chunks(frame).map(frame_rms).collect();
-    let floor = percentile(&rms, cfg.floor_percentile);
-    let loud = percentile(&rms, 0.90);
+    let floor = percentile(loudness, cfg.floor_percentile);
+    let loud = percentile(loudness, 0.90);
     // Two-sided: above the noise, but never above half the loud level — a
     // speech-only recording has no silence to estimate a floor from.
     let threshold = (floor * cfg.floor_multiplier)
         .min(loud * cfg.max_threshold_ratio)
         .max(cfg.absolute_floor);
-    let mut flags: Vec<bool> = rms.iter().map(|r| *r > threshold).collect();
+    let mut flags: Vec<bool> = loudness.iter().map(|level| *level > threshold).collect();
 
-    let rate = frame_rate(cfg);
+    let rate = 1.0 / frame_secs;
     let min_speech_frames = ((cfg.min_speech_secs * rate).round() as usize).max(1);
 
     // Drop bursts too short to be a word, then bridge gaps too short to be a
@@ -144,6 +145,24 @@ pub(crate) fn detect(samples: &[f32], cfg: &VadConfig) -> Vec<Segment> {
             flags[start..start + len].fill(true);
         }
     }
+
+    flags
+}
+
+/// Detect speech segments in a 16 kHz mono recording.
+///
+/// The pipeline is: frame RMS → [`speech_frames`] → runs to segments → merge
+/// close segments → pad. Every threshold is expressed in the config, so a caller
+/// tuning one of them cannot accidentally change another.
+pub(crate) fn detect(samples: &[f32], cfg: &VadConfig) -> Vec<Segment> {
+    let frame = cfg.frame_samples.max(1);
+    if samples.is_empty() || samples.len() < frame {
+        return Vec::new();
+    }
+
+    let rate = frame_rate(cfg);
+    let rms: Vec<f32> = samples.chunks(frame).map(frame_rms).collect();
+    let flags = speech_frames(&rms, 1.0 / rate, cfg);
 
     // Frames → seconds.
     let mut spans: Vec<Segment> = runs(&flags)
@@ -183,6 +202,7 @@ pub(crate) fn detect(samples: &[f32], cfg: &VadConfig) -> Vec<Segment> {
     }
     padded
 }
+
 
 #[cfg(test)]
 mod tests {
