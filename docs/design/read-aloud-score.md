@@ -86,19 +86,37 @@ The reference is no longer synthesised during scoring. It is an asset the **data
 
 ```sql
 CREATE TABLE IF NOT EXISTS read_standard_audio (
-    uuid       TEXT PRIMARY KEY,
-    text_uuid  TEXT NOT NULL,
-    note       TEXT NOT NULL DEFAULT '',   -- free-form: origin, voice, how it was cropped
-    boundaries TEXT,                       -- TTS word timings; NULL ⇒ an upload (none)
-    text_sha   TEXT NOT NULL DEFAULT '',   -- sha256 of the reference text it was made from
-    is_default INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    uuid        TEXT PRIMARY KEY,
+    text_uuid   TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',   -- free-form: origin, voice, how it was cropped
+    boundaries  TEXT,                       -- TTS word timings; NULL ⇒ not a synthesis
+    text_sha    TEXT NOT NULL DEFAULT '',   -- sha256 of the reference text it was made from
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    origin      TEXT NOT NULL DEFAULT '',   -- tts | upload | align ('' on a pre-column row)
+    source_uuid TEXT,                       -- align only: the recording it was cut from
+    start_secs  REAL,
+    end_secs    REAL
 );
 ```
 
-The table carries only what cannot be derived. The row's identity *is* its path (so row and file cannot disagree); `boundaries IS NULL` is what makes a clip an upload rather than a synthesis; the duration is decoded from the wav when a text's clips are listed; and `note` is the single free-form field for provenance, never parsed. `text_sha` covers the *effective* reference (`normalized_content` when set, else `content`), which turns staleness into a comparison instead of a migration.
+The table carries only what cannot be derived. The row's identity *is* its path (so row and file cannot disagree); the duration is decoded from the wav when a text's clips are listed; and `note` is the single free-form field for provenance, never parsed. `text_sha` covers the *effective* reference (`normalized_content` when set, else `content`), which turns staleness into a comparison instead of a migration. `origin` names what made the clip; a row written before the column existed leaves it empty and is read by the old rule — only a TTS clip carries word boundaries — so a migrated dataset needs no row rewritten.
 
-One default is enforced on write (the first insert for a text becomes default; `set_default` clears the others in one transaction; deleting the default promotes the earliest remaining) and tolerated on read (`ORDER BY is_default DESC, created_at, rowid`, then the first row whose wav still exists) — a sync replay must never fail on a partial unique index. A row whose wav is missing is filtered out, so a metadata/file race degrades to "no standard audio", never a broken entry.
+### Span first, file second
+
+An aligned clip ("this text is read from 31.51 s to 44.58 s of *that* recording") stores the **span**, not the audio: `source_uuid` + `start_secs` + `end_secs`, with `media/<text_uuid>/<uuid>.wav` as a **cache** of those seconds. Applying a whole book is therefore a few hundred row writes instead of hours of decoding, a text nobody practises costs no disk, and an edge can be corrected numerically without touching audio.
+
+The cache is cut in exactly three places, each a moment where the audio is about to be needed:
+
+| where | why there |
+|---|---|
+| a **text-scoped** listing (`read_aloud_standard_audio_list` with a `text_uuid`) | the page opened the text to play or score it — this is the normal path |
+| `pack_archive` / the REST `/snapshot` handler | the recordings stay where the user keeps them and `align/` is a derived index that never ships, so a follower could not cut the clip itself |
+| never in the **dataset-wide** listing, and never in the scorer | badging a list is not worth decoding a book, and scoring is a read path that must not write into a dataset |
+
+A read-only base under the download root is never cut into (that would copy the dataset just to draw a player); its own package was materialised when it was published. The `/snapshot` handler materialises *before* it hashes, and the follower records the hash that response carries rather than the earlier `/manifest` one — otherwise the first sync after an apply would re-download the dataset once to discover it already had it.
+
+One default is enforced on write (the first insert for a text becomes default; `set_default` clears the others in one transaction; deleting the default promotes the earliest remaining) and tolerated on read (`ORDER BY is_default DESC, created_at, rowid`, then the first row that can be read) — a sync replay must never fail on a partial unique index. `usable` is "the wav is here, or the recording it names is", so a span clip is scorable before its cache exists and a clip whose recording has gone is reported as not usable rather than as missing audio.
 
 Why not keep synthesising on demand into a cache: a score must not depend on an HTTP request, and a clipped or mispronounced TTS rendering must be replaceable by a human reading. The old `<workspace>/read_aloud_tts/` cache is retired; its files are left on disk as derived data.
 
@@ -117,6 +135,8 @@ The phoneme model is a transformer: its self-attention is quadratic in frames (~
 The clips ride the existing dataset channels for free. `read_standard_audio_save` / `_delete` join the dataset-scoped change kinds beside `read_text_save` / `_delete` (object id = uuid, delete → tombstone); the hub's snapshot is a whole `data.sqlite3` copy and `sanitize_snapshot_db` drops only `card_review` + `read_attempt`; and the wavs travel as ordinary files, hashed into `compute_manifest` and fetched by hash. Deleting a text cascades: its rows go with it, and `media/<text_uuid>/` is removed.
 
 One measured addition to D4: a stored pause costs ~48 bytes (`{"start":12.04,"end":12.31,"kind":"within_phrase"}`) and the aggregates ~520, so `MAX_STORED_PAUSES` is **24**, not 40 — 40 would put a verbose attempt at ~3 KB and break the row budget. Raising it again needs a narrower pause shape, not a bigger number.
+
+A span clip's wav is *derived*, so a follower may legitimately hold the row and not the file: it materialises the first time the text is opened. That is why the pack and snapshot paths must cut every missing span before the file walk — the source recording is not in the package, so nothing on the receiving side could cut it later.
 
 ## Scoring definitions
 

@@ -12,7 +12,8 @@
 //! passages along one global token stream in `order_num`: first the passages long
 //! enough to be found on their own, then everything in the gaps those leave. Each
 //! passage yields a span, the spans are written down as *proposals*, a human
-//! accepts or rejects them, and only then are the clips cut.
+//! accepts or rejects them, and only then are the spans stored — as rows, with
+//! the wav cut later, the first time something needs to hear it.
 //!
 //! ## Why two passes and not one walk
 //!
@@ -79,7 +80,7 @@ use crate::settings::SettingsState;
 
 use super::standard_audio::{
     text_reference, GUESS_MAX_GAP, GUESS_MIN_MATCH_RATIO, GUESS_MIN_WORDS, GUESS_PAD_AFTER,
-    GUESS_PAD_BEFORE,
+    GUESS_PAD_BEFORE, MAX_SOURCE_SECS,
 };
 use super::{edges, find_dataset_dir, find_dataset_dir_write, open_db};
 
@@ -93,12 +94,6 @@ use super::{edges, find_dataset_dir, find_dataset_dir_write, open_db};
 const AUDIO_EXTENSIONS: [&str; 12] = [
     "mp3", "m4a", "m4b", "aac", "wav", "flac", "ogg", "oga", "opus", "wma", "mp4", "mkv",
 ];
-
-/// The longest single recording one call will decode. Two hours of 16 kHz f32 is
-/// ~460 MB, which the transcription call holds on top of the samples, so this is
-/// where a single-file unabridged audiobook is refused with a message instead of
-/// being swapped to disk until the process dies.
-const MAX_SOURCE_SECS: f64 = 7200.0;
 
 /// Width of one peak-envelope bucket. Short enough that a syllable boundary is
 /// visible at the crop edges, long enough that ten hours is 1.8M pairs.
@@ -310,6 +305,35 @@ fn save_index(dir: &Path, index: &SourceIndex) -> Result<(), String> {
 
 fn load_proposals(dir: &Path) -> ProposalSet {
     read_json(&proposals_path(dir)).unwrap_or_default()
+}
+
+// ============================================================
+// Looking a recording up from a stored span
+// ============================================================
+//
+// A span row names the recording it came from and nothing else: the align cache
+// is derived and never travels, so "where is `8d2c…` now?" is answered from the
+// index on this device, or not at all. These two reads are how the clip cache
+// (`standard_audio::materialize`) finds the audio to cut.
+
+/// The recording a stored span names, if it is still where it was registered.
+/// A moved or deleted file answers `None` — a clip is not cut from a guess.
+pub(crate) fn source_file(dir: &Path, source_uuid: &str) -> Option<PathBuf> {
+    let index = load_index(dir);
+    let entry = index.sources.iter().find(|s| s.uuid == source_uuid)?;
+    let path = PathBuf::from(&entry.path);
+    path.is_file().then_some(path)
+}
+
+/// Every registered recording that is still on this device, for a listing that
+/// wants to know which span clips it could cut without asking one by one.
+pub(crate) fn present_sources(dir: &Path) -> std::collections::HashSet<String> {
+    load_index(dir)
+        .sources
+        .into_iter()
+        .filter(|s| Path::new(&s.path).is_file())
+        .map(|s| s.uuid)
+        .collect()
 }
 
 // ============================================================
@@ -1696,13 +1720,14 @@ pub(crate) fn decide(
 // Apply
 // ============================================================
 
-/// Cut every accepted span out of its recording and store it as the text's
-/// standard audio.
+/// Store every accepted span as its text's standard audio.
 ///
-/// Each recording is decoded **once** however many spans come out of it, which
-/// is the whole reason this is a batch call and not a loop of imports. `limit`
-/// bounds the call (`generate_all`'s pattern): an agent repeats until `remaining`
-/// is 0 rather than holding a request open for an hour.
+/// Nothing is decoded here: a span is three numbers and a recording id, the row
+/// is written, and the clip is cut the first time it is played, scored or packed
+/// (`standard_audio::materialize`). Applying a book is therefore a few hundred
+/// row writes instead of an hour of decoding — and a text nobody practises costs
+/// no disk at all. `limit` bounds the call (`generate_all`'s pattern): an agent
+/// repeats until `remaining` is 0 rather than holding a request open for an hour.
 pub(crate) fn apply(settings: &SettingsState, dataset_uuid: &str, limit: Option<i64>) -> Result<Value, String> {
     let dir = find_dataset_dir_write(settings, dataset_uuid)?;
     let index = load_index(&dir);
@@ -1724,78 +1749,59 @@ pub(crate) fn apply(settings: &SettingsState, dataset_uuid: &str, limit: Option<
             "failed": [],
             "failed_count": 0,
             "remaining": 0,
+            "clips_cut": 0,
         }));
     }
 
     let mut applied = 0usize;
     let mut failed: Vec<Value> = Vec::new();
-    for source in &index.sources {
-        let targets: Vec<usize> = planned
-            .iter()
-            .copied()
-            .filter(|i| set.proposals[*i].source_uuid.as_deref() == Some(source.uuid.as_str()))
-            .collect();
-        if targets.is_empty() {
+    for i in planned {
+        let proposal = set.proposals[i].clone();
+        let Some(source_uuid) = proposal.source_uuid.clone() else {
+            failed.push(json!({
+                "text_uuid": proposal.text_uuid,
+                "error": "The proposal names no recording; re-run the guess.",
+            }));
+            continue;
+        };
+        if !index.sources.iter().any(|s| s.uuid == source_uuid) {
+            failed.push(json!({
+                "text_uuid": proposal.text_uuid,
+                "error": format!("Recording {} is no longer registered; re-register the folder.", source_uuid),
+            }));
             continue;
         }
-        let samples = match audio::decode_to_pcm_capped(Path::new(&source.path), MAX_SOURCE_SECS) {
-            Ok(samples) => samples,
+        let reference = match text_reference(&dir, &proposal.text_uuid) {
+            Ok(reference) => reference,
             Err(error) => {
-                for i in targets {
-                    failed.push(json!({
-                        "text_uuid": set.proposals[i].text_uuid,
-                        "error": error,
-                    }));
-                }
+                failed.push(json!({ "text_uuid": proposal.text_uuid, "error": error }));
                 continue;
             }
         };
-        let rate = audio::DECODED_SAMPLE_RATE as f64;
-        for i in targets {
-            let proposal = set.proposals[i].clone();
-            let reference = match text_reference(&dir, &proposal.text_uuid) {
-                Ok(reference) => reference,
-                Err(error) => {
-                    failed.push(json!({ "text_uuid": proposal.text_uuid, "error": error }));
-                    continue;
-                }
-            };
-            let first = ((proposal.start * rate).round() as usize).min(samples.len());
-            let last = ((proposal.end * rate).round() as usize).min(samples.len());
-            if last <= first {
-                failed.push(json!({
-                    "text_uuid": proposal.text_uuid,
-                    "error": "The span falls outside the recording; re-run the guess.",
-                }));
-                continue;
+        match super::standard_audio::store_span(
+            settings,
+            dataset_uuid,
+            &dir,
+            &proposal.text_uuid,
+            &reference,
+            &source_uuid,
+            &proposal.source_name,
+            proposal.start,
+            proposal.end,
+        ) {
+            Ok(clip) => {
+                set.proposals[i].applied_uuid = Some(clip.uuid);
+                applied += 1;
             }
-            let note = format!(
-                "Align · {} · {:.2}–{:.2} s",
-                proposal.source_name, proposal.start, proposal.end
-            );
-            match super::standard_audio::store_samples(
-                settings,
-                dataset_uuid,
-                &dir,
-                &proposal.text_uuid,
-                &reference,
-                &samples[first..last],
-                &note,
-            ) {
-                Ok(clip) => {
-                    set.proposals[i].applied_uuid = Some(clip.uuid);
-                    applied += 1;
-                }
-                Err(error) => failed.push(json!({
-                    "text_uuid": proposal.text_uuid,
-                    "error": error,
-                })),
-            }
+            Err(error) => failed.push(json!({
+                "text_uuid": proposal.text_uuid,
+                "error": error,
+            })),
         }
-        // Save per recording, so a long apply that is interrupted keeps what it
-        // already stored instead of doing it again.
-        write_json(&proposals_path(&dir), &set)?;
     }
+    // Saved once, after the loop: a row write cannot fail halfway through the way
+    // a decode could, and a run interrupted here is simply re-run.
+    write_json(&proposals_path(&dir), &set)?;
 
     let remaining = set.proposals.iter().filter(|p| p.is_open()).count();
     let failed_count = failed.len();
@@ -1805,6 +1811,9 @@ pub(crate) fn apply(settings: &SettingsState, dataset_uuid: &str, limit: Option<
         "failed": failed,
         "failed_count": failed_count,
         "remaining": remaining,
+        // Every stored clip is a span: the wav is cut on first use, so this call
+        // does no audio work. The field stays so a caller can say so.
+        "clips_cut": 0,
         "counts": counts(&set),
     }))
 }

@@ -272,30 +272,46 @@ export const WEAK_WORD_SCORE = 0.4;
  * One reference clip a text owns, read from `read_standard_audio`.
  *
  * Scoring measures pronunciation against the **default** clip only. `kind`,
- * `duration` and `stale` are derived on read (the row stores neither) so they
- * can never disagree with the wav they describe.
+ * `duration`, `stale` and `usable` are derived on read (the row stores none of
+ * them) so they can never disagree with the wav they describe.
  */
 export interface ReadStandardAudio {
   uuid: string;
   text_uuid: string;
-  /** Free-form origin note: `Edge TTS · <voice>` or `Upload · <file>`. */
+  /** Free-form origin note: `Edge TTS · <voice>`, `Upload · <file>`, `Align · <file> · <from>–<to> s`. */
   note: string;
-  /** `tts` when the clip carries word timings, `upload` otherwise. */
-  kind: "tts" | "upload";
+  /**
+   * What made it: `tts` (word timings came with it), `upload` (a picked file),
+   * or `align` (a span of a recording — see `source_uuid`).
+   */
+  kind: "tts" | "upload" | "align";
   /**
    * Seconds, decoded from the wav — or `null` when nothing decoded it (the
    * dataset-wide listing deliberately skips that, and the wav may not be on
    * this device at all). `null` means "not measured", never "zero seconds".
    */
   duration: number | null;
-  /** Absolute path for playback, null when the wav is missing here. */
+  /**
+   * Absolute path for playback, null when the wav is missing here. The wav of
+   * an `align` clip is a *cache*: it is cut the first time the text's own
+   * listing is read (or the dataset is packed), so opening a text is what makes
+   * a freshly aligned clip playable. `usable` already says whether it can be.
+   */
   audio_url: string | null;
   is_default: boolean;
   /** Made from an earlier version of the text: regenerate before scoring. */
   stale: boolean;
-  /** Present and not stale — what scoring would read. */
+  /** The audio is here, or can be cut from a recording that is. */
   usable: boolean;
   created_at: string;
+  /**
+   * Where an `align` clip sits: the recording it was cut from and the seconds
+   * it covers. All three are `null` for a tts or upload clip, whose audio is
+   * its own content rather than a span of something longer.
+   */
+  source_uuid: string | null;
+  start_secs: number | null;
+  end_secs: number | null;
 }
 
 /**

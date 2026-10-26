@@ -266,6 +266,21 @@ pub async fn dataset_sync_snapshot(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok());
 
+    // The hash *this* response archived, which is what the bytes below actually
+    // are. Preferred over the manifest hash from step 1 because the two can
+    // differ for a reason that is not drift: a read-aloud snapshot cuts every
+    // clip that was still only a span of a recording before it measures, so its
+    // content is newer than the manifest that preceded it. Recording the stale
+    // manifest hash would make the next check see a difference that no longer
+    // exists and re-download the whole dataset once more.
+    let installed_hash = resp
+        .headers()
+        .get("x-snapshot-hash")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| hash.clone());
+
     let mut file = std::fs::File::create(&part).map_err(|e| e.to_string())?;
     let mut stream = resp.bytes_stream();
     let mut received: u64 = 0;
@@ -331,7 +346,7 @@ pub async fn dataset_sync_snapshot(
                      COALESCE((SELECT availability FROM dataset_sync_state WHERE dataset_uuid = ?1), 'listed'))",
             params![
                 &uuid,
-                &hash,
+                &installed_hash,
                 received as i64,
                 file_count as i64,
                 snapshot_seq,
@@ -350,7 +365,7 @@ pub async fn dataset_sync_snapshot(
 
     Ok(SyncResult {
         updated: true,
-        hash,
+        hash: installed_hash,
         bytes: received,
         file_count,
     })

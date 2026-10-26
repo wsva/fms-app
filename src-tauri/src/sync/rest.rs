@@ -604,6 +604,37 @@ async fn snapshot(State(st): State<RestState>, axum::extract::Path(uuid): axum::
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
 
+    // A read-aloud clip may be only a *span* of a recording until something needs
+    // the audio, and this is the moment: the recordings stay where the user keeps
+    // them and `align/` — the index that could resolve one — is a derived index
+    // that never ships, so a follower could not cut the clip either. Cutting here
+    // (before the manifest is computed, so the hash and the bytes agree) costs
+    // one decode pass per recording, once; it is deliberately *not* in
+    // `/manifest`, which is the cheap "is there anything new?" poll. Blocking
+    // work, so off the async runtime — and never on a read-only base.
+    if !datasets::is_under_download_root(&settings, &dir) {
+        let d = dir.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            let is_read_aloud =
+                datasets::read_info_opt(&d).is_some_and(|i| i.dataset_type == datasets::DatasetType::Read);
+            if !is_read_aloud {
+                return;
+            }
+            match datasets::read_aloud::standard_audio::materialize_all(&d) {
+                Ok(0) => {}
+                Ok(n) => log::info!(
+                    "[sync] {}: cut {n} lazy standard-audio clip(s) for the snapshot",
+                    d.display()
+                ),
+                Err(e) => log::warn!(
+                    "[sync] {}: standard-audio materialise failed, snapshotting as-is: {e}",
+                    d.display()
+                ),
+            }
+        })
+        .await;
+    }
+
     // Read the hub cursor *before* freezing the DB image: a follower records this
     // seq as its cursor, so any change that races in afterwards (seq > this) is
     // re-delivered by the next `/changes` pull rather than silently lost. The

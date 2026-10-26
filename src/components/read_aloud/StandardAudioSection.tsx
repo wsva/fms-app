@@ -86,6 +86,14 @@ const SOURCE_LABELS: Record<VoiceResolution["source"], string> = {
   default: "built-in default",
 };
 
+/** What made a clip, in the row's words. An aligned clip is a span of a longer
+ *  recording, which the note spells out (`Align · file · a–b s`). */
+const KIND_LABELS: Record<ReadStandardAudio["kind"], string> = {
+  tts: "Edge TTS",
+  upload: "Upload",
+  align: "Aligned",
+};
+
 /**
  * The standard audio of one text: the reference clip its pronunciation is
  * measured against.
@@ -494,8 +502,7 @@ export default function StandardAudioSection({
   const primaryButton = `inline-flex items-center gap-1.5 px-2.5 rounded-md text-[11px] font-medium bg-accent-bg text-white hover:opacity-90 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${controlHeight}`;
   const chip = "text-[10px] px-1.5 py-0.5 rounded-full";
 
-  const label = (clip: ReadStandardAudio) =>
-    clip.note || (clip.kind === "tts" ? "Edge TTS" : "Upload");
+  const label = (clip: ReadStandardAudio) => clip.note || KIND_LABELS[clip.kind] || "Upload";
   const defaultClip = clips.find((c) => c.is_default) ?? null;
   const voiceLabel = voice ? voiceName(voice) : "the resolved voice";
   // One progress line beats a spinner hidden in an 11px chip: synthesis is a
@@ -706,7 +713,7 @@ export default function StandardAudioSection({
                     >
                       <span className="text-xs text-text-primary truncate">{label(clip)}</span>
                       <span className="text-[10px] text-text-tertiary flex items-center gap-x-1.5 flex-wrap">
-                        <span>{clip.kind === "tts" ? "Edge TTS" : "Upload"}</span>
+                        <span>{KIND_LABELS[clip.kind] ?? "Upload"}</span>
                         <span className="tabular-nums">{seconds(clip.duration)}</span>
                         {inUse && (
                           <span className={`${chip} bg-accent-bg/20 text-accent-bg`}>in use</span>

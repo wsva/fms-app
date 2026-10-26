@@ -435,6 +435,34 @@ async fn send_archive(
     Ok(body)
 }
 
+/// Cut any read-aloud clip that is still only a span of a recording, before the
+/// dataset is walked for packing.
+///
+/// An aligned clip names seconds of a recording that stays where the user keeps
+/// it, and `align/` — the index that could resolve it — is a derived index that
+/// never ships (`datasets::is_derived_index`), so a recipient could not cut it
+/// either. The wav therefore has to exist in the archive. Best-effort: a
+/// recording that has since gone missing leaves that one row without audio,
+/// which the UI and `/list` already report as not usable.
+fn materialise_read_aloud(dir: &Path) {
+    let is_read_aloud = datasets::read_info_opt(dir)
+        .is_some_and(|i| i.dataset_type == datasets::DatasetType::Read);
+    if !is_read_aloud {
+        return;
+    }
+    match datasets::read_aloud::standard_audio::materialize_all(dir) {
+        Ok(0) => {}
+        Ok(n) => log::info!(
+            "[upload] {}: cut {n} lazy standard-audio clip(s) before packing",
+            dir.display()
+        ),
+        Err(e) => log::warn!(
+            "[upload] {}: standard-audio materialise failed, packing as-is: {e}",
+            dir.display()
+        ),
+    }
+}
+
 /// Shared core for both commands: resolve dir → refresh + pack → send.
 async fn pack_and_send(
     app: &AppHandle,
@@ -450,6 +478,11 @@ async fn pack_and_send(
     let _ = std::fs::remove_file(&archive);
 
     log::info!("[upload] {uuid}: packing archive from {}", dir.display());
+    // A read-only base is never written to; its own package was materialised
+    // when it was published, and forking it just to re-pack would be worse.
+    if !datasets::is_under_download_root(settings, dir) {
+        materialise_read_aloud(dir);
+    }
     let size = pack_archive(app, dir, &archive)?;
     let result = send_archive(app, settings, uuid, &archive, visibility, tag_uuids).await;
     let _ = std::fs::remove_file(&archive);

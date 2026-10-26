@@ -35,9 +35,11 @@ To make one, open the practice toolbar's **Manage** button for the text and use 
 
 A text can have several clips — try voices, or keep a human reading beside a synthesised one — and exactly one is **in use**: the circle beside a clip chooses the one pronunciation is measured against. Use **Play** to compare and the bin icon to delete; a clip whose audio file has not synced to this device yet says so, so an unplayable row is never mistaken for a bad one. A new clip always uses the voice resolved at the moment it is made, so changing the preference later never re‑voices an existing clip — delete and regenerate it if you want the new voice.
 
+Each clip is labelled with where it came from — **Edge TTS**, **Upload**, or **Aligned**. An **Aligned** clip is one you made on the **Init Standard Audios from Audiobook** page (the texts view's overflow menu): rather than a file of its own, it remembers that this text runs from one second to another of a longer recording, and its note says so — `Align · lesson01.mp3 · 31.51–44.58 s`. The short clip is cut out of that recording the first time you open the text to hear or score it, so a clip applied a minute ago may have no audio on disk yet; that is normal and it becomes playable as soon as the page opens it. The longer recording is yours and is not part of the dataset, so if it is moved or deleted, the clip says it cannot be cut any more instead of playing silence — align the text again against the recording's new place.
+
 If you later edit the text, its clip is marked **Stale**: the words no longer match what the clip says, so pronunciation stops being scored until you make a new clip. That is deliberate — grading you against a target for a passage you are no longer reading would be worse than a blank. Nothing is regenerated behind your back.
 
-Clips belong to the dataset, so they travel with it: another device that syncs the dataset gets the same standard audio, and your score means the same thing there.
+Clips belong to the dataset, so they travel with it: another device that syncs the dataset gets the same standard audio, and your score means the same thing there. An aligned clip travels as its audio, not as its span: the other device has no copy of your long recording, so the clip is cut here before the dataset is shared or synced.
 
 ## Comparing what you said to the text
 

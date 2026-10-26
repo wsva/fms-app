@@ -22,15 +22,30 @@
 //! The row keeps only what cannot be derived: the note (free-form provenance —
 //! origin, voice, how it was cropped; display-only, never parsed), the TTS word
 //! boundaries (which an upload cannot have), the hash of the text it was made
-//! from, and the default flag. The path is the row's identity, the duration is
-//! decoded from the file, and `kind` is `boundaries IS NULL`. A column that can
-//! be recomputed from the row's identity or its file would only be a second copy
-//! that can drift from the truth.
+//! from, the default flag, and — for an aligned clip — the span it was cut from.
+//! `origin` says which of the three made it (`tts`, `upload`, `align`), and a row
+//! written before that column existed still answers it: only a TTS clip carries
+//! word boundaries. The path is the row's identity and the duration is decoded
+//! from the file. A column that can be recomputed from the row's identity or its
+//! file would only be a second copy that can drift from the truth.
 //!
-//! The clip itself is **16 kHz mono WAV** — the phoneme model's input rate, which
-//! is exactly what [`crate::audio::decode_to_pcm`] returns, and small. No source
-//! file is kept: a TTS clip is regenerable in one click, and an upload's original
-//! is still where the user picked it.
+//! ## Span first, file second
+//!
+//! An aligned clip describes **seconds of a recording**: `source_uuid`,
+//! `start_secs`, `end_secs`. The wav is a **cache** of those seconds, cut the
+//! first time something needs the audio — a play, a score, or a package leaving
+//! the machine ([`materialize`]). Two consequences, both deliberate:
+//!
+//! * applying a whole book is a few hundred row writes instead of hours of
+//!   decoding, and a text nobody practises costs no disk at all;
+//! * the row, not the file, is what the UI and the agents read, so an edge can be
+//!   corrected numerically without touching audio.
+//!
+//! A row *without* a span (an upload, a TTS clip) is the other way round: its wav
+//! is the content and comes first. The clip itself is **16 kHz mono WAV** — the
+//! phoneme model's input rate, which is exactly what [`crate::audio::decode_to_pcm`]
+//! returns. No source recording is ever copied into the dataset: it stays where
+//! the user keeps it, and only a span row's `source_uuid` points at it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -58,6 +73,20 @@ const PROBE_COLUMNS: usize = 600;
 /// reading.
 const MIN_CLIP_SECS: f64 = 0.3;
 
+/// The longest recording one clip may be cut out of. Two hours of 16 kHz f32 is
+/// ~460 MB, which the cut holds in memory while it slices, so this is where a
+/// single-file unabridged audiobook is refused with a message instead of being
+/// swapped to disk until the process dies. Shared with the transcription pass,
+/// which holds the same samples on top of its own buffers.
+pub(crate) const MAX_SOURCE_SECS: f64 = 7200.0;
+
+/// The column list every `SELECT` of the table spells, in the order
+/// [`row_of`] reads it. One string instead of five copies keeps the two in step:
+/// a column added here but not to `row_of` is a compile error, one added to
+/// neither is a test failure.
+const ROW_COLUMNS: &str = "uuid, text_uuid, note, boundaries, text_sha, is_default, created_at, \
+                         origin, source_uuid, start_secs, end_secs";
+
 // ============================================================
 // Types
 // ============================================================
@@ -80,6 +109,18 @@ pub(crate) struct StandardAudioRow {
     pub is_default: bool,
     #[serde(default)]
     pub created_at: String,
+    /// `"tts"`, `"upload"` or `"align"`. Empty on a row written before the
+    /// column existed — [`StandardAudioRow::kind`] still names those.
+    #[serde(default)]
+    pub origin: String,
+    /// The recording an `align` clip was cut from, and the seconds of it it
+    /// covers. All three are `None` for a clip whose wav *is* the content.
+    #[serde(default)]
+    pub source_uuid: Option<String>,
+    #[serde(default)]
+    pub start_secs: Option<f64>,
+    #[serde(default)]
+    pub end_secs: Option<f64>,
 }
 
 impl StandardAudioRow {
@@ -93,6 +134,7 @@ impl StandardAudioRow {
         if text_uuid.is_empty() {
             return Err("read_standard_audio change carries no text_uuid".to_string());
         }
+        let number = |k: &str| payload.get(k).and_then(|v| v.as_f64());
         Ok(Self {
             uuid,
             text_uuid,
@@ -107,6 +149,14 @@ impl StandardAudioRow {
             text_sha: get("text_sha"),
             is_default: payload.get("is_default").and_then(|v| v.as_bool()).unwrap_or(false),
             created_at: super::canonical_or_now(payload.get("created_at").and_then(|v| v.as_str())),
+            origin: get("origin"),
+            source_uuid: payload
+                .get("source_uuid")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|s| !s.is_empty()),
+            start_secs: number("start_secs"),
+            end_secs: number("end_secs"),
         })
     }
 
@@ -119,7 +169,34 @@ impl StandardAudioRow {
             "text_sha": self.text_sha,
             "is_default": self.is_default,
             "created_at": self.created_at,
+            "origin": self.origin,
+            "source_uuid": self.source_uuid,
+            "start_secs": self.start_secs,
+            "end_secs": self.end_secs,
         })
+    }
+
+    /// What made this clip. The column when it has a value; otherwise the old
+    /// rule — only TTS carries word timings — so a dataset written before the
+    /// column existed needs no migration of its rows to be read correctly.
+    fn kind(&self) -> &'static str {
+        match self.origin.as_str() {
+            "tts" => "tts",
+            "align" => "align",
+            "upload" => "upload",
+            _ if self.boundaries.is_some() => "tts",
+            _ => "upload",
+        }
+    }
+
+    /// The recording and seconds an aligned clip was taken from. `None` for a
+    /// clip whose content is its own wav.
+    fn span(&self) -> Option<(&str, f64, f64)> {
+        Some((
+            self.source_uuid.as_deref()?,
+            self.start_secs?,
+            self.end_secs?,
+        ))
     }
 }
 
@@ -131,21 +208,28 @@ pub struct ReadStandardAudio {
     pub text_uuid: String,
     /// Free-form provenance shown verbatim: `Edge TTS · <voice>`, `Upload · <file>`.
     pub note: String,
-    /// `"tts"` when the clip carries word boundaries, `"upload"` otherwise.
+    /// `"tts"`, `"upload"` or `"align"`.
     pub kind: String,
     /// Seconds, decoded from the wav. `None` — JSON `null` — when this call did
     /// not decode it: the dataset-wide listing deliberately does not, and a
     /// missing wav has nothing to measure. A fabricated `0.0` would read as a
     /// real measurement, so absence is said out loud.
     pub duration: Option<f64>,
-    /// Absolute path for playback, when the wav is on this device.
+    /// Absolute path for playback, when the wav is on this device. `null` for a
+    /// span clip whose wav has not been cut yet — [`materialize`] is what cuts it.
     pub audio_url: Option<String>,
     pub is_default: bool,
     /// The clip was made from an earlier version of the text.
     pub stale: bool,
-    /// The wav exists here and is not stale: pronunciation will use it.
+    /// The audio is here, or can be cut from a recording that is: pronunciation
+    /// will use it (cutting it first, if need be).
     pub usable: bool,
     pub created_at: String,
+    /// The recording and seconds this clip covers, for an `align` clip. The
+    /// source is named so an agent can show *where* a text sits, not just when.
+    pub source_uuid: Option<String>,
+    pub start_secs: Option<f64>,
+    pub end_secs: Option<f64>,
 }
 
 /// A decoded default clip, ready for scoring. `seconds()` is the denominator the
@@ -233,18 +317,58 @@ pub(crate) fn text_reference(dir: &Path, text_uuid: &str) -> Result<String, Stri
 pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS read_standard_audio (
-            uuid       TEXT PRIMARY KEY,
-            text_uuid  TEXT NOT NULL,
-            note       TEXT NOT NULL DEFAULT '',
-            boundaries TEXT,
-            text_sha   TEXT NOT NULL DEFAULT '',
-            is_default INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            uuid        TEXT PRIMARY KEY,
+            text_uuid   TEXT NOT NULL,
+            note        TEXT NOT NULL DEFAULT '',
+            boundaries  TEXT,
+            text_sha    TEXT NOT NULL DEFAULT '',
+            is_default  INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            origin      TEXT NOT NULL DEFAULT '',
+            source_uuid TEXT,
+            start_secs  REAL,
+            end_secs    REAL
         );
         CREATE INDEX IF NOT EXISTS idx_read_standard_audio_text
             ON read_standard_audio(text_uuid, created_at);",
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    ensure_span_columns(conn)
+}
+
+/// Add the span columns to a table that predates them. `CREATE TABLE IF NOT
+/// EXISTS` leaves an existing table alone and SQLite has no `ADD COLUMN IF NOT
+/// EXISTS`, so the columns are checked one by one — cheap (one pragma over four
+/// rows) and idempotent, which matters because [`ensure_schema`] runs on every
+/// read.
+///
+/// A migrated row keeps `origin = ''`, which [`StandardAudioRow::kind`] reads as
+/// "decide by the word boundaries", so no row has to be rewritten.
+fn ensure_span_columns(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(read_standard_audio)")
+        .map_err(|e| e.to_string())?;
+    let have: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    let wanted = [
+        ("origin", "TEXT NOT NULL DEFAULT ''"),
+        ("source_uuid", "TEXT"),
+        ("start_secs", "REAL"),
+        ("end_secs", "REAL"),
+    ];
+    for (name, declared) in wanted {
+        if have.iter().any(|c| c == name) {
+            continue;
+        }
+        conn.execute_batch(&format!(
+            "ALTER TABLE read_standard_audio ADD COLUMN {name} {declared}"
+        ))
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn row_count(conn: &Connection, text_uuid: &str) -> Result<i64, String> {
@@ -287,8 +411,9 @@ fn write_row(conn: &Connection, row: &StandardAudioRow, replace: bool) -> Result
     conn.execute(
         &format!(
             "{verb} INTO read_standard_audio \
-             (uuid, text_uuid, note, boundaries, text_sha, is_default, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+             (uuid, text_uuid, note, boundaries, text_sha, is_default, created_at, \
+              origin, source_uuid, start_secs, end_secs) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
         ),
         rusqlite::params![
             row.uuid,
@@ -297,7 +422,11 @@ fn write_row(conn: &Connection, row: &StandardAudioRow, replace: bool) -> Result
             row.boundaries,
             row.text_sha,
             row.is_default,
-            row.created_at
+            row.created_at,
+            row.origin,
+            row.source_uuid,
+            row.start_secs,
+            row.end_secs
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -331,25 +460,31 @@ fn promote_earliest(conn: &Connection, text_uuid: &str) -> Result<Option<String>
 
 fn load_row(conn: &Connection, audio_uuid: &str) -> Result<Option<StandardAudioRow>, String> {
     let mut stmt = conn
-        .prepare(
-            "SELECT uuid, text_uuid, note, boundaries, text_sha, is_default, created_at \
-             FROM read_standard_audio WHERE uuid = ?1",
-        )
+        .prepare(&format!(
+            "SELECT {ROW_COLUMNS} FROM read_standard_audio WHERE uuid = ?1"
+        ))
         .map_err(|e| e.to_string())?;
     let row = stmt
-        .query_row([audio_uuid], |r| {
-            Ok(StandardAudioRow {
-                uuid: r.get(0)?,
-                text_uuid: r.get(1)?,
-                note: r.get(2)?,
-                boundaries: r.get(3)?,
-                text_sha: r.get(4)?,
-                is_default: r.get(5)?,
-                created_at: r.get(6)?,
-            })
-        })
+        .query_row([audio_uuid], row_of)
         .ok();
     Ok(row)
+}
+
+/// Column order shared by every `SELECT` of this table — see [`ROW_COLUMNS`].
+fn row_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<StandardAudioRow> {
+    Ok(StandardAudioRow {
+        uuid: r.get(0)?,
+        text_uuid: r.get(1)?,
+        note: r.get(2)?,
+        boundaries: r.get(3)?,
+        text_sha: r.get(4)?,
+        is_default: r.get(5)?,
+        created_at: r.get(6)?,
+        origin: r.get(7)?,
+        source_uuid: r.get(8)?,
+        start_secs: r.get(9)?,
+        end_secs: r.get(10)?,
+    })
 }
 
 // ============================================================
@@ -577,17 +712,31 @@ pub(crate) fn audio_totals(settings: &SettingsState, dataset_uuid: &str) -> Resu
 /// One text's clips (`text_uuid: Some`) or every clip in the dataset (`None`),
 /// default first. The dataset-wide listing is what badges the texts list, so it
 /// does not decode the wavs — it only checks that they are on this device.
+///
+/// The **per-text** listing also cuts what is missing: a span clip has no file
+/// until something asks to hear it, and this is the call the page makes when a
+/// text is opened. The dataset-wide one deliberately does not — it runs for
+/// every text at once, and drawing a badge is not worth cutting a whole book.
 pub(crate) fn list(
     settings: &SettingsState,
     dataset_uuid: &str,
     text_uuid: Option<&str>,
 ) -> Result<Vec<ReadStandardAudio>, String> {
     let dir = find_dataset_dir(settings, dataset_uuid)?;
+    // Only a writable dataset may be cut into: a base under the download root is
+    // read-only, and forking it just to draw a player would copy the dataset.
+    if let (Some(text), true) = (text_uuid, !super::is_under_download_root(settings, &dir)) {
+        if let Err(e) = materialize(&dir, text) {
+            log::warn!("read_aloud: could not cut the clip for text {}: {}", text, e);
+        }
+    }
+
     let conn = open_db(&dir)?;
     ensure_schema(&conn)?;
     let mut stmt = conn
         .prepare(
-            "SELECT a.uuid, a.text_uuid, a.note, a.boundaries, a.text_sha, a.is_default, a.created_at, \
+            "SELECT a.uuid, a.text_uuid, a.note, a.boundaries, a.text_sha, a.is_default, \
+                    a.created_at, a.origin, a.source_uuid, a.start_secs, a.end_secs, \
                     t.content, t.normalized_content \
              FROM read_standard_audio a LEFT JOIN read_text t ON t.uuid = a.text_uuid \
              WHERE (?1 IS NULL OR a.text_uuid = ?1) \
@@ -597,21 +746,16 @@ pub(crate) fn list(
     let rows = stmt
         .query_map(rusqlite::params![text_uuid], |r| {
             Ok((
-                StandardAudioRow {
-                    uuid: r.get(0)?,
-                    text_uuid: r.get(1)?,
-                    note: r.get(2)?,
-                    boundaries: r.get(3)?,
-                    text_sha: r.get(4)?,
-                    is_default: r.get(5)?,
-                    created_at: r.get(6)?,
-                },
-                r.get::<_, Option<String>>(7)?,
-                r.get::<_, Option<String>>(8)?,
+                row_of(r)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, Option<String>>(12)?,
             ))
         })
         .map_err(|e| e.to_string())?;
 
+    // Which recordings are still on this device, read once: a dataset-wide
+    // listing would otherwise re-read the index for every clip.
+    let present = super::source_align::present_sources(&dir);
     let decode = text_uuid.is_some();
     let mut out = Vec::new();
     for (row, content, normalized) in rows.flatten() {
@@ -624,6 +768,9 @@ pub(crate) fn list(
             Some(digest) => !row.text_sha.is_empty() && &row.text_sha != digest,
             None => false,
         };
+        // A span whose recording is here can be cut on demand, so it is a clip
+        // this device can score against even before the wav exists.
+        let cuttable = row.span().is_some_and(|(source, _, _)| present.contains(source));
         let duration = if decode && exists {
             audio::decode_to_pcm(&path)
                 .ok()
@@ -632,17 +779,21 @@ pub(crate) fn list(
         } else {
             None
         };
+        let kind = row.kind().to_string();
         out.push(ReadStandardAudio {
             uuid: row.uuid,
             text_uuid: row.text_uuid,
             note: row.note,
-            kind: if row.boundaries.is_some() { "tts" } else { "upload" }.to_string(),
+            kind,
             duration,
             audio_url: exists.then(|| path.to_string_lossy().into_owned()),
             is_default: row.is_default,
             stale,
-            usable: exists && !stale,
+            usable: !stale && (exists || cuttable),
             created_at: row.created_at,
+            source_uuid: row.source_uuid,
+            start_secs: row.start_secs,
+            end_secs: row.end_secs,
         });
     }
     Ok(out)
@@ -1024,22 +1175,31 @@ pub(crate) async fn generate_with(
         text_sha: text_digest(&reference),
         is_default: row_count(&conn, text_uuid)? == 0,
         created_at: super::now_row_stamp(),
+        origin: "tts".to_string(),
+        source_uuid: None,
+        start_secs: None,
+        end_secs: None,
     };
     write_row(&conn, &row, false)?;
     let _ = super::touch_info(&dir);
     journal(settings, "read_standard_audio_save", dataset_uuid, &row);
 
+    let duration = Some(samples.len() as f64 / audio::DECODED_SAMPLE_RATE as f64);
+    let kind = row.kind().to_string();
     Ok(ReadStandardAudio {
         uuid: row.uuid,
         text_uuid: row.text_uuid,
         note: row.note,
-        kind: "tts".to_string(),
-        duration: Some(samples.len() as f64 / audio::DECODED_SAMPLE_RATE as f64),
+        kind,
+        duration,
         audio_url: Some(path.to_string_lossy().into_owned()),
         is_default: row.is_default,
         stale: false,
         usable: true,
         created_at: row.created_at,
+        source_uuid: None,
+        start_secs: None,
+        end_secs: None,
     })
 }
 
@@ -1145,9 +1305,10 @@ pub(crate) async fn generate_all(
     Ok(out)
 }
 
-/// Write a decoded clip and its row — the one body an upload, a synthesis and
-/// a source-alignment crop all go through, so the wav layout, the one-default
-/// rule and the journal entry are spelled once.
+/// Write a decoded clip and its row — the one body an upload and a synthesis go
+/// through, so the wav layout, the one-default rule and the journal entry are
+/// spelled once. An aligned clip does not come through here: it has no decoded
+/// samples yet and is stored by [`store_span`].
 ///
 /// The row carries no word timings, which is how `kind` stays derivable: only a
 /// TTS clip knows where its words are.
@@ -1181,23 +1342,238 @@ pub(crate) fn store_samples(
         text_sha: text_digest(reference),
         is_default: row_count(&conn, text_uuid)? == 0,
         created_at: super::now_row_stamp(),
+        origin: "upload".to_string(),
+        source_uuid: None,
+        start_secs: None,
+        end_secs: None,
     };
     write_row(&conn, &row, false)?;
     let _ = super::touch_info(dir);
     journal(settings, "read_standard_audio_save", dataset_uuid, &row);
 
+    let duration = Some(clip.len() as f64 / audio::DECODED_SAMPLE_RATE as f64);
+    let kind = row.kind().to_string();
     Ok(ReadStandardAudio {
         uuid: row.uuid,
         text_uuid: row.text_uuid,
         note: row.note,
-        kind: "upload".to_string(),
-        duration: Some(clip.len() as f64 / audio::DECODED_SAMPLE_RATE as f64),
+        kind,
+        duration,
         audio_url: Some(path.to_string_lossy().into_owned()),
         is_default: row.is_default,
         stale: false,
         usable: true,
         created_at: row.created_at,
+        source_uuid: None,
+        start_secs: None,
+        end_secs: None,
     })
+}
+
+/// Store **seconds of a recording** as a text's standard audio, without cutting
+/// anything.
+///
+/// The wav is a cache of these three values and appears the first time someone
+/// listens, scores or packs ([`materialize`]), which is what makes applying a
+/// whole book a matter of row writes rather than hours of decoding. The note
+/// keeps the human-readable copy of the span; the columns are the one code
+/// reads.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn store_span(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    dir: &Path,
+    text_uuid: &str,
+    reference: &str,
+    source_uuid: &str,
+    source_name: &str,
+    start_secs: f64,
+    end_secs: f64,
+) -> Result<ReadStandardAudio, String> {
+    if end_secs - start_secs < MIN_CLIP_SECS {
+        return Err(format!(
+            "The span is {:.2} s; a standard audio clip needs at least {:.1} s",
+            (end_secs - start_secs).max(0.0),
+            MIN_CLIP_SECS
+        ));
+    }
+    let conn = open_db(dir)?;
+    ensure_schema(&conn)?;
+    let row = StandardAudioRow {
+        uuid: Uuid::new_v4().to_string(),
+        text_uuid: text_uuid.to_string(),
+        note: align_note(source_name, start_secs, end_secs),
+        boundaries: None,
+        text_sha: text_digest(reference),
+        is_default: row_count(&conn, text_uuid)? == 0,
+        created_at: super::now_row_stamp(),
+        origin: "align".to_string(),
+        source_uuid: Some(source_uuid.to_string()),
+        start_secs: Some(start_secs),
+        end_secs: Some(end_secs),
+    };
+    write_row(&conn, &row, false)?;
+    let _ = super::touch_info(dir);
+    journal(settings, "read_standard_audio_save", dataset_uuid, &row);
+
+    let kind = row.kind().to_string();
+    Ok(ReadStandardAudio {
+        uuid: row.uuid,
+        text_uuid: row.text_uuid,
+        note: row.note,
+        kind,
+        // Nothing was decoded, and the span already says how long the clip will
+        // be — reporting a duration here would claim a measurement instead.
+        duration: None,
+        audio_url: None,
+        is_default: row.is_default,
+        stale: false,
+        usable: true,
+        created_at: row.created_at,
+        source_uuid: row.source_uuid,
+        start_secs: row.start_secs,
+        end_secs: row.end_secs,
+    })
+}
+
+/// The note an aligned clip carries: what it was cut from and where. Display
+/// only — [`StandardAudioRow::span`] is the machine-readable copy — but it keeps
+/// a text's clip list reading like a list of recordings.
+fn align_note(source_name: &str, start_secs: f64, end_secs: f64) -> String {
+    format!(
+        "Align \u{b7} {} \u{b7} {:.2}\u{2013}{:.2} s",
+        source_name, start_secs, end_secs
+    )
+}
+
+// ============================================================
+// Materialising a span
+// ============================================================
+
+/// Cut the wav of every span clip of one text that has none yet. Returns how
+/// many files were written.
+///
+/// Best effort by design: a clip whose recording has moved or gone is left
+/// without a file — the row still says where it came from, and inventing audio
+/// would be worse than having none. Failures are logged rather than returned,
+/// because the caller is usually a listing that must not fail over one clip.
+pub(crate) fn materialize(dir: &Path, text_uuid: &str) -> Result<usize, String> {
+    let conn = open_db(dir)?;
+    ensure_schema(&conn)?;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {ROW_COLUMNS} FROM read_standard_audio WHERE text_uuid = ?1 \
+             ORDER BY is_default DESC, created_at, rowid"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<StandardAudioRow> = stmt
+        .query_map([text_uuid], row_of)
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(cut_missing(dir, rows))
+}
+
+/// Cut every span clip in the dataset that has no file yet — what a dataset
+/// needs before it leaves the machine, because the recordings a span names stay
+/// where the user keeps them and never travel with the package.
+pub(crate) fn materialize_all(dir: &Path) -> Result<usize, String> {
+    let conn = open_db(dir)?;
+    ensure_schema(&conn)?;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {ROW_COLUMNS} FROM read_standard_audio ORDER BY text_uuid, rowid"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<StandardAudioRow> = stmt
+        .query_map([], row_of)
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(cut_missing(dir, rows))
+}
+
+/// Cut every missing clip, decoding each recording **once** for all the spans
+/// that come out of it — the reason this is not a loop over spans.
+fn cut_missing(dir: &Path, rows: Vec<StandardAudioRow>) -> usize {
+    let mut wanted: Vec<(String, String, String, f64, f64)> = Vec::new();
+    for row in rows {
+        let Some((source_uuid, start, end)) = row.span() else {
+            continue;
+        };
+        if clip_path(dir, &row.text_uuid, &row.uuid).exists() {
+            continue;
+        }
+        wanted.push((
+            source_uuid.to_string(),
+            row.text_uuid.clone(),
+            row.uuid.clone(),
+            start,
+            end,
+        ));
+    }
+    if wanted.is_empty() {
+        return 0;
+    }
+
+    let rate = audio::DECODED_SAMPLE_RATE as f64;
+    let mut written = 0usize;
+    let mut decoded: Vec<String> = Vec::new();
+    for (source_uuid, ..) in &wanted {
+        if decoded.contains(source_uuid) {
+            continue;
+        }
+        decoded.push(source_uuid.clone());
+        let Some(source) = super::source_align::source_file(dir, source_uuid) else {
+            let count = wanted.iter().filter(|w| &w.0 == source_uuid).count();
+            log::warn!(
+                "read_aloud: {} clip(s) name recording {} which is not on this device",
+                count,
+                source_uuid
+            );
+            continue;
+        };
+        let samples = match audio::decode_to_pcm_capped(&source, MAX_SOURCE_SECS) {
+            Ok(samples) => samples,
+            Err(e) => {
+                log::warn!(
+                    "read_aloud: could not decode {} to cut a clip: {}",
+                    source.display(),
+                    e
+                );
+                continue;
+            }
+        };
+        for (_, text_uuid, audio_uuid, start, end) in wanted.iter().filter(|w| &w.0 == source_uuid)
+        {
+            let first = ((start * rate).round() as usize).min(samples.len());
+            let last = ((end * rate).round() as usize).min(samples.len());
+            if last <= first {
+                log::warn!(
+                    "read_aloud: clip {} covers {:.2}-{:.2} s, past the end of the recording",
+                    audio_uuid,
+                    start,
+                    end
+                );
+                continue;
+            }
+            let path = clip_path(dir, text_uuid, audio_uuid);
+            match audio::write_wav(&path, &samples[first..last], audio::DECODED_SAMPLE_RATE, 1) {
+                Ok(()) => {
+                    written += 1;
+                    log::debug!(
+                        "read_aloud: cut {} ({:.2}-{:.2} s of {})",
+                        path.display(),
+                        start,
+                        end,
+                        source_uuid
+                    );
+                }
+                Err(e) => log::warn!("read_aloud: could not write {}: {}", path.display(), e),
+            }
+        }
+    }
+    written
 }
 
 /// Store a picked (and cut) recording as this text's standard audio. `start` and
@@ -1899,5 +2275,167 @@ mod tests {
     #[test]
     fn no_matches_means_no_run() {
         assert!(densest_run(&[]).is_empty());
+    }
+
+    // ---- span as truth, wav as cache ----
+
+    /// Leave the dataset the way the source-align page does after an apply: a
+    /// recording registered in the align index, living wherever the user keeps
+    /// it, and no clip cut out of it.
+    fn stage_source(
+        settings: &SettingsState,
+        workspace: &Path,
+        dataset_uuid: &str,
+        source_uuid: &str,
+        seconds: f64,
+    ) -> PathBuf {
+        let recordings = workspace.join("recordings");
+        std::fs::create_dir_all(&recordings).unwrap();
+        let path = recordings.join(format!("{source_uuid}.wav"));
+        let samples = vec![0.25f32; (audio::DECODED_SAMPLE_RATE as f64 * seconds) as usize];
+        audio::write_wav(&path, &samples, audio::DECODED_SAMPLE_RATE, 1).unwrap();
+
+        let dir = find_dataset_dir(settings, dataset_uuid).unwrap();
+        let align = dir.join(crate::datasets::READ_ALOUD_ALIGN_DIR);
+        std::fs::create_dir_all(&align).unwrap();
+        // Written by hand: `SourceIndex` is the align module's own shape, and
+        // this test is about what `standard_audio` reads out of it.
+        let index = serde_json::json!({
+            "directory": recordings.to_string_lossy(),
+            "sources": [{
+                "uuid": source_uuid,
+                "file_name": format!("{source_uuid}.wav"),
+                "path": path.to_string_lossy(),
+                "size": std::fs::metadata(&path).unwrap().len(),
+                "modified_ms": 0,
+            }],
+        });
+        std::fs::write(align.join("sources.json"), index.to_string()).unwrap();
+        path
+    }
+
+    /// The whole point of the redesign: applying a span writes a row and no
+    /// audio, and the listing that opens a text is what cuts it.
+    #[test]
+    fn a_span_is_a_row_until_the_text_is_opened() {
+        let (settings, ws) = temp_settings("sa-span");
+        let (ds, text) = dataset_with_text(&settings, "hello world");
+        stage_source(&settings, &ws, &ds, "src1", 4.0);
+        let dir = find_dataset_dir(&settings, &ds).unwrap();
+
+        let stored = store_span(
+            &settings, &ds, &dir, &text, "hello world", "src1", "book.wav", 1.0, 2.5,
+        )
+        .unwrap();
+        assert_eq!(stored.kind, "align");
+        assert!(stored.is_default, "the first clip of a text is the default");
+        assert!(stored.audio_url.is_none());
+        assert!(stored.usable, "the recording is here, so the clip can be cut");
+        assert_eq!(stored.source_uuid.as_deref(), Some("src1"));
+        assert_eq!(stored.start_secs, Some(1.0));
+        let path = clip_path(&dir, &text, &stored.uuid);
+        assert!(!path.exists(), "storing a span must not decode or cut");
+
+        // The badge listing stays cheap: it says the clip is usable, not that
+        // its wav exists.
+        let wide = list(&settings, &ds, None).unwrap();
+        assert!(wide[0].usable && wide[0].audio_url.is_none());
+        assert!(!path.exists(), "the dataset-wide listing must not cut either");
+
+        // Opening the text is what materialises it — and only the span.
+        let clips = list(&settings, &ds, Some(&text)).unwrap();
+        assert!(path.exists(), "the per-text listing cuts the wav");
+        assert_eq!(clips[0].audio_url.as_deref(), Some(path.to_string_lossy().as_ref()));
+        let seconds = clips[0].duration.unwrap();
+        assert!((seconds - 1.5).abs() < 0.02, "got {seconds} s, wanted the span's 1.5");
+    }
+
+    /// A span too short to be a reading is refused instead of stored.
+    #[test]
+    fn a_span_shorter_than_a_word_is_refused() {
+        let (settings, ws) = temp_settings("sa-span-short");
+        let (ds, text) = dataset_with_text(&settings, "hello");
+        stage_source(&settings, &ws, &ds, "src1", 2.0);
+        let dir = find_dataset_dir(&settings, &ds).unwrap();
+        let err = store_span(
+            &settings, &ds, &dir, &text, "hello", "src1", "book.wav", 1.0, 1.1,
+        )
+        .unwrap_err();
+        assert!(err.contains("at least"), "{err}");
+        assert!(list(&settings, &ds, Some(&text)).unwrap().is_empty());
+    }
+
+    /// Packing is the other moment a clip must exist, because the recording it
+    /// names never leaves the machine.
+    #[test]
+    fn packing_materialises_every_span_but_not_one_whose_recording_is_gone() {
+        let (settings, ws) = temp_settings("sa-span-all");
+        let (ds, text) = dataset_with_text(&settings, "hello world");
+        let source = stage_source(&settings, &ws, &ds, "src1", 4.0);
+        let dir = find_dataset_dir(&settings, &ds).unwrap();
+        let cut = store_span(
+            &settings, &ds, &dir, &text, "hello world", "src1", "book.wav", 0.5, 1.5,
+        )
+        .unwrap();
+        // A second span naming the same recording: one decode must serve both.
+        let also = store_span(
+            &settings, &ds, &dir, &text, "hello world", "src1", "book.wav", 2.0, 3.0,
+        )
+        .unwrap();
+
+        assert_eq!(materialize_all(&dir).unwrap(), 2);
+        assert!(clip_path(&dir, &text, &cut.uuid).exists());
+        assert!(clip_path(&dir, &text, &also.uuid).exists());
+        // Idempotent: the second pack has nothing to cut.
+        assert_eq!(materialize_all(&dir).unwrap(), 0);
+
+        // The recording being gone is not a failure — the row keeps its span and
+        // simply has no audio, which is what the UI shows as not usable.
+        std::fs::remove_file(&source).unwrap();
+        assert_eq!(materialize_all(&dir).unwrap(), 0);
+    }
+
+    /// A dataset written before the span columns existed keeps working: they are
+    /// added in place, no row is rewritten, and `kind` still names the two old
+    /// origins (only TTS carries word boundaries).
+    #[test]
+    fn a_table_from_before_the_span_columns_is_migrated_in_place() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE read_standard_audio (
+                uuid TEXT PRIMARY KEY, text_uuid TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+                boundaries TEXT, text_sha TEXT NOT NULL DEFAULT '',
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            INSERT INTO read_standard_audio (uuid, text_uuid, boundaries, is_default)
+                VALUES ('tts', 't', '[{\"text\":\"hi\"}]', 1);
+            INSERT INTO read_standard_audio (uuid, text_uuid, boundaries, is_default)
+                VALUES ('upload', 't', NULL, 0);",
+        )
+        .unwrap();
+
+        ensure_schema(&conn).unwrap();
+        // Runs on every read, so it has to be idempotent.
+        ensure_schema(&conn).unwrap();
+
+        let tts = load_row(&conn, "tts").unwrap().unwrap();
+        assert_eq!(tts.origin, "", "a migrated row is left as it was");
+        assert_eq!(tts.kind(), "tts");
+        assert!(tts.span().is_none());
+
+        let upload = load_row(&conn, "upload").unwrap().unwrap();
+        assert_eq!(upload.kind(), "upload");
+
+        // And the new columns are writable through the same row shape.
+        let mut row = tts.clone();
+        row.origin = "align".to_string();
+        row.source_uuid = Some("src".to_string());
+        row.start_secs = Some(1.5);
+        row.end_secs = Some(2.5);
+        write_row(&conn, &row, true).unwrap();
+        let back = load_row(&conn, "tts").unwrap().unwrap();
+        assert_eq!(back.kind(), "align");
+        assert_eq!(back.span(), Some(("src", 1.5, 2.5)));
     }
 }

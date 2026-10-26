@@ -242,6 +242,18 @@ export default function ReadAloudPage() {
   const [clipsByText, setClipsByText] = useState<Map<string, ReadStandardAudio[]>>(
     () => new Map()
   );
+  // The open text's own listing — the call that cuts a lazily-staged clip's
+  // audio, since the backend materialises on a *text* query and deliberately not
+  // on the dataset-wide one (badging a list is not worth decoding a book). Kept
+  // beside that map rather than merged into it, so a slow dataset-wide answer
+  // can never overwrite a fresh per-text one and take the player away.
+  const [openTextClips, setOpenTextClips] = useState<{
+    text: string;
+    clips: ReadStandardAudio[];
+  } | null>(null);
+  // Bumped when the open text's clips must be re-read for a reason other than
+  // switching texts: a refresh, or an apply from the source-align page.
+  const [textClipsKey, setTextClipsKey] = useState(0);
 
   const [datasetDialog, setDatasetDialog] = useState<DatasetDialogState>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
@@ -428,6 +440,7 @@ export default function ReadAloudPage() {
       void loadTexts(selectedDataset);
       void loadStandardClips(selectedDataset);
     }
+    setTextClipsKey((k) => k + 1);
     setAttemptsRefreshKey((k) => k + 1);
   }, [loadStandardClips, loadTexts, selectedDataset]);
 
@@ -448,6 +461,38 @@ export default function ReadAloudPage() {
 
   const activeText = texts.find((t) => t.uuid === selectedText) ?? null;
   const activeDataset = datasets.find((d) => d.uuid === selectedDataset) ?? null;
+
+  // What the practice pane and the attempts page read: the open text's own
+  // listing once it is loaded (it is the one with a cut wav), the dataset-wide
+  // badge data until then.
+  const activeTextClips =
+    (openTextClips && openTextClips.text === activeText?.uuid ? openTextClips.clips : undefined) ??
+    (activeText ? clipsByText.get(activeText.uuid) : undefined);
+
+  // Opening a text is what gives a span clip its wav, so this effect is a
+  // materialisation step as much as a read — see `listStandardAudio`'s
+  // `textUuid` parameter. A `null` here always means "not loaded for *this*
+  // text", which is why the text uuid is stored with the clips.
+  useEffect(() => {
+    const textUuid = activeText?.uuid;
+    if (!isTauri() || !selectedDataset || !textUuid) {
+      setOpenTextClips(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const clips = await listStandardAudio(selectedDataset, textUuid);
+        if (!cancelled) setOpenTextClips({ text: textUuid, clips });
+      } catch (e) {
+        // Never fatal: the badge data still renders the row.
+        if (!cancelled) logError(`load standard audio failed: ${String(e)}`, LOG_MODULE);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDataset, activeText?.uuid, textClipsKey]);
 
   // Wiki-style view modes derived from the selection: no dataset → the dataset
   // list, a dataset but no text → its text list, a text → the practice pane.
@@ -1295,14 +1340,14 @@ export default function ReadAloudPage() {
             onSelectAttempt={handleSelectAttempt}
             refreshKey={attemptsRefreshKey}
             compare={compareView}
-            standardAudioAvailable={hasUsableClip(clipsByText.get(activeText.uuid))}
+            standardAudioAvailable={hasUsableClip(activeTextClips)}
           />
         </>
       ) : viewMode === "practice" && activeDataset && activeText ? (
         <PracticePanel
           datasetUuid={activeDataset.uuid}
           text={activeText}
-          standardAudio={clipsByText.get(activeText.uuid)}
+          standardAudio={activeTextClips}
           fontCss={raFontOption(raFont).css}
           spaceCss={raSpaceOption(raSpace).css}
           onScored={() => loadTexts(selectedDataset)}
@@ -1318,6 +1363,9 @@ export default function ReadAloudPage() {
               onApplied={() => {
                 void loadStandardClips(selectedDataset);
                 void loadTexts(selectedDataset);
+                // The apply may have given the open text a span clip, which only
+                // gets its wav when this text's own listing is read.
+                setTextClipsKey((k) => k + 1);
               }}
             />
           )}
