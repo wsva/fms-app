@@ -16,22 +16,27 @@ import {
   type AlignProposals,
   type AlignSourceIndex,
 } from "@/lib/read_aloud/sourceAlign";
-import AlignStages from "./AlignStages";
+import { FolderOpen, ListChecks, Scissors } from "lucide-react";
+import { TabBar, type TabBarItem } from "@/components/ui/toolbar";
+import CutTab from "./CutTab";
 import PassageEditor from "./PassageEditor";
-import PassageInspector from "./PassageInspector";
 import PassageQueue, { QUEUE_FILTERS, matchesFilter, type QueueFilter } from "./PassageQueue";
+import RecordingsTab from "./RecordingsTab";
 import { COARSE_STEP, CONTEXT_PAD, MIN_SPAN, NUDGE_STEP, clock, errorText, roundMs } from "./format";
 
 /**
  * The Advanced page: a folder of recordings in, one clip per text out.
  *
- * The panel this replaced did the same job as one stacked column, so the review
- * — the actual work — began below every control and every passage row showed
- * all ten of its buttons at once. Here the page is three zones: the pipeline
- * runs across the top, the queue walks the passages on the left, one passage is
- * open at full size in the middle, and the numbers behind its verdict sit on the
- * right. State and every `read_aloud_align_*` call live here; the four views are
- * renderers.
+ * Three tabs, because the job is three jobs. **Review** is the work: the queue
+ * on the left, one passage open beside it with its waveform, its typed edges
+ * and its verdict. **Recordings** is everything that has to happen before a
+ * passage can be judged — the folder, one transcript per file, the guess.
+ * **Cut** is the accepted set, the batch verdicts and the apply.
+ *
+ * The panel this replaced put all of it on one page, so forty rows of buttons
+ * sat under four pipeline chips and a context rail, and none of it could be
+ * read. State and every `read_aloud_align_*` call live here; the three views
+ * are renderers.
  */
 
 /** Spans at or above this confidence are accepted without listening to them. */
@@ -44,6 +49,9 @@ const APPLY_BATCH = 10;
 const NUDGE_COMMIT_MS = 300;
 
 type Note = { kind: "ok" | "warn"; text: string };
+
+/** The three jobs, one per tab. */
+type TabId = "review" | "recordings" | "cut";
 
 type Props = {
   datasetUuid: string;
@@ -67,6 +75,7 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   /** Nudged spans, by text uuid, until the write is acknowledged. */
   const [edits, setEdits] = useState<Record<string, { start: number; end: number }>>({});
   const [selected, setSelected] = useState<string | null>(null);
+  const [tab, setTab] = useState<TabId>("review");
   const [filter, setFilter] = useState<QueueFilter>("all");
   const [search, setSearch] = useState("");
   /** Which edge the arrow keys move; the fields show it. */
@@ -218,6 +227,7 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
     setError(null);
     setEdits({});
     setSelected(null);
+    setTab("review");
     setFilter("all");
     setSearch("");
     setPlayhead(null);
@@ -346,6 +356,8 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
       const result = await guessAlignSpans(datasetUuid);
       setSelected(null);
       await refresh(true);
+      // The point of a guess is the queue: land where the spans are judged.
+      setTab("review");
       setNote({
         kind: result.refused > 0 ? "warn" : "ok",
         text: `${result.proposed} of ${result.passages} passages placed (mean ${Math.round(
@@ -464,6 +476,16 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
     if (audioRef.current) audioRef.current.currentTime = t;
   };
 
+  /**
+   * The batch threshold is a number a person types, so it becomes real on blur:
+   * typing "9" on the way to "90" must not move the verdicts to 9 %.
+   */
+  const commitThreshold = (value: string) => {
+    const parsed = Number(value.replace("%", "").trim());
+    if (Number.isFinite(parsed)) setThreshold(Math.min(100, Math.max(0, parsed)) / 100);
+    setThresholdDraft(null);
+  };
+
   // ---- derived ------------------------------------------------------------
 
   const sources = index?.sources ?? [];
@@ -529,22 +551,16 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
       : null) ?? null;
   const duration = selectedSource?.duration && selectedSource.duration > 0 ? selectedSource.duration : null;
 
-  const firstBySource = useMemo(() => {
-    const map: Record<string, string | undefined> = {};
-    for (const proposal of spans) {
-      if (proposal.source_uuid && proposal.status === "proposed" && !map[proposal.source_uuid]) {
-        map[proposal.source_uuid] = proposal.text_uuid;
-      }
-    }
-    return map;
-  }, [spans]);
-
   const acceptAllCount = spans.filter(
     (p) => p.status === "proposed" && p.state !== "accepted" && p.confidence >= threshold
   ).length;
   const rejectAllCount = spans.filter(
     (p) => p.status === "proposed" && p.state !== "rejected" && p.confidence >= threshold
   ).length;
+
+  const openCount = counts?.open ?? 0;
+  const refused = counts?.refused ?? 0;
+  const pending = spans.filter((p) => p.status === "proposed" && p.state === "pending").length;
 
   // The selection follows the rows: a filter that hides it, a re-guess that
   // drops it, or the first load all land on the first passage still visible.
@@ -555,11 +571,11 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
 
   const emptyHint =
     sources.length === 0
-      ? "Pick the folder that holds the audiobook's files to start."
+      ? "Pick the folder that holds the audiobook's files — Recordings tab."
       : transcribed === 0
-        ? "Transcribe at least one recording, then place the passages."
+        ? "Transcribe one recording on the Recordings tab, then place the passages."
         : spans.length === 0
-          ? "Every recording is transcribed — place the passages now."
+          ? "Every recording is transcribed — place the passages from the Recordings tab."
           : "Select a passage in the queue.";
 
   // ---- keyboard -----------------------------------------------------------
@@ -581,6 +597,9 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
         }
         return;
       }
+      // The verdict keys are for the passage in front of you, and the passage is
+      // only in front of you on the Review tab.
+      if (tab !== "review") return;
       if (!selectedProposal) return;
 
       if (event.key === " ") {
@@ -628,109 +647,157 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
     // listener is cheap to re-attach and this keeps every handler current.
   });
 
+  const tabItems: TabBarItem<TabId>[] = [
+    { id: "review", label: "Review", icon: ListChecks, count: pending },
+    { id: "recordings", label: "Recordings", icon: FolderOpen, count: sources.length },
+    { id: "cut", label: "Cut", icon: Scissors, count: openCount },
+  ];
+
+  // One line under the tabs, always in the same place: what just happened, or
+  // what the keys do on the view you are looking at.
+  const tabHint =
+    tab === "review"
+      ? spans.length === 0
+        ? "Nothing placed yet: open Recordings, listen to the files, then place the passages."
+        : "Space play · A accept · R reject · ← → nudge the highlighted edge (Shift 100 ms) · ↑ ↓ passage · Esc stop"
+      : tab === "recordings"
+        ? "Pick the folder, listen to each file once, then place the passages along them."
+        : "Accept spans in Review, then cut them into this dataset here.";
+  const busyText =
+    busy === "picking"
+      ? "Picking the folder…"
+      : busy === "transcribing"
+        ? "Listening to the next file…"
+        : busy === "listening"
+          ? "Listening to this file…"
+          : busy === "guessing"
+            ? "Placing every passage…"
+            : busy === "deciding"
+              ? "Saving the verdict…"
+              : busy === "cutting"
+                ? "Cutting the accepted spans…"
+                : "";
+
   return (
     <div className="flex-1 min-h-0 flex flex-col">
-      <AlignStages
-        mobile={mobile}
-        directory={index?.directory ?? ""}
-        sourceCount={index?.source_count ?? 0}
-        transcribed={transcribed}
-        words={words}
-        passagesTotal={passagesTotal}
-        placed={placed}
-        meanConfidence={meanConfidence}
-        open={counts?.open ?? 0}
-        applied={counts?.applied ?? 0}
-        busy={busy}
-        error={error}
-        note={note}
-        onPick={pickFolder}
-        onTranscribe={transcribeAll}
-        onStop={() => {
-          stopRef.current = true;
-        }}
-        onGuess={guess}
-        onApply={applyAccepted}
+      <TabBar
+        label="Alignment sections"
+        items={tabItems}
+        value={tab}
+        onChange={setTab}
+        className="shrink-0 px-4 bg-bg-card"
       />
 
-      <div className="flex-1 min-h-0 overflow-y-auto p-4 lg:overflow-hidden">
-        <div className="grid gap-4 lg:h-full lg:min-h-0 lg:grid-cols-[300px_minmax(0,1fr)_320px]">
-          <PassageQueue
-            proposals={spans}
-            visible={visible}
-            filter={filter}
-            filterCounts={filterCounts}
-            onFilter={setFilter}
-            search={search}
-            onSearch={setSearch}
-            selected={selected}
-            onSelect={setSelected}
-            busy={busy != null}
-            threshold={threshold}
-            thresholdDraft={thresholdDraft}
-            onThresholdDraft={setThresholdDraft}
-            onThresholdCommit={(value) => {
-              // Committed on blur, not on every keystroke: a half-typed "9"
-              // would otherwise move the batch verdicts to 9 %.
-              const parsed = Number(value.replace("%", "").trim());
-              if (Number.isFinite(parsed)) {
-                setThreshold(Math.min(100, Math.max(0, parsed)) / 100);
-              }
-              setThresholdDraft(null);
-            }}
-            acceptAllCount={acceptAllCount}
-            rejectAllCount={rejectAllCount}
-            onDecideMany={decideMany}
-          />
-
-          <PassageEditor
-            proposal={selectedProposal}
-            span={span}
-            siblings={siblings}
-            position={position}
-            duration={duration}
-            playhead={playhead}
-            playing={playing}
-            loop={loop}
-            busy={busy != null}
-            activeEdge={activeEdge}
-            emptyHint={emptyHint}
-            onActivateEdge={setActiveEdge}
-            onMove={(start, end) => {
-              if (selectedProposal) moveSpan(selectedProposal, start, end);
-            }}
-            onDecide={(state) => {
-              if (selectedProposal) decide(selectedProposal, state);
-            }}
-            onPlay={togglePlay}
-            onToggleLoop={() => setLoop((value) => !value)}
-            onScrub={scrub}
-            onSelect={setSelected}
-          />
-
-          <PassageInspector
-            proposal={selectedProposal}
-            source={selectedSource}
-            position={position}
-            sources={sources}
-            firstBySource={firstBySource}
-            busy={busy}
-            mobile={mobile}
-            canPrev={position != null && position.index > 1}
-            canNext={position != null && position.index < position.total}
-            onStep={(direction) => {
-              if (!position) return;
-              const next = siblings[position.index - 1 + direction];
-              if (next) setSelected(next.text_uuid);
-            }}
-            onSelectSource={(sourceUuid) => {
-              const first = firstBySource[sourceUuid];
-              if (first) setSelected(first);
-            }}
-            onTranscribeFile={transcribeOne}
-          />
-        </div>
+      <div className="shrink-0 border-b border-border-default bg-bg-card px-4 py-1.5 text-[11px]">
+        {error ? (
+          <p className="text-error-text break-words">{error}</p>
+        ) : note ? (
+          <p
+            className={`break-words ${
+              note.kind === "warn" ? "text-warning-text" : "text-text-tertiary"
+            }`}
+          >
+            {note.text}
+          </p>
+        ) : (
+          <p className="text-text-tertiary truncate" title={tabHint}>
+            {busy ? busyText : tabHint}
+          </p>
+        )}
       </div>
+
+      {tab === "review" ? (
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 lg:overflow-hidden">
+          <div className="grid gap-4 lg:h-full lg:min-h-0 lg:grid-cols-[280px_minmax(0,1fr)]">
+            <PassageQueue
+              proposals={spans}
+              visible={visible}
+              filter={filter}
+              filterCounts={filterCounts}
+              onFilter={setFilter}
+              search={search}
+              onSearch={setSearch}
+              selected={selected}
+              onSelect={setSelected}
+            />
+
+            <PassageEditor
+              proposal={selectedProposal}
+              span={span}
+              siblings={siblings}
+              position={position}
+              duration={duration}
+              playhead={playhead}
+              playing={playing}
+              loop={loop}
+              busy={busy != null}
+              activeEdge={activeEdge}
+              emptyHint={emptyHint}
+              canPrev={position != null && position.index > 1}
+              canNext={position != null && position.index < position.total}
+              onStep={(direction: -1 | 1) => {
+                if (!position) return;
+                const next = siblings[position.index - 1 + direction];
+                if (next) setSelected(next.text_uuid);
+              }}
+              onActivateEdge={setActiveEdge}
+              onMove={(start, end) => {
+                if (selectedProposal) moveSpan(selectedProposal, start, end);
+              }}
+              onDecide={(state) => {
+                if (selectedProposal) decide(selectedProposal, state);
+              }}
+              onPlay={togglePlay}
+              onToggleLoop={() => setLoop((value) => !value)}
+              onScrub={scrub}
+              onSelect={setSelected}
+            />
+          </div>
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0 overflow-y-auto p-4">
+          {tab === "recordings" ? (
+            <RecordingsTab
+              mobile={mobile}
+              directory={index?.directory ?? ""}
+              sources={sources}
+              transcribed={transcribed}
+              words={words}
+              busy={busy}
+              passagesTotal={passagesTotal}
+              placed={placed}
+              refused={refused}
+              meanConfidence={meanConfidence}
+              onPick={pickFolder}
+              onTranscribeAll={transcribeAll}
+              onTranscribeFile={transcribeOne}
+              onStop={() => {
+                stopRef.current = true;
+              }}
+              onGuess={guess}
+            />
+          ) : (
+            <CutTab
+              proposals={spans}
+              counts={counts}
+              busy={busy}
+              threshold={threshold}
+              thresholdDraft={thresholdDraft}
+              onThresholdDraft={setThresholdDraft}
+              onThresholdCommit={commitThreshold}
+              acceptAllCount={acceptAllCount}
+              rejectAllCount={rejectAllCount}
+              onDecideMany={decideMany}
+              onApply={applyAccepted}
+              onOpen={(textUuid: string) => {
+                setSelected(textUuid);
+                setTab("review");
+              }}
+              onReject={(proposal) => decide(proposal, "rejected")}
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }

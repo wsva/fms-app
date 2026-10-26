@@ -1,11 +1,11 @@
 "use client";
 
-import { Check, Crosshair, Play, Repeat, Square, Wand2, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Crosshair, Play, Repeat, Square, Wand2, X } from "lucide-react";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import type { AlignProposal, AlignProposalState } from "@/lib/read_aloud/sourceAlign";
 import SpanTrack from "./SpanTrack";
-import { MIN_SPAN, clock, confidenceTone, percent, roundMs } from "./format";
+import { MIN_SPAN, clock, clockShort, confidenceTone, percent, roundMs } from "./format";
 
 /**
  * One passage, open at full size: what it says, where it sits in its recording,
@@ -213,6 +213,10 @@ type Props = {
   busy: boolean;
   activeEdge: Edge;
   emptyHint: string;
+  canPrev: boolean;
+  canNext: boolean;
+  /** Walk to the previous / next passage of the same recording. */
+  onStep: (direction: -1 | 1) => void;
   onActivateEdge: (edge: Edge) => void;
   onMove: (start: number, end: number) => void;
   onDecide: (state: AlignProposalState) => void;
@@ -234,6 +238,9 @@ export default function PassageEditor({
   busy,
   activeEdge,
   emptyHint,
+  canPrev,
+  canNext,
+  onStep,
   onActivateEdge,
   onMove,
   onDecide,
@@ -252,8 +259,8 @@ export default function PassageEditor({
             <Wand2 size={20} className="text-text-tertiary" />
             <p className="text-sm text-text-secondary max-w-[420px]">{emptyHint}</p>
             <p className="text-[11px] text-text-tertiary max-w-[420px]">
-              Step 2 listens to each recording once; step 3 places every passage along them. The
-              queue on the left is where the review happens.
+              The Recordings tab listens to each file once and places the passages; this tab is
+              where they are judged and cut from.
             </p>
           </div>
         </div>
@@ -349,24 +356,45 @@ export default function PassageEditor({
           </p>
         ) : (
           <>
-            {duration && duration > 0 && (
-              <div className="flex flex-col gap-1">
-                <div className="flex items-baseline justify-between gap-2 text-[10px] text-text-tertiary">
-                  <span className="truncate" title={proposal.source_path}>
-                    {proposal.source_name}
-                  </span>
-                  <span className="tabular-nums shrink-0">
-                    {position ? `passage ${position.index} of ${position.total}` : "this recording"}
-                  </span>
-                </div>
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-2 text-[10px] text-text-tertiary">
+                <span className="min-w-0 truncate" title={proposal.source_path}>
+                  {proposal.source_name}
+                  {duration != null && duration > 0 ? ` · ${clockShort(duration)}` : ""}
+                  {position ? ` · passage ${position.index} of ${position.total}` : ""}
+                </span>
+                <span className="ml-auto flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => onStep(-1)}
+                    disabled={!canPrev}
+                    aria-label="Previous passage in this recording"
+                    title="Previous passage in this recording"
+                    className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-bg-muted text-text-secondary hover:bg-bg-hover cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <ChevronLeft size={11} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onStep(1)}
+                    disabled={!canNext}
+                    aria-label="Next passage in this recording"
+                    title="Next passage in this recording"
+                    className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-bg-muted text-text-secondary hover:bg-bg-hover cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <ChevronRight size={11} />
+                  </button>
+                </span>
+              </div>
+              {duration != null && duration > 0 && (
                 <ChapterMap
                   siblings={siblings}
                   current={proposal.text_uuid}
                   duration={duration}
                   onSelect={onSelect}
                 />
-              </div>
-            )}
+              )}
+            </div>
 
             <SpanTrack
               preview={proposal.preview}
@@ -416,9 +444,6 @@ export default function PassageEditor({
               </button>
               <span className="text-[10px] text-text-tertiary tabular-nums">
                 {(span.end - span.start).toFixed(3)} s
-              </span>
-              <span className="ml-auto text-[10px] text-text-tertiary">
-                Space play · A accept · R reject · ← → nudge
               </span>
             </div>
 

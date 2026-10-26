@@ -2,17 +2,16 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import { AlertTriangle, Check, Search, Upload, X } from "lucide-react";
-import type { AlignProposal, AlignProposalState } from "@/lib/read_aloud/sourceAlign";
+import type { AlignProposal } from "@/lib/read_aloud/sourceAlign";
 import { clock, confidenceTone, percent } from "./format";
 
 /**
  * The queue: every passage in reading order, narrowed by what you still have to
  * decide.
  *
- * It is a list to walk, not a form — one line per passage, a filter, and the
- * batch verdicts at the foot where they act on what is above them. The rail is
- * 300 px wide on a desktop, so this is deliberately glanceable: title, where the
- * span starts, how much of the text was heard, and what was decided.
+ * It is a list to walk, not a form — one line per passage, a filter, and nothing
+ * else. The batch verdicts and the accepted set live on the Cut tab, so this
+ * rail stays narrow enough to sit beside the passage being worked on.
  */
 
 export type QueueFilter = "all" | "review" | "accepted" | "rejected" | "refused" | "stored";
@@ -92,16 +91,6 @@ type Props = {
   onSearch: (value: string) => void;
   selected: string | null;
   onSelect: (textUuid: string) => void;
-  busy: boolean;
-  threshold: number;
-  /** The half-typed threshold, so "9" is not read as 9 % while it is typed. */
-  thresholdDraft: string | null;
-  onThresholdDraft: (value: string) => void;
-  onThresholdCommit: (value: string) => void;
-  /** How many rows each batch verdict would actually change. */
-  acceptAllCount: number;
-  rejectAllCount: number;
-  onDecideMany: (state: AlignProposalState) => void;
 };
 
 export default function PassageQueue({
@@ -114,14 +103,6 @@ export default function PassageQueue({
   onSearch,
   selected,
   onSelect,
-  busy,
-  threshold,
-  thresholdDraft,
-  onThresholdDraft,
-  onThresholdCommit,
-  acceptAllCount,
-  rejectAllCount,
-  onDecideMany,
 }: Props) {
   const rowsRef = useRef<Record<string, HTMLButtonElement | null>>({});
   const ordinal = useMemo(() => {
@@ -244,47 +225,6 @@ export default function PassageQueue({
             );
           })
         )}
-      </div>
-
-      <div className="shrink-0 border-t border-border-default px-2 py-2 flex flex-col gap-1.5">
-        <label className="flex items-center gap-1 px-1 text-[10px] text-text-tertiary">
-          <span>Decide everything at confidence ≥</span>
-          <input
-            value={thresholdDraft ?? String(percent(threshold))}
-            onChange={(e) => onThresholdDraft(e.target.value)}
-            onBlur={(e) => onThresholdCommit(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                e.currentTarget.blur();
-              }
-            }}
-            inputMode="numeric"
-            aria-label="Confidence threshold in percent"
-            className="w-[42px] px-1 py-0.5 rounded-md bg-bg-muted text-center text-[10px] tabular-nums border border-border-default text-text-primary focus:outline-none focus:border-accent-bg"
-          />
-          <span>%</span>
-        </label>
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => onDecideMany("accepted")}
-            disabled={busy || acceptAllCount === 0}
-            className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 rounded-md bg-bg-muted text-text-secondary text-[11px] hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-            title="Accept every undecided span at or above the threshold"
-          >
-            <Check size={11} /> accept {acceptAllCount}
-          </button>
-          <button
-            type="button"
-            onClick={() => onDecideMany("rejected")}
-            disabled={busy || rejectAllCount === 0}
-            className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 rounded-md bg-bg-muted text-text-secondary text-[11px] hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-            title="Reject every undecided span at or above the threshold"
-          >
-            <X size={11} /> reject {rejectAllCount}
-          </button>
-        </div>
       </div>
     </section>
   );
