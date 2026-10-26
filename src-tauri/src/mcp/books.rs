@@ -649,9 +649,13 @@ struct ReadAloudAlignDecideParam {
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudAlignApplyParam {
     dataset_uuid: String,
-    /// How many accepted spans this call cuts (default 10).
+    /// How many spans this call stores (default 10).
     #[serde(default)]
     limit: Option<i64>,
+    /// Save this one text (a row's Save button). Omit to save every text that
+    /// still has no clip.
+    #[serde(default)]
+    text_uuid: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -1583,7 +1587,7 @@ async fn read_aloud_standard_audio_guess(
         Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_align_proposals", description = "Read the alignment proposals joined with the passages they are for. Read-only. Each row carries `text_uuid`, `title`, `content`, `status` (proposed|refused), `state` (pending|accepted|rejected), `note`, `source_uuid`, `source_name`, `source_path` (for playback), `start`/`end` in seconds at millisecond precision, `confidence`, `matched_words`/`reference_words`, `applied_uuid`, and a `preview` of the surrounding audio ({start, peak_seconds, peaks} as interleaved min/max i8 pairs) so a human can look before accepting. Also returns `generated_at`, `passages_total` and `counts`. IMPORTANT: an agent may present these numbers, but only a human can hear the clip — do not accept a span on the caller's behalf unless they asked for it.")]
+    #[tool(name = "read_aloud_align_proposals", description = "Read the alignment proposals joined with the passages they are for. Read-only. Each row carries `text_uuid`, `title`, `content`, `status` (proposed|refused), `state` (history: pending|accepted|rejected), `note`, `source_uuid`, `source_name`, `source_path` (for playback), `start`/`end` in seconds at millisecond precision, `confidence`, `matched_words`/`reference_words`, `applied_uuid`, `clip`, and a `preview` of the surrounding audio ({start, peak_seconds, peaks} as interleaved min/max i8 pairs). `clip` is the standard audio the text ALREADY has ({uuid, kind: tts|upload|align, is_default, start_secs, end_secs, note}) or null: a non-null `clip` means `read_aloud_align_apply` will skip that text until the clip is deleted. Also returns `generated_at`, `passages_total` and `counts`. IMPORTANT: an agent may present these numbers, but only a human can hear the clip — do not save a span on the caller's behalf unless they asked for it.")]
     async fn read_aloud_align_proposals(
         &self,
         Parameters(param): Parameters<ReadAloudDatasetOnlyParam>,
@@ -1594,7 +1598,7 @@ async fn read_aloud_standard_audio_guess(
         Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_align_decide", description = "Accept, reject or re-open alignment proposals. Pass `text_uuid` to decide one passage, or `min_confidence` (0-1) to decide every proposal at or above it in one call — the usual shape is `min_confidence: 0.95, state: \"accepted\"` for the confident bulk, then a human decides the rest one by one. Only rows with `status: proposed` can be decided; a refusal has no span and answers with its reason. Pass `start` and `end` (seconds) together with a `text_uuid` to correct a span by hand — the panel's 10 ms nudges use that — and note that a span already stored for the text is refused instead of silently duplicated. Returns `{changed, state, counts}`. Accepting writes no audio and stores nothing yet: the spans become rows in read_aloud_align_apply, and a clip's wav is cut only when the text is first opened (or the dataset is packed), so a batch can be narrowed before any audio exists.")]
+    #[tool(name = "read_aloud_align_decide", description = "Correct one alignment proposal: pass `start` and `end` (seconds) with a `text_uuid` to move a span by hand (the panel's 10 ms nudges use that). Moving a span that was already saved clears its `applied_uuid` — the stored clip still holds the old seconds, so it must be deleted before the new span can be saved. `state` (pending|accepted|rejected) still exists in the proposal file for older datasets and for `min_confidence` batch calls, but the page no longer asks a human to judge a span: a placed row is accepted as placed. Returns `{changed, state, counts}`. Nothing is stored and no audio exists until `read_aloud_align_apply`.")]
     async fn read_aloud_align_decide(
         &self,
         Parameters(param): Parameters<ReadAloudAlignDecideParam>,
@@ -1618,21 +1622,23 @@ async fn read_aloud_standard_audio_guess(
         Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_align_apply", description = "Store the accepted spans as standard audio: each becomes a row naming the recording and the seconds it covers (`source_uuid`, `start_secs`, `end_secs`), and the first clip becomes the text's default. No audio is decoded or cut here — the wav is a cache cut the first time the text is opened or the dataset is packed, which is what makes the bulk path cheap (a whole book is a few hundred row writes). `limit` (default 10) bounds the call; repeat until `remaining` is 0. Returns `{applied, failed: [{text_uuid, error}], failed_count, remaining, clips_cut: 0, counts}`. Only rows in state `accepted` are stored, and a row already applied is skipped.")]
+    #[tool(name = "read_aloud_align_apply", description = "Store placed spans as standard audio: each becomes a row naming the recording and the seconds it covers (`source_uuid`, `start_secs`, `end_secs`), and the first clip becomes the text's default. No audio is decoded or cut here — the wav is a cache cut the first time the text is opened or the dataset is packed, which is what makes the bulk path cheap (a whole book is a few hundred row writes). Pass `text_uuid` to save one text (what the page's per-row Save does); omit it to save every text that has no clip yet. `limit` (default 10) bounds the call; repeat until `remaining` is 0. IMPORTANT: a text that ALREADY has standard audio is never overwritten — it comes back in `skipped` with the clip's uuid, and changing its span means deleting that clip first (standard audio delete, undoable only by re-cutting). Returns `{applied, failed: [{text_uuid, error}], failed_count, skipped: [{text_uuid, uuid, kind, reason}], skipped_count, remaining, clips_cut: 0, counts}`.")]
     async fn read_aloud_align_apply(
         &self,
         Parameters(param): Parameters<ReadAloudAlignApplyParam>,
     ) -> Result<String, String> {
         log::info!(
-            "[MCP] read_aloud_align_apply: dataset={}, limit={:?}",
+            "[MCP] read_aloud_align_apply: dataset={}, limit={:?}, text={:?}",
             param.dataset_uuid,
-            param.limit
+            param.limit,
+            param.text_uuid
         );
         let settings = self.app.state::<SettingsState>();
         let out = datasets::read_aloud::source_align::apply(
             settings.inner(),
             &param.dataset_uuid,
             param.limit,
+            param.text_uuid.as_deref(),
         )?;
         Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
     }

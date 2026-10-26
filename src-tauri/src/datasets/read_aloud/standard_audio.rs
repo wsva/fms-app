@@ -47,6 +47,7 @@
 //! returns. No source recording is ever copied into the dataset: it stays where
 //! the user keeps it, and only a span row's `source_uuid` points at it.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -179,7 +180,7 @@ impl StandardAudioRow {
     /// What made this clip. The column when it has a value; otherwise the old
     /// rule — only TTS carries word timings — so a dataset written before the
     /// column existed needs no migration of its rows to be read correctly.
-    fn kind(&self) -> &'static str {
+    pub(crate) fn kind(&self) -> &'static str {
         match self.origin.as_str() {
             "tts" => "tts",
             "align" => "align",
@@ -708,6 +709,30 @@ pub(crate) fn audio_totals(settings: &SettingsState, dataset_uuid: &str) -> Resu
 // ============================================================
 // Reads
 // ============================================================
+
+/// Every clip in the dataset, grouped by text — one query, for the callers that
+/// have to know *which* texts already have standard audio rather than what each
+/// clip says: the align page's "clip exists" badge, and `align::apply`, which
+/// refuses to give a text a second one.
+///
+/// Default first within a text, so `rows.first()` is the clip the scorer reads
+/// and `rows.iter().find(|r| r.origin == "align")` is the one this app cut.
+pub(crate) fn rows_by_text(dir: &Path) -> Result<HashMap<String, Vec<StandardAudioRow>>, String> {
+    let conn = open_db(dir)?;
+    ensure_schema(&conn)?;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {ROW_COLUMNS} FROM read_standard_audio \
+             ORDER BY is_default DESC, created_at, rowid"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], row_of).map_err(|e| e.to_string())?;
+    let mut out: HashMap<String, Vec<StandardAudioRow>> = HashMap::new();
+    for row in rows.flatten() {
+        out.entry(row.text_uuid.clone()).or_default().push(row);
+    }
+    Ok(out)
+}
 
 /// One text's clips (`text_uuid: Some`) or every clip in the dataset (`None`),
 /// default first. The dataset-wide listing is what badges the texts list, so it

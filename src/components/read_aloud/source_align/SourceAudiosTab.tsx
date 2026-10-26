@@ -22,7 +22,7 @@ import { Splitter, useSplitWidth } from "./Splitter";
  * listen is the thing a person wants to read, and a row cannot hold a chapter's
  * word timings. So the tab is two columns: the list on the left with its two
  * verbs per row (listen / view), and the transcript on the right, where the
- * words and their times have room. Judging a passage is the Review tab's job;
+ * words and their times have room. Storing a span is the Texts tab's job;
  * this is where you check that the words are the right words.
  */
 

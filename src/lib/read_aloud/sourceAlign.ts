@@ -6,7 +6,7 @@ import { isTauri } from "@/lib/tauri";
  * clip from a directory of recordings.
  *
  * The pipeline is `register` → `transcribe` (once per file) → `guess` →
- * `decide` → `apply`, and it exists because the per-text "Guess from speech"
+ * `save`/`delete`, and it exists because the per-text "Guess from speech"
  * decodes and transcribes the whole file *per passage*. Here one recording is
  * transcribed once and every passage is placed along it, so the cost is
  * O(files) instead of O(texts × files).
@@ -111,6 +111,26 @@ export interface AlignPreview {
 export type AlignProposalStatus = "proposed" | "refused";
 export type AlignProposalState = "pending" | "accepted" | "rejected";
 
+/**
+ * The standard audio a text already owns.
+ *
+ * A text that has one is skipped by a save rather than given a second clip: the
+ * clip on disk still holds the seconds its wav was cut from, so changing a span
+ * means deleting that clip first (`deleteStandardAudio`).
+ */
+export interface AlignClip {
+  uuid: string;
+  /** `tts`, `upload` or `align`. */
+  kind: "tts" | "upload" | "align";
+  /** The clip the scorer reads. */
+  is_default: boolean;
+  /** The seconds it covers, when it was cut from a recording. */
+  start_secs: number | null;
+  end_secs: number | null;
+  /** Provenance as written: `Align · chapter1.mp3 · 12.30–18.90 s`. */
+  note: string;
+}
+
 export interface AlignProposal {
   text_uuid: string;
   title: string;
@@ -130,6 +150,8 @@ export interface AlignProposal {
   reference_words: number;
   /** Set by `apply`: the standard-audio uuid now holding this span. */
   applied_uuid: string | null;
+  /** The standard audio the text already has, if any — the reason Save is off. */
+  clip: AlignClip | null;
   /** `null` for a refusal, or when this device no longer holds the cache. */
   preview: AlignPreview | null;
 }
@@ -140,7 +162,7 @@ export interface AlignCounts {
   accepted: number;
   rejected: number;
   applied: number;
-  /** Accepted but not yet cut. */
+  /** Placed with no clip yet — what a save would still store. */
   open: number;
 }
 
@@ -183,13 +205,26 @@ export interface AlignApplyFailure {
   error: string;
 }
 
+/** A placed span that was not saved because its text already has a clip. */
+export interface AlignApplySkip {
+  text_uuid: string;
+  /** The clip in the way — delete it to save this span. */
+  uuid: string;
+  kind: "tts" | "upload" | "align";
+  reason: string;
+}
+
 export interface AlignApplyResult {
   status: string;
   applied: number;
   failed: AlignApplyFailure[];
   failed_count: number;
-  /** Accepted spans still uncut; repeat until 0. */
+  /** Texts that already had a clip: nothing was written for them. */
+  skipped: AlignApplySkip[];
+  skipped_count: number;
+  /** Spans still waiting to be saved; repeat until 0. */
   remaining: number;
+  clips_cut?: number;
   counts?: AlignCounts;
 }
 
@@ -251,8 +286,8 @@ export async function readAlignTranscript(
  * Read-only with respect to `media/`: it only writes `align/proposals.json`.
  * Passages are walked in `order_num` with a cursor that never moves backwards,
  * so a re-run after fixing the folder replaces the proposal set rather than
- * appending to it. Review state (accepted/rejected) survives a re-run only for
- * spans that did not move.
+ * appending to it. A row whose span did not move keeps its saved state; a row
+ * that moved is a new answer and starts unsaved.
  */
 export async function guessAlignSpans(datasetUuid: string): Promise<AlignGuessResult> {
   requireTauri();
@@ -289,11 +324,12 @@ export async function listAlignProposals(datasetUuid: string): Promise<AlignProp
 }
 
 /**
- * Accept or reject one proposal, or every proposal at or above a confidence.
+ * Move one proposal's span by hand (the 10 ms nudges), or set its state.
  *
- * `start`/`end` correct one passage's span (the panel's 10 ms nudges) and need
- * a `textUuid`; the two must be given together. Nudging is a judgement, not a
- * write — `apply` is what cuts audio.
+ * `start`/`end` need a `textUuid` and must be given together. A nudge is a
+ * judgement, not a write: `applyAlignProposals` is what stores a clip. Moving a
+ * span that was already saved clears its `applied_uuid`, because the clip on
+ * disk still holds the old seconds.
  */
 export async function decideAlignProposals(params: {
   datasetUuid: string;
@@ -315,20 +351,26 @@ export async function decideAlignProposals(params: {
 }
 
 /**
- * Cut every accepted span out of its recording and store it as the text's
- * standard audio.
+ * Store placed spans as their text's standard audio.
  *
- * Each recording is decoded **once** however many spans come out of it. `limit`
- * bounds the call, so the panel repeats until `remaining` is 0 rather than
- * holding one request open for an hour.
+ * Each recording is decoded **once** however many spans come out of it — and
+ * not at all here: the wav is cut on first use. `limit` bounds the call, so the
+ * page repeats until `remaining` is 0 rather than holding one request open for
+ * an hour. `textUuid` saves that one text (a row's Save button); omit it to save
+ * every text that still has no clip.
+ *
+ * A text that already has standard audio is never overwritten — it comes back
+ * in `skipped`, and its span can only be changed by deleting that clip first.
  */
 export async function applyAlignProposals(
   datasetUuid: string,
-  limit?: number
+  limit?: number,
+  textUuid?: string
 ): Promise<AlignApplyResult> {
   requireTauri();
   return invoke<AlignApplyResult>("read_aloud_align_apply", {
     datasetUuid,
     limit: limit ?? null,
+    textUuid: textUuid ?? null,
   });
 }

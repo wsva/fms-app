@@ -11,9 +11,11 @@
 //! This module pays for the transcription **once per file**, then places the
 //! passages along one global token stream in `order_num`: first the passages long
 //! enough to be found on their own, then everything in the gaps those leave. Each
-//! passage yields a span, the spans are written down as *proposals*, a human
-//! accepts or rejects them, and only then are the spans stored — as rows, with
-//! the wav cut later, the first time something needs to hear it.
+//! passage yields a span, the spans are written down as *proposals*, and `apply`
+//! stores them — as rows, with the wav cut later, the first time something needs
+//! to hear it. A proposal is taken as accepted the moment it is placed: there is
+//! no verdict to give, only a clip to save (and a clip to delete when the span
+//! has to change, because a save never overwrites one).
 //!
 //! ## Why two passes and not one walk
 //!
@@ -48,7 +50,7 @@
 //! |---|---|
 //! | `sources.json` | the registered recordings, in playing order, with size+mtime |
 //! | `<source_uuid>.json` | one recording's word timings and 20 ms peak envelope |
-//! | `proposals.json` | one entry per passage: the span, its confidence, its verdict |
+//! | `proposals.json` | one entry per passage: the span, its confidence, whether it was saved |
 //!
 //! All three are derived and regenerable, so none of them is journalled, and
 //! [`crate::datasets::is_derived_index`] keeps the whole directory out of the
@@ -57,7 +59,7 @@
 //!
 //! ## What a caller does
 //!
-//! `register` → `transcribe` (once per file) → `run` → `decide` → `apply`.
+//! `register` → `transcribe` (once per file) → `run` → `apply`.
 //! Each step is idempotent and resumable, and every one of them is a tool, so an
 //! agent can drive the same pipeline a human does in the Advanced panel.
 
@@ -79,8 +81,8 @@ use crate::datasets::asr_metric;
 use crate::settings::SettingsState;
 
 use super::standard_audio::{
-    text_reference, GUESS_MAX_GAP, GUESS_MIN_MATCH_RATIO, GUESS_MIN_WORDS, GUESS_PAD_AFTER,
-    GUESS_PAD_BEFORE, MAX_SOURCE_SECS,
+    text_reference, StandardAudioRow, GUESS_MAX_GAP, GUESS_MIN_MATCH_RATIO, GUESS_MIN_WORDS,
+    GUESS_PAD_AFTER, GUESS_PAD_BEFORE, MAX_SOURCE_SECS,
 };
 use super::{edges, find_dataset_dir, find_dataset_dir_write, open_db};
 
@@ -247,8 +249,24 @@ impl Proposal {
         }
     }
 
+    /// A placed span: the row a Save would store, unless its text already has a
+    /// clip — `apply` checks that, because only it reads the standard audio.
+    ///
+    /// `state` is not consulted. Nothing on this page rejects a span any more,
+    /// so the field is history: a row left `pending` by an older build, or
+    /// `rejected` by the verdict buttons that used to be here, is savable like
+    /// any other placed span — which is what lets a re-guess fix it.
+    fn is_placed(&self) -> bool {
+        self.status == "proposed"
+    }
+
+    /// A placed span whose clip was never cut.
+    ///
+    /// `applied_uuid` is deliberately not consulted: deleting a clip does not
+    /// rewrite `proposals.json`, so a row whose clip was deleted would otherwise
+    /// keep a uuid that no longer resolves and never be savable again.
     fn is_open(&self) -> bool {
-        self.status == "proposed" && self.state == "accepted" && self.applied_uuid.is_none()
+        self.is_placed() && self.applied_uuid.is_none()
     }
 }
 
@@ -1181,8 +1199,9 @@ fn span_proposal(
     let confidence = (found.matched as f64 / tokens.len() as f64 * 100.0).round() / 100.0;
     let source_uuid = prepared.index.sources[first_source].uuid.clone();
 
-    // A span that did not move keeps the verdict it already had; a span that
-    // moved is a new question and goes back to pending.
+    // A span that did not move keeps what it already had; a span that moved is a
+    // new answer, and it starts accepted like every other: the page has no
+    // verdict to give, only a clip to save.
     let carried = previous
         .proposals
         .iter()
@@ -1194,7 +1213,7 @@ fn span_proposal(
                 && (p.end - end).abs() <= 0.05
         })
         .map(|p| (p.state.clone(), p.applied_uuid.clone()))
-        .unwrap_or_else(|| ("pending".to_string(), None));
+        .unwrap_or_else(|| ("accepted".to_string(), None));
 
     Placed {
         proposal: Proposal {
@@ -1496,9 +1515,49 @@ pub struct ProposalView {
     pub matched_words: usize,
     pub reference_words: usize,
     pub applied_uuid: Option<String>,
+    /// The standard audio this text already has, if any — the reason its row is
+    /// badged, and the reason `apply` will refuse to give it a second clip.
+    pub clip: Option<ClipView>,
     /// `None` when the span cannot be previewed — a refusal, or a recording
     /// whose cache is gone on this device.
     pub preview: Option<Preview>,
+}
+
+/// The standard audio a text already owns, as the align page needs to see it:
+/// enough to badge the row and to send the user to the right delete button, not
+/// the whole row.
+#[derive(Serialize)]
+pub struct ClipView {
+    pub uuid: String,
+    /// `tts`, `upload` or `align`.
+    pub kind: String,
+    /// The clip the scorer reads.
+    pub is_default: bool,
+    /// The seconds it covers, when it was cut from a recording.
+    pub start_secs: Option<f64>,
+    pub end_secs: Option<f64>,
+    /// Provenance as written: `Align · chapter1.mp3 · 12.30–18.90 s`, `Edge TTS · …`.
+    pub note: String,
+}
+
+/// The clip a row is about: the one this page cut if there is one, else the one
+/// the scorer reads, else whatever is there. `None` — the text has no standard
+/// audio at all, and saving one is exactly what its row offers.
+fn clip_of(rows: Option<&Vec<StandardAudioRow>>) -> Option<ClipView> {
+    let rows = rows?;
+    let row = rows
+        .iter()
+        .find(|row| row.origin == "align")
+        .or_else(|| rows.iter().find(|row| row.is_default))
+        .or_else(|| rows.first())?;
+    Some(ClipView {
+        uuid: row.uuid.clone(),
+        kind: row.kind().to_string(),
+        is_default: row.is_default,
+        start_secs: row.start_secs,
+        end_secs: row.end_secs,
+        note: row.note.clone(),
+    })
 }
 
 /// The proposals, joined with the texts they are for.
@@ -1531,6 +1590,10 @@ pub(crate) fn list(settings: &SettingsState, dataset_uuid: &str) -> Result<Value
             total,
         )
     };
+
+    // Which texts already have standard audio: one query for the whole dataset,
+    // because a row's badge and its Save verb both depend on it.
+    let clips = super::standard_audio::rows_by_text(&dir)?;
 
     // One envelope decode per recording, not per passage: a ten-hour book is a
     // few megabytes of base64 and forty passages would decode it forty times.
@@ -1575,6 +1638,7 @@ pub(crate) fn list(settings: &SettingsState, dataset_uuid: &str) -> Result<Value
             matched_words: proposal.matched_words,
             reference_words: proposal.reference_words,
             applied_uuid: proposal.applied_uuid.clone(),
+            clip: clip_of(clips.get(&proposal.text_uuid)),
             preview,
         });
     }
@@ -1600,16 +1664,13 @@ fn counts(set: &ProposalSet) -> Value {
     })
 }
 
-/// Accept or reject one proposal, or every proposal at or above a confidence.
+/// Move one proposal's span, or set its state. The page only uses the first:
+/// a span is nudged by hand here and stored by `apply`.
 ///
-/// Accepting is a verdict, not a write: nothing reaches `media/` until `apply`,
-/// so a batch can be accepted, looked over and narrowed before any crop is made.
-///
-/// `start`/`end` move one passage's span (the panel's 10 ms nudges); they need a
-/// `text_uuid` and must be given together. A moved span is *not* re-cut on its
-/// own — the verdict it carries is what `apply` reads — so moving one on a
-/// passage that was already cut is refused rather than silently duplicated: the
-/// clip that already exists would no longer be the span on the row.
+/// `start`/`end` need a `text_uuid` and must be given together. Moving a span
+/// that was already stored clears its `applied_uuid` — the clip on disk no
+/// longer holds these seconds — which is what turns the row back into one with
+/// a clip that has to be deleted before it can be saved again.
 pub(crate) fn decide(
     settings: &SettingsState,
     dataset_uuid: &str,
@@ -1677,15 +1738,12 @@ pub(crate) fn decide(
             }
             if let Some((start, end)) = span {
                 let moved = (proposal.start - start).abs() > 1e-9 || (proposal.end - end).abs() > 1e-9;
-                if moved && proposal.applied_uuid.is_some() {
-                    return Err(
-                        "That span was already cut into the dataset. Re-run the guess and apply again if it is wrong."
-                            .to_string(),
-                    );
-                }
                 if moved {
                     proposal.start = start;
                     proposal.end = end;
+                    // The stored clip still holds the old seconds, so this row
+                    // is no longer "saved": delete the clip to cut the new one.
+                    proposal.applied_uuid = None;
                     changed = 1;
                 }
             }
@@ -1720,7 +1778,7 @@ pub(crate) fn decide(
 // Apply
 // ============================================================
 
-/// Store every accepted span as its text's standard audio.
+/// Store the spans whose text has no clip yet as their standard audio.
 ///
 /// Nothing is decoded here: a span is three numbers and a recording id, the row
 /// is written, and the clip is cut the first time it is played, scored or packed
@@ -1728,29 +1786,50 @@ pub(crate) fn decide(
 /// row writes instead of an hour of decoding — and a text nobody practises costs
 /// no disk at all. `limit` bounds the call (`generate_all`'s pattern): an agent
 /// repeats until `remaining` is 0 rather than holding a request open for an hour.
-pub(crate) fn apply(settings: &SettingsState, dataset_uuid: &str, limit: Option<i64>) -> Result<Value, String> {
+///
+/// A text that **already has** standard audio is skipped, never overwritten. A
+/// second row would leave two clips claiming one text (the first one still
+/// holds the seconds its wav was cut from), so changing a span means deleting
+/// that clip first and saving again. `text_uuid` narrows the call to one text —
+/// that is a row's Save button; omitting it is Save all.
+pub(crate) fn apply(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    limit: Option<i64>,
+    text_uuid: Option<&str>,
+) -> Result<Value, String> {
     let dir = find_dataset_dir_write(settings, dataset_uuid)?;
     let index = load_index(&dir);
     let mut set = load_proposals(&dir);
     let limit = limit.unwrap_or(10).clamp(1, 200) as usize;
+    let only = text_uuid.map(str::trim).filter(|s| !s.is_empty());
 
-    let planned: Vec<usize> = set
-        .proposals
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| p.is_open())
-        .map(|(i, _)| i)
-        .take(limit)
-        .collect();
-    if planned.is_empty() {
-        return Ok(json!({
-            "status": "ok",
-            "applied": 0,
-            "failed": [],
-            "failed_count": 0,
-            "remaining": 0,
-            "clips_cut": 0,
-        }));
+    // Which texts already own a clip decides what may be stored at all, so it is
+    // read once for the whole set rather than asked row by row.
+    let clips = super::standard_audio::rows_by_text(&dir)?;
+
+    let mut planned: Vec<usize> = Vec::new();
+    let mut skipped: Vec<Value> = Vec::new();
+    for (i, proposal) in set.proposals.iter().enumerate() {
+        if !proposal.is_placed() {
+            continue;
+        }
+        if only.is_some_and(|uuid| proposal.text_uuid != uuid) {
+            continue;
+        }
+        if let Some(existing) = clips.get(&proposal.text_uuid).and_then(|rows| rows.first()) {
+            skipped.push(json!({
+                "text_uuid": proposal.text_uuid,
+                "uuid": existing.uuid,
+                "kind": existing.kind(),
+                "reason": "That text already has standard audio — delete the clip to save this span instead.",
+            }));
+            continue;
+        }
+        planned.push(i);
+        if planned.len() == limit {
+            break;
+        }
     }
 
     let mut applied = 0usize;
@@ -1803,13 +1882,25 @@ pub(crate) fn apply(settings: &SettingsState, dataset_uuid: &str, limit: Option<
     // a decode could, and a run interrupted here is simply re-run.
     write_json(&proposals_path(&dir), &set)?;
 
-    let remaining = set.proposals.iter().filter(|p| p.is_open()).count();
+    // "Still to save" excludes what a clip blocks: a caller looping until 0
+    // would otherwise spin on rows this call can never store. The map is read
+    // again because the rows written above are clips too, and the stale one
+    // would count them as still pending.
+    let owned = super::standard_audio::rows_by_text(&dir)?;
+    let remaining = set
+        .proposals
+        .iter()
+        .filter(|p| p.is_placed() && !owned.contains_key(&p.text_uuid))
+        .count();
     let failed_count = failed.len();
+    let skipped_count = skipped.len();
     Ok(json!({
         "status": "ok",
         "applied": applied,
         "failed": failed,
         "failed_count": failed_count,
+        "skipped": skipped,
+        "skipped_count": skipped_count,
         "remaining": remaining,
         // Every stored clip is a span: the wav is cut on first use, so this call
         // does no audio work. The field stays so a caller can say so.
@@ -1972,14 +2063,16 @@ pub async fn read_aloud_align_decide(
     )
 }
 
-/// Cut the accepted spans into standard audio, one decode per recording.
+/// Cut the spans that have no clip yet into standard audio. `text_uuid` saves
+/// one text; omitting it saves every text that still has none.
 #[tauri::command]
 pub async fn read_aloud_align_apply(
     settings: State<'_, SettingsState>,
     dataset_uuid: String,
     limit: Option<i64>,
+    text_uuid: Option<String>,
 ) -> Result<Value, String> {
-    apply(&settings, &dataset_uuid, limit)
+    apply(&settings, &dataset_uuid, limit, text_uuid.as_deref())
 }
 
 #[cfg(test)]

@@ -14,17 +14,21 @@ import {
   registerAlignSources,
   transcribeAlignSource,
   type AlignProposal,
-  type AlignProposalState,
   type AlignProposals,
   type AlignSourceIndex,
   type AlignTranscript,
 } from "@/lib/read_aloud/sourceAlign";
-import { FolderOpen, ListChecks, Scissors } from "lucide-react";
+import { deleteStandardAudio } from "@/lib/read_aloud/standardAudio";
+import { FolderOpen, ListChecks } from "lucide-react";
 import { TabBar, type TabBarItem } from "@/components/ui/toolbar";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
-import CutTab from "./CutTab";
 import PassageEditor from "./PassageEditor";
-import PassageQueue, { QUEUE_FILTERS, matchesFilter, type QueueFilter } from "./PassageQueue";
+import PassageQueue, {
+  QUEUE_FILTERS,
+  canSave,
+  matchesFilter,
+  type QueueFilter,
+} from "./PassageQueue";
 import SourceAudiosTab from "./SourceAudiosTab";
 import { Splitter, useSplitWidth } from "./Splitter";
 import { COARSE_STEP, CONTEXT_PAD, MIN_SPAN, NUDGE_STEP, clock, errorText, roundMs } from "./format";
@@ -32,31 +36,34 @@ import { COARSE_STEP, CONTEXT_PAD, MIN_SPAN, NUDGE_STEP, clock, errorText, round
 /**
  * The standard-audio page: a folder of recordings in, one clip per text out.
  *
- * Three tabs, in the order the work is done. **Source Audios** is the folder,
- * one row per recording with its two verbs — listen, read what came back — and
- * the transcript on the right, because "did it hear this right?" is answered by
- * the words and their times, not by a number. **Review** is the work: the queue
- * on the left, one passage open beside it with its waveform, its typed edges
- * and its verdict. **Cut** is the accepted set, the batch verdicts and the
- * apply.
+ * Two tabs, in the order the work is done. **Source Audios** is the folder, one
+ * row per recording with its two verbs — listen, read what came back — and the
+ * transcript on the right, because "did it hear this right?" is answered by the
+ * words and their times, not by a number. **Texts** is the work: the queue on
+ * the left, one passage open beside it with its waveform and its typed edges,
+ * and the two verbs each row owns — place it again, and save (or delete) the
+ * one clip it is allowed to have.
  *
- * The panel this replaced put all of it on one page, so forty rows of buttons
- * sat under four pipeline chips and a context rail, and none of it could be
- * read. State and every `read_aloud_align_*` call live here; the three views
- * are renderers.
+ * There is no verdict to give: a placed span is the answer, and saving it writes
+ * a row that names the recording and the seconds it covers. A save never
+ * overwrites a clip, so a text that already has standard audio is skipped until
+ * that clip is deleted here — which is why every row carries a delete as well as
+ * a save.
+ *
+ * State and every `read_aloud_align_*` call live here; the views are renderers.
  */
 
-/** Spans at or above this confidence are accepted without listening to them. */
-const DEFAULT_THRESHOLD = 0.9;
-
-/** How many spans one `apply` call cuts; the loop repeats until done. */
+/** How many spans one `apply` call stores; the loop repeats until done. */
 const APPLY_BATCH = 10;
 
 /** How long a burst of nudges waits before it becomes one rewrite of the file. */
 const NUDGE_COMMIT_MS = 300;
 
-/** The Review seam: the rail as it was, and neither side becomes a sliver. */
-const REVIEW_SPLIT = {
+/**
+ * The Texts seam: the rail as it was, and neither side becomes a sliver. The
+ * storage key keeps the old name so a width someone already dragged survives.
+ */
+const TEXTS_SPLIT = {
   storageKey: "read-aloud:review:split",
   initial: 300,
   leftMin: 240,
@@ -65,8 +72,8 @@ const REVIEW_SPLIT = {
 
 type Note = { kind: "ok" | "warn"; text: string };
 
-/** The three jobs, one per tab, in the order they are done. */
-type TabId = "sources" | "review" | "cut";
+/** The two jobs, one per tab, in the order they are done. */
+type TabId = "sources" | "texts";
 
 type Props = {
   datasetUuid: string;
@@ -81,12 +88,10 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<Note | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [threshold, setThreshold] = useState(DEFAULT_THRESHOLD);
-  /** The threshold while it is being typed, so a half-typed "9" is not 9 %. */
-  const [thresholdDraft, setThresholdDraft] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [playhead, setPlayhead] = useState<number | null>(null);
-  const [loop, setLoop] = useState(false);
+  /** The text whose span is being stored right now; its row shows the spinner. */
+  const [savingText, setSavingText] = useState<string | null>(null);
   /** Nudged spans, by text uuid, until the write is acknowledged. */
   const [edits, setEdits] = useState<Record<string, { start: number; end: number }>>({});
   const [selected, setSelected] = useState<string | null>(null);
@@ -109,11 +114,10 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   const [activeEdge, setActiveEdge] = useState<"start" | "end">("start");
 
   // The seam between the rail and the passage, remembered like the other tab's.
-  const reviewSplit = useSplitWidth(REVIEW_SPLIT);
+  const textsSplit = useSplitWidth(TEXTS_SPLIT);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const boundsRef = useRef<{ from: number; to: number } | null>(null);
-  const loopRef = useRef(false);
   const stopRef = useRef(false);
   const busyRef = useRef<string | null>(null);
   const proposalsRef = useRef<AlignProposals | null>(null);
@@ -121,10 +125,6 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   const pendingRef = useRef<Record<string, { start: number; end: number }>>({});
   /** Which transcript request is the current one, so a slow answer can be dropped. */
   const transcriptSeq = useRef(0);
-
-  useEffect(() => {
-    loopRef.current = loop;
-  }, [loop]);
 
   useEffect(() => {
     busyRef.current = busy;
@@ -180,9 +180,10 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   /**
    * Write one nudged span.
    *
-   * The verdict is read from the current proposals rather than captured when
-   * the nudge was made: pressing A during the debounce must not be undone by a
-   * queued write that still remembers "pending".
+   * `state` is read from the current proposals rather than captured when the
+   * nudge was made, and it is carried through untouched — this page has no
+   * verdicts any more, so the field only travels with the row it came with.
+   * Reading it late is what keeps a queued write from resurrecting an old one.
    *
    * `force` exists for the pipeline, which writes the pending spans *before* it
    * starts its own step. A debounce that fires mid-step is still dropped — a
@@ -457,8 +458,8 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
       const result = await guessAlignSpans(datasetUuid);
       setSelected(null);
       await refresh(true);
-      // The point of a guess is the queue: land where the spans are judged.
-      setTab("review");
+      // The point of a guess is the queue: land where the spans are saved.
+      setTab("texts");
       setNote({
         kind: result.refused > 0 ? "warn" : "ok",
         text: `${result.proposed} of ${result.passages} texts placed (mean ${Math.round(
@@ -496,37 +497,44 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
       }
     });
 
-  const decide = (proposal: AlignProposal, state: AlignProposalState) => {
-    if (busyRef.current || proposal.status !== "proposed" || proposal.applied_uuid) return;
-    pipeline("deciding", async () => {
-      await decideAlignProposals({ datasetUuid, textUuid: proposal.text_uuid, state });
-      await refresh();
-    });
-  };
-
-  const decideMany = (state: AlignProposalState) =>
-    pipeline("deciding", async () => {
-      const result = await decideAlignProposals({
-        datasetUuid,
-        state,
-        minConfidence: threshold,
-      });
-      await refresh();
-      setNote({
-        kind: "ok",
-        text: `${result.changed} passage${result.changed === 1 ? "" : "s"} ${state} (≥ ${Math.round(
-          threshold * 100
-        )}%).`,
-      });
+  /**
+   * Save one text's span — the row's Save button.
+   *
+   * `apply` skips a text that already has a clip, so the row only offers Save
+   * when there is nothing to overwrite; the note still says so, in case a clip
+   * was made on another page between two renders.
+   */
+  const saveOne = (textUuid: string) =>
+    pipeline("saving", async () => {
+      setSavingText(textUuid);
+      try {
+        const result = await applyAlignProposals(datasetUuid, 1, textUuid);
+        const saved = result.applied > 0;
+        await refresh();
+        if (saved) onApplied();
+        const title = spans.find((p) => p.text_uuid === textUuid)?.title || "This text";
+        setNote(
+          saved
+            ? { kind: "ok", text: `${title}: the span is now this text's clip.` }
+            : result.skipped_count > 0
+              ? { kind: "warn", text: `${title} already has a clip — delete it, then save again.` }
+              : { kind: "warn", text: `${title} has no span to save.` }
+        );
+      } finally {
+        setSavingText(null);
+      }
     });
 
   /**
-   * Cut the accepted spans. The loop repeats because `apply` is bounded, and it
-   * stops on no progress as well as on nothing left: a span that fails stays
-   * accepted, so repeating it would fail forever.
+   * Save every span whose text has no clip yet.
+   *
+   * The loop repeats because `apply` is bounded, and it stops on no progress as
+   * well as on nothing left: a span that failed stays unsavable, so repeating it
+   * would fail forever. The texts that already have a clip are not touched —
+   * they are counted on the rows, not overwritten here.
    */
-  const applyAccepted = () =>
-    pipeline("cutting", async () => {
+  const saveAll = () =>
+    pipeline("saving", async () => {
       let stored = 0;
       let failures = 0;
       for (;;) {
@@ -536,15 +544,56 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
         if (result.remaining === 0 || result.applied === 0) break;
       }
       await refresh();
-      onApplied();
+      if (stored > 0) onApplied();
       setNote({
-        kind: failures > 0 ? "warn" : "ok",
+        kind: failures > 0 || stored === 0 ? "warn" : "ok",
         text:
-          failures > 0
-            ? `${stored} clip${stored === 1 ? "" : "s"} stored, ${failures} failed — see the rows.`
-            : `${stored} clip${stored === 1 ? "" : "s"} stored as standard audio.`,
+          stored === 0
+            ? "Nothing was saved: no placed text was free of a clip."
+            : `${stored} clip${stored === 1 ? "" : "s"} saved as standard audio${
+                failures > 0 ? `, ${failures} failed — see the rows` : ""
+              }.`,
       });
     });
+
+  /**
+   * Delete a text's clip, which is the only way its span can be replaced.
+   *
+   * A clip this page cut is one Save away from coming back, so it goes without
+   * asking; a generated or uploaded clip is not, and that one asks first.
+   */
+  const deleteClip = (proposal: AlignProposal) => {
+    const clip = proposal.clip;
+    if (!clip || busyRef.current) return;
+    const remove = () =>
+      pipeline("deleting", async () => {
+        await deleteStandardAudio(datasetUuid, clip.uuid);
+        await refresh();
+        onApplied();
+        setNote({
+          kind: "ok",
+          text: `${proposal.title || "This text"}: clip deleted — Save now stores the span.`,
+        });
+      });
+    if (clip.kind === "align") {
+      remove();
+      return;
+    }
+    setConfirm({
+      title: "Delete this clip?",
+      message: (
+        <>
+          <span className="text-text-primary">{proposal.title || "This text"}</span> has
+          {clip.kind === "tts" ? " a generated clip" : " an uploaded clip"} ({clip.note}). Deleting it
+          removes the file, and nothing on this page can make the same one again — the span would
+          take its place.
+        </>
+      ),
+      confirmLabel: "Delete clip",
+      danger: true,
+      onConfirm: remove,
+    });
+  };
 
   /**
    * Nudging is a local edit first and a write second: the field must not wait a
@@ -575,14 +624,7 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
       setPlayhead(el.currentTime);
       const bounds = boundsRef.current;
       if (!bounds) return;
-      if (el.currentTime >= bounds.to) {
-        if (loopRef.current) {
-          el.currentTime = bounds.from;
-          setPlayhead(bounds.from);
-        } else {
-          stopAudio();
-        }
-      }
+      if (el.currentTime >= bounds.to) stopAudio();
     };
     el.onended = () => stopAudio();
     el.play().catch(() => stopAudio());
@@ -606,21 +648,10 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
     if (audioRef.current) audioRef.current.currentTime = t;
   };
 
-  /**
-   * The batch threshold is a number a person types, so it becomes real on blur:
-   * typing "9" on the way to "90" must not move the verdicts to 9 %.
-   */
-  const commitThreshold = (value: string) => {
-    const parsed = Number(value.replace("%", "").trim());
-    if (Number.isFinite(parsed)) setThreshold(Math.min(100, Math.max(0, parsed)) / 100);
-    setThresholdDraft(null);
-  };
-
   // ---- derived ------------------------------------------------------------
 
   const sources = index?.sources ?? [];
   const spans = proposals?.proposals ?? [];
-  const counts = proposals?.counts ?? null;
   const transcribed = index?.transcribed ?? 0;
   const words = useMemo(() => sources.reduce((sum, s) => sum + (s.words ?? 0), 0), [sources]);
 
@@ -674,15 +705,8 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
       : null) ?? null;
   const duration = selectedSource?.duration && selectedSource.duration > 0 ? selectedSource.duration : null;
 
-  const acceptAllCount = spans.filter(
-    (p) => p.status === "proposed" && p.state !== "accepted" && p.confidence >= threshold
-  ).length;
-  const rejectAllCount = spans.filter(
-    (p) => p.status === "proposed" && p.state !== "rejected" && p.confidence >= threshold
-  ).length;
-
-  const openCount = counts?.open ?? 0;
-  const pending = spans.filter((p) => p.status === "proposed" && p.state === "pending").length;
+  /** Rows a save would still store: placed, and free of a clip. */
+  const saveable = spans.filter(canSave).length;
 
   // The selection follows the rows: a filter that hides it, a re-guess that
   // drops it, or the first load all land on the first passage still visible.
@@ -719,9 +743,9 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
         }
         return;
       }
-      // The verdict keys are for the passage in front of you, and the passage is
-      // only in front of you on the Review tab.
-      if (tab !== "review") return;
+      // The transport keys are for the passage in front of you, and the passage
+      // is only in front of you on the Texts tab.
+      if (tab !== "texts") return;
       if (!selectedProposal) return;
 
       if (event.key === " ") {
@@ -740,7 +764,8 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
         return;
       }
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-        if (busy != null || selectedProposal.applied_uuid) return;
+        // A stored span is read-only until its clip is deleted.
+        if (busy != null || selectedProposal.clip) return;
         event.preventDefault();
         const delta =
           (event.key === "ArrowLeft" ? -1 : 1) * (event.shiftKey ? COARSE_STEP : NUDGE_STEP);
@@ -753,38 +778,26 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
         }
         return;
       }
-      if (event.key === "a" || event.key === "A") {
-        event.preventDefault();
-        decide(selectedProposal, "accepted");
-        return;
-      }
-      if (event.key === "r" || event.key === "R") {
-        event.preventDefault();
-        decide(selectedProposal, "rejected");
-      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // `moveSpan`, `togglePlay` and `decide` are re-created with this render; the
-    // listener is cheap to re-attach and this keeps every handler current.
+    // `moveSpan` and `togglePlay` are re-created with this render; the listener
+    // is cheap to re-attach and this keeps every handler current.
   });
 
   const tabItems: TabBarItem<TabId>[] = [
     { id: "sources", label: "Source Audios", icon: FolderOpen, count: sources.length },
-    { id: "review", label: "Review", icon: ListChecks, count: pending },
-    { id: "cut", label: "Cut", icon: Scissors, count: openCount },
+    { id: "texts", label: "Texts", icon: ListChecks, count: saveable },
   ];
 
   // One line under the tabs, always in the same place: what just happened, or
   // what the keys do on the view you are looking at.
   const tabHint =
-    tab === "review"
+    tab === "texts"
       ? spans.length === 0
         ? "Nothing placed yet: press Guess for all to walk the texts along the recordings."
-        : "Space play · A accept · R reject · ← → nudge the highlighted edge (Shift 100 ms) · ↑ ↓ text · Esc stop"
-      : tab === "sources"
-        ? "Listen to each file once, read what came back on the right, then judge the texts on Review."
-        : "Accept spans in Review, then cut them into this dataset here.";
+        : "Space play · ← → nudge the highlighted edge (Shift 100 ms) · ↑ ↓ text · Esc stop · Save stores the span"
+      : "Listen to each file once, read what came back on the right, then save the texts on the Texts tab.";
   const busyText =
     busy === "picking"
       ? "Picking the folder…"
@@ -796,10 +809,10 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
             ? "Placing every text…"
             : busy === "reguessing"
               ? "Placing this text again…"
-              : busy === "deciding"
-                ? "Saving the verdict…"
-                : busy === "cutting"
-                  ? "Cutting the accepted spans…"
+              : busy === "saving"
+                ? "Saving the span as standard audio…"
+                : busy === "deleting"
+                  ? "Deleting the clip…"
                   : "";
 
   return (
@@ -830,12 +843,12 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
         )}
       </div>
 
-      {tab === "review" ? (
+      {tab === "texts" ? (
         <div className="flex-1 min-h-0 overflow-y-auto p-4 lg:overflow-hidden">
           <div
-            ref={reviewSplit.containerRef}
+            ref={textsSplit.containerRef}
             className="flex flex-col gap-3 lg:grid lg:h-full lg:min-h-0 lg:gap-0"
-            style={reviewSplit.columns}
+            style={textsSplit.columns}
           >
             <PassageQueue
               proposals={spans}
@@ -848,18 +861,23 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
               selected={selected}
               onSelect={setSelected}
               onGuessAll={guess}
+              onSaveAll={saveAll}
+              saveable={saveable}
               onReguess={guessOne}
+              onSave={saveOne}
+              onDeleteClip={deleteClip}
               reguessing={guessingText}
+              saving={savingText}
               busy={busy != null}
               canGuess={transcribed > 0}
             />
 
             <Splitter
-              width={reviewSplit.width}
+              width={textsSplit.width}
               label="Resize the text list and the passage"
-              onChange={reviewSplit.resize}
-              onCommit={reviewSplit.commit}
-              onReset={reviewSplit.reset}
+              onChange={textsSplit.resize}
+              onCommit={textsSplit.commit}
+              onReset={textsSplit.reset}
             />
 
             <PassageEditor
@@ -870,7 +888,6 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
               duration={duration}
               playhead={playhead}
               playing={playing}
-              loop={loop}
               busy={busy != null}
               activeEdge={activeEdge}
               emptyHint={emptyHint}
@@ -885,17 +902,20 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
               onMove={(start, end) => {
                 if (selectedProposal) moveSpan(selectedProposal, start, end);
               }}
-              onDecide={(state) => {
-                if (selectedProposal) decide(selectedProposal, state);
-              }}
               onPlay={togglePlay}
-              onToggleLoop={() => setLoop((value) => !value)}
               onScrub={scrub}
               onSelect={setSelected}
+              onSave={() => {
+                if (selectedProposal) saveOne(selectedProposal.text_uuid);
+              }}
+              onDeleteClip={() => {
+                if (selectedProposal) deleteClip(selectedProposal);
+              }}
+              saving={savingText != null && savingText === selectedProposal?.text_uuid}
             />
           </div>
         </div>
-      ) : tab === "sources" ? (
+      ) : (
         <div className="flex-1 min-h-0 overflow-y-auto p-4 lg:overflow-hidden">
           <SourceAudiosTab
             mobile={mobile}
@@ -918,27 +938,6 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
             onOpenResult={(sourceUuid: string) => {
               void openTranscript(sourceUuid);
             }}
-          />
-        </div>
-      ) : (
-        <div className="flex-1 min-h-0 overflow-y-auto p-4">
-          <CutTab
-            proposals={spans}
-            counts={counts}
-            busy={busy}
-            threshold={threshold}
-            thresholdDraft={thresholdDraft}
-            onThresholdDraft={setThresholdDraft}
-            onThresholdCommit={commitThreshold}
-            acceptAllCount={acceptAllCount}
-            rejectAllCount={rejectAllCount}
-            onDecideMany={decideMany}
-            onApply={applyAccepted}
-            onOpen={(textUuid: string) => {
-              setSelected(textUuid);
-              setTab("review");
-            }}
-            onReject={(proposal) => decide(proposal, "rejected")}
           />
         </div>
       )}

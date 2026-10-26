@@ -1,19 +1,22 @@
 "use client";
 
-import { Check, ChevronLeft, ChevronRight, Crosshair, Play, Repeat, Square, Wand2, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Crosshair, Play, Square, Wand2 } from "lucide-react";
 import { useState } from "react";
-import type { ReactNode } from "react";
-import type { AlignProposal, AlignProposalState } from "@/lib/read_aloud/sourceAlign";
+import type { AlignProposal } from "@/lib/read_aloud/sourceAlign";
+import { ClipChip, DeleteClipButton, SaveClipButton } from "./ClipActions";
 import SpanTrack from "./SpanTrack";
 import { MIN_SPAN, clock, clockShort, confidenceTone, percent, roundMs } from "./format";
 
 /**
- * One passage, open at full size: what it says, where it sits in its recording,
- * the audio around its span, and the two edges at millisecond precision.
+ * One passage, open at full size: the audio at the top, the text underneath.
  *
- * This is the pane the job is actually done in. It shows one passage rather
- * than forty rows so the waveform can be big enough to judge, and it keeps the
- * verdict beside the numbers that justify it.
+ * The pane is a fixed column of three bands — what the recording is and where
+ * the span sits, the text itself on its own ground, and the transport — so the
+ * waveform never scrolls out of reach while a long passage is read, and the
+ * play button sits under the text where the eye is when the reading ends. A
+ * text that already has a clip keeps its span read-only: the clip holds the
+ * seconds its wav was cut from, so it has to be deleted before a new span can
+ * take its place.
  */
 
 type Edge = "start" | "end";
@@ -209,7 +212,6 @@ type Props = {
   duration: number | null;
   playhead: number | null;
   playing: boolean;
-  loop: boolean;
   busy: boolean;
   activeEdge: Edge;
   emptyHint: string;
@@ -219,11 +221,15 @@ type Props = {
   onStep: (direction: -1 | 1) => void;
   onActivateEdge: (edge: Edge) => void;
   onMove: (start: number, end: number) => void;
-  onDecide: (state: AlignProposalState) => void;
   onPlay: (context: boolean) => void;
-  onToggleLoop: () => void;
   onScrub: (seconds: number) => void;
   onSelect: (textUuid: string) => void;
+  /** Save this span as the text's clip — the row's Save, in the pane. */
+  onSave: () => void;
+  /** Delete the clip standing between this span and that save. */
+  onDeleteClip: () => void;
+  /** The save is in flight. */
+  saving: boolean;
 };
 
 export default function PassageEditor({
@@ -234,7 +240,6 @@ export default function PassageEditor({
   duration,
   playhead,
   playing,
-  loop,
   busy,
   activeEdge,
   emptyHint,
@@ -243,14 +248,15 @@ export default function PassageEditor({
   onStep,
   onActivateEdge,
   onMove,
-  onDecide,
   onPlay,
-  onToggleLoop,
   onScrub,
   onSelect,
+  onSave,
+  onDeleteClip,
+  saving,
 }: Props) {
-  // No local state beyond the field drafts: the workspace owns the span, the
-  // audio element and the verdict, so this pane can be re-rendered freely.
+  // No local state beyond the field drafts: the workspace owns the span and
+  // the audio element, so this pane can be re-rendered freely.
   if (!proposal) {
     return (
       <section className="rounded-xl border border-border-default bg-bg-card flex flex-col min-w-0 min-h-0 overflow-hidden">
@@ -260,7 +266,7 @@ export default function PassageEditor({
             <p className="text-sm text-text-secondary max-w-[420px]">{emptyHint}</p>
             <p className="text-[11px] text-text-tertiary max-w-[420px]">
               The Source Audios tab listens to each file once and places the passages; this tab is
-              where they are judged and cut from.
+              where a span is checked by ear and saved as the text's clip.
             </p>
           </div>
         </div>
@@ -269,15 +275,10 @@ export default function PassageEditor({
   }
 
   const refused = proposal.status === "refused";
-  const applied = Boolean(proposal.applied_uuid);
-  const locked = busy || applied || refused;
-  const stateChip = applied
-    ? "bg-accent-bg/15 text-accent-bg"
-    : proposal.state === "accepted"
-      ? "bg-accent-bg/15 text-accent-bg"
-      : proposal.state === "rejected"
-        ? "bg-bg-muted text-text-tertiary"
-        : "bg-bg-muted text-text-secondary";
+  // A clip is a cut wav that holds the seconds it was cut from, so a stored
+  // span is read-only until that clip is deleted.
+  const blocked = proposal.clip != null;
+  const locked = busy || refused || blocked;
 
   const setStart = (raw: number) => {
     const start = Math.min(Math.max(0, raw), span.end - MIN_SPAN);
@@ -288,43 +289,16 @@ export default function PassageEditor({
     onMove(span.start, roundMs(end));
   };
 
-  const decideButton = (
-    state: AlignProposalState,
-    icon: ReactNode,
-    label: string,
-    keyHint: string
-  ) => {
-    const active = proposal.state === state;
-    return (
-      <button
-        type="button"
-        onClick={() => onDecide(state)}
-        disabled={locked || active}
-        title={`${label} (${keyHint})`}
-        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs cursor-pointer disabled:cursor-not-allowed ${
-          active
-            ? state === "accepted"
-              ? "bg-accent-bg text-white"
-              : "bg-bg-muted text-text-primary border border-border-default"
-            : state === "accepted"
-              ? "bg-accent-bg/15 text-accent-bg hover:bg-accent-bg/25 disabled:opacity-50"
-              : "bg-bg-muted text-text-secondary hover:bg-bg-hover disabled:opacity-50"
-        }`}
-      >
-        {icon}
-        {label}
-        <span className="text-[10px] opacity-60">{keyHint}</span>
-      </button>
-    );
-  };
-
   return (
     <section className="rounded-xl border border-border-default bg-bg-card flex flex-col min-w-0 min-h-0 overflow-hidden">
-      <div className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col gap-4">
+      {/* The audio band. It does not scroll: the waveform and the two edges
+          stay in reach however long the passage below turns out to be. */}
+      <div className="shrink-0 px-4 py-3 flex flex-col gap-3 border-b border-border-default">
         <div className="flex items-start gap-2 flex-wrap">
           <h2 className="text-base font-medium text-text-primary min-w-0 break-words">
             {proposal.title || "Untitled"}
           </h2>
+          {proposal.clip && <ClipChip clip={proposal.clip} />}
           <span className="ml-auto flex items-center gap-2 text-[11px] tabular-nums">
             {!refused && (
               <span
@@ -339,20 +313,13 @@ export default function PassageEditor({
                 {proposal.matched_words}/{proposal.reference_words} w
               </span>
             )}
-            <span className={`px-1.5 py-0.5 rounded ${stateChip}`}>
-              {applied ? "stored" : proposal.state}
-            </span>
           </span>
         </div>
-
-        <p className="text-sm leading-relaxed text-text-primary whitespace-pre-wrap break-words">
-          {proposal.content}
-        </p>
 
         {refused ? (
           <p className="text-[11px] text-warning-text">
             {proposal.note || "The guess refused this passage."} A refused passage has no span to
-            move or accept — re-guess with another folder, or leave it out.
+            move or save — re-guess with another folder, or leave it out.
           </p>
         ) : (
           <>
@@ -408,45 +375,6 @@ export default function PassageEditor({
               onActivateEdge={onActivateEdge}
             />
 
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => onPlay(false)}
-                disabled={!proposal.source_path}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-bg-muted text-text-secondary text-[11px] hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                title={playing ? "Stop (Space)" : "Play this span (Space)"}
-              >
-                {playing ? <Square size={11} /> : <Play size={11} />}
-                {playing ? "Stop" : "Play span"}
-              </button>
-              <button
-                type="button"
-                onClick={() => onPlay(true)}
-                disabled={!proposal.source_path}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-bg-muted text-text-secondary text-[11px] hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Play half a second each side, to hear the edge in context"
-              >
-                ±0.5 s
-              </button>
-              <button
-                type="button"
-                onClick={onToggleLoop}
-                aria-pressed={loop}
-                className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[11px] cursor-pointer ${
-                  loop
-                    ? "bg-accent-bg/15 text-accent-bg"
-                    : "bg-bg-muted text-text-secondary hover:bg-bg-hover"
-                }`}
-                title={loop ? "Looping — click to play once" : "Loop the span while you listen"}
-              >
-                <Repeat size={11} />
-                Loop
-              </button>
-              <span className="text-[10px] text-text-tertiary tabular-nums">
-                {(span.end - span.start).toFixed(3)} s
-              </span>
-            </div>
-
             <div className="flex flex-col gap-1.5">
               <EdgeRow
                 edge="start"
@@ -467,20 +395,61 @@ export default function PassageEditor({
                 onActivate={() => onActivateEdge("end")}
               />
             </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              {decideButton("accepted", <Check size={12} />, "Accept", "A")}
-              {decideButton("rejected", <X size={12} />, "Reject", "R")}
-              <span className="text-[11px] text-text-tertiary">
-                {applied
-                  ? "Already cut — the clip is this text's standard audio."
-                  : "Accepted spans are cut in step 4, not here."}
-              </span>
-            </div>
-
-            {proposal.note && <p className="text-[11px] text-text-tertiary">{proposal.note}</p>}
           </>
         )}
+      </div>
+
+      {/* The text, on its own ground — a different surface, so the eye can tell
+          what is heard from what is read, and it scrolls instead of the audio. */}
+      <div className="flex-1 min-h-0 overflow-y-auto bg-bg-muted px-4 py-3 flex flex-col gap-2">
+        <p className="text-sm leading-relaxed text-text-primary whitespace-pre-wrap break-words">
+          {proposal.content}
+        </p>
+        {blocked && (
+          <p className="text-[11px] text-text-secondary">
+            This text already has standard audio, so its span is locked. Delete the clip to cut
+            this one instead.
+          </p>
+        )}
+        {proposal.note && !refused && (
+          <p className="text-[11px] text-text-tertiary">{proposal.note}</p>
+        )}
+      </div>
+
+      {/* Under the text, where the reading ends: play, then the two verbs that
+          decide whether this span becomes (or has to give way to) a clip. */}
+      <div className="shrink-0 px-4 py-2 border-t border-border-default flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => onPlay(false)}
+          disabled={!proposal.source_path}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-bg-muted text-text-secondary text-[11px] hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+          title={playing ? "Stop (Space)" : "Play this span (Space)"}
+        >
+          {playing ? <Square size={11} /> : <Play size={11} />}
+          {playing ? "Stop" : "Play span"}
+        </button>
+        <button
+          type="button"
+          onClick={() => onPlay(true)}
+          disabled={!proposal.source_path}
+          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-bg-muted text-text-secondary text-[11px] hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+          title="Play half a second each side, to hear the edge in context"
+        >
+          ±0.5 s
+        </button>
+        <span className="text-[10px] text-text-tertiary tabular-nums">
+          {(span.end - span.start).toFixed(3)} s
+        </span>
+        <span className="ml-auto flex items-center gap-1.5">
+          <DeleteClipButton clip={proposal.clip} busy={busy} onDelete={onDeleteClip} />
+          <SaveClipButton
+            proposal={proposal}
+            busy={busy}
+            saving={saving}
+            onSave={onSave}
+          />
+        </span>
       </div>
     </section>
   );

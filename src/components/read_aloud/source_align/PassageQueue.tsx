@@ -1,58 +1,50 @@
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
-import { AlertTriangle, Check, Loader2, RotateCcw, Search, Upload, Wand2, X } from "lucide-react";
+import { AlertTriangle, Loader2, RotateCcw, Save, Search, Wand2, X } from "lucide-react";
 import type { AlignProposal } from "@/lib/read_aloud/sourceAlign";
+import { ClipChip, DeleteClipButton, SaveClipButton } from "./ClipActions";
 import { clock, confidenceTone, percent } from "./format";
 
 /**
- * The queue: every text in reading order, narrowed by what you still have to
- * decide.
+ * The queue: every text in reading order, with the two verbs that belong to it
+ * at the bottom right of its row — place it again, and save (or delete) the one
+ * clip it is allowed to have.
  *
- * It is a list to walk, not a form — one line per text, a filter, and nothing
- * else. The verbs live here because a span is judged next to its neighbours:
- * "guess for all" re-places the whole set in order, and "re-guess" re-places
- * one text without touching the edges already nudged on any other. The batch
- * verdicts and the accepted set live on the Cut tab, so this rail stays narrow
- * enough to sit beside the passage being worked on.
+ * Two lines per row, because that is what the rule needs to fit: the title and
+ * the "clip exists" chip on top, where the eye starts, and Save / Delete clip
+ * underneath, where it ends. A save never overwrites a clip, so a text that
+ * already has one shows the delete instead of a Save that would do nothing.
  */
 
-export type QueueFilter = "all" | "review" | "accepted" | "rejected" | "refused" | "stored";
+export type QueueFilter = "all" | "unsaved" | "saved" | "refused";
 
 export const QUEUE_FILTERS: { id: QueueFilter; label: string }[] = [
   { id: "all", label: "All" },
-  { id: "review", label: "Review" },
-  { id: "accepted", label: "Accepted" },
-  { id: "rejected", label: "Rejected" },
+  { id: "unsaved", label: "Unsaved" },
+  { id: "saved", label: "Saved" },
   { id: "refused", label: "Refused" },
-  { id: "stored", label: "Stored" },
 ];
+
+/** True when this row's span could still become a clip. */
+export function canSave(proposal: AlignProposal): boolean {
+  return proposal.status === "proposed" && proposal.clip == null;
+}
 
 export function matchesFilter(proposal: AlignProposal, filter: QueueFilter): boolean {
   switch (filter) {
     case "all":
       return true;
-    case "review":
-      return proposal.status === "proposed" && proposal.state === "pending";
-    case "accepted":
-      return proposal.state === "accepted";
-    case "rejected":
-      return proposal.state === "rejected";
+    case "unsaved":
+      return canSave(proposal);
+    case "saved":
+      return proposal.clip != null;
     case "refused":
       return proposal.status === "refused";
-    case "stored":
-      return proposal.applied_uuid != null;
   }
 }
 
 function StateMark({ proposal }: { proposal: AlignProposal }) {
-  if (proposal.applied_uuid) {
-    return (
-      <span className="shrink-0 text-accent-bg" title="Cut into the dataset">
-        <Upload size={11} />
-      </span>
-    );
-  }
   if (proposal.status === "refused") {
     return (
       <span className="shrink-0 text-warning-text" title="The guess refused this passage">
@@ -60,26 +52,7 @@ function StateMark({ proposal }: { proposal: AlignProposal }) {
       </span>
     );
   }
-  if (proposal.state === "accepted") {
-    return (
-      <span className="shrink-0 text-accent-bg" title="Accepted">
-        <Check size={11} />
-      </span>
-    );
-  }
-  if (proposal.state === "rejected") {
-    return (
-      <span className="shrink-0 text-text-tertiary" title="Rejected">
-        <X size={11} />
-      </span>
-    );
-  }
-  return (
-    <span
-      className="shrink-0 w-[9px] h-[9px] rounded-full border border-text-tertiary/60"
-      title="Not decided yet"
-    />
-  );
+  return null;
 }
 
 type Props = {
@@ -96,10 +69,20 @@ type Props = {
   onSelect: (textUuid: string) => void;
   /** Place every text along the recordings again, in reading order. */
   onGuessAll: () => void;
+  /** Save every placed span whose text has no clip yet. */
+  onSaveAll: () => void;
+  /** How many rows Save all would store — 0 turns the button off. */
+  saveable: number;
   /** Place one text again, leaving every other span in the file alone. */
   onReguess: (textUuid: string) => void;
+  /** Save one row's span as its text's clip. */
+  onSave: (textUuid: string) => void;
+  /** Delete a text's clip, which is what unblocks its Save. */
+  onDeleteClip: (proposal: AlignProposal) => void;
   /** The text being re-guessed right now, so its row shows the spinner. */
   reguessing: string | null;
+  /** The text being saved right now, for the same reason. */
+  saving: string | null;
   /** A run of any kind is in flight: the queue's buttons step aside for it. */
   busy: boolean;
   /** Nothing to guess against until at least one recording is transcribed. */
@@ -117,8 +100,13 @@ export default function PassageQueue({
   selected,
   onSelect,
   onGuessAll,
+  onSaveAll,
+  saveable,
   onReguess,
+  onSave,
+  onDeleteClip,
   reguessing,
+  saving,
   busy,
   canGuess,
 }: Props) {
@@ -161,6 +149,24 @@ export default function PassageQueue({
         >
           <Wand2 size={11} />
           Guess for all
+        </button>
+
+        {/* The save follows the guess, in the same place: it stores every span
+            that has no clip yet and skips the ones that do. */}
+        <button
+          type="button"
+          onClick={onSaveAll}
+          disabled={busy || saveable === 0}
+          className="inline-flex items-center justify-center gap-1.5 px-2 py-1 rounded-md text-[11px] bg-bg-muted text-text-secondary border border-border-default hover:bg-bg-hover hover:text-text-primary cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-bg-muted"
+          title={
+            saveable === 0
+              ? "Nothing to save: every placed text already has a clip, or none is placed"
+              : `Save ${saveable} span${saveable === 1 ? "" : "s"} as standard audio — texts that already have a clip are skipped`
+          }
+        >
+          <Save size={11} />
+          Save all clips
+          <span className="tabular-nums opacity-70">{saveable}</span>
         </button>
 
         <div className="flex flex-wrap gap-1">
@@ -223,11 +229,11 @@ export default function PassageQueue({
             const active = proposal.text_uuid === selected;
             const working = reguessing === proposal.text_uuid;
             return (
-              // The row is a box with two buttons in it rather than one button
-              // with another inside: a button cannot nest a button.
+              // The row is a box with several buttons in it rather than one
+              // button with others inside: a button cannot nest a button.
               <div
                 key={proposal.text_uuid}
-                className={`flex items-center border-l-2 ${
+                className={`flex flex-col border-l-2 ${
                   active ? "border-accent-bg bg-bg-muted" : "border-transparent hover:bg-bg-hover"
                 }`}
               >
@@ -238,18 +244,24 @@ export default function PassageQueue({
                   }}
                   onClick={() => onSelect(proposal.text_uuid)}
                   aria-current={active ? "true" : undefined}
-                  className="min-w-0 flex-1 text-left flex items-center gap-2 pl-2 pr-1 py-1.5 cursor-pointer"
+                  className="min-w-0 text-left flex items-center gap-2 px-2 pt-1.5 pb-0.5 cursor-pointer"
                 >
                   <span className="w-6 shrink-0 text-right text-[10px] text-text-tertiary tabular-nums">
                     {ordinal.get(proposal.text_uuid) ?? ""}
                   </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-xs text-text-primary truncate">
+                  <span className="min-w-0 flex-1 flex items-center gap-1.5">
+                    <span className="min-w-0 truncate text-xs text-text-primary">
                       {proposal.title || "Untitled"}
                     </span>
-                    <span className="block text-[10px] text-text-tertiary tabular-nums">
-                      {refused ? "no span" : clock(proposal.start)}
-                    </span>
+                    {proposal.clip && <ClipChip clip={proposal.clip} />}
+                    {!refused && !proposal.clip && (
+                      <span
+                        className="shrink-0 text-[9px] uppercase tracking-wide text-text-tertiary"
+                        title="Placed, but not saved as this text's standard audio yet"
+                      >
+                        unsaved
+                      </span>
+                    )}
                   </span>
                   {!refused && (
                     <span
@@ -262,27 +274,52 @@ export default function PassageQueue({
                   <StateMark proposal={proposal} />
                 </button>
 
-                {/* Re-places this text alone: the spans of its neighbours,
-                    hand-nudged or not, are read but never rewritten. */}
-                <button
-                  type="button"
-                  onClick={() => onReguess(proposal.text_uuid)}
-                  disabled={busy || !canGuess}
-                  aria-label={`Guess ${proposal.title || "this text"} again`}
-                  title={
-                    canGuess
-                      ? "Guess this text again — the other texts keep their spans"
-                      : "Listen to at least one recording first — Source Audios tab"
-                  }
-                  className="shrink-0 mr-1 inline-flex items-center gap-1 px-1.5 py-1 rounded-md border border-border-default text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                >
-                  {working ? (
-                    <Loader2 size={10} className="animate-spin" />
-                  ) : (
-                    <RotateCcw size={10} />
-                  )}
-                  Re-guess
-                </button>
+                {/* The verbs, bottom right: where the row ends, so a column of
+                    them lines up down the rail. */}
+                <div className="flex items-center gap-1 pl-10 pr-2 pb-1.5 pt-0.5">
+                  <span
+                    className="mr-auto min-w-0 truncate text-[10px] text-text-tertiary tabular-nums"
+                    title={
+                      refused
+                        ? undefined
+                        : `${clock(proposal.start)} – ${clock(proposal.end)}`
+                    }
+                  >
+                    {refused ? proposal.note || "no span" : clock(proposal.start)}
+                  </span>
+                  {/* Re-places this text alone: the spans of its neighbours,
+                      hand-nudged or not, are read but never rewritten. */}
+                  <button
+                    type="button"
+                    onClick={() => onReguess(proposal.text_uuid)}
+                    disabled={busy || !canGuess}
+                    aria-label={`Guess ${proposal.title || "this text"} again`}
+                    title={
+                      canGuess
+                        ? "Guess this text again — the other texts keep their spans"
+                        : "Listen to at least one recording first — Source Audios tab"
+                    }
+                    className="shrink-0 inline-flex items-center gap-1 px-1.5 py-1 rounded-md border border-border-default text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                  >
+                    {working ? (
+                      <Loader2 size={10} className="animate-spin" />
+                    ) : (
+                      <RotateCcw size={10} />
+                    )}
+                    Re-guess
+                  </button>
+                  <DeleteClipButton
+                    clip={proposal.clip}
+                    busy={busy}
+                    onDelete={() => onDeleteClip(proposal)}
+                  />
+                  <SaveClipButton
+                    proposal={proposal}
+                    busy={busy}
+                    saving={saving === proposal.text_uuid}
+                    onSave={() => onSave(proposal.text_uuid)}
+                  />
+                </div>
               </div>
             );
           })
