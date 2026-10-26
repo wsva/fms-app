@@ -863,11 +863,6 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
               onGuessAll={guess}
               onSaveAll={saveAll}
               saveable={saveable}
-              onReguess={guessOne}
-              onSave={saveOne}
-              onDeleteClip={deleteClip}
-              reguessing={guessingText}
-              saving={savingText}
               busy={busy != null}
               canGuess={transcribed > 0}
             />
@@ -905,6 +900,9 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
               onPlay={togglePlay}
               onScrub={scrub}
               onSelect={setSelected}
+              onReguess={() => {
+                if (selectedProposal) guessOne(selectedProposal.text_uuid);
+              }}
               onSave={() => {
                 if (selectedProposal) saveOne(selectedProposal.text_uuid);
               }}
@@ -912,6 +910,8 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
                 if (selectedProposal) deleteClip(selectedProposal);
               }}
               saving={savingText != null && savingText === selectedProposal?.text_uuid}
+              reguessing={selectedProposal?.text_uuid === guessingText}
+              canGuess={transcribed > 0}
             />
           </div>
         </div>

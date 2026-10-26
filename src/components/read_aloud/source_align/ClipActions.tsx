@@ -9,8 +9,9 @@ import type { AlignClip, AlignProposal } from "@/lib/read_aloud/sourceAlign";
  * A text owns at most one standard audio, and a save never overwrites one: the
  * clip on disk still holds the seconds its wav was cut from, so the only way to
  * give a text a new span is to delete the clip first. The chip says a clip is
- * there, and the button beside it is the one verb that state allows — so a row
- * never offers a Save that would silently do nothing.
+ * there — in the queue, and at the head of the passage — and the button beside
+ * it is the one verb that state allows, so Save is never offered for a text
+ * whose click would silently do nothing.
  */
 
 export function ClipChip({ clip }: { clip: AlignClip }) {
@@ -28,10 +29,10 @@ export function ClipChip({ clip }: { clip: AlignClip }) {
 }
 
 const BUTTON =
-  "shrink-0 inline-flex items-center gap-1 px-1.5 py-1 rounded-md border text-[10px] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent";
+  "shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-[11px] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent";
 
 /**
- * Store this row's span. Off while the row has nothing to store — a refusal, or
+ * Store this passage's span. Off while there is nothing to store — a refusal, or
  * a text whose clip has to go first — and the title says which.
  */
 export function SaveClipButton({
@@ -61,9 +62,9 @@ export function SaveClipButton({
               ? "Saving this span…"
               : "Save this span as the text's standard audio"
       }
-      className={`${BUTTON} border-accent-bg/40 bg-accent-bg/15 text-accent-bg hover:bg-accent-bg/25`}
+      className={`${BUTTON} border-accent-bg bg-accent-bg text-white hover:bg-accent-bg/90`}
     >
-      {saving ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
+      {saving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
       Save
     </button>
   );
@@ -88,7 +89,7 @@ export function DeleteClipButton({
       title="Delete this clip — the span can then be saved again"
       className={`${BUTTON} border-border-default bg-bg-muted text-text-secondary hover:bg-bg-hover hover:text-error-text`}
     >
-      <Trash2 size={10} />
+      <Trash2 size={11} />
       Delete clip
     </button>
   );

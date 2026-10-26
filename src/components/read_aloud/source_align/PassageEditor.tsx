@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronLeft, ChevronRight, Crosshair, Play, Square, Wand2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Crosshair, Loader2, Play, RotateCcw, Square, Wand2 } from "lucide-react";
 import { useState } from "react";
 import type { AlignProposal } from "@/lib/read_aloud/sourceAlign";
 import { ClipChip, DeleteClipButton, SaveClipButton } from "./ClipActions";
@@ -13,10 +13,12 @@ import { MIN_SPAN, clock, clockShort, confidenceTone, percent, roundMs } from ".
  * The pane is a fixed column of three bands — what the recording is and where
  * the span sits, the text itself on its own ground, and the transport — so the
  * waveform never scrolls out of reach while a long passage is read, and the
- * play button sits under the text where the eye is when the reading ends. A
- * text that already has a clip keeps its span read-only: the clip holds the
- * seconds its wav was cut from, so it has to be deleted before a new span can
- * take its place.
+ * play button sits under the text where the eye is when the reading ends.
+ *
+ * The verbs that act on this text close the first band, directly under the two
+ * edges they change: Re-guess, and Save — or the Delete clip that has to come
+ * first, since a clip holds the seconds its wav was cut from and a save never
+ * overwrites one.
  */
 
 type Edge = "start" | "end";
@@ -224,12 +226,18 @@ type Props = {
   onPlay: (context: boolean) => void;
   onScrub: (seconds: number) => void;
   onSelect: (textUuid: string) => void;
-  /** Save this span as the text's clip — the row's Save, in the pane. */
+  /** Place this text again, leaving every other span in the file alone. */
+  onReguess: () => void;
+  /** Save this span as the text's clip. */
   onSave: () => void;
   /** Delete the clip standing between this span and that save. */
   onDeleteClip: () => void;
-  /** The save is in flight. */
+  /** A re-guess of this text is in flight. */
+  reguessing: boolean;
+  /** A save is in flight. */
   saving: boolean;
+  /** Some recording is transcribed, so there is something to guess against. */
+  canGuess: boolean;
 };
 
 export default function PassageEditor({
@@ -251,9 +259,12 @@ export default function PassageEditor({
   onPlay,
   onScrub,
   onSelect,
+  onReguess,
   onSave,
   onDeleteClip,
+  reguessing,
   saving,
+  canGuess,
 }: Props) {
   // No local state beyond the field drafts: the workspace owns the span and
   // the audio element, so this pane can be re-rendered freely.
@@ -397,6 +408,33 @@ export default function PassageEditor({
             </div>
           </>
         )}
+
+        {/* The verbs close this band, directly under the two edges they act on:
+            a span is only worth saving or re-placing while its times are in
+            sight. A refused passage keeps Re-guess here too — that is the one
+            thing it can do — and its Save explains why it is off. */}
+        <div className="flex items-center gap-1.5 justify-end">
+          <button
+            type="button"
+            onClick={onReguess}
+            disabled={busy || !canGuess}
+            title={
+              canGuess
+                ? "Guess this text again — the other texts keep their spans"
+                : "Listen to at least one recording first — Source Audios tab"
+            }
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-border-default bg-bg-muted text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+          >
+            {reguessing ? (
+              <Loader2 size={11} className="animate-spin" />
+            ) : (
+              <RotateCcw size={11} />
+            )}
+            Re-guess
+          </button>
+          <DeleteClipButton clip={proposal.clip} busy={busy} onDelete={onDeleteClip} />
+          <SaveClipButton proposal={proposal} busy={busy} saving={saving} onSave={onSave} />
+        </div>
       </div>
 
       {/* The text, on its own ground — a different surface, so the eye can tell
@@ -416,8 +454,8 @@ export default function PassageEditor({
         )}
       </div>
 
-      {/* Under the text, where the reading ends: play, then the two verbs that
-          decide whether this span becomes (or has to give way to) a clip. */}
+      {/* Under the text, where the reading ends: the transport, and how long
+          the span is. The verbs are up top, beside the edges they change. */}
       <div className="shrink-0 px-4 py-2 border-t border-border-default flex flex-wrap items-center gap-2">
         <button
           type="button"
@@ -440,15 +478,6 @@ export default function PassageEditor({
         </button>
         <span className="text-[10px] text-text-tertiary tabular-nums">
           {(span.end - span.start).toFixed(3)} s
-        </span>
-        <span className="ml-auto flex items-center gap-1.5">
-          <DeleteClipButton clip={proposal.clip} busy={busy} onDelete={onDeleteClip} />
-          <SaveClipButton
-            proposal={proposal}
-            busy={busy}
-            saving={saving}
-            onSave={onSave}
-          />
         </span>
       </div>
     </section>

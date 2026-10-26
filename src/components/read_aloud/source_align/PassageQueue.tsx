@@ -1,20 +1,20 @@
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
-import { AlertTriangle, Loader2, RotateCcw, Save, Search, Wand2, X } from "lucide-react";
+import { AlertTriangle, Save, Search, Wand2, X } from "lucide-react";
 import type { AlignProposal } from "@/lib/read_aloud/sourceAlign";
-import { ClipChip, DeleteClipButton, SaveClipButton } from "./ClipActions";
+import { ClipChip } from "./ClipActions";
 import { clock, confidenceTone, percent } from "./format";
 
 /**
- * The queue: every text in reading order, with the two verbs that belong to it
- * at the bottom right of its row — place it again, and save (or delete) the one
- * clip it is allowed to have.
+ * The queue: every text in reading order, one line each — its number, its
+ * title, the chip that says it already owns a clip, and where the span starts.
  *
- * Two lines per row, because that is what the rule needs to fit: the title and
- * the "clip exists" chip on top, where the eye starts, and Save / Delete clip
- * underneath, where it ends. A save never overwrites a clip, so a text that
- * already has one shows the delete instead of a Save that would do nothing.
+ * The verbs that act on a text are deliberately not here. They live in the pane
+ * beside the queue, under the two edges they act on: a row is a target, and a
+ * target the width of a rail cannot hold three buttons and still be easy to hit.
+ * What a row has to answer is "which text is this, and does it have a clip" —
+ * so that is all it draws.
  */
 
 export type QueueFilter = "all" | "unsaved" | "saved" | "refused";
@@ -73,16 +73,6 @@ type Props = {
   onSaveAll: () => void;
   /** How many rows Save all would store — 0 turns the button off. */
   saveable: number;
-  /** Place one text again, leaving every other span in the file alone. */
-  onReguess: (textUuid: string) => void;
-  /** Save one row's span as its text's clip. */
-  onSave: (textUuid: string) => void;
-  /** Delete a text's clip, which is what unblocks its Save. */
-  onDeleteClip: (proposal: AlignProposal) => void;
-  /** The text being re-guessed right now, so its row shows the spinner. */
-  reguessing: string | null;
-  /** The text being saved right now, for the same reason. */
-  saving: string | null;
   /** A run of any kind is in flight: the queue's buttons step aside for it. */
   busy: boolean;
   /** Nothing to guess against until at least one recording is transcribed. */
@@ -102,11 +92,6 @@ export default function PassageQueue({
   onGuessAll,
   onSaveAll,
   saveable,
-  onReguess,
-  onSave,
-  onDeleteClip,
-  reguessing,
-  saving,
   busy,
   canGuess,
 }: Props) {
@@ -227,100 +212,61 @@ export default function PassageQueue({
           visible.map((proposal) => {
             const refused = proposal.status === "refused";
             const active = proposal.text_uuid === selected;
-            const working = reguessing === proposal.text_uuid;
             return (
-              // The row is a box with several buttons in it rather than one
-              // button with others inside: a button cannot nest a button.
-              <div
+              <button
                 key={proposal.text_uuid}
-                className={`flex flex-col border-l-2 ${
+                type="button"
+                ref={(node) => {
+                  rowsRef.current[proposal.text_uuid] = node;
+                }}
+                onClick={() => onSelect(proposal.text_uuid)}
+                aria-current={active ? "true" : undefined}
+                className={`w-full min-w-0 text-left flex items-center gap-2 px-2 py-1.5 border-l-2 cursor-pointer ${
                   active ? "border-accent-bg bg-bg-muted" : "border-transparent hover:bg-bg-hover"
                 }`}
               >
-                <button
-                  type="button"
-                  ref={(node) => {
-                    rowsRef.current[proposal.text_uuid] = node;
-                  }}
-                  onClick={() => onSelect(proposal.text_uuid)}
-                  aria-current={active ? "true" : undefined}
-                  className="min-w-0 text-left flex items-center gap-2 px-2 pt-1.5 pb-0.5 cursor-pointer"
-                >
-                  <span className="w-6 shrink-0 text-right text-[10px] text-text-tertiary tabular-nums">
-                    {ordinal.get(proposal.text_uuid) ?? ""}
+                <span className="w-6 shrink-0 text-right text-[10px] text-text-tertiary tabular-nums">
+                  {ordinal.get(proposal.text_uuid) ?? ""}
+                </span>
+                <span className="min-w-0 flex-1 flex items-center gap-1.5">
+                  <span className="min-w-0 truncate text-xs text-text-primary">
+                    {proposal.title || "Untitled"}
                   </span>
-                  <span className="min-w-0 flex-1 flex items-center gap-1.5">
-                    <span className="min-w-0 truncate text-xs text-text-primary">
-                      {proposal.title || "Untitled"}
-                    </span>
-                    {proposal.clip && <ClipChip clip={proposal.clip} />}
-                    {!refused && !proposal.clip && (
-                      <span
-                        className="shrink-0 text-[9px] uppercase tracking-wide text-text-tertiary"
-                        title="Placed, but not saved as this text's standard audio yet"
-                      >
-                        unsaved
-                      </span>
-                    )}
-                  </span>
-                  {!refused && (
+                  {proposal.clip && <ClipChip clip={proposal.clip} />}
+                  {!refused && !proposal.clip && (
                     <span
-                      className={`shrink-0 text-[10px] tabular-nums ${confidenceTone(proposal.confidence)}`}
-                      title="How much of the passage was heard, in order"
+                      className="shrink-0 text-[9px] uppercase tracking-wide text-text-tertiary"
+                      title="Placed, but not saved as this text's standard audio yet"
                     >
-                      {percent(proposal.confidence)}%
+                      unsaved
                     </span>
                   )}
-                  <StateMark proposal={proposal} />
-                </button>
-
-                {/* The verbs, bottom right: where the row ends, so a column of
-                    them lines up down the rail. */}
-                <div className="flex items-center gap-1 pl-10 pr-2 pb-1.5 pt-0.5">
+                </span>
+                {refused ? (
                   <span
-                    className="mr-auto min-w-0 truncate text-[10px] text-text-tertiary tabular-nums"
-                    title={
-                      refused
-                        ? undefined
-                        : `${clock(proposal.start)} – ${clock(proposal.end)}`
-                    }
+                    className="shrink-0 max-w-[45%] truncate text-[10px] text-text-tertiary"
+                    title={proposal.note}
                   >
-                    {refused ? proposal.note || "no span" : clock(proposal.start)}
+                    no span
                   </span>
-                  {/* Re-places this text alone: the spans of its neighbours,
-                      hand-nudged or not, are read but never rewritten. */}
-                  <button
-                    type="button"
-                    onClick={() => onReguess(proposal.text_uuid)}
-                    disabled={busy || !canGuess}
-                    aria-label={`Guess ${proposal.title || "this text"} again`}
-                    title={
-                      canGuess
-                        ? "Guess this text again — the other texts keep their spans"
-                        : "Listen to at least one recording first — Source Audios tab"
-                    }
-                    className="shrink-0 inline-flex items-center gap-1 px-1.5 py-1 rounded-md border border-border-default text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                ) : (
+                  <span
+                    className="shrink-0 text-[10px] text-text-tertiary tabular-nums"
+                    title={`${clock(proposal.start)} – ${clock(proposal.end)}`}
                   >
-                    {working ? (
-                      <Loader2 size={10} className="animate-spin" />
-                    ) : (
-                      <RotateCcw size={10} />
-                    )}
-                    Re-guess
-                  </button>
-                  <DeleteClipButton
-                    clip={proposal.clip}
-                    busy={busy}
-                    onDelete={() => onDeleteClip(proposal)}
-                  />
-                  <SaveClipButton
-                    proposal={proposal}
-                    busy={busy}
-                    saving={saving === proposal.text_uuid}
-                    onSave={() => onSave(proposal.text_uuid)}
-                  />
-                </div>
-              </div>
+                    {clock(proposal.start)}
+                  </span>
+                )}
+                {!refused && (
+                  <span
+                    className={`shrink-0 text-[10px] tabular-nums ${confidenceTone(proposal.confidence)}`}
+                    title="How much of the passage was heard, in order"
+                  >
+                    {percent(proposal.confidence)}%
+                  </span>
+                )}
+                <StateMark proposal={proposal} />
+              </button>
             );
           })
         )}
