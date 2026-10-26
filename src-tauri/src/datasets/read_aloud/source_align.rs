@@ -8,10 +8,36 @@
 //! whole dataset that way costs O(texts × files) minutes and throws away the one
 //! fact the bulk case has: the texts are in the same order as the recordings.
 //!
-//! This module pays for the transcription **once per file**, then walks the
-//! passages in `order_num` along one global token stream with a cursor that only
-//! moves forward. Each passage yields a span, the spans are written down as
-//! *proposals*, a human accepts or rejects them, and only then are the clips cut.
+//! This module pays for the transcription **once per file**, then places the
+//! passages along one global token stream in `order_num`: first the passages long
+//! enough to be found on their own, then everything in the gaps those leave. Each
+//! passage yields a span, the spans are written down as *proposals*, a human
+//! accepts or rejects them, and only then are the clips cut.
+//!
+//! ## Why two passes and not one walk
+//!
+//! The first version walked the passages with a cursor that only moved forward
+//! and aligned each one against a window growing from that cursor. On a real
+//! audiobook (784 mails, 34 files, 45 000 heard words) it placed five of them.
+//! Three things were wrong, and each one on its own is enough to lose a dataset:
+//!
+//! * the alignment was **global**, so a fifteen-word mail aligned against a
+//!   four-minute window had to delete three quarters of the window, and paid for
+//!   it with the words it should have matched — 7 matches where 11 were heard;
+//! * a wider window made that *worse*, but the wider answer overwrote the
+//!   narrower one, so refusing was the only way out of the loop;
+//! * one passage placed in the wrong place moved the cursor past the passages
+//!   that came after it, and everything behind the cursor refused. 500 of the
+//!   784 refusals in that run were one bad span in the first third of the book.
+//!
+//! So the guess no longer trusts a cursor. It trusts **reading order**: a text's
+//! position is predicted from the words counted before it ([`prior_position`]),
+//! a semi-global alignment asks "where in this window is this text" without
+//! paying for the rest of the window, and every passage's span is decided
+//! against that prediction rather than against where its neighbour happened to
+//! land. The passages too short to be evidence on their own are then aligned as
+//! one block inside the gap their neighbours leave, which cannot put them out of
+//! order even when the phrase they consist of occurs twenty times in the book.
 //!
 //! ## Storage
 //!
@@ -52,7 +78,7 @@ use crate::datasets::asr_metric;
 use crate::settings::SettingsState;
 
 use super::standard_audio::{
-    densest_run, text_reference, GUESS_MIN_MATCH_RATIO, GUESS_MIN_WORDS, GUESS_PAD_AFTER,
+    text_reference, GUESS_MAX_GAP, GUESS_MIN_MATCH_RATIO, GUESS_MIN_WORDS, GUESS_PAD_AFTER,
     GUESS_PAD_BEFORE,
 };
 use super::{find_dataset_dir, find_dataset_dir_write, open_db};
@@ -83,11 +109,34 @@ const PEAK_SECONDS: f64 = 0.02;
 /// cut than the boundary itself.
 const SNAP_WINDOW_SECS: f64 = 0.15;
 
-/// The first window a passage is searched in, how much it grows, and the factor
-/// past which a final attempt may as well be the rest of the stream.
-const SEARCH_INITIAL_TOKENS: usize = 400;
-const SEARCH_GROWTH: usize = 4;
-const SEARCH_MAX_FACTOR: usize = 64;
+/// How far from its predicted position a passage is looked for. The tight value
+/// is the common case and also what keeps a five-word one-liner from being
+/// matched to the same phrase twenty minutes later; the wide one is the retry
+/// for a passage the prediction put more than a page away.
+const PRIOR_SLACK_TOKENS: usize = 400;
+const PRIOR_WIDE_SLACK_TOKENS: usize = 1500;
+
+/// Longest window one semi-global pass aligns. The matrix costs a byte per cell,
+/// so a text of several hundred words must not be allowed to ask for a window
+/// the size of the whole book.
+const MAX_WINDOW_TOKENS: usize = 12_000;
+
+/// A text with fewer words than this is not evidence of anything by itself:
+/// "40 Sekunden später" is read a dozen times in a 20-hour book, so aligning it
+/// alone finds *an* occurrence, not *the* one. Those are placed as a block
+/// inside the gap their longer neighbours leave.
+const ANCHOR_MIN_WORDS: usize = 12;
+
+/// What a text long enough to divide a gap must still have been heard as. Below
+/// this it is a hint at a span, not a fact about where the book is.
+const ANCHOR_MIN_MATCH_RATIO: f64 = 0.7;
+
+/// How many tokens of distance from the predicted position one matched word is
+/// worth when two runs compete for the same passage. At 0.005 a run 400 tokens
+/// nearer the prediction beats a run that merely matched two more words, which
+/// is the point: both are plausible alignments, and only one is in the right
+/// part of the book.
+const PRIOR_DISTANCE_PENALTY: f64 = 0.005;
 
 /// Shortest span a proposal may describe. Below this the two edges are a
 /// mis-drag, not a reading.
@@ -669,6 +718,7 @@ pub(crate) fn transcribe(
 // ============================================================
 
 /// A stretch of the stream that matches a passage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Found {
     /// Absolute index of the run's first and last token in the stream.
     from: usize,
@@ -676,46 +726,148 @@ struct Found {
     matched: usize,
 }
 
+/// What the guess decided about one passage: the span worth proposing, and the
+/// best stretch of the stream pass one saw — kept even when nothing is worth
+/// proposing, because "the model heard 3 of your 5 words" is the difference
+/// between a text that is missing and a model that misheard.
+#[derive(Clone, Copy, Debug)]
+struct Guess {
+    span: Option<Found>,
+    heard: Option<Found>,
+}
+
+/// What one search turned up: the run worth a span, and the best run seen
+/// regardless, so a refusal can still say how much of the text was heard.
+#[derive(Debug, Default)]
+struct Search {
+    hit: Option<Found>,
+    best: Option<Found>,
+}
+
+/// `(first, last, matched)` of every maximal run of aligned pairs, in order.
+///
+/// The break rule is [`densest_run`]'s, but all the runs are kept: a passage can
+/// match two places in one window, and which of the two to keep is a question
+/// about where the passage *belongs*, not about which run is longer.
+fn runs_of(pairs: &[(usize, usize)]) -> Vec<(usize, usize, usize)> {
+    let mut runs: Vec<(usize, usize, usize)> = Vec::new();
+    let mut from = 0usize;
+    for index in 1..=pairs.len() {
+        let breaks = index == pairs.len()
+            || pairs[index].0.saturating_sub(pairs[index - 1].0) > GUESS_MAX_GAP
+            || pairs[index].1.saturating_sub(pairs[index - 1].1) > GUESS_MAX_GAP;
+        if breaks {
+            if index > from {
+                runs.push((pairs[from].1, pairs[index - 1].1, index - from));
+            }
+            from = index;
+        }
+    }
+    runs
+}
+
+/// Where reading order says a passage starts, in stream tokens.
+///
+/// A passage's text *is* what a stretch of the recording says, so the number of
+/// reference words before it maps onto the stream arithmetically: a book whose
+/// 784 mails hold 44 699 words against 45 828 heard tokens settles at 1:1, and
+/// every mail's expected position follows from the words counted before it. This
+/// is what keeps one bad span from dragging the rest with it — the prediction
+/// does not depend on where the previous passage was put, only on the order the
+/// texts were written in.
+fn prior_position(before: usize, total_reference: usize, total_stream: usize) -> usize {
+    if total_reference == 0 || total_stream == 0 {
+        return 0;
+    }
+    let position = (before as u128 * total_stream as u128 / total_reference as u128) as usize;
+    position.min(total_stream - 1)
+}
+
+/// The score two candidate runs are compared by: words matched, less a small
+/// charge for every token of distance from the predicted position.
+fn run_score(found: &Found, expected: usize) -> f64 {
+    found.matched as f64 - PRIOR_DISTANCE_PENALTY * found.from.abs_diff(expected) as f64
+}
+
+/// Scan one window: semi-global alignment of the whole passage, then the runs of
+/// the result, keeping the run that scores best against `expected`.
+fn scan_window(
+    reference: &[String],
+    stream: &[String],
+    lo: usize,
+    hi: usize,
+    expected: usize,
+    need: usize,
+) -> Search {
+    let mut search = Search::default();
+    if lo >= hi || reference.is_empty() {
+        return search;
+    }
+    let pairs = asr_metric::aligned_pairs_glocal(reference, &stream[lo..hi]);
+    for (first, last, matched) in runs_of(&pairs) {
+        let found = Found { from: first + lo, to: last + lo, matched };
+        if matched >= need && search.hit.map_or(true, |best| run_score(&found, expected) > run_score(&best, expected)) {
+            search.hit = Some(found);
+        }
+        if search.best.map_or(true, |best| found.matched > best.matched) {
+            search.best = Some(found);
+        }
+    }
+    search
+}
+
+/// Where one passage is read, judged against the position reading order predicts
+/// for it.
+///
+/// Tight window first, wide second. The tight one is where nine passages in ten
+/// are, and it is also what stops an eight-word one-liner from being matched to
+/// the same words twenty minutes later — a match that would otherwise score
+/// just as well.
+fn find_predicted(reference: &[String], stream: &[String], expected: usize, need: usize) -> Search {
+    let mut best: Option<Found> = None;
+    for slack in [PRIOR_SLACK_TOKENS, PRIOR_WIDE_SLACK_TOKENS] {
+        let lo = expected.saturating_sub(slack);
+        let width = slack
+            .saturating_mul(2)
+            .saturating_add(reference.len().saturating_mul(3))
+            .saturating_add(300)
+            .min(MAX_WINDOW_TOKENS);
+        let hi = lo.saturating_add(width).min(stream.len());
+        let found = scan_window(reference, stream, lo, hi, expected, need);
+        if found.best.map_or(false, |f| best.map_or(true, |b| f.matched > b.matched)) {
+            best = found.best;
+        }
+        if found.hit.is_some() {
+            return Search { hit: found.hit, best: found.hit.or(best) };
+        }
+    }
+    Search { hit: None, best }
+}
+
 /// Search forward from `cursor` for the passage's reading.
 ///
-/// The window starts small and grows, because most passages are found a file
-/// away from where the cursor stands and aligning a 400-token window costs a
-/// fraction of aligning the whole book. A run that reaches the window's last
-/// token is *truncated*: the reading may well continue past it, so widening is
-/// the right move and refusing would be wrong. When nothing satisfies `need`,
-/// the best run seen is returned anyway, so a refusal can say how much was heard.
-fn find_run(reference: &[String], stream: &[String], cursor: usize, need: usize) -> Option<Found> {
-    if cursor >= stream.len() || reference.is_empty() {
-        return None;
-    }
-    let mut window = reference.len().saturating_mul(SEARCH_GROWTH).max(SEARCH_INITIAL_TOKENS);
-    let mut best: Option<Found> = None;
-    loop {
-        let last_attempt =
-            cursor + window >= stream.len() || window >= reference.len().saturating_mul(SEARCH_MAX_FACTOR);
-        let end = if last_attempt { stream.len() } else { cursor + window };
-        let slice = &stream[cursor..end];
-        let pairs = asr_metric::aligned_pairs(reference, slice);
-        let run = densest_run(&pairs);
-        if !run.is_empty() {
-            let from = cursor + run[0].1;
-            let to = cursor + run[run.len() - 1].1;
-            let truncated = end < stream.len() && run[run.len() - 1].1 + 1 >= slice.len();
-            let found = Found {
-                from,
-                to,
-                matched: run.len(),
-            };
-            if !truncated && found.matched >= need {
-                return Some(found);
-            }
-            best = Some(found);
+/// The last resort, for the case the prediction cannot serve: the texts are not
+/// the recordings read in order — a sample chapter added in front, half the
+/// book's files untranscribed — so there is nothing to count words against and
+/// the windows [`find_predicted`] builds point at unrelated audio. Walking a
+/// cursor is worse than predicting (that is what [`place_all`] is for), but it
+/// does find what is there in the order it was written, which beats placing
+/// nothing at all.
+#[cfg(feature = "stt")]
+fn walk_from_cursor(stream: &[String], texts: &[Vec<String>]) -> Vec<Guess> {
+    let mut slots: Vec<Guess> = vec![Guess { span: None, heard: None }; texts.len()];
+    let mut cursor = 0usize;
+    for (index, reference) in texts.iter().enumerate() {
+        if reference.is_empty() {
+            continue;
         }
-        if last_attempt {
-            return best;
+        let search = find_predicted(reference, stream, cursor, need_for(reference));
+        if let Some(found) = search.hit {
+            slots[index] = Guess { span: Some(found), heard: Some(found) };
+            cursor = found.to + 1;
         }
-        window = window.saturating_mul(SEARCH_GROWTH);
     }
+    slots
 }
 
 /// The padded span of a passage, before the silence snap: `[start, end)` in
@@ -844,6 +996,133 @@ fn need_for(tokens: &[String]) -> usize {
         .max(GUESS_MIN_WORDS.min(tokens.len()))
 }
 
+/// Place every passage along the stream: anchors first, then the gaps.
+///
+/// Pass one asks every passage long enough to be evidence in itself where it is,
+/// against the position its order predicts. What comes out is an absolute span
+/// with a confidence, and the spans are forced to be increasing, so a wrong one
+/// costs itself and nothing else — it cannot drag the next passage with it the
+/// way a shared cursor could.
+///
+/// Pass two takes the gaps pass one left and aligns everything unplaced in each
+/// as one block against the audio between the two surrounding anchors. That is
+/// where the one-liners go: "40 Sekunden später" is eight words and occurs a
+/// dozen times, so aligning it alone finds *an* occurrence — the block alignment
+/// cannot put it out of order, and it can tell that there is no room here for
+/// the passages that claim to be.
+///
+/// A passage that survives both passes unplaced keeps the best run pass one saw,
+/// so a refusal can still report it heard 5 of the text's 310 words — but that
+/// run is *not* a placement: it is wherever the words happened to occur, which
+/// is not where the passage belongs.
+#[cfg(feature = "stt")]
+fn place_all(stream: &[String], texts: &[Vec<String>]) -> Vec<Guess> {
+    let total_reference: usize = texts.iter().map(Vec::len).sum();
+    let mut slots: Vec<Option<Found>> = vec![None; texts.len()];
+    let mut heard: Vec<Option<Found>> = vec![None; texts.len()];
+    let mut anchors: Vec<(usize, usize, usize)> = Vec::new();
+    let mut before = 0usize;
+    let mut floor = 0usize;
+
+    for (index, reference) in texts.iter().enumerate() {
+        let start = before;
+        before += reference.len();
+        if reference.len() < ANCHOR_MIN_WORDS {
+            continue;
+        }
+        let need = need_for(reference);
+        let expected = prior_position(start, total_reference, stream.len());
+        let search = find_predicted(reference, stream, expected, need);
+        heard[index] = search.hit.or(search.best);
+        let Some(found) = search.hit else { continue };
+        if (found.matched as f64) < ANCHOR_MIN_MATCH_RATIO * reference.len() as f64 {
+            continue;
+        }
+        if found.from <= floor {
+            continue;
+        }
+        slots[index] = Some(found);
+        anchors.push((index, found.from, found.to));
+        floor = found.to;
+    }
+
+    let mut next_text = 0usize;
+    let mut next_stream = 0usize;
+    for &(index, from, to) in &anchors {
+        fill_gap(stream, texts, &mut slots, next_text..index, next_stream..from);
+        next_text = index + 1;
+        next_stream = to + 1;
+    }
+    fill_gap(stream, texts, &mut slots, next_text..texts.len(), next_stream..stream.len());
+
+    slots
+        .into_iter()
+        .zip(heard)
+        .map(|(span, heard)| Guess { span, heard })
+        .collect()
+}
+
+/// Align one gap's passages as a single block.
+///
+/// The concatenation of their texts is aligned once against the audio between
+/// the two anchors that bound the gap, which makes the answer monotone by
+/// construction: no passage in a block can be placed before another one, and
+/// none can claim audio that belongs to its neighbour. Where the block's own
+/// alignment heard too little of a passage — a gap that does not hold it at all —
+/// that passage stays unplaced instead of being stretched across the gap.
+#[cfg(feature = "stt")]
+fn fill_gap(
+    stream: &[String],
+    texts: &[Vec<String>],
+    slots: &mut [Option<Found>],
+    range: std::ops::Range<usize>,
+    audio: std::ops::Range<usize>,
+) {
+    let pending: Vec<usize> = range
+        .filter(|&index| !texts[index].is_empty() && slots[index].is_none())
+        .collect();
+    if pending.is_empty() || audio.start >= audio.end {
+        return;
+    }
+    let start = audio.start.min(stream.len());
+    let end = audio.end.min(stream.len());
+    if start >= end {
+        return;
+    }
+
+    let mut block: Vec<String> = Vec::new();
+    let mut spans: Vec<(usize, usize, usize)> = Vec::new();
+    for &index in &pending {
+        spans.push((index, block.len(), block.len() + texts[index].len()));
+        block.extend(texts[index].iter().cloned());
+    }
+
+    let pairs = asr_metric::aligned_pairs(&block, &stream[start..end]);
+    let mut cursor = 0usize;
+    let mut previous_end: Option<usize> = None;
+    for (index, from, to) in spans {
+        while cursor < pairs.len() && pairs[cursor].0 < from {
+            cursor += 1;
+        }
+        let first = cursor;
+        while cursor < pairs.len() && pairs[cursor].0 < to {
+            cursor += 1;
+        }
+        let matched = cursor - first;
+        if matched < need_for(&texts[index]) {
+            continue;
+        }
+        let lower = previous_end.map_or(start, |end| end + 1);
+        let span = Found {
+            from: (pairs[first].1 + start).max(lower),
+            to: (pairs[cursor - 1].1 + start).max(lower),
+            matched,
+        };
+        slots[index] = Some(span);
+        previous_end = Some(span.to);
+    }
+}
+
 /// A placed (or refused) passage, and the floor the *next* passage in reading
 /// order must not start before.
 #[cfg(feature = "stt")]
@@ -957,60 +1236,73 @@ fn span_proposal(
     }
 }
 
-/// Walk every passage along one token stream and write the proposals.
+/// Place every passage and write the proposals.
 ///
-/// The cursor only moves forward, which is the whole trick: it is *known* the
-/// texts are the recordings read in order, so a passage cannot be inside an
-/// earlier one, and the search never has to consider the part of the book it has
-/// already assigned. Re-running is therefore idempotent — same stream, same
-/// cursor path, same spans — except where a transcript changed under it.
+/// Every passage is decided from its own position in reading order, so re-running
+/// is idempotent — same stream, same spans — except where a transcript changed
+/// under it, and one surprising span costs only itself.
 #[cfg(feature = "stt")]
 pub(crate) fn run(settings: &SettingsState, dataset_uuid: &str) -> Result<Value, String> {
     let dir = find_dataset_dir_write(settings, dataset_uuid)?;
     let prepared = prepare(&dir)?;
     let previous = load_proposals(&dir);
-    let mut proposals: Vec<Proposal> = Vec::with_capacity(prepared.texts.len());
-    let mut cursor = 0usize;
-    let mut floor: Option<(usize, f64)> = None;
+    let texts: Vec<Vec<String>> = prepared
+        .texts
+        .iter()
+        .map(|(_, reference)| asr_metric::normalize_tokens(reference))
+        .collect();
+    // Reading order is the model the guess is built on, and when it does not
+    // hold — half the files were never transcribed, the texts were reordered
+    // by hand — the predicted windows point at unrelated audio and everything
+    // refuses. A quarter placed is the line where that is the explanation
+    // rather than a hard book, and a cursor walk that finds what is there in
+    // the order it was written beats placing nothing.
+    let mut found = place_all(&prepared.stream, &texts);
+    let placed = found.iter().filter(|guess| guess.span.is_some()).count();
+    if placed * 4 < texts.len() {
+        found = walk_from_cursor(&prepared.stream, &texts);
+    }
 
-    for (text_uuid, reference) in &prepared.texts {
-        let tokens = asr_metric::normalize_tokens(reference);
+    let mut proposals: Vec<Proposal> = Vec::with_capacity(prepared.texts.len());
+    let mut floor: Option<(usize, f64)> = None;
+    let mut last_end = 0usize;
+
+    for (index, (text_uuid, _)) in prepared.texts.iter().enumerate() {
+        let tokens = &texts[index];
         if tokens.is_empty() {
             proposals.push(Proposal::refusal(text_uuid, "That text has no words to look for.".to_string()));
             continue;
         }
-        let need = need_for(&tokens);
-
-        let Some(found) = find_run(&tokens, &prepared.stream, cursor, need) else {
-            proposals.push(Proposal::refusal(
+        let guess = found[index];
+        // Nothing worth proposing. A refusal that can say how much of the text
+        // the model did hear points at a mishearing (a weak model, a strange
+        // name); one that cannot points at the text itself — a subject line, a
+        // greeting, a date that the narrator never reads.
+        let Some(span) = guess.span else {
+            let mut refusal = Proposal::refusal(
                 text_uuid,
-                "There is no recording left after the previous passage, so this one was not looked for. Check the file order and length.".to_string(),
-            ));
+                match guess.heard {
+                    Some(heard) => format!(
+                        "The model heard only {} of this text's {} words in the recordings, which is too little to place the reading. Try a stronger model, normalize the text, or set the edges by hand.",
+                        heard.matched, tokens.len()
+                    ),
+                    None => "No stretch of the recordings holds this text, so it was not placed. It may be missing from the audio, or it may be all header — a subject line, a greeting, a date — that is never read aloud. Normalize the text, then guess again.".to_string(),
+                },
+            );
+            if let Some(heard) = guess.heard {
+                refusal.matched_words = heard.matched;
+                refusal.reference_words = tokens.len();
+            }
+            proposals.push(refusal);
             continue;
         };
 
-        if found.matched < need {
-            let mut refusal = Proposal::refusal(
-                text_uuid,
-                format!(
-                    "The model heard only {} of this text's {} words in the recordings, which is too little to place the reading. Try a stronger model, or set the edges by hand.",
-                    found.matched,
-                    tokens.len()
-                ),
-            );
-            refusal.matched_words = found.matched;
-            refusal.reference_words = tokens.len();
-            proposals.push(refusal);
-            cursor = found.to + 1;
-            continue;
-        }
-
-        let placed = span_proposal(&prepared, text_uuid, &tokens, &found, floor, &previous);
+        let placed = span_proposal(&prepared, text_uuid, tokens, &span, floor, &previous);
         if let Some(next) = placed.floor {
             floor = Some(next);
         }
+        last_end = last_end.max(span.to + 1);
         proposals.push(placed.proposal);
-        cursor = found.to + 1;
     }
 
     let set = ProposalSet {
@@ -1038,7 +1330,7 @@ pub(crate) fn run(settings: &SettingsState, dataset_uuid: &str) -> Result<Value,
         "proposed": proposed,
         "refused": refused,
         "mean_confidence": mean_confidence,
-        "unused_words": prepared.stream.len().saturating_sub(cursor),
+        "unused_words": prepared.stream.len().saturating_sub(last_end),
         "sources": prepared.index.sources.len(),
         "generated_at": set.generated_at,
     }))
@@ -1054,9 +1346,10 @@ pub(crate) fn run(_settings: &SettingsState, _dataset_uuid: &str) -> Result<Valu
 /// The bulk guess is the right tool for a set that has never been placed and
 /// the wrong one for a single row: it rewrites the whole file, so a span
 /// somebody nudged by hand would be replaced by the model's opinion of it. This
-/// walks only the requested text — from the end of the nearest passage before it
-/// that has a span, along the same stream the bulk guess reads — and replaces
-/// that one row. Everything else, verdicts included, is untouched.
+/// places only the requested text — at the position its order predicts, along the
+/// same stream the bulk guess reads, and with the end of the nearest earlier
+/// passage as a fallback when that prediction finds nothing — and replaces that
+/// one row. Everything else, verdicts included, is untouched.
 #[cfg(feature = "stt")]
 pub(crate) fn run_one(
     settings: &SettingsState,
@@ -1110,13 +1403,34 @@ pub(crate) fn run_one(
     }
     let need = need_for(&tokens);
 
+    // The prediction first, the neighbour's end second. The prediction is the
+    // better answer — it is where the bulk guess would put this row — and the
+    // cursor is only a fallback for a set whose order no longer matches the
+    // recordings, e.g. after passages were added or re-placed by hand.
+    let every_text: Vec<Vec<String>> = prepared
+        .texts
+        .iter()
+        .map(|(_, reference)| asr_metric::normalize_tokens(reference))
+        .collect();
+    let total_reference: usize = every_text.iter().map(Vec::len).sum();
+    let before: usize = every_text[..position].iter().map(Vec::len).sum();
+    let expected = prior_position(before, total_reference, prepared.stream.len());
+    let mut search = find_predicted(&tokens, &prepared.stream, expected, need);
+    if search.hit.is_none() && cursor.abs_diff(expected) > PRIOR_SLACK_TOKENS {
+        let retry = find_predicted(&tokens, &prepared.stream, cursor, need);
+        if retry.hit.is_some() {
+            search = retry;
+        }
+    }
+    let found = search.hit.or(search.best);
+
     // The two ways to come up empty are written as refusals, not errors: the row
     // exists, and the answer to "why is it still not placed?" belongs on it.
-    let placed = match find_run(&tokens, &prepared.stream, cursor, need) {
+    let placed = match found {
         None => Placed {
             proposal: Proposal::refusal(
                 text_uuid,
-                "There is no recording left after the previous passage, so this one was not looked for. Check the file order and length.".to_string(),
+                "No stretch of the recordings holds this text, so it was not placed. It may be missing from the audio, or it may be all header — a subject line, a greeting, a date — that is never read aloud. Normalize the text, then guess again.".to_string(),
             ),
             floor: None,
         },
@@ -1766,28 +2080,81 @@ mod tests {
         assert!((round_ms(12.3456) - 12.346).abs() < 1e-9);
     }
 
-    /// A passage found inside the first window is returned in absolute stream
-    /// positions; a passage past it makes the search widen instead.
+    /// Reading order maps word counts onto stream positions, and the answer can
+    /// never point past the last heard token.
     #[test]
-    fn the_search_widens_until_the_passage_is_found() {
-        let reference: Vec<String> = (0..101).map(|i| format!("w{}", i)).collect();
-        let mut stream: Vec<String> = (0..600).map(|i| format!("x{}", i)).collect();
-        for (offset, token) in reference.iter().enumerate() {
-            stream[500 + offset] = token.clone();
-        }
-        let found = find_run(&reference, &stream, 0, reference.len()).expect("the passage is there");
-        assert_eq!(found.from, 500);
-        assert_eq!(found.to, 600);
-        assert_eq!(found.matched, 101);
+    fn the_prior_follows_the_word_count() {
+        assert_eq!(prior_position(0, 100, 1000), 0);
+        assert_eq!(prior_position(50, 100, 1000), 500);
+        assert_eq!(prior_position(100, 100, 1000), 999);
+        assert_eq!(prior_position(5, 0, 1000), 0);
     }
 
-    /// The cursor is what keeps the pass monotonic: a search that starts after
-    /// a passage's words can never find it again.
+    /// The predicted window decides *which* occurrence: a passage that occurs
+    /// once near the start and once far later belongs to the one reading order
+    /// points at, even though the earlier one scores just as well.
+    #[cfg(feature = "stt")]
     #[test]
-    fn the_search_never_looks_backwards() {
-        let reference: Vec<String> = (0..10).map(|i| format!("w{}", i)).collect();
-        let stream: Vec<String> = reference.clone();
-        assert!(find_run(&reference, &stream, 0, 10).is_some());
-        assert!(find_run(&reference, &stream, 10, 10).is_none());
+    fn the_prediction_picks_the_occurrence_in_reading_order() {
+        let reference: Vec<String> = (0..15).map(|i| format!("w{}", i)).collect();
+        let mut stream: Vec<String> = (0..6000).map(|i| format!("x{}", i)).collect();
+        for offset in [200usize, 5000] {
+            for (index, token) in reference.iter().enumerate() {
+                stream[offset + index] = token.clone();
+            }
+        }
+        let need = need_for(&reference);
+        let found = find_predicted(&reference, &stream, 5000, need).hit.expect("the passage is there");
+        assert_eq!(found.from, 5000, "placed at {} instead of the predicted 5000", found.from);
+        assert_eq!(found.matched, 15);
+    }
+
+    /// The gap between two anchors is where the one-liners go: a phrase that
+    /// occurs a dozen times in the book still lands between its neighbours,
+    /// because a block alignment cannot put it anywhere else.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn the_gap_fill_keeps_a_one_liner_between_its_neighbours() {
+        let words = |prefix: &str| -> Vec<String> {
+            (0..14).map(|i| format!("{prefix}{i}")).collect()
+        };
+        let texts = vec![words("a"), ["ja", "ja", "ja"].map(String::from).to_vec(), words("c")];
+
+        let mut stream: Vec<String> = (0..100).map(|i| format!("x{}", i)).collect();
+        stream.extend(texts[0].iter().cloned());
+        stream.extend((0..40).map(|i| format!("y{}", i)));
+        stream.extend(texts[1].iter().cloned());
+        stream.extend((0..40).map(|i| format!("z{}", i)));
+        stream.extend(texts[2].iter().cloned());
+        stream.extend((0..100).map(|i| format!("q{}", i)));
+
+        let slots = place_all(&stream, &texts);
+        let first = slots[0].span.expect("the long first text is placed");
+        let middle = slots[1].span.expect("the one-liner is placed in the gap");
+        let last = slots[2].span.expect("the long last text is placed");
+        assert_eq!((first.from, first.to), (100, 113));
+        assert_eq!((middle.from, middle.to), (154, 156));
+        assert_eq!((last.from, last.to), (197, 210));
+    }
+
+    /// A gap that does not hold the passages claiming to be in it leaves them
+    /// unplaced rather than stretching them across the audio it does hold.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn a_gap_that_holds_nothing_refuses_instead_of_stretching() {
+        let words = |prefix: &str| -> Vec<String> {
+            (0..14).map(|i| format!("{prefix}{i}")).collect()
+        };
+        let texts = vec![words("a"), words("m"), words("c")];
+
+        let mut stream: Vec<String> = (0..100).map(|i| format!("x{}", i)).collect();
+        stream.extend(texts[0].iter().cloned());
+        stream.extend((0..40).map(|i| format!("y{}", i)));
+        stream.extend(texts[2].iter().cloned());
+        stream.extend((0..100).map(|i| format!("q{}", i)));
+
+        let slots = place_all(&stream, &texts);
+        assert!(slots[0].span.is_some() && slots[2].span.is_some());
+        assert!(slots[1].span.is_none(), "the missing text was placed at {:?}", slots[1].span);
     }
 }

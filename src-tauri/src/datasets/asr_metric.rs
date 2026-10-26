@@ -303,6 +303,99 @@ pub(crate) fn aligned_pairs(reference: &[String], hypothesis: &[String]) -> Vec<
         .collect()
 }
 
+/// Direction codes of the traceback matrix [`aligned_pairs_glocal`] builds.
+const STEP_DIAGONAL: u8 = 0;
+const STEP_REFERENCE: u8 = 1;
+const STEP_HYPOTHESIS: u8 = 2;
+
+/// The `(reference_index, hypothesis_index)` pairs of a **semi-global**
+/// alignment: the whole reference is consumed, the hypothesis may begin and end
+/// anywhere.
+///
+/// This is the right comparison for "where in this recording is this text" and
+/// [`aligned_pairs`] is not. The reference is one passage and the hypothesis is
+/// a window of the recording, usually several times longer, holding that
+/// passage plus whatever was read before and after it. A global alignment has to
+/// account for every hypothesis token too, so it pays for the surplus with
+/// deletions — and the deletions are cheapest *inside* the passage, which is
+/// exactly where the matched words are. A text that was heard perfectly scores
+/// well under 100 %, and the shorter the text relative to the window the worse
+/// the score: a fifteen-word mail against a four-minute window came back with 7
+/// of 15 matches instead of 11.
+///
+/// Free ends cost one thing a global alignment gives for free: the caller must
+/// bound the window itself, because this will happily align ten words against a
+/// window that starts three minutes earlier. The window's centre is the caller's
+/// business (see the position prior in `read_aloud::source_align`).
+///
+/// The DP is O(m×n) in time and O(m×n) bytes for the traceback, which is why the
+/// caller keeps the window tight; ties prefer the diagonal, then the reference
+/// side, so a run of matched words stays one piece instead of being cut into
+/// alternating substitutions.
+pub(crate) fn aligned_pairs_glocal(reference: &[String], hypothesis: &[String]) -> Vec<(usize, usize)> {
+    let ref_len = reference.len();
+    let hyp_len = hypothesis.len();
+    if ref_len == 0 || hyp_len == 0 {
+        return Vec::new();
+    }
+
+    let stride = hyp_len + 1;
+    let mut steps: Vec<u8> = vec![STEP_DIAGONAL; ref_len * stride];
+    // Row 0 is all zeros: beginning anywhere in the hypothesis is free.
+    let mut prev_row: Vec<usize> = vec![0; stride];
+    let mut curr_row: Vec<usize> = vec![0; stride];
+
+    for ref_idx in 1..=ref_len {
+        curr_row[0] = ref_idx;
+        let row = &mut steps[(ref_idx - 1) * stride..ref_idx * stride];
+        row[0] = STEP_REFERENCE;
+        for hyp_idx in 1..=hyp_len {
+            let diagonal = prev_row[hyp_idx - 1]
+                + usize::from(reference[ref_idx - 1] != hypothesis[hyp_idx - 1]);
+            let up = prev_row[hyp_idx] + 1;
+            let left = curr_row[hyp_idx - 1] + 1;
+            let (cost, step) = if diagonal <= up && diagonal <= left {
+                (diagonal, STEP_DIAGONAL)
+            } else if up <= left {
+                (up, STEP_REFERENCE)
+            } else {
+                (left, STEP_HYPOTHESIS)
+            };
+            curr_row[hyp_idx] = cost;
+            row[hyp_idx] = step;
+        }
+        std::mem::swap(&mut prev_row, &mut curr_row);
+    }
+
+    // Ending anywhere is free too: leave the matrix at the cheapest cell of the
+    // last row, the earliest one on a tie so the span stays as short as the
+    // evidence allows.
+    let mut end = 0usize;
+    for hyp_idx in 1..=hyp_len {
+        if prev_row[hyp_idx] < prev_row[end] {
+            end = hyp_idx;
+        }
+    }
+
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    let (mut ref_pos, mut hyp_pos) = (ref_len, end);
+    while ref_pos > 0 && hyp_pos > 0 {
+        match steps[(ref_pos - 1) * stride + hyp_pos] {
+            STEP_DIAGONAL => {
+                if reference[ref_pos - 1] == hypothesis[hyp_pos - 1] {
+                    pairs.push((ref_pos - 1, hyp_pos - 1));
+                }
+                ref_pos -= 1;
+                hyp_pos -= 1;
+            }
+            STEP_REFERENCE => ref_pos -= 1,
+            _ => hyp_pos -= 1,
+        }
+    }
+    pairs.reverse();
+    pairs
+}
+
 // ============================================================
 // Numbers
 // ============================================================
@@ -954,6 +1047,42 @@ mod tests {
 
         let ops = align(&words("hello foo"), &words("hello world foo"));
         assert!(matches!(ops[1], EditOp::Insert { .. }));
+    }
+
+    #[test]
+    fn glocal_ignores_the_words_around_the_passage() {
+        // A window is the passage plus a minute of other reading either side.
+        // A global alignment would be charged for every one of those tokens —
+        // which is why handing it a wider window used to buy nothing — while
+        // this one starts and ends where the passage does and keeps every word.
+        let reference = words("kein betreff emmi du bist die schoenste frau der welt");
+        let mut window = vec!["und".to_string(); 200];
+        window.extend(reference.iter().cloned());
+        window.extend(vec!["dann".to_string(); 200]);
+
+        let pairs = aligned_pairs_glocal(&reference, &window);
+        assert_eq!(pairs.len(), reference.len());
+        assert_eq!(pairs[0], (0, 200));
+        assert_eq!(pairs[reference.len() - 1], (reference.len() - 1, 200 + reference.len() - 1));
+    }
+
+    #[test]
+    fn glocal_starts_and_ends_anywhere() {
+        let reference = words("das ist der anfang vom ende");
+        let window = words("lorem ipsum das ist der anfang vom ende dolor sit");
+        let pairs = aligned_pairs_glocal(&reference, &window);
+        assert_eq!(pairs.len(), reference.len());
+        assert_eq!(pairs[0], (0, 2));
+        assert_eq!(pairs[pairs.len() - 1], (reference.len() - 1, 7));
+    }
+
+    #[test]
+    fn glocal_prefers_the_cheapest_end_on_a_tie() {
+        // "ende" occurs twice; the first one leaves the shortest span.
+        let reference = words("vom ende");
+        let window = words("vom ende und vom ende");
+        let pairs = aligned_pairs_glocal(&reference, &window);
+        assert_eq!(pairs, vec![(0, 0), (1, 1)]);
     }
 
     #[test]
