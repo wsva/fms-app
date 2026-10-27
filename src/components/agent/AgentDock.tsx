@@ -30,8 +30,10 @@ import {
   CornerDownRight,
   Inbox,
   ListTodo,
+  Loader2,
   RefreshCw,
   Undo2,
+  Wrench,
   X,
 } from "lucide-react";
 import { isTauri } from "@/lib/tauri";
@@ -82,6 +84,15 @@ const DEFAULT_DOCK_WIDTH = 380;
 const MIN_DOCK_WIDTH = 320;
 const MAX_DOCK_WIDTH = 640;
 
+// The panel's open/close slide duration; the exit unmount is scheduled off
+// this same constant so the timer and the CSS transition can never disagree.
+const EXIT_MS = 200;
+
+// How long an armed Cancel stays live: enough to decide, short enough that a
+// row walked away from silently disarms instead of sitting one click from a
+// terminal cancel.
+const ARM_DISARM_MS = 4000;
+
 // Floating toggle button geometry. Persisted so users can park it out of the
 // way when it covers page content (waveform, video, cue list) and the choice
 // survives reloads. Null = default bottom-right corner (matches the pre-drag
@@ -108,10 +119,24 @@ const TONE: Record<MailTone, string> = {
   bad: "text-red-400",
 };
 
-const GHOST =
-  "inline-flex items-center gap-1 rounded border border-border-default bg-bg-muted px-1.5 py-0.5 " +
-  "text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors " +
-  "disabled:opacity-50 disabled:cursor-default";
+// The row's tone as its left edge colour — the card borders were replaced by a
+// divider list, so the edge carries the whole tone signal.
+const TONE_EDGE: Record<MailTone, string> = {
+  neutral: "border-l-border-default",
+  accent: "border-l-accent-bg",
+  ok: "border-l-green-500",
+  warn: "border-l-yellow-500",
+  bad: "border-l-red-400",
+};
+
+// Row actions are icon-only 16px buttons, hidden until the row is hovered or
+// keyboard-focused; `group-focus-within` keeps them reachable by Tab, and the
+// armed/replying states force them visible so a live interaction never loses
+// its own controls.
+const ICON_BTN =
+  "p-1.5 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors " +
+  "disabled:opacity-50 disabled:cursor-default opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 " +
+  "pointer-events-none group-hover:pointer-events-auto group-focus-within:pointer-events-auto";
 
 type LaneId = "you" | "agent" | "inbox";
 
@@ -136,7 +161,7 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
   const [busy, setBusy] = useState<string | null>(null);
   const [armed, setArmed] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [openTodos, setOpenTodos] = useState<number | null>(null);
 
   // ---- MCP surface state, read from the same store the Agent page uses ----
@@ -177,6 +202,20 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
 
   useEffect(() => {
     isDockOpenRef.current = open;
+  }, [open]);
+
+  // Keep the panel mounted through the exit slide: `open` flips to false, the
+  // class swap runs the 200ms transition back out, and only then does the
+  // delayed unmount remove it. Mounting mirrors `open` immediately, so the
+  // entry slide always plays from off-screen.
+  const [mounted, setMounted] = useState(open);
+  useEffect(() => {
+    if (open) {
+      setMounted(true);
+      return;
+    }
+    const id = setTimeout(() => setMounted(false), EXIT_MS);
+    return () => clearTimeout(id);
   }, [open]);
 
   // ---- Load persisted presentation state + platform flag ----
@@ -406,12 +445,13 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
   // an agent invoking them gets the failure verbatim. A button click attaches a
   // `.catch` that puts it on the panel's error strip.
 
+  // The dock stays open across a jump — it overlays the page, and working
+  // through the tray item by item should not cost an open/close cycle per row.
   const goTo = useCallback(
     (tab: string) => {
       onNavigate?.(tab);
-      setOpen(false);
     },
-    [onNavigate, setOpen]
+    [onNavigate]
   );
 
   const copyBrief = useCallback(
@@ -561,6 +601,13 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
     },
   ]);
 
+  // An armed Cancel expires on its own; re-arming restarts the fuse.
+  useEffect(() => {
+    if (!armed) return;
+    const id = setTimeout(() => setArmed(null), ARM_DISARM_MS);
+    return () => clearTimeout(id);
+  }, [armed]);
+
   // ---- Polling: the badge always, the lanes while the panel is open ----
   useEffect(() => {
     void refreshBadge();
@@ -629,6 +676,7 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
   const badge = head ? badgeOf(head) : null;
   const copyable = lanes.agent.filter((row) => row.status === "queued").length;
   const stamp = now || Date.now();
+  const allClear = head !== null && now !== 0 && lanes.you.length + lanes.agent.length + lanes.inbox.length === 0;
 
   const rowProps = (lane: LaneId) => (row: MailSummary) => ({
     row,
@@ -637,7 +685,7 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
     busy: busy === row.uuid,
     armed: armed === row.uuid,
     replyOpen: replyTo === row.uuid,
-    draft,
+    draft: drafts[row.uuid] ?? "",
     onOpen: () => runRow(row.uuid, () => openItem(row.uuid)),
     onCopy: () => runRow(row.uuid, () => copyOne(row.uuid)),
     onTakeOver: () => runRow(row.uuid, () => takeOverClaim(row.uuid)),
@@ -654,22 +702,22 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
     onReply: () => {
       if (replyTo === row.uuid) {
         setReplyTo(null);
-        setDraft("");
+        // Drop the draft with the box; the ledger entry itself is untouched.
+        setDrafts(({ [row.uuid]: _removed, ...rest }) => rest);
       } else {
         setReplyTo(row.uuid);
-        setDraft("");
       }
     },
-    onDraft: setDraft,
+    onDraft: (value: string) => setDrafts((d) => ({ ...d, [row.uuid]: value })),
     onSubmit: () => {
-      const answer = draft.trim();
+      const answer = (drafts[row.uuid] ?? "").trim();
       if (!answer) return;
       setBusy(row.uuid);
       setError(null);
       void answerQuestion(row.uuid, answer)
         .then(() => {
           setReplyTo(null);
-          setDraft("");
+          setDrafts(({ [row.uuid]: _removed, ...rest }) => rest);
         })
         .catch((e) => setError(reason(e)))
         .finally(() => setBusy(null));
@@ -693,7 +741,7 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
         >
           <Bot size={22} />
           {badge ? (
-            <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-yellow-500 text-[10px] font-semibold leading-[18px] text-black text-center">
+            <span className="absolute -top-1 -right-1 min-w-[20px] h-[20px] px-1 rounded-full bg-yellow-500 text-[11px] font-semibold leading-[20px] text-black text-center">
               {badge}
             </span>
           ) : unread ? (
@@ -707,9 +755,11 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
           while the mailbox is open. No `shadow-*`: a box shadow falls mainly
           downward, so it painted a smudge across the status bar — the left
           border alone separates the panel from the page. */}
-      {open && (
+      {mounted && (
         <aside
-          className="fixed top-0 right-0 bottom-[var(--shell-statusbar-h)] z-[100] flex flex-col bg-bg-card border-l border-border-default"
+          className={`fixed top-0 right-0 bottom-[var(--shell-statusbar-h)] z-[100] flex flex-col bg-bg-card border-l border-border-default transition-transform duration-200 ease-out ${
+            open ? "translate-x-0" : "translate-x-full"
+          }`}
           style={{ width: dockWidth }}
         >
           {/* Resize handle on the left edge (mouse-drag only; not useful on touch) */}
@@ -720,35 +770,22 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
             <div className="w-0.5 h-12 rounded-full bg-border-default group-hover:bg-accent transition-colors" />
           </div>
 
-          {/* Header: the title, the counts, whether an agent could attach right
-              now, and the two exits. */}
-          <div className="px-4 py-3 border-b border-border-default flex items-center gap-2">
-            <h1 className="text-xs font-semibold uppercase tracking-[0.18em] flex items-center gap-2 shrink-0">
+          {/* Header: the title and the two exits. The attach state is not
+              mirrored here — the status bar already wears it. The counts live
+              with the lanes below, where they are read. */}
+          <div className="px-4 py-2.5 border-b border-border-default flex items-center gap-2">
+            <h1 className="text-[13px] font-semibold uppercase tracking-[0.12em] flex items-center gap-2 shrink-0">
               <Inbox size={16} /> Mailbox
             </h1>
-            <span
-              className="text-[10px] text-text-tertiary tabular-nums truncate"
-              title="held: your agent is working on it · waiting: queued or lapsed, nobody holds it"
-            >
-              {head ? `${head.held} held · ${head.waiting} waiting` : "reading the ledger…"}
-            </span>
             <div className="flex-1" />
-            <span
-              className={`text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded border shrink-0 ${
-                listening
-                  ? "bg-accent-bg/15 border-accent-bg/30 text-accent-bg"
-                  : "bg-bg-muted border-border-default text-text-tertiary"
-              }`}
-              title={manual?.endpoints.mcp ?? "The MCP server is not answering"}
-            >
-              {listening ? "listening" : "offline"}
-            </span>
             <button
               type="button"
               onClick={() => goTo("agent")}
-              className="px-2 py-1 rounded-md bg-bg-muted border border-border-default text-[11px] font-medium text-text-secondary hover:bg-bg-hover transition-colors"
+              aria-label="Open agent setup"
+              title="Setup"
+              className="p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
             >
-              Setup
+              <Wrench size={16} />
             </button>
             <button
               type="button"
@@ -761,27 +798,21 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
             </button>
           </div>
 
-          {/* The one line that keeps the panel from reading as a chat box. */}
-          <div className="px-4 py-1.5 text-[11px] text-text-tertiary bg-bg-muted border-b border-border-default">
-            {listening ? (
-              <>
-                An agent attaches at <code>{manual?.endpoints.mcp ?? "/mcp"}</code> and runs in its
-                own window. Copy a prompt into it, or let it claim straight from the tray.
-              </>
-            ) : (
-              <>
-                No agent can attach — the MCP server is not answering.{" "}
-                <button
-                  type="button"
-                  className="underline hover:text-text-secondary"
-                  onClick={() => goTo("agent")}
-                >
-                  Open Setup
-                </button>
-                .
-              </>
-            )}
-          </div>
+          {/* The attach explanation only earns its space when it is actionable:
+              well, the status bar says *whether*; this says *what to do*. */}
+          {!listening && (
+            <div className="px-4 py-2 text-[11px] text-yellow-500 bg-yellow-500/10 border-b border-border-default">
+              No agent can attach — the MCP server is not answering.{" "}
+              <button
+                type="button"
+                className="underline hover:text-text-secondary"
+                onClick={() => goTo("agent")}
+              >
+                Open Setup
+              </button>
+              .
+            </div>
+          )}
 
           {error && (
             <div className="px-3 py-2 text-[11px] text-red-400 bg-red-500/10 border-b border-border-default flex items-start gap-2">
@@ -797,29 +828,41 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
             </div>
           )}
 
-          {/* The lanes. Two folders, one of them split by `owed_by` (§6). */}
+          {/* The lanes. Two folders, one of them split by `owed_by` (§6). One
+              all-clear message instead of three separate empty-section lines. */}
           <div className="flex-1 overflow-y-auto min-h-0 divide-y divide-border-default">
-            <Lane
-              title="You owe"
-              hint="Requests blocked on a decision or an unread failure."
-              rows={lanes.you}
-              empty="Nothing is waiting on you."
-              render={rowProps("you")}
-            />
-            <Lane
-              title="Your agent owes"
-              hint="The Outbox: what an attached agent can claim."
-              rows={lanes.agent}
-              empty="Your agent has nothing queued."
-              render={rowProps("agent")}
-            />
-            <Lane
-              title="Inbox"
-              hint="Deliveries and notices. Opening one marks it read."
-              rows={lanes.inbox}
-              empty="No unread mail."
-              render={rowProps("inbox")}
-            />
+            {allClear ? (
+              <div className="h-full flex flex-col items-center justify-center gap-2 text-center px-6">
+                <Inbox size={28} className="text-text-tertiary" aria-hidden />
+                <p className="text-[12px] text-text-tertiary">
+                  All clear — nothing on the ledger.
+                </p>
+              </div>
+            ) : (
+              <>
+                <Lane
+                  title="Needs you"
+                  hint="Requests blocked on a decision or an unread failure."
+                  rows={lanes.you}
+                  empty="Nothing is waiting on you."
+                  render={rowProps("you")}
+                />
+                <Lane
+                  title="Waiting on your agent"
+                  hint="The Outbox: what an attached agent can claim."
+                  rows={lanes.agent}
+                  empty="Nothing queued for your agent."
+                  render={rowProps("agent")}
+                />
+                <Lane
+                  title="Delivered"
+                  hint="Deliveries and notices. Opening one marks it read."
+                  rows={lanes.inbox}
+                  empty="No unread mail."
+                  render={rowProps("inbox")}
+                />
+              </>
+            )}
           </div>
 
           {/* Footer: one manual action per session, not per item (§6). */}
@@ -848,7 +891,7 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
                     ? "Nothing is waiting to be handed over"
                     : "Copy every queued prompt as one brief"
                 }
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-bg-muted border border-border-default text-xs font-medium text-text-secondary hover:bg-bg-hover transition-colors disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-bg-muted border border-border-default text-[12px] font-medium text-text-secondary hover:bg-bg-hover transition-colors disabled:opacity-50"
               >
                 <Copy size={13} />
                 {copied === "mail.brief" ? "Copied" : `Copy all${copyable ? ` ${copyable}` : ""}`}
@@ -858,9 +901,9 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
                 type="button"
                 onClick={() => void refresh()}
                 title="Reload the mailbox"
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-bg-muted border border-border-default text-xs font-medium text-text-secondary hover:bg-bg-hover transition-colors"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-bg-muted border border-border-default text-[12px] font-medium text-text-secondary hover:bg-bg-hover transition-colors"
               >
-                <RefreshCw size={13} /> Receive
+                <RefreshCw size={13} /> Refresh
               </button>
             </div>
           </div>
@@ -889,8 +932,11 @@ function Lane({
 }) {
   return (
     <section className="px-3 py-3">
-      <div className="flex items-baseline gap-2 px-1 mb-1.5" title={hint}>
-        <h2 className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
+      <div className="flex items-baseline gap-2 px-1 mb-1.5">
+        <h2
+          className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary"
+          title={hint}
+        >
           {title}
         </h2>
         {rows.length > 0 && (
@@ -900,7 +946,7 @@ function Lane({
       {rows.length === 0 ? (
         <p className="px-1 text-[11px] text-text-tertiary">{empty}</p>
       ) : (
-        <ul className="space-y-1.5">
+        <ul className="divide-y divide-border-default">
           {rows.map((row) => (
             <MailItem key={row.uuid} {...render(row)} />
           ))}
@@ -948,7 +994,9 @@ function MailItem({
   const hasActions = copyable || held || answerable;
 
   return (
-    <li className="rounded-lg border border-border-default bg-bg-muted/60 px-2.5 py-2">
+    <li
+      className={`group relative py-1.5 pr-2.5 pl-3.5 border-l-[3px] transition-colors hover:bg-bg-hover ${TONE_EDGE[look.tone]}`}
+    >
       <button
         type="button"
         onClick={onOpen}
@@ -961,22 +1009,31 @@ function MailItem({
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-baseline gap-2">
-            <span className="text-[13px] text-text-primary truncate">{row.subject}</span>
-            <span className="ml-auto shrink-0 text-[10px] tabular-nums text-text-tertiary">
+            <span className="text-[13px] text-text-primary truncate" title={row.subject}>
+              {row.subject}
+            </span>
+            <span className="ml-auto shrink-0 text-[11px] tabular-nums text-text-tertiary">
               {look.text}
             </span>
           </span>
-          <span className="block text-[10px] text-text-tertiary truncate">
+          <span className="block text-[11px] text-text-tertiary truncate">
             # {channelLine(row)}
           </span>
         </span>
       </button>
 
       {hasActions && (
-        <div className="mt-1.5 pl-6 flex flex-wrap items-center gap-1">
+        <div className="mt-0.5 pl-6 flex flex-wrap items-center gap-0.5">
           {copyable && (
-            <button type="button" onClick={onCopy} disabled={busy} className={GHOST}>
-              <Copy size={10} /> Copy
+            <button
+              type="button"
+              onClick={onCopy}
+              disabled={busy}
+              title="Copy this prompt to the clipboard"
+              aria-label="Copy this prompt"
+              className={ICON_BTN}
+            >
+              {busy ? <Loader2 size={16} className="animate-spin" /> : <Copy size={16} />}
             </button>
           )}
           {copyable && (
@@ -985,10 +1042,22 @@ function MailItem({
               onClick={onCancel}
               disabled={busy}
               aria-label="Cancel this request"
-              title="Cancel this request — a later delivery for it is refused"
-              className={`${GHOST} ${armed ? "border-red-500/50 text-red-400" : ""}`}
+              title={
+                armed
+                  ? "Click again within 4 seconds to cancel for good — a later delivery is refused"
+                  : "Cancel this request — a later delivery for it is refused"
+              }
+              className={`${ICON_BTN} ${
+                armed
+                  ? "opacity-100 pointer-events-auto text-red-400 hover:text-red-400"
+                  : ""
+              }`}
             >
-              {armed ? "Cancel?" : <X size={10} />}
+              {armed ? (
+                <span className="text-[11px] font-medium leading-none px-0.5">Armed</span>
+              ) : (
+                <X size={16} />
+              )}
             </button>
           )}
           {held && (
@@ -997,38 +1066,60 @@ function MailItem({
               onClick={onTakeOver}
               disabled={busy}
               title="End this hold so the item can be claimed again (the attempt is refunded)"
-              className={GHOST}
+              aria-label="Take over"
+              className={ICON_BTN}
             >
-              <Undo2 size={10} /> Take over
+              {busy ? <Loader2 size={16} className="animate-spin" /> : <Undo2 size={16} />}
             </button>
           )}
           {answerable && (
-            <button type="button" onClick={onReply} disabled={busy} className={GHOST}>
-              <CornerDownRight size={10} /> Reply
+            <button
+              type="button"
+              onClick={onReply}
+              disabled={busy}
+              title={replyOpen ? "Hide the answer box" : "Answer the question this request is waiting on"}
+              aria-label="Reply"
+              className={`${ICON_BTN} ${replyOpen ? "opacity-100 pointer-events-auto" : ""}`}
+            >
+              {busy ? <Loader2 size={16} className="animate-spin" /> : <CornerDownRight size={16} />}
             </button>
           )}
         </div>
       )}
 
       {replyOpen && (
-        <div className="mt-1.5 pl-6 space-y-1">
+        <div className="mt-1.5 pl-6 space-y-1.5">
           <textarea
             autoFocus
             rows={2}
             value={draft}
             onChange={(e) => onDraft(e.target.value)}
-            placeholder="The decision the agent asked for…"
-            className="w-full resize-none rounded-md bg-bg-card border border-border-default px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent-bg"
+            onKeyDown={(e) => {
+              // Enter answers, Shift+Enter breaks a line, Escape backs out —
+              // the whole box is usable without leaving the keyboard.
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                onSubmit();
+              } else if (e.key === "Escape") {
+                onReply();
+              }
+            }}
+            placeholder="The decision the agent asked for… (Enter to answer, Escape to close)"
+            className="w-full resize-none rounded-md bg-bg-card border border-border-default px-2 py-1.5 text-[12px] text-text-primary focus:outline-none focus:border-accent-bg"
           />
-          <div className="flex items-center justify-end gap-1">
-            <button type="button" onClick={onReply} className={GHOST}>
+          <div className="flex items-center justify-end gap-1.5">
+            <button
+              type="button"
+              onClick={onReply}
+              className="px-2 py-1 rounded-md text-[11px] text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
+            >
               Close
             </button>
             <button
               type="button"
               onClick={onSubmit}
               disabled={busy || draft.trim() === ""}
-              className="inline-flex items-center gap-1 rounded border border-accent-bg/40 bg-accent-bg/15 px-2 py-0.5 text-[10px] text-accent-bg hover:bg-accent-bg/25 transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-1 rounded-md border border-accent-bg/40 bg-accent-bg/15 px-2.5 py-1 text-[11px] text-accent-bg hover:bg-accent-bg/25 transition-colors disabled:opacity-50"
             >
               Answer
             </button>
