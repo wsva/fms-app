@@ -896,6 +896,17 @@ pub struct ArtifactJob {
     pub model: Option<String>,
     /// `queued` | `claimed` | `delivering` | `waiting_user`.
     pub status: String,
+    /// Who holds the lease, when somebody does. The same name the dock shows, so
+    /// the panel can say who has it rather than only that somebody does.
+    pub claimed_by: Option<String>,
+    /// Claims charged so far. Above zero while still `queued` is the difference
+    /// between "nobody has looked at this" and "one attempt lapsed".
+    pub attempts: i64,
+    /// Unix ms the lease runs out; `None` when nobody holds it.
+    pub expires_at: Option<i64>,
+    /// Why it last came back, when the ledger recorded one — the sentence the
+    /// requester reads in the dock.
+    pub reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// The scope's text at read time, so the agent need not fetch it separately.

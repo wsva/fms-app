@@ -152,8 +152,16 @@ export interface ArtifactJob {
   instructions: string;
   /** Model hint from the requester; the fulfilling agent may ignore it. */
   model?: string | null;
-  /** `pending` today. */
+  /** `queued` | `claimed` | `delivering` | `waiting_user`. */
   status: string;
+  /** Who holds the lease, when an agent does. */
+  claimed_by?: string | null;
+  /** Claims charged so far: above zero while still `queued` means one lapsed. */
+  attempts: number;
+  /** Unix ms the lease runs out; null when nobody holds it. */
+  expires_at?: number | null;
+  /** Why it last came back, when the ledger recorded one. */
+  reason?: string | null;
   created_at: string;
   updated_at: string;
   /** The scope's text at read time, so an agent need not fetch it separately. */

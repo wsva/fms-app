@@ -90,9 +90,9 @@ The **Mailbox** panel is how you watch this. Open it with the floating bot butto
 
 - The header reads **held** and **waiting** — how many items an agent is working on, and how many nobody holds yet — plus a **listening** badge naming the endpoint an agent attaches at.
 - Three lanes: **You owe** (a request blocked on your decision, or a failure to read), **Your agent owes** (the outbox — what an attached agent can claim), and **Inbox** (deliveries and notices; opening one marks it read).
-- To give it something to do, open a book in **Books**, open a chapter or a paragraph in the Understand panel, and press the small bot button beside a card — *Ask an attached agent to generate this*. The row appears under **Your agent owes** and the card reads *Waiting for agent…*.
+- To give it something to do, open a book in **Books**, open a chapter or a paragraph in the Understand panel, and press the small bot button beside a card — *Ask an attached agent to generate this*. The row appears under **Your agent owes**, and the card reports where the request has got to: *Waiting for agent…* until somebody claims it, *Agent working…* with the holder's name and the minutes left on the lease once an agent has it, *Needs your answer* if it asked you something (answer in the Mailbox).
 - When the agent delivers, the artifact replaces the request in place, showing the model that produced it and whether it is out of date.
-- The same panel can also give you a **Copy prompt** for one request at a time. That route works without the standing prompt above: you carry each request over by hand, and the agent never has to wait on the mailbox.
+- With no agent attached the request simply waits, and the card says as much instead of pretending work is happening. A disclosure under that sentence carries a **Copy prompt** for one request at a time, for an agent that cannot attach on its own: you carry each request over by hand, and the agent never has to wait on the mailbox.
 
 Nothing appears on your phone: agents attach to the desktop's server, so the bot button is desktop-only. The result is still part of the dataset, so it reaches your phone the next time that dataset syncs — you simply cannot start the request from there.
 

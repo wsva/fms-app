@@ -29,6 +29,7 @@ import UnderstandingModelPicker from "./UnderstandingModelPicker";
 import SpeakToolbar from "./SpeakToolbar";
 import type { useBookData } from "@/hooks/useBookData";
 import type {
+  ArtifactJob,
   ArtifactKind,
   ArtifactScopeType,
   BookArtifactView,
@@ -219,6 +220,52 @@ function tabStale(b: ReturnType<typeof useBookData>, tab: Tab): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// What an open request is doing
+// ---------------------------------------------------------------------------
+
+/** "7 min left on the lease", or the honest alternative when there is no
+ *  deadline to count. Pure, so the ticker only has to supply `now`. */
+function leaseText(expiresAt: number | null | undefined, now: number): string {
+  if (!expiresAt) return "on a live lease";
+  const left = Math.ceil((expiresAt - now) / 60_000);
+  if (left <= 0) return "the lease is about to lapse";
+  return `${left} min left on the lease`;
+}
+
+/** The one sentence the panel shows where it used to print a prompt.
+ *
+ *  With the mailbox, an attached agent claims a request by itself, so the
+ *  question the learner actually has is "who has it, and is anything
+ *  happening" — not "what do I paste where". The prompt survives a disclosure
+ *  below, for the one case this sentence cannot help: no agent attached yet. */
+function jobStateLine(job: ArtifactJob, now: number): string {
+  const state = (() => {
+    if (job.status === "waiting_user") {
+      return "The agent asked a question — answer it in the Mailbox (Ctrl+Space).";
+    }
+    if (job.status === "claimed" || job.status === "delivering") {
+      const who = job.claimed_by?.trim() || "Your agent";
+      return `${who} is working on this · ${leaseText(job.expires_at, now)}.`;
+    }
+    if (job.attempts > 0) {
+      const n = job.attempts === 1 ? "one attempt" : `${job.attempts} attempts`;
+      // The ledger's own sentence, when it kept one: an agent that released
+      // the item said why, and that is the part the learner cannot infer from
+      // a count.
+      const why = job.reason?.trim() ? ` Last one: ${job.reason.trim()}` : "";
+      return `The last attempt came back unfulfilled (${n} so far).${why} An attached agent can claim it again.`;
+    }
+    // The one case the sentence has to answer for: nobody is attached, and the
+    // request will sit here until someone is. The page that fixes it is named.
+    return "Nobody has picked this up yet. An attached agent claims it by itself — Tools → Agent if none is attached.";
+  })();
+  // The header's amber wand is the icon; this is the sentence that says what it
+  // means, because the passage changing under a live request is the one thing a
+  // learner should not have to infer from a colour.
+  return job.stale ? `${state} The passage changed since you asked.` : state;
+}
+
+// ---------------------------------------------------------------------------
 // Generated markdown artifact (explain / simplify / argument / digest)
 // ---------------------------------------------------------------------------
 
@@ -244,12 +291,14 @@ function GeneratedSection({
   const { generating, handleGenerate, handleRequestAgent, handleCancelJob, handleDeleteArtifact, jobs, mobile, bookUUID } = b;
   // The outstanding agent request for this exact scope + kind, if any.
   const job = jobs.find((j) => j.scope_uuid === scopeUuid && j.kind === kind);
-  // FmS cannot call the agent, so the learner carries the request over by hand.
-  // Build the copy/paste prompt from the job row itself (its instructions are the
-  // truth), and pre-fill the existing uuid only when regenerating in place.
+  // The fallback, one disclosure down: for an agent that cannot attach on its
+  // own. Built from the job row itself (its instructions are the truth), naming
+  // the job so the agent claims this one, and pre-filling the existing uuid
+  // only when regenerating in place.
   const agentPrompt = job
     ? buildArtifactJobPrompt({
         bookUuid: bookUUID,
+        jobUuid: job.uuid,
         scopeType: job.scope_type,
         scopeUuid: job.scope_uuid,
         kind: job.kind,
@@ -257,6 +306,21 @@ function GeneratedSection({
         existingUuid: artifact?.uuid,
       })
     : "";
+  // The lease line names minutes, so a claimed card has to re-render. 30 s is
+  // enough for a countdown read at a glance, and nothing else here ticks. The
+  // effect keys on the status, not the row: the poll replaces the object every
+  // 12 s, and keying on it would restart the interval before it ever fired.
+  const [now, setNow] = useState(() => Date.now());
+  const jobStatus = job?.status;
+  useEffect(() => {
+    if (jobStatus !== "claimed" && jobStatus !== "delivering") return;
+    // First tick is the claim itself, so the countdown starts from when the row
+    // was read rather than from when this panel mounted.
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, [jobStatus]);
+
   const [copied, setCopied] = useState(false);
   const [clipFailed, setClipFailed] = useState(false);
   // A new job (or its disappearance) resets the copy feedback.
@@ -279,7 +343,12 @@ function GeneratedSection({
         <div className="flex items-center gap-1.5 text-xs text-text-tertiary min-w-0">
           {job ? (
             <span className="flex items-center gap-1 text-accent truncate">
-              <Loader2 size={12} className="animate-spin shrink-0" /> Waiting for agent…
+              <Loader2 size={12} className="animate-spin shrink-0" />{" "}
+              {job.status === "waiting_user"
+                ? "Needs your answer"
+                : job.status === "claimed" || job.status === "delivering"
+                  ? "Agent working…"
+                  : "Waiting for agent…"}
               {job.stale && <Wand2 size={12} className="text-amber-500 shrink-0" />}
             </span>
           ) : artifact ? (
@@ -322,11 +391,12 @@ function GeneratedSection({
           {!mobile && !job && (
             <button
               title="Ask an attached agent to generate this"
-              className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border border-border-default text-text-secondary hover:bg-bg-hover disabled:opacity-50 cursor-pointer"
+              className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border border-border-default text-text-secondary hover:bg-bg-hover disabled:opacity-50 cursor-pointer shrink-0"
               disabled={generating}
               onClick={() => handleRequestAgent(scopeType, scopeUuid, kind)}
             >
               <Bot size={13} />
+              Ask an agent
             </button>
           )}
           <button
@@ -346,31 +416,51 @@ function GeneratedSection({
         </div>
       </div>
       {job && (
-        <div className="flex flex-col gap-1.5 rounded-lg border border-border-default bg-bg-muted p-2.5">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs text-text-secondary">
-              Paste this into your agent so it can fill the request:
+        <div className="flex flex-col gap-2 rounded-lg border border-border-default bg-bg-muted px-2.5 py-2">
+          {/* State, not instructions. An attached agent claims this on its own,
+              so what is worth showing is who has it and how long is left; the
+              prompt is the fallback for when nobody is attached at all. */}
+          <div className="flex items-start gap-1.5 text-xs text-text-secondary">
+            <span className="mt-px shrink-0 text-text-tertiary">
+              {job.status === "claimed" || job.status === "delivering" ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <Bot size={12} />
+              )}
             </span>
-            <button
-              type="button"
-              className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border border-border-default text-text-secondary hover:bg-bg-hover cursor-pointer shrink-0"
-              onClick={() => void copyPrompt()}
-            >
-              {copied ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
-              {copied ? "Copied" : "Copy prompt"}
-            </button>
+            <span className="min-w-0">{jobStateLine(job, now)}</span>
           </div>
-          <textarea
-            readOnly
-            value={agentPrompt}
-            onFocus={(e) => e.currentTarget.select()}
-            className="w-full h-40 p-2 rounded-md bg-bg-base border border-border-default text-[11px] text-text-primary font-mono resize-y"
-          />
-          <p className="text-[11px] text-text-tertiary">
-            {clipFailed
-              ? "Could not reach the clipboard — select the text above and copy it."
-              : "Nothing changes until your agent reads this request and delivers the result here."}
-          </p>
+          <details>
+            <summary className="cursor-pointer text-[11px] text-text-tertiary hover:text-text-secondary">
+              No agent attached? Copy the request for one.
+            </summary>
+            <div className="mt-2 flex flex-col gap-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-text-tertiary">
+                  Paste it into an agent that cannot attach on its own.
+                </span>
+                <button
+                  type="button"
+                  className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border border-border-default text-text-secondary hover:bg-bg-hover cursor-pointer shrink-0"
+                  onClick={() => void copyPrompt()}
+                >
+                  {copied ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
+                  {copied ? "Copied" : "Copy prompt"}
+                </button>
+              </div>
+              <textarea
+                readOnly
+                value={agentPrompt}
+                onFocus={(e) => e.currentTarget.select()}
+                className="w-full h-32 p-2 rounded-md bg-bg-base border border-border-default text-[11px] text-text-primary font-mono resize-y"
+              />
+              {clipFailed && (
+                <p className="text-[11px] text-amber-500">
+                  Could not reach the clipboard — select the text above and copy it.
+                </p>
+              )}
+            </div>
+          </details>
         </div>
       )}
       {artifact ? (

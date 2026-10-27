@@ -38,6 +38,11 @@ import { getUUID, nowIso } from "@/components/books/utils";
 
 export type BookView = "read" | "manage" | "advanced";
 
+/** How often an open agent request is reread from the ledger. The dock's open
+ *  list uses 8 s; this panel is one step removed from the work (it reports the
+ *  state, it does not work the queue), so it can afford to be a beat slower. */
+const OPEN_JOBS_POLL_MS = 12_000;
+
 export function useBookData() {
   // ── Shared navigation ──────────────────────────────────────────
   const [books, setBooks] = useState<BookMeta[]>([]);
@@ -157,6 +162,18 @@ export function useBookData() {
       console.error("Failed to load artifact jobs:", e);
     }
   }, [bookUUID]);
+
+  // A claim, a lapsed lease or a question are ledger facts, not artifact facts,
+  // so none of them fires `book-artifact-changed`. The panel tells the learner
+  // who holds the request and how long is left, which is only true if the row
+  // is reread while it is open. Delivery itself still arrives through the
+  // event, exactly once — this poll only keeps the state line honest.
+  const hasOpenJobs = jobs.length > 0;
+  useEffect(() => {
+    if (!hasOpenJobs) return;
+    const id = setInterval(() => void loadJobs(), OPEN_JOBS_POLL_MS);
+    return () => clearInterval(id);
+  }, [hasOpenJobs, loadJobs]);
 
   const loadTerms = useCallback(async () => {
     if (!bookUUID || !isTauri()) {

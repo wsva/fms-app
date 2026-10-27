@@ -169,6 +169,14 @@ fn job_of(book: &Connection, m: &Mail) -> ArtifactJob {
         instructions: spec.instructions,
         model: spec.model,
         status: m.status.clone(),
+        // The holder, the attempt count and the lease deadline are already in
+        // hand here — `list_jobs` builds every row from a live mail row — so the
+        // panel can say who is working and how long is left without a second
+        // read. Four fields, no extra query.
+        claimed_by: m.claimed_by.clone(),
+        attempts: m.attempts,
+        expires_at: m.expires_at,
+        reason: m.reason.clone(),
         created_at: stamp(m.created_at),
         updated_at: stamp(m.updated_at),
         source_text: text,
