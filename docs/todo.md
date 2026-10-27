@@ -46,11 +46,11 @@ convert abbreviation to full form
 
 use the recognized text of standard audio as scoring reference
 
-move user info out of logout button
 
 read-aloud, record > saving > saved
 reperate from transcribing anf scoring
 
 rename "read-a-book" to "books" project-wide
 
-add a function, send the recording and text to AI, to get suggestions in pronuciation and speaking, how to improve
+
+I tried to use the read-aloud page, but got very low scores, and no tips, no guidence, no improve suggestions. So I want to add a function, send the recording and text to a LLM, to get suggestions in pronuciation and speaking, and how to improve them. We don't send, we setup a message, and let the third-aprty agent fetch it and ask, then the user can use the agent to discuss with AI platform further
