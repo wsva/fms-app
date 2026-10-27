@@ -25,6 +25,7 @@ import {
   Copy,
 } from "lucide-react";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
+import AgentBadge from "@/components/agent/AgentBadge";
 import UnderstandingModelPicker from "./UnderstandingModelPicker";
 import SpeakToolbar from "./SpeakToolbar";
 import type { useBookData } from "@/hooks/useBookData";
@@ -387,16 +388,18 @@ function GeneratedSection({
           )}
           {/* Delegate to an attached third-party agent. Desktop only: agents
               attach to the desktop MCP server, so a phone job would never be
-              picked up. Hidden while a request is already outstanding. */}
+              picked up. Hidden while a request is already outstanding. The badge
+              is the leading icon; "Get Help" is the visible label (the badge is
+              decorative beside it, so it carries no own title). */}
           {!mobile && !job && (
             <button
               title="Ask an attached agent to generate this"
-              className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border border-border-default text-text-secondary hover:bg-bg-hover disabled:opacity-50 cursor-pointer shrink-0"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border border-border-default text-text-secondary hover:bg-bg-hover disabled:opacity-50 cursor-pointer shrink-0"
               disabled={generating}
               onClick={() => handleRequestAgent(scopeType, scopeUuid, kind)}
             >
-              <Bot size={13} />
-              Ask an agent
+              <AgentBadge height={11} chip title={null} />
+              Get Help
             </button>
           )}
           <button
