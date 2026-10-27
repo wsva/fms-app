@@ -240,11 +240,18 @@
     overflow: hidden;
   }
 
-  /* The desktop status bar's height, owned by the shell rather than by the bar.
-     The bar spans the full window width, so the sidebar, the agent dock and the
-     floating button all stop above it — and each reads this instead of
-     repeating the same magic number. */
+  /* The desktop shell's own strips, owned by the shell rather than by the bar.
+     Both span the full window width, so the sidebar, the agent dock and the
+     floating button stop at their edges — and each reads these back instead of
+     repeating the same magic number.
+
+     `--shell-titlebar-h` is the custom title bar's height. It exists because the
+     window is created with `decorations: false` (see src-tauri/tauri.conf.json),
+     so the app draws the bar the OS would have drawn, and it must also clear the
+     native resize strip the OS hit-tests at the very top of an undecorated
+     window — hence a few px taller than a row of 22px buttons. */
   :root {
+    --shell-titlebar-h: 34px;
     --shell-statusbar-h: 28px;
   }
 }

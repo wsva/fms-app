@@ -731,7 +731,9 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
           border alone separates the panel from the page. */}
       {mounted && (
         <aside
-          className={`fixed top-0 right-0 bottom-[var(--shell-statusbar-h)] z-[100] flex flex-col bg-bg-card border-l border-border-default transition-transform duration-200 ease-out ${
+          // The panel is the content column's neighbour, so it spans exactly the
+          // content: below the title bar the app draws, above the status bar.
+          className={`fixed top-[var(--shell-titlebar-h)] right-0 bottom-[var(--shell-statusbar-h)] z-[100] flex flex-col bg-bg-card border-l border-border-default transition-transform duration-200 ease-out ${
             open ? "translate-x-0" : "translate-x-full"
           }`}
           style={{ width: dockWidth }}
@@ -1094,26 +1096,37 @@ function MailItem({
 // the space `left`/`top` live in — which is the window divided by the page
 // zoom factor; clamping against raw `innerWidth` let `left * zoom` overshoot
 // the viewport and threw the button off-screen at zoom levels above 100%.
-// The bottom edge is the viewport minus the status bar, which the button must
-// not cover.
+// The bottom edge is the viewport minus the status bar and the top edge is
+// clear of the title bar, neither of which the button may cover.
 function clampFabPos(x: number, y: number) {
   const z = pageZoomFactor();
   const vw = window.innerWidth / z;
   const vh = window.innerHeight / z - statusBarInset();
+  const top = titleBarInset() + FAB_EDGE_PAD;
   return {
     x: Math.max(FAB_EDGE_PAD, Math.min(vw - FAB_SIZE - FAB_EDGE_PAD, x)),
-    y: Math.max(FAB_EDGE_PAD, Math.min(vh - FAB_SIZE - FAB_EDGE_PAD, y)),
+    y: Math.max(top, Math.min(vh - FAB_SIZE - FAB_EDGE_PAD, y)),
   };
 }
 
-// The status bar's height, read from the var the shell declares in globals.css
+// A shell bar's height, read from the var the shell declares in globals.css
 // rather than repeated here. A client-only call: it runs from a pointer handler
 // or the clamp on restore, never during the prerender.
-function statusBarInset(): number {
+function shellBarHeight(varName: string): number {
   const px = parseFloat(
-    getComputedStyle(document.documentElement).getPropertyValue("--shell-statusbar-h")
+    getComputedStyle(document.documentElement).getPropertyValue(varName)
   );
   return Number.isFinite(px) && px > 0 ? px : 0;
+}
+
+function statusBarInset(): number {
+  return shellBarHeight("--shell-statusbar-h");
+}
+
+// The app draws the window's title bar (the desktop window has no decorations),
+// so it is a strip the floating button must not sit on top of either.
+function titleBarInset(): number {
+  return shellBarHeight("--shell-titlebar-h");
 }
 
 function reason(e: unknown): string {

@@ -21,6 +21,8 @@ import {
 import MicTestPanel from "@/components/voice/MicTestPanel";
 import { isMobileApp } from "@/lib/platform";
 import { logError, logInfo } from "@/lib/logger";
+import { THEMES } from "@/lib/theme";
+import { useTheme } from "@/hooks/useTheme";
 import { AGENT_SURFACE_SAVED } from "@/lib/agent/control";
 import {
   DEFAULT_NAV_CONFIG,
@@ -105,33 +107,6 @@ interface WorkspaceSettings {
   cluster_id: string;
 }
 
-type ThemeId = "light" | "dark" | "solarized" | "gruvbox";
-
-const themes: { id: ThemeId; label: string; preview: string }[] = [
-  { id: "light", label: "Light", preview: "bg-[#fbfbfb] border-[#e0e0e0]" },
-  { id: "dark", label: "Dark", preview: "bg-[#1a1a1a] border-[#3a3a3a]" },
-  { id: "solarized", label: "Solarized", preview: "bg-[#fdf6e3] border-[#d3cbb7]" },
-  { id: "gruvbox", label: "Gruvbox", preview: "bg-[#282828] border-[#504945]" },
-];
-
-// ---------------------------------------------------------------------------
-// Theme helpers
-// ---------------------------------------------------------------------------
-
-function getStoredTheme(): ThemeId {
-  if (typeof window === "undefined") return "light";
-  return (localStorage.getItem("theme") as ThemeId) || "light";
-}
-
-function applyTheme(theme: ThemeId) {
-  localStorage.setItem("theme", theme);
-  if (theme === "light") {
-    document.documentElement.removeAttribute("data-theme");
-  } else {
-    document.documentElement.setAttribute("data-theme", theme);
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Shared Tailwind class fragments
 // ---------------------------------------------------------------------------
@@ -149,7 +124,9 @@ export default function SettingsPage() {
   const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings | null>(null);
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [savedGlobal, setSavedGlobal] = useState(false);
-  const [currentTheme, setCurrentTheme] = useState<ThemeId>("light");
+  // Owned by lib/theme so the title bar's View menu and this picker can never
+  // disagree about which theme is in force.
+  const { theme: currentTheme, setTheme } = useTheme();
 
   // ---- Platform (mobile vs desktop) ----
   // `isMobileApp()` is false during prerendering (no navigator) and only turns
@@ -344,7 +321,6 @@ export default function SettingsPage() {
 
   useEffect(() => {
     fetchSettings();
-    setCurrentTheme(getStoredTheme());
   }, [fetchSettings]);
 
   // The Agent page owns `mcp_policy`, `mcp_enabled` and `agent_fab_visible` now.
@@ -356,13 +332,6 @@ export default function SettingsPage() {
     window.addEventListener(AGENT_SURFACE_SAVED, onAgentSurface);
     return () => window.removeEventListener(AGENT_SURFACE_SAVED, onAgentSurface);
   }, [fetchSettings]);
-
-  // ---- Theme change ----
-
-  function handleThemeChange(theme: ThemeId) {
-    setCurrentTheme(theme);
-    applyTheme(theme);
-  }
 
   // ---- Update helpers ----
 
@@ -466,7 +435,7 @@ export default function SettingsPage() {
             Choose a color theme for the application.
           </p>
           <div className="flex flex-wrap gap-3">
-            {themes.map((t) => (
+            {THEMES.map((t) => (
               <button
                 key={t.id}
                 className={`flex flex-col items-center gap-2 p-3 rounded-lg border-2 transition-colors cursor-pointer w-28 ${
@@ -474,7 +443,7 @@ export default function SettingsPage() {
                     ? "border-accent bg-bg-hover"
                     : "border-border-default bg-bg-card hover:border-accent-hover"
                 }`}
-                onClick={() => handleThemeChange(t.id)}
+                onClick={() => setTheme(t.id)}
               >
                 <div
                   className={`w-full h-10 rounded-md border ${t.preview}`}

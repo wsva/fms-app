@@ -239,6 +239,23 @@ export function reqNum(
   return n;
 }
 
+/** A required boolean parameter. Only `true`/`false` and the strings "true"/
+ *  "false" pass: a truthy blob is not a yes, and guessing would let an agent
+ *  that sent `{ on: "no" }` get the opposite of what it asked for. */
+export function reqBool(
+  actionId: string,
+  params: Record<string, unknown>,
+  name: string
+): boolean {
+  const v = params[name];
+  if (typeof v === "boolean") return v;
+  if (v === "true") return true;
+  if (v === "false") return false;
+  throw new Error(
+    `${describe(actionId, name)} must be a boolean, got ${JSON.stringify(v ?? null)}`
+  );
+}
+
 /** A value that must be one of `allowed`; the error names the set. */
 export function oneOf<T extends string>(
   actionId: string,

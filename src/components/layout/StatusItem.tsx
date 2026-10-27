@@ -4,11 +4,13 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { Check, type LucideIcon } from "lucide-react";
 
 // ---------------------------------------------------------------------------
-// Status bar item
+// Bar item
 // ---------------------------------------------------------------------------
-// The status bar is a strip of buttons, in the VS Code sense: each item fills
-// the bar's height so its hover rectangle touches its neighbours, and clicking
-// one raises a menu *above* it. Two consequences shape this primitive:
+// A strip of buttons, in the VS Code sense: each item fills the bar's height so
+// its hover rectangle touches its neighbours, and clicking one raises a menu.
+// Two bars use this primitive — the status bar at the bottom (menus open
+// *above* their item) and the title bar at the top (menus open *below*, via
+// `direction="down"`). Three consequences shape it:
 //
 //  * The panel sits at z-[110], over the agent dock (z-100) and the floating
 //    button (z-101). The right-hand items live under the dock's own column, so
@@ -18,6 +20,8 @@ import { Check, type LucideIcon } from "lucide-react";
 //    to `auto`, so there is no "clip one way only" escape. Truncation therefore
 //    belongs on the item's own text (`max-w-*` + `truncate`), never on a
 //    wrapping div.
+//  * The menu opens on click, not hover, because a WebView fires no `mouseleave`
+//    that could be trusted to close it again on a touch screen.
 // ---------------------------------------------------------------------------
 
 /** Closes the owning menu; a no-op for a row rendered outside one. */
@@ -40,18 +44,21 @@ export type StatusItemProps = {
   /** Which edge the panel aligns to: `start` for left-group items, `end` for
    *  right-group ones, so no menu is ever pushed off screen. */
   align?: "start" | "end";
+  /** Which side of the item the panel opens on: `up` for a bottom bar, `down`
+   *  for the title bar at the top of the window. */
+  direction?: "up" | "down";
   /** Action for a plain item. Ignored when the item has menu children. */
   onClick?: () => void;
-  /** Menu contents. With children the item owns an upward popover; without
-   *  them it is a bare button — which is what the dock toggle wants. */
+  /** Menu contents. With children the item owns a popover in `direction`;
+   *  without them it is a bare button — which is what the dock toggle wants. */
   children?: ReactNode;
   className?: string;
 };
 
 /**
- * One item of the status bar: a full-height button, optionally with an upward
- * menu. Owns the open state, the Escape handler and the tap-away backdrop —
- * the backdrop because a WebView fires no `mouseleave`, so hover dismissal
+ * One item of a shell bar: a full-height button, optionally with a menu.
+ * Owns the open state, the Escape handler and the tap-away backdrop — the
+ * backdrop because a WebView fires no `mouseleave`, so hover dismissal
  * would leave a menu stuck open on touch.
  */
 export function StatusItem({
@@ -62,6 +69,7 @@ export function StatusItem({
   trailing,
   active = false,
   align = "start",
+  direction = "up",
   onClick,
   children,
   className = "",
@@ -107,7 +115,9 @@ export function StatusItem({
           <div
             role="menu"
             aria-label={label}
-            className={`absolute bottom-full mb-1 z-[110] min-w-[220px] max-w-[380px] rounded-lg border border-border-default bg-bg-card py-1 text-sm font-normal shadow-xl ${
+            className={`absolute ${
+              direction === "down" ? "top-full mt-1" : "bottom-full mb-1"
+            } z-[110] min-w-[220px] max-w-[380px] rounded-lg border border-border-default bg-bg-card py-1 text-sm font-normal shadow-xl ${
               align === "end" ? "right-0" : "left-0"
             }`}
           >

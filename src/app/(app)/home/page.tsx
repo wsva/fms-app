@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { isMobileApp } from "@/lib/platform";
 import Sidebar, { type TabId } from "@/components/layout/Sidebar";
+import TitleBar from "@/components/layout/TitleBar";
 import StatusBar from "@/components/layout/StatusBar";
 import BottomNav from "@/components/layout/BottomNav";
 import WorkspaceChooser from "@/components/workspace/WorkspaceChooser";
@@ -272,6 +273,18 @@ export default function Home() {
   // politeness: a WebView-level reload remounts every page and destroys state
   // the app deliberately keeps alive — including dictation answers, which are
   // never persisted. The page's own guard decides whether a re-read is safe.
+  // The title bar's File menu calls this same function, so a click and a
+  // keystroke cannot diverge on what "refresh" means or what it reports back.
+  const refreshActivePageWithToast = useCallback(() => {
+    void refreshActivePage("manual").then((outcome) => {
+      if (outcome.status === "blocked") {
+        showToast("Not refreshed: this page has unsaved edits.");
+      } else if (outcome.status === "none") {
+        showToast("Nothing to refresh on this page.");
+      }
+    });
+  }, [showToast]);
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.repeat) return;
@@ -280,17 +293,11 @@ export default function Home() {
         ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "r");
       if (!isRefreshKey) return;
       e.preventDefault();
-      void refreshActivePage("manual").then((outcome) => {
-        if (outcome.status === "blocked") {
-          showToast("Not refreshed: this page has unsaved edits.");
-        } else if (outcome.status === "none") {
-          showToast("Nothing to refresh on this page.");
-        }
-      });
+      refreshActivePageWithToast();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [showToast]);
+  }, [refreshActivePageWithToast]);
 
   // The same path the keyboard takes, for an agent: refresh is otherwise
   // UI-only, and every feature is supposed to be reachable through MCP.
@@ -308,9 +315,30 @@ export default function Home() {
     setShowWorkspaceChooser(false);
   }
 
+  // The window's own bar. The desktop window is created with `decorations: false`,
+  // so this row is the only way to minimize, maximize or move the window — which
+  // is why it is drawn in *both* branches below: an undecorated window behind the
+  // workspace chooser would otherwise be a frame the user cannot drag or leave.
+  // Mobile keeps the system bar it was given.
+  const titleBar = mobile ? null : (
+    <TitleBar
+      onNavigate={(tab) => setActiveTab(tab as TabId)}
+      onRefresh={refreshActivePageWithToast}
+      onWorkspaceChooser={() => setShowWorkspaceChooser(true)}
+    />
+  );
+
   // Show workspace chooser if needed
   if (showWorkspaceChooser) {
-    return <WorkspaceChooser onSelect={handleWorkspaceSelect} />;
+    // The chooser is a `fixed inset-0` scrim of its own; the bar out-stacks it
+    // (see the z order in TitleBar) instead of being dimmed under it, the way a
+    // native title bar is not.
+    return (
+      <div className="flex flex-col h-full">
+        {titleBar}
+        <WorkspaceChooser onSelect={handleWorkspaceSelect} />
+      </div>
+    );
   }
 
   return (
@@ -319,15 +347,18 @@ export default function Home() {
       // a viewport unit is multiplied by the global page zoom while a percentage
       // resolves against a viewport already divided by it, so 100vh overshoots
       // the window at any zoom above 1 and the window itself starts scrolling.
-      // The shell is a column: the sidebar + pages row on top, the status bar
-      // under it. The bar is a sibling of that row rather than a child of the
-      // pages, so it spans the whole window width — which is also why the
-      // sidebar can be an in-flow flex item instead of a `fixed` panel: it stops
-      // at the row's bottom edge, above the bar.
+      // The shell is a column: the title bar on top, the sidebar + pages row
+      // under it, the status bar under that. Both bars are siblings of the row
+      // rather than children of the pages, so each spans the whole window width
+      // — which is also why the sidebar can be an in-flow flex item instead of a
+      // `fixed` panel: it stops at the row's edges, below the title bar and above
+      // the status bar.
       className="flex flex-col h-full"
       // Edge-to-edge WebView draws under the status bar; push the shell below it.
       style={mobile ? { paddingTop: "env(safe-area-inset-top)" } : undefined}
     >
+      {titleBar}
+
       <div className="flex flex-1 min-h-0">
         {!mobile && (
           <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
