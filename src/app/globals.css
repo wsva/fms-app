@@ -168,6 +168,51 @@
     --fam-6: #e5eec6;
   }
 
+  /* ── Code ─────────────────────────────────────────────────
+     A syntax-highlighting dark theme lifted from a VS Code-style editor.
+     The text roles follow the code roles: primary text is the editor
+     foreground (plain identifiers), secondary is the comment grey, tertiary
+     is the light-blue variable colour, the accent is keyword-purple and the
+     button background is function-teal — so different kinds of text across
+     the UI read like different token types in a source file. */
+  [data-theme="code"] {
+    --bg-body: #1e1e1c;
+    --bg-card: #262623;
+    --bg-input: #1e1e1c;
+    --bg-elevated: #2d2d29;
+    --bg-muted: #373732;
+    --bg-hover: #3a3a34;
+    --bg-progress: #3a3a34;
+    --text-primary: #d4d4aa;
+    --text-secondary: #878773;
+    --text-tertiary: #9cdcfe;
+    --border-default: #3a3a34;
+    --border-light: #52524a;
+    --border-input: #52524a;
+    --accent: #c586c0;
+    --accent-hover: #d3a0cf;
+    --accent-bg: #41b0a6;
+    --accent-bg-hover: #369a91;
+    --success-bg: #1f3a2c;
+    --success-text: #4ec9b0;
+    --error-bg: #3d2426;
+    --error-text: #f48771;
+    --info-bg: #1f2c40;
+    --info-text: #569cd6;
+    --warning-bg: #3a2e17;
+    --warning-text: #d7ba7d;
+    --brand-pink: #dcdcaa;
+    --gray-mid: #6a6a63;
+    /* Familiarity ramp — muted dark tints in the syntax palette's hues */
+    --fam-0: #32322e;
+    --fam-1: #46302e;
+    --fam-2: #4a3a26;
+    --fam-3: #45402a;
+    --fam-4: #2a3c48;
+    --fam-5: #27423a;
+    --fam-6: #3c4028;
+  }
+
   /* ── Gruvbox ───────────────────────────────────────────── */
   [data-theme="gruvbox"] {
     --bg-body: #282828;
@@ -220,7 +265,8 @@
   }
   [data-theme="dark"],
   [data-theme="solarized"],
-  [data-theme="gruvbox"] {
+  [data-theme="gruvbox"],
+  [data-theme="code"] {
     color: var(--text-primary);
     background-color: var(--bg-body);
   }

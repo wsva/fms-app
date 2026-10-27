@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------------
-// The four themes are defined as `--bg-*` / `--text-*` custom properties per
+// The themes are defined as `--bg-*` / `--text-*` custom properties per
 // `[data-theme="…"]` block in app/globals.css; switching one is a single
 // attribute on `<html>`. This module owns that write so the settings page and
 // the title bar's View menu cannot drift apart, and so the key below stays in
@@ -12,7 +12,7 @@
 // `data-theme="light"`, matching both that script and globals.css, where the
 // light values live on the bare `:root` selector.
 
-export type ThemeId = "light" | "dark" | "solarized" | "gruvbox";
+export type ThemeId = "light" | "dark" | "solarized" | "code" | "gruvbox";
 
 export interface ThemeDef {
   id: ThemeId;
@@ -22,11 +22,12 @@ export interface ThemeDef {
   preview: string;
 }
 
-/** Order is the picker order: light first, then the three dark variants. */
+/** Order is the picker order: light first, then the dark variants. */
 export const THEMES: ThemeDef[] = [
   { id: "light", label: "Light", preview: "bg-[#fbfbfb] border-[#e0e0e0]" },
   { id: "dark", label: "Dark", preview: "bg-[#1a1a1a] border-[#3a3a3a]" },
   { id: "solarized", label: "Solarized", preview: "bg-[#fdf6e3] border-[#d3cbb7]" },
+  { id: "code", label: "Code", preview: "bg-[#1e1e1c] border-[#3a3a34]" },
   { id: "gruvbox", label: "Gruvbox", preview: "bg-[#282828] border-[#504945]" },
 ];
 

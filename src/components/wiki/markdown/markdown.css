@@ -205,6 +205,17 @@
 .md-body code {
     font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
     font-size: 0.9em;
+    /* Code text reads as a distinct token type: the accent (keyword) colour at
+       a slightly heavier weight than the prose around it, in every theme. */
+    color: var(--accent);
+    font-weight: 500;
+}
+
+/* Inside a fenced block the base editor foreground keeps long listings calm;
+   the accent is reserved for inline code that sits within a sentence. */
+.md-body pre code {
+    color: var(--text-primary);
+    font-weight: 400;
 }
 
 .md-body p code,

@@ -268,7 +268,7 @@ export default function TitleBar({
           type: "string",
           required: true,
           enum: THEME_IDS,
-          description: "The theme id: light, dark, solarized or gruvbox.",
+          description: "The theme id: light, dark, solarized, code or gruvbox.",
         },
       },
       run: (params) => {
