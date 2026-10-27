@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Play, RotateCcw, Wand2 } from "lucide-react";
-import type { ReadAloudSubmitResult, ReadStandardAudio, ReadText } from "@/lib/read_aloud/types";
+import type { ReadAloudSubmitResult, ReadAttempt, ReadStandardAudio, ReadText } from "@/lib/read_aloud/types";
 import { GOOD_SCORE, PASS_SCORE, scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { useRecorder } from "@/components/books/useRecorder";
 import AsrDiff from "@/components/read_aloud/AsrDiff";
@@ -77,6 +78,32 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
     setResult(null);
     setError(null);
   }, [text.uuid]);
+
+  // A delegated feedback report is written back out of band by an attached
+  // agent (via `read_aloud_save_feedback`, which emits this event). When it
+  // names the take on screen, refetch that attempt so its stored report feeds
+  // the card — the just-finished `result` would otherwise never gain a report.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const uuid = result?.attempt.uuid;
+    if (!uuid) return;
+    const unlisten = listen<{ attempt_uuid?: string }>("read-aloud-feedback-saved", async (e) => {
+      if (e.payload?.attempt_uuid && e.payload.attempt_uuid !== uuid) return;
+      try {
+        const rows = await invoke<ReadAttempt[]>("read_aloud_list_attempts", {
+          datasetUuid,
+          textUuid: text.uuid,
+        });
+        const fresh = rows.find((r) => r.uuid === uuid);
+        if (fresh) setResult((prev) => (prev ? { ...prev, attempt: fresh } : prev));
+      } catch (err) {
+        logError(`feedback reload failed: ${String(err)}`, LOG_MODULE);
+      }
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [result?.attempt.uuid, datasetUuid, text.uuid]);
 
   const handleResult = useCallback(
     async ({
@@ -265,11 +292,6 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
               textUuid={text.uuid}
               stored={result.attempt.feedback ?? null}
               measured={result.attempt.metrics != null}
-              onSaved={(report) =>
-                setResult((prev) =>
-                  prev ? { ...prev, attempt: { ...prev.attempt, feedback: report } } : prev
-                )
-              }
             />
           </div>
           {result.attempt.audio_url && (

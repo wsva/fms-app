@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   Play,
   Trash2,
@@ -468,6 +469,20 @@ export default function AttemptsPanel({
     loadAttempts();
   }, [loadAttempts, refreshKey]);
 
+  // An attached agent answers a delegated feedback request out of band: it
+  // claims the mailbox row, listens to the take, and `read_aloud_save_feedback`
+  // writes the report back. That tool emits `read-aloud-feedback-saved`, so
+  // reload the list — the report lives on the attempt row, which feeds the card.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const unlisten = listen<{ attempt_uuid?: string }>("read-aloud-feedback-saved", () => {
+      void loadAttempts();
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [loadAttempts]);
+
   const deleteAttempt = (a: ReadAttempt) => {
     setConfirm({
       title: "Delete attempt",
@@ -605,12 +620,6 @@ export default function AttemptsPanel({
               measured={selectedAttempt.metrics != null}
               disabled={rerecognizing !== null}
               onAssessAgain={selectedAttempt.audio_url ? () => void assessAgain(selectedAttempt) : undefined}
-              onSaved={() => {
-                // The report lives in the attempt row, so the list is the copy
-                // that has it: reload rather than keep a second source of truth.
-                void loadAttempts();
-                onChanged?.();
-              }}
             />
 
             {/* Compare mode (toolbar "Compare") pairs the texts sentence by

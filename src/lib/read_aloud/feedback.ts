@@ -3,10 +3,17 @@
  * for the model choice, and the calls the panel makes.
  *
  * The prompt itself is *not* here. It lives in the backend
- * (`src-tauri/src/datasets/read_aloud/feedback.rs`) so the in-app call, the
- * "copy the prompt" route and the MCP tool an agent drives all send exactly the
- * same words — and because the evidence it quotes is assembled from the stored
- * attempt, which only the backend can read.
+ * (`src-tauri/src/datasets/read_aloud/feedback.rs`) so the "copy the prompt"
+ * route and the MCP tool an agent drives all send exactly the same words — and
+ * because the evidence it quotes is assembled from the stored attempt, which
+ * only the backend can read.
+ *
+ * A report about a reading needs the reading, and the app's text-only LLM seam
+ * cannot carry audio. So feedback is delegated: `requestFeedback` posts the
+ * evidence, the prompt and the recording's location to the agent mailbox, an
+ * attached agent that can hear the take answers, and `read_aloud_save_feedback`
+ * writes the report back into this card. The panel reloads on the
+ * `read-aloud-feedback-saved` event.
  *
  * A report is derived output: it never affects a score, and it is device-local
  * (see `feedback_json` on the attempt row).
@@ -56,7 +63,8 @@ export interface FeedbackReport {
   focus_words: FeedbackFocusWord[];
   drill?: string | null;
   next_try: string;
-  /** `"llm"` for the in-app route, `"agent"` for a report written back via MCP. */
+  /** `"agent"` for a report written back via MCP; `"llm"` on a legacy report
+   *  the removed in-app route once produced. */
   source: string;
   model?: string | null;
   created_at: string;
@@ -134,12 +142,26 @@ export interface FeedbackArgs {
 }
 
 /**
- * Ask the configured model for feedback and store it. Resolves with the report
- * as stored; throws the backend's message (already phrased for a person — e.g.
- * "No LLM model is configured…") when it cannot.
+ * Receipt of a delegated feedback request: the mailbox row an attached agent
+ * will claim, listen to the recording for, and answer. The report itself lands
+ * later (via `read_aloud_save_feedback`) and reaches the card through the
+ * `read-aloud-feedback-saved` event — this only confirms the ask was posted.
  */
-export async function generateFeedback(args: FeedbackArgs): Promise<FeedbackReport> {
-  return invoke<FeedbackReport>("read_aloud_feedback", {
+export interface FeedbackRequestReceipt {
+  mail_uuid: string;
+  status: string;
+  subject: string;
+  recording?: string | null;
+}
+
+/**
+ * Delegate this take to an agent that can hear it (T1): post the evidence, the
+ * exact prompt and the recording's location to the agent mailbox. Resolves with
+ * the mail receipt; throws the backend's message (already phrased for a person —
+ * e.g. "This attempt's recording is not on this device…") when it cannot.
+ */
+export async function requestFeedback(args: FeedbackArgs): Promise<FeedbackRequestReceipt> {
+  return invoke<FeedbackRequestReceipt>("read_aloud_request_feedback", {
     datasetUuid: args.datasetUuid,
     attemptUuid: args.attemptUuid,
     textUuid: args.textUuid ?? null,

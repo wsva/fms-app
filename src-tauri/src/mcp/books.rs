@@ -416,25 +416,6 @@ struct ReadAloudNormalizeMeasureParam {
 const MAX_INLINE_AUDIO_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
-struct ReadAloudFeedbackParam {
-    dataset_uuid: String,
-    attempt_uuid: String,
-    /// The attempt's text. Optional — it is checked against the attempt and
-    /// never trusted over it.
-    #[serde(default)]
-    text_uuid: Option<String>,
-    /// Model to run the prompt with (Ollama, or the configured provider). Omit
-    /// for the app's configured `llm_model`.
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    temperature: Option<f32>,
-    /// BCP-47 tag for the answer (`en`, `de`). Default `en`.
-    #[serde(default)]
-    language: Option<String>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudFeedbackContextParam {
     dataset_uuid: String,
     attempt_uuid: String,
@@ -458,6 +439,13 @@ struct ReadAloudSaveFeedbackParam {
     /// The model that wrote it, kept as provenance.
     #[serde(default)]
     model: Option<String>,
+    /// The mailbox request this report answers (`mail_claim` gave you its
+    /// `mail_uuid`), so saving closes the `read_aloud_request_feedback` row.
+    #[serde(default)]
+    mail_uuid: Option<String>,
+    /// The claim token paired with `mail_uuid`; both are needed to close it.
+    #[serde(default)]
+    claim_id: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -1272,29 +1260,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_feedback", description = "Explain a stored attempt and say what to do differently: renders everything the scorer measured into one evidence block, runs the app's own feedback prompt through the configured LLM (Ollama via `model`, or the configured provider — omit `model` for the app's `llm_model`), and stores the structured report on the attempt. The report names what went wrong, why, how to fix it, a short drill and one line to keep in mind next take. Every number it quotes exists in the evidence; an axis that was not measured is stated as not measured. Needs an existing stored attempt (read_aloud_list_attempts) — feedback explains measurements, it never invents them. Returns an actionable error when no model is configured.")]
-    async fn read_aloud_feedback(&self, Parameters(param): Parameters<ReadAloudFeedbackParam>) -> Result<String, String> {
-        log::info!(
-            "[MCP] read_aloud_feedback: dataset={}, attempt={}, model={:?}",
-            param.dataset_uuid,
-            param.attempt_uuid,
-            param.model
-        );
-        let settings = self.app.state::<SettingsState>();
-        let report = datasets::read_aloud::feedback::generate(
-            &settings,
-            &param.dataset_uuid,
-            &param.attempt_uuid,
-            param.text_uuid,
-            param.model,
-            param.temperature,
-            param.language,
-        )
-        .await?;
-        Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
-    }
-
-    #[tool(name = "read_aloud_feedback_context", description = "Read-only agent handoff: everything one attempt can tell a model, plus the exact prompt to answer it — `{attempt, passage, language, feedback_language, assessment, phone_detail, evidence, prompt, audio: {path, bytes, duration, format}}`. This is how a recording reaches a model that can hear, which the in-app route cannot do (its LLM seam is text only): pass `include_audio_base64: true` to get the take's bytes inline (refused above 8 MB — read the file at `audio.path` instead). `phone_detail` names the weakest sounds and what the acoustic model heard instead, recomputed on demand from the device-local recording. Write the answer back with read_aloud_save_feedback so it lands in the same UI card.")]
+    #[tool(name = "read_aloud_feedback_context", description = "Read-only agent handoff: everything one attempt can tell a model, plus the exact prompt to answer it — `{attempt, passage, language, feedback_language, assessment, phone_detail, evidence, prompt, audio: {path, bytes, duration, format}}`. This is how a recording reaches a model that can hear it: a feedback request the panel posts via `read_aloud_request_feedback` arrives in the mailbox; claim it with `mail_claim`, call this with `include_audio_base64: true` to get the take's bytes inline (refused above 8 MB — read the file at `audio.path` instead) and judge the reading by listening, never by reading a recognizer's transcript. Write the answer back with read_aloud_save_feedback — citing the request's `mail_uuid` and `claim_id` so it lands in the attempt's feedback card and closes the request.")] 
     async fn read_aloud_feedback_context(&self, Parameters(param): Parameters<ReadAloudFeedbackContextParam>) -> Result<String, String> {
         log::info!(
             "[MCP] read_aloud_feedback_context: dataset={}, attempt={}, audio={}",
@@ -1340,7 +1306,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&value).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_save_feedback", description = "Store a feedback report an agent produced after reading (and possibly listening to) read_aloud_feedback_context. Same shape as the prompt asks for: `summary` (mandatory, 3-4 sentences), optional `diagnosis`, `issues` (area/evidence/detail/fix/drill, worst first), `focus_words` (word/ipa/hint/score), `drill`, `next_try`. Caps are applied on save (5 issues, 8 focus words) and `source` is forced to `agent`. The report is device-local derived output — it appears in the attempt's feedback card and is not synced.")]
+    #[tool(name = "read_aloud_save_feedback", description = "Store a feedback report an agent produced after reading (and listening to) read_aloud_feedback_context. Same shape as the prompt asks for: `summary` (mandatory, 3-4 sentences), optional `diagnosis`, `issues` (area/evidence/detail/fix/drill, worst first), `focus_words` (word/ipa/hint/score), `drill`, `next_try`. Caps are applied on save (5 issues, 8 focus words) and `source` is forced to `agent`. Cite the `mail_uuid` + `claim_id` from `mail_claim` when you are answering a `read_aloud_request_feedback` request — that closes the request once the report is stored. The report is device-local derived output — it appears in the attempt's feedback card and is not synced.")]
     async fn read_aloud_save_feedback(&self, Parameters(param): Parameters<ReadAloudSaveFeedbackParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_save_feedback: attempt={}", param.attempt_uuid);
         let settings = self.app.state::<SettingsState>();
@@ -1349,7 +1315,14 @@ impl DatasetMcpServer {
             &param.attempt_uuid,
             param.report.into(),
             param.model,
+            param.mail_uuid,
+            param.claim_id,
         )?;
+        use tauri::Emitter;
+        let _ = self.app.emit(
+            "read-aloud-feedback-saved",
+            serde_json::json!({ "attempt_uuid": param.attempt_uuid }),
+        );
         Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
     }
 

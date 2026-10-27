@@ -9,7 +9,7 @@ import {
   LS_FEEDBACK_MODEL,
   feedbackContext,
   feedbackProvenance,
-  generateFeedback,
+  requestFeedback,
   type FeedbackReport,
 } from "@/lib/read_aloud/feedback";
 import { isTauri } from "@/lib/tauri";
@@ -52,8 +52,6 @@ type Props = {
    * either way.
    */
   language?: string;
-  /** Called with the stored report so the caller can refresh its own copy. */
-  onSaved?: (report: FeedbackReport) => void;
   /** Offered when nothing was measured yet. */
   onAssessAgain?: () => void;
   /** Paused while the page is saving, or another attempt is being re-assessed. */
@@ -67,12 +65,14 @@ const primaryButton =
 
 /**
  * The feedback card for one attempt: the stored report, and the button that
- * asks for one.
+ * asks an agent for one.
  *
- * Two routes, one card. "Get feedback" runs the app's own prompt through the
- * configured model and stores the answer; "Copy prompt" hands that same prompt
- * to a provider the app cannot reach (an agent that can also hear the
- * recording), whose answer shows up here after the attempts are reloaded.
+ * A report about a reading needs the reading, and the app's text-only LLM seam
+ * cannot carry audio. So "Ask agent" hands the take to the agent mailbox: the
+ * evidence, the exact prompt and the recording's location go out, an attached
+ * agent that can *hear* the take answers, and its report lands back in this
+ * card when the attempts reload (the `read-aloud-feedback-saved` event). "Copy
+ * prompt" is the manual escape hatch for a provider nothing is attached to.
  *
  * It is deliberately a card and not another score: nothing here changes a
  * number, awards XP, or is written anywhere but the attempt's own
@@ -85,7 +85,6 @@ export default function FeedbackPanel({
   stored,
   measured,
   language = "en",
-  onSaved,
   onAssessAgain,
   disabled,
 }: Props) {
@@ -142,23 +141,22 @@ export default function FeedbackPanel({
     if (!isTauri()) return;
     setBusy("generate");
     setPrompt("");
-    setNote({
-      kind: "info",
-      text: "Analyzing your take… a local model can take a minute. Nothing leaves this device.",
-    });
     try {
-      const saved = await generateFeedback(args);
-      setReport(saved);
-      setNote(null);
-      onSaved?.(saved);
+      const receipt = await requestFeedback(args);
+      // The report is not here yet — an agent has to claim the request, listen
+      // to the take and write the answer back. It lands through the reload event.
+      setNote({
+        kind: "info",
+        text: `Asked an agent to listen to this take (${receipt.subject}). Its report appears here as soon as it answers — leave the app open, or reload the attempts once it has finished.`,
+      });
     } catch (e) {
       const msg = String(e);
-      logError(`feedback failed: ${msg}`, LOG_MODULE);
+      logError(`feedback request failed: ${msg}`, LOG_MODULE);
       setNote({ kind: "error", text: msg });
     } finally {
       setBusy("");
     }
-  }, [args, onSaved]);
+  }, [args]);
 
   const copyPrompt = useCallback(async () => {
     if (!isTauri()) return;
@@ -227,12 +225,12 @@ export default function FeedbackPanel({
           onClick={() => void ask()}
           title={
             measured
-              ? "Ask the configured model to explain this take and suggest fixes"
+              ? "Send this take to an attached agent that can listen to it and explain what to fix"
               : "Nothing was measured for this attempt yet — assess it again first"
           }
         >
           {busy === "generate" ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
-          {busy === "generate" ? "Analyzing…" : report ? "Ask again" : "Get feedback"}
+          {busy === "generate" ? "Asking…" : report ? "Ask agent again" : "Ask agent"}
         </button>
 
         <button

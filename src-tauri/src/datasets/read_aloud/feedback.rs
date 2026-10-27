@@ -2,18 +2,18 @@
 //!
 //! Read Aloud measures three axes and stops there. The numbers answer *did you
 //! say the right words*; they never answer *what should I do differently* —
-//! this module is that second half. It renders everything the scorer knows into
-//! one evidence block, hands the block to the configured LLM, and stores the
-//! structured answer beside the attempt.
+//! this module is that second half. And a report about a reading needs the
+//! reading: the app's text-only LLM seam cannot carry audio, so the feedback
+//! route is the agent mailbox — the panel's "Ask agent" posts the evidence, the
+//! prompt and the recording to an attached agent that can hear the take.
 //!
 //! One prompt, two callers:
 //!
-//! * [`generate`] — the in-app route. `llm_complete` runs the prompt (local
-//!   Ollama or any configured cloud provider) and the answer is stored.
-//! * [`context`] — the agent route: the same evidence, the exact prompt, and
-//!   where the recording is. That is how a multimodal model gets to hear the
-//!   take at all, since this app's LLM seam carries text only. [`save_report`]
-//!   writes the agent's answer back into the same UI card.
+//! * [`request_feedback`] — the panel's "Ask agent" button: it builds the
+//!   context and posts it to the mailbox. The agent claims the row, calls
+//!   [`context`] (which carries `audio.path` and, on request, the take's bytes
+//!   as base64), and answers through [`save_report`], which writes into the
+//!   same UI card and closes the request.
 //!
 //! The report is derived output: `feedback_json` on the attempt row, device
 //! local, deliberately outside the sync journal. It costs one click to
@@ -30,9 +30,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::State;
 
-use crate::ai::llm::{llm_complete, ChatMessage};
 use crate::datasets::asr_metric::{normalize_words, score_asr, AsrOp, AsrScoreSummary};
 use crate::datasets::{now_row_stamp, read_info_opt};
+use crate::mail::{self, NewRequest, ORIGIN_USER};
 use crate::settings::SettingsState;
 
 use super::assess::{Assessment, PronReason};
@@ -42,10 +42,6 @@ use super::open_attempts;
 /// Bumped when the stored shape changes incompatibly. Readers default every
 /// field, so an older report still renders.
 pub(crate) const SCHEMA_VERSION: i64 = 1;
-
-/// What a generation call asks for. Low on purpose: the evidence is the
-/// content, and a model that invents detail is the failure mode to avoid.
-const DEFAULT_TEMPERATURE: f32 = 0.3;
 
 /// Language the model is asked to answer in when the caller names none.
 const DEFAULT_LANGUAGE: &str = "en";
@@ -59,7 +55,6 @@ const MAX_PHONES_PER_WORD: usize = 2;
 const MAX_ALIGNMENT_RUNS: usize = 12;
 const MAX_EVIDENCE_PAUSES: usize = 10;
 const MAX_PASSAGE_CHARS: usize = 4000;
-const MAX_TRANSCRIPT_CHARS: usize = 2000;
 const MAX_SUMMARY_CHARS: usize = 4000;
 const MAX_DIAGNOSIS_CHARS: usize = 600;
 const MAX_DRILL_CHARS: usize = 2000;
@@ -173,7 +168,9 @@ impl FeedbackReport {
 // Evidence: what the scorer knows, rendered as facts
 // ============================================================
 
-/// The recording behind an attempt, as facts a report can quote.
+/// The recording behind an attempt, as facts a report can quote. The take
+/// itself is handed to the model through the agent mailbox — this app's LLM
+/// seam carries text only.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AudioFacts {
     /// Absolute path on this device, when the wav is here.
@@ -210,8 +207,8 @@ pub struct WordPhones {
 }
 
 /// Everything one attempt can tell a model, plus the prompt that asks for the
-/// report. Shared by the in-app route and the agent route, so both see exactly
-/// the same evidence.
+/// report. Shared by the command route and the agent mailbox, so both see
+/// exactly the same evidence.
 #[derive(Debug, Clone, Serialize)]
 pub struct FeedbackContext {
     /// Identity of the attempt: uuid, text, score, transcript, recording path.
@@ -415,7 +412,6 @@ fn build_evidence(
     target_language: &str,
     feedback_language: &str,
     passage: &str,
-    recognized: &str,
     summary: &AsrScoreSummary,
     stored: Option<&Assessment>,
     phone: Option<&[WordPhones]>,
@@ -434,10 +430,25 @@ fn build_evidence(
         normalize_words(passage).len(),
         quoted(passage, MAX_PASSAGE_CHARS)
     ));
-    out.push_str(&format!(
-        "WHAT THE RECOGNIZER HEARD\n{}\n\n",
-        quoted(recognized, MAX_TRANSCRIPT_CHARS)
-    ));
+    // The take itself, not the recognizer's guess at it: the model that
+    // answers this prompt hears the recording, so no transcript is dumped here.
+    out.push_str("RECORDING\n");
+    if audio.available {
+        out.push_str(&format!(
+            "- {}{} is passed to you with this evidence — judge the reading by listening to it, \
+             not by reading a recognizer's transcript of it\n",
+            audio
+                .duration
+                .map(|d| format!("{:.1} s ", d))
+                .unwrap_or_default(),
+            audio.format.to_uppercase()
+        ));
+    } else {
+        out.push_str(
+            "- the recording is not on this device, so there is nothing to listen to\n",
+        );
+    }
+    out.push_str("\n");
 
     // --- accuracy ---------------------------------------------------------
     out.push_str("ACCURACY — were the right words said (0-100; below 60 does not pass)\n");
@@ -619,22 +630,6 @@ fn build_evidence(
     }
     out.push('\n');
 
-    // --- the recording ----------------------------------------------------
-    out.push_str("RECORDING\n");
-    if audio.available {
-        out.push_str(&format!(
-            "- {}{} · device-local; this analysis received the measurements only\n",
-            audio
-                .duration
-                .map(|d| format!("{:.1} s ", d))
-                .unwrap_or_default(),
-            audio.format.to_uppercase()
-        ));
-    } else {
-        out.push_str(
-            "- the recording is not on this device, so there is nothing to listen to\n",
-        );
-    }
     out
 }
 
@@ -909,14 +904,14 @@ async fn phone_detail(
 }
 
 // ============================================================
-// Context, generation, storage
+// Context, mailbox request, storage
 // ============================================================
 
 /// Build the evidence + prompt for one attempt. Read-only.
 ///
 /// `language` is whatever tag the caller had — a UI locale, an agent's choice —
-/// and is normalized here, so every route (command, MCP tool, in-app
-/// generation) sends the model the same directive for the same input.
+/// and is normalized here, so every route (command, MCP tool, mailbox request)
+/// sends the model the same directive for the same input.
 pub(crate) async fn context(
     settings: &SettingsState,
     dataset_uuid: &str,
@@ -940,7 +935,6 @@ pub(crate) async fn context(
         &language,
         &feedback_language,
         &passage,
-        &attempt.recognized,
         &summary,
         attempt.metrics.as_ref(),
         phone.as_deref(),
@@ -1000,59 +994,92 @@ fn persist(
     Ok(())
 }
 
-/// Run the in-app route: build the evidence, ask the configured model, store
-/// the answer. `model` empty uses the app's configured `llm_model`.
-pub(crate) async fn generate(
+/// The mailbox's stable address for one attempt's feedback: the agent route
+/// needs one open request per take, so "Ask agent" twice reuses the row
+/// instead of queueing the same ask twice (§2.2).
+fn feedback_subject_key(dataset_uuid: &str, attempt_uuid: &str) -> String {
+    format!("read_aloud:{dataset_uuid}:{attempt_uuid}:feedback")
+}
+
+/// Post the feedback handoff to the agent mailbox (T1): the exact prompt, the
+/// evidence and the recording's location, so the answering model hears the take
+/// itself instead of reading a recognizer's transcript. The agent claims the
+/// row with `mail_claim`, reads the same context via `read_aloud_feedback_context`
+/// — passing `include_audio_base64` to get the bytes inline — and answers with
+/// `read_aloud_save_feedback`, citing the request it is closing.
+pub(crate) async fn request_feedback(
     settings: &SettingsState,
     dataset_uuid: &str,
     attempt_uuid: &str,
     text_uuid: Option<String>,
     model: Option<String>,
-    temperature: Option<f32>,
     language: Option<String>,
-) -> Result<FeedbackReport, String> {
+) -> Result<Value, String> {
     let feedback_language = normalize_language(language.as_deref());
-    let requested = model.as_deref().map(str::trim).unwrap_or("").to_string();
-    let configured = {
-        let s = settings.settings.lock().unwrap();
-        s.llm_model.trim().to_string()
-    };
-    if requested.is_empty() && configured.is_empty() {
-        return Err(
-            "No LLM model is configured, so feedback cannot be generated. Pick one in Settings → \
-             LLM (or in the feedback panel), or copy the prompt and run it with another provider."
-                .to_string(),
-        );
-    }
-
     let ctx =
         context(settings, dataset_uuid, attempt_uuid, text_uuid.as_deref(), Some(&feedback_language))
             .await?;
-    let messages = vec![ChatMessage { role: "user".to_string(), content: ctx.prompt.clone() }];
-    let response = llm_complete(
-        settings,
-        model.clone(),
-        messages,
-        temperature.unwrap_or(DEFAULT_TEMPERATURE),
-    )
-    .await?;
-
-    let mut report = parse_report(&response.content)?;
-    report.schema_version = SCHEMA_VERSION;
-    report.source = "llm".to_string();
-    report.model = Some(if requested.is_empty() { configured } else { requested });
-    report.created_at = now_row_stamp();
-    persist(settings, attempt_uuid, &report)?;
-    Ok(report)
+    if !ctx.audio.available {
+        return Err(
+            "This attempt's recording is not on this device, so there is nothing to hand an \
+             agent to listen to. Ask agent only works for takes this device recorded."
+                .to_string(),
+        );
+    }
+    // serde escapes the interpolated ids: a uuid-like string from the caller
+    // must not be able to break the payload JSON.
+    let payload = json!({
+        "dataset_uuid": dataset_uuid,
+        "attempt_uuid": attempt_uuid,
+        "text_uuid": ctx.attempt.get("text_uuid").and_then(Value::as_str),
+        "model": model.as_deref().map(str::trim).filter(|m| !m.is_empty()),
+        "language": feedback_language,
+        "audio_path": ctx.audio.path,
+        "prompt": ctx.prompt,
+    })
+    .to_string();
+    let body = format!(
+        "Listen to this read-aloud take and answer the feedback prompt. The recording is at \n         {} — or call \n         read_aloud_feedback_context {{dataset_uuid, attempt_uuid}} with include_audio_base64: true \n         for the bytes inline. Answer the prompt in the request payload's `prompt` field (the same \n         one context() renders) and write the JSON report back with read_aloud_save_feedback, \n         citing mail_uuid and claim_id so this request closes.",
+        ctx.audio.path.as_deref().unwrap_or("(see audio.path in the payload)")
+    );
+    let subject = feedback_subject_key(dataset_uuid, attempt_uuid);
+    let channel = format!("read_aloud:{dataset_uuid}:{attempt_uuid}");
+    let label = format!("feedback · {}", attempt_uuid.chars().take(8).collect::<String>());
+    let request = NewRequest::new(&channel, &subject, &label)
+        .body(&body)
+        .payload(&payload)
+        .resource(Some("llm"))
+        .refer(Some("read_attempt"), Some(attempt_uuid))
+        .origin(ORIGIN_USER);
+    let mut conn = mail::open(settings)?;
+    let receipt = mail::request(&mut conn, mail::now_ms(), &request)
+        .map_err(|r| match r.successor {
+            Some(successor) => format!("{}: {} (replaced by request {successor})", r.code, r.message),
+            None => format!("{}: {}", r.code, r.message),
+        })?;
+    Ok(json!({
+        "mail_uuid": receipt.mail.uuid,
+        "status": receipt.mail.status,
+        "subject": receipt.mail.subject,
+        "recording": ctx.audio.path,
+    }))
 }
 
-/// Store a report produced elsewhere — an agent that read the context (and
-/// possibly listened to the recording) writing its answer back.
+/// Store a report produced by the agent route — one that read the mailbox
+/// request (and listened to the recording) and is writing its answer back.
+///
+/// When the delivery cites the request it answers (`mail_uuid` + the `claim_id`
+/// from `mail_claim`), the mail row closes: begin_delivery → store →
+/// finish_delivery. The report itself is cheap to regenerate, so a lost race on
+/// the claim (another agent took the row) costs a journal line, not the answer —
+/// it is stored either way rather than thrown away.
 pub(crate) fn save_report(
     settings: &SettingsState,
     attempt_uuid: &str,
     report: Value,
     model: Option<String>,
+    mail_uuid: Option<String>,
+    claim_id: Option<String>,
 ) -> Result<FeedbackReport, String> {
     let mut parsed: FeedbackReport = serde_json::from_value(report)
         .map_err(|e| format!("The report does not match the feedback schema: {}", e))?;
@@ -1076,6 +1103,22 @@ pub(crate) fn save_report(
         parsed.format = default_format();
     }
     persist(settings, attempt_uuid, &parsed)?;
+    if let (Some(mail_uuid), Some(claim_id)) = (
+        mail_uuid.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        claim_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+    ) {
+        let conn = mail::open(settings)?;
+        let now = mail::now_ms();
+        if mail::begin_delivery(&conn, mail_uuid, claim_id, now).unwrap_or(0) == 1 {
+            // result_ref names the row the answer landed on.
+            let _ = mail::finish_delivery(&conn, mail_uuid, claim_id, attempt_uuid, now);
+        } else {
+            log::warn!(
+                "read_aloud_save_feedback: request {} no longer names this claim; the report was stored but the request stays open for its holder",
+                mail_uuid
+            );
+        }
+    }
     Ok(parsed)
 }
 
@@ -1083,24 +1126,38 @@ pub(crate) fn save_report(
 // Commands
 // ============================================================
 
-/// Ask the configured model for feedback on one attempt, and store it.
+/// "Ask agent": post the evidence, the exact prompt and the recording's
+/// location to the agent mailbox, so an attached model that can hear answers
+/// this take. The recording itself — not a recognizer's transcript — is the
+/// handoff. Returns the mail receipt; the report lands later through
+/// `read_aloud_save_feedback`.
 #[tauri::command]
-pub async fn read_aloud_feedback(
+pub async fn read_aloud_request_feedback(
+    app: tauri::AppHandle,
     settings: State<'_, SettingsState>,
     dataset_uuid: String,
     attempt_uuid: String,
     text_uuid: Option<String>,
     model: Option<String>,
-    temperature: Option<f32>,
     language: Option<String>,
-) -> Result<FeedbackReport, String> {
+) -> Result<Value, String> {
     log::info!(
-        "read_aloud_feedback: dataset={}, attempt={}, model={:?}",
+        "read_aloud_request_feedback: dataset={}, attempt={}, model={:?}",
         dataset_uuid,
         attempt_uuid,
         model
     );
-    generate(&settings, &dataset_uuid, &attempt_uuid, text_uuid, model, temperature, language).await
+    let receipt =
+        request_feedback(&settings, &dataset_uuid, &attempt_uuid, text_uuid, model, language).await?;
+    use tauri::Emitter;
+    let _ = app.emit(
+        "read-aloud-feedback-requested",
+        serde_json::json!({
+            "dataset_uuid": dataset_uuid,
+            "attempt_uuid": attempt_uuid,
+        }),
+    );
+    Ok(receipt)
 }
 
 /// The evidence, the exact prompt and the recording's path, for a caller that
@@ -1128,7 +1185,6 @@ mod tests {
             "de",
             "en",
             passage,
-            recognized,
             &summary,
             None,
             None,
@@ -1146,6 +1202,27 @@ mod tests {
         let prompt = build_prompt(&evidence, "de");
         assert!(prompt.contains(&evidence), "the prompt must carry the evidence verbatim");
         assert!(prompt.contains("Write the whole answer in de."));
+    }
+
+    #[test]
+    fn the_evidence_hands_over_the_recording_not_a_transcript() {
+        let (_, evidence) = evidence_for("der hund bellt laut", "der hund bellt");
+        assert!(
+            !evidence.contains("WHAT THE RECOGNIZER HEARD"),
+            "the recognizer's transcript is no longer dumped into the evidence"
+        );
+        // With the take present, the model is told to listen rather than read it.
+        let summary = score_asr("der hund", "der hund");
+        let heard = build_evidence(
+            "de",
+            "en",
+            "der hund",
+            &summary,
+            None,
+            None,
+            &AudioFacts { available: true, format: "wav".into(), ..Default::default() },
+        );
+        assert!(heard.contains("judge the reading by listening to it"));
     }
 
     #[test]
@@ -1196,11 +1273,10 @@ mod tests {
             "de",
             "en",
             passage,
-            passage,
             &summary,
             Some(&assessment),
             None,
-            &AudioFacts { duration: Some(4.0), format: "wav".into(), ..Default::default() },
+            &AudioFacts { duration: Some(4.0), available: true, format: "wav".into(), ..Default::default() },
         );
         assert!(evidence.contains("84 correct words per minute (slow)"));
         assert!(evidence.contains("score 63.0 of 100"));
@@ -1214,7 +1290,6 @@ mod tests {
         let evidence = build_evidence(
             "de",
             "en",
-            "der hund",
             "der hund",
             &summary,
             None,
