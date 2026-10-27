@@ -89,10 +89,44 @@ export function useWindowControls() {
   // Closing the main window is what quits the app in this build: the shell owns
   // the only window, and Tauri exits once the last one closes.
   const close = useCallback(() => run("Close", (w) => w.close()), [run]);
+  // The show state to hand back when fullscreen ends. Kept in a ref, not state:
+  // nothing renders from it, and the value has to survive the whole fullscreen
+  // stretch, during which the window is deliberately *not* maximized.
+  const maximizedBeforeFullscreen = useRef(false);
+
+  /** Enter or leave native fullscreen.
+   *
+   *  The maximize sandwich is a workaround for a tao interaction that only bites
+   *  an *undecorated* window (`decorations: false`, which this app is). Its
+   *  `WM_NCCALCSIZE` handler shrinks the client area to the monitor's **work
+   *  area** for as long as `GetWindowPlacement` still reports `SW_MAXIMIZE` —
+   *  correct for a maximized window, whose frame is deliberately oversized — but
+   *  tao never clears that show state when it enters borderless fullscreen, it
+   *  only moves the frame. So the frame covers the taskbar and the shell hides
+   *  it, while the webview keeps its maximized height: a dead strip exactly where
+   *  the taskbar was. Unmaximizing first takes the handler's other branch, which
+   *  applies no inset at all while fullscreen, and the content fills the monitor.
+   *
+   *  Both commands are queued to the same event-loop pass, so the intermediate
+   *  restored size is not a frame the user sees. */
   const setFullscreen = useCallback(
-    (on: boolean) => run("Fullscreen", (w) => w.setFullscreen(on)),
+    (on: boolean) =>
+      run("Fullscreen", async (w) => {
+        if (on) {
+          maximizedBeforeFullscreen.current = await w.isMaximized().catch(() => false);
+          if (maximizedBeforeFullscreen.current) await w.unmaximize();
+          await w.setFullscreen(true);
+          return;
+        }
+        await w.setFullscreen(false);
+        if (maximizedBeforeFullscreen.current) {
+          maximizedBeforeFullscreen.current = false;
+          await w.maximize();
+        }
+      }),
     [run],
   );
+
   const toggleFullscreen = useCallback(
     () => setFullscreen(!fullscreen),
     [setFullscreen, fullscreen],
