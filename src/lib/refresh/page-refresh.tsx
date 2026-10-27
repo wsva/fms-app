@@ -56,6 +56,13 @@ export interface RefreshOutcome {
 type Registration = {
   /** Taught by `usePageRefresh`; runs the page's current closure. */
   run: (reason: RefreshReason) => Promise<RefreshOutcome>;
+  /**
+   * The page's live "a re-read would discard unsaved edits" guard, read through a
+   * ref so it never goes stale. The tab strip consults this before replacing a
+   * tab (docs/design/tab-strip.md §4.4): a dirty page is auto-pinned, never
+   * unmounted. Absent guard means "always clean".
+   */
+  canRefresh: () => boolean;
 };
 
 /** At most one registration per tab — a page mounts once and stays mounted. */
@@ -156,7 +163,12 @@ export function usePageRefresh(tab: string, options: PageRefreshOptions): void {
 
   // Publish this page so `refreshActivePage` (F5, `shell.refresh`) can reach it.
   useEffect(() => {
-    const registration: Registration = { run };
+    const registration: Registration = {
+      run,
+      // Read through `latest` so the guard reflects this render's state, not the
+      // closure captured when the registration was first made.
+      canRefresh: () => latest.current.canRefresh?.() ?? true,
+    };
     registry.set(tab, registration);
     return () => {
       // Identity check, not id check: a second mount of the same tab (strict
@@ -241,4 +253,18 @@ export async function refreshActivePage(reason: RefreshReason): Promise<RefreshO
   const registration = registry.get(currentTab);
   if (!registration) return { status: "none", tab: currentTab };
   return await registration.run(reason);
+}
+
+/**
+ * Can the instance keyed by `id` be re-read without discarding unsaved edits?
+ * `true` when nothing is registered (no page, so nothing to lose) or the page
+ * declares no guard. The tab strip's dirty guard calls this before replacing a
+ * tab: a `false` here means "auto-pin, do not unmount" (docs/design/tab-strip.md
+ * §4.4). `id` is the same key `usePageRefresh` registered under — the focused
+ * instance id, which equals the `TabId` for every singleton page.
+ */
+export function canRefreshInstance(id: string): boolean {
+  const registration = registry.get(id);
+  if (!registration) return true;
+  return registration.canRefresh();
 }

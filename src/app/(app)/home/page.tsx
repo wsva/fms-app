@@ -1,42 +1,32 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useReducer } from "react";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { isMobileApp } from "@/lib/platform";
-import Sidebar, { type TabId } from "@/components/layout/Sidebar";
+import Sidebar, { TAB_DEFS, type TabId } from "@/components/layout/Sidebar";
 import TitleBar from "@/components/layout/TitleBar";
 import StatusBar from "@/components/layout/StatusBar";
 import BottomNav from "@/components/layout/BottomNav";
+import PageHost from "@/components/layout/PageHost";
 import WorkspaceChooser from "@/components/workspace/WorkspaceChooser";
-import ModelsPage from "@/components/listen_speak/models/ModelsPage";
-import DictationPage from "@/components/listen_speak/dictation/DictationPage";
-import WorkflowPage from "@/components/tools/WorkflowPage";
-import DatasetsSyncPage from "@/components/listen_speak/datasets/DatasetsSyncPage";
-import DevicesHubPage from "@/components/devices/DevicesHubPage";
-import BooksPage from "@/components/books/BooksPage";
-import ReadAloudPage from "@/components/read_aloud/ReadAloudPage";
-import CardsPage from "@/components/cards/CardsPage";
-import TasksPage from "@/components/tools/TasksPage";
 import CardContextMenu from "@/components/cards/CardContextMenu";
-import TtsPage from "@/components/listen_speak/edge_tts/TtsPage";
-import SettingsPage from "@/components/settings/SettingsPage";
-import AgentPage from "@/components/agent/AgentPage";
-import LLMChatPage from "@/components/llm/chat/ChatPage";
-import DeviceChatPage from "@/components/chat/ChatPage";
-import OcrPage from "@/components/ocr/OcrPage";
-import WikiPage from "@/components/wiki/WikiPage";
-import LogPage from "@/components/tools/LogPage";
-import WorkspacesPage from "@/components/workspace/WorkspacesPage";
-import SimpleWordsPage from "@/components/tools/SimpleWordsPage";
-import SplitTextPage from "@/components/tools/SplitTextPage";
-import PdfReaderPage from "@/components/tools/PdfReaderPage";
 import AgentDock from "@/components/agent/AgentDock";
 import type { AgentAction } from "@/lib/agent/types";
 import { setUiContext } from "@/lib/agent/ui-context";
 import { jsonSafeDetail, runUiAction, useAgentActions } from "@/lib/agent/ui-actions";
-import { refreshActivePage, useActiveTabSource } from "@/lib/refresh/page-refresh";
+import {
+  refreshActivePage,
+  useActiveTabSource,
+  canRefreshInstance,
+} from "@/lib/refresh/page-refresh";
+import {
+  initialTabStrip,
+  tabStripReducer,
+  planOpen,
+  MAX_OPEN_TABS,
+} from "@/lib/shell/tabs";
 
 interface Workspace {
   uuid: string;
@@ -60,7 +50,18 @@ interface PairingRequest {
 }
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<TabId>("dictation");
+  // The tab strip's state (docs/design/tab-strip.md): a reducer over the open
+  // page instances plus which one is focused. `activeTab` is derived from the
+  // focused instance so every existing consumer — ui-context, the refresh
+  // source, the sidebar, the title bar, the bottom nav, the agent dock — keeps
+  // reading a plain `TabId` and none of them learn about instances.
+  const [tabs, dispatchTabs] = useReducer(tabStripReducer, undefined, initialTabStrip);
+  const focusedInst = tabs.order.find((i) => i.instanceId === tabs.focused) ?? tabs.order[0];
+  const activeTab: TabId = focusedInst.tabId;
+  // Latest committed state, read by `openTab` so it can stay a stable callback:
+  // the agent listener and deep-link effects depend on it and must not
+  // re-subscribe on every tab change.
+  const tabsRef = useRef(tabs);
   // No sidebar width here: the rail is an in-flow flex item, so it reserves its
   // own space and the pages simply take what is left.
   const [showWorkspaceChooser, setShowWorkspaceChooser] = useState(false);
@@ -92,6 +93,50 @@ export default function Home() {
     setMobile(isMobileApp());
     setBooted(true);
   }, []);
+
+  useEffect(() => {
+    tabsRef.current = tabs;
+  }, [tabs]);
+
+  const titleFor = useCallback((tabId: TabId) => TAB_DEFS[tabId]?.label ?? tabId, []);
+
+  // Focus-or-open: the single seam every navigation source uses (sidebar, menus,
+  // status bar, bottom nav, agent, deep links). Policy is replace-by-default —
+  // `planOpen` recycles the focused tab when it is unpinned and clean, otherwise
+  // adds beside it. A dirty focused tab is auto-pinned first (its `canRefresh`
+  // returns false), so unsaved edits are never unmounted (§4.4).
+  const openTab = useCallback(
+    (tabId: TabId) => {
+      const state = tabsRef.current;
+      const focusedDirty = !canRefreshInstance(state.focused);
+      const placement = planOpen(state, tabId, focusedDirty);
+      switch (placement.kind) {
+        case "focus":
+          dispatchTabs({ type: "focus", instanceId: placement.instanceId });
+          return;
+        case "replace":
+          dispatchTabs({
+            type: "replace",
+            instanceId: placement.instanceId,
+            tabId,
+            title: titleFor(tabId),
+          });
+          return;
+        case "add": {
+          if (state.order.length >= MAX_OPEN_TABS) {
+            showToast("Too many tabs open — close one first.");
+            return;
+          }
+          if (placement.autoPin) {
+            dispatchTabs({ type: "togglePin", instanceId: placement.autoPin });
+          }
+          dispatchTabs({ type: "add", tabId, title: titleFor(tabId) });
+          return;
+        }
+      }
+    },
+    [titleFor, showToast]
+  );
 
   // Check workspace state on mount
   useEffect(() => {
@@ -131,12 +176,12 @@ export default function Home() {
   // Listen for wiki deep link navigation (fms-app://wiki/path/to/file.md)
   useEffect(() => {
     const unlisten = listen<string>("wiki-navigate", () => {
-      setActiveTab("wiki");
+      openTab("wiki");
     });
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, []);
+  }, [openTab]);
 
   // The shell's slice of the agent-visible UI context: which tab is showing.
   // The pages own the rest (Dictation reports the dataset/media/cue) and merge
@@ -157,14 +202,14 @@ export default function Home() {
           // honouring it would yank the user off whatever they were reading.
           // Ignore it so a stale prompt cannot blank the content area.
           if ((action.tab as string) === "agent") break;
-          setActiveTab(action.tab);
+          openTab(action.tab as TabId);
           break;
         case "open-review":
-          setActiveTab("cards");
+          openTab("cards");
           void emit("agent-open-review", { dataset_uuid: action.dataset_uuid ?? null });
           break;
         case "start-dictation": {
-          setActiveTab("dictation");
+          openTab("dictation");
           // Drive the page through the action registry instead of re-emitting an
           // event: `agent-start-dictation` had no listener, so the dataset and
           // media an agent named were silently dropped on the floor.
@@ -225,7 +270,7 @@ export default function Home() {
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [showToast]);
+  }, [showToast, openTab]);
 
   // Pairing: ask the PC owner about each request, one at a time. This dialog is
   // the only way a device is ever approved — no bearer secret can replace the
@@ -322,11 +367,19 @@ export default function Home() {
   // Mobile keeps the system bar it was given.
   const titleBar = mobile ? null : (
     <TitleBar
-      onNavigate={(tab) => setActiveTab(tab as TabId)}
+      onNavigate={(tab) => openTab(tab as TabId)}
       activeTab={activeTab}
       onRefresh={refreshActivePageWithToast}
       onWorkspaceChooser={() => setShowWorkspaceChooser(true)}
       currentWorkspace={currentWorkspace?.uuid ?? null}
+      tabs={tabs.order}
+      focusedId={tabs.focused}
+      onFocusTab={(instanceId) => dispatchTabs({ type: "focus", instanceId })}
+      onCloseTab={(instanceId) => dispatchTabs({ type: "close", instanceId })}
+      onTogglePin={(instanceId) => dispatchTabs({ type: "togglePin", instanceId })}
+      onSpawnTab={(tab) =>
+        dispatchTabs({ type: "spawn", tabId: tab, title: titleFor(tab) })
+      }
     />
   );
 
@@ -363,81 +416,19 @@ export default function Home() {
 
       <div className="flex flex-1 min-h-0">
         {!mobile && (
-          <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
+          <Sidebar activeTab={activeTab} onTabChange={openTab} />
         )}
 
         <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-          <div style={{ display: activeTab === "dictation" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <DictationPage active={activeTab === "dictation"} />
-          </div>
-          <div style={{ display: activeTab === "workflow" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <WorkflowPage />
-          </div>
-          <div style={{ display: activeTab === "datasets-sync" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <DatasetsSyncPage onNavigate={(tab) => setActiveTab(tab as TabId)} />
-          </div>
-          <div style={{ display: activeTab === "devices-hub" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <DevicesHubPage />
-          </div>
-          <div style={{ display: activeTab === "simple-words" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <SimpleWordsPage />
-          </div>
-          <div style={{ display: activeTab === "books" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <BooksPage />
-          </div>
-          <div style={{ display: activeTab === "read-aloud" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <ReadAloudPage />
-          </div>
-          <div style={{ display: activeTab === "cards" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <CardsPage />
-          </div>
-          <div style={{ display: activeTab === "tasks" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <TasksPage />
-          </div>
-          <div style={{ display: activeTab === "edge-tts" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <TtsPage />
-          </div>
-          <div style={{ display: activeTab === "models" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <ModelsPage />
-          </div>
-          <div style={{ display: activeTab === "agent" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <AgentPage />
-          </div>
-          <div style={{ display: activeTab === "settings" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <SettingsPage />
-          </div>
-          <div style={{ display: activeTab === "llm-chat" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <LLMChatPage />
-          </div>
-          <div style={{ display: activeTab === "chat" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <DeviceChatPage active={activeTab === "chat"} />
-          </div>
-          <div style={{ display: activeTab === "ocr" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <OcrPage />
-          </div>
-          <div style={{ display: activeTab === "split-text" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <SplitTextPage />
-          </div>
-          <div style={{ display: activeTab === "pdf-reader" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <PdfReaderPage />
-          </div>
-          <div style={{ display: activeTab === "wiki" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <WikiPage />
-          </div>
-          <div style={{ display: activeTab === "logs" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <LogPage />
-          </div>
-          <div style={{ display: activeTab === "workspaces" ? "flex" : "none" }} className="flex-1 min-h-0">
-            <WorkspacesPage />
-          </div>
+          <PageHost order={tabs.order} focusedId={tabs.focused} onNavigate={openTab} />
         </div>
       </div>
 
       {/* A menu row's "…page…" lands on the same tabs the sidebar lists, so the
           strip navigates through the shell it lives in, not a route. */}
-      {!mobile && <StatusBar onNavigate={(tab) => setActiveTab(tab as TabId)} />}
+      {!mobile && <StatusBar onNavigate={(tab) => openTab(tab as TabId)} />}
 
-      {mobile && <BottomNav activeTab={activeTab} onTabChange={setActiveTab} />}
+      {mobile && <BottomNav activeTab={activeTab} onTabChange={openTab} />}
 
       {/* Global text-selection → "Add to Card" menu */}
       <CardContextMenu />
@@ -450,7 +441,7 @@ export default function Home() {
           `booted` is required as well as `!mobile`: the platform is unknown on
           the prerendered first paint, so without it Android would mount the
           dock for one commit and its effects would call desktop-only commands. */}
-      {booted && !mobile && <AgentDock onNavigate={(tab) => setActiveTab(tab as TabId)} />}
+      {booted && !mobile && <AgentDock onNavigate={(tab) => openTab(tab as TabId)} />}
 
       {/* Agent `app_notify` toast */}
       {toast && (

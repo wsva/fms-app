@@ -55,7 +55,7 @@ export type TabId =
   | "agent"
   | "settings";
 
-type TabDef = {
+export type TabDef = {
   id: TabId;
   label: string;
   icon: React.ComponentType<{ width?: number; height?: number; className?: string }>;
@@ -127,6 +127,14 @@ const rootTabs: TabDef[] = [
 const bottomTabs: TabDef[] = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
+
+// One lookup of every tab's label + icon, built from the same tables the sidebar
+// and the title-bar menus already render, so the tab chips in the title bar
+// cannot drift from the navigation. Consumed by the shell's tab strip
+// (`lib/shell/tabs.ts` and `components/layout/TitleBarTabs.tsx`).
+export const TAB_DEFS: Record<TabId, TabDef> = Object.fromEntries(
+  [...rootTabs, ...NAV_GROUPS.flatMap((g) => g.tabs), ...bottomTabs].map((t) => [t.id, t])
+) as Record<TabId, TabDef>;
 
 // Tabs reachable in the Android thin client. Everything else (OCR,
 // Edge TTS, LLM Chat, Logs, Simple Words, Workflow pipeline) is hidden.

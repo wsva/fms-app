@@ -51,6 +51,8 @@ import {
   StatusMenuSep,
 } from "./StatusItem";
 import { NAV_GROUPS, type TabId } from "./Sidebar";
+import TitleBarTabs from "./TitleBarTabs";
+import type { TabInstance } from "@/lib/shell/tabs";
 
 /**
  * The window's title bar, drawn by the app.
@@ -94,6 +96,19 @@ interface TitleBarProps {
    *  directory" needs it to say whether there is a directory to open at all —
    *  the path itself stays derived in Rust, never from this. */
   currentWorkspace: string | null;
+  /** The open tab instances, drawn as chips in the bar's middle region (§4.2 of
+   *  docs/design/tab-strip.md). */
+  tabs: TabInstance[];
+  /** The instance currently shown. */
+  focusedId: string;
+  /** Focus an already-open tab. */
+  onFocusTab: (instanceId: string) => void;
+  /** Close a tab. */
+  onCloseTab: (instanceId: string) => void;
+  /** Pin/unpin a tab, protecting it from being replaced. */
+  onTogglePin: (instanceId: string) => void;
+  /** Open a new instance of a multi-instance kind (the "+" picker). */
+  onSpawnTab: (tab: TabId) => void;
 }
 
 // The theme ids, read off the same list the View menu draws — so the closed set
@@ -140,6 +155,12 @@ export default function TitleBar({
   onRefresh,
   onWorkspaceChooser,
   currentWorkspace,
+  tabs,
+  focusedId,
+  onFocusTab,
+  onCloseTab,
+  onTogglePin,
+  onSpawnTab,
 }: TitleBarProps) {
   const {
     available,
@@ -522,9 +543,21 @@ export default function TitleBar({
         </StatusItem>
       </div>
 
-      {/* The rest of the bar is empty handle — the part you grab to move the
-          window, and double-click to maximize. */}
-      <div className="min-w-0 flex-1" />
+      {/* Middle region: the open-page tab chips, then empty space that stays a
+          drag handle. Each chip opts out of the drag region on its own (see
+          TitleBarTabs), while the container and the gap after the last chip do
+          not — so the window is still grabbable here and double-clicks to
+          maximize, exactly as the bare `flex-1` strip this replaces did. */}
+      <div className="flex min-w-0 flex-1 items-stretch">
+        <TitleBarTabs
+          order={tabs}
+          focusedId={focusedId}
+          onFocus={onFocusTab}
+          onClose={onCloseTab}
+          onTogglePin={onTogglePin}
+          onSpawn={onSpawnTab}
+        />
+      </div>
 
       {/* Window controls. Hidden outside Tauri (a browser preview has no window
           to command) and in full screen, where minimize and maximize have no
