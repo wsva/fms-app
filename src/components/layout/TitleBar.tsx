@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { invoke } from "@tauri-apps/api/core";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Bot,
   Copy,
   FolderKanban,
+  FolderOpen,
   Globe,
   Info,
   Maximize,
@@ -30,6 +32,7 @@ import {
 } from "@/lib/agent/dock-events";
 import { isTauri } from "@/lib/platform";
 import { CARD_BASE_URL } from "@/lib/cards";
+import { logError } from "@/lib/logger";
 import { THEMES } from "@/lib/theme";
 import { useAgentActions, oneOf, reqBool, reqNum } from "@/lib/agent/ui-actions";
 import { useTheme } from "@/hooks/useTheme";
@@ -87,6 +90,10 @@ interface TitleBarProps {
   onRefresh: () => void;
   /** Put the workspace chooser back on screen (the shell owns that state). */
   onWorkspaceChooser: () => void;
+  /** The workspace uuid the shell has selected, or null. "Open workspace
+   *  directory" needs it to say whether there is a directory to open at all —
+   *  the path itself stays derived in Rust, never from this. */
+  currentWorkspace: string | null;
 }
 
 // The theme ids, read off the same list the View menu draws — so the closed set
@@ -132,6 +139,7 @@ export default function TitleBar({
   activeTab,
   onRefresh,
   onWorkspaceChooser,
+  currentWorkspace,
 }: TitleBarProps) {
   const {
     available,
@@ -175,6 +183,29 @@ export default function TitleBar({
   function openWebsite() {
     if (isTauri()) void openUrl(CARD_BASE_URL).catch(() => {});
     else window.open(CARD_BASE_URL, "_blank");
+  }
+
+  // Hand the current workspace's directory to the OS file explorer and answer
+  // with the path that was revealed. The path comes from the backend
+  // (`workspace_get_current_dir`) rather than being rebuilt from the uuid here,
+  // so the on-disk layout stays the Rust's alone. The menu row sits under the
+  // Workspace heading, which only makes sense once a workspace is selected —
+  // with none, there is no directory to open.
+  //
+  // A failure is logged and rethrown rather than swallowed: the click would
+  // otherwise do nothing and leave no trace, and an agent calling the same body
+  // needs the reason as its answer. `logError` reaches the Logs page that the
+  // Help menu's own "Logs & diagnostics" row points at.
+  async function openWorkspaceDir(): Promise<string | null> {
+    if (!isTauri() || !currentWorkspace) return null;
+    try {
+      const dir = await invoke<string>("workspace_get_current_dir");
+      await revealItemInDir(dir);
+      return dir;
+    } catch (e) {
+      logError(`Open workspace directory failed: ${String(e)}`, "titlebar");
+      throw e;
+    }
   }
 
   // ---- Publishing this bar's controls to an agent ----
@@ -274,6 +305,23 @@ export default function TitleBar({
       },
     },
     {
+      id: "titlebar.open-workspace-dir",
+      label:
+        "Open the current workspace's directory in the OS file explorer — the File > Workspace menu row. Returns the path that was revealed.",
+      // `mutate`, not `read`, to agree with the MCP twin `app_open_workspace_dir`
+      // (UI_CONTROL): it raises a window on the user's desktop.
+      kind: "mutate",
+      run: async () => {
+        if (!isTauri() || !currentWorkspace) {
+          throw new Error(
+            "titlebar.open-workspace-dir needs a selected workspace; none is active — switch or create one first"
+          );
+        }
+        const path = await openWorkspaceDir();
+        return { path, workspace_uuid: currentWorkspace };
+      },
+    },
+    {
       id: "titlebar.quit",
       label:
         "Close the window and quit FmS. Refused through ui_invoke_action: unsaved edits are lost and nothing lands in the trash.",
@@ -325,6 +373,15 @@ export default function TitleBar({
             icon={FolderKanban}
             text="Workspaces page…"
             onClick={() => onNavigate("workspaces")}
+          />
+          <StatusMenuRow
+            icon={FolderOpen}
+            text="Open workspace directory"
+            disabled={!currentWorkspace}
+            // The empty catch only stops an unhandled rejection: `openWorkspaceDir`
+            // has already logged the failure, and rethrows so the agent action
+            // still gets it as its answer.
+            onClick={() => void openWorkspaceDir().catch(() => {})}
           />
           <StatusMenuSep />
           <StatusMenuRow

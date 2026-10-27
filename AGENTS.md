@@ -167,7 +167,7 @@ src-tauri/src/
 │   ├── sync.rs             # web service, pairing registry, PC scan/connect/pull, incremental sync (15)
 │   ├── system.rs           # settings, auth, logs, OCR, screenshot, app UI control (the `app_*` verbs the
 │   │                       #   dock and the shell listen for), the `app_events` timeline, the trash undo
-│   │                       #   loop, MCP audit journal (27)
+│   │                       #   loop, MCP audit journal (28)
 │   ├── workflow.rs         # persistent workflow state machine: list/create/status/reap/next/get_definition/
 │   │                       #   advance/record/intervene/verify/adopt/builtin_templates, plus list_actions — the
 │   │                       #   step vocabulary the Workflow page publishes (13)

@@ -451,6 +451,7 @@ pub fn run() {
             // Workspace management
             workspace::workspace_list,
             workspace::workspace_get_current,
+            workspace::workspace_get_current_dir,
             workspace::workspace_create,
             workspace::workspace_select,
             workspace::workspace_delete,
@@ -916,6 +917,7 @@ macro_rules! mobile_invoke_handler {
             datasets::wiki::wiki_dataset_search,
             workspace::workspace_list,
             workspace::workspace_get_current,
+            workspace::workspace_get_current_dir,
             workspace::workspace_create,
             workspace::workspace_select,
             workspace::workspace_delete,

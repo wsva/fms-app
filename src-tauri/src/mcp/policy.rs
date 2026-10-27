@@ -176,10 +176,13 @@ const RECOVERABLE: [&str; 17] = [
 
 /// Drives the user's screen. `ui_invoke_action` is listed ahead of the UI action
 /// registry landing so the tier is already right when it does.
-const UI_CONTROL: [&str; 6] = [
+const UI_CONTROL: [&str; 7] = [
     "app_navigate",
     "app_notify",
     "app_open_review",
+    // Nothing on disk changes, but it raises an OS explorer window in front of
+    // the user — the screen, not the app's data.
+    "app_open_workspace_dir",
     "app_start_dictation",
     "capture_screenshot",
     "ui_invoke_action",

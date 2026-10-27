@@ -326,6 +326,7 @@ export default function Home() {
       activeTab={activeTab}
       onRefresh={refreshActivePageWithToast}
       onWorkspaceChooser={() => setShowWorkspaceChooser(true)}
+      currentWorkspace={currentWorkspace?.uuid ?? null}
     />
   );
 

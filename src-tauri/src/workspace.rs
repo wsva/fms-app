@@ -508,6 +508,20 @@ pub async fn workspace_get_current(
     Ok(current.clone())
 }
 
+/// Absolute path of the current workspace's directory. The path stays derived
+/// in Rust (`workspace_dir` is the single source of the layout) — the frontend
+/// never reconstructs it from the uuid, so the two cannot drift apart.
+#[tauri::command]
+pub async fn workspace_get_current_dir(
+    state: State<'_, WorkspaceState>,
+) -> Result<String, String> {
+    let current = state.current.lock().unwrap();
+    let ws = current
+        .as_ref()
+        .ok_or_else(|| "no workspace is selected — switch or create one first".to_string())?;
+    Ok(workspace_dir(&ws.uuid).to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub async fn workspace_create(
     app: AppHandle,

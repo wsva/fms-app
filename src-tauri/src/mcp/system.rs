@@ -14,6 +14,7 @@ use crate::ocr::hyphen::{self, HyphenState};
 #[cfg(feature = "textsplit")]
 use crate::textsplit::{self, TextSplitState};
 use crate::settings::SettingsState;
+use crate::workspace::WorkspaceState;
 
 use super::{DatasetMcpServer, JsonValue};
 
@@ -519,6 +520,22 @@ impl DatasetMcpServer {
             .emit("agent-action", serde_json::json!({ "type": "navigate", "tab": tab }))
             .map_err(|e| e.to_string())?;
         Ok(serde_json::json!({ "ok": true, "action": "navigate", "tab": tab }).to_string())
+    }
+
+    // Named `app_*` rather than `workspace_*`: the tools in this file act on the
+    // running app, `workspace_` is not a domain prefix in mcp/manual.rs (a
+    // `workspace_*` tool would fall into the `misc` bucket and fail
+    // `every_tool_has_a_domain`), and the command it calls keeps the
+    // `workspace_get_current_dir` name because that one only returns a path.
+    #[tool(name = "app_open_workspace_dir", description = "Reveal the current workspace's directory in the OS file explorer (Explorer / Finder / xdg) and return its absolute path. Nothing on disk changes, but it does put an explorer window on the user's desktop — which is why the policy tier is UI_CONTROL and not a read. Errors with a next-step hint when no workspace is selected; ask the user to switch or create one on the Workspaces page rather than guessing a path.")]
+    async fn app_open_workspace_dir(&self) -> Result<String, String> {
+        let state = self.app.state::<WorkspaceState>();
+        let dir = crate::workspace::workspace_get_current_dir(state).await?;
+        log::info!("[MCP] app_open_workspace_dir: {}", dir);
+        tauri_plugin_opener::reveal_item_in_dir(&dir).map_err(|e| {
+            format!("the workspace directory exists but the OS explorer refused to open it: {e}. Path: {dir}")
+        })?;
+        Ok(serde_json::json!({ "ok": true, "path": dir }).to_string())
     }
 
     #[tool(name = "app_open_review", description = "Open the interactive Cards review/quiz panel. Optionally preselect a card dataset by uuid. Use this when the user wants the visual quiz UI (as opposed to answering inline in the chat).")]
