@@ -22,14 +22,12 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   Bot,
   Copy,
   CornerDownRight,
   Inbox,
-  ListTodo,
   Loader2,
   RefreshCw,
   Undo2,
@@ -68,12 +66,6 @@ import {
   type MailSummary,
   type MailTone,
 } from "@/lib/agent/mail";
-
-/** The subset of `todo::Todo` the footer counts. */
-interface TodoRow {
-  uuid: string;
-  status: string;
-}
 
 // Dock presentation state, persisted across restarts. Like `dictation.collapsed`,
 // localStorage only ever holds an explicit user choice (written in the toggle
@@ -162,7 +154,6 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
   const [armed, setArmed] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [openTodos, setOpenTodos] = useState<number | null>(null);
 
   // ---- MCP surface state, read from the same store the Agent page uses ----
   const { manual, surface, copied } = useAgentControl();
@@ -645,23 +636,6 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
     };
   }, [refresh, refreshBadge]);
 
-  // ---- Footer count: open agent tasks ----
-  const refreshTodos = useCallback(async () => {
-    if (!isTauri()) return;
-    try {
-      const rows = await invoke<TodoRow[]>("todo_list", { status: "open" });
-      setOpenTodos(rows.length);
-    } catch {
-      // A count is decoration; failing to read it must not break the panel.
-      setOpenTodos(null);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    void refreshTodos();
-  }, [open, refreshTodos]);
-
   // ---- Publish presentation state for the status bar button ----
   // It mirrors what the FAB used to show — open/closed plus the same attention
   // marker — so relocating the entry point costs the user no information. Runs
@@ -865,47 +839,33 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
             )}
           </div>
 
-          {/* Footer: one manual action per session, not per item (§6). */}
-          <div className="border-t border-border-default">
-            {openTodos ? (
-              <button
-                type="button"
-                onClick={() => goTo("tasks")}
-                className="w-full px-3 pt-2 pb-0 flex items-center gap-2 text-[11px] text-text-tertiary hover:text-text-secondary transition-colors"
-              >
-                <ListTodo size={12} />
-                <span>
-                  {openTodos} open agent task{openTodos === 1 ? "" : "s"}
-                </span>
-                <div className="flex-1" />
-                <span>Tasks →</span>
-              </button>
-            ) : null}
-            <div className="p-3 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => runRow("", () => copyBrief())}
-                disabled={copyable === 0}
-                title={
-                  copyable === 0
-                    ? "Nothing is waiting to be handed over"
-                    : "Copy every queued prompt as one brief"
-                }
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-bg-muted border border-border-default text-[12px] font-medium text-text-secondary hover:bg-bg-hover transition-colors disabled:opacity-50"
-              >
-                <Copy size={13} />
-                {copied === "mail.brief" ? "Copied" : `Copy all${copyable ? ` ${copyable}` : ""}`}
-              </button>
-              <div className="flex-1" />
-              <button
-                type="button"
-                onClick={() => void refresh()}
-                title="Reload the mailbox"
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-bg-muted border border-border-default text-[12px] font-medium text-text-secondary hover:bg-bg-hover transition-colors"
-              >
-                <RefreshCw size={13} /> Refresh
-              </button>
-            </div>
+          {/* Footer: one manual action per session, not per item (§6). The open
+              task count is not echoed here — the status bar already wears it,
+              and a second number on the second surface only invites arguing. */}
+          <div className="p-3 border-t border-border-default flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => runRow("", () => copyBrief())}
+              disabled={copyable === 0}
+              title={
+                copyable === 0
+                  ? "Nothing is waiting to be handed over"
+                  : "Copy every queued prompt as one brief"
+              }
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-bg-muted border border-border-default text-[12px] font-medium text-text-secondary hover:bg-bg-hover transition-colors disabled:opacity-50"
+            >
+              <Copy size={13} />
+              {copied === "mail.brief" ? "Copied" : `Copy all${copyable ? ` ${copyable}` : ""}`}
+            </button>
+            <div className="flex-1" />
+            <button
+              type="button"
+              onClick={() => void refresh()}
+              title="Reload the mailbox"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-bg-muted border border-border-default text-[12px] font-medium text-text-secondary hover:bg-bg-hover transition-colors"
+            >
+              <RefreshCw size={13} /> Refresh
+            </button>
           </div>
         </aside>
       )}
