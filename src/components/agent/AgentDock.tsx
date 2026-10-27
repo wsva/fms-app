@@ -43,6 +43,10 @@ import {
   useAgentControl,
 } from "@/lib/agent/control";
 import type { AgentAction } from "@/lib/agent/types";
+import {
+  dispatchDockState,
+  DOCK_TOGGLE_EVENT,
+} from "@/lib/agent/dock-events";
 import { reqStr, useAgentActions } from "@/lib/agent/ui-actions";
 import { pageZoomFactor, ZOOM_CHANGED_EVENT } from "@/hooks/usePageZoom";
 import {
@@ -311,6 +315,15 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+  }, [setOpen]);
+
+  // ---- Status bar button: the shell's permanent entry point ----
+  // Same toggle as the shortcut and the FAB, so the three never disagree about
+  // what "open" means.
+  useEffect(() => {
+    const onToggle = () => setOpen(!isDockOpenRef.current);
+    window.addEventListener(DOCK_TOGGLE_EVENT, onToggle);
+    return () => window.removeEventListener(DOCK_TOGGLE_EVENT, onToggle);
   }, [setOpen]);
 
   // ---- Resize (left edge, mouse-drag; mirrors the Wiki sidebar pattern) ----
@@ -594,6 +607,15 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
     if (!open) return;
     void refreshTodos();
   }, [open, refreshTodos]);
+
+  // ---- Publish presentation state for the status bar button ----
+  // It mirrors what the FAB used to show — open/closed plus the same attention
+  // marker — so relocating the entry point costs the user no information. Runs
+  // on mount too, which is how a listener that mounted first converges.
+  useEffect(() => {
+    if (mobile) return;
+    dispatchDockState({ open, unread, badge: head ? badgeOf(head) : null });
+  }, [mobile, open, unread, head]);
 
   if (mobile) return null;
 
