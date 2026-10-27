@@ -19,6 +19,7 @@ import {
 } from "@/lib/mobile-nav";
 import { useAuth } from "@/hooks/useAuth";
 import LoginModal from "@/components/auth/LoginModal";
+import LevelAvatar from "@/components/auth/LevelAvatar";
 
 /**
  * Mobile-only bottom navigation. Replaces the desktop sidebar on the Android
@@ -156,9 +157,14 @@ export default function BottomNav({
         <div className="px-4 py-2 border-b border-border-default shrink-0">
           {authUser ? (
             <div className="flex items-center gap-3">
-              <span className="w-9 h-9 rounded-full bg-accent-bg text-white flex items-center justify-center text-sm font-bold shrink-0">
-                {authUser.name.charAt(0).toUpperCase()}
-              </span>
+              {/* Same level ring the PC sidebar uses. The drawer already costs
+                  a tap, so logout stays a one-tap button beside it. */}
+              <LevelAvatar
+                name={authUser.name}
+                xp={xpUser?.lifetime_xp ?? 0}
+                size={36}
+                flash={xpFlash}
+              />
               <div className="flex flex-col min-w-0 flex-1">
                 <span className="text-sm font-semibold text-text-primary truncate">
                   {authUser.name}

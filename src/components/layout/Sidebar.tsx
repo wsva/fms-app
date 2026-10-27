@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { isMobileApp } from "@/lib/platform";
 import { useAuth } from "@/hooks/useAuth";
 import LoginModal from "@/components/auth/LoginModal";
+import AccountMenu from "@/components/auth/AccountMenu";
 import {
   Box,
   Bot,
@@ -23,8 +24,6 @@ import {
   AudioLines,
   Network,
   User,
-  LogOut,
-  Star,
   FolderKanban,
   Type,
   ArrowUpDown,
@@ -341,60 +340,31 @@ export default function Sidebar({
         }}
       >
       <nav className="flex flex-col w-full items-center gap-1 pt-2 flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
-        {/* Auth button at top */}
+        {/* Root tabs above groups: Dictation, Read a Book, Read Aloud, Cards, Wiki */}
+        {rootTabs.map((tab) => renderTab(tab, false))}
+
+        {/* Navigation groups */}
+        {navGroups.map(renderGroup)}
+
+        {/* Settings at bottom of nav */}
+        {bottomTabs.map((tab) => renderTab(tab, false))}
+      </nav>
+
+      {/* Account footer. Identity sits below the scrolling nav, not inside it,
+          so who you are signed in as stays put while the menu scrolls. The row
+          is a read-only trigger; logout lives inside the panel it opens. */}
+      <div className="w-full shrink-0 border-t border-border-default pt-2 pb-1">
         {authUser ? (
-          <div className="flex flex-col w-full items-center gap-0.5">
-            {/* Logout button */}
-            <button
-              onClick={logout}
-              className={`flex items-center w-full rounded-lg px-2 py-1 hover:bg-mid-gray/20 transition-colors cursor-pointer gap-2 ${
-                collapsed ? "justify-center" : ""
-              }`}
-              title={collapsed ? `${authUser.name} (click to logout)` : "Click to logout"}
-            >
-              <span className="w-6 h-6 rounded-full bg-accent-bg text-white flex items-center justify-center text-xs font-bold shrink-0">
-                {authUser.name.charAt(0).toUpperCase()}
-              </span>
-              {!collapsed && (
-                <>
-                  <span className="text-xs font-medium text-text-primary truncate flex-1 text-left">
-                    {authUser.name}
-                  </span>
-                  <LogOut size={14} className="text-text-tertiary shrink-0" />
-                </>
-              )}
-            </button>
-            {/* XP status */}
-            {!collapsed && (
-              <div className="flex items-center justify-center gap-2 px-2 py-0.5 text-[10px] leading-none text-text-tertiary">
-                <span className="flex items-center gap-0.5 leading-none">
-                  Lv.{xpUser?.level ?? 1}
-                </span>
-                <span className="flex items-center gap-0.5 leading-none">
-                  <Star size={10} className="text-yellow-500" />
-                  {xpUser?.lifetime_xp ?? 0} XP
-                </span>
-                {(xpUser?.pending_xp ?? 0) > 0 && (
-                  <span
-                    className="text-text-tertiary/70 leading-none"
-                    title={`${xpUser?.pending_xp} XP awaiting hub sync`}
-                  >
-                    (+{xpUser?.pending_xp}⋯)
-                  </span>
-                )}
-                {xpFlash !== null && (
-                  <span className="text-yellow-500 font-bold animate-bounce">
-                    +{xpFlash}
-                  </span>
-                )}
-              </div>
-            )}
-            {collapsed && xpFlash !== null && (
-              <span className="text-[9px] text-yellow-500 font-bold text-center animate-bounce">
-                +{xpFlash}
-              </span>
-            )}
-          </div>
+          <AccountMenu
+            collapsed={collapsed}
+            name={authUser.name}
+            email={authUser.email}
+            xp={xpUser?.lifetime_xp ?? 0}
+            pendingXp={xpUser?.pending_xp ?? 0}
+            flash={xpFlash}
+            onLogout={logout}
+            onWorkspaces={() => onTabChange("workspaces")}
+          />
         ) : checking ? (
           /* Login status still being validated (startup / workspace switch) —
              show a placeholder instead of the Login button. */
@@ -421,18 +391,7 @@ export default function Sidebar({
             {!collapsed && <span className="text-xs font-medium text-text-secondary">Login</span>}
           </button>
         )}
-
-        <div className="w-full border-b border-border-default my-1" />
-
-        {/* Root tabs above groups: Dictation, Read a Book, Read Aloud, Cards, Wiki */}
-        {rootTabs.map((tab) => renderTab(tab, false))}
-
-        {/* Navigation groups */}
-        {navGroups.map(renderGroup)}
-
-        {/* Settings at bottom of nav */}
-        {bottomTabs.map((tab) => renderTab(tab, false))}
-      </nav>
+      </div>
 
       {/* Resize handle */}
       <div

@@ -120,7 +120,12 @@ export function useAuth() {
     if (!isTauri()) return;
     try {
       await invoke("auth_logout");
+      // Clear the XP alongside the user: the `auth-logout` event is the other
+      // path, but this one always runs, so no stale level can outlive a
+      // signed-out state.
       setAuthUser(null);
+      setXpUser(null);
+      setXpFlash(null);
     } catch {
       /* ignore */
     }
