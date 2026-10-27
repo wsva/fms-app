@@ -55,6 +55,14 @@ mod xp;
 /// Agent TODO domain — user-facing tasks an agent or the workflow `human` step
 /// leaves for the learner. Not desktop-gated: todos are cleared on mobile too.
 mod todo;
+/// The agent-mail ledger's state machine — the transition table of
+/// `docs/design/agent/mailbox.md` §4.1 as data, with the property test
+/// generated from it. Pure: no SQL, no clock, no Tauri.
+///
+/// `allow(dead_code)` until the ledger lands (§12 step 2): the table is
+/// exercised by its own tests, and the allow goes away with the first caller.
+#[allow(dead_code)]
+mod mail;
 
 // Voice synthesis (all platforms).
 mod edge_tts;
@@ -407,6 +415,16 @@ pub fn run() {
             todo::todo_list,
             todo::todo_complete,
             todo::todo_dismiss,
+            // The dock's mailbox verbs. The agent's six live in `mcp::mail`;
+            // these are the user's own transitions and reads (§6).
+            mail::commands::mail_head,
+            mail::commands::mail_list,
+            mail::commands::mail_open,
+            mail::commands::mail_brief,
+            mail::commands::mail_take_over,
+            mail::commands::mail_cancel,
+            mail::commands::mail_reply,
+            mail::commands::mail_archive,
             models::index::model_index_get,
             models::index::model_index_refresh,
             capture::capture_screenshot,

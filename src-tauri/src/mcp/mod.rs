@@ -53,6 +53,7 @@ mod system;
 mod workflow;
 mod ui;
 mod todo;
+mod mail;
 // Not a tool domain: the policy tier + audit journal every route is wrapped in
 // by [`DatasetMcpServer::tool_router`].
 mod policy;
@@ -144,7 +145,8 @@ impl DatasetMcpServer {
                 + Self::system_router()
                 + Self::workflow_router()
                 + Self::ui_router()
-                + Self::todo_router(),
+                + Self::todo_router()
+                + Self::mail_router(),
         )
     }
 }

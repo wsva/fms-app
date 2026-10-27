@@ -1,6 +1,6 @@
 # Agent Control Plane — controlling *all* aspects of the app
 
-Sibling to [integration.md](./integration.md): that file covers how an agent **finds and attaches** to FmS; this one covers what it can **do** once attached, and what is missing for a third-party agent (Codex, Claude Code, goose, WorkBuddy, …) to control the whole app rather than answer one quiz.
+Sibling to [integration.md](./integration.md): that file covers how an agent **finds and attaches** to FmS; this one covers what it can **do** once attached, and what is missing for a third-party agent (Codex, Claude Code, goose, WorkBuddy, …) to control the whole app rather than answer one quiz. [mailbox.md](./mailbox.md) is the third sibling: asynchronous cooperation — the request/claim/notice ledger the dock renders.
 
 Status legend, as in `integration.md`: ✅ built · ⚠️ partial · 💡 proposed.
 

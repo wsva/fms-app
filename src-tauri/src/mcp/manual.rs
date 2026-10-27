@@ -35,7 +35,7 @@ use crate::sync::server::{WebServiceConfig, WebServiceState, WebServiceStatus};
 /// as the `read-aloud` domain because `fms://docs/domain/{domain}` is the slice
 /// an agent reads before it starts, and "books" is not a word a read-aloud task
 /// begins with.
-const DOMAIN_PREFIXES: [(&str, &str); 27] = [
+const DOMAIN_PREFIXES: [(&str, &str); 28] = [
     ("dataset_", "datasets"),
     ("subtitle_", "datasets"),
     ("dictation_", "dictation"),
@@ -63,6 +63,7 @@ const DOMAIN_PREFIXES: [(&str, &str); 27] = [
     ("workflow_", "workflow"),
     ("ui_", "ui"),
     ("todo_", "todo"),
+    ("mail_", "mail"),
 ];
 
 /// The domain a name falls into when no prefix matches. A tool landing here is a
@@ -71,7 +72,7 @@ const UNMAPPED: &str = "misc";
 
 /// The order domains are rendered in — the same order as the `mod` list, which
 /// is roughly "content first, infrastructure last".
-const DOMAIN_ORDER: [&str; 13] = [
+const DOMAIN_ORDER: [&str; 14] = [
     "datasets",
     "dictation",
     "cards",
@@ -85,6 +86,7 @@ const DOMAIN_ORDER: [&str; 13] = [
     "workflow",
     "ui",
     "todo",
+    "mail",
 ];
 
 /// The first five calls a cold agent should make, in order. Names only —

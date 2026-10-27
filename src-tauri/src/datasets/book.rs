@@ -177,6 +177,12 @@ pub(crate) fn open_book_db(book_dir: &Path) -> Result<Connection, String> {
             model        TEXT,
             parent_uuid  TEXT,
             content_hash TEXT NOT NULL DEFAULT '',
+            -- Provenance, written only by the mailbox delivery path: which request
+            -- produced this row, who delivered it, and the source text's hash at
+            -- claim time (NULL = unknown vintage, e.g. an adopted delivery).
+            mail_uuid    TEXT,
+            delivered_by TEXT,
+            source_hash  TEXT,
             created_at   TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -229,6 +235,16 @@ pub(crate) fn open_book_db(book_dir: &Path) -> Result<Connection, String> {
     // §3.4: a per-dataset tombstone table (travels with snapshots) so a delete
     // is durable and can collide with a resurrected offline edit.
     crate::sync::change_log::ensure_tombstones(&conn)?;
+    // Mailbox provenance, added after the first datasets shipped. `CREATE TABLE
+    // IF NOT EXISTS` cannot add a column to an existing table, so the three are
+    // applied lazily here — the same idempotent pattern the read-aloud tables use.
+    for (column, decl) in [
+        ("mail_uuid", "TEXT"),
+        ("delivered_by", "TEXT"),
+        ("source_hash", "TEXT"),
+    ] {
+        ensure_column(&conn, "book_artifact", column, decl)?;
+    }
     // Every paragraph — including a chapter's last — is terminated by a
     // `paragraph_break` row so its uuid is a stable anchor for paragraph audio and
     // understanding artifacts. Idempotent and NOT journaled: each device self-heals
@@ -236,6 +252,24 @@ pub(crate) fn open_book_db(book_dir: &Path) -> Result<Connection, String> {
     // journaling would fork every adopted base and flood the writeback queue.
     backfill_paragraph_anchors(&conn)?;
     Ok(conn)
+}
+
+/// Add one column to a table if it is not there yet.
+fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<(), String> {
+    let sql = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let existing: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    if existing.iter().any(|c| c == column) {
+        return Ok(());
+    }
+    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Append a `paragraph_break` sentinel to any chapter whose sentences are

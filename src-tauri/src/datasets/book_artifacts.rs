@@ -57,6 +57,19 @@ pub struct BookArtifact {
     /// FNV-1a 64-bit hex of the source text at generation time ('' for notes).
     #[serde(default)]
     pub content_hash: String,
+    /// The mailbox request this artifact answers, when it was delivered against
+    /// one. Provenance only — an artifact written without mail is legitimate.
+    #[serde(default)]
+    pub mail_uuid: Option<String>,
+    /// Who delivered it (`claimed_by` of the claim, or `user` for the built-in
+    /// generator). Display text, sanitised at ingestion.
+    #[serde(default)]
+    pub delivered_by: Option<String>,
+    /// The source text's hash **at claim time**, so a delivery made from stale
+    /// text cannot pass for fresh. `None` means unknown vintage — the artifact
+    /// was adopted rather than claimed (§5.1).
+    #[serde(default)]
+    pub source_hash: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -96,7 +109,7 @@ pub struct QuizResultResponse {
 }
 
 /// Kinds produced by [`generate_artifact`] (regenerated in place, hash-tracked).
-const GENERATED_KINDS: &[&str] = &[
+pub(crate) const GENERATED_KINDS: &[&str] = &[
     "explanation",
     "simplification",
     "digest",
@@ -188,7 +201,7 @@ fn chapter_text(rows: &[(String, i64, String, String)]) -> String {
 }
 
 /// Resolve the source text an artifact of `scope_type`/`scope_uuid` was made from.
-fn source_text(conn: &Connection, scope_type: &str, scope_uuid: &str) -> Result<String, String> {
+pub(crate) fn source_text(conn: &Connection, scope_type: &str, scope_uuid: &str) -> Result<String, String> {
     match scope_type {
         "chapter" => {
             let rows = chapter_rows(conn, scope_uuid)?;
@@ -220,12 +233,23 @@ fn source_text(conn: &Connection, scope_type: &str, scope_uuid: &str) -> Result<
 // Artifact row helpers
 // ============================================================
 
-fn save_artifact_row(conn: &Connection, a: &BookArtifact) -> Result<(), String> {
+pub(crate) fn save_artifact_row(conn: &Connection, a: &BookArtifact) -> Result<(), String> {
+    // A replace, not an `INSERT OR REPLACE`: the latter deletes the old row, so
+    // any column the new value does not carry (a note added to a generated
+    // artifact, the mail provenance of an earlier delivery) would be lost.
     conn.execute(
-        "INSERT OR REPLACE INTO book_artifact \
+        "INSERT INTO book_artifact \
          (uuid, book_uuid, scope_type, scope_uuid, kind, content, source, model, \
-          parent_uuid, content_hash, created_at, updated_at) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+          parent_uuid, content_hash, mail_uuid, delivered_by, source_hash, \
+          created_at, updated_at) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) \
+         ON CONFLICT(uuid) DO UPDATE SET \
+             book_uuid = excluded.book_uuid, scope_type = excluded.scope_type, \
+             scope_uuid = excluded.scope_uuid, kind = excluded.kind, \
+             content = excluded.content, source = excluded.source, model = excluded.model, \
+             parent_uuid = excluded.parent_uuid, content_hash = excluded.content_hash, \
+             mail_uuid = excluded.mail_uuid, delivered_by = excluded.delivered_by, \
+             source_hash = excluded.source_hash, updated_at = excluded.updated_at",
         rusqlite::params![
             a.uuid,
             a.book_uuid,
@@ -237,6 +261,9 @@ fn save_artifact_row(conn: &Connection, a: &BookArtifact) -> Result<(), String> 
             a.model,
             a.parent_uuid,
             a.content_hash,
+            a.mail_uuid,
+            a.delivered_by,
+            a.source_hash,
             a.created_at,
             a.updated_at
         ],
@@ -257,13 +284,16 @@ fn row_to_artifact(row: &rusqlite::Row) -> rusqlite::Result<BookArtifact> {
         model: row.get(7)?,
         parent_uuid: row.get(8)?,
         content_hash: row.get(9)?,
+        mail_uuid: row.get(12)?,
+        delivered_by: row.get(13)?,
+        source_hash: row.get(14)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
     })
 }
 
 const ARTIFACT_COLS: &str = "uuid, book_uuid, scope_type, scope_uuid, kind, content, source, \
-     model, parent_uuid, content_hash, created_at, updated_at";
+     model, parent_uuid, content_hash, created_at, updated_at, mail_uuid, delivered_by, source_hash";
 
 fn query_artifact(conn: &Connection, uuid: &str) -> Result<BookArtifact, String> {
     conn.query_row(
@@ -402,6 +432,11 @@ pub(crate) async fn generate_artifact(
         model: model.filter(|m| !m.trim().is_empty()),
         parent_uuid: None,
         content_hash: hash_text(&source),
+        mail_uuid: None,
+        delivered_by: None,
+        // Built-in generation reads the text in the same breath, so its vintage
+        // is provable rather than unknown.
+        source_hash: Some(hash_text(&source)),
         created_at,
         updated_at: now,
     };
@@ -470,6 +505,11 @@ pub(crate) async fn assess_note(
         model: model.filter(|m| !m.trim().is_empty()),
         parent_uuid: Some(note_uuid.to_string()),
         content_hash: note.content_hash.clone(),
+        // An assessment judges a note, which is user-authored and never stale;
+        // it is not a delivery of any request.
+        mail_uuid: None,
+        delivered_by: None,
+        source_hash: None,
         created_at,
         updated_at: now,
     };
@@ -691,34 +731,46 @@ pub async fn book_list_artifacts(
     Ok(views)
 }
 
-/// Write one artifact row, clear any matching agent job, and journal the change.
-/// Shared by the [`book_save_artifact`] command (which also emits the refresh
-/// event) and the sync replay path in `sync::client::round`, which has no
-/// `AppHandle` to emit through — a pull refreshes the reader on its own.
+// ============================================================
+// Artifact writes
+// ============================================================
+
+/// Write one artifact row, close any request it satisfies, and journal it.
+///
+/// Shared by the built-in generator, the plain save path and the sync replay —
+/// none of which holds a claim, so this path can only *adopt* a free request.
+/// The claimed path is [`super::book_mail::deliver`], where the write is guarded
+/// by the row inside the same statement.
 pub(crate) fn save_artifact_inner(
     settings: &State<'_, SettingsState>,
     book_uuid: &str,
     artifact: BookArtifact,
+    by: &str,
 ) -> Result<(), String> {
     let dir = find_book_dir_write(settings, book_uuid)?;
     let conn = open_book_db(&dir)?;
     let mut artifact = artifact;
     artifact.book_uuid = book_uuid.to_string();
     if artifact.uuid.trim().is_empty() {
-        artifact.uuid = Uuid::new_v4().to_string();
+        // A generated artifact derives its uuid from the subject, so the row a
+        // request will land on exists before anyone can deliver into it. A note
+        // is not addressed by mail, so it keeps a random one.
+        artifact.uuid = if GENERATED_KINDS.contains(&artifact.kind.as_str()) {
+            super::book_mail::target_for(book_uuid, &artifact.scope_uuid, &artifact.kind)
+        } else {
+            Uuid::new_v4().to_string()
+        };
     }
     if artifact.created_at.trim().is_empty() {
         artifact.created_at = now_stamp();
     }
     artifact.updated_at = now_stamp();
     save_artifact_row(&conn, &artifact)?;
-    // The artifact satisfies any pending agent request for the same scope+kind,
-    // whatever produced it (an agent fulfilling a job, or the built-in generator
-    // the user ran instead of waiting). Jobs are ephemeral, so it is deleted.
-    let _ = conn.execute(
-        "DELETE FROM book_artifact_job WHERE book_uuid = ?1 AND scope_uuid = ?2 AND kind = ?3",
-        rusqlite::params![book_uuid, artifact.scope_uuid, artifact.kind],
-    );
+    // An app-side write satisfies any pending request for the same subject —
+    // whatever produced it (the built-in generator the user ran instead of
+    // waiting, or an artifact pulled from another device). A live claim is left
+    // alone: its holder's own guarded write closes it.
+    super::book_mail::note_local_write(settings, book_uuid, &artifact, by);
     let _ = commit_change(
         settings,
         "book_artifact_save",
@@ -728,23 +780,55 @@ pub(crate) fn save_artifact_inner(
     Ok(())
 }
 
-/// Insert or update one artifact (the agent/manual write path). Writing an
-/// artifact also clears any outstanding agent job for the same scope + kind and
-/// notifies the webview, so a result an attached agent delivers through this same
-/// path shows up in the Understanding panel without the user reloading.
+/// Insert or update one artifact (the agent/manual write path).
+///
+/// `job_uuid` names the mailbox request this delivery answers: the artifact
+/// then lands at **that request's** `target_uuid`, and the write is guarded by
+/// the claim inside the same statement, so a delivery whose claim moved writes
+/// nothing (§5.1). `claim_id` is the token from `mail_claim`.
+///
+/// With no `job_uuid` the write is correlated against a request nobody is
+/// working and delivered through the same door; with no request at all it is a
+/// legitimate unsolicited artifact, recorded without a link to mail.
 #[tauri::command]
 pub async fn book_save_artifact(
     app: tauri::AppHandle,
     settings: State<'_, SettingsState>,
     book_uuid: String,
     artifact: BookArtifact,
-) -> Result<(), String> {
-    save_artifact_inner(&settings, &book_uuid, artifact)?;
+    job_uuid: Option<String>,
+    claim_id: Option<String>,
+) -> Result<super::book_mail::Delivery, String> {
+    let delivery = if job_uuid.is_some() || claim_id.is_some() {
+        super::book_mail::deliver(
+            &settings,
+            &book_uuid,
+            artifact,
+            job_uuid.as_deref(),
+            claim_id.as_deref(),
+            "agent",
+        )?
+    } else {
+        let uuid = artifact.uuid.clone();
+        let scope_uuid = artifact.scope_uuid.clone();
+        let kind = artifact.kind.clone();
+        save_artifact_inner(&settings, &book_uuid, artifact, "user")?;
+        let artifact_uuid = if uuid.trim().is_empty() {
+            super::book_mail::target_for(&book_uuid, &scope_uuid, &kind)
+        } else {
+            uuid
+        };
+        super::book_mail::Delivery {
+            artifact_uuid,
+            mail_uuid: None,
+            outcome: "saved",
+        }
+    };
     let _ = app.emit(
         "book-artifact-changed",
         serde_json::json!({ "book_uuid": book_uuid }),
     );
-    Ok(())
+    Ok(delivery)
 }
 
 /// Delete one artifact.
@@ -768,21 +852,23 @@ pub async fn book_delete_artifact(
 }
 
 // ============================================================
-// Artifact job mailbox — delegate generation to an attached agent
+// Artifact requests — delegate generation to an attached agent
 // ============================================================
 //
 // FmS never dials an agent, so the Understand panel's buttons cannot *call* a
-// third-party agent (WorkBuddy, goose, …) directly. Instead a button writes a job
-// row here; an agent attached over MCP discovers it with `book_list_artifact_jobs`
-// (which carries the source text), generates with its own model, and delivers
-// through the very same [`book_save_artifact`] every other write path uses — which
-// clears the job and notifies the panel, so the result lands in the same place a
-// built-in generation would. Jobs are ephemeral coordination state: not journaled
-// for sync, and deleted once fulfilled or cancelled.
+// third-party agent (WorkBuddy, goose, …) directly. Instead a button writes a
+// **mailbox request**; an agent attached over MCP discovers it with
+// `book_list_artifact_jobs` (which carries the source text), claims it, generates
+// with its own model, and delivers through the very same [`book_save_artifact`]
+// every other write path uses — guarded by the claim, so a second agent's write
+// cannot land. The ledger owns the lifecycle; this module is only the art.
 
-/// A request for an agent to generate an artifact. Mirrors the
-/// `book_artifact_job` table, enriched on read with the source text and a
-/// staleness flag so an agent can act on it without a second round-trip.
+/// A request for an agent to generate an artifact. Carries the mail row's
+/// identity and status, enriched on read with the scope's live text and a
+/// staleness flag so an agent can act on it without a second round-trip. The
+/// fields are the ones the pre-ledger `book_artifact_job` table exposed, so an
+/// attached agent's contract does not move; `status` now speaks the mailbox's
+/// vocabulary (`queued`, `claimed`, `delivering`, `waiting_user`).
 #[derive(Clone, Debug, Serialize)]
 pub struct ArtifactJob {
     pub uuid: String,
@@ -796,7 +882,7 @@ pub struct ArtifactJob {
     pub instructions: String,
     /// Model hint from the requester; the agent is free to ignore it.
     pub model: Option<String>,
-    /// `pending` today; reserved for a future `claimed` without a migration.
+    /// `queued` | `claimed` | `delivering` | `waiting_user`.
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
@@ -806,67 +892,9 @@ pub struct ArtifactJob {
     pub stale: bool,
 }
 
-/// The stored row, before it is enriched with the live source text.
-struct JobRow {
-    uuid: String,
-    book_uuid: String,
-    scope_type: String,
-    scope_uuid: String,
-    kind: String,
-    instructions: String,
-    model: Option<String>,
-    status: String,
-    content_hash: String,
-    created_at: String,
-    updated_at: String,
-}
-
-const JOB_COLS: &str = "uuid, book_uuid, scope_type, scope_uuid, kind, instructions, \
-     model, status, content_hash, created_at, updated_at";
-
-fn row_to_job(row: &rusqlite::Row) -> rusqlite::Result<JobRow> {
-    Ok(JobRow {
-        uuid: row.get(0)?,
-        book_uuid: row.get(1)?,
-        scope_type: row.get(2)?,
-        scope_uuid: row.get(3)?,
-        kind: row.get(4)?,
-        instructions: row.get(5)?,
-        model: row.get(6)?,
-        status: row.get(7)?,
-        content_hash: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
-    })
-}
-
-/// Attach the live source text and a staleness flag to a stored row.
-fn enrich_job(conn: &Connection, row: JobRow) -> ArtifactJob {
-    let text = source_text(conn, &row.scope_type, &row.scope_uuid).unwrap_or_default();
-    let stale = if row.content_hash.is_empty() || text.is_empty() {
-        false
-    } else {
-        hash_text(&text) != row.content_hash
-    };
-    ArtifactJob {
-        uuid: row.uuid,
-        book_uuid: row.book_uuid,
-        scope_type: row.scope_type,
-        scope_uuid: row.scope_uuid,
-        kind: row.kind,
-        instructions: row.instructions,
-        model: row.model,
-        status: row.status,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-        source_text: text,
-        stale,
-    }
-}
-
 /// Request an agent-generated artifact for a scope. Idempotent per (scope, kind):
-/// a second request while one is still open returns the existing job rather than
-/// queueing a duplicate.
+/// a second request while one is still open returns the existing row rather than
+/// queueing a duplicate, and a live claim is refused with `claim_required`.
 #[tauri::command]
 pub async fn book_request_artifact(
     app: tauri::AppHandle,
@@ -878,108 +906,30 @@ pub async fn book_request_artifact(
     instructions: Option<String>,
     model: Option<String>,
 ) -> Result<ArtifactJob, String> {
-    if !GENERATED_KINDS.contains(&kind.as_str()) {
-        return Err(format!(
-            "kind '{}' cannot be requested from an agent. Valid kinds: {}",
-            kind,
-            GENERATED_KINDS.join(", ")
-        ));
-    }
-    let dir = find_book_dir_write(&settings, &book_uuid)?;
-    let conn = open_book_db(&dir)?;
-    let text = source_text(&conn, &scope_type, &scope_uuid)?;
-    if text.trim().is_empty() {
-        return Err("this scope has no text to generate from".into());
-    }
-
-    // Reuse an outstanding job for the same scope+kind instead of queueing twice.
-    let existing: Option<JobRow> = conn
-        .query_row(
-            &format!(
-                "SELECT {JOB_COLS} FROM book_artifact_job \
-                 WHERE book_uuid = ?1 AND scope_uuid = ?2 AND kind = ?3 LIMIT 1"
-            ),
-            rusqlite::params![book_uuid, scope_uuid, kind],
-            row_to_job,
-        )
-        .ok();
-    if let Some(row) = existing {
-        return Ok(enrich_job(&conn, row));
-    }
-
-    let uuid = Uuid::new_v4().to_string();
-    let now = now_stamp();
-    conn.execute(
-        "INSERT INTO book_artifact_job \
-         (uuid, book_uuid, scope_type, scope_uuid, kind, instructions, model, status, \
-          content_hash, created_at, updated_at) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9,?9)",
-        rusqlite::params![
-            uuid,
-            book_uuid,
-            scope_type,
-            scope_uuid,
-            kind,
-            instructions.unwrap_or_default(),
-            model,
-            hash_text(&text),
-            now,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    let row = conn
-        .query_row(
-            &format!("SELECT {JOB_COLS} FROM book_artifact_job WHERE uuid = ?1"),
-            [&uuid],
-            row_to_job,
-        )
-        .map_err(|e| e.to_string())?;
+    let job = super::book_mail::request_artifact(
+        &settings, &book_uuid, &scope_type, &scope_uuid, &kind, instructions, model,
+    )?;
     let _ = app.emit(
         "book-artifact-changed",
         serde_json::json!({ "book_uuid": book_uuid }),
     );
-    Ok(enrich_job(&conn, row))
+    Ok(job)
 }
 
-/// List a book's artifact jobs. `status` filters to one state; omit it for every
-/// outstanding request, oldest first.
+/// List a book's outstanding artifact requests. `status` filters to one state;
+/// omit it for every non-terminal request, oldest first.
 #[tauri::command]
 pub async fn book_list_artifact_jobs(
     settings: State<'_, SettingsState>,
     book_uuid: String,
     status: Option<String>,
 ) -> Result<Vec<ArtifactJob>, String> {
-    let dir = find_book_dir(&settings, &book_uuid)?;
-    let conn = open_book_db(&dir)?;
-    let filter = status.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let (sql, params): (String, Vec<String>) = match filter {
-        Some(s) => (
-            format!(
-                "SELECT {JOB_COLS} FROM book_artifact_job WHERE book_uuid = ?1 AND status = ?2 \
-                 ORDER BY created_at ASC"
-            ),
-            vec![book_uuid.clone(), s.to_string()],
-        ),
-        None => (
-            format!(
-                "SELECT {JOB_COLS} FROM book_artifact_job WHERE book_uuid = ?1 \
-                 ORDER BY created_at ASC"
-            ),
-            vec![book_uuid.clone()],
-        ),
-    };
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows: Vec<JobRow> = stmt
-        .query_map(rusqlite::params_from_iter(params.iter()), row_to_job)
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(rows.into_iter().map(|r| enrich_job(&conn, r)).collect())
+    super::book_mail::list_jobs(&settings, &book_uuid, status)
 }
 
-/// Cancel an outstanding job (the requester changed their mind, or generated it
-/// locally instead). Deletes the row; jobs are ephemeral, so there is nothing to
-/// undo and nothing to sync.
+/// Cancel an outstanding request (the requester changed their mind, or
+/// generated it locally instead). The row is cancelled, not deleted: the trail
+/// survives, and a late delivery is refused with `orphan_refused`.
 #[tauri::command]
 pub async fn book_cancel_artifact_job(
     app: tauri::AppHandle,
@@ -987,13 +937,7 @@ pub async fn book_cancel_artifact_job(
     book_uuid: String,
     uuid: String,
 ) -> Result<(), String> {
-    let dir = find_book_dir_write(&settings, &book_uuid)?;
-    let conn = open_book_db(&dir)?;
-    conn.execute(
-        "DELETE FROM book_artifact_job WHERE uuid = ?1 AND book_uuid = ?2",
-        rusqlite::params![uuid, book_uuid],
-    )
-    .map_err(|e| e.to_string())?;
+    super::book_mail::cancel_job(&settings, &book_uuid, &uuid)?;
     let _ = app.emit(
         "book-artifact-changed",
         serde_json::json!({ "book_uuid": book_uuid }),

@@ -1,6 +1,6 @@
 # Agent integration — the self-describing app, zero-config connect
 
-This file is the design record for the **attachment** half of FmS's agent-facing surface: how an agent finds FmS, what it is told once it arrives, and why it is trusted. The standing principles are [../../agent_friendly_design.md](../../agent_friendly_design.md); this directory also holds real artifacts ([goose_recipe/](./goose_recipe/), [prompt/](./prompt/)). Its sibling [control.md](./control.md) covers the other half — what an agent can *do* once attached. Everything below is marked by status:
+This file is the design record for the **attachment** half of FmS's agent-facing surface: how an agent finds FmS, what it is told once it arrives, and why it is trusted. The standing principles are [../../agent_friendly_design.md](../../agent_friendly_design.md); this directory also holds real artifacts ([goose_recipe/](./goose_recipe/), [prompt/](./prompt/)). Its sibling [control.md](./control.md) covers the other half — what an agent can *do* once attached — and [mailbox.md](./mailbox.md) covers how the app and one or more agents cooperate asynchronously (requests, claims, notices) once it is attached. Everything below is marked by status:
 
 - ✅ built and working in this codebase today
 - ⚠️ partial — the mechanism exists but is incomplete or undocumented to agents

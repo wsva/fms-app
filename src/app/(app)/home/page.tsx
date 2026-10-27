@@ -406,10 +406,11 @@ export default function Home() {
       {/* Global text-selection → "Add to Card" menu */}
       <CardContextMenu />
 
-      {/* Always-accessible agent dock (desktop only) — overlays the content
-          area on the right, toggled by the floating Bot button or Ctrl+Space.
-          It is the outbox of the agent→FmS link (notifications, task count),
-          so it only navigates; it never holds a session.
+      {/* Always-accessible mailbox (desktop only) — overlays the content area
+          on the right, toggled by the floating Bot button or Ctrl+Space. It
+          renders the ledger's three lanes (you owe / your agent owes / inbox)
+          over the same rows an attached agent claims from, so it holds no
+          session: `onNavigate` is only how a row reaches what it is about.
           `booted` is required as well as `!mobile`: the platform is unknown on
           the prerendered first paint, so without it Android would mount the
           dock for one commit and its effects would call desktop-only commands. */}

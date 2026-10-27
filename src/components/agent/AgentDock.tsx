@@ -1,44 +1,66 @@
 "use client";
 
 /**
- * Agent dock — the agent's outbox, reachable from Ctrl+Space or from the floating
- * Bot button.
+ * Agent dock — the mailbox (§6 of `docs/design/agent/mailbox.md`).
  *
  * FmS does not dial an agent, so there is no session here to stream. An agent
- * attaches to this app's MCP server and runs in its own window; what it can
- * push back while the user is on some other page is a notification
- * (`app_notify` → `agent-action` notify) and a task (`todo_add`). This panel is
- * where the first one is kept: the shell's toast lasts four seconds, the dock
- * holds the trail, and clicking an entry copies it for pasting into the agent's
- * own window. The task queue keeps its page (Tools → Tasks) — the footer only
- * counts what is waiting so it is not silently missed.
+ * attaches to this app's MCP server, runs in its own window, and finds work in
+ * the mail tray. This panel is the other end of that tray: three lanes over one
+ * ledger, so "what is my agent doing" and "what is waiting on me" are answered
+ * by the same rows the agent claims from.
  *
- * The button is opt-in: `agent_fab_visible` is off by default (Agent page →
- * Agent surface), because a FAB sits on top of every page. Only the button is
- * gated — Ctrl+Space always opens the panel, so the trail is never unreachable.
+ * The lanes are two folders, one of them split: YOUR AGENT OWES is the Outbox,
+ * YOU OWE and INBOX are both the Inbox, split by `owed_by`. That is why the
+ * header counts and the lane lengths cannot disagree — both are the backend's
+ * fold (§4.2), never a rule re-implemented here.
  *
- * Presentation is untouched from when this component spoke ACP: the FAB can be
- * dragged, the panel width is draggable, and both survive a reload.
+ * The shell is unchanged from when this was a notification trail: draggable
+ * opt-in FAB (drag to move, tap to open), draggable width, Ctrl+Space, desktop
+ * only. The dock's own transitions — take over, cancel, answer — are Tauri
+ * commands published as UI actions, so an agent acting *as the user* reaches
+ * them through `ui_invoke_action` like any other button.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Bell, Bot, Copy, ListTodo, X } from "lucide-react";
+import {
+  Bot,
+  Copy,
+  CornerDownRight,
+  Inbox,
+  ListTodo,
+  RefreshCw,
+  Undo2,
+  X,
+} from "lucide-react";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
-import { copyAgentText, ensureAgentLoaded, ensureSurfaceLoaded, useAgentControl } from "@/lib/agent/control";
+import {
+  copyAgentText,
+  ensureAgentLoaded,
+  ensureSurfaceLoaded,
+  useAgentControl,
+} from "@/lib/agent/control";
 import type { AgentAction } from "@/lib/agent/types";
-
-// ---------------------------------------------------------------------------
-// View model — one row per thing the agent pushed at the user.
-// ---------------------------------------------------------------------------
-
-interface Note {
-  id: number;
-  at: number;
-  text: string;
-}
+import { reqStr, useAgentActions } from "@/lib/agent/ui-actions";
+import {
+  badgeOf,
+  channelLine,
+  mailBrief,
+  mailCancel,
+  mailHead,
+  mailList,
+  mailLook,
+  mailOpen,
+  mailReply,
+  mailTakeOver,
+  promptOf,
+  tabForRow,
+  type MailHead,
+  type MailSummary,
+  type MailTone,
+} from "@/lib/agent/mail";
 
 /** The subset of `todo::Todo` the footer counts. */
 interface TodoRow {
@@ -52,7 +74,7 @@ interface TodoRow {
 const DOCK_OPEN_KEY = "agent.dockOpen";
 const DOCK_WIDTH_KEY = "agent.dockWidth";
 const DEFAULT_DOCK_WIDTH = 380;
-const MIN_DOCK_WIDTH = 300;
+const MIN_DOCK_WIDTH = 320;
 const MAX_DOCK_WIDTH = 640;
 
 // Floating toggle button geometry. Persisted so users can park it out of the
@@ -67,8 +89,26 @@ const FAB_POS_KEY = "agent.fabPos";
 // drag and suppresses the click-to-open handler on pointerup.
 const FAB_DRAG_THRESHOLD = 4;
 
-// The trail is a convenience, not a journal: keep the last handful of notes.
-const MAX_NOTES = 30;
+// The mailbox lives in the app database, so polling it is cheap — but the
+// panel is not the place to spend a core on. The badge polls slower than the
+// open list because it only needs the counts.
+const OPEN_POLL_MS = 8000;
+const BADGE_POLL_MS = 30000;
+
+const TONE: Record<MailTone, string> = {
+  neutral: "text-text-tertiary",
+  accent: "text-accent-bg",
+  ok: "text-green-500",
+  warn: "text-yellow-500",
+  bad: "text-red-400",
+};
+
+const GHOST =
+  "inline-flex items-center gap-1 rounded border border-border-default bg-bg-muted px-1.5 py-0.5 " +
+  "text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors " +
+  "disabled:opacity-50 disabled:cursor-default";
+
+type LaneId = "you" | "agent" | "inbox";
 
 export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) => void }) {
   // ---- Dock presentation state ----
@@ -77,13 +117,25 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
   const [unread, setUnread] = useState(false);
   const [dockWidth, setDockWidth] = useState(DEFAULT_DOCK_WIDTH);
 
-  // ---- The outbox ----
-  const [notes, setNotes] = useState<Note[]>([]);
+  // ---- The mailbox ----
+  const [head, setHead] = useState<MailHead | null>(null);
+  const [lanes, setLanes] = useState<{ you: MailSummary[]; agent: MailSummary[]; inbox: MailSummary[] }>({
+    you: [],
+    agent: [],
+    inbox: [],
+  });
+  // Ages are rendered from one stamped instant, refreshed with the poll, so a
+  // row list does not re-read the clock for every row.
+  const [now, setNow] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [armed, setArmed] = useState<string | null>(null);
+  const [replyTo, setReplyTo] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
   const [openTodos, setOpenTodos] = useState<number | null>(null);
-  const noteSeq = useRef(0);
 
   // ---- MCP surface state, read from the same store the Agent page uses ----
-  const { manual, surface } = useAgentControl();
+  const { manual, surface, copied } = useAgentControl();
   const listening = Boolean(manual?.endpoints.running);
   // Missing settings read as "no button": the switch is opt-in, so until the
   // store has the real value the safe default is the one a fresh install gets.
@@ -112,10 +164,10 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
 
   // setOpen — single funnel for every open/close so the user's explicit choice
   // is persisted; auto-opens pass persist=false.
-  const setOpen = useCallback((v: boolean, persist: boolean = true) => {
+  const setOpen = useCallback((v: boolean) => {
     setOpenState(v);
     if (v) setUnread(false);
-    if (persist) localStorage.setItem(DOCK_OPEN_KEY, v ? "1" : "0");
+    localStorage.setItem(DOCK_OPEN_KEY, v ? "1" : "0");
   }, []);
 
   useEffect(() => {
@@ -131,7 +183,7 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
       setDockWidth(Math.min(MAX_DOCK_WIDTH, Math.max(MIN_DOCK_WIDTH, w)));
     }
     // Restore FAB position if we have a stored one; anything else falls back
-    // to the default bottom-right corner at render time (see `effectivePos`).
+    // to the default bottom-right corner at render time (see `fabStyle`).
     try {
       const raw = localStorage.getItem(FAB_POS_KEY);
       if (raw) {
@@ -277,27 +329,240 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
     [dockWidth]
   );
 
-  // ---- Inbox: the notify half of `agent-action` ----
+  // ---- Reading the ledger ----
+
+  /** Counts only: what the FAB badge needs, and all it needs. */
+  const refreshBadge = useCallback(async () => {
+    if (!isTauri()) return;
+    try {
+      setHead(await mailHead());
+    } catch {
+      // A count is decoration; a failed read must not break the panel.
+    }
+  }, []);
+
+  /** The three lanes, folded by the backend rather than by this file. */
+  const refresh = useCallback(async () => {
+    if (!isTauri()) return;
+    try {
+      const [nextHead, owedYou, owedAgent, folderInbox] = await Promise.all([
+        mailHead(),
+        mailList({ owed_by: "you" }),
+        mailList({ owed_by: "agent" }),
+        mailList({ folder: "inbox" }),
+      ]);
+      setHead(nextHead);
+      setLanes({
+        you: owedYou,
+        agent: owedAgent,
+        // The Inbox lane is the *rest* of the folder: a `waiting_user` request
+        // sits in the same folder and is already under YOU OWE (§6).
+        inbox: folderInbox.filter((row) => row.owed_by === "nobody"),
+      });
+      setNow(Date.now());
+      setError(null);
+    } catch (e) {
+      setError(reason(e));
+    }
+  }, []);
+
+  // ---- The user's transitions, in one place ----
+  //
+  // These throw rather than swallow: the same functions back the UI actions, so
+  // an agent invoking them gets the failure verbatim. A button click attaches a
+  // `.catch` that puts it on the panel's error strip.
+
+  const goTo = useCallback(
+    (tab: string) => {
+      onNavigate?.(tab);
+      setOpen(false);
+    },
+    [onNavigate, setOpen]
+  );
+
+  const copyBrief = useCallback(
+    async (limit?: number) => {
+      const brief = await mailBrief(limit);
+      await copyAgentText("mail.brief", brief.text);
+      void refreshBadge();
+      return brief;
+    },
+    [refreshBadge]
+  );
+
+  const copyOne = useCallback(
+    async (uuid: string) => {
+      const row = await mailOpen(uuid);
+      await copyAgentText(`mail.${uuid}`, promptOf(row));
+      await refresh();
+      return { mail_uuid: uuid, subject: row.subject };
+    },
+    [refresh]
+  );
+
+  const openItem = useCallback(
+    async (uuid: string) => {
+      const row = await mailOpen(uuid);
+      await refresh();
+      const tab = tabForRow(row);
+      if (tab) goTo(tab);
+      return { mail_uuid: uuid, subject: row.subject, tab };
+    },
+    [goTo, refresh]
+  );
+
+  /** T14 — end a **live** hold. Not a claim: nothing here has expired. */
+  const takeOverClaim = useCallback(
+    async (uuid: string) => {
+      const row = await mailOpen(uuid);
+      if (!row.claim_id) {
+        throw new Error(
+          "nobody is holding this item any more, so there is no claim to end — it is " +
+            "already free. An agent picks it up with `mail_claim {next: true}`."
+        );
+      }
+      await mailTakeOver(uuid, row.claim_id);
+      await refresh();
+      return { mail_uuid: uuid, released: row.claimed_by ?? "the previous holder" };
+    },
+    [refresh]
+  );
+
+  /** T15 — cancel an open request. A delivery for it is refused afterwards. */
+  const cancelRequest = useCallback(
+    async (uuid: string) => {
+      await mailCancel(uuid);
+      await refresh();
+      return { mail_uuid: uuid, cancelled: true };
+    },
+    [refresh]
+  );
+
+  /** T10 — answer the question a request is blocked on; it returns to the tray. */
+  const answerQuestion = useCallback(
+    async (uuid: string, answer: string) => {
+      await mailReply(uuid, answer);
+      await refresh();
+      return { mail_uuid: uuid, answered: true };
+    },
+    [refresh]
+  );
+
+  /** Run a row action with the busy marker and the panel's error strip. */
+  const runRow = useCallback((uuid: string, work: () => Promise<unknown>) => {
+    setBusy(uuid);
+    setError(null);
+    void work()
+      .catch((e) => setError(reason(e)))
+      .finally(() => setBusy(null));
+  }, []);
+
+  // ---- Publishing the dock's buttons to an agent ----
+  //
+  // The registry is how the agent-friendly rule is kept without a seventh
+  // mailbox tool: an agent that wants to act *as the user* drives the same
+  // buttons the person clicks. `cancel` is declared destructive and therefore
+  // refused by `ui_invoke_action` — a cancelled request has no undo, and an
+  // agent can end its own claim with `mail_fail` instead.
+  useAgentActions("shell", [
+    {
+      id: "shell.mail-copy-all",
+      label: "Copy every prompt your agent owes, as one brief, to the clipboard",
+      kind: "read",
+      params_schema: {
+        limit: { type: "number", description: "How many items to include. Default 50." },
+      },
+      run: (params) => copyBrief(typeof params.limit === "number" ? params.limit : undefined),
+    },
+    {
+      id: "shell.mail-copy",
+      label: "Open one item and copy its prompt to the clipboard (marks it read)",
+      kind: "mutate",
+      params_schema: {
+        mail_uuid: { type: "string", required: true, description: "The mail's uuid." },
+      },
+      run: (params) => copyOne(reqStr("shell.mail-copy", params, "mail_uuid")),
+    },
+    {
+      id: "shell.mail-open",
+      label: "Open one item, mark it read, and go to the page it is about",
+      kind: "mutate",
+      params_schema: {
+        mail_uuid: { type: "string", required: true, description: "The mail's uuid." },
+      },
+      run: (params) => openItem(reqStr("shell.mail-open", params, "mail_uuid")),
+    },
+    {
+      id: "shell.mail-take-over",
+      label: "Release a live claim so the item can be claimed again, refunding the attempt",
+      kind: "mutate",
+      params_schema: {
+        mail_uuid: { type: "string", required: true, description: "The mail's uuid." },
+      },
+      run: (params) => takeOverClaim(reqStr("shell.mail-take-over", params, "mail_uuid")),
+    },
+    {
+      id: "shell.mail-answer",
+      label: "Answer the question a request is waiting on, and return it to the tray",
+      kind: "mutate",
+      params_schema: {
+        mail_uuid: { type: "string", required: true, description: "The waiting request's uuid." },
+        answer: { type: "string", required: true, description: "The decision, in words." },
+      },
+      run: (params) =>
+        answerQuestion(
+          reqStr("shell.mail-answer", params, "mail_uuid"),
+          reqStr("shell.mail-answer", params, "answer")
+        ),
+    },
+    {
+      id: "shell.mail-cancel",
+      label:
+        "Cancel an open request; a later delivery for it is refused and nothing is written. No undo.",
+      kind: "destructive",
+      params_schema: {
+        mail_uuid: { type: "string", required: true, description: "The request's uuid." },
+      },
+      run: (params) => cancelRequest(reqStr("shell.mail-cancel", params, "mail_uuid")),
+    },
+  ]);
+
+  // ---- Polling: the badge always, the lanes while the panel is open ----
+  useEffect(() => {
+    void refreshBadge();
+  }, [refreshBadge]);
+
+  useEffect(() => {
+    if (!open) return;
+    void refresh();
+    const id = setInterval(() => void refresh(), OPEN_POLL_MS);
+    return () => clearInterval(id);
+  }, [open, refresh]);
+
+  useEffect(() => {
+    const id = setInterval(() => void refreshBadge(), BADGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [refreshBadge]);
+
+  // ---- `agent-action`: now a hint that the ledger changed ----
+  //
+  // `app_notify` writes a row, so the trail is the ledger itself; this handler
+  // only makes the panel notice without waiting for the poll.
   useEffect(() => {
     if (!isTauri()) return;
     const unlisten = listen<AgentAction>("agent-action", (event) => {
-      const action = event.payload;
-      if (action.type !== "notify") return;
-      const text = String(action.message ?? "").trim();
-      if (!text) return;
-      // Allocate the id outside the updater: a state updater must be pure, and
-      // React may run it twice (StrictMode) which would burn ids.
-      const id = ++noteSeq.current;
-      setNotes((prev) => [{ id, at: Date.now(), text }, ...prev].slice(0, MAX_NOTES));
-      // The shell raises a toast for the same event; the dot says the trail is
-      // still here after it fades. No auto-open: a notification should not
-      // steal the panel over the page the user is working on.
-      if (!isDockOpenRef.current) setUnread(true);
+      if (event.payload.type !== "notify") return;
+      if (isDockOpenRef.current) {
+        void refresh();
+      } else {
+        setUnread(true);
+        void refreshBadge();
+      }
     });
     return () => {
       void unlisten.then((fn) => fn());
     };
-  }, []);
+  }, [refresh, refreshBadge]);
 
   // ---- Footer count: open agent tasks ----
   const refreshTodos = useCallback(async () => {
@@ -318,10 +583,55 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
 
   if (mobile) return null;
 
-  const goTo = (tab: string) => {
-    onNavigate?.(tab);
-    setOpen(false);
-  };
+  const badge = head ? badgeOf(head) : null;
+  const copyable = lanes.agent.filter((row) => row.status === "queued").length;
+  const stamp = now || Date.now();
+
+  const rowProps = (lane: LaneId) => (row: MailSummary) => ({
+    row,
+    lane,
+    now: stamp,
+    busy: busy === row.uuid,
+    armed: armed === row.uuid,
+    replyOpen: replyTo === row.uuid,
+    draft,
+    onOpen: () => runRow(row.uuid, () => openItem(row.uuid)),
+    onCopy: () => runRow(row.uuid, () => copyOne(row.uuid)),
+    onTakeOver: () => runRow(row.uuid, () => takeOverClaim(row.uuid)),
+    onCancel: () => {
+      // A cancelled request is terminal and has no undo, so the first click
+      // only arms the button.
+      if (armed !== row.uuid) {
+        setArmed(row.uuid);
+        return;
+      }
+      setArmed(null);
+      runRow(row.uuid, () => cancelRequest(row.uuid));
+    },
+    onReply: () => {
+      if (replyTo === row.uuid) {
+        setReplyTo(null);
+        setDraft("");
+      } else {
+        setReplyTo(row.uuid);
+        setDraft("");
+      }
+    },
+    onDraft: setDraft,
+    onSubmit: () => {
+      const answer = draft.trim();
+      if (!answer) return;
+      setBusy(row.uuid);
+      setError(null);
+      void answerQuestion(row.uuid, answer)
+        .then(() => {
+          setReplyTo(null);
+          setDraft("");
+        })
+        .catch((e) => setError(reason(e)))
+        .finally(() => setBusy(null));
+    },
+  });
 
   return (
     <>
@@ -333,15 +643,19 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
           onPointerMove={handleFabPointerMove}
           onPointerUp={handleFabPointerUp}
           onPointerCancel={handleFabPointerUp}
-          title="Agent — drag to move, click to open/close (Ctrl+Space)"
-          aria-label="Toggle agent panel"
+          title="Mailbox — drag to move, click to open/close (Ctrl+Space)"
+          aria-label="Toggle the mailbox"
           className="fixed z-[101] rounded-full bg-accent-bg text-white shadow-lg flex items-center justify-center hover:opacity-90 cursor-grab active:cursor-grabbing select-none touch-none"
           style={fabStyle}
         >
           <Bot size={22} />
-          {unread && (
+          {badge ? (
+            <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-yellow-500 text-[10px] font-semibold leading-[18px] text-black text-center">
+              {badge}
+            </span>
+          ) : unread ? (
             <span className="absolute top-0.5 right-0.5 w-3 h-3 rounded-full bg-yellow-500 border-2 border-bg-card" />
-          )}
+          ) : null}
         </button>
       )}
 
@@ -359,12 +673,19 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
             <div className="w-0.5 h-12 rounded-full bg-border-default group-hover:bg-accent transition-colors" />
           </div>
 
-          {/* Header. The badge is the MCP surface, not a session: it says whether
-              an agent *could* be attached right now. */}
-          <div className="p-4 border-b border-border-default flex items-center gap-3">
-            <h1 className="text-sm font-semibold flex items-center gap-2 truncate">
-              <Bot size={18} /> Agent
+          {/* Header: the title, the counts, whether an agent could attach right
+              now, and the two exits. */}
+          <div className="px-4 py-3 border-b border-border-default flex items-center gap-2">
+            <h1 className="text-xs font-semibold uppercase tracking-[0.18em] flex items-center gap-2 shrink-0">
+              <Inbox size={16} /> Mailbox
             </h1>
+            <span
+              className="text-[10px] text-text-tertiary tabular-nums truncate"
+              title="held: your agent is working on it · waiting: queued or lapsed, nobody holds it"
+            >
+              {head ? `${head.held} held · ${head.waiting} waiting` : "reading the ledger…"}
+            </span>
+            <div className="flex-1" />
             <span
               className={`text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded border shrink-0 ${
                 listening
@@ -375,18 +696,17 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
             >
               {listening ? "listening" : "offline"}
             </span>
-            <div className="flex-1" />
             <button
               type="button"
               onClick={() => goTo("agent")}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-bg-muted border border-border-default text-xs font-medium text-text-secondary hover:bg-bg-hover transition-colors"
+              className="px-2 py-1 rounded-md bg-bg-muted border border-border-default text-[11px] font-medium text-text-secondary hover:bg-bg-hover transition-colors"
             >
               Setup
             </button>
             <button
               type="button"
               onClick={() => setOpen(false)}
-              aria-label="Close agent panel"
+              aria-label="Close the mailbox"
               title="Close (Ctrl+Space)"
               className="p-1.5 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
             >
@@ -395,16 +715,20 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
           </div>
 
           {/* The one line that keeps the panel from reading as a chat box. */}
-          <div className="px-4 py-2 text-xs text-text-tertiary bg-bg-muted border-b border-border-default">
+          <div className="px-4 py-1.5 text-[11px] text-text-tertiary bg-bg-muted border-b border-border-default">
             {listening ? (
               <>
                 An agent attaches at <code>{manual?.endpoints.mcp ?? "/mcp"}</code> and runs in its
-                own window. What it sends you lands here.
+                own window. Copy a prompt into it, or let it claim straight from the tray.
               </>
             ) : (
               <>
-                The MCP server is not answering, so no agent can attach.{" "}
-                <button type="button" className="underline hover:text-text-secondary" onClick={() => goTo("agent")}>
+                No agent can attach — the MCP server is not answering.{" "}
+                <button
+                  type="button"
+                  className="underline hover:text-text-secondary"
+                  onClick={() => goTo("agent")}
+                >
                   Open Setup
                 </button>
                 .
@@ -412,62 +736,259 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
             )}
           </div>
 
-          {/* The trail. */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
-            {notes.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full text-center text-text-tertiary">
-                <Bell size={48} className="mb-4 opacity-50" />
-                <p className="text-sm max-w-xs">
-                  Nothing yet. When an agent needs your attention it calls{" "}
-                  <code>app_notify</code>, and the note stays here after the toast fades.
-                </p>
-              </div>
-            ) : (
-              notes.map((n) => (
-                <div
-                  key={n.id}
-                  className="rounded-lg border border-border-default bg-bg-muted px-3 py-2 space-y-1"
-                >
-                  <div className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-text-tertiary">
-                    <Bell size={11} />
-                    <span>{clock(n.at)}</span>
-                    <div className="flex-1" />
-                    <button
-                      type="button"
-                      onClick={() => void copyAgentText(`note-${n.id}`, n.text)}
-                      title="Copy this note"
-                      className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
-                    >
-                      <Copy size={12} />
-                    </button>
-                  </div>
-                  <p className="text-sm text-text-primary whitespace-pre-wrap break-words">{n.text}</p>
-                </div>
-              ))
-            )}
+          {error && (
+            <div className="px-3 py-2 text-[11px] text-red-400 bg-red-500/10 border-b border-border-default flex items-start gap-2">
+              <span className="flex-1 break-words">{error}</span>
+              <button
+                type="button"
+                onClick={() => setError(null)}
+                aria-label="Dismiss"
+                className="p-0.5 rounded hover:bg-bg-hover"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          )}
+
+          {/* The lanes. Two folders, one of them split by `owed_by` (§6). */}
+          <div className="flex-1 overflow-y-auto min-h-0 divide-y divide-border-default">
+            <Lane
+              title="You owe"
+              hint="Requests blocked on a decision or an unread failure."
+              rows={lanes.you}
+              empty="Nothing is waiting on you."
+              render={rowProps("you")}
+            />
+            <Lane
+              title="Your agent owes"
+              hint="The Outbox: what an attached agent can claim."
+              rows={lanes.agent}
+              empty="Your agent has nothing queued."
+              render={rowProps("agent")}
+            />
+            <Lane
+              title="Inbox"
+              hint="Deliveries and notices. Opening one marks it read."
+              rows={lanes.inbox}
+              empty="No unread mail."
+              render={rowProps("inbox")}
+            />
           </div>
 
-          {/* Footer: the task queue keeps its own page; this is only the count,
-              so a waiting `human` step is not missed. */}
-          <button
-            type="button"
-            onClick={() => goTo("tasks")}
-            className="p-3 border-t border-border-default flex items-center gap-2 text-xs text-text-secondary hover:bg-bg-hover transition-colors"
-          >
-            <ListTodo size={14} />
-            <span>
-              {openTodos === null
-                ? "Agent tasks"
-                : openTodos === 0
-                ? "No open agent tasks"
-                : `${openTodos} open agent task${openTodos === 1 ? "" : "s"}`}
-            </span>
-            <div className="flex-1" />
-            <span className="text-text-tertiary">Tasks →</span>
-          </button>
+          {/* Footer: one manual action per session, not per item (§6). */}
+          <div className="border-t border-border-default">
+            {openTodos ? (
+              <button
+                type="button"
+                onClick={() => goTo("tasks")}
+                className="w-full px-3 pt-2 pb-0 flex items-center gap-2 text-[11px] text-text-tertiary hover:text-text-secondary transition-colors"
+              >
+                <ListTodo size={12} />
+                <span>
+                  {openTodos} open agent task{openTodos === 1 ? "" : "s"}
+                </span>
+                <div className="flex-1" />
+                <span>Tasks →</span>
+              </button>
+            ) : null}
+            <div className="p-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => runRow("", () => copyBrief())}
+                disabled={copyable === 0}
+                title={
+                  copyable === 0
+                    ? "Nothing is waiting to be handed over"
+                    : "Copy every queued prompt as one brief"
+                }
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-bg-muted border border-border-default text-xs font-medium text-text-secondary hover:bg-bg-hover transition-colors disabled:opacity-50"
+              >
+                <Copy size={13} />
+                {copied === "mail.brief" ? "Copied" : `Copy all${copyable ? ` ${copyable}` : ""}`}
+              </button>
+              <div className="flex-1" />
+              <button
+                type="button"
+                onClick={() => void refresh()}
+                title="Reload the mailbox"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-bg-muted border border-border-default text-xs font-medium text-text-secondary hover:bg-bg-hover transition-colors"
+              >
+                <RefreshCw size={13} /> Receive
+              </button>
+            </div>
+          </div>
         </aside>
       )}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// One lane, one row
+// ---------------------------------------------------------------------------
+
+function Lane({
+  title,
+  hint,
+  rows,
+  empty,
+  render,
+}: {
+  title: string;
+  hint: string;
+  rows: MailSummary[];
+  empty: string;
+  render: (row: MailSummary) => React.ComponentProps<typeof MailItem>;
+}) {
+  return (
+    <section className="px-3 py-3">
+      <div className="flex items-baseline gap-2 px-1 mb-1.5" title={hint}>
+        <h2 className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
+          {title}
+        </h2>
+        {rows.length > 0 && (
+          <span className="text-[10px] text-text-tertiary tabular-nums">{rows.length}</span>
+        )}
+      </div>
+      {rows.length === 0 ? (
+        <p className="px-1 text-[11px] text-text-tertiary">{empty}</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {rows.map((row) => (
+            <MailItem key={row.uuid} {...render(row)} />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function MailItem({
+  row,
+  lane,
+  now,
+  busy,
+  armed,
+  replyOpen,
+  draft,
+  onOpen,
+  onCopy,
+  onTakeOver,
+  onCancel,
+  onReply,
+  onDraft,
+  onSubmit,
+}: {
+  row: MailSummary;
+  lane: LaneId;
+  now: number;
+  busy: boolean;
+  armed: boolean;
+  replyOpen: boolean;
+  draft: string;
+  onOpen: () => void;
+  onCopy: () => void;
+  onTakeOver: () => void;
+  onCancel: () => void;
+  onReply: () => void;
+  onDraft: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  const look = mailLook(row, now);
+  const held = row.status === "claimed" || row.status === "delivering";
+  const copyable = lane === "agent" && row.status === "queued";
+  const answerable = lane === "you" && row.kind === "question" && row.owed_by === "you";
+  const hasActions = copyable || held || answerable;
+
+  return (
+    <li className="rounded-lg border border-border-default bg-bg-muted/60 px-2.5 py-2">
+      <button
+        type="button"
+        onClick={onOpen}
+        disabled={busy}
+        className="w-full text-left flex items-start gap-2 min-w-0 disabled:opacity-60"
+        title="Open: mark it read and go to what it is about"
+      >
+        <span className={`text-sm leading-5 shrink-0 ${TONE[look.tone]}`} aria-hidden>
+          {look.glyph}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-baseline gap-2">
+            <span className="text-[13px] text-text-primary truncate">{row.subject}</span>
+            <span className="ml-auto shrink-0 text-[10px] tabular-nums text-text-tertiary">
+              {look.text}
+            </span>
+          </span>
+          <span className="block text-[10px] text-text-tertiary truncate">
+            # {channelLine(row)}
+          </span>
+        </span>
+      </button>
+
+      {hasActions && (
+        <div className="mt-1.5 pl-6 flex flex-wrap items-center gap-1">
+          {copyable && (
+            <button type="button" onClick={onCopy} disabled={busy} className={GHOST}>
+              <Copy size={10} /> Copy
+            </button>
+          )}
+          {copyable && (
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={busy}
+              aria-label="Cancel this request"
+              title="Cancel this request — a later delivery for it is refused"
+              className={`${GHOST} ${armed ? "border-red-500/50 text-red-400" : ""}`}
+            >
+              {armed ? "Cancel?" : <X size={10} />}
+            </button>
+          )}
+          {held && (
+            <button
+              type="button"
+              onClick={onTakeOver}
+              disabled={busy}
+              title="End this hold so the item can be claimed again (the attempt is refunded)"
+              className={GHOST}
+            >
+              <Undo2 size={10} /> Take over
+            </button>
+          )}
+          {answerable && (
+            <button type="button" onClick={onReply} disabled={busy} className={GHOST}>
+              <CornerDownRight size={10} /> Reply
+            </button>
+          )}
+        </div>
+      )}
+
+      {replyOpen && (
+        <div className="mt-1.5 pl-6 space-y-1">
+          <textarea
+            autoFocus
+            rows={2}
+            value={draft}
+            onChange={(e) => onDraft(e.target.value)}
+            placeholder="The decision the agent asked for…"
+            className="w-full resize-none rounded-md bg-bg-card border border-border-default px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent-bg"
+          />
+          <div className="flex items-center justify-end gap-1">
+            <button type="button" onClick={onReply} className={GHOST}>
+              Close
+            </button>
+            <button
+              type="button"
+              onClick={onSubmit}
+              disabled={busy || draft.trim() === ""}
+              className="inline-flex items-center gap-1 rounded border border-accent-bg/40 bg-accent-bg/15 px-2 py-0.5 text-[10px] text-accent-bg hover:bg-accent-bg/25 transition-colors disabled:opacity-50"
+            >
+              Answer
+            </button>
+          </div>
+        </div>
+      )}
+    </li>
   );
 }
 
@@ -481,8 +1002,6 @@ function clampFabPos(x: number, y: number) {
   };
 }
 
-/** HH:MM in the user's locale. Only ever called after mount (notes arrive from
- *  events), so this cannot desync the prerendered HTML. */
-function clock(at: number) {
-  return new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+function reason(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }

@@ -95,6 +95,14 @@ struct BookListArtifactsParam {
 struct BookArtifactParam {
     book_uuid: String,
     artifact: JsonValue,
+    /// The mailbox request this delivery answers, from `mail_claim`. The
+    /// artifact then lands at that request's target uuid, and the write is
+    /// guarded by the claim: a delivery whose claim moved writes nothing.
+    #[serde(default)]
+    job_uuid: Option<String>,
+    /// The `claim_id` that claim returned.
+    #[serde(default)]
+    claim_id: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -801,13 +809,27 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&artifacts).unwrap_or_default())
     }
 
-    #[tool(name = "book_save_artifact", description = "Create or update an artifact. Pass artifact as JSON with fields: uuid (empty to create), scope_type ('paragraph'|'chapter'|'sentence'), scope_uuid, kind ('explanation'|'simplification'|'digest'|'argument_map'|'questions'|'note'|'assessment'), content, source, model?, parent_uuid?, content_hash?.")]
+    #[tool(name = "book_save_artifact", description = "Create or update an artifact, and deliver a mailbox request if this answers one. Pass artifact as JSON with fields: uuid (ignored when job_uuid is given), scope_type ('paragraph'|'chapter'|'sentence'), scope_uuid, kind ('explanation'|'simplification'|'digest'|'argument_map'|'questions'|'note'|'assessment'), content, source, model?, parent_uuid?, content_hash?. When delivering a claimed request, pass job_uuid (the mail uuid) and claim_id: the row moves to `delivering`, the artifact is written at the request's target uuid by the same statement that checks the claim still matches, and the row closes. A retried delivery returns `already_delivered` and writes nothing; a displaced one returns `late_refused`; a request that was cancelled or failed returns `orphan_refused`.")]
     async fn book_save_artifact(&self, Parameters(param): Parameters<BookArtifactParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         let artifact: datasets::book_artifacts::BookArtifact = serde_json::from_value(param.artifact.into())
             .map_err(|e| format!("Invalid artifact JSON: {}", e))?;
-        datasets::book_artifacts::book_save_artifact(self.app.clone(), settings, param.book_uuid, artifact).await?;
-        Ok(serde_json::json!({"status": "ok", "message": "Artifact saved"}).to_string())
+        let delivery = datasets::book_artifacts::book_save_artifact(
+            self.app.clone(),
+            settings,
+            param.book_uuid,
+            artifact,
+            param.job_uuid,
+            param.claim_id,
+        )
+        .await?;
+        Ok(serde_json::json!({
+            "status": "ok",
+            "outcome": delivery.outcome,
+            "artifact_uuid": delivery.artifact_uuid,
+            "mail_uuid": delivery.mail_uuid,
+        })
+        .to_string())
     }
 
     #[tool(name = "book_delete_artifact", description = "Delete an artifact (a generated explanation/digest/quiz, or a user note). Derived artifacts can be regenerated.")]
@@ -817,7 +839,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Artifact deleted"}).to_string())
     }
 
-    #[tool(name = "book_list_artifact_jobs", description = "List outstanding requests for an agent to generate understanding artifacts in a book — the mailbox the Understand panel's 'Ask agent' button writes to. Each job carries scope_type, scope_uuid, kind, optional instructions/model, the source_text to generate from, and a stale flag. Fulfil one by calling book_save_artifact with the same scope_uuid + kind and source 'agent'; that writes the artifact, clears the job and refreshes the user's panel. Optional status filter.")]
+    #[tool(name = "book_list_artifact_jobs", description = "List outstanding requests for an agent to generate understanding artifacts in a book — the mailbox the Understand panel's 'Ask agent' button writes to, and the same rows `mail_list` shows. Each job carries scope_type, scope_uuid, kind, optional instructions/model, the source_text to generate from, and a stale flag. Claim one with `mail_claim {mail_uuid: <job uuid>}` (or `book_save_artifact` without a claim, which adopts a free request), then deliver with book_save_artifact, passing job_uuid and claim_id. Status speaks the mailbox vocabulary: queued, claimed, delivering, waiting_user; `pending` is accepted as an alias for queued. Optional status filter.")]
     async fn book_list_artifact_jobs(&self, Parameters(param): Parameters<BookListArtifactJobsParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         let jobs = datasets::book_artifacts::book_list_artifact_jobs(settings, param.book_uuid, param.status).await?;
