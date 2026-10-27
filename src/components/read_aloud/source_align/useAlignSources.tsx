@@ -10,7 +10,7 @@ import {
   type AlignSourceIndex,
   type AlignTranscript,
 } from "@/lib/read_aloud/sourceAlign";
-import type { ConfirmRequest } from "@/components/read_book/ConfirmDialog";
+import type { ConfirmRequest } from "@/components/books/ConfirmDialog";
 import { clock, errorText } from "./format";
 
 /** One empty list for the "no index yet" case, so `sources` keeps its identity. */

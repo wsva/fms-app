@@ -11,7 +11,7 @@ import ReadingView from "./ReadingView";
 import BookManager from "./BookManager";
 import BookAdvanced from "./BookAdvanced";
 
-export default function ReadBookPage() {
+export default function BooksPage() {
   const b = useBookData();
   const mobile = b.mobile;
 
@@ -36,7 +36,7 @@ export default function ReadBookPage() {
   // Keep the books/chapters/sentences current without a toolbar button: the
   // shared hook re-reads on activation, on app resume and on
   // `dataset-list-changed`, and refuses while a sentence reorder is unsaved.
-  usePageRefresh("read-book", {
+  usePageRefresh("books", {
     refresh: () => {
       b.refresh();
       setLocRefresh((n) => n + 1);

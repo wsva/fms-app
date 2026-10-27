@@ -5,7 +5,7 @@ import { Menu, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { isMobileApp } from "@/lib/platform";
 
 /**
- * Shared collapsible left sidebar used by Read a Book, Read Aloud and Wiki.
+ * Shared collapsible left sidebar used by Books, Read Aloud and Wiki.
  *
  * Anchored inside a `relative flex flex-1 min-h-0 overflow-hidden` body
  * wrapper placed after the page's top bar (never `fixed` to the viewport, so

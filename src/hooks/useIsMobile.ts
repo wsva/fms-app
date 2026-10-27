@@ -11,7 +11,7 @@ import { isMobileApp } from "@/lib/platform";
  * avoid a hydration mismatch — the first client paint matches the server HTML.
  *
  * This centralizes the `const [mobile,setMobile]=useState(false); useEffect(...)`
- * boilerplate that each page previously repeated. `ReadBookPage` keeps sourcing
+ * boilerplate that each page previously repeated. `BooksPage` keeps sourcing
  * `mobile` from `useBookData` and passes it into `<Toolbar mobile={...}>`.
  */
 export function useIsMobile(): boolean {

@@ -73,7 +73,7 @@ question-generation prompt pipeline, a storage table for Q&A sets, and a UI to t
 | **Read a book** | Digitalize a book section by section; browse chapters, sentences, and saved words; generate/import per-sentence audio via TTS. | ✅ |
 | **Web text / news** | Capture a text from the internet or a newspaper, read it, take notes, learn new words and expressions. | 🟡 |
 
-Reading is implemented under `src/components/read_book/` (`BookManager`, `ReadingView`,
+Reading is implemented under `src/components/books/` (`BookManager`, `ReadingView`,
 `ParagraphList`, `SentenceDrawer`) backed by `src-tauri/src/datasets/book.rs`. Books have chapters →
 sentences → words, and sentences can be voiced with Edge TTS (`book_write_audio`,
 `book_import_audio`).
@@ -93,7 +93,7 @@ external service loaded in-app.
 
 | Feature | Description | Status |
 |---------|-------------|--------|
-| **Word saving in context** | Save a word from a book sentence, with its surrounding context. | ✅ (within Read-a-Book) |
+| **Word saving in context** | Save a word from a book sentence, with its surrounding context. | ✅ (within Books) |
 | **AI word explanation** | Explain a word (definition, usage, examples) via the LLM. | ❌ |
 | **Embedded external card site** | Load an existing web-based card/SRS service by URL inside the app instead of building native pages. | ❌ |
 | **Hand-off to external SRS** | Push words saved in the app into the embedded external service. | ❌ |
@@ -154,7 +154,7 @@ Tauri v2 desktop application.
 
 Navigation is a single-page shell with a sidebar. Current tabs:
 
-- **Root:** Dictation ✅, Read a Book ✅, Settings ✅
+- **Root:** Dictation ✅, Books ✅, Settings ✅
 - **Tools group:** Dictation Datasets ✅, STT Models ✅, Edge TTS ✅, LLM Chat ✅, Web Service ✅
 
 Backend modules (`src-tauri/src/`): `model`, `model_download`, `model_list`, `settings`,
@@ -223,7 +223,7 @@ user accounts.
 ### 7.2 Comprehension ❌
 `audio → STT → transcript → LLM generates Q&A → user listens and answers → graded.`
 
-### 7.3 Read a book ✅ / 🟡
+### 7.3 Books ✅ / 🟡
 `digitalize book section by section → read → save sentences/words → TTS audio per sentence.`
 `Future: AI analyses the text (difficulty, expressions, glosses).`
 
@@ -243,7 +243,7 @@ user accounts.
 | Reading | Read a book (chapters/sentences/words + TTS) | ✅ |
 | Reading | Web/news clipping + notes | 🟡 |
 | Reading | AI text analysis | ❌ |
-| Vocabulary | Save word in context | ✅ (in Read-a-Book) |
+| Vocabulary | Save word in context | ✅ (in Books) |
 | Vocabulary | Embedded external card/SRS site (by URL) | ❌ |
 | Vocabulary | AI word explanation | ❌ |
 | Data | Dataset pipeline (subtitles/waveform/DB/align) | ✅ |
@@ -269,7 +269,7 @@ user accounts.
 ### Phase 2 — Vocabulary via embedded external SRS
 - Embed an external card/SRS website by URL inside the app (no native flashcard pages).
 - **AI word explanation** wired into the word drawer and the embedded flow.
-- Hand-off: push words saved in Read-a-Book into the external service.
+- Hand-off: push words saved in Books into the external service.
 
 ### Phase 3 — Motivation layer (local-first)
 - Desktop reminders / notifications and a visible daily streak, persisted locally.

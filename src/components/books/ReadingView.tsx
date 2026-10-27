@@ -11,8 +11,8 @@ import UnderstandingPanel from "./UnderstandingPanel";
 type Props = { b: ReturnType<typeof useBookData> };
 
 /**
- * Presentational drill-down for the "Read a Book" mode. All state and handlers
- * live in `useBookData` (see ReadBookPage, which renders the shared breadcrumb +
+ * Presentational drill-down for the "Books" mode. All state and handlers
+ * live in `useBookData` (see BooksPage, which renders the shared breadcrumb +
  * toolbar). This component swaps between three levels:
  *   no book       -> books list
  *   book, no chap -> chapter list

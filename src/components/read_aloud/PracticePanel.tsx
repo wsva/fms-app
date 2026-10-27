@@ -5,7 +5,7 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { Play, RotateCcw, Wand2 } from "lucide-react";
 import type { ReadAloudSubmitResult, ReadStandardAudio, ReadText } from "@/lib/read_aloud/types";
 import { GOOD_SCORE, PASS_SCORE, scoreBadgeClasses } from "@/lib/read_aloud/types";
-import { useRecorder } from "@/components/read_book/useRecorder";
+import { useRecorder } from "@/components/books/useRecorder";
 import AsrDiff from "@/components/read_aloud/AsrDiff";
 import AssessmentCards from "@/components/read_aloud/AssessmentCards";
 import StandardAudioPlayer from "@/components/read_aloud/StandardAudioPlayer";

@@ -14,7 +14,7 @@ import { isTauri } from "@/lib/tauri";
 import { logError, logInfo } from "@/lib/logger";
 
 /** Log-page tag for the reading drawer's recording flow. */
-const LOG_MODULE = "read-book-recorder";
+const LOG_MODULE = "books-recorder";
 
 export type RecorderResult = {
   wavBase64: string;

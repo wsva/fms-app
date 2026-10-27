@@ -10,7 +10,7 @@ type ToolbarProps = {
   className?: string;
   /**
    * Override the mobile flag handed to descendant buttons. Pages that already
-   * track `mobile` (ReadBookPage via useBookData) pass it here; when omitted the
+   * track `mobile` (BooksPage via useBookData) pass it here; when omitted the
    * bar resolves it with the shared `useIsMobile()` hook.
    */
   mobile?: boolean;

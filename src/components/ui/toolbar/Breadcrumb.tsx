@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
  * Breadcrumb bar shared by every dataset page: a full-width, edge-to-edge
  * `bg-bg-card` bar with a bottom border, sitting above the toolbar. Centralizes
  * the crumb classes that were previously duplicated (and slightly drifted)
- * across ReadBook / Cards / Dictation / ReadAloud / Wiki.
+ * across Books / Cards / Dictation / ReadAloud / Wiki.
  */
 
 const NAV =

@@ -16,10 +16,10 @@ import {
 import type { ReadAttempt, ReadText, StandardAudioAssessment } from "@/lib/read_aloud/types";
 import { rerecognizeAttempt } from "@/lib/read_aloud/rerecognize";
 import { assessStandardAudio } from "@/lib/read_aloud/standardAudio";
-import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
+import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
 import AssessmentCards, { PauseRibbon, ScoreAxes } from "@/components/read_aloud/AssessmentCards";
 import AssessmentLogPanel from "@/components/read_aloud/AssessmentLogPanel";
-import { highlightDifferences } from "@/components/read_book/diff";
+import { highlightDifferences } from "@/components/books/diff";
 import { lcs } from "@/lib/listen/lcs";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
@@ -190,7 +190,7 @@ const segDisabled = "px-2 py-0.5 text-xs rounded-md text-text-tertiary opacity-5
  * heuristic, or the SaT-3L-sm model (desktop only, needs the model downloaded).
  * The two sequences are then fuzzy-aligned (see alignSentences) rather than
  * paired by index; the recognized side carries the same red diff highlighting
- * the read-a-book sentence drawer uses. Side by side on a wide screen (PC),
+ * the Books sentence drawer uses. Side by side on a wide screen (PC),
  * stacked on narrow ones.
  */
 function SentenceCompare({ reference, recognized }: { reference: string; recognized: string }) {

@@ -20,7 +20,7 @@ This manual is written for learners. It walks you from a fresh install to everyd
 ### Datasets & practice modes
 - [Datasets & the Processing Pipeline](datasets.md) — dataset types, importing, generating subtitles/waveforms/databases, the Workflow automation, the online Market.
 - [Dictation](dictation.md) — the core listening‑and‑typing practice, the cue editor, waveforms, focus mode, and favourites.
-- [Read a Book](read_a_book.md) — chapter/sentence reading, the sentence drawer, and word generation.
+- [Books](books.md) — chapter/sentence reading, the sentence drawer, and word generation.
 - [Read Aloud](read_aloud.md) — record yourself, get STT scoring, and review your attempts.
 - [Cards](cards.md) — flashcards, spaced‑repetition review, tags, and full‑text search.
 - [Wiki](wiki.md) — Markdown document datasets you can read, edit, search, and sync.

@@ -1,10 +1,10 @@
-# Read a Book
+# Books
 
-Read a Book works with a **Book** dataset — a longer text (a graded reader, a chapter book, a collection of passages) that FmS has split into **chapters** and **sentences**, optionally with an audio recording for each sentence.
+The Books page works with a **Book** dataset — a longer text (a graded reader, a chapter book, a collection of passages) that FmS has split into **chapters** and **sentences**, optionally with an audio recording for each sentence.
 
 ## Opening a book
 
-Open **Read a Book** from the sidebar. You'll see your **Books library** — the list of Book datasets available in your locations. Pick one to open it. The toolbar breadcrumb tracks your depth (Books → the book → the chapter), and **Refresh** re‑reads whichever level you're on. Use the overflow menu to open the **locations** manager and add book folders.
+Open **Books** from the sidebar. You'll see your **Books library** — the list of Book datasets available in your locations. Pick one to open it. The toolbar breadcrumb tracks your depth (Books → the book → the chapter), and **Refresh** re‑reads whichever level you're on. Use the overflow menu to open the **locations** manager and add book folders.
 
 The book's left area can use a **collapsible sidebar** for navigating chapters, so you can jump between sections while reading.
 

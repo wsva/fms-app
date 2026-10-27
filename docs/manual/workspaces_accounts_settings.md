@@ -46,7 +46,7 @@ These apply to the app as a whole (not per workspace):
 Settings that belong to the current workspace:
 
 - **Datasets directory** — the folder FmS scans for datasets.
-- **Books directory** — used by Read a Book.
+- **Books directory** — used by Books.
 - **Recordings directory** — where Read Aloud stores your recordings.
 - **Sync role** (**Desktop** only) — **Hub** (authoritative, serves datasets) or **Follower** (downloads from a Hub). Phones are always Followers. Changing this is the first step of multi‑device setup; the details live in [Multiple Devices](multiple_devices.md).
 

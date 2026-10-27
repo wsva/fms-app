@@ -14,7 +14,7 @@ This page takes you from a fresh install to your first practice session.
 
 The desktop app is a single window with a **sidebar** that holds every feature:
 
-- **Practice modes at the top** — Dictation, Read a Book, Read Aloud, Cards, Wiki.
+- **Practice modes at the top** — Dictation, Books, Read Aloud, Cards, Wiki.
 - **Tools** (a collapsible group) — Workspaces, Workflow, Devices & Hub, Datasets Sync, Cross‑Device Chat, Simple Words, Edge TTS, LLM Chat, OCR, Split Text, PDF Reader, Models, and Logs.
 - **Settings** at the bottom.
 - Your **account and XP** at the very top: a Login button when you're signed out, and your avatar, level, and XP once signed in.
@@ -26,7 +26,7 @@ You can drag the sidebar's right edge to resize it, or double‑click an empty p
 Before importing anything, tell FmS where your material lives. Open **Settings**:
 
 - **Datasets directory** — the folder that holds your dataset folders. FmS discovers datasets here.
-- **Books directory** and **Recordings directory** — used by Read a Book and Read Aloud respectively.
+- **Books directory** and **Recordings directory** — used by Books and Read Aloud respectively.
 - **Model directory** — where speech‑to‑text and other model files are downloaded (see [Models](models.md)).
 
 These live in your **workspace**, so each workspace can keep its own folders. More on workspaces in [Workspaces, Accounts & Settings](workspaces_accounts_settings.md).
@@ -61,7 +61,7 @@ You can run these from the dataset's controls on the practice page, or drive the
 
 ## Start practicing
 
-Open **Dictation**, pick your dataset at the top, choose a media file, and start typing what you hear. Each cue you complete correctly earns XP. Explore the other modes — [Read a Book](read_a_book.md), [Read Aloud](read_aloud.md), [Cards](cards.md) — whenever you like.
+Open **Dictation**, pick your dataset at the top, choose a media file, and start typing what you hear. Each cue you complete correctly earns XP. Explore the other modes — [Books](books.md), [Read Aloud](read_aloud.md), [Cards](cards.md) — whenever you like.
 
 ## Next steps
 

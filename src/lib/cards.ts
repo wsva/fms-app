@@ -32,7 +32,7 @@ export const CARD_LINKS: CardLink[] = [
 
 /**
  * Build a `/card/add` route with prefilled fields, for handing content off from
- * other parts of the app (e.g. a Read-a-Book sentence or a dictation cue).
+ * other parts of the app (e.g. a Books sentence or a dictation cue).
  */
 export function buildAddCardPath(params: {
   question?: string;

@@ -18,7 +18,7 @@
 
 import type { BookChapter } from "./types";
 import { flattenChapters } from "./types";
-import { getUUID } from "@/components/read_book/utils";
+import { getUUID } from "@/components/books/utils";
 
 /** Wire node for the `book_sync_chapters` command (mirrors the Rust SyncNode). */
 export interface SyncNode {

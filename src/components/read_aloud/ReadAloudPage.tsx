@@ -75,7 +75,7 @@ import AttemptsPanel from "./AttemptsPanel";
 import DatasetDialog from "./DatasetDialog";
 import StandardAudioSection from "./StandardAudioSection";
 import LiveTranscript from "./LiveTranscript";
-import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
+import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
 
 const LOG_MODULE = "read-aloud";
 

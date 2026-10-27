@@ -52,7 +52,7 @@ import { oneOf, reqStr, optStr, useAgentActions } from "@/lib/agent/ui-actions";
 type TabId = "cards" | "review" | "tags";
 
 // Detail-view toolbar modes, rendered as toggle buttons on the toolbar right
-// (active = solid accent), mirroring ReadBook's Manage/Advanced mode group.
+// (active = solid accent), mirroring Books' Manage/Advanced mode group.
 // The former "Search" tab is gone: searching is unified into the Cards view's
 // search box, whose This-dataset/All-datasets scope toggle switches engines in place.
 // "Cards" itself is not rendered as a toggle either: it is the dataset's default

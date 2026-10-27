@@ -11,7 +11,7 @@ import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui
 import { Trash2, Target, CheckCircle, FolderOpen, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown, Captions } from "lucide-react";
 import CueEditor from "./components/CueEditor";
 import WaveformCanvas from "./components/WaveformCanvas";
-import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
+import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
 import { FAVORITES_DATASET_UUID, type Cue } from "@/lib/types";
 import { useDictationData } from "@/hooks/useDictationData";
 import { usePageRefresh } from "@/lib/refresh/page-refresh";
@@ -459,7 +459,7 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
             <Toolbar mobile={mobile} className="@container">
                 {/* Alignment matches the other four dataset pages: a flexible
                     spacer on the left pushes whichever contextual section group
-                    is visible to the right edge (ReadBook / Cards / ReadAloud /
+                    is visible to the right edge (Books / Cards / ReadAloud /
                     Wiki all right-align their toolbar actions the same way). */}
                 <div className="flex-1 min-w-0" />
 

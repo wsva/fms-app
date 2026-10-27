@@ -1,8 +1,8 @@
 /**
- * useBookData — encapsulates all shared navigation state plus the "Read a Book"
+ * useBookData — encapsulates all shared navigation state plus the "Books"
  * data loading, state management and business logic for the books page.
  *
- * Mirrors `useDictationData`: the hook owns everything, `ReadBookPage` renders
+ * Mirrors `useDictationData`: the hook owns everything, `BooksPage` renders
  * the breadcrumb + toolbar chrome off it, and `ReadingView` becomes a purely
  * presentational drill-down (books list -> chapter list -> reading pane).
  */
@@ -33,8 +33,8 @@ import { groupArtifactsByScope } from "@/lib/read/artifacts";
 import type { CardDatasetSummary } from "@/lib/types";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
-import { useRecorder } from "@/components/read_book/useRecorder";
-import { getUUID, nowIso } from "@/components/read_book/utils";
+import { useRecorder } from "@/components/books/useRecorder";
+import { getUUID, nowIso } from "@/components/books/utils";
 
 export type BookView = "read" | "manage" | "advanced";
 

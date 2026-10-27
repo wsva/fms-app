@@ -85,4 +85,4 @@ Completing read‑aloud attempts contributes to your progress, and XP earned her
 ## Related
 
 - Choose and manage the speech‑to‑text model behind scoring: [Models](models.md).
-- Reading for comprehension instead of speaking: [Read a Book](read_a_book.md).
+- Reading for comprehension instead of speaking: [Books](books.md).

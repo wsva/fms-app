@@ -8,7 +8,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
-    <!-- Voice input (local STT) on the dictation and read-a-book pages. The
+    <!-- Voice input (local STT) on the dictation and books pages. The
          WebView asks for these two as soon as JS calls getUserMedia(): wry's
          RustWebChromeClient grants AUDIO_CAPTURE by default and then requests
          the matching Android runtime permissions. requestPermissions() is

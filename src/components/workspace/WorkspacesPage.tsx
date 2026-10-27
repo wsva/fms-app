@@ -15,7 +15,7 @@ import {
   FolderOpen,
   MonitorCheck,
 } from "lucide-react";
-import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
+import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
 import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
 import { usePageRefresh } from "@/lib/refresh/page-refresh";
 

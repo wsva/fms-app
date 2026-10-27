@@ -11,7 +11,7 @@ import {
   type AlignProposals,
 } from "@/lib/read_aloud/sourceAlign";
 import { deleteStandardAudio } from "@/lib/read_aloud/standardAudio";
-import type { ConfirmRequest } from "@/components/read_book/ConfirmDialog";
+import type { ConfirmRequest } from "@/components/books/ConfirmDialog";
 import { clock, errorText } from "./format";
 
 /** How many spans one `apply` call stores; the loop repeats until done. */

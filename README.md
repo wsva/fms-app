@@ -35,7 +35,7 @@ and ships for **Windows and Linux** (plus an experimental **Android** client tha
   transcription against reference subtitles, in large/focus modes.
 - **Speaking practice** — system-wide voice input: tap the mic (or `Ctrl+C` in any text field) and
   your speech is transcribed locally and inserted at the cursor.
-- **Read a Book** — split books into chapters/sentences, read with per-sentence TTS audio (Edge TTS),
+- **Books** — split books into chapters/sentences, read with per-sentence TTS audio (Edge TTS),
   and save words/sentences in context.
 - **Read Aloud** — recite sentences aloud and get them checked against the target text.
 - **Cards** — flashcard datasets with review queues, question generation, and FTS5 search.

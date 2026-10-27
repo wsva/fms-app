@@ -714,7 +714,7 @@ export default function SettingsPage() {
             </div>
           </div>
           <p className="text-text-secondary text-sm mb-4">
-            Input device used by voice input and by Read a Book recordings. Leave it on
+            Input device used by voice input and by Books recordings. Leave it on
             System default to follow the operating system, or pin your real microphone so a
             virtual device (Steam, OBS, Voicemeeter) cannot quietly take over dictation. Stored
             on this device only.

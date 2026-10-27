@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { FolderOpen, ListChecks } from "lucide-react";
 import { TabBar, type TabBarItem } from "@/components/ui/toolbar";
-import ConfirmDialog, { type ConfirmRequest } from "@/components/read_book/ConfirmDialog";
+import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
 import { canSave } from "./ClipActions";
 import PassageEditor from "./PassageEditor";
 import PassageQueue, { QUEUE_FILTERS, matchesFilter, type QueueFilter } from "./PassageQueue";

@@ -34,7 +34,7 @@ import { MicGlyph } from "@/components/voice/MicGlyph";
 
 export type TabId =
   | "dictation"
-  | "read-book"
+  | "books"
   | "read-aloud"
   | "cards"
   | "tasks"
@@ -113,7 +113,7 @@ const navGroups: NavGroup[] = [
 // the Cross Device group than buried under a utility group.
 const rootTabs: TabDef[] = [
   { id: "dictation", label: "Dictation", icon: Headphones },
-  { id: "read-book", label: "Read a Book", icon: BookOpen },
+  { id: "books", label: "Books", icon: BookOpen },
   { id: "read-aloud", label: "Read Aloud", icon: MicGlyph },
   { id: "cards", label: "Cards", icon: Layers },
   { id: "wiki", label: "Wiki", icon: BookOpenText },
@@ -129,7 +129,7 @@ const bottomTabs: TabDef[] = [
 // "models" is enabled to verify local STT (transcribe-rs/ONNX) on Android.
 const MOBILE_VISIBLE_TABS: TabId[] = [
   "dictation",
-  "read-book",
+  "books",
   "read-aloud",
   "cards",
   "tasks",
@@ -340,7 +340,7 @@ export default function Sidebar({
         }}
       >
       <nav className="flex flex-col w-full items-center gap-1 pt-2 flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
-        {/* Root tabs above groups: Dictation, Read a Book, Read Aloud, Cards, Wiki */}
+        {/* Root tabs above groups: Dictation, Books, Read Aloud, Cards, Wiki */}
         {rootTabs.map((tab) => renderTab(tab, false))}
 
         {/* Navigation groups */}

@@ -31,7 +31,7 @@ The TSV rebuild repairs words broken across a line break with a **Hunspell dicti
 
 ## Simple Words
 
-**Tools → Simple Words** maintains your list of **known simple words**, per language, sourced from the card datasets you select. Marking a word as already‑known tells features like **word generation** and dictation helpers to skip vocabulary you've mastered, so they focus on what's actually new to you. You can add words, browse the set, and pick the active language and source datasets here. It works hand‑in‑hand with [Cards](cards.md) and [Read a Book](read_a_book.md).
+**Tools → Simple Words** maintains your list of **known simple words**, per language, sourced from the card datasets you select. Marking a word as already‑known tells features like **word generation** and dictation helpers to skip vocabulary you've mastered, so they focus on what's actually new to you. You can add words, browse the set, and pick the active language and source datasets here. It works hand‑in‑hand with [Cards](cards.md) and [Books](books.md).
 
 ## Logs
 

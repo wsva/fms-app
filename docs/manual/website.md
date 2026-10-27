@@ -16,7 +16,7 @@ Visiting the site root shows a public marketing landing page — what FmS is, it
 
 Once signed in, the site presents the same navigation model as the desktop app — practice modes at the top, and grouped items beneath:
 
-- **Dictation**, **Read a Book**, **Read Aloud**, **Cards**, **Wiki** — the practice modes, working in the browser against the datasets on your account. See the linked app pages for how each mode works: [Dictation](dictation.md), [Read a Book](read_a_book.md), [Read Aloud](read_aloud.md), [Cards](cards.md), [Wiki](wiki.md).
+- **Dictation**, **Books**, **Read Aloud**, **Cards**, **Wiki** — the practice modes, working in the browser against the datasets on your account. See the linked app pages for how each mode works: [Dictation](dictation.md), [Books](books.md), [Read Aloud](read_aloud.md), [Cards](cards.md), [Wiki](wiki.md).
 - **Settings** — your site settings.
 - **Blog** — write and read learning blogs: your own posts, posts by others, and adding new entries.
 - **Tools** — a small set of hosted utilities:

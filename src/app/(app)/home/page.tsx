@@ -14,7 +14,7 @@ import DictationPage from "@/components/listen_speak/dictation/DictationPage";
 import WorkflowPage from "@/components/tools/WorkflowPage";
 import DatasetsSyncPage from "@/components/listen_speak/datasets/DatasetsSyncPage";
 import DevicesHubPage from "@/components/devices/DevicesHubPage";
-import ReadBookPage from "@/components/read_book/ReadBookPage";
+import BooksPage from "@/components/books/BooksPage";
 import ReadAloudPage from "@/components/read_aloud/ReadAloudPage";
 import CardsPage from "@/components/cards/CardsPage";
 import TasksPage from "@/components/tools/TasksPage";
@@ -349,8 +349,8 @@ export default function Home() {
         <div style={{ display: activeTab === "simple-words" ? "flex" : "none" }} className="flex-1 min-h-0">
           <SimpleWordsPage />
         </div>
-        <div style={{ display: activeTab === "read-book" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <ReadBookPage />
+        <div style={{ display: activeTab === "books" ? "flex" : "none" }} className="flex-1 min-h-0">
+          <BooksPage />
         </div>
         <div style={{ display: activeTab === "read-aloud" ? "flex" : "none" }} className="flex-1 min-h-0">
           <ReadAloudPage />

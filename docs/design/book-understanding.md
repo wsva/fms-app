@@ -8,7 +8,7 @@ same rows are written by two doors: the built‑in Tauri commands (over the exis
 `llm_chat` core and `edge_tts`) and the MCP tools (so a third‑party agent can drive
 generation). Backend lives in `src-tauri/src/datasets/book_artifacts.rs`; frontend in
 `src/lib/read/artifacts.ts`, `src/hooks/useBookData.ts`, and
-`src/components/read_book/UnderstandingPanel.tsx`.
+`src/components/books/UnderstandingPanel.tsx`.
 
 ## Scopes and anchors
 
@@ -228,7 +228,7 @@ registered, so `mcp/manual.rs` needs no change.
 
 ## UI: Understanding split mode
 
-- **Toolbar toggle** (`ReadBookPage.tsx`): an **Understanding** `ToolbarButton`
+- **Toolbar toggle** (`BooksPage.tsx`): an **Understanding** `ToolbarButton`
   (`variant="toggle"`, `Brain` icon) in the contextual read‑actions group, rendered only
   on a chapter page. Clicking while active returns to plain reading. Enabling it with no
   paragraph focused yet focuses the first paragraph that has an anchor.

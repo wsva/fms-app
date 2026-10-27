@@ -26,7 +26,7 @@ Reviewing is how vocabulary moves from short‑term to long‑term memory, so do
 
 You can add cards directly (the **Add/Plus** action) or edit an existing one in the card editor. Because the editor is shared across the app, you can also:
 
-- Create a card from a word or phrase while reading — see [Read a Book](read_a_book.md).
+- Create a card from a word or phrase while reading — see [Books](books.md).
 - Capture a tricky dictation cue as a card — see [Dictation](dictation.md).
 
 A card generally pairs a **question** (the prompt) with an **answer**, and may carry extra fields and tags.
@@ -49,5 +49,5 @@ Card datasets each hold their own deck, tags, and review schedule. You can have 
 
 ## Related
 
-- Generate vocabulary from what you read: [Read a Book](read_a_book.md).
+- Generate vocabulary from what you read: [Books](books.md).
 - Keeping card datasets in sync across devices: [Using FmS on Multiple Devices](multiple_devices.md).

@@ -50,7 +50,7 @@ export type NavMenu = {
  *  mobile-visible PC tabs are listed — see Sidebar's MOBILE_VISIBLE_TABS. */
 export const NAV_MENUS: NavMenu[] = [
   { id: "dictation", label: "Dictation", icon: Headphones, group: "root" },
-  { id: "read-book", label: "Read a Book", icon: BookOpen, group: "root" },
+  { id: "books", label: "Books", icon: BookOpen, group: "root" },
   { id: "read-aloud", label: "Read Aloud", icon: MicGlyph, group: "root" },
   { id: "cards", label: "Cards", icon: Layers, group: "root" },
   { id: "wiki", label: "Wiki", icon: BookOpenText, group: "root" },
@@ -94,6 +94,20 @@ const CHANGE_EVENT = "bottom-nav-config-changed";
 const isTabId = (v: unknown): v is TabId =>
   typeof v === "string" && MENU_BY_ID.has(v as TabId);
 
+/** Menu ids that were renamed after a release. A saved layout still names the
+ *  old id, so fold it onto the current one instead of dropping it — dropping
+ *  would silently remove that button from a bar the user had customized. */
+const RENAMED_IDS: Record<string, TabId> = { "read-book": "books" };
+
+/** Ids read back from storage, renamed to their current spelling and filtered
+ *  down to the ids this build actually has a menu for. */
+function storedIds(v: unknown): TabId[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((id) => (typeof id === "string" ? (RENAMED_IDS[id] ?? id) : id))
+    .filter(isTabId);
+}
+
 /** Read + validate the stored layout. Tolerates a missing/corrupt entry and
  *  merges ids the saved list predates (the menu universe grew), so no device
  *  can end up without a route to some page. */
@@ -103,9 +117,9 @@ export function loadNavConfig(): NavConfig {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_NAV_CONFIG;
     const parsed = JSON.parse(raw);
-    const saved: TabId[] = Array.isArray(parsed?.order) ? parsed.order.filter(isTabId) : [];
+    const saved: TabId[] = storedIds(parsed?.order);
     const order = [...new Set([...saved, ...NAV_MENUS.map((m) => m.id)])];
-    const barRaw: TabId[] = Array.isArray(parsed?.bar) ? parsed.bar.filter(isTabId) : [];
+    const barRaw: TabId[] = storedIds(parsed?.bar);
     // Dedupe, clamp to the cap, and keep only ids that survive in `order`.
     const bar: TabId[] = [];
     for (const id of new Set<TabId>(barRaw)) {

@@ -25,7 +25,7 @@ The `info.json` file is what tells FmS the folder is a dataset and what kind it 
 |------|---------|----------|
 | **Dictation** | Dictation | audio + subtitles + cues |
 | **Cards** | Cards | flashcards and tags |
-| **Book** | Read a Book | chapters, sentences, and per‑sentence audio |
+| **Book** | Books | chapters, sentences, and per‑sentence audio |
 | **Read Aloud** | Read Aloud | texts, their standard audio, and your recorded attempts |
 | **Wiki** | Wiki | Markdown documents |
 
@@ -73,4 +73,4 @@ Downloading a dataset from the Market installs a read‑only copy under your dow
 
 ## Next steps
 
-Practice with a processed dataset in [Dictation](dictation.md), [Read a Book](read_a_book.md), [Read Aloud](read_aloud.md), [Cards](cards.md), or [Wiki](wiki.md).
+Practice with a processed dataset in [Dictation](dictation.md), [Books](books.md), [Read Aloud](read_aloud.md), [Cards](cards.md), or [Wiki](wiki.md).

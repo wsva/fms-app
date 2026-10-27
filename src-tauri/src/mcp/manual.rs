@@ -443,7 +443,7 @@ fn stdio_snippet() -> Value {
 pub(crate) fn errors_convention() -> Value {
     json!({
         "shape": "Errors are returned as tool-level errors (isError), not JSON-RPC faults, so they arrive as text you can act on.",
-        "contract": "Every error names the valid set and the next call. app_navigate is the model: `unknown tab 'x'. Valid tabs: dictation, read-book, ...`.",
+        "contract": "Every error names the valid set and the next call. app_navigate is the model: `unknown tab 'x'. Valid tabs: dictation, books, ...`.",
         "therefore": "Read the message instead of retrying with a variation — it already tells you what to pass.",
     })
 }

@@ -55,7 +55,7 @@ The align plane has its own note, [read-aloud-align.md](./read-aloud-align.md): 
 
 ## Frontend
 
-`src/components/read_aloud/`: `ReadAloudPage` (dataset selector, text list with score badges, management), `PracticePanel` (record → transcribe → submit, result, attempt history with playback), `TextEditor` and `DatasetDialog` (modals). The diff under a result is `AsrDiff`, a pure renderer for backend chunks — substituted and inserted words go red with the reference word in the tooltip, skipped words render struck through. The older client-side LCS highlighter (`read_book/diff.tsx`, with its fake-space "missing" placeholder) now serves only the book `SentenceDrawer`; unifying it onto `asr_metric` chunks is an open follow-up.
+`src/components/read_aloud/`: `ReadAloudPage` (dataset selector, text list with score badges, management), `PracticePanel` (record → transcribe → submit, result, attempt history with playback), `TextEditor` and `DatasetDialog` (modals). The diff under a result is `AsrDiff`, a pure renderer for backend chunks — substituted and inserted words go red with the reference word in the tooltip, skipped words render struck through. The older client-side LCS highlighter (`books/diff.tsx`, with its fake-space "missing" placeholder) now serves only the book `SentenceDrawer`; unifying it onto `asr_metric` chunks is an open follow-up.
 
 ## Known rough edges
 

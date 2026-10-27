@@ -488,7 +488,7 @@ impl DatasetMcpServer {
         Ok(restored.to_string())
     }
 
-    #[tool(name = "app_navigate", description = "Switch the app to another page/tab. Valid tabs: dictation, read-book, read-aloud, cards, tasks, agent, workflow, datasets-sync, devices-hub, simple-words, models, edge-tts, llm-chat, chat, ocr, split-text, pdf-reader, wiki, workspaces, logs, settings. Use this to bring the user to the right screen before/while acting. `agent` is the agent *configuration* page — the copyable MCP snippets and the policy mode; it holds no conversation, because you (the agent) run in your own window. ui_list_actions reports which tab each registered action belongs to, so the two vocabularies agree.")]
+    #[tool(name = "app_navigate", description = "Switch the app to another page/tab. Valid tabs: dictation, books, read-aloud, cards, tasks, agent, workflow, datasets-sync, devices-hub, simple-words, models, edge-tts, llm-chat, chat, ocr, split-text, pdf-reader, wiki, workspaces, logs, settings. Use this to bring the user to the right screen before/while acting. `agent` is the agent *configuration* page — the copyable MCP snippets and the policy mode; it holds no conversation, because you (the agent) run in your own window. ui_list_actions reports which tab each registered action belongs to, so the two vocabularies agree.")]
     async fn app_navigate(&self, Parameters(param): Parameters<AppNavigateParam>) -> Result<String, String> {
         // Must match `TabId` in src/components/layout/Sidebar.tsx exactly: the
         // shell does `setActiveTab(tab)` with this string, and a name that is
@@ -496,11 +496,17 @@ impl DatasetMcpServer {
         // error anywhere. (It once listed a "studio" tab that never existed and
         // omitted split-text and pdf-reader.)
         const VALID: [&str; 21] = [
-            "dictation", "read-book", "read-aloud", "cards", "tasks", "agent", "workflow",
+            "dictation", "books", "read-aloud", "cards", "tasks", "agent", "workflow",
             "datasets-sync", "devices-hub", "simple-words", "models", "edge-tts", "llm-chat",
             "chat", "ocr", "split-text", "pdf-reader", "wiki", "workspaces", "logs", "settings",
         ];
-        let tab = param.tab.trim();
+        // `read-book` was this tab's id before it was renamed to `books`. Fold it
+        // onto the current name so an agent carrying an older recipe still lands
+        // on the page instead of hitting an "unknown tab" dead end.
+        let tab = match param.tab.trim() {
+            "read-book" => "books",
+            other => other,
+        };
         if !VALID.contains(&tab) {
             return Err(format!(
                 "unknown tab '{}'. Valid tabs: {}",

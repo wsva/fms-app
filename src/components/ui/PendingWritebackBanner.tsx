@@ -10,7 +10,7 @@ import useWritebackPending from "@/hooks/useWritebackPending";
  * a `shrink-0` sibling so it never scrolls away.
  *
  * `mobile` may be passed in by pages that already resolve the platform flag
- * (ReadBookPage takes it from `useBookData`); omitted, it self-resolves via
+ * (BooksPage takes it from `useBookData`); omitted, it self-resolves via
  * `useWritebackPending`, which stays SSR-safe by answering 0 until the
  * webview-side effect settles the platform.
  */

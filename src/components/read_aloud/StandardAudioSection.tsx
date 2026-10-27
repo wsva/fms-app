@@ -6,7 +6,7 @@ import { emit } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle, Check, Loader2, Play, Square, Trash2, Upload, Wand2 } from "lucide-react";
 import type { AudioProbe, ReadStandardAudio, VoiceResolution } from "@/lib/read_aloud/types";
-import ConfirmDialog from "@/components/read_book/ConfirmDialog";
+import ConfirmDialog from "@/components/books/ConfirmDialog";
 import {
   deleteStandardAudio,
   generateStandardAudio,

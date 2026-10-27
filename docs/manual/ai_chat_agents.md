@@ -57,4 +57,4 @@ FmS supports recording audio from your microphone in more than one place — Rea
 ## Related
 
 - The speech‑to‑text side of AI: [Models](models.md).
-- How chat and generation feed reading vocabulary: [Read a Book](read_a_book.md).
+- How chat and generation feed reading vocabulary: [Books](books.md).

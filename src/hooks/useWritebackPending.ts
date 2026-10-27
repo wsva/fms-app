@@ -21,7 +21,7 @@ const POLL_MS = 5000;
  * false during prerender (no `navigator`, same posture as `useIsMobile`) and
  * only turns true inside the webview, so the poll starts one effect later —
  * desktop is the hub and never queues, staying silent without a platform gate
- * at the call site. Pages that already resolve the flag (ReadBookPage takes
+ * at the call site. Pages that already resolve the flag (BooksPage takes
  * `mobile` from `useBookData`) pass it in as `externalMobile` to skip the
  * re-detection; the flag also gates the poll, so hiding the banner never
  * leaves a timer running.

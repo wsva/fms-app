@@ -1,5 +1,5 @@
 /**
- * Shared types for the "Read a book" feature.
+ * Shared types for the "Books" feature.
  *
  * These mirror the Rust structs in `src-tauri/src/book.rs` (serde snake_case).
  * Books are stored dataset-style: each book is a directory containing

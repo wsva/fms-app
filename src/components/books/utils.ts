@@ -1,4 +1,4 @@
-/** Small helpers shared across the "Read a book" feature. */
+/** Small helpers shared across the "Books" feature. */
 
 /** Generate a UUID (crypto.randomUUID with a fallback). */
 export function getUUID(): string {
