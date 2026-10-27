@@ -44,6 +44,7 @@ import {
 } from "@/lib/agent/control";
 import type { AgentAction } from "@/lib/agent/types";
 import { reqStr, useAgentActions } from "@/lib/agent/ui-actions";
+import { pageZoomFactor, ZOOM_CHANGED_EVENT } from "@/hooks/usePageZoom";
 import {
   badgeOf,
   channelLine,
@@ -203,7 +204,10 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
   }, []);
 
   // Re-clamp when the viewport shrinks (window resize, dev tools dock, etc.)
-  // so the button never drifts off-screen and becomes unreachable.
+  // or the page zoom changes. Zoom needs its own event: CSS `zoom` leaves
+  // `innerWidth/Height` at the window size while a `left/top`-placed element
+  // renders at `left*zoom`, so a position that was in view at 100% is off the
+  // edge at 130% and no `resize` fires to tell us.
   useEffect(() => {
     const onResize = () => {
       setFabPosState((prev) => {
@@ -215,7 +219,11 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
       });
     };
     window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    window.addEventListener(ZOOM_CHANGED_EVENT, onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener(ZOOM_CHANGED_EVENT, onResize);
+    };
   }, []);
 
   // Effective FAB styling: until a position is stored or dragged, the button
@@ -233,10 +241,13 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
     // Ignore right/middle mouse; let text-selection / context menu still work.
     if (e.pointerType === "mouse" && e.button !== 0) return;
     // Handlers run on the client only, so reading the viewport here is safe; it
-    // mirrors the `right`/`bottom` default into `left`/`top` for the drag.
+    // mirrors the `right`/`bottom` default into `left`/`top` for the drag. The
+    // viewport must be read in layout units (`/ zoom`): `left` is multiplied by
+    // the page zoom on screen, so the window-px corner would land off it.
+    const z = pageZoomFactor();
     const cur = fabPosRef.current ?? {
-      x: window.innerWidth - FAB_MARGIN - FAB_SIZE,
-      y: window.innerHeight - FAB_MARGIN - FAB_SIZE,
+      x: window.innerWidth / z - FAB_MARGIN - FAB_SIZE,
+      y: window.innerHeight / z - FAB_MARGIN - FAB_SIZE,
     };
     fabDrag.current = {
       active: true,
@@ -256,8 +267,11 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
   const handleFabPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
     const d = fabDrag.current;
     if (!d.active) return;
-    const dx = e.clientX - d.startX;
-    const dy = e.clientY - d.startY;
+    // Pointer deltas are window px; the element's left/top are layout px.
+    // Dividing by the zoom factor keeps the button pinned to the cursor.
+    const z = pageZoomFactor();
+    const dx = (e.clientX - d.startX) / z;
+    const dy = (e.clientY - d.startY) / z;
     d.moved = Math.max(d.moved, Math.abs(dx) + Math.abs(dy));
     setFabPos(clampFabPos(d.startLeft + dx, d.startTop + dy));
   };
@@ -992,10 +1006,14 @@ function MailItem({
   );
 }
 
-// Small helper so the drag handler stays readable.
+// Small helper so the drag handler stays readable. Bounds are in layout px —
+// the space `left`/`top` live in — which is the window divided by the page
+// zoom factor; clamping against raw `innerWidth` let `left * zoom` overshoot
+// the viewport and threw the button off-screen at zoom levels above 100%.
 function clampFabPos(x: number, y: number) {
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
+  const z = pageZoomFactor();
+  const vw = window.innerWidth / z;
+  const vh = window.innerHeight / z;
   return {
     x: Math.max(FAB_EDGE_PAD, Math.min(vw - FAB_SIZE - FAB_EDGE_PAD, x)),
     y: Math.max(FAB_EDGE_PAD, Math.min(vh - FAB_SIZE - FAB_EDGE_PAD, y)),

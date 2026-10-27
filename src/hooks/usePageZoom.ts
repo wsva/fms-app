@@ -30,6 +30,24 @@ const ZOOM_MAX = 2;
 const ZOOM_STEP = 0.1;
 const ZOOM_DEFAULT = 1;
 
+/** Fired on `window` whenever the applied factor changes, carrying the new
+ *  level in `detail`. CSS zoom does not fire `resize`, so anything whose pixel
+ *  geometry was derived from the viewport (the agent dock's floating button)
+ *  must re-derive itself on this event or it silently drifts off-screen. */
+export const ZOOM_CHANGED_EVENT = "page-zoom-changed";
+
+/**
+ * The factor `<html>` is currently zoomed by. `window.innerWidth/Height` are
+ * *not* scaled by CSS `zoom` — they stay in window CSS px — so a fixed element
+ * placed at `left: x` renders at `x * zoom`. Code that clamps a position to
+ * the visible area must therefore work in layout units: `innerWidth / zoom`.
+ */
+export function pageZoomFactor(): number {
+  if (typeof window === "undefined") return 1;
+  const z = parseFloat(document.documentElement.style.zoom || "1");
+  return Number.isFinite(z) && z > 0 ? z : 1;
+}
+
 function clampZoom(value: number): number {
   if (!Number.isFinite(value)) return ZOOM_DEFAULT;
   // Round to the step so repeated zooming does not drift on float noise.
@@ -46,10 +64,13 @@ export function usePageZoom() {
   const [zoom, setZoom] = useState(readStoredZoom);
 
   // Push the level onto <html>. Runs on mount too, so the hook converges on
-  // whatever the pre-paint script left there.
+  // whatever the pre-paint script left there. The event lets zoom-derived
+  // geometry (see `pageZoomFactor`) re-clamp; dispatching it redundantly on
+  // mount is harmless — listeners re-derive the same in-view position.
   useEffect(() => {
     document.documentElement.style.zoom = zoom === ZOOM_DEFAULT ? "" : String(zoom);
     localStorage.setItem(ZOOM_KEY, String(zoom));
+    window.dispatchEvent(new CustomEvent(ZOOM_CHANGED_EVENT, { detail: zoom }));
   }, [zoom]);
 
   const zoomIn = useCallback(() => setZoom((z) => clampZoom(z + ZOOM_STEP)), []);
