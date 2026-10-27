@@ -51,7 +51,6 @@ read-aloud, record > saving > saved
 reperate from transcribing anf scoring
 
 
-I tried to use the read-aloud page, but got very low scores, and no tips, no guidence, no improve suggestions. So I want to add a function, send the recording and text to a agent, to get suggestions in pronuciation and speaking, and how to improve them.
+I tried to use the read-aloud page, but got very low scores, and no tips, no guidence, no improve suggestions. So I want to add a feature, send the recording and text to a agent, to get suggestions in pronuciation and speaking, and how to improve them. Latest AI models mostly support multi-modal, I think they can do this job better
 
 
-after click the ask an agent to generate explaination, we don't need to show the prompt any more

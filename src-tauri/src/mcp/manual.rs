@@ -316,6 +316,21 @@ pub(crate) fn house_rules() -> Value {
     ])
 }
 
+/// The mailbox contract, inlined instead of left behind `resources/read`.
+///
+/// `fms://mailbox` is a resource, and a client that implements tools but not
+/// resources can never dereference one — yet the six sentences are exactly what
+/// such a client needs before its first `mail_claim`. So the same const is
+/// rendered here, and the resource keeps the one thing this page cannot carry
+/// honestly: the live `mail` tool table, read off the router.
+fn mailbox() -> Value {
+    json!({
+        "resource": super::resources::URI_MAILBOX,
+        "note": "The six sentences of the mailbox contract, verbatim. `resources/read` on fms://mailbox returns the same text plus the live `mail` tool table.",
+        "contract": super::resources::MAILBOX_CONTRACT,
+    })
+}
+
 /// integration.md §5.0 item 6: the way in, spelled as calls. There is one door —
 /// attach over MCP and drive the app from your own window. FmS used to offer a
 /// second one (it dialled an agent over ACP and hosted the session in its own
@@ -480,6 +495,7 @@ pub(crate) fn render_json(app: &AppHandle, zone: &str) -> Value {
         "resources": resources_index(),
         "prompts": prompts_index(),
         "house_rules": house_rules(),
+        "mailbox": mailbox(),
         "errors": errors_convention(),
         "workflow_templates": templates,
         "workflow_actions": step_ops,
@@ -742,6 +758,43 @@ pub(crate) fn render_markdown_from(body: &Value) -> String {
             }
         }
         out.push('\n');
+    }
+
+    // 7b. the mailbox. A resource, inlined: a client with tools but no resource
+    // support cannot read fms://mailbox, and these six sentences are what it
+    // needs before its first claim.
+    if let Some(mailbox) = body.get("mailbox") {
+        out.push_str("## The mailbox\n\n");
+        out.push_str(&format!(
+            "Work handed to you arrives in the mailbox. `{}` is its contract, as a resource; it \
+             is repeated here because a client that implements tools but not resources could \
+             never dereference it.\n\n{}",
+            mailbox.get("resource").and_then(|v| v.as_str()).unwrap_or_default(),
+            mailbox.get("note").and_then(|v| v.as_str()).unwrap_or_default(),
+        ));
+        out.push_str("\n\n");
+        if let Some(contract) = mailbox.get("contract").and_then(|v| v.as_str()) {
+            out.push_str(contract);
+            out.push_str("\n\n");
+        }
+        // A contract about tools the build does not have is worse than no
+        // contract: say which case this is, the same way `fms://mailbox` does.
+        let has_mail_tools = body
+            .pointer("/tools/domains")
+            .and_then(|v| v.as_array())
+            .map(|domains| {
+                domains
+                    .iter()
+                    .any(|d| d.get("domain").and_then(|v| v.as_str()) == Some("mail"))
+            })
+            .unwrap_or(false);
+        out.push_str(if has_mail_tools {
+            "The `mail` tools themselves are listed under the `mail` heading in the tool index \
+             below.\n\n"
+        } else {
+            "This build exposes no `mail` tools, so the contract above describes work nothing \
+             here can hand you.\n\n"
+        });
     }
 
     // 8. errors
@@ -1045,6 +1098,8 @@ mod tests {
                 "index": [{ "name": "app_get_ui_state", "domain": "system", "tier": "read", "summary": "S." }] },
             "paths": {},
             "house_rules": ["rule one"],
+            "mailbox": { "resource": "fms://mailbox", "note": "mailbox note",
+                "contract": "1. claim one" },
             "errors": { "shape": "shape", "contract": "contract", "therefore": "therefore" },
             "connect": { "pointer_sentence": "point", "pointer_when": "pw",
                 "snippets": [{ "product": "Codex", "text": "codex mcp add" }] },
@@ -1060,6 +1115,9 @@ mod tests {
             "app_get_ui_state",
             "rule one",
             "schemas elsewhere",
+            "fms://mailbox",
+            "mailbox note",
+            "1. claim one",
             "_[read]_",
             "Codex",
             "codex mcp add",

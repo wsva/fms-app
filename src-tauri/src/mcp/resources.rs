@@ -34,7 +34,7 @@ const URI_DOCS_PRINCIPLES: &str = "fms://docs/principles";
 /// The built-in pipeline definitions, YAML included.
 const URI_TEMPLATES: &str = "fms://workflows/templates";
 /// The mailbox group contract: six sentences, then the `mail` tool table.
-const URI_MAILBOX: &str = "fms://mailbox";
+pub(crate) const URI_MAILBOX: &str = "fms://mailbox";
 /// Prefix for the per-domain documents; one per entry of [`DOC_DOMAINS`].
 const URI_DOCS_DOMAIN: &str = "fms://docs/domain/";
 /// The one parameterised resource: `<uuid>` is a dataset uuid from `dataset_list`.
@@ -90,8 +90,9 @@ pub(crate) fn list() -> ListResourcesResult {
             .with_title("The mailbox contract")
             .with_description(
                 "How to work an item: claim, deliver, ask, release, fail — six sentences, then \
-                 the `mail` tool table. Read this before your first `mail_claim`; it is the only \
-                 place the lease, the nonce and the delivery outcomes are stated together.",
+                 the `mail` tool table. Read this before your first `mail_claim`; it states the \
+                 lease, the nonce and the delivery outcomes together, and adds the live tool \
+                 table (the manual inlines the same six sentences without it).",
             )
             .with_mime_type("text/markdown"),
     ];
@@ -411,8 +412,11 @@ fn templates_doc() -> String {
 
 /// The six sentences of §5.2, verbatim in intent. They are the one place the
 /// lease, the nonce and the three delivery outcomes are stated together, so a
-/// carrier reads this once and its child inherits it.
-const MAILBOX_CONTRACT: &str = "\
+/// carrier reads this once and its child inherits it. The manual inlines this
+/// same text (`manual::mailbox`), because a client that implements tools but
+/// not resources cannot dereference `fms://mailbox` at all — and those six
+/// sentences are exactly what it needs before its first `mail_claim`.
+pub(crate) const MAILBOX_CONTRACT: &str = "\
 1. Claim one item at a time with `mail_claim {next: true}`, and mint a **fresh `nonce` for that \
 attempt** — one per claim, not one per session — keeping it until the delivery lands. A retry \
 searches by nonce alone, because a caller that lost the response never learned the `uuid`. The \
