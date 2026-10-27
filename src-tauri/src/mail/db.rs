@@ -1,9 +1,11 @@
-//! The mailbox's only edge to the rest of the app: where the app-level
-//! database lives, and the one cross-database read the reconcile needs.
+//! The mailbox's two edges to the rest of the app: where the app-level database
+//! lives, the cross-database read the reconcile needs, and the subject a claim
+//! hands its holder.
 //!
 //! Everything else in this module tree takes a `Connection` and a `now`, which
 //! is what keeps the ledger testable against `:memory:`. This file is the
-//! exception on purpose — it is the whole of what a claim knows about books.
+//! exception on purpose — it is the whole of what a claim knows about books,
+//! and the ledger itself names no dataset.
 
 use rusqlite::Connection;
 
@@ -84,6 +86,22 @@ pub fn reconcile_read(settings: &SettingsState, mail: &Mail) -> Reconciled {
         Ok(landed) if landed != 0 => Reconciled::Landed,
         Ok(_) => Reconciled::Absent,
         Err(_) => Reconciled::SubjectGone,
+    }
+}
+
+/// The work behind a request, resolved **now**, for the `data` envelope a claim
+/// returns (§5.2 rule 2, §9 "payloads are links").
+///
+/// The text is read at claim time rather than copied into the row, so an edit
+/// made after the request is visible instead of frozen, and the hash the
+/// request was made against travels with it so the holder can see the work now
+/// reads against different text. `None` means this app cannot resolve the
+/// subject — an unknown `ref_kind`, or a book deleted since — and the claim says
+/// so rather than shipping an empty string that reads like an empty scope.
+pub fn resolve_data(settings: &SettingsState, mail: &Mail) -> Option<serde_json::Value> {
+    match mail.ref_kind.as_deref() {
+        Some("book") => crate::datasets::book_mail::envelope(settings, mail),
+        _ => None,
     }
 }
 

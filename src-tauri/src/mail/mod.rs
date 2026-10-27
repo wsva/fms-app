@@ -39,7 +39,7 @@ pub(crate) mod machine;
 pub(crate) mod store;
 
 pub(crate) use claim::{claim, fail, release, ClaimRequest, Claimed, Reconciled};
-pub(crate) use db::{open, path as db_path, reconcile_read};
+pub(crate) use db::{open, path as db_path, reconcile_read, resolve_data};
 pub(crate) use machine::{
     check, get, promotion, take_id, Actor, AttemptDelta, Facts, Guard, Illegal, MailState,
     Transition, CLAIM_PATH, TRANSITIONS,
