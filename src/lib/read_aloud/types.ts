@@ -6,6 +6,8 @@
  * practise; each text can be read aloud, recorded, transcribed and scored.
  */
 
+import type { FeedbackReport } from "./feedback";
+
 /** A read-aloud dataset (a collection of texts). */
 export interface ReadAloudMeta {
   uuid: string;
@@ -64,6 +66,12 @@ export interface ReadAttempt {
    * It is the compact form: worst words only, at most 24 pauses.
    */
   metrics?: Assessment | null;
+  /**
+   * The stored feedback report for this attempt, when one was asked for.
+   * Derived, device-local and outside the sync journal: it never affects a
+   * score and can always be regenerated. See `lib/read_aloud/feedback.ts`.
+   */
+  feedback?: FeedbackReport | null;
   created_at: string;
 }
 

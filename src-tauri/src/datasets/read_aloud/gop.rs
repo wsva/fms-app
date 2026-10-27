@@ -63,6 +63,48 @@ impl LogPost {
     fn max_at(&self, frame: usize) -> f32 {
         self.frame_max.get(frame).copied().unwrap_or(f32::NEG_INFINITY)
     }
+
+    /// The phone the model itself thought it heard over one span: the most
+    /// frequent non-blank winner across the span's frames.
+    ///
+    /// GOP says how much mass the *reference* phone got; this says which phone
+    /// won instead, which is what turns "the /u/ scored 0.12" into "the model
+    /// heard /o/". Blank frames are skipped — they hold CTC transitions, not a
+    /// sound — so a span with no non-blank frame returns `None` rather than
+    /// claiming silence was a phone. Ties go to the larger summed
+    /// log-probability, i.e. the more confident of two equally frequent ids.
+    pub(crate) fn argmax_phone(&self, span: &PhoneSpan) -> Option<usize> {
+        // At most one entry per vocabulary id; a span is a few frames long, so
+        // a linear scan beats any map here.
+        let mut votes: Vec<(usize, usize, f32)> = Vec::new();
+        for t in span.start..span.end.min(self.len()) {
+            let mut best: Option<(usize, f32)> = None;
+            for (phone, &lp) in self.row(t).iter().enumerate() {
+                if phone == self.blank || !lp.is_finite() {
+                    continue;
+                }
+                if best.map_or(true, |(_, top)| lp > top) {
+                    best = Some((phone, lp));
+                }
+            }
+            if let Some((phone, lp)) = best {
+                match votes.iter_mut().find(|v| v.0 == phone) {
+                    Some(v) => {
+                        v.1 += 1;
+                        v.2 += lp;
+                    }
+                    None => votes.push((phone, 1, lp)),
+                }
+            }
+        }
+        votes
+            .into_iter()
+            .max_by(|a, b| {
+                a.1.cmp(&b.1)
+                    .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+            })
+            .map(|v| v.0)
+    }
 }
 
 /// The frames one reference phone was pinned to: `[start, end)`.
@@ -386,6 +428,22 @@ mod tests {
         let spans = forced_align(&post, &[1, 2]).unwrap();
         let score = word_score(&post, &spans, 2.5).unwrap();
         assert!(score > 0.5, "duration weighting should favour the long phone: {score}");
+    }
+
+    #[test]
+    fn argmax_phone_reports_the_modal_sound_and_skips_blank() {
+        // The reference says phone 2; the frames say 3, 2, 3, blank. The winner
+        // is the *modal* non-blank id, not the single most confident frame.
+        let frames = vec![frame(3, 4), frame(2, 4), frame(3, 4), frame(BLANK, 4)];
+        let post = LogPost::new(frames, BLANK);
+        let span = PhoneSpan { phone: 2, start: 0, end: 4 };
+        assert_eq!(post.argmax_phone(&span), Some(3));
+
+        // A span made only of blank frames heard no phone at all.
+        let silent = PhoneSpan { phone: 2, start: 3, end: 4 };
+        assert_eq!(post.argmax_phone(&silent), None);
+        // An empty or out-of-range span is nothing, not an error.
+        assert_eq!(post.argmax_phone(&PhoneSpan { phone: 1, start: 2, end: 2 }), None);
     }
 
     #[test]

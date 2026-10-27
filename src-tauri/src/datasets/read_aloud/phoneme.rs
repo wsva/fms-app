@@ -257,6 +257,15 @@ impl PhonemeModel {
         })
     }
 
+    /// The vocabulary in id order, specials included.
+    ///
+    /// A GOP pass only ever handles ids, so anything that wants to *name* a
+    /// phone — the feedback evidence says "heard /o/" — reads the id back
+    /// through this slice.
+    pub(crate) fn tokens(&self) -> &[String] {
+        &self.tokens
+    }
+
     /// Run the acoustic model over 16 kHz mono samples and return per-frame
     /// log-probabilities, ready for [`super::gop`].
     ///

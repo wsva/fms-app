@@ -8,6 +8,7 @@ import { GOOD_SCORE, PASS_SCORE, scoreBadgeClasses } from "@/lib/read_aloud/type
 import { useRecorder } from "@/components/books/useRecorder";
 import AsrDiff from "@/components/read_aloud/AsrDiff";
 import AssessmentCards from "@/components/read_aloud/AssessmentCards";
+import FeedbackPanel from "@/components/read_aloud/FeedbackPanel";
 import StandardAudioPlayer from "@/components/read_aloud/StandardAudioPlayer";
 import { isTauri } from "@/lib/tauri";
 import { logError, logInfo } from "@/lib/logger";
@@ -251,6 +252,25 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
               meaning and in what XP is awarded for. */}
           <div className="mt-1">
             <AssessmentCards assessment={result.assessment} />
+          </div>
+
+          {/* The numbers above say *which* words were wrong; this says what to
+              do about them. Asked for explicitly — a low score is exactly when
+              the explanation is worth a model call, and nothing is generated
+              for a take nobody asked about. */}
+          <div className="mt-1">
+            <FeedbackPanel
+              datasetUuid={datasetUuid}
+              attemptUuid={result.attempt.uuid}
+              textUuid={text.uuid}
+              stored={result.attempt.feedback ?? null}
+              measured={result.attempt.metrics != null}
+              onSaved={(report) =>
+                setResult((prev) =>
+                  prev ? { ...prev, attempt: { ...prev.attempt, feedback: report } } : prev
+                )
+              }
+            />
           </div>
           {result.attempt.audio_url && (
             <button

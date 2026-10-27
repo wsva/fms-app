@@ -237,7 +237,7 @@ The model that answers is whichever one is *loaded*, which is a live choice on t
 - `τ` and the band table are heuristics. Nothing in this project has teacher ratings, so nothing is calibrated; both are one constant and one table to revise later.
 - Fluency is Parakeet-only, which on a dataset read with a Whisper model means the fluency card never appears.
 - Long Parakeet takes are cut into overlapping chunks, so the language is chosen per chunk rather than for the take: a chunk that starts on a pause can still land on the wrong language. Before this, audio past the model's window was fed to the encoder in one pass and collapsed wholesale — a whole German take came back in English — so per-chunk choice is the smaller failure, not a new one.
-- Pronunciation is reported per word; phone-level detail exists in the scoring path but is not surfaced in the UI.
+- Pronunciation is reported per word; the per-phone detail the scorer computes is surfaced only inside a feedback report ([read-aloud-feedback.md](./read-aloud-feedback.md)), never on the assessment card itself.
 - The phoneme model is a second, optional download (**603 MB**, fp16). It is not on the critical path — every other feature works without it — and it is installed from the Models page's **Pronunciation** section (catalog id `Hochien/wav2vec2-alignment`), which writes into `<model_root>/phoneme/<owner>/<repo>/` beside the hand-dropped layout `phoneme::find_model_dir` scans. The full 392-entry phone inventory is fetched from the upstream PyTorch repo, because the ONNX repo's own `vocab.json` files are pruned per language. Nothing is fetched automatically, and nothing pretends to have measured pronunciation in the meantime. The size is the honest cost of an fp16 wav2vec2-large export; there is no int8 build of this model to point at. The downloaded file was load-tested on Windows: it opens through `ort`, reports 392 classes and one posterior row per 20 ms of audio, and free-decodes a 38 s German recording into 92 plausible IPA phones rather than one saturated id — which is what the normalisation step is there to guarantee.
 - No recorded fixtures are in the repo. The Phase-0 gate (four attempts: clean, error-laden, restarting, deliberately mispronounced) needs a microphone and stays an acceptance step for a real device; the automated surface is the synthetic and hand-built ones below.
 - An uploaded clip has no word timings, so per-word attribution for it is time-proportional across the reference words — approximate, though the aggregate score is unaffected. Generating with Edge TTS is the exact-per-word route.
@@ -263,7 +263,7 @@ Integration was meant to run on four recorded fixtures — clean, word errors, r
 
 ## Not in v1
 
-A calibrated composite reading score; a lexicon/G2P fallback so the reference phone sequence works offline; phoneme-level feedback in the UI; published reading-rate norms; streaming or real-time feedback during the attempt; a quantized (int8) phoneme export; automatic clip regeneration when a text changes (it is reported stale, one click to fix); per-clip usage statistics, waveform caches for clips, and re-trimming a clip after the fact; and any change to the XP gate.
+A calibrated composite reading score; a lexicon/G2P fallback so the reference phone sequence works offline; a per-phone table on the assessment card (phone detail appears only in a requested feedback report — see [read-aloud-feedback.md](./read-aloud-feedback.md)); published reading-rate norms; streaming or real-time feedback during the attempt; a quantized (int8) phoneme export; automatic clip regeneration when a text changes (it is reported stale, one click to fix); per-clip usage statistics, waveform caches for clips, and re-trimming a clip after the fact; and any change to the XP gate.
 
 ## Decision log
 
@@ -300,3 +300,9 @@ Still open, to be settled on a real device:
 - **Does the TTS target hold for German compound nouns?** Edge TTS handles them, but the phone sequence for a compound read as two words versus one will differ; the alignment tolerates it, the word grouping may not.
 - **Does GOP separate accent from error?** Unanswerable without the fourth fixture; the score is presented as informational until it is.
 - **Is `wcpm` the right fluency headline for adults?** It is the standard oral-reading-fluency measure and the right shape here, but its bands are drawn from school-age reading research; adult self-study may need its own table.
+
+## See also
+
+- [read-aloud-feedback.md](./read-aloud-feedback.md) — what the three axes are turned into: an explicit "Get feedback" action that sends this page's measurements (and, through MCP, the recording itself) to a model and stores a structured report on the attempt.
+- [dataset-read-aloud.md](./dataset-read-aloud.md) — the v1 practice loop these scores extend.
+- [read-aloud-score-claude.md](./read-aloud-score-claude.md) — the superseded standalone-CLI specification.

@@ -94,8 +94,8 @@ src-tauri/src/
 │   │   ├── source_align/   # Align page: recording folder → word timings → spans → clips
 │   │   │                   #   (`index` register/peaks, `place` the matcher, `proposals` the
 │   │   │                   #   span file + review view, `writes` apply; commands in `mod.rs`)
-│   │   └── …               # assess, audit, edges, fluency, gop, import, normalize,
-│   │                       #   phoneme, standard_audio, tts_ref, vad
+│   │   └── …               # assess, audit, edges, feedback, fluency, gop, import,
+│   │                       #   normalize, phoneme, standard_audio, tts_ref, vad
 │   ├── report.rs           # The whole read-only picture of one dataset in one call: identity,
 │   │                       #   audit, every workflow run scored against it, STT model state,
 │   │                       #   actionable hint (`dataset_full_report`) — desktop

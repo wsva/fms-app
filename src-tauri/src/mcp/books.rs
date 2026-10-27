@@ -411,6 +411,55 @@ struct ReadAloudNormalizeMeasureParam {
     candidate: String,
 }
 
+/// Above this a recording is not shipped inline: base64 inflates it by a third
+/// and the path is one field away.
+const MAX_INLINE_AUDIO_BYTES: u64 = 8 * 1024 * 1024;
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudFeedbackParam {
+    dataset_uuid: String,
+    attempt_uuid: String,
+    /// The attempt's text. Optional — it is checked against the attempt and
+    /// never trusted over it.
+    #[serde(default)]
+    text_uuid: Option<String>,
+    /// Model to run the prompt with (Ollama, or the configured provider). Omit
+    /// for the app's configured `llm_model`.
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    temperature: Option<f32>,
+    /// BCP-47 tag for the answer (`en`, `de`). Default `en`.
+    #[serde(default)]
+    language: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudFeedbackContextParam {
+    dataset_uuid: String,
+    attempt_uuid: String,
+    #[serde(default)]
+    text_uuid: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
+    /// Send the recording's bytes as base64 so a multimodal model can hear the
+    /// take. Off by default: it is megabytes, and `audio.path` is usually
+    /// enough. Refused above 8 MB — read the file from `audio.path` instead.
+    #[serde(default)]
+    include_audio_base64: bool,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudSaveFeedbackParam {
+    attempt_uuid: String,
+    /// The report, in the schema `read_aloud_feedback_context` asks for. Only
+    /// `summary` is mandatory; the caps are applied on save.
+    report: JsonValue,
+    /// The model that wrote it, kept as provenance.
+    #[serde(default)]
+    model: Option<String>,
+}
+
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudModelDownloadParam {
     /// Catalog id (a HuggingFace repo id). Empty installs the default espeak
@@ -1221,6 +1270,87 @@ impl DatasetMcpServer {
             &param.candidate,
         )?;
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_feedback", description = "Explain a stored attempt and say what to do differently: renders everything the scorer measured into one evidence block, runs the app's own feedback prompt through the configured LLM (Ollama via `model`, or the configured provider — omit `model` for the app's `llm_model`), and stores the structured report on the attempt. The report names what went wrong, why, how to fix it, a short drill and one line to keep in mind next take. Every number it quotes exists in the evidence; an axis that was not measured is stated as not measured. Needs an existing stored attempt (read_aloud_list_attempts) — feedback explains measurements, it never invents them. Returns an actionable error when no model is configured.")]
+    async fn read_aloud_feedback(&self, Parameters(param): Parameters<ReadAloudFeedbackParam>) -> Result<String, String> {
+        log::info!(
+            "[MCP] read_aloud_feedback: dataset={}, attempt={}, model={:?}",
+            param.dataset_uuid,
+            param.attempt_uuid,
+            param.model
+        );
+        let settings = self.app.state::<SettingsState>();
+        let report = datasets::read_aloud::feedback::generate(
+            &settings,
+            &param.dataset_uuid,
+            &param.attempt_uuid,
+            param.text_uuid,
+            param.model,
+            param.temperature,
+            param.language,
+        )
+        .await?;
+        Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_feedback_context", description = "Read-only agent handoff: everything one attempt can tell a model, plus the exact prompt to answer it — `{attempt, passage, language, feedback_language, assessment, phone_detail, evidence, prompt, audio: {path, bytes, duration, format}}`. This is how a recording reaches a model that can hear, which the in-app route cannot do (its LLM seam is text only): pass `include_audio_base64: true` to get the take's bytes inline (refused above 8 MB — read the file at `audio.path` instead). `phone_detail` names the weakest sounds and what the acoustic model heard instead, recomputed on demand from the device-local recording. Write the answer back with read_aloud_save_feedback so it lands in the same UI card.")]
+    async fn read_aloud_feedback_context(&self, Parameters(param): Parameters<ReadAloudFeedbackContextParam>) -> Result<String, String> {
+        log::info!(
+            "[MCP] read_aloud_feedback_context: dataset={}, attempt={}, audio={}",
+            param.dataset_uuid,
+            param.attempt_uuid,
+            param.include_audio_base64
+        );
+        let settings = self.app.state::<SettingsState>();
+        let ctx = datasets::read_aloud::feedback::context(
+            &settings,
+            &param.dataset_uuid,
+            &param.attempt_uuid,
+            param.text_uuid.as_deref(),
+            param.language.as_deref(),
+        )
+        .await?;
+        let mut value = serde_json::to_value(&ctx)
+            .map_err(|e| format!("Failed to serialize the feedback context: {}", e))?;
+        if param.include_audio_base64 {
+            let path = ctx.audio.path.clone().ok_or_else(|| {
+                format!(
+                    "The recording for attempt {} is not on this device, so there is nothing to \
+                     listen to. Everything else is in this response.",
+                    param.attempt_uuid
+                )
+            })?;
+            let bytes = std::fs::read(&path)
+                .map_err(|e| format!("Could not read the recording {}: {}", path, e))?;
+            if bytes.len() as u64 > MAX_INLINE_AUDIO_BYTES {
+                return Err(format!(
+                    "The recording is {:.1} MB, above the {} MB limit for inline audio. Read it \
+                     from `audio.path` and send it as a file instead: {}",
+                    bytes.len() as f64 / (1024.0 * 1024.0),
+                    MAX_INLINE_AUDIO_BYTES / (1024 * 1024),
+                    path
+                ));
+            }
+            use base64::Engine;
+            value["audio_base64"] = serde_json::Value::String(
+                base64::engine::general_purpose::STANDARD.encode(&bytes),
+            );
+        }
+        Ok(serde_json::to_string_pretty(&value).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_save_feedback", description = "Store a feedback report an agent produced after reading (and possibly listening to) read_aloud_feedback_context. Same shape as the prompt asks for: `summary` (mandatory, 3-4 sentences), optional `diagnosis`, `issues` (area/evidence/detail/fix/drill, worst first), `focus_words` (word/ipa/hint/score), `drill`, `next_try`. Caps are applied on save (5 issues, 8 focus words) and `source` is forced to `agent`. The report is device-local derived output — it appears in the attempt's feedback card and is not synced.")]
+    async fn read_aloud_save_feedback(&self, Parameters(param): Parameters<ReadAloudSaveFeedbackParam>) -> Result<String, String> {
+        log::info!("[MCP] read_aloud_save_feedback: attempt={}", param.attempt_uuid);
+        let settings = self.app.state::<SettingsState>();
+        let report = datasets::read_aloud::feedback::save_report(
+            &settings,
+            &param.attempt_uuid,
+            param.report.into(),
+            param.model,
+        )?;
+        Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
     }
 
     #[tool(name = "read_aloud_assess", description = "Score an attempt across all three axes without persisting anything: accuracy (the WIP 0-100 score, identical to read_aloud_score), fluency (words/min, articulation rate, pauses, longest run — needs `words` timings from model_transcribe_detailed and the WAV), and pronunciation (CTC phoneme GOP against the text's standard audio — the dataset-owned reference clip, never a network call). Each axis degrades honestly: a missing phoneme model, an absent standard clip or an attempt too short to align reports `unavailable_reason` (no_reference / stale_reference / model_missing / too_short) instead of a fabricated score. Use this to preview a result before read_aloud_submit; call read_aloud_standard_audio_list first when no_reference comes back. The result also carries a one-line `headline` (accuracy, pace, pauses, pronunciation) beside the full structure, so an agent can report the attempt without parsing it.")]

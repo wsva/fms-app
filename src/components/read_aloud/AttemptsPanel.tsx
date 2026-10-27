@@ -19,6 +19,7 @@ import { assessStandardAudio } from "@/lib/read_aloud/standardAudio";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
 import AssessmentCards, { PauseRibbon, ScoreAxes } from "@/components/read_aloud/AssessmentCards";
 import AssessmentLogPanel from "@/components/read_aloud/AssessmentLogPanel";
+import FeedbackPanel from "@/components/read_aloud/FeedbackPanel";
 import { highlightDifferences } from "@/components/books/diff";
 import { lcs } from "@/lib/listen/lcs";
 import { isTauri } from "@/lib/tauri";
@@ -590,6 +591,27 @@ export default function AttemptsPanel({
             ) : (
               <ScoreAxes score={selectedAttempt.score} metrics={null} size="md" />
             )}
+
+            {/* What to do about those numbers. A stored report is shown as it
+                was saved; with none, the button asks for one. The report is
+                device-local derived output, so it is only ever this attempt's
+                own — never something another device wrote. */}
+            <FeedbackPanel
+              key={selectedAttempt.uuid}
+              datasetUuid={datasetUuid}
+              attemptUuid={selectedAttempt.uuid}
+              textUuid={selectedAttempt.text_uuid}
+              stored={selectedAttempt.feedback ?? null}
+              measured={selectedAttempt.metrics != null}
+              disabled={rerecognizing !== null}
+              onAssessAgain={selectedAttempt.audio_url ? () => void assessAgain(selectedAttempt) : undefined}
+              onSaved={() => {
+                // The report lives in the attempt row, so the list is the copy
+                // that has it: reload rather than keep a second source of truth.
+                void loadAttempts();
+                onChanged?.();
+              }}
+            />
 
             {/* Compare mode (toolbar "Compare") pairs the texts sentence by
                 sentence; otherwise just show the recognized transcript. */}

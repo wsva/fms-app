@@ -16,6 +16,7 @@
 pub(crate) mod assess;
 pub(crate) mod audit;
 pub(crate) mod edges;
+pub(crate) mod feedback;
 pub(crate) mod fluency;
 pub(crate) mod gop;
 pub(crate) mod import;
@@ -221,6 +222,13 @@ pub struct ReadAttempt {
     /// simply drop it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<Value>,
+    /// The stored feedback report for this attempt (see `feedback`), when one
+    /// was asked for. Device-local and derived: it is deliberately absent from
+    /// `attempt_payload`, so it never travels with the sync journal and never
+    /// costs journal traffic — it can always be regenerated from the recording
+    /// (or from the metrics, or simply by asking again).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<Value>,
     pub created_at: String,
 }
 
@@ -417,6 +425,7 @@ fn ensure_attempt_schema(conn: &Connection) -> Result<(), String> {
             recognized   TEXT NOT NULL DEFAULT '',
             score        REAL NOT NULL DEFAULT 0,
             metrics_json TEXT,
+            feedback_json TEXT,
             created_at   TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_rae_owner_text
@@ -442,6 +451,18 @@ fn ensure_attempt_schema(conn: &Connection) -> Result<(), String> {
         .unwrap_or(false);
     if !has_metrics {
         conn.execute("ALTER TABLE read_attempt_event ADD COLUMN metrics_json TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Same shape for feedback: derived output a device may produce at any time,
+    // so the column is created when it is first needed and left null otherwise.
+    // Null means "nobody asked yet" — never "the answer was empty".
+    let has_feedback: bool = conn
+        .prepare("SELECT 1 FROM PRAGMA_table_info('read_attempt_event') WHERE name = 'feedback_json'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if !has_feedback {
+        conn.execute("ALTER TABLE read_attempt_event ADD COLUMN feedback_json TEXT", [])
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -1278,7 +1299,7 @@ pub async fn read_aloud_list_attempts(
         .conn
         .prepare(
             "SELECT a.uuid, a.text_uuid, a.user_id, a.audio_path, a.recognized, a.score, a.created_at, \
-                    t.content, t.normalized_content, a.metrics_json \
+                    t.content, t.normalized_content, a.metrics_json, a.feedback_json \
              FROM app.read_attempt_event a LEFT JOIN read_text t ON t.uuid = a.text_uuid \
              WHERE a.text_uuid = ?1 AND a.user_id = ?2 ORDER BY a.created_at DESC",
         )
@@ -1308,6 +1329,7 @@ pub async fn read_aloud_list_attempts(
                 recognized,
                 score,
                 metrics: stored_metrics(row.get::<_, Option<String>>(9)?),
+                feedback: stored_metrics(row.get::<_, Option<String>>(10)?),
                 created_at: row.get(6)?,
             })
         })
@@ -1482,7 +1504,11 @@ async fn update_recognized_inner(
     {
         let conn = open_app_attempts(settings)?;
         conn.execute(
-            "UPDATE read_attempt_event SET recognized = ?1, score = ?2, metrics_json = ?3 \
+            // `feedback_json` is cleared with the transcript it was derived from:
+            // the report quotes the old numbers, so keeping it would show advice
+            // that no longer describes this attempt. "Ask again" is one click.
+            "UPDATE read_attempt_event SET recognized = ?1, score = ?2, metrics_json = ?3, \
+             feedback_json = NULL \
              WHERE uuid = ?4 AND user_id = ?5",
             params![
                 recognized,
@@ -1535,6 +1561,7 @@ async fn update_recognized_inner(
         recognized: recognized.to_string(),
         score,
         metrics,
+        feedback: None,
         created_at,
     })
 }
@@ -1614,12 +1641,21 @@ fn stored_metrics(raw: Option<String>) -> Option<Value> {
 struct PronRun {
     post: gop::LogPost,
     spans: Vec<Vec<gop::PhoneSpan>>,
+    /// The model's vocabulary in id order. Carried alongside the posteriors so
+    /// a caller that wants to *name* a phone (feedback says "the model heard
+    /// /o/") can read the id back without reloading the model.
+    tokens: Vec<String>,
     reason: Option<PronReason>,
 }
 
 impl PronRun {
     fn unavailable(reason: PronReason) -> Self {
-        Self { post: gop::LogPost::new(Vec::new(), 0), spans: Vec::new(), reason: Some(reason) }
+        Self {
+            post: gop::LogPost::new(Vec::new(), 0),
+            spans: Vec::new(),
+            tokens: Vec::new(),
+            reason: Some(reason),
+        }
     }
 
     fn evidence(&self) -> PronEvidence<'_> {
@@ -1854,9 +1890,15 @@ async fn pronunciation_evidence(
     let target = tts_ref::flatten(&groups);
 
     // 3. The learner's posteriors — the same model, so the two sides share one
-    //    phone inventory and nothing has to be mapped between them.
-    let post = match phoneme::with_model(&model_dir, |model| model.posteriors(samples)) {
-        Ok(post) => post,
+    //    phone inventory and nothing has to be mapped between them. The
+    //    vocabulary comes out of the same borrow: it is the thing that turns a
+    //    phone id into a symbol.
+    let (post, tokens) = match phoneme::with_model(&model_dir, |model| {
+        let tokens = model.tokens().to_vec();
+        let post = model.posteriors(samples)?;
+        Ok((post, tokens))
+    }) {
+        Ok(pair) => pair,
         Err(message) => {
             log::warn!("read_aloud phoneme model failed on the recording: {}", message);
             return PronRun::unavailable(PronReason::ModelError);
@@ -1869,7 +1911,7 @@ async fn pronunciation_evidence(
     };
     let spans = tts_ref::split_by_word(&aligned, &groups);
 
-    PronRun { post, spans, reason: None }
+    PronRun { post, spans, tokens, reason: None }
 }
 
 /// Without the `phoneme` feature nothing can measure pronunciation; say so
@@ -2207,6 +2249,7 @@ pub async fn read_aloud_submit(
         recognized,
         score,
         metrics: stored_metrics(Some(assessment.metrics_json())),
+        feedback: None,
         created_at: now,
     };
     // Event write + `@app` change journal, through the same path a synced attempt
@@ -2330,6 +2373,7 @@ mod tests {
             recognized: "hello world".into(),
             score,
             metrics: None,
+            feedback: None,
             created_at: now_row_stamp(),
         }
     }
