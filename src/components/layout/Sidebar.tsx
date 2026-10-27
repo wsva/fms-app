@@ -152,12 +152,10 @@ export default function Sidebar({
   activeTab,
   onTabChange,
   onCollapseChange,
-  onWidthChange,
 }: {
   activeTab: TabId;
   onTabChange: (id: TabId) => void;
   onCollapseChange?: (collapsed: boolean) => void;
-  onWidthChange?: (width: number) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [expandedWidth, setExpandedWidth] = useState(DEFAULT_EXPANDED_WIDTH);
@@ -183,12 +181,6 @@ export default function Sidebar({
       if (w >= MIN_WIDTH && w <= MAX_WIDTH) setExpandedWidth(w);
     }
   }, []);
-
-  // Notify parent of width changes
-  useEffect(() => {
-    const currentWidth = collapsed ? COLLAPSED_WIDTH : expandedWidth;
-    onWidthChange?.(currentWidth);
-  }, [collapsed, expandedWidth, onWidthChange]);
 
   // Handle resize drag
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -221,6 +213,9 @@ export default function Sidebar({
     };
   }, [isDragging, expandedWidth]);
 
+  // The rail's own width, and the only place it is decided. As an in-flow flex
+  // item it reserves its own space, so no parent is told to make room (the old
+  // `fixed` layout needed a `marginLeft` mirror that lagged every drag frame).
   const sidebarWidth = collapsed ? COLLAPSED_WIDTH : expandedWidth;
 
   const handleToggle = () => {
@@ -327,7 +322,11 @@ export default function Sidebar({
   return (
     <>
       <aside
-        className="fixed left-0 top-0 flex flex-col h-full border-r border-border-default items-center px-2 z-10 bg-bg-card select-none"
+        // In-flow (not `fixed`): the shell's row reserves this rail's space, so
+        // the account footer ends at the row's bottom edge — above the full-width
+        // status bar — and the pages need no matching margin-left. `shrink-0`
+        // keeps the rail at its own width while the pages absorb the rest.
+        className="relative shrink-0 flex flex-col h-full border-r border-border-default items-center px-2 z-10 bg-bg-card select-none"
         style={{
           width: sidebarWidth,
           transition: isDragging ? "none" : "width 200ms",

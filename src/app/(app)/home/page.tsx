@@ -60,7 +60,8 @@ interface PairingRequest {
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<TabId>("dictation");
-  const [sidebarWidth, setSidebarWidth] = useState(176); // default expanded width
+  // No sidebar width here: the rail is an in-flow flex item, so it reserves its
+  // own space and the pages simply take what is left.
   const [showWorkspaceChooser, setShowWorkspaceChooser] = useState(false);
   const [currentWorkspace, setCurrentWorkspace] = useState<Workspace | null>(null);
   const [mobile, setMobile] = useState(false);
@@ -318,88 +319,90 @@ export default function Home() {
       // a viewport unit is multiplied by the global page zoom while a percentage
       // resolves against a viewport already divided by it, so 100vh overshoots
       // the window at any zoom above 1 and the window itself starts scrolling.
-      className={`flex h-full ${mobile ? "flex-col" : ""}`}
+      // The shell is a column: the sidebar + pages row on top, the status bar
+      // under it. The bar is a sibling of that row rather than a child of the
+      // pages, so it spans the whole window width — which is also why the
+      // sidebar can be an in-flow flex item instead of a `fixed` panel: it stops
+      // at the row's bottom edge, above the bar.
+      className="flex flex-col h-full"
       // Edge-to-edge WebView draws under the status bar; push the shell below it.
       style={mobile ? { paddingTop: "env(safe-area-inset-top)" } : undefined}
     >
-      {!mobile && (
-        <Sidebar
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          onWidthChange={setSidebarWidth}
-        />
-      )}
+      <div className="flex flex-1 min-h-0">
+        {!mobile && (
+          <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
+        )}
 
-      <div
-        className="flex-1 flex flex-col overflow-hidden transition-[margin] duration-200 min-h-0"
-        style={{ marginLeft: mobile ? 0 : sidebarWidth }}
-      >
-        <div style={{ display: activeTab === "dictation" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <DictationPage active={activeTab === "dictation"} />
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+          <div style={{ display: activeTab === "dictation" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <DictationPage active={activeTab === "dictation"} />
+          </div>
+          <div style={{ display: activeTab === "workflow" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <WorkflowPage />
+          </div>
+          <div style={{ display: activeTab === "datasets-sync" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <DatasetsSyncPage onNavigate={(tab) => setActiveTab(tab as TabId)} />
+          </div>
+          <div style={{ display: activeTab === "devices-hub" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <DevicesHubPage />
+          </div>
+          <div style={{ display: activeTab === "simple-words" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <SimpleWordsPage />
+          </div>
+          <div style={{ display: activeTab === "books" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <BooksPage />
+          </div>
+          <div style={{ display: activeTab === "read-aloud" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <ReadAloudPage />
+          </div>
+          <div style={{ display: activeTab === "cards" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <CardsPage />
+          </div>
+          <div style={{ display: activeTab === "tasks" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <TasksPage />
+          </div>
+          <div style={{ display: activeTab === "edge-tts" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <TtsPage />
+          </div>
+          <div style={{ display: activeTab === "models" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <ModelsPage />
+          </div>
+          <div style={{ display: activeTab === "agent" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <AgentPage />
+          </div>
+          <div style={{ display: activeTab === "settings" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <SettingsPage />
+          </div>
+          <div style={{ display: activeTab === "llm-chat" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <LLMChatPage />
+          </div>
+          <div style={{ display: activeTab === "chat" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <DeviceChatPage active={activeTab === "chat"} />
+          </div>
+          <div style={{ display: activeTab === "ocr" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <OcrPage />
+          </div>
+          <div style={{ display: activeTab === "split-text" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <SplitTextPage />
+          </div>
+          <div style={{ display: activeTab === "pdf-reader" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <PdfReaderPage />
+          </div>
+          <div style={{ display: activeTab === "wiki" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <WikiPage />
+          </div>
+          <div style={{ display: activeTab === "logs" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <LogPage />
+          </div>
+          <div style={{ display: activeTab === "workspaces" ? "flex" : "none" }} className="flex-1 min-h-0">
+            <WorkspacesPage />
+          </div>
         </div>
-        <div style={{ display: activeTab === "workflow" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <WorkflowPage />
-        </div>
-        <div style={{ display: activeTab === "datasets-sync" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <DatasetsSyncPage onNavigate={(tab) => setActiveTab(tab as TabId)} />
-        </div>
-        <div style={{ display: activeTab === "devices-hub" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <DevicesHubPage />
-        </div>
-        <div style={{ display: activeTab === "simple-words" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <SimpleWordsPage />
-        </div>
-        <div style={{ display: activeTab === "books" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <BooksPage />
-        </div>
-        <div style={{ display: activeTab === "read-aloud" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <ReadAloudPage />
-        </div>
-        <div style={{ display: activeTab === "cards" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <CardsPage />
-        </div>
-        <div style={{ display: activeTab === "tasks" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <TasksPage />
-        </div>
-        <div style={{ display: activeTab === "edge-tts" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <TtsPage />
-        </div>
-        <div style={{ display: activeTab === "models" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <ModelsPage />
-        </div>
-        <div style={{ display: activeTab === "agent" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <AgentPage />
-        </div>
-        <div style={{ display: activeTab === "settings" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <SettingsPage />
-        </div>
-        <div style={{ display: activeTab === "llm-chat" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <LLMChatPage />
-        </div>
-        <div style={{ display: activeTab === "chat" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <DeviceChatPage active={activeTab === "chat"} />
-        </div>
-        <div style={{ display: activeTab === "ocr" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <OcrPage />
-        </div>
-        <div style={{ display: activeTab === "split-text" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <SplitTextPage />
-        </div>
-        <div style={{ display: activeTab === "pdf-reader" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <PdfReaderPage />
-        </div>
-        <div style={{ display: activeTab === "wiki" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <WikiPage />
-        </div>
-        <div style={{ display: activeTab === "logs" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <LogPage />
-        </div>
-        <div style={{ display: activeTab === "workspaces" ? "flex" : "none" }} className="flex-1 min-h-0">
-          <WorkspacesPage />
-        </div>
-
-        {!mobile && <StatusBar />}
       </div>
+
+      {/* A menu row's "…page…" lands on the same tabs the sidebar lists, so the
+          strip navigates through the shell it lives in, not a route. */}
+      {!mobile && <StatusBar onNavigate={(tab) => setActiveTab(tab as TabId)} />}
 
       {mobile && <BottomNav activeTab={activeTab} onTabChange={setActiveTab} />}
 

@@ -239,6 +239,14 @@
     height: 100%;
     overflow: hidden;
   }
+
+  /* The desktop status bar's height, owned by the shell rather than by the bar.
+     The bar spans the full window width, so the sidebar, the agent dock and the
+     floating button all stop above it — and each reads this instead of
+     repeating the same magic number. */
+  :root {
+    --shell-statusbar-h: 28px;
+  }
 }
 
 /* Hide scrollbar while keeping scroll functionality */

@@ -236,10 +236,16 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
   // `window.innerWidth/innerHeight` makes the prerendered HTML (no window, so a
   // placeholder size) disagree with the client's real viewport on the style
   // attribute — a hydration mismatch React warns about and deliberately does not
-  // patch up, leaving the FAB in the wrong corner.
+  // patch up, leaving the FAB in the wrong corner. The bar's height therefore
+  // goes in as a `calc()` over the shell's own var, not as a JS-read number.
   const fabStyle: React.CSSProperties = fabPos
     ? { left: fabPos.x, top: fabPos.y, width: FAB_SIZE, height: FAB_SIZE }
-    : { right: FAB_MARGIN, bottom: FAB_MARGIN, width: FAB_SIZE, height: FAB_SIZE };
+    : {
+        right: FAB_MARGIN,
+        bottom: `calc(var(--shell-statusbar-h) + ${FAB_MARGIN}px)`,
+        width: FAB_SIZE,
+        height: FAB_SIZE,
+      };
 
   const handleFabPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
     // Ignore right/middle mouse; let text-selection / context menu still work.
@@ -247,11 +253,12 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
     // Handlers run on the client only, so reading the viewport here is safe; it
     // mirrors the `right`/`bottom` default into `left`/`top` for the drag. The
     // viewport must be read in layout units (`/ zoom`): `left` is multiplied by
-    // the page zoom on screen, so the window-px corner would land off it.
+    // the page zoom on screen, so the window-px corner would land off it. The
+    // status bar is subtracted because the default corner sits above it.
     const z = pageZoomFactor();
     const cur = fabPosRef.current ?? {
       x: window.innerWidth / z - FAB_MARGIN - FAB_SIZE,
-      y: window.innerHeight / z - FAB_MARGIN - FAB_SIZE,
+      y: window.innerHeight / z - statusBarInset() - FAB_MARGIN - FAB_SIZE,
     };
     fabDrag.current = {
       active: true,
@@ -695,10 +702,14 @@ export default function AgentDock({ onNavigate }: { onNavigate?: (tab: string) =
         </button>
       )}
 
-      {/* Dock panel — overlays the content area on the right. */}
+      {/* Dock panel — overlays the content area on the right and stops at the
+          status bar's top edge, so the bar stays fully readable and clickable
+          while the mailbox is open. No `shadow-*`: a box shadow falls mainly
+          downward, so it painted a smudge across the status bar — the left
+          border alone separates the panel from the page. */}
       {open && (
         <aside
-          className="fixed top-0 right-0 h-full z-[100] flex flex-col bg-bg-card border-l border-border-default shadow-xl"
+          className="fixed top-0 right-0 bottom-[var(--shell-statusbar-h)] z-[100] flex flex-col bg-bg-card border-l border-border-default"
           style={{ width: dockWidth }}
         >
           {/* Resize handle on the left edge (mouse-drag only; not useful on touch) */}
@@ -1032,14 +1043,26 @@ function MailItem({
 // the space `left`/`top` live in — which is the window divided by the page
 // zoom factor; clamping against raw `innerWidth` let `left * zoom` overshoot
 // the viewport and threw the button off-screen at zoom levels above 100%.
+// The bottom edge is the viewport minus the status bar, which the button must
+// not cover.
 function clampFabPos(x: number, y: number) {
   const z = pageZoomFactor();
   const vw = window.innerWidth / z;
-  const vh = window.innerHeight / z;
+  const vh = window.innerHeight / z - statusBarInset();
   return {
     x: Math.max(FAB_EDGE_PAD, Math.min(vw - FAB_SIZE - FAB_EDGE_PAD, x)),
     y: Math.max(FAB_EDGE_PAD, Math.min(vh - FAB_SIZE - FAB_EDGE_PAD, y)),
   };
+}
+
+// The status bar's height, read from the var the shell declares in globals.css
+// rather than repeated here. A client-only call: it runs from a pointer handler
+// or the clamp on restore, never during the prerender.
+function statusBarInset(): number {
+  const px = parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue("--shell-statusbar-h")
+  );
+  return Number.isFinite(px) && px > 0 ? px : 0;
 }
 
 function reason(e: unknown): string {
