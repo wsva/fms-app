@@ -7,7 +7,7 @@
 //! route is the agent mailbox — the panel's "Get Help" posts the evidence, the
 //! prompt and the recording to an attached agent that can hear the take.
 //!
-//! One prompt, two callers:
+//! One prompt, one caller:
 //!
 //! * [`request_feedback`] — the panel's "Get Help" button: it builds the
 //!   context and posts it to the mailbox. The agent claims the row, calls
@@ -144,24 +144,6 @@ pub struct FeedbackFocusWord {
     pub hint: String,
     #[serde(default)]
     pub score: Option<f64>,
-}
-
-impl FeedbackReport {
-    fn empty() -> Self {
-        Self {
-            schema_version: SCHEMA_VERSION,
-            summary: String::new(),
-            diagnosis: None,
-            issues: Vec::new(),
-            focus_words: Vec::new(),
-            drill: None,
-            next_try: String::new(),
-            source: String::new(),
-            model: None,
-            created_at: String::new(),
-            format: default_format(),
-        }
-    }
 }
 
 // ============================================================
@@ -673,55 +655,8 @@ pub(crate) fn build_prompt(evidence: &str, language: &str) -> String {
 }
 
 // ============================================================
-// Parsing — tolerant, because small local models decorate
+// Normalizing — trim to budget, drop what carries nothing
 // ============================================================
-
-/// ` ```json … ``` ` around an answer that was told not to be fenced.
-fn strip_fences(raw: &str) -> String {
-    let body = raw.trim();
-    let body = body
-        .strip_prefix("```")
-        .map(|rest| rest.split_once('\n').map_or(rest, |(_, r)| r))
-        .unwrap_or(body);
-    let body = body.trim_end();
-    body.strip_suffix("```").unwrap_or(body).trim().to_string()
-}
-
-/// The first balanced `{…}` in `text`, ignoring braces inside strings. Prose
-/// around the object (or a truncated tail after it) is dropped rather than
-/// failing the parse.
-fn first_object(text: &str) -> Option<&str> {
-    let start = text.find('{')?;
-    let bytes = text.as_bytes();
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (offset, byte) in bytes[start..].iter().enumerate() {
-        let index = start + offset;
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if *byte == b'\\' {
-                escaped = true;
-            } else if *byte == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match byte {
-            b'"' => in_string = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return text.get(start..=index);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
 
 /// Trim every field to its budget and drop what carries nothing.
 fn normalize_report(mut report: FeedbackReport) -> FeedbackReport {
@@ -762,42 +697,6 @@ fn normalize_report(mut report: FeedbackReport) -> FeedbackReport {
         .take(MAX_FOCUS_WORDS)
         .collect();
     report
-}
-
-/// The structured answer, or `None` when the reply was not a usable report —
-/// which includes JSON that parsed but carried no `summary`.
-fn parse_json_report(raw: &str) -> Option<FeedbackReport> {
-    let cleaned = strip_fences(raw);
-    let candidate = first_object(&cleaned).unwrap_or(cleaned.as_str());
-    let mut report: FeedbackReport = serde_json::from_str(candidate).ok()?;
-    if report.summary.trim().is_empty() {
-        return None;
-    }
-    if report.format.trim().is_empty() {
-        report.format = default_format();
-    }
-    Some(normalize_report(report))
-}
-
-/// The report, or the prose answer kept as one. A model that ignored the JSON
-/// instruction still said something useful, and losing it is worse than storing
-/// it unstructured.
-pub(crate) fn parse_report(raw: &str) -> Result<FeedbackReport, String> {
-    if let Some(report) = parse_json_report(raw) {
-        return Ok(report);
-    }
-    let prose = strip_fences(raw);
-    if prose.trim().is_empty() {
-        return Err(
-            "The model returned an empty answer. Try again, choose another model, or copy the \
-             prompt and run it with a different provider."
-                .to_string(),
-        );
-    }
-    let mut report = FeedbackReport::empty();
-    report.summary = truncate(&prose, MAX_SUMMARY_CHARS);
-    report.format = "text".to_string();
-    Ok(report)
 }
 
 /// BCP-47 tag for the answer; anything odd falls back to English rather than
@@ -1306,42 +1205,6 @@ mod tests {
     }
 
     #[test]
-    fn json_is_found_inside_fences_and_prose() {
-        let raw = "Here you go:\n```json\n{\"summary\": \"Der Hund war zu schnell.\", \"issues\": [], \"focus_words\": []}\n```\nHope that helps.";
-        let report = parse_report(raw).expect("parsed");
-        assert_eq!(report.summary, "Der Hund war zu schnell.");
-        assert_eq!(report.format, "report");
-    }
-
-    #[test]
-    fn a_truncated_tail_after_the_object_is_ignored() {
-        let raw = "{\"summary\": \"Sauber gelesen.\", \"next_try\": \"Tempo halten\"} und dann noch Text";
-        let report = parse_report(raw).expect("parsed");
-        assert_eq!(report.next_try, "Tempo halten");
-    }
-
-    #[test]
-    fn prose_survives_as_one_summary() {
-        let report = parse_report("  Du hast die Endungen verschluckt. Sprich langsamer.  ")
-            .expect("kept");
-        assert_eq!(report.format, "text");
-        assert!(report.summary.starts_with("Du hast die Endungen"));
-    }
-
-    #[test]
-    fn an_empty_answer_is_an_error() {
-        assert!(parse_report("   \n\n").is_err());
-    }
-
-    #[test]
-    fn a_report_without_a_summary_is_not_a_report() {
-        let raw = r#"{"issues": [{"area": "fluency", "fix": "slow down"}], "next_try": "x"}"#;
-        assert!(parse_json_report(raw).is_none());
-        // …and the prose fallback keeps it rather than losing it.
-        assert_eq!(parse_report(raw).map(|r| r.format).as_deref(), Ok("text"));
-    }
-
-    #[test]
     fn caps_hold_on_a_flooded_report() {
         let issues: Vec<String> = (0..20)
             .map(|i| format!(r#"{{"area": "accuracy", "evidence": "e{i}", "detail": "d", "fix": "f"}}"#))
@@ -1354,7 +1217,8 @@ mod tests {
             issues.join(","),
             words.join(",")
         );
-        let report = parse_json_report(&raw).expect("parsed");
+        let report: FeedbackReport = serde_json::from_str(&raw).expect("deserialized");
+        let report = normalize_report(report);
         assert_eq!(report.issues.len(), MAX_ISSUES);
         assert_eq!(report.focus_words.len(), MAX_FOCUS_WORDS);
     }
@@ -1373,7 +1237,8 @@ mod tests {
     #[test]
     fn an_issue_without_any_content_is_dropped() {
         let raw = r#"{"summary": "s", "issues": [{"area": "accuracy"}, {"detail": "d", "fix": "f"}]}"#;
-        let report = parse_json_report(raw).expect("parsed");
+        let report: FeedbackReport = serde_json::from_str(raw).expect("deserialized");
+        let report = normalize_report(report);
         assert_eq!(report.issues.len(), 1);
     }
 }
