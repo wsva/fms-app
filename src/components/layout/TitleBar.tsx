@@ -60,12 +60,13 @@ import {
  * What the platform gives back for free, and what this row therefore does not
  * implement:
  *  * Dragging. `data-tauri-drag-region="deep"` on the root makes every
- *    non-interactive part of the bar a drag handle, and Tauri's own script
- *    refuses to start a drag from a button, a link or an input — so the menus
- *    and the window controls sit inside the handle without fighting it.
- *    (Requires `core:window:allow-start-dragging`.)
+ *    non-interactive part of the bar a drag handle. (Requires
+ *    `core:window:allow-start-dragging`.) The menu items opt out of it — see the
+ *    module comment in StatusItem.tsx, which explains why a menu's own dismiss
+ *    area must not be part of the handle. The window controls need no opt-out:
+ *    Tauri's script never starts a drag from a clickable node.
  *  * Double-click to maximize, likewise handled by that script through the
- *    already-allowed internal command.
+ *    already-allowed internal command — on the handle, not on a menu.
  *  * Resizing. tao hit-tests the edges of an undecorated resizable window
  *    itself, so there is no resize handle to draw here — and no `100vh`, since
  *    the app's own global zoom would overshoot the window (see globals.css).
@@ -283,6 +284,10 @@ export default function TitleBar({ onNavigate, onRefresh, onWorkspaceChooser }: 
       // window is never impossible to drag or leave, and its menus (z-110 inside
       // this stacking context) have to clear the agent dock (z-100) and its
       // floating button (z-101), which hang on the right of the content below.
+      //
+      // Only the empty strip and the identity group are the handle: each menu
+      // item marks itself `data-tauri-drag-region="false"`, and the window
+      // controls are buttons, which Tauri's drag script skips on its own.
       className="relative z-[120] flex h-[var(--shell-titlebar-h)] shrink-0 items-stretch border-b border-border-default bg-bg-card text-[12px] select-none"
     >
       {/* Identity — what the native bar used to show. */}
@@ -291,14 +296,20 @@ export default function TitleBar({ onNavigate, onRefresh, onWorkspaceChooser }: 
         <span className="font-semibold tracking-wide text-text-secondary">FmS</span>
       </div>
 
-      {/* The menu row. Each item opens downward, over the pages. */}
+      {/* The menu row. Each item opens downward, over the pages, on hover as
+          well as on click. */}
       <div className="flex shrink-0 items-stretch pl-1">
-        <StatusItem label="File menu" title="File" content={<span>File</span>} direction="down">
+        <StatusItem
+          label="File menu"
+          title="File"
+          content={<span>File</span>}
+          direction="down"
+          openOnHover
+        >
           <StatusMenuHeading>Workspace</StatusMenuHeading>
           <StatusMenuRow
             icon={Users}
             text="Switch workspace…"
-            detail="Change the account and folder set this window works on"
             onClick={onWorkspaceChooser}
           />
           <StatusMenuRow
@@ -310,7 +321,6 @@ export default function TitleBar({ onNavigate, onRefresh, onWorkspaceChooser }: 
           <StatusMenuRow
             icon={Settings}
             text="Settings…"
-            detail="Theme, directories, sync, agent"
             onClick={() => onNavigate("settings")}
           />
           <StatusMenuRow
@@ -333,7 +343,13 @@ export default function TitleBar({ onNavigate, onRefresh, onWorkspaceChooser }: 
           />
         </StatusItem>
 
-        <StatusItem label="View menu" title="View" content={<span>View</span>} direction="down">
+        <StatusItem
+          label="View menu"
+          title="View"
+          content={<span>View</span>}
+          direction="down"
+          openOnHover
+        >
           <StatusMenuHeading>Theme</StatusMenuHeading>
           {THEMES.map((t) => (
             <StatusMenuRow
@@ -372,7 +388,6 @@ export default function TitleBar({ onNavigate, onRefresh, onWorkspaceChooser }: 
           <StatusMenuRow
             icon={Bot}
             text="Agent mailbox"
-            detail={dock.open ? "open" : "closed"}
             checked={dock.open}
             keepOpen
             onClick={dispatchDockToggle}
@@ -388,7 +403,13 @@ export default function TitleBar({ onNavigate, onRefresh, onWorkspaceChooser }: 
           />
         </StatusItem>
 
-        <StatusItem label="Help menu" title="Help" content={<span>Help</span>} direction="down">
+        <StatusItem
+          label="Help menu"
+          title="Help"
+          content={<span>Help</span>}
+          direction="down"
+          openOnHover
+        >
           <StatusMenuRow icon={Globe} text="Website & manual…" onClick={openWebsite} />
           <StatusMenuRow
             icon={ExternalLink}
@@ -399,7 +420,6 @@ export default function TitleBar({ onNavigate, onRefresh, onWorkspaceChooser }: 
           <StatusMenuRow
             icon={Info}
             text="About & updates…"
-            detail="Build version and the latest release"
             onClick={() => onNavigate("settings")}
           />
         </StatusItem>

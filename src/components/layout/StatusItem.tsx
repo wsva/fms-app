@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, type LucideIcon } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -20,12 +20,40 @@ import { Check, type LucideIcon } from "lucide-react";
 //    to `auto`, so there is no "clip one way only" escape. Truncation therefore
 //    belongs on the item's own text (`max-w-*` + `truncate`), never on a
 //    wrapping div.
-//  * The menu opens on click, not hover, because a WebView fires no `mouseleave`
-//    that could be trusted to close it again on a touch screen.
+//  * The item opts out of the title bar's drag region with
+//    `data-tauri-drag-region="false"` on its own wrapper, and that is not
+//    cosmetic. Tauri's drag script walks the click's composed path and treats
+//    any *non-clickable* node under a `deep` region as a handle: it prevents the
+//    default and asks the window to start dragging. The tap-away scrim is a bare
+//    div, so leaving it inside the handle meant a click "outside the menu"
+//    started a window drag instead of closing it, and a second click on the item
+//    (`e.detail === 2`) invoked `internal_toggle_maximize` — the window resized.
+//    The button element itself was never the problem: a clickable node blocks a
+//    drag on its own.
+//  * Two open styles: `openOnHover` for a mouse-driven bar (title bar), and
+//    click-plus-scrim for a bar that may be touched (status bar), because a
+//    touch screen fires no trustworthy `mouseleave`, so a hover-opened menu
+//    there could only be closed by tapping its own item again.
 // ---------------------------------------------------------------------------
 
 /** Closes the owning menu; a no-op for a row rendered outside one. */
 const CloseContext = createContext<() => void>(() => {});
+
+/** How long a hover-opened menu stays up after the pointer leaves its item.
+ *  Long enough to cross the gap above the panel, short enough to read as
+ *  instant. See the `cancelScheduledClose` comment in the component. */
+const HOVER_CLOSE_MS = 150;
+
+/** The hover-opened menu on screen right now, if any. Module scope, because the
+ *  items are siblings each owning their own open state — nothing above them
+ *  knows which panel is up — and moving from one label to the next has to take
+ *  the first panel down at once instead of letting its grace timer run out with
+ *  two menus floating over the pages.
+ *
+ *  Only the hover-opened style takes part: a click-opened menu already puts a
+ *  full-window scrim under the pointer, so its neighbour cannot be entered at
+ *  all — which is exactly why a hover-opened item drops the scrim. */
+let hoveredCloser: (() => void) | null = null;
 
 export type StatusItemProps = {
   /** Accessible name, and the tooltip unless `title` overrides it. Always a
@@ -47,6 +75,12 @@ export type StatusItemProps = {
   /** Which side of the item the panel opens on: `up` for a bottom bar, `down`
    *  for the title bar at the top of the window. */
   direction?: "up" | "down";
+  /** Open on mouse enter and close when the pointer leaves, instead of only on
+   *  click. The title bar sets it; a bar that gets touched must not (see the
+   *  module comment), and it drops the tap-away scrim in favour of a document
+   *  listener, because the scrim covers the *neighbouring* items and so would
+   *  swallow their `mouseenter` — hover-to-switch would not work. */
+  openOnHover?: boolean;
   /** Action for a plain item. Ignored when the item has menu children. */
   onClick?: () => void;
   /** Menu contents. With children the item owns a popover in `direction`;
@@ -57,9 +91,9 @@ export type StatusItemProps = {
 
 /**
  * One item of a shell bar: a full-height button, optionally with a menu.
- * Owns the open state, the Escape handler and the tap-away backdrop — the
- * backdrop because a WebView fires no `mouseleave`, so hover dismissal
- * would leave a menu stuck open on touch.
+ * Owns the open state, the Escape handler, the hover policy and the dismiss —
+ * by a tap-away backdrop when the item is click-opened, by a document listener
+ * when it is hover-opened.
  */
 export function StatusItem({
   label,
@@ -70,21 +104,72 @@ export function StatusItem({
   active = false,
   align = "start",
   direction = "up",
+  openOnHover = false,
   onClick,
   children,
   className = "",
 }: StatusItemProps) {
   const [open, setOpen] = useState(false);
   const hasMenu = Boolean(children);
+  const hoverable = hasMenu && openOnHover;
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // A grace period, not an instant close: the panel hangs 4px below the item
+  // (`mt-1`), and while the pointer crosses that gap it is over neither the item
+  // nor the panel, which would otherwise close the menu the moment the user aims
+  // for it. Entering the panel cancels the pending close. Stable identity, so the
+  // unmount cleanup below can depend on it honestly.
+  const cancelScheduledClose = useCallback(() => {
+    if (closeTimer.current) {
+      clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  }, []);
+
+  // Stable identities, so the module-level claim can be compared and released
+  // without a new closure on every render.
+  const closeNow = useCallback(() => setOpen(false), []);
+
+  /** The one way out of an open menu: release the claim, then close. */
+  const dismiss = useCallback(() => {
+    if (hoveredCloser === closeNow) hoveredCloser = null;
+    cancelScheduledClose();
+    setOpen(false);
+  }, [cancelScheduledClose, closeNow]);
 
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") dismiss();
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [open]);
+  }, [open, dismiss]);
+
+  // Dismiss on a click anywhere outside this item, while a hover-opened menu is
+  // up. Bubbling phase, so the item's own toggle and the rows' handlers run
+  // first. The click then continues into the page below: absorbing it would need
+  // a full-window scrim, and a scrim is exactly what breaks hover.
+  useEffect(() => {
+    if (!open || !hoverable) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      const root = rootRef.current;
+      if (root && e.target instanceof Node && !root.contains(e.target)) dismiss();
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [open, hoverable, dismiss]);
+
+  // A menu left open by hover must not outlive the pointer, and an unmount must
+  // not leave a pending timer, nor a claim pointing at a component that is gone.
+  useEffect(
+    () => () => {
+      cancelScheduledClose();
+      if (hoveredCloser === closeNow) hoveredCloser = null;
+    },
+    [cancelScheduledClose, closeNow],
+  );
 
   const hint = title ?? label;
   const tint =
@@ -92,8 +177,36 @@ export function StatusItem({
       ? "bg-bg-hover text-text-primary"
       : "text-text-secondary hover:bg-bg-hover hover:text-text-primary";
 
+  // Entering the panel itself counts as entering the item — it is a descendant
+  // of this wrapper — so the pending close is cancelled on the way in. Both the
+  // hover and the click path open through here, so "one panel at a time" holds
+  // however this one came up.
+  const openItem = () => {
+    cancelScheduledClose();
+    if (hoverable) {
+      // Take the screen over from a sibling's panel at once, rather than
+      // stacking two of them for the length of the grace period.
+      if (hoveredCloser && hoveredCloser !== closeNow) hoveredCloser();
+      hoveredCloser = closeNow;
+    }
+    setOpen(true);
+  };
+
+  const scheduleClose = () => {
+    cancelScheduledClose();
+    closeTimer.current = setTimeout(dismiss, HOVER_CLOSE_MS);
+  };
+
   return (
-    <div className={`relative flex shrink-0 ${className}`}>
+    <div
+      ref={rootRef}
+      // See the module comment: inside the title bar's `deep` drag region this
+      // is what keeps the item, its panel and its dismiss area out of the handle.
+      data-tauri-drag-region="false"
+      onMouseEnter={hoverable ? openItem : undefined}
+      onMouseLeave={hoverable ? scheduleClose : undefined}
+      className={`relative flex shrink-0 ${className}`}
+    >
       <button
         type="button"
         title={hint}
@@ -101,7 +214,16 @@ export function StatusItem({
         aria-haspopup={hasMenu || undefined}
         aria-expanded={hasMenu ? open : undefined}
         aria-pressed={hasMenu ? undefined : active}
-        onClick={() => (hasMenu ? setOpen((v) => !v) : onClick?.())}
+        onClick={() => {
+          if (!hasMenu) {
+            onClick?.();
+            return;
+          }
+          // Click toggles even where hover does: it is how a menu whose pointer
+          // has already left, or one opened on a touch screen, gets shut.
+          if (open) dismiss();
+          else openItem();
+        }}
         className={`flex h-full items-center gap-1.5 px-1.5 cursor-pointer transition-colors ${tint}`}
       >
         {Icon && <Icon size={13} className="shrink-0 opacity-80" />}
@@ -111,7 +233,9 @@ export function StatusItem({
 
       {hasMenu && open && (
         <>
-          <div className="fixed inset-0 z-[105]" onClick={() => setOpen(false)} />
+          {!openOnHover && (
+            <div className="fixed inset-0 z-[105]" onClick={dismiss} />
+          )}
           <div
             role="menu"
             aria-label={label}
@@ -121,7 +245,7 @@ export function StatusItem({
               align === "end" ? "right-0" : "left-0"
             }`}
           >
-            <CloseContext.Provider value={() => setOpen(false)}>{children}</CloseContext.Provider>
+            <CloseContext.Provider value={dismiss}>{children}</CloseContext.Provider>
           </div>
         </>
       )}
