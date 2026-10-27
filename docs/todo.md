@@ -45,3 +45,12 @@ convert number to word
 convert abbreviation to full form
 
 use the recognized text of standard audio as scoring reference
+
+move user info out of logout button
+
+read-aloud, record > saving > saved
+reperate from transcribing anf scoring
+
+rename "read-a-book" to "books" project-wide
+
+add a function, send the recording and text to AI, to get suggestions in pronuciation and speaking, how to improve
