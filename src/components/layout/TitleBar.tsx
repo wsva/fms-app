@@ -47,6 +47,7 @@ import {
   StatusMenuRow,
   StatusMenuSep,
 } from "./StatusItem";
+import { NAV_GROUPS, type TabId } from "./Sidebar";
 
 /**
  * The window's title bar, drawn by the app.
@@ -79,6 +80,9 @@ import {
 interface TitleBarProps {
   /** Jump the shell to a tab, the same seam the status bar uses. */
   onNavigate: (tab: string) => void;
+  /** The tab on screen, so the two navigation menus can check the row that is
+   *  already open — the bar should not offer a page without saying so. */
+  activeTab: TabId;
   /** Re-read the page on screen — the F5 path, guard and all. */
   onRefresh: () => void;
   /** Put the workspace chooser back on screen (the shell owns that state). */
@@ -123,7 +127,12 @@ function WindowButton({
   );
 }
 
-export default function TitleBar({ onNavigate, onRefresh, onWorkspaceChooser }: TitleBarProps) {
+export default function TitleBar({
+  onNavigate,
+  activeTab,
+  onRefresh,
+  onWorkspaceChooser,
+}: TitleBarProps) {
   const {
     available,
     maximized,
@@ -402,6 +411,37 @@ export default function TitleBar({ onNavigate, onRefresh, onWorkspaceChooser }: 
             onClick={toggleFullscreen}
           />
         </StatusItem>
+
+        {/* Cross Device and Tools — the sidebar's two collapsible groups, read
+            straight off its table (see the NAV_GROUPS comment in Sidebar.tsx),
+            so a page added to a group appears in the menu with no second list to
+            maintain. They exist because the sidebar can be collapsed and because
+            a menu lists a whole group at once: the point is reaching any page
+            from anywhere, the way VS Code's menus work.
+
+            Nothing here publishes an agent action: every row navigates, and
+            `app_navigate` already owns that verb — see the registry comment
+            above, which keeps one id per action on purpose. */}
+        {NAV_GROUPS.map((group) => (
+          <StatusItem
+            key={group.id}
+            label={`${group.label} menu`}
+            title={group.label}
+            content={<span>{group.label}</span>}
+            direction="down"
+            openOnHover
+          >
+            {group.tabs.map((tab) => (
+              <StatusMenuRow
+                key={tab.id}
+                icon={tab.icon}
+                text={tab.label}
+                checked={activeTab === tab.id}
+                onClick={() => onNavigate(tab.id)}
+              />
+            ))}
+          </StatusItem>
+        ))}
 
         <StatusItem
           label="Help menu"

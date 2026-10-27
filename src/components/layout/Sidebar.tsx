@@ -72,7 +72,11 @@ type NavGroup = {
 // multi-user coordination pages; Tools keeps the local processing utilities
 // plus the Tasks queue the workflow `human` step and an agent's `todo_add`
 // fill in.
-const navGroups: NavGroup[] = [
+//
+// Exported because the title bar draws these two groups as menus too: one table
+// decides what belongs to a group and what it is called, so a page added here
+// reaches the top bar without a second list to keep in step.
+export const NAV_GROUPS: NavGroup[] = [
   {
     id: "cross-device",
     label: "Cross Device",
@@ -343,7 +347,7 @@ export default function Sidebar({
         {rootTabs.map((tab) => renderTab(tab, false))}
 
         {/* Navigation groups */}
-        {navGroups.map(renderGroup)}
+        {NAV_GROUPS.map(renderGroup)}
 
         {/* Settings at bottom of nav */}
         {bottomTabs.map((tab) => renderTab(tab, false))}

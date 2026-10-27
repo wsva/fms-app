@@ -323,6 +323,7 @@ export default function Home() {
   const titleBar = mobile ? null : (
     <TitleBar
       onNavigate={(tab) => setActiveTab(tab as TabId)}
+      activeTab={activeTab}
       onRefresh={refreshActivePageWithToast}
       onWorkspaceChooser={() => setShowWorkspaceChooser(true)}
     />

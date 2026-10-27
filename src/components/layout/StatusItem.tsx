@@ -1,7 +1,7 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, type LucideIcon } from "lucide-react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
+import { Check } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Bar item
@@ -39,6 +39,13 @@ import { Check, type LucideIcon } from "lucide-react";
 /** Closes the owning menu; a no-op for a row rendered outside one. */
 const CloseContext = createContext<() => void>(() => {});
 
+/** A bar icon: a Lucide icon or one of the app's own glyphs (the microphone in
+ *  the navigation), which have nothing in common but the two props a bar passes.
+ *  Named rather than inlined because `Sidebar.tsx` types its nav entries with the
+ *  same shape, and the title bar's navigation menus hand those entries to these
+ *  rows — widening the prop here is what keeps the call site free of a cast. */
+export type BarIcon = ComponentType<{ size?: number; className?: string }>;
+
 /** How long a hover-opened menu stays up after the pointer leaves its item.
  *  Long enough to cross the gap above the panel, short enough to read as
  *  instant. See the `cancelScheduledClose` comment in the component. */
@@ -61,7 +68,7 @@ export type StatusItemProps = {
   label: string;
   title?: string;
   /** Leading icon, sized to the bar. */
-  icon?: LucideIcon;
+  icon?: BarIcon;
   /** Visible body. Defaults to `label`; pass custom nodes for a live value. */
   content?: ReactNode;
   /** Trailing node — a count or an unread dot, kept out of the a11y name. */
@@ -269,7 +276,7 @@ export function StatusMenuRow({
   trailing,
   keepOpen = false,
 }: {
-  icon?: LucideIcon;
+  icon?: BarIcon;
   text: ReactNode;
   detail?: ReactNode;
   onClick?: () => void;
