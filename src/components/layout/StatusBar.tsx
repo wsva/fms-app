@@ -90,6 +90,15 @@ function actionFor(m: LoadedModel): { label: string; Icon: LucideIcon } | null {
   return null;
 }
 
+/** A hub model id is `owner/name`. The strip is one line and the owner adds
+ *  nothing a glance needs — so the chip shows the bare name while `LoadedModel.id`
+ *  stays the full id the backend gave, readable in the tooltip and the menu. */
+function shortId(id: string | null): string | null {
+  if (!id) return id;
+  const slash = id.lastIndexOf("/");
+  return slash >= 0 ? id.slice(slash + 1) : id;
+}
+
 function ModelItem({
   model,
   onAction,
@@ -103,7 +112,7 @@ function ModelItem({
   return (
     <StatusItem
       label={`${model.fullName}: ${model.id ?? "none"} — ${model.stateText}`}
-      title={`${model.fullName} — ${model.stateText}`}
+      title={`${model.fullName} — ${model.id ?? "none"} · ${model.stateText}`}
       align="start"
       active={model.state === "loaded"}
       icon={typeIcon(model.type)}
@@ -111,7 +120,7 @@ function ModelItem({
         <>
           <StateDot state={model.state} />
           <span className="shrink-0 opacity-70">{model.label}</span>
-          <span className="max-w-[160px] truncate">{model.id ?? "—"}</span>
+          <span className="max-w-[160px] truncate">{shortId(model.id) ?? "—"}</span>
         </>
       }
     >
