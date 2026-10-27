@@ -292,6 +292,7 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
               textUuid={text.uuid}
               stored={result.attempt.feedback ?? null}
               measured={result.attempt.metrics != null}
+              audioPath={result.attempt.audio_url ?? null}
             />
           </div>
           {result.attempt.audio_url && (

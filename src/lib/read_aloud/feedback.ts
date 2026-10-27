@@ -1,6 +1,6 @@
 /**
- * Shared bits of the attempt feedback: the report shape, the localStorage key
- * for the model choice, and the calls the panel makes.
+ * Shared bits of the attempt feedback: the report shape and the calls the panel
+ * makes.
  *
  * The prompt itself is *not* here. It lives in the backend
  * (`src-tauri/src/datasets/read_aloud/feedback.rs`) so the "copy the prompt"
@@ -20,13 +20,6 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-
-/**
- * The model choice, under the same key the Chat, OCR and Understanding pickers
- * use: this is one preference ("the model I run locally"), not one per page.
- * Empty means the app default from Settings.
- */
-export const LS_FEEDBACK_MODEL = "llm_selected_model";
 
 /** One thing to fix, with the evidence it came from. */
 export interface FeedbackIssue {

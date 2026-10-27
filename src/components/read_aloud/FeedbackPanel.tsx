@@ -1,12 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { AlertTriangle, Check, Copy, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { AlertTriangle, Bot, Check, Copy, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
-import type { OllamaModelInfo } from "@/lib/llm/types";
 import {
-  LS_FEEDBACK_MODEL,
   feedbackContext,
   feedbackProvenance,
   requestFeedback,
@@ -47,6 +44,12 @@ type Props = {
    */
   measured: boolean;
   /**
+   * Full path of this attempt's recording on this device. The manual "Copy
+   * prompt" route cannot carry audio in the prompt, so the panel names the file
+   * the learner must attach themselves; an attached agent reaches it on its own.
+   */
+  audioPath?: string | null;
+  /**
    * Language the report is written in. The app's interface is English, so the
    * explanation is too; the passage's own words stay quoted in its language
    * either way.
@@ -68,11 +71,12 @@ const primaryButton =
  * asks an agent for one.
  *
  * A report about a reading needs the reading, and the app's text-only LLM seam
- * cannot carry audio. So "Ask agent" hands the take to the agent mailbox: the
+ * cannot carry audio. So "Get Help" hands the take to the agent mailbox: the
  * evidence, the exact prompt and the recording's location go out, an attached
  * agent that can *hear* the take answers, and its report lands back in this
  * card when the attempts reload (the `read-aloud-feedback-saved` event). "Copy
- * prompt" is the manual escape hatch for a provider nothing is attached to.
+ * prompt" is the manual escape hatch: it copies the prompt but not the audio,
+ * so the card names the recording file the learner must attach themselves.
  *
  * It is deliberately a card and not another score: nothing here changes a
  * number, awards XP, or is written anywhere but the attempt's own
@@ -84,6 +88,7 @@ export default function FeedbackPanel({
   textUuid,
   stored,
   measured,
+  audioPath,
   language = "en",
   onAssessAgain,
   disabled,
@@ -94,9 +99,6 @@ export default function FeedbackPanel({
   /** The prompt, shown only when the clipboard refused it. */
   const [prompt, setPrompt] = useState("");
 
-  const [models, setModels] = useState<OllamaModelInfo[]>([]);
-  const [model, setModel] = useState("");
-
   // A different attempt is a different report. Resetting on `stored` too is what
   // makes an agent's answer appear after the caller reloads the attempts.
   useEffect(() => {
@@ -105,37 +107,12 @@ export default function FeedbackPanel({
     setPrompt("");
   }, [attemptUuid, stored]);
 
-  // The chosen model is one app-wide preference, under the same key the Chat,
-  // OCR and Understanding pickers use. Empty = the Settings default.
-  useEffect(() => {
-    if (typeof localStorage === "undefined") return;
-    setModel(localStorage.getItem(LS_FEEDBACK_MODEL) ?? "");
-  }, []);
-
-  useEffect(() => {
-    if (!isTauri()) return;
-    invoke<{ installed: OllamaModelInfo[] }>("llm_list_models")
-      .then((res) => setModels(res.installed ?? []))
-      .catch(() => {});
-  }, []);
-
-  const pickModel = (name: string) => {
-    setModel(name);
-    if (typeof localStorage === "undefined") return;
-    if (name) localStorage.setItem(LS_FEEDBACK_MODEL, name);
-    else localStorage.removeItem(LS_FEEDBACK_MODEL);
-  };
-
   const args = useMemo(
-    () => ({ datasetUuid, attemptUuid, textUuid: textUuid ?? null, model, language }),
-    [datasetUuid, attemptUuid, textUuid, model, language]
+    () => ({ datasetUuid, attemptUuid, textUuid: textUuid ?? null, language }),
+    [datasetUuid, attemptUuid, textUuid, language]
   );
 
   const paused = !!disabled || busy !== "";
-  const configured = model.trim();
-  // Keep a previously-chosen model visible even when Ollama does not list it,
-  // so the select never silently resets to "App default".
-  const missing = !!configured && !models.some((m) => m.name === configured);
 
   const ask = useCallback(async () => {
     if (!isTauri()) return;
@@ -169,7 +146,7 @@ export default function FeedbackPanel({
         await navigator.clipboard.writeText(ctx.prompt);
         setNote({
           kind: "good",
-          text: "Prompt copied. Paste it into any model — one that can also read the recording file gives the most specific answer — then save its JSON report and reload the attempts.",
+          text: "Prompt copied. It carries the evidence but never the audio, so attach the recording below to any model you run it in — then save its JSON report and reload the attempts.",
         });
       } catch (e) {
         logError(`clipboard write failed: ${String(e)}`, LOG_MODULE);
@@ -188,6 +165,19 @@ export default function FeedbackPanel({
     }
   }, [args]);
 
+  // The manual route needs the recording itself: copy its on-disk path so the
+  // learner can attach that exact file when they send the prompt by hand.
+  const copyPath = useCallback(async () => {
+    if (!audioPath) return;
+    try {
+      await navigator.clipboard.writeText(audioPath);
+      setNote({ kind: "good", text: "Recording path copied. Attach this audio file when you send the prompt yourself." });
+    } catch (e) {
+      logError(`copying the recording path failed: ${String(e)}`, LOG_MODULE);
+      setNote({ kind: "warn", text: "Could not reach the clipboard — select the path below and copy it." });
+    }
+  }, [audioPath]);
+
   return (
     <section className="flex flex-col gap-2 p-3 rounded-xl border border-dashed border-border-default bg-bg-card min-w-0">
       <div className="flex flex-wrap items-center gap-2 min-w-0">
@@ -199,25 +189,6 @@ export default function FeedbackPanel({
           </p>
         </div>
 
-        <label className="flex items-center gap-1.5 text-[11px] text-text-tertiary shrink-0">
-          model
-          <select
-            className="max-w-[10rem] px-1.5 py-1 rounded bg-bg-muted border border-border-default text-[11px] text-text-primary focus:outline-none focus:border-accent-bg cursor-pointer"
-            value={configured}
-            onChange={(e) => pickModel(e.target.value)}
-            disabled={paused}
-            title="Model to ask. “App default” is what Settings → LLM configures."
-          >
-            <option value="">App default</option>
-            {models.map((m) => (
-              <option key={m.name} value={m.name}>
-                {m.name}
-              </option>
-            ))}
-            {missing && <option value={configured}>{configured} (not installed)</option>}
-          </select>
-        </label>
-
         <button
           type="button"
           className={primaryButton}
@@ -225,12 +196,12 @@ export default function FeedbackPanel({
           onClick={() => void ask()}
           title={
             measured
-              ? "Send this take to an attached agent that can listen to it and explain what to fix"
+              ? "Ask an attached agent to listen to this take and explain what to fix"
               : "Nothing was measured for this attempt yet — assess it again first"
           }
         >
-          {busy === "generate" ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
-          {busy === "generate" ? "Asking…" : report ? "Ask agent again" : "Ask agent"}
+          {busy === "generate" ? <Loader2 size={12} className="animate-spin" /> : <Bot size={12} />}
+          {busy === "generate" ? "Sending…" : "Get Help"}
         </button>
 
         <button
@@ -238,12 +209,32 @@ export default function FeedbackPanel({
           className={smallButton}
           disabled={paused || !measured}
           onClick={() => void copyPrompt()}
-          title="Copies the exact prompt the button above would send, evidence included. Run it in any model and save the result."
+          title="Copies the exact prompt the button above would send, evidence included. The audio is not in the prompt — attach the recording yourself."
         >
           {busy === "copy" ? <Loader2 size={12} className="animate-spin" /> : <Copy size={12} />}
           Copy prompt
         </button>
       </div>
+
+      {/* The manual "Copy prompt" route cannot carry audio, so name the file the
+          learner must upload alongside the copied prompt. An attached agent
+          reaches this path on its own through the mailbox. */}
+      {audioPath && (
+        <div className="flex flex-col gap-1 min-w-0">
+          <p className="text-[11px] text-text-tertiary break-words">
+            Send the prompt yourself? Attach this recording — the prompt holds only the
+            measurements, so a model can hear the take just by reading this file.
+          </p>
+          <div className="flex items-center gap-1.5 min-w-0">
+            <code className="flex-1 min-w-0 px-2 py-1 rounded bg-bg-muted border border-border-default text-[11px] text-text-primary break-all select-all">
+              {audioPath}
+            </code>
+            <button type="button" className={smallButton} onClick={() => void copyPath()} title="Copy the recording's file path">
+              <Copy size={12} /> Path
+            </button>
+          </div>
+        </div>
+      )}
 
       {!measured && (
         <div className="flex flex-wrap items-center gap-2">

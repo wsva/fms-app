@@ -618,6 +618,7 @@ export default function AttemptsPanel({
               textUuid={selectedAttempt.text_uuid}
               stored={selectedAttempt.feedback ?? null}
               measured={selectedAttempt.metrics != null}
+              audioPath={selectedAttempt.audio_url ?? null}
               disabled={rerecognizing !== null}
               onAssessAgain={selectedAttempt.audio_url ? () => void assessAgain(selectedAttempt) : undefined}
             />

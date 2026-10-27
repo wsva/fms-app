@@ -4,12 +4,12 @@
 //! say the right words*; they never answer *what should I do differently* —
 //! this module is that second half. And a report about a reading needs the
 //! reading: the app's text-only LLM seam cannot carry audio, so the feedback
-//! route is the agent mailbox — the panel's "Ask agent" posts the evidence, the
+//! route is the agent mailbox — the panel's "Get Help" posts the evidence, the
 //! prompt and the recording to an attached agent that can hear the take.
 //!
 //! One prompt, two callers:
 //!
-//! * [`request_feedback`] — the panel's "Ask agent" button: it builds the
+//! * [`request_feedback`] — the panel's "Get Help" button: it builds the
 //!   context and posts it to the mailbox. The agent claims the row, calls
 //!   [`context`] (which carries `audio.path` and, on request, the take's bytes
 //!   as base64), and answers through [`save_report`], which writes into the
@@ -1022,7 +1022,7 @@ pub(crate) async fn request_feedback(
     if !ctx.audio.available {
         return Err(
             "This attempt's recording is not on this device, so there is nothing to hand an \
-             agent to listen to. Ask agent only works for takes this device recorded."
+             agent to listen to. Get Help only works for takes this device recorded."
                 .to_string(),
         );
     }
@@ -1126,7 +1126,7 @@ pub(crate) fn save_report(
 // Commands
 // ============================================================
 
-/// "Ask agent": post the evidence, the exact prompt and the recording's
+/// "Get Help": post the evidence, the exact prompt and the recording's
 /// location to the agent mailbox, so an attached model that can hear answers
 /// this take. The recording itself — not a recognizer's transcript — is the
 /// handoff. Returns the mail receipt; the report lands later through
