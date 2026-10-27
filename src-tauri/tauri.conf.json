@@ -14,6 +14,7 @@
     "windows": [
       {
         "title": "FmS",
+        "url": "home",
         "width": 800,
         "height": 600,
         "maximized": true,
