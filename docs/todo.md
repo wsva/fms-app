@@ -50,7 +50,8 @@ use the recognized text of standard audio as scoring reference
 read-aloud, record > saving > saved
 reperate from transcribing anf scoring
 
-rename "read-a-book" to "books" project-wide
+
+I tried to use the read-aloud page, but got very low scores, and no tips, no guidence, no improve suggestions. So I want to add a function, send the recording and text to a agent, to get suggestions in pronuciation and speaking, and how to improve them.
 
 
-I tried to use the read-aloud page, but got very low scores, and no tips, no guidence, no improve suggestions. So I want to add a function, send the recording and text to a LLM, to get suggestions in pronuciation and speaking, and how to improve them. We don't send, we setup a message, and let the third-aprty agent fetch it and ask, then the user can use the agent to discuss with AI platform further
+after click the ask an agent to generate explaination, we don't need to show the prompt any more

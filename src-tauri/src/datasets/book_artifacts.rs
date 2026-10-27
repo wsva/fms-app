@@ -35,9 +35,19 @@ use crate::xp::{xp_award_internal, XpAwardResult};
 // ============================================================
 
 /// A persisted understanding artifact. Mirrors the `book_artifact` table.
+///
+/// Five fields are derived by the write path rather than chosen by the caller,
+/// so they are optional on the way in: `uuid` (the request's target, or the
+/// subject's derived uuid), `book_uuid` (the argument the tool was called
+/// with), the two timestamps, and `content_hash` (the request's, when a
+/// delivery leaves it out — an empty one would be read as never stale). A
+/// delivery therefore only has to carry what it alone knows — the subject, the
+/// kind, the content and its source.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BookArtifact {
+    #[serde(default)]
     pub uuid: String,
+    #[serde(default)]
     pub book_uuid: String,
     /// `paragraph` | `chapter` | `sentence`.
     pub scope_type: String,
@@ -70,7 +80,9 @@ pub struct BookArtifact {
     /// was adopted rather than claimed (§5.1).
     #[serde(default)]
     pub source_hash: Option<String>,
+    #[serde(default)]
     pub created_at: String,
+    #[serde(default)]
     pub updated_at: String,
 }
 

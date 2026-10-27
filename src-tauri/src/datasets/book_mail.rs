@@ -140,6 +140,20 @@ fn stale_now(text: &str, requested_hash: &str) -> bool {
     !requested_hash.is_empty() && !text.is_empty() && hash_text(text) != requested_hash
 }
 
+/// Does this artifact answer *this* request (§5.1)?
+///
+/// One request is about one subject, so a delivery that names a different
+/// paragraph or asks for a different kind is refused rather than filed beside
+/// the one that was asked for. A request whose payload names no subject — a
+/// notice, or a row written by hand — contradicts nothing and is not compared,
+/// the same reading [`stale_now`] gives an empty hash.
+fn agrees_with_request(spec: &JobSpec, a: &BookArtifact) -> bool {
+    if spec.scope_type.is_empty() || spec.scope_uuid.is_empty() || spec.kind.is_empty() {
+        return true;
+    }
+    a.scope_type == spec.scope_type && a.scope_uuid == spec.scope_uuid && a.kind == spec.kind
+}
+
 /// A mail row as the Understand panel's job list shows it — the shape that
 /// predates the ledger, so an attached agent sees the same fields it always did.
 fn job_of(book: &Connection, m: &Mail) -> ArtifactJob {
@@ -337,6 +351,13 @@ pub struct Delivery {
 ///    correlated against a live claim would hand the zombie its bypass.
 /// 3. **no `job_uuid`** — no request at all: a legitimate unsolicited artifact,
 ///    recorded and never linked.
+///
+/// Whichever case it is, an artifact that names a subject is checked against
+/// the request it answers and refused with `mismatch_refused` when the two
+/// disagree; and a delivery that answers a request lands at **that request's**
+/// `target_uuid`, never at one the caller could have computed differently
+/// (§5.1). Both refusals happen before the claim is touched, so a malformed
+/// delivery costs no attempt.
 pub(crate) fn deliver(
     settings: &SettingsState,
     book_uuid: &str,
@@ -354,8 +375,9 @@ pub(crate) fn deliver(
     let now = mail::now_ms();
 
     let subject = subject_key(book_uuid, &artifact.scope_uuid, &artifact.kind);
-    let target = mail::target_uuid(&subject);
-    // The caller cannot choose where the artifact lands (§5.1).
+    let mut target = mail::target_uuid(&subject);
+    // Where the artifact would land if nobody had asked: derived from its own
+    // subject. A request, once found, overrides this with its `target_uuid`.
     artifact.uuid = target.clone();
     artifact.book_uuid = book_uuid.to_string();
     if artifact.created_at.trim().is_empty() {
@@ -406,6 +428,28 @@ pub(crate) fn deliver(
         _ => {}
     }
 
+    // §5.1: the guarded write below checks the *claim*, not the subject, so a
+    // delivery naming a different paragraph would land there and still close
+    // this request. Refuse before the claim is touched: nothing written, no
+    // attempt spent, and the holder can resend.
+    let spec = spec_of(&row);
+    if !agrees_with_request(&spec, &artifact) {
+        return Err(format!(
+            "mismatch_refused: request {} asks for a `{}` of {} `{}`, but this artifact is a \
+             `{}` of {} `{}`. Nothing was written and the claim is untouched: send the same \
+             content again with the request's `kind`, `scope_type` and `scope_uuid` — all three \
+             are in the claim's `data`.",
+            row.uuid, spec.kind, spec.scope_type, spec.scope_uuid,
+            artifact.kind, artifact.scope_type, artifact.scope_uuid
+        ));
+    }
+    // The request knows where its artifact belongs; recomputing from the
+    // artifact would only follow the caller.
+    if let Some(fixed) = row.target_uuid.as_deref().filter(|t| !t.trim().is_empty()) {
+        target = fixed.to_string();
+        artifact.uuid = target.clone();
+    }
+
     // Which claim guards the write, and how fresh is the text behind it.
     let mut adopted = false;
     let claim = match claim_id {
@@ -446,9 +490,16 @@ pub(crate) fn deliver(
         return Err("late_refused: the request has no claim to deliver against".into());
     }
 
-    let spec = spec_of(&row);
     artifact.mail_uuid = Some(row.uuid.clone());
-    artifact.delivered_by = Some(who.to_string());
+    // The claim's holder, not the tool's generic caller: provenance should not
+    // have to be joined through a mail row that may be archived long before the
+    // artifact is. Falls back to `who` when the row names nobody (an adopted
+    // claim is taken under the caller's own label).
+    artifact.delivered_by = row
+        .claimed_by
+        .clone()
+        .filter(|n| !n.trim().is_empty())
+        .or_else(|| Some(who.to_string()));
     // An adopted delivery has no claim-time hash: the agent may have generated
     // from text it fetched long before it called, so `NULL` (unknown vintage)
     // is the only honest stamp. It reads as possibly stale, not as fresh.
@@ -460,6 +511,13 @@ pub(crate) fn deliver(
             .filter(|h| !h.is_empty())
             .or_else(|| Some(spec.content_hash.clone()).filter(|h| !h.is_empty()))
     };
+    // An omitted `content_hash` reads as never stale — `book_list_artifacts`
+    // treats an empty hash as unprovable — so a delivery that does not echo it
+    // would opt out of staleness detection for good. The request knows the text
+    // it asked about, so supply it rather than leave the artifact unjudgeable.
+    if artifact.content_hash.trim().is_empty() {
+        artifact.content_hash = spec.content_hash.clone();
+    }
 
     // T5: freeze the row into the two-minute write lease.
     let began = mail::begin_delivery(&app, &row.uuid, &claim, now).map_err(|e| e.to_string())?;
