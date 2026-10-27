@@ -10,12 +10,14 @@ Beyond the practice modes, FmS bundles several AI and voice capabilities. They'r
 - If you'd rather use a hosted model, set the **LLM provider, API key, and model** in Settings instead.
 - The dock/agent (below) can sit alongside your work so you can ask questions without leaving the page you're on.
 
-## The Agent Dock (Goose) — **Desktop**
+## The Agent Dock and the Mailbox — **Desktop**
 
-The **Agent Dock** connects FmS to an AI agent (Goose) over its ACP bridge. Because every part of FmS is exposed through the built‑in MCP server, the agent can do real work for you: import and process datasets, generate subtitles, run card reviews, manage sync — the same actions you'd do by hand.
+FmS does not start an agent; one you already use attaches to the app's built‑in MCP server, and the Dock shows the mailbox it works from. Because every part of FmS is exposed there, the agent can do real work for you: import and process datasets, generate subtitles, run card reviews, manage sync — the same actions you'd do by hand.
 
-- Configure the connection in Settings → Global (the **Agent / Goose** section, desktop only).
-- Use the dock to give the agent a task and watch it operate on your data.
+- **Tools → Agent** is where the connection is set up, and where you decide how much an attached agent may do.
+- The Dock (bot button, or `Ctrl`+`Space`) carries the **Mailbox**: leave a request in FmS, and an attached agent claims it and files the result back where you asked for it.
+
+Setting it up — including the one prompt that makes an agent watch the mailbox for you — is [Attaching an Agent](agents.md).
 
 This is optional — you never need the agent to use FmS — but it's what makes repetitive batch work (processing twenty datasets, cleaning up cues) something you can delegate.
 

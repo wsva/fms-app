@@ -142,7 +142,7 @@ pub fn mail_brief(settings: State<'_, SettingsState>, limit: Option<i64>) -> Res
                  instructions. Deliver with the domain tool, citing the mail uuid and your \
                  claim_id.\nRead `fms://mailbox` once before you start. If `mail_*` is not in your \
                  tool list, your client did not mount FmS: point it at the app's `/mcp` endpoint \
-                 (FmS → Connect shows the address) and drive the same JSON-RPC over HTTP. \
+                 (Tools → Agent shows the address) and drive the same JSON-RPC over HTTP. \
                  `mail_head`'s `owed_agent` is the work signal; `unread` also counts mail you \
                  just delivered.\n",
             );
