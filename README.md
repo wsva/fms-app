@@ -22,8 +22,8 @@
 FmS turns authentic audio — textbook recordings, audiobooks, podcasts — into structured
 **dictation and speaking practice**. You import a dataset, the app transcribes it with a local
 speech-to-text model, generates waveforms and cue-level subtitles, and then you practice by
-typing (or speaking) what you hear. Everything runs on your machine: your material, your
-progress, and your models never leave the device.
+typing (or speaking) what you hear. Your audio, your progress and your models stay on the device —
+the few features that do talk to the network are listed under [Privacy](#privacy).
 
 The app is a **Tauri v2** port of the web version at [wsva/fms](https://github.com/wsva/fms),
 and ships for **Windows and Linux** (plus an experimental **Android** client that syncs with a PC).
@@ -49,6 +49,55 @@ and ships for **Windows and Linux** (plus an experimental **Android** client tha
 - **LLM Chat** — Ollama (local) or cloud providers through the goose SDK provider layer.
 - **OCR, Edge TTS, Wiki** — capture text from images, synthesize speech, keep notes.
 - **Workspaces** — multi-user data isolation with per-workspace directories and XP.
+
+## Privacy
+
+FmS is **local-first, not local-only**. Transcription, cuing, review scheduling, scoring and OCR all
+run on-device; a handful of features need the network, and each one is something you switch on.
+There is no telemetry, no analytics, no crash reporting, and no account is needed to use the app.
+
+| What you do | Leaves the device? | What is sent |
+|---|---|---|
+| Import, STT subtitles, waveforms, cue database, alignment | **No** | — |
+| Dictation, cards, review scheduling, search, XP, wiki | **No** | — |
+| Voice input, read-aloud scoring, OCR, book splitting | **No** | — |
+| LLM chat with Ollama on `localhost` | **No** | — |
+| LLM chat or generated content with a cloud provider (`openai`, `anthropic`, `groq`, `databricks`) | Yes — only if you configure a key | The prompt, and the text it asks about |
+| Speaking text aloud: Books, Read Aloud, Understanding panel, TTS page | Yes | The text to be spoken → Microsoft Edge TTS |
+| Dataset sync to another of your devices | To that device only | The dataset snapshot, over your LAN or tailnet |
+| Website account, dataset registry, mirror | Yes — opt-in | Login plus the dataset metadata you publish to `lusworkshop.site` |
+| Model download | Yes — opt-in | A file request to `huggingface.co` or `blob.handy.computer` |
+| Release/update check (Settings → About) | Yes | A request to `api.github.com`; no identifiers beyond the request itself |
+
+**Audio never leaves the device.** Every speech-to-text path is on-device (ONNX and GGML models
+downloaded once into your model directory; see the [manual](docs/manual/models.md)). Only *text* can
+leave, and only via the rows above that say so.
+
+The embedded MCP/HTTP server (port `35711`) is how an agent talks to the app. Loopback peers and
+Tailscale addresses (`100.64.0.0/10`) are trusted without credentials — with a `Host`-header check so
+a web page cannot reach it by pointing a public name at `127.0.0.1` — and every other peer must
+present a paired device's Ed25519 signature; unpaired peers can read only `/api/v1/status`,
+`/api/v1/cluster`, `/api/v1/pair/*` and the agent manual. The socket does listen on all interfaces,
+because that is how a paired phone syncs, and a UDP beacon on `35712` advertises the machine on your
+LAN so devices can find each other. Whatever you let a connected agent read does go to that agent —
+that is the point of attaching one — so attach an agent on your own machine if you want that traffic
+to stay there.
+
+API keys and the website login token are stored in this app's own settings and auth files inside
+your workspace, are only ever sent to the provider you chose, and are redacted (`***`) when a tool
+reads settings back.
+
+### Edge TTS is an unofficial dependency
+
+Speech synthesis uses the endpoint behind Edge's *Read Aloud*. It needs no API key, which is why it
+is free and covers every language the app needs — but it is **not a public Microsoft API**: it can
+change or stop working without notice, and it is governed by Microsoft's terms, not this project's.
+It has broken once already (the older client's `Sec-MS-GEC` token began returning `403`, fixed by a
+newer token version in `edge-tts-rust` 0.1.7). Treat speech synthesis as best-effort: synthesized
+audio is cached on disk, so anything already spoken keeps playing offline.
+
+**Planned:** a local TTS engine (Piper-class) as a fallback, which would let Books and Read Aloud
+run with the network switched off. Until then, TTS is the one feature that needs a connection.
 
 ## Download
 
