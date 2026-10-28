@@ -48,7 +48,9 @@ network are listed under [Privacy](#privacy), and what you may safely import is 
 [Bring your own content](#bring-your-own-content).
 
 The app is a **Tauri v2** port of the web version at [wsva/fms](https://github.com/wsva/fms),
-and ships for **Windows and Linux** (plus an experimental **Android** client that syncs with a PC).
+and ships for **Windows, Linux and macOS**, plus **Android and iOS** clients that practise a dataset
+and sync it with a PC. Every target is built from this repository by
+[GitHub Actions](.github/workflows/build.yml) on each `v*` tag.
 
 ## Features
 
@@ -168,15 +170,47 @@ page, and check it for the country you are in.
 
 Grab a prebuilt installer from the [latest release](https://github.com/wsva/fms-app/releases/latest):
 
-| Platform | Artifacts |
-|----------|-----------|
-| Windows  | `.exe` (NSIS), `.msi` |
-| Linux    | `.AppImage`, `.deb`, `.rpm` |
-| Android  | `.apk` (arm64) |
+| Platform | Artifacts | Notes |
+|----------|-----------|-------|
+| Windows  | `.exe` (NSIS), `.msi` | x64 |
+| Linux    | `.AppImage`, `.deb`, `.rpm` | x64 |
+| macOS    | `.dmg` | Apple Silicon only, macOS 11+, unsigned |
+| Android  | `.apk` | arm64 |
+| iOS      | `.ipa` | arm64, unsigned — re-sign it before it will install |
 
-Each asset is named `FmS_<platform>_<arch>_<tag>.<ext>` — `FmS_windows_x64_v0.1.1.exe`, `FmS_linux_amd64_v0.1.1.deb`, `FmS_android_arm64_v0.1.1.apk` — so the
-release tag is the only version in the name. Releases are built automatically by
-[GitHub Actions](.github/workflows/build.yml) on every `v*` tag.
+Each asset is named `FmS_<platform>_<arch>_<tag>.<ext>` — `FmS_windows_x64_v0.1.1.exe`,
+`FmS_linux_amd64_v0.1.1.deb`, `FmS_macos_arm64_v0.1.1.dmg` — so the release tag is the only version
+in the name.
+
+### Apple builds
+
+**Apple Silicon only.** The STT and desktop feature sets link ONNX Runtime through `ort-sys`, whose
+prebuilt binaries cover `aarch64-apple-darwin` and `aarch64-apple-ios` but not Intel Macs, so there
+is no `x86_64` build to download. macOS 11 (Big Sur) is the floor.
+
+**The macOS bundle is unsigned**, so Gatekeeper blocks the first launch of the downloaded app.
+Either right-click → *Open*, or clear the quarantine flag once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/FmS.app
+```
+
+**The iOS package needs re-signing.** CI holds no Apple Developer certificate, so the `.ipa` is
+archived with signing disabled and published as `FmS_ios_arm64_<tag>-unsigned.ipa`. Re-sign it with
+a free Apple ID (Sideloadly, AltStore) or a paid one (Xcode), then sideload.
+
+**The phone builds are clients, not PC replacements.** A phone practises a dataset and syncs it with
+a PC. What *builds* one — subtitle and waveform generation, transcript alignment, book splitting —
+and the PC-hosted extras (embedded HTTP/MCP server, OCR, screenshot capture, the Goose agent bridge)
+are desktop-only.
+
+### Platform notes
+
+- **OCR needs Tesseract on macOS and Linux.** The app runs `tesseract` from `PATH`
+  (`brew install tesseract` / `apt install tesseract-ocr`); only the usual Windows install
+  locations are probed by the app itself.
+- **Screen capture on macOS** asks for *Screen Recording* permission on first use and captures the
+  primary monitor — the drag-out-a-region overlay is Windows-only.
 
 ## License
 
