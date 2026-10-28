@@ -1,13 +1,13 @@
 {
   "spec": 2,
-  "uuid": "fms-manual",
+  "uuid": "wiki_eeddf6c5fb24",
   "type": "wiki",
   "format": "wiki-v1",
   "name": "fms-manual",
   "description": "User manual for FmS covering the desktop, Android, and website: setup, datasets, the practice modes, models, tools, sync, and the website.",
   "language": "en",
   "created_at": "2026-10-08T10:11:59Z",
-  "updated_at": "2026-10-20T00:00:00Z",
+  "updated_at": "2026-10-28T18:17:26Z",
   "sharing": {
     "visibility": "public",
     "owner_id": "",

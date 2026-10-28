@@ -1,13 +1,13 @@
 {
   "spec": 2,
-  "uuid": "fms-blog",
+  "uuid": "wiki_afe834097cf7",
   "type": "wiki",
   "format": "wiki-v1",
   "name": "fms-blog",
   "description": "",
   "language": "",
   "created_at": "2026-10-08T10:11:59Z",
-  "updated_at": "2026-10-08T10:11:59Z",
+  "updated_at": "2026-10-28T18:17:26Z",
   "sharing": {
     "visibility": "public",
     "owner_id": "",
