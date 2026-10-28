@@ -26,8 +26,8 @@ use crate::settings::SettingsState;
 
 use super::{
     assert_uuid_free, dataset_roots, fork_base_to_overlay, is_derived_index, is_under_download_root,
-    move_to_trash, read_info_opt, touch_info, write_info, DatasetInfo, DatasetType, FORMAT_WIKI,
-    INFO_FILE,
+    mint_into, move_to_trash, read_info_opt, touch_info, write_info, DatasetInfo, DatasetType,
+    FORMAT_WIKI, INFO_FILE,
 };
 
 /// The derived FTS index inside a wiki dataset dir. Never synced, never listed.
@@ -285,7 +285,15 @@ pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<WikiDatasetSummary>
 }
 
 /// Create a brand-new empty wiki dataset in the first configured root.
-pub(crate) fn create_dataset(settings: &SettingsState, name: &str) -> Result<WikiDatasetSummary, String> {
+///
+/// `family` joins an existing family of datasets (the `<type>_<key>` id grammar
+/// in [`super::ids`]) — the wiki notes written about a book carry its key;
+/// `None` starts a family of one.
+pub(crate) fn create_dataset(
+    settings: &SettingsState,
+    name: &str,
+    family: Option<&str>,
+) -> Result<WikiDatasetSummary, String> {
     if name.trim().is_empty() {
         return Err("Dataset name must not be empty".into());
     }
@@ -302,11 +310,13 @@ pub(crate) fn create_dataset(settings: &SettingsState, name: &str) -> Result<Wik
     if root.join(&folder).exists() {
         folder = format!("{}-{}", folder, &Uuid::new_v4().simple().to_string()[..8]);
     }
+    // Mint before creating anything on disk: a family key that does not resolve
+    // must not leave an empty dataset folder behind.
+    let uuid = mint_into(settings, DatasetType::Wiki, family)?;
+    assert_uuid_free(settings, &uuid)?;
     let dir = root.join(&folder);
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create dataset dir: {}", e))?;
 
-    let uuid = Uuid::new_v4().to_string();
-    assert_uuid_free(settings, &uuid)?;
     let info = DatasetInfo::new(
         uuid,
         DatasetType::Wiki,
@@ -332,7 +342,14 @@ pub(crate) fn create_dataset(settings: &SettingsState, name: &str) -> Result<Wik
 /// Convert an existing markdown folder into a wiki dataset *in place*: write
 /// an `info.json` with a fresh uuid and link the folder into
 /// `<datasets_dir>/wiki/meta.json`. No data is moved.
-pub(crate) fn import_dir(settings: &SettingsState, name: &str, path: &str) -> Result<WikiDatasetSummary, String> {
+///
+/// `family` is the same optional key as [`create_dataset`]'s.
+pub(crate) fn import_dir(
+    settings: &SettingsState,
+    name: &str,
+    path: &str,
+    family: Option<&str>,
+) -> Result<WikiDatasetSummary, String> {
     let dir = PathBuf::from(path);
     if !dir.exists() {
         return Err(format!("Directory does not exist: {}", path));
@@ -355,7 +372,7 @@ pub(crate) fn import_dir(settings: &SettingsState, name: &str, path: &str) -> Re
         return Err(format!("Directory already imported: {}", path));
     }
 
-    let uuid = Uuid::new_v4().to_string();
+    let uuid = mint_into(settings, DatasetType::Wiki, family)?;
     assert_uuid_free(settings, &uuid)?;
     let info = DatasetInfo::new(
         uuid,
@@ -797,8 +814,9 @@ pub async fn wiki_dataset_list(settings: State<'_, SettingsState>) -> Result<Vec
 pub async fn wiki_dataset_create(
     settings: State<'_, SettingsState>,
     name: String,
+    family: Option<String>,
 ) -> Result<WikiDatasetSummary, String> {
-    create_dataset(settings.inner(), &name)
+    create_dataset(settings.inner(), &name, family.as_deref())
 }
 
 /// Convert an existing markdown folder into a wiki dataset in place.
@@ -807,8 +825,9 @@ pub async fn wiki_dataset_import_dir(
     settings: State<'_, SettingsState>,
     name: String,
     path: String,
+    family: Option<String>,
 ) -> Result<WikiDatasetSummary, String> {
-    import_dir(settings.inner(), &name, &path)
+    import_dir(settings.inner(), &name, &path, family.as_deref())
 }
 
 /// Delete a wiki dataset, moving its folder into the shared trash. Returns the

@@ -43,8 +43,8 @@ use uuid::Uuid;
 use crate::auth::workspace_identity;
 use crate::datasets::{
     assert_uuid_free, canonical_stamp, dataset_roots, fork_base_to_overlay, is_under_download_root,
-    move_to_trash, now_row_stamp, now_stamp, read_info, read_info_opt, touch_info, write_info,
-    DatasetInfo, DatasetType, FORMAT_READ_ALOUD, INFO_FILE,
+    mint_into, move_to_trash, now_row_stamp, now_stamp, read_info, read_info_opt, short, touch_info,
+    write_info, DatasetInfo, DatasetType, FORMAT_READ_ALOUD, INFO_FILE,
 };
 use crate::settings::SettingsState;
 use crate::datasets::asr_metric::{score_asr, score_value, AsrScoreSummary};
@@ -856,18 +856,24 @@ pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<ReadAloudMeta> {
 }
 
 /// Create a new read-aloud dataset with an initialized database.
+///
+/// `family` joins an existing family of datasets (the `<type>_<key>` id grammar
+/// in [`crate::datasets::ids`]), so a read-aloud set recorded from a book stays
+/// addressable from it; omit it to start a family of one.
 #[tauri::command]
 pub async fn read_aloud_create(
     settings: State<'_, SettingsState>,
     name: String,
     description: Option<String>,
     language: Option<String>,
+    family: Option<String>,
 ) -> Result<ReadAloudMeta, String> {
     create_dataset(
         &settings,
         name,
         description.unwrap_or_default(),
         language.unwrap_or_default(),
+        family.as_deref(),
     )
 }
 
@@ -876,19 +882,23 @@ pub(crate) fn create_dataset(
     name: String,
     description: String,
     language: String,
+    family: Option<&str>,
 ) -> Result<ReadAloudMeta, String> {
     if name.trim().is_empty() {
         return Err("Name is required".into());
     }
     let root = primary_root(settings)?;
 
-    let uuid = Uuid::new_v4().to_string();
+    let uuid = mint_into(settings, DatasetType::Read, family)?;
     assert_uuid_free(settings, &uuid)?;
     let base_name = sanitize_name(&name);
 
     let mut dst = root.join(&base_name);
     if dst.exists() {
-        dst = root.join(format!("{}-{}", base_name, &uuid[..8]));
+        // `short` takes the *family key's* head. Slicing the id directly would
+        // hand back "read_alo" — the same eight chars for every read-aloud set,
+        // and a cut through the type slug rather than the distinguishing part.
+        dst = root.join(format!("{}-{}", base_name, short(&uuid)));
     }
     fs::create_dir_all(dst.join("media")).map_err(|e| e.to_string())?;
 
@@ -2333,7 +2343,7 @@ pub(crate) mod tests_support {
 
     /// A real read-aloud dataset with one text, built through the production path.
     pub(crate) fn dataset_with_text(settings: &SettingsState, content: &str) -> (String, String) {
-        let meta = create_dataset(settings, "Practise".into(), String::new(), String::new()).unwrap();
+        let meta = create_dataset(settings, "Practise".into(), String::new(), String::new(), None).unwrap();
         let text_uuid = Uuid::new_v4().to_string();
         let now = now_stamp();
         save_text_row(

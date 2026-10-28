@@ -17,6 +17,11 @@ struct CardDatasetCreateParam {
     description: String,
     #[serde(default)]
     location: String,
+    /// Family key to join (the `<type>_<key>` id grammar; see the
+    /// `dataset_family` tool) — the key of the book or dictation set this deck
+    /// was built from. Empty starts a standalone deck.
+    #[serde(default)]
+    family: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -115,13 +120,14 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"datasets": items, "count": items.len()}).to_string())
     }
 
-    #[tool(name = "card_dataset_create", description = "Create a new card dataset with a name and optional description. Returns the dataset summary with UUID. Use card_save to add cards afterwards.")]
+    #[tool(name = "card_dataset_create", description = "Create a new card dataset with a name and optional description. Returns the dataset summary with UUID. Use card_save to add cards afterwards. Pass `family` (see dataset_family) to make this deck the card member of a book's or dictation set's family.")]
     async fn card_dataset_create(&self, Parameters(param): Parameters<CardDatasetCreateParam>) -> Result<String, String> {
         log::info!("[MCP] card_dataset_create: name={}", param.name);
         let settings = self.app.state::<SettingsState>();
         let desc = if param.description.is_empty() { None } else { Some(param.description) };
         let loc = if param.location.is_empty() { None } else { Some(param.location) };
-        let summary = datasets::cards::card_dataset_create(settings, param.name, desc, loc).await?;
+        let family = if param.family.is_empty() { None } else { Some(param.family) };
+        let summary = datasets::cards::card_dataset_create(settings, param.name, desc, loc, family).await?;
         Ok(serde_json::json!({"status": "ok", "dataset": {
             "uuid": summary.info.uuid,
             "name": summary.info.name,

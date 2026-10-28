@@ -15,6 +15,9 @@ import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDi
 import { FAVORITES_DATASET_UUID, type Cue } from "@/lib/types";
 import { useDictationData } from "@/hooks/useDictationData";
 import { usePageRefresh } from "@/lib/refresh/page-refresh";
+import { useDatasetFamily } from "@/hooks/useDatasetFamily";
+import { openDatasetInTab } from "@/lib/nav/open-in-tab";
+import type { TabId } from "@/lib/shell/tabs";
 import { isAudio } from "@/lib/listen/utils";
 import { datasetStatusLabel, datasetStatusBadgeClasses, type DatasetStatus } from "@/lib/datasets/types";
 import { tbGhost } from "@/lib/ui/toolbar";
@@ -41,8 +44,15 @@ const getUUID = () => crypto.randomUUID().replaceAll("-", "");
 // Persistent preference for the mobile "cues only" collapse toggle.
 const COLLAPSED_KEY = "dictation.collapsed";
 
-export default function DictationPage({ active = true }: { active?: boolean }) {
+export default function DictationPage({ active = true, onNavigate }: { active?: boolean; onNavigate: (tab: TabId) => void }) {
     const d = useDictationData();
+
+    // The family of the open dataset, read so the trail can show which book it
+    // belongs to. `report.anchor` is the book member's uuid and `display_name`
+    // its name — a legacy dataset (no family key) yields no anchor and so adds
+    // no crumb.
+    const { report: family } = useDatasetFamily(d.selectedDatasetUuid);
+    const bookUuid = family?.anchor && family.anchor !== d.selectedDatasetUuid ? family.anchor : null;
 
     // ── Report this page's slice of the agent-visible UI context ──
     // The shell reports `active_tab`; this page owns the dataset, the open media
@@ -423,6 +433,20 @@ export default function DictationPage({ active = true }: { active?: boolean }) {
                     <>
                         <Breadcrumb.Sep />
                         <Breadcrumb.Current grow={false}>Locations</Breadcrumb.Current>
+                    </>
+                )}
+                {bookUuid && (
+                    <>
+                        <Breadcrumb.Sep />
+                        {/* The book this dictation dataset belongs to: one family,
+                            one key. Clicking crosses to the Books page and opens it. */}
+                        <Breadcrumb.Link
+                            truncate
+                            title={family?.display_name ?? "Book"}
+                            onClick={() => void openDatasetInTab(onNavigate, "books", "books.open-book", bookUuid)}
+                        >
+                            {family?.display_name ?? "Book"}
+                        </Breadcrumb.Link>
                     </>
                 )}
                 {d.selectedDataset && (

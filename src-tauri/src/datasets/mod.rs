@@ -9,6 +9,7 @@
 //! shared core is split by concern:
 //!
 //! - [`roots`] — `DatasetType`, where each type lives, `meta.json` links
+//! - [`ids`] — the `<type>_<family>` id grammar: mint, parse, resolve a family
 //! - [`registry`] — discovery, the summary/detail DTOs, import/update/delete
 //! - [`paths`] — uuid to directory (base vs overlay)
 //! - [`media`] — media enumeration, the `media/`-mirroring paths, trash, sync
@@ -26,6 +27,7 @@ pub(crate) mod book_mail;
 pub(crate) mod cards;
 pub(crate) mod db;
 pub(crate) mod dictation;
+pub(crate) mod ids;
 pub(crate) mod info;
 pub(crate) mod media;
 pub(crate) mod paths;
@@ -48,6 +50,13 @@ use tauri::{AppHandle, State};
 
 #[cfg(feature = "desktop")]
 use crate::{models::ModelState, settings::SettingsState};
+
+// The id grammar is one module's business; only the names the creators and the
+// family report actually call are re-exported, so a reader of this list sees the
+// scheme's whole surface.
+pub(crate) use ids::{
+    family_of, family_resolves, is_valid_key, mint_into, resolve_family, short,
+};
 
 // The shared descriptor and its helpers are addressed through this module root by
 // every dataset type and by the sync layer.

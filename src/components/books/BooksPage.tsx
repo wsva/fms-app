@@ -4,14 +4,17 @@ import { useState } from "react";
 import { AlignJustify, AlignLeft, Settings2, Zap, FolderOpen, Brain } from "lucide-react";
 import { useBookData } from "@/hooks/useBookData";
 import { usePageRefresh } from "@/lib/refresh/page-refresh";
+import { useAgentActions, reqStr } from "@/lib/agent/ui-actions";
 import { Toolbar, Breadcrumb, ToolbarButton, ToolbarOverflow, ToolbarMenuItem } from "@/components/ui/toolbar";
 import { LocationsManager } from "@/components/ui/LocationsManager";
 import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
+import type { TabId } from "@/lib/shell/tabs";
+import CompanionsStrip from "./CompanionsStrip";
 import ReadingView from "./ReadingView";
 import BookManager from "./BookManager";
 import BookAdvanced from "./BookAdvanced";
 
-export default function BooksPage() {
+export default function BooksPage({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
   const b = useBookData();
   const mobile = b.mobile;
 
@@ -44,6 +47,43 @@ export default function BooksPage() {
     canRefresh: () => !b.needSave,
     events: ["dataset-list-changed"],
   });
+
+  // What an agent (and the companions strip on a derived page) can drive here.
+  // The lookup refuses a uuid this page has not loaded, in the same wording the
+  // dictation and cards actions use, so a caller that arrives before the book
+  // list does can retry instead of guessing.
+  useAgentActions("books", [
+    {
+      id: "books.open-book",
+      label: "Open a book in the reading library, at its chapter list.",
+      kind: "read",
+      params_schema: {
+        dataset_uuid: {
+          type: "string",
+          description: "The book's uuid, from book_list or dataset_family.",
+          required: true,
+        },
+      },
+      run: (params) => {
+        const uuid = reqStr("books.open-book", params, "dataset_uuid");
+        const found = b.books.find((x) => x.uuid === uuid);
+        if (!found) {
+          throw new Error(
+            `no book with uuid '${uuid}' is loaded on this page. Loaded: ${
+              b.books.map((x) => `${x.name} (${x.uuid})`).join(", ") ||
+              "(none yet — the list may still be loading; retry once)"
+            }. book_list has the full set.`
+          );
+        }
+        // A book, not a chapter: clear the drill-down so the chapter list shows.
+        b.setBookUUID(uuid);
+        b.setChapterUUID("");
+        b.setView("read");
+        setShowLocations(false);
+        return { opened: uuid, name: found.name };
+      },
+    },
+  ]);
 
   return (
     <div className="flex h-full w-full bg-bg-body min-w-0">
@@ -215,6 +255,17 @@ export default function BooksPage() {
             </ToolbarOverflow>
           )}
         </Toolbar>
+
+        {/* Companions — the other datasets sharing this book's family key. A
+            book-level concern, so it hides on a chapter page (where the toolbar
+            is reading actions) and behind the Locations overlay. */}
+        {b.selectedBook && !onChapterPage && !showLocations && (
+          <CompanionsStrip
+            bookUuid={b.selectedBook.uuid}
+            bookName={b.selectedBook.name}
+            onNavigate={onNavigate}
+          />
+        )}
 
         {/* Locations overlay — replaces the three views while open, the same
             full-content overlay the Cards page uses. */}

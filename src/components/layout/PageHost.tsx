@@ -9,7 +9,8 @@
 // instance is `display:flex`, the rest `display:none`.
 //
 // A page receives `focused` where it previously received the ad-hoc `active`
-// prop, and `onNavigate` for the one page (Datasets Sync) that drives the shell.
+// prop, and `onNavigate` where it drives the shell — Datasets Sync, and the
+// pages a family crumb/chip links across (Books, Dictation, Cards, Read Aloud).
 //
 // Scroll offsets are the one piece of state a display toggle does not carry:
 // a pane with no layout box has no scrolling box, so a hidden pane returns at
@@ -65,7 +66,7 @@ function PageFor({
 }) {
   switch (tabId) {
     case "dictation":
-      return <DictationPage active={focused} />;
+      return <DictationPage active={focused} onNavigate={onNavigate} />;
     case "workflow":
       return <WorkflowPage />;
     case "datasets-sync":
@@ -75,11 +76,11 @@ function PageFor({
     case "simple-words":
       return <SimpleWordsPage />;
     case "books":
-      return <BooksPage />;
+      return <BooksPage onNavigate={onNavigate} />;
     case "read-aloud":
-      return <ReadAloudPage />;
+      return <ReadAloudPage onNavigate={onNavigate} />;
     case "cards":
-      return <CardsPage />;
+      return <CardsPage onNavigate={onNavigate} />;
     case "tasks":
       return <TasksPage />;
     case "edge-tts":

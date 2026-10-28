@@ -13,7 +13,8 @@ use crate::settings::SettingsState;
 
 use super::{
     DatasetInfo, FAVORITES_DATASET_UUID, FORMAT_DICTATION, INFO_FILE, LAYER_ROLE_FLAT,
-    LAYER_ROLE_OVERLAY, now_stamp, read_info, read_info_opt, write_info,
+    LAYER_ROLE_OVERLAY, assert_uuid_free, family_of, is_valid_key, mint_into, now_stamp, read_info,
+    read_info_opt, resolve_family, write_info,
 };
 
 use super::{
@@ -64,6 +65,38 @@ pub struct DatasetDetail {
     pub has_database: bool,
     pub has_book: bool,
     pub status: String,
+}
+
+/// One dataset of a family. `dataset_type` is the slug the dataset was *found*
+/// under, which is authoritative; the prefix in `uuid` is only a claim (see
+/// [`super::ids`]).
+#[derive(Clone, Serialize)]
+pub struct FamilyMember {
+    pub uuid: String,
+    pub dataset_type: String,
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub is_read_only: bool,
+}
+
+/// Everything knowable about a family in one read: its members, and the two
+/// derived facts a UI needs — the book to link back to and a name to show.
+///
+/// A family is a relation, not an entity, so this report is computed per call
+/// from the ids and never stored. `family` is `None` for a dataset whose id does
+/// not follow the grammar, in which case `members` holds that one dataset: an
+/// unaffiliated dataset is a family of one, which lets callers skip the special
+/// case.
+#[derive(Clone, Serialize)]
+pub struct FamilyReport {
+    pub family: Option<String>,
+    pub members: Vec<FamilyMember>,
+    /// The book member's uuid, when the family has one — what a derived page's
+    /// breadcrumb links back to.
+    pub anchor: Option<String>,
+    /// The book member's name, else the alphabetically-first member's.
+    pub display_name: Option<String>,
 }
 
 pub struct DatasetState;
@@ -211,11 +244,16 @@ pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<DatasetSummary> {
 /// Import a dataset from a source directory. The directory must contain a `media/`
 /// subdirectory with at least one audio file. The entire directory is copied into
 /// the managed datasets directory and an `info.json` is generated.
+///
+/// `family` is consulted only when the folder carries no usable `info.json`: a
+/// dataset exported by another copy of the app keeps the identity it arrived
+/// with, exactly as before.
 #[allow(dead_code)]
 #[tauri::command]
 pub async fn dataset_import(
     settings: State<'_, SettingsState>,
     source_dir: String,
+    family: Option<String>,
 ) -> Result<DatasetSummary, String> {
     let src = PathBuf::from(&source_dir);
     if !src.exists() || !src.is_dir() {
@@ -238,13 +276,13 @@ pub async fn dataset_import(
         .unwrap_or_else(|| datasets_dir(&settings));
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create datasets dir: {}", e))?;
 
-    let uuid = Uuid::new_v4().to_string();
-
-    // Use the source directory name as the dataset folder name
+    // Use the source directory name as the dataset folder name. A path with no
+    // file name (a filesystem root) falls back to a throwaway id: the dataset's
+    // own uuid is only decided below, once we know whether the folder brought one.
     let dir_name = src
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| uuid.clone());
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let dst = dir.join(&dir_name);
     if dst.exists() {
@@ -278,6 +316,17 @@ pub async fn dataset_import(
             if imported_info_path.exists() {
                 log::warn!("Imported '{}' has an info.json we cannot read; replacing it", dir_name);
             }
+            let uuid = match mint_into(&settings, DatasetType::Dictation, family.as_deref())
+                .and_then(|uuid| assert_uuid_free(&settings, &uuid).map(|()| uuid))
+            {
+                Ok(uuid) => uuid,
+                Err(e) => {
+                    // The copy already happened; leaving it behind would register
+                    // a half-imported dataset with no identity.
+                    let _ = fs::remove_dir_all(&dst);
+                    return Err(e);
+                }
+            };
             DatasetInfo::new(uuid, DatasetType::Dictation, FORMAT_DICTATION, name)
         }
     };
@@ -313,6 +362,106 @@ pub async fn dataset_get(
     let has_book = path.join("book.txt").exists();
     let status = if has_database { "ready" } else { "not_ready" };
     Ok(DatasetDetail { info, media, has_subtitles, has_waveforms, has_database, has_book, status: status.into() })
+}
+
+/// The datasets that share a family key — the `<type>_<key>` relation defined in
+/// [`super::ids`]. `uuid_or_key` may be a member's uuid or a bare family key.
+///
+/// Nothing here is stored: the report is rebuilt from the ids on every call, so
+/// it cannot drift the way a family registry would.
+#[tauri::command]
+pub async fn dataset_family(
+    settings: State<'_, SettingsState>,
+    uuid_or_key: String,
+) -> Result<FamilyReport, String> {
+    family_report(&settings, &uuid_or_key)
+}
+
+/// Body of [`dataset_family`], split out so the MCP tool and the command share it.
+///
+/// The dataset lookup comes first, and that order is load-bearing: a legacy
+/// 32-hex uuid *is* a well-formed family key, so testing [`is_valid_key`] first
+/// would send every pre-scheme dataset down the family path and answer "no
+/// dataset belongs to family …" for an id that plainly exists. A bare key can
+/// never be a registered dataset id, so dataset-first is unambiguous both ways.
+pub(crate) fn family_report(
+    settings: &SettingsState,
+    uuid_or_key: &str,
+) -> Result<FamilyReport, String> {
+    let arg = uuid_or_key.trim();
+    if arg.is_empty() {
+        return Err("dataset_family needs a dataset uuid or a family key".into());
+    }
+
+    if let Ok((path, ty)) = find_dataset_dir_typed(settings, arg) {
+        let info = read_info(&path)?;
+        let Some(family) = family_of(&info.uuid) else {
+            // Unaffiliated: reported as a family of one, so a caller never needs
+            // a special case for a legacy dataset.
+            return Ok(report_from(None, vec![member_of(settings, &info, ty, &path)]));
+        };
+        return Ok(report_from(Some(family.to_string()), members_of(settings, family)));
+    }
+
+    if is_valid_key(arg) {
+        super::family_resolves(settings, arg)?;
+        return Ok(report_from(Some(arg.to_string()), members_of(settings, arg)));
+    }
+
+    Err(format!(
+        "No dataset has id '{}', and it is not a family key either. Pass a uuid from \
+         `dataset_list`, or the key part of one (an id looks like '{}').",
+        arg,
+        super::ids::mint(DatasetType::Book, "a1b2c3d4e5f6")
+    ))
+}
+
+/// Read every dataset carrying `family`, in `DatasetType::ALL` order so the UI
+/// shows siblings in a stable sequence.
+fn members_of(settings: &SettingsState, family: &str) -> Vec<FamilyMember> {
+    resolve_family(settings, family)
+        .into_iter()
+        .filter_map(|(ty, uuid, path)| match read_info(&path) {
+            Ok(info) => Some(member_of(settings, &info, ty, &path)),
+            // A member we cannot read is not one we can report; a broken
+            // `info.json` is the audit tools' business, not this one's.
+            Err(e) => {
+                log::warn!("Skipping family member '{}': {}", uuid, e);
+                None
+            }
+        })
+        .collect()
+}
+
+fn member_of(
+    settings: &SettingsState,
+    info: &DatasetInfo,
+    ty: DatasetType,
+    path: &Path,
+) -> FamilyMember {
+    FamilyMember {
+        uuid: info.uuid.clone(),
+        // The type it was *found* under, not the one its prefix claims.
+        dataset_type: ty.as_str().to_string(),
+        name: info.name.clone(),
+        path: path.to_string_lossy().into_owned(),
+        is_read_only: is_under_download_root(settings, path),
+    }
+}
+
+/// Derive the two facts a UI asks of a family: which member to link back to, and
+/// what to call the family. Both come from the members — a family owns no name.
+fn report_from(family: Option<String>, members: Vec<FamilyMember>) -> FamilyReport {
+    let anchor = members
+        .iter()
+        .find(|m| m.dataset_type == DatasetType::Book.as_str())
+        .map(|m| m.uuid.clone());
+    let display_name = anchor
+        .as_deref()
+        .and_then(|a| members.iter().find(|m| m.uuid == a))
+        .map(|m| m.name.clone())
+        .or_else(|| members.iter().map(|m| m.name.clone()).min());
+    FamilyReport { family, members, anchor, display_name }
 }
 
 /// Layer / read-only status of a dataset, for status-before-acting checks

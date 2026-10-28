@@ -33,8 +33,17 @@ struct ListCuesParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
-struct PathParam {
+struct DatasetInitDirParam {
     path: String,
+    /// Family key to join (see [`dataset_family`]). Empty starts a new family.
+    #[serde(default)]
+    family: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct DatasetFamilyParam {
+    /// Any member's dataset uuid, or a bare family key on its own.
+    uuid_or_key: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -58,6 +67,10 @@ struct DatasetRemoveDirParam {
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct DatasetImportParam {
     source_dir: String,
+    /// Family key to join (see [`dataset_family`]). Only consulted when the
+    /// folder brings no readable `info.json`; empty starts a new family.
+    #[serde(default)]
+    family: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -67,6 +80,9 @@ struct DatasetCreateParam {
     description: String,
     #[serde(default)]
     location: String,
+    /// Family key to join (see [`dataset_family`]). Empty starts a new family.
+    #[serde(default)]
+    family: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -193,6 +209,14 @@ impl DatasetMcpServer {
                 "transcript": has("transcript")
             }
         }).to_string())
+    }
+
+    #[tool(name = "dataset_family", description = "List every dataset of one family — the `<type>_<key>` id relation that ties a book to its dictation set, card deck, read-aloud set and wiki notes. Pass any member's uuid (or a bare family key) and get the siblings back with their type, name, path and read-only flag, plus `anchor` (the book member, when there is one) and a derived `display_name`. A dataset whose id predates the grammar comes back alone with `family: null`, so it is safe to call this on any uuid. Nothing about a family is stored: the report is computed from the ids on every call, so it cannot go stale. To create a missing sibling, call that type's create tool with this family's key as its `family` argument.")]
+    async fn dataset_family(&self, Parameters(param): Parameters<DatasetFamilyParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_family: uuid_or_key={}", param.uuid_or_key);
+        let settings = self.app.state::<SettingsState>();
+        let report = datasets::family_report(&settings, &param.uuid_or_key)?;
+        Ok(serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?)
     }
 
     #[tool(name = "dataset_info_get", description = "Read a dataset's unified info.json descriptor, whatever its type: spec, uuid, type, format, name, description, language, created_at, updated_at, sharing (visibility, owner_id, subscribers), plus its path and location on this machine.")]
@@ -574,31 +598,34 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "dataset_type": param.dataset_type, "message": format!("Unlinked directory: {}", param.path)}).to_string())
     }
 
-    #[tool(name = "dataset_import", description = "Import an existing dataset directory. The directory must contain an info.json file. Returns the dataset summary with UUID.")]
+    #[tool(name = "dataset_import", description = "Import an existing dataset directory. The directory must contain an info.json file. Returns the dataset summary with UUID. Pass `family` (see dataset_family) only if the folder has no readable info.json — an imported id is kept as it is.")]
     async fn dataset_import(&self, Parameters(param): Parameters<DatasetImportParam>) -> Result<String, String> {
         log::info!("[MCP] dataset_import: source={}", param.source_dir);
         let settings = self.app.state::<SettingsState>();
-        let summary = datasets::dataset_import(settings, param.source_dir).await?;
+        let family = if param.family.is_empty() { None } else { Some(param.family) };
+        let summary = datasets::dataset_import(settings, param.source_dir, family).await?;
         let _ = self.app.emit("dataset-list-changed", ());
         Ok(serde_json::to_string_pretty(&summary).unwrap_or_default())
     }
 
-    #[tool(name = "dataset_create", description = "Create a new empty dataset with a name and optional description. Returns the dataset summary with UUID. Use dataset_import_media afterwards to add audio files.")]
+    #[tool(name = "dataset_create", description = "Create a new empty dataset with a name and optional description. Returns the dataset summary with UUID. Use dataset_import_media afterwards to add audio files. Pass `family` (see dataset_family) to make it a sibling of datasets that already exist.")]
     async fn dataset_create(&self, Parameters(param): Parameters<DatasetCreateParam>) -> Result<String, String> {
         log::info!("[MCP] dataset_create: name={}", param.name);
         let settings = self.app.state::<SettingsState>();
         let desc = if param.description.is_empty() { None } else { Some(param.description) };
         let loc = if param.location.is_empty() { None } else { Some(param.location) };
-        let summary = datasets::dataset_create(settings, param.name, desc, loc).await?;
+        let family = if param.family.is_empty() { None } else { Some(param.family) };
+        let summary = datasets::dataset_create(settings, param.name, desc, loc, family).await?;
         let _ = self.app.emit("dataset-list-changed", ());
         Ok(serde_json::to_string_pretty(&summary).unwrap_or_default())
     }
 
-    #[tool(name = "dataset_init_dir", description = "Initialize a raw media folder IN PLACE as a dictation dataset: mint a server-side uuid and write a default info.json into the folder where it already lives (no copy — unlike dataset_import). The folder must sit directly inside a configured dataset location and contain media/. Idempotent: if a readable info.json already exists its summary is returned unchanged. Follow with dataset_info_save to edit the metadata.")]
-    async fn dataset_init_dir(&self, Parameters(param): Parameters<PathParam>) -> Result<String, String> {
+    #[tool(name = "dataset_init_dir", description = "Initialize a raw media folder IN PLACE as a dictation dataset: mint a server-side uuid and write a default info.json into the folder where it already lives (no copy — unlike dataset_import). The folder must sit directly inside a configured dataset location and contain media/. Idempotent: if a readable info.json already exists its summary is returned unchanged, and `family` is then ignored. Follow with dataset_info_save to edit the metadata.")]
+    async fn dataset_init_dir(&self, Parameters(param): Parameters<DatasetInitDirParam>) -> Result<String, String> {
         log::info!("[MCP] dataset_init_dir: path={}", param.path);
         let settings = self.app.state::<SettingsState>();
-        let summary = datasets::dataset_init_dir(settings, param.path).await?;
+        let family = if param.family.is_empty() { None } else { Some(param.family) };
+        let summary = datasets::dataset_init_dir(settings, param.path, family).await?;
         let _ = self.app.emit("dataset-list-changed", ());
         Ok(serde_json::to_string_pretty(&summary).unwrap_or_default())
     }

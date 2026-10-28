@@ -75,6 +75,7 @@ src-tauri/src/
 │   ├── waveform.rs         # Stage 2b: symphonia peaks into `waveform/*.json`, which the dictation page
 │   │                       #   draws without decoding the audio again
 │   ├── db.rs               # Stage 3: the `data.sqlite3` schema, VTT parsing, cue generation
+│   ├── ids.rs              # The `<type-slug>_<family-key>` id grammar: mint/split/family helpers that link the datasets of one work (no storage; advisory only)
 │   ├── info.rs             # The unified `info.json` descriptor every dataset type shares
 │   ├── dictation/
 │   │   ├── mod.rs          # Dictation commands: media/subtitle/cue queries, progress (app-level DB)

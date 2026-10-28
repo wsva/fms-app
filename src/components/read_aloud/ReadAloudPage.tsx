@@ -43,6 +43,10 @@ import type {
 } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { usePageRefresh } from "@/lib/refresh/page-refresh";
+import { useAgentActions, reqStr } from "@/lib/agent/ui-actions";
+import { useDatasetFamily } from "@/hooks/useDatasetFamily";
+import { openDatasetInTab } from "@/lib/nav/open-in-tab";
+import type { TabId } from "@/lib/shell/tabs";
 import { rerecognizeAttempt } from "@/lib/read_aloud/rerecognize";
 import { groupByText, hasUsableClip, listStandardAudio } from "@/lib/read_aloud/standardAudio";
 import type { RaFontId, RaSpaceId } from "@/lib/read_aloud/fonts";
@@ -167,7 +171,7 @@ function ManageGroup({
   );
 }
 
-export default function ReadAloudPage() {
+export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
   const [datasets, setDatasets] = useState<ReadAloudMeta[]>([]);
   const [selectedDataset, setSelectedDataset] = useState<string>("");
   const [texts, setTexts] = useState<ReadText[]>([]);
@@ -551,6 +555,49 @@ export default function ReadAloudPage() {
     setSelectedText(null);
   };
 
+  // The family of the open dataset, read so the trail can show which book it
+  // belongs to. `report.anchor` is the book member's uuid, and `display_name`
+  // is that book's name when there is one — so a legacy dataset (no key, no
+  // family) yields no anchor and simply adds no crumb.
+  const { report: family } = useDatasetFamily(selectedDataset);
+  const bookUuid = family?.anchor && family.anchor !== selectedDataset ? family.anchor : null;
+
+  // What an agent — and the book page's companions strip — can drive here.
+  // The lookup refuses a uuid this page has not loaded, in the same wording the
+  // dictation and cards actions use, so a caller that arrives before the dataset
+  // list does can retry instead of guessing.
+  useAgentActions("read-aloud", [
+    {
+      id: "read-aloud.open-dataset",
+      label: "Open a read-aloud dataset and show its texts.",
+      kind: "read",
+      params_schema: {
+        dataset_uuid: {
+          type: "string",
+          description: "The read-aloud dataset uuid, from read_aloud_list or dataset_family.",
+          required: true,
+        },
+      },
+      run: (params) => {
+        const uuid = reqStr("read-aloud.open-dataset", params, "dataset_uuid");
+        const found = datasets.find((d) => d.uuid === uuid);
+        if (!found) {
+          throw new Error(
+            `no read-aloud dataset with uuid '${uuid}' is loaded on this page. Loaded: ${
+              datasets.map((d) => `${d.name} (${d.uuid})`).join(", ") ||
+              "(none yet — the list may still be loading; retry once)"
+            }. read_aloud_list has the full set.`
+          );
+        }
+        setAdvancedView(false);
+        setSelectedDataset(uuid);
+        setSelectedText(null);
+        setShowLocations(false);
+        return { opened: uuid, name: found.name };
+      },
+    },
+  ]);
+
   // ── Editor lifecycle ──────────────────────────────────────────────
   const startEdit = (t: ReadText | null) => {
     setEditText(t);
@@ -797,6 +844,20 @@ export default function ReadAloudPage() {
           <>
             <Breadcrumb.Sep />
             <Breadcrumb.Current grow={false}>Locations</Breadcrumb.Current>
+          </>
+        )}
+        {bookUuid && (
+          <>
+            <Breadcrumb.Sep />
+            {/* The book this read-aloud dataset belongs to: one family, one key.
+                Clicking crosses to the Books page and opens it there. */}
+            <Breadcrumb.Link
+              truncate
+              title={family?.display_name ?? "Book"}
+              onClick={() => void openDatasetInTab(onNavigate, "books", "books.open-book", bookUuid)}
+            >
+              {family?.display_name ?? "Book"}
+            </Breadcrumb.Link>
           </>
         )}
         {activeDataset && (

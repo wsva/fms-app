@@ -11,14 +11,22 @@ use crate::settings::SettingsState;
 use super::DatasetMcpServer;
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
-struct WikiDatasetNameParam {
+struct WikiDatasetCreateParam {
     name: String,
+    /// Family key to join (the `<type>_<key>` id grammar; see the
+    /// `dataset_family` tool) — the book these notes are about. Empty starts a
+    /// standalone wiki.
+    #[serde(default)]
+    family: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct WikiDatasetImportParam {
     name: String,
     path: String,
+    /// Family key to join, as `wiki_dataset_create`'s.
+    #[serde(default)]
+    family: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -61,19 +69,21 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&datasets).unwrap_or_default())
     }
 
-    #[tool(name = "wiki_dataset_create", description = "Create a new empty wiki dataset with the given name under the datasets directory. Returns the new dataset summary including its uuid.")]
-    async fn wiki_dataset_create(&self, Parameters(param): Parameters<WikiDatasetNameParam>) -> Result<String, String> {
+    #[tool(name = "wiki_dataset_create", description = "Create a new empty wiki dataset with the given name under the datasets directory. Pass `family` (see dataset_family) to attach it to the book or dictation set it documents. Returns the new dataset summary including its uuid.")]
+    async fn wiki_dataset_create(&self, Parameters(param): Parameters<WikiDatasetCreateParam>) -> Result<String, String> {
         log::info!("[MCP] wiki_dataset_create: name={}", param.name);
         let state = self.app.state::<SettingsState>();
-        let summary = crate::datasets::wiki::wiki_dataset_create(state.into(), param.name).await?;
+        let family = if param.family.is_empty() { None } else { Some(param.family) };
+        let summary = crate::datasets::wiki::wiki_dataset_create(state.into(), param.name, family).await?;
         Ok(serde_json::to_string_pretty(&summary).unwrap_or_default())
     }
 
-    #[tool(name = "wiki_dataset_import_dir", description = "Convert an existing local markdown folder into a wiki dataset in place: writes an info.json into it and links the folder — no files are moved or copied.")]
+    #[tool(name = "wiki_dataset_import_dir", description = "Convert an existing local markdown folder into a wiki dataset in place: writes an info.json into it and links the folder — no files are moved or copied. Pass `family` (see dataset_family) to attach it to the book or dictation set it documents.")]
     async fn wiki_dataset_import_dir(&self, Parameters(param): Parameters<WikiDatasetImportParam>) -> Result<String, String> {
         log::info!("[MCP] wiki_dataset_import_dir: name={}, path={}", param.name, param.path);
         let state = self.app.state::<SettingsState>();
-        let summary = crate::datasets::wiki::wiki_dataset_import_dir(state.into(), param.name, param.path).await?;
+        let family = if param.family.is_empty() { None } else { Some(param.family) };
+        let summary = crate::datasets::wiki::wiki_dataset_import_dir(state.into(), param.name, param.path, family).await?;
         Ok(serde_json::to_string_pretty(&summary).unwrap_or_default())
     }
 

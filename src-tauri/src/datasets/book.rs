@@ -8,9 +8,9 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::datasets::{
-    assert_uuid_free, dataset_roots, fork_base_to_overlay, is_under_download_root, move_to_trash,
-    now_stamp, read_info, read_info_opt, write_info, DatasetInfo, DatasetType, FORMAT_BOOK,
-    INFO_FILE,
+    assert_uuid_free, dataset_roots, fork_base_to_overlay, is_under_download_root, mint_into,
+    move_to_trash, now_stamp, read_info, read_info_opt, short, write_info, DatasetInfo, DatasetType,
+    FORMAT_BOOK, INFO_FILE,
 };
 use crate::settings::SettingsState;
 
@@ -394,10 +394,16 @@ pub(crate) fn list_books(settings: &SettingsState) -> Vec<BookMeta> {
 }
 
 /// Create a new book directory with an initialized database.
+///
+/// `family` joins an existing family of datasets (the `<type>_<key>` id grammar
+/// in [`crate::datasets::ids`]). It is normally omitted: a book is the member a
+/// family is minted *from*, so it starts one. A book derived from a dictation set
+/// or deck that already exists passes that dataset's key instead.
 #[tauri::command]
 pub async fn book_create(
     settings: State<'_, SettingsState>,
     name: String,
+    family: Option<String>,
 ) -> Result<BookMeta, String> {
     if name.trim().is_empty() {
         return Err("Book name is required".into());
@@ -408,13 +414,16 @@ pub async fn book_create(
         .ok_or_else(|| "No book location configured".to_string())?;
     fs::create_dir_all(&root).map_err(|e| format!("Failed to create books dir: {}", e))?;
 
-    let uuid = Uuid::new_v4().to_string();
+    let uuid = mint_into(&settings, DatasetType::Book, family.as_deref())?;
     assert_uuid_free(&settings, &uuid)?;
     let base_name = sanitize_dir_name(&name);
 
     let mut dst = root.join(&base_name);
     if dst.exists() {
-        dst = root.join(format!("{}-{}", base_name, &uuid[..8]));
+        // `short` takes the *family key's* head. Slicing the id directly would
+        // hand back "book_a1b" — the same eight chars for every book, i.e. no
+        // disambiguation at all.
+        dst = root.join(format!("{}-{}", base_name, short(&uuid)));
     }
 
     fs::create_dir_all(dst.join("media")).map_err(|e| e.to_string())?;

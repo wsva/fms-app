@@ -728,12 +728,17 @@ pub async fn card_dataset_list(
 }
 
 /// Create a new card dataset.
+///
+/// `family` joins an existing family of datasets (the `<type>_<key>` id grammar
+/// in [`crate::datasets::ids`]), which is how a deck derived from a book or a
+/// dictation set stays addressable from it; omit it for a standalone deck.
 #[tauri::command]
 pub async fn card_dataset_create(
     settings: State<'_, SettingsState>,
     name: String,
     description: Option<String>,
     location: Option<String>,
+    family: Option<String>,
 ) -> Result<CardDatasetSummary, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -756,7 +761,11 @@ pub async fn card_dataset_create(
     };
     fs::create_dir_all(&root).map_err(|e| format!("Failed to create datasets dir: {}", e))?;
 
-    let uuid = Uuid::new_v4().to_string();
+    let uuid = crate::datasets::mint_into(
+        &settings,
+        crate::datasets::DatasetType::Card,
+        family.as_deref(),
+    )?;
     assert_uuid_free(&settings, &uuid)?;
 
     // Sanitize directory name

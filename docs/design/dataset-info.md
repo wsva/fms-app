@@ -72,31 +72,58 @@ external generator for no functional gain. All path construction goes through
   the UI (`DictationPage`) disables "add to Favorites" by comparing the selected
   dataset's uuid, not a boolean.
 
-## Companion datasets carry the book's uuid, prefixed
+## A family key links the datasets of one work
 
-A card dataset derived from a book encodes the linkage **in its own id**:
+Datasets that belong to the same work — a book and its dictation set, its cards,
+its read-aloud texts, its wiki — encode the linkage **in their own ids**:
 
 ```
-uuid = "cards_of_book_" + <book's uuid>      e.g. cards_of_book_a3a033d207c84b9a88d97452a9c3f7b1
+uuid = "<type-slug>" + "_" + <family-key>   e.g. book_a1b2c3d4e5f6, dictation_a1b2c3d4e5f6, card_a1b2c3d4e5f6
 ```
 
-- Locating the companion from a book (or recovering the book from it) is pure
-  string work — prepend or strip the prefix — with no schema field, no query
-  over the dataset set, and nothing to keep in sync when either side moves.
-  The link is visible wherever the id is: logs, the hub catalog, the
-  `dataset_sync_state` key.
-- It stands on the `uuid` contract exactly as the reserved Favorites id does:
-  the value is an opaque slug, never format-validated, so a synthetic derived
-  id is legal by construction.
-- **Convention, not contract.** No code validates the prefix, and the scheme is
-  1:1 — one dataset per book. Should several datasets per book ever be needed, the
-  prefix strains and the right tool becomes an optional `derived_from` field on
-  the *card* dataset (pointer on the child, per the `card_fork` lineage
-  precedent), resolved as book→datasets by reverse lookup. Not built.
+- **Grammar:** `<type-slug>_<family-key>[_<discriminator>]`. The slug is
+  `DatasetType::as_str()` verbatim (`book`, `dictation`, `card`, `read_aloud`,
+  `wiki`); the key is 8–32 lowercase hex chars and contains no `_`, which is what
+  makes `read_aloud_…` unambiguous. The whole grammar lives in one module,
+  `src-tauri/src/datasets/ids.rs` — nothing else parses an id, and the frontend
+  only carries the two DTOs (`src/lib/datasets/family.ts`), never the grammar.
+- **Minted keys are 12 hex chars (48 bits).** The key is paid five times over: it
+  sits inside every member's uuid, and those ids appear in
+  `/api/v1/datasets/{uuid}/…`, in the follower's snapshot path
+  `<datasets>/<type>/<uuid>/`, in `dataset_sync_state`, in `xp_ledger`, in logs and
+  in MCP params an agent echoes back. So 22-char ids beat 42-char ones at no cost —
+  collision odds are ~10⁻⁹ at 1,000 families and ~10⁻⁷ at 10,000, four orders of
+  magnitude below what this app will reach. The grammar still accepts up to 32, so
+  a full uuid stays legal and a migrated family may carry one. The failure mode
+  worth remembering: a key collision is **not** caught by `assert_uuid_free` — two
+  unrelated works would silently merge into one family — and the repair is
+  re-minting one of them.
+- **Advisory, never authoritative.** No code may infer a dataset's type from its
+  id. The directory slug and `info.type` stay the authority
+  (`find_dataset_dir_typed` already warns and skips on mismatch), so a re-typed
+  dataset with a stale prefix is cosmetic, not broken.
+- **The family is not an entity.** There is no registry file, no app-DB table, no
+  `info.json` field. A family exists *iff* at least one dataset's id parses to it,
+  and its display name is derived — the book member's `info.name`, else the
+  alphabetically-first member's. Nothing to administer, no new page: `dataset_family`
+  (Tauri command + MCP read tool) answers "who is in this family" by probing the
+  five candidate ids with `find_dataset_dir_typed` (≤5 lookups, no scan), and the
+  Books page's companions strip is the one place the relation is *written*.
+- **Legacy ids never parse.** Random uuids, `de_a1_by_system`, the reserved
+  `dictation-favorites` and the retired `cards_of_book_…` all yield family `None`
+  and are reported as a family of one, so callers need no special case.
+- **1:1 per (family, type)** by default. The third segment is reserved as the
+  escape hatch and nothing mints it today; minting into a family whose slot for
+  that type is taken is an error naming the occupant's uuid and pointing at the
+  discriminator.
+- **`cards_of_book_<book uuid>` is superseded.** It was the single-type ancestor of
+  this scheme and still works as a plain (family-less) id, but new companions are
+  `card_<key>`. `learning/dataset_studio`'s exporters still mint the old form;
+  switching them over is separate work in that repo.
 - The generator must mint the derived id, not clone the source's:
   `learning/dataset_studio`'s card export originally copied the book's
   `info.json` *including its uuid* — the collision below was introduced that
-  way, then re-minted by hand into this scheme.
+  way, then re-minted by hand into a prefixed id.
 
 Why identity is the wrong binding: `uuid` is the dataset's global primary key
 — the REST routes, snapshot resolution (`find_dataset_dir_typed`, first root

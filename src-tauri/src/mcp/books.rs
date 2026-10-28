@@ -12,8 +12,13 @@ use crate::settings::SettingsState;
 use super::{DatasetMcpServer, JsonValue};
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
-struct BookTitleParam {
+struct BookCreateParam {
     title: String,
+    /// Family key to join (the `<type>_<key>` id grammar; see the `dataset_family`
+    /// tool). Empty starts a new family, which is the usual case — a book is
+    /// normally what a family is minted *from*.
+    #[serde(default)]
+    family: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -231,6 +236,10 @@ struct ReadAloudCreateParam {
     /// than fixing the voice per dataset.
     #[serde(default)]
     language: Option<String>,
+    /// Family key to join (the `<type>_<key>` id grammar; see the
+    /// `dataset_family` tool). Empty starts a new family.
+    #[serde(default)]
+    family: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -735,11 +744,12 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&books).unwrap_or_default())
     }
 
-    #[tool(name = "book_create", description = "Create a new book in the reading library. Returns the book metadata with UUID.")]
-    async fn book_create(&self, Parameters(param): Parameters<BookTitleParam>) -> Result<String, String> {
+    #[tool(name = "book_create", description = "Create a new book in the reading library. Returns the book metadata with UUID, which is `book_<family key>`: pass that key as `family` to the dictation / card / read-aloud / wiki create tools to build the book's companions, or pass an existing key here to make this book their sibling.")]
+    async fn book_create(&self, Parameters(param): Parameters<BookCreateParam>) -> Result<String, String> {
         log::info!("[MCP] book_create: title={}", param.title);
         let settings = self.app.state::<SettingsState>();
-        let result = datasets::book::book_create(settings, param.title).await?;
+        let family = if param.family.is_empty() { None } else { Some(param.family) };
+        let result = datasets::book::book_create(settings, param.title, family).await?;
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
@@ -994,15 +1004,17 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&items).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_create", description = "Create a read-aloud dataset (a collection of passages to practise reading aloud). Pass `name` and optionally `description` and `language` (a tag like `de` or `de-DE`). The language is what makes generation pick the user's preferred voice for that language, so set it here. Returns the dataset metadata with its UUID; `texts_total` is 0 until texts are added.")]
+    #[tool(name = "read_aloud_create", description = "Create a read-aloud dataset (a collection of passages to practise reading aloud). Pass `name` and optionally `description` and `language` (a tag like `de` or `de-DE`). The language is what makes generation pick the user's preferred voice for that language, so set it here. Pass `family` (see dataset_family) to make it a sibling of the book or dictation set it was recorded from. Returns the dataset metadata with its UUID; `texts_total` is 0 until texts are added.")]
     async fn read_aloud_create(&self, Parameters(param): Parameters<ReadAloudCreateParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_create: name={}", param.name);
         let settings = self.app.state::<SettingsState>();
+        let family = if param.family.is_empty() { None } else { Some(param.family) };
         let result = datasets::read_aloud::read_aloud_create(
             settings,
             param.name,
             Some(param.description),
             param.language,
+            family,
         )
         .await?;
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())

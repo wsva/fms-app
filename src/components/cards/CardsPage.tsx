@@ -5,6 +5,10 @@ import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { usePageRefresh } from "@/lib/refresh/page-refresh";
+import { useDatasetFamily } from "@/hooks/useDatasetFamily";
+import { openDatasetInTab } from "@/lib/nav/open-in-tab";
+// Aliased: this file already has its own `TabId` for the cards/review/tags modes.
+import type { TabId as ShellTabId } from "@/lib/shell/tabs";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
   Plus,
@@ -63,11 +67,18 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "tags", label: "Tags", icon: Tag },
 ];
 
-export default function CardsPage() {
+export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId) => void }) {
   // Dataset state
   const [datasets, setDatasets] = useState<CardDatasetSummary[]>([]);
   const [selectedDatasetUuid, setSelectedDatasetUuid] = useState<string>("");
   const [loading, setLoading] = useState(true);
+
+  // The family of the open dataset, read so the trail can show which book it
+  // belongs to. `report.anchor` is the book member's uuid and `display_name`
+  // its name — a legacy dataset (no family key) yields no anchor and so adds
+  // no crumb.
+  const { report: family } = useDatasetFamily(selectedDatasetUuid);
+  const bookUuid = family?.anchor && family.anchor !== selectedDatasetUuid ? family.anchor : null;
 
   // Card list state
   const [cards, setCards] = useState<Card[]>([]);
@@ -606,6 +617,20 @@ export default function CardsPage() {
           </Breadcrumb.Link>
         ) : (
           <Breadcrumb.Current grow={false}>Cards</Breadcrumb.Current>
+        )}
+        {selectedDataset && bookUuid && (
+          <>
+            <Breadcrumb.Sep />
+            {/* The book this card dataset belongs to: one family, one key.
+                Clicking crosses to the Books page and opens it there. */}
+            <Breadcrumb.Link
+              truncate
+              title={family?.display_name ?? "Book"}
+              onClick={() => void openDatasetInTab(onNavigate, "books", "books.open-book", bookUuid)}
+            >
+              {family?.display_name ?? "Book"}
+            </Breadcrumb.Link>
+          </>
         )}
         {crumbTail && (
           <>

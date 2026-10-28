@@ -10,6 +10,7 @@ import {
   Save, CircleHelp, Search, ExternalLink, List,
 } from "lucide-react";
 import { usePageRefresh } from "@/lib/refresh/page-refresh";
+import { useAgentActions, reqStr } from "@/lib/agent/ui-actions";
 import WikiSearch from "./WikiSearch";
 import MdEditor from "./MdEditor";
 import { insertAround, insertAtLineStart } from "./mdEditorInserts";
@@ -742,6 +743,45 @@ export default function WikiPage() {
     canRefresh: () => !editing,
     events: ["dataset-list-changed"],
   });
+
+  // What an agent — and the book page's companions strip — can drive here: open
+  // one local wiki dataset at its root directory. The lookup refuses a uuid this
+  // page has not loaded, in the same wording the other pages' actions use, so a
+  // caller that arrives before the dataset list does can retry instead of
+  // guessing. Hub datasets are deliberately not accepted: they are read-only
+  // remote browse, and a companion is always local.
+  useAgentActions("wiki", [
+    {
+      id: "wiki.open-dataset",
+      label: "Open a local wiki dataset at its root directory.",
+      kind: "read",
+      params_schema: {
+        dataset_uuid: {
+          type: "string",
+          description: "The wiki dataset uuid, from wiki_dataset_list or dataset_family.",
+          required: true,
+        },
+      },
+      run: (params) => {
+        const uuid = reqStr("wiki.open-dataset", params, "dataset_uuid");
+        const found = localDatasets.find((d) => d.uuid === uuid);
+        if (!found) {
+          throw new Error(
+            `no local wiki dataset with uuid '${uuid}' is loaded on this page. Loaded: ${
+              localDatasets.map((d) => `${d.name} (${d.uuid})`).join(", ") ||
+              "(none yet — the list may still be loading; retry once)"
+            }. wiki_dataset_list has the full set.`
+          );
+        }
+        // The browse view resolves against whichever side is mounted, so leaving
+        // hub mode is part of opening a local dataset, not a side effect.
+        if (hubMode) setHubMode(false);
+        setShowLocations(false);
+        goToDatasetDir(uuid, "");
+        return { opened: uuid, name: found.name };
+      },
+    },
+  ]);
 
   const openPrompt = useCallback((title: string, submit: (name: string) => Promise<void>) => {
     setPromptValue("");

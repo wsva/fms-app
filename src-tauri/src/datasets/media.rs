@@ -20,7 +20,7 @@ use super::{
 
 use super::{
     DatasetSummary, DatasetType, MediaFile, create_db_schema, dataset_roots, datasets_dir,
-    ensure_dataset_db, find_dataset_dir, find_dataset_dir_write,
+    ensure_dataset_db, find_dataset_dir, find_dataset_dir_write, mint_into,
 };
 
 // ---------------------------------------------------------------------------
@@ -260,12 +260,17 @@ pub(crate) fn symlink_file(src: &Path, dst: &Path) -> Result<(), String> {
 
 /// Create a new empty dataset directory skeleton (media/, subtitle/, waveform/,
 /// transcript/) plus an info.json under a configured dataset location.
+///
+/// `family` joins an existing family of datasets (the `<type>_<key>` id grammar
+/// in [`super::ids`]) so this dataset becomes a sibling of the ones that already
+/// carry that key; omit it to start a family of one.
 #[tauri::command]
 pub async fn dataset_create(
     settings: State<'_, SettingsState>,
     name: String,
     description: Option<String>,
     location: Option<String>,
+    family: Option<String>,
 ) -> Result<DatasetSummary, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -288,7 +293,7 @@ pub async fn dataset_create(
     };
     fs::create_dir_all(&root).map_err(|e| format!("Failed to create datasets dir: {}", e))?;
 
-    let uuid = Uuid::new_v4().to_string();
+    let uuid = mint_into(&settings, DatasetType::Dictation, family.as_deref())?;
     assert_uuid_free(&settings, &uuid)?;
     let dir_name = sanitize_dir_name(trimmed).unwrap_or_else(|| uuid.clone());
     let dst = root.join(&dir_name);
@@ -333,10 +338,14 @@ pub async fn dataset_create(
 /// least one media file, mirroring what `scan_dataset_dir` surfaces as a
 /// no-uuid candidate. Idempotent: if a readable `info.json` already exists, its
 /// summary is returned unchanged, so re-running is safe.
+///
+/// `family` is only consulted when the folder has no `info.json` yet — an
+/// already-initialized dataset keeps the id it has.
 #[tauri::command]
 pub async fn dataset_init_dir(
     settings: State<'_, SettingsState>,
     path: String,
+    family: Option<String>,
 ) -> Result<DatasetSummary, String> {
     let dir = PathBuf::from(path.trim());
     if !dir.is_dir() {
@@ -359,7 +368,7 @@ pub async fn dataset_init_dir(
     let info = if dir.join(INFO_FILE).exists() {
         read_info(&dir)?
     } else {
-        let uuid = Uuid::new_v4().to_string();
+        let uuid = mint_into(&settings, DatasetType::Dictation, family.as_deref())?;
         assert_uuid_free(&settings, &uuid)?;
         let name = dir
             .file_name()
