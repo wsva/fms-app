@@ -765,6 +765,17 @@ export default function SettingsPage() {
                 <span className="text-xs px-1.5 py-0.5 rounded bg-mid-gray/20 text-text-tertiary shrink-0">Development build</span>
               )}
             </div>
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-text-secondary w-36 shrink-0">License</span>
+              <a
+                href="https://github.com/wsva/fms-app/blob/main/LICENSE"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm font-mono text-accent hover:underline"
+              >
+                MIT
+              </a>
+            </div>
           </div>
         </section>
         </div>

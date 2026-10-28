@@ -3,6 +3,8 @@ name = "fms-app"
 version = "0.1.0"
 description = "Fremdsprachen machen Spaß"
 authors = ["you"]
+license = "MIT"
+repository = "https://github.com/wsva/fms-app"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

@@ -11,7 +11,7 @@
     <a href="https://github.com/wsva/fms-app/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/wsva/fms-app/build.yml?label=build" alt="Build status" /></a>
     <img src="https://img.shields.io/badge/Tauri-2.x-orange" alt="Tauri 2" />
     <img src="https://img.shields.io/badge/React-19-blue" alt="React 19" />
-    <img src="https://img.shields.io/badge/license-TBD-lightgrey" alt="License TBD" />
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License MIT" /></a>
   </p>
 </div>
 
@@ -63,3 +63,13 @@ Grab a prebuilt installer from the [latest release](https://github.com/wsva/fms-
 Each asset is named `FmS_<platform>_<arch>_<tag>.<ext>` — `FmS_windows_x64_v0.1.1.exe`, `FmS_linux_amd64_v0.1.1.deb`, `FmS_android_arm64_v0.1.1.apk` — so the
 release tag is the only version in the name. Releases are built automatically by
 [GitHub Actions](.github/workflows/build.yml) on every `v*` tag.
+
+## License
+
+FmS is released under the [MIT License](LICENSE). You may use, modify, and redistribute it,
+including commercially, as long as the copyright notice and permission notice are kept.
+
+The bundled Playwrite fonts in [`public/fonts`](public/fonts) are covered by their own
+[SIL Open Font License](public/fonts/PLAYWRITE-OFL.txt). Downloaded models and any content you
+import into a dataset keep whatever license their respective owners give them — FmS ships no
+third-party audio, only the tools to practice with your own.

@@ -36,6 +36,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
+    "copyright": "Copyright © 2026 wsva",
     "macOS": {
       "minimumSystemVersion": "11.0"
     },
