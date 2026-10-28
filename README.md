@@ -3,8 +3,11 @@
   <h1>FmS — fms-app</h1>
   <p><strong>Fremdsprachen machen Spaß!</strong> — Foreign languages are fun.</p>
   <p>
-    A local-first language learning desktop app built around <em>listening, speaking, reading and vocabulary</em>,
-    powered by on-device AI.
+    Turn the audio you already own into <strong>dictation practice</strong> — on your machine,
+    offline, no account, no per-minute bill.
+  </p>
+  <p>
+    Built first for the German learner heading towards Goethe or TestDaF.
   </p>
   <p>
     <a href="https://github.com/wsva/fms-app/releases/latest"><img src="https://img.shields.io/github/v/release/wsva/fms-app?label=release" alt="Latest release" /></a>
@@ -19,37 +22,63 @@
 
 ## What is this?
 
-FmS turns authentic audio — textbook recordings, audiobooks, podcasts — into structured
-**dictation and speaking practice**. You import a dataset, the app transcribes it with a local
-speech-to-text model, generates waveforms and cue-level subtitles, and then you practice by
-typing (or speaking) what you hear. Your audio, your progress and your models stay on the device —
-the few features that do talk to the network are listed under [Privacy](#privacy), and what you may
-safely import is covered under [Bring your own content](#bring-your-own-content).
+FmS turns audio you already own — a textbook's MP3s, an audiobook, a podcast, a lecture recording —
+into **dictation practice**. You import the files, a local speech-to-text model cuts them into
+cue-level subtitles, and then you train by typing what you hear, cue by cue, revealing the reference
+when you are done. No upload, no per-minute bill, no account: the model, the cues and your progress
+live on the disk you already have.
+
+**Who it's for:** the intermediate German learner — roughly B1 to C1 — working towards the
+Goethe-Zertifikat or TestDaF, who wants to train on *real* speech (a novel read aloud, a news
+podcast, a course's own drills) rather than the dozen canned clips that come with a textbook. The
+method is not German-specific: it works for any language with a usable local STT model, and it is
+the loop the old FSI and Peace Corps drill courses were built around.
+
+**Why not something else?**
+- **Anki** is a scheduler: it reviews cards you have already made and does not transcribe or cue
+  audio.
+- **LingQ** is reading-first — the text sits in front of you and you tap the words you don't know.
+  FmS hides the text and asks you to produce it.
+- **Language Reactor** runs on top of Netflix and YouTube, so the material has to live on those
+  platforms, and the subtitles are given to you rather than being the thing you write.
+- **Speechify** reads text aloud to you; FmS asks you to write down what you hear.
+
+**Audio stays on the device**, and no model call is metered. The few features that do talk to the
+network are listed under [Privacy](#privacy), and what you may safely import is covered under
+[Bring your own content](#bring-your-own-content).
 
 The app is a **Tauri v2** port of the web version at [wsva/fms](https://github.com/wsva/fms),
 and ships for **Windows and Linux** (plus an experimental **Android** client that syncs with a PC).
 
 ## Features
 
-**Learning**
-- **Dictation** — media player with canvas waveform, cue cards, and per-cue progress; compare your
-  transcription against reference subtitles, in large/focus modes.
-- **Speaking practice** — system-wide voice input: tap the mic (or `Ctrl+C` in any text field) and
-  your speech is transcribed locally and inserted at the cursor.
-- **Books** — split books into chapters/sentences, read with per-sentence TTS audio (Edge TTS),
-  and save words/sentences in context.
-- **Read Aloud** — recite sentences aloud and get them checked against the target text.
-- **Cards** — flashcard datasets with review queues, question generation, and FTS5 search.
+**The dictation loop — the reason this app exists**
+- **Import what you own** — one dataset per book, course or album; `mp3`, `wav`, `m4a`/`m4b`
+  (audiobooks), `ogg`, `flac`, `mp4`, `webm`.
+- **Local subtitles and cues** — on-device STT (Parakeet ONNX, Whisper GGML on desktop) cuts the audio
+  into cues, with multi-pass alignment when you supply `book.txt` or a transcript.
+- **Practise by typing what you hear** — media player with a canvas waveform, cue cards, per-cue
+  progress, large and focus modes, and a word-level hint that lights up the words you missed when you
+  ask for it.
+- **Speak instead of typing** — system-wide voice input: tap the mic (or `Ctrl+C` in a text field)
+  and your speech is transcribed locally and inserted at the cursor.
 
-**Tooling**
-- **Dataset Studio** — staged pipeline: import → generate subtitles (STT) → waveforms → database,
-  plus transcript alignment and book splitting.
-- **Datasets Sync** — pull datasets from another FmS machine over the LAN or tailnet (phone ↔ PC,
+**Supporting tools** — secondary to the dictation loop, never the pitch
+- **Books** — split a text into chapters and sentences, read along with per-sentence TTS, and save the
+  words and sentences you keep in context.
+- **Read Aloud** — record a sentence and have it scored against the target text, with reference audio
+  generated per sentence.
+- **Cards** — separate flashcard datasets with SM-2 review queues, FTS5 search and a hint field,
+  for the vocabulary you collect from your own material.
+- **Dataset Studio** — the staged pipeline behind all of it: import → generate subtitles (STT) →
+  waveforms → database, plus transcript alignment and book splitting.
+- **STT Models** — download, load and manage the local models (Parakeet family via `transcribe-rs`).
+- **Datasets Sync** — pull a dataset from another FmS machine over the LAN or tailnet (phone ↔ PC,
   PC ↔ PC) with discovery, device pairing, and snapshot progress.
-- **STT Models** — download, load, and manage local ONNX models (Parakeet family via `transcribe-rs`).
-- **LLM Chat** — Ollama (local) or cloud providers through the goose SDK provider layer.
-- **OCR, Edge TTS, Wiki** — capture text from images, synthesize speech, keep notes.
-- **Workspaces** — multi-user data isolation with per-workspace directories and XP.
+- **LLM Chat** — Ollama locally, or a cloud provider through the goose SDK layer, for explanations
+  and generated practice material.
+- **OCR, Edge TTS, Wiki, Workspaces** — capture text from an image, synthesize speech, keep notes,
+  and keep several learners' data apart.
 
 ## Privacy
 
