@@ -565,6 +565,7 @@ pub fn run() {
             ai::chat::chat_send_message,
             ai::chat::chat_resolve_attachment,
             ai::chat::chat_save_attachment,
+            ai::chat::chat_attachment_name,
             ui_state::agent_report_ui_state,
             ui_state::agent_report_ui_actions,
             ui_state::agent_get_ui_actions,
@@ -1011,6 +1012,7 @@ macro_rules! mobile_invoke_handler {
             ai::chat::chat_send_message,
             ai::chat::chat_resolve_attachment,
             ai::chat::chat_save_attachment,
+            ai::chat::chat_attachment_name,
             $($extra),*
         ]
     };

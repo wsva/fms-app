@@ -25,6 +25,11 @@ use std::path::{Path, PathBuf};
 use jni::objects::{JObject, JString, JValue};
 use jni::JNIEnv;
 
+use super::android_content::cursor_display_name;
+use super::android_jni::{
+    android_context, call_int, call_object, call_void, sdk_int, swallow, uri_parse,
+};
+
 /// Sub-folder of the public Downloads directory that FmS writes into.
 const FOLDER: &str = "FmS";
 
@@ -147,8 +152,9 @@ fn media_store_copy(src: &Path, name: &str, mime: &str) -> Result<String, String
         log::warn!("[chat] MediaStore did not commit the pending entry for {name}");
     }
 
-    // MediaStore renames on a collision, so report what it actually stored.
-    Ok(display_name(&mut env, &resolver, &uri).unwrap_or_else(|| name.to_string()))
+    // MediaStore renames on a collision (` (1)` and friends), so report what it
+    // actually stored rather than what was asked for.
+    Ok(cursor_display_name(&mut env, &resolver, &uri).unwrap_or_else(|| name.to_string()))
 }
 
 /// `ContentValues` for a new pending download: display name, MIME type, the
@@ -222,63 +228,6 @@ fn stream_into(env: &mut JNIEnv, out: &JObject, src: &Path) -> Result<(), String
     }
     call_void(env, out, "flush", "()V", &[])?;
     Ok(())
-}
-
-/// The name MediaStore gave the row — it appends ` (1)` and friends when a file
-/// of that name already exists in `Download/FmS/`.
-fn display_name(env: &mut JNIEnv, resolver: &JObject, uri: &JObject) -> Option<String> {
-    let null = JObject::null();
-    let cursor = call_object(
-        env,
-        resolver,
-        "query",
-        "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)\
-         Landroid/database/Cursor;",
-        &[
-            JValue::Object(uri),
-            JValue::Object(&null),
-            JValue::Object(&null),
-            JValue::Object(&null),
-            JValue::Object(&null),
-        ],
-    )
-    .ok()?;
-    if cursor.is_null() {
-        return None;
-    }
-    let key = env.new_string("_display_name").ok()?;
-    let col = env
-        .call_method(
-            &cursor,
-            "getColumnIndex",
-            "(Ljava/lang/String;)I",
-            &[JValue::Object(&key)],
-        )
-        .ok()?
-        .i()
-        .ok()?;
-    let name = if col >= 0
-        && env
-            .call_method(&cursor, "moveToFirst", "()Z", &[])
-            .ok()?
-            .z()
-            .unwrap_or(false)
-    {
-        let value = env
-            .call_method(&cursor, "getString", "(I)Ljava/lang/String;", &[JValue::Int(col)])
-            .ok()?
-            .l()
-            .ok()?;
-        if value.is_null() {
-            None
-        } else {
-            env.get_string(&JString::from(value)).ok().map(String::from)
-        }
-    } else {
-        None
-    };
-    swallow(env, &cursor, "close", "()V", &[]);
-    name
 }
 
 // ---------------------------------------------------------------------------
@@ -407,110 +356,3 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{stem} ({}){ext}", std::process::id()))
 }
 
-// ---------------------------------------------------------------------------
-// JNI plumbing
-// ---------------------------------------------------------------------------
-
-fn android_context() -> Result<(jni::JavaVM, JObject<'static>), String> {
-    let ctx = ndk_context::android_context();
-    let vm =
-        unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| format!("jni vm: {e}"))?;
-    let context = unsafe { JObject::from_raw(ctx.context().cast()) };
-    Ok((vm, context))
-}
-
-fn sdk_int() -> Result<i32, String> {
-    let (vm, _context) = android_context()?;
-    let mut env = vm
-        .attach_current_thread()
-        .map_err(|e| format!("jni attach: {e}"))?;
-    let version = env
-        .find_class("android/os/Build$VERSION")
-        .map_err(|e| format!("jni find_class: {e}"))?;
-    env.get_static_field(version, "SDK_INT", "I")
-        .map_err(|e| format!("jni SDK_INT: {e}"))?
-        .i()
-        .map_err(|e| format!("jni SDK_INT: {e}"))
-}
-
-/// `android.net.Uri.parse(text)`.
-fn uri_parse(env: &mut JNIEnv, text: &str) -> Result<JObject<'static>, String> {
-    let raw = env.new_string(text).map_err(|e| e.to_string())?;
-    let raw_obj: &JObject = &raw;
-    let parsed = env
-        .call_static_method(
-            "android/net/Uri",
-            "parse",
-            "(Ljava/lang/String;)Landroid/net/Uri;",
-            &[JValue::Object(raw_obj)],
-        )
-        .map(|v| v.l())
-        .map_err(|e| format!("Uri.parse({text}): {e}"))?
-        .map_err(|e| format!("Uri.parse({text}): {e}"))?;
-    Ok(unsafe { JObject::from_raw(parsed.into_raw()) })
-}
-
-/// One object-returning Java call, with the `null` check every caller here needs.
-/// A Java exception is cleared as soon as it is seen: leaving one pending makes
-/// every later JNI call on this thread fail, and the caller only ever reports
-/// the message.
-fn call_object(
-    env: &mut JNIEnv,
-    receiver: &JObject,
-    name: &str,
-    sig: &str,
-    args: &[JValue],
-) -> Result<JObject<'static>, String> {
-    let value = match env.call_method(receiver, name, sig, args) {
-        Ok(v) => v.l().map_err(|e| format!("{name}: {e}"))?,
-        Err(e) => {
-            let _ = env.exception_clear();
-            return Err(format!("{name}: {e}"));
-        }
-    };
-    if value.is_null() {
-        return Err(format!("{name} returned null"));
-    }
-    Ok(unsafe { JObject::from_raw(value.into_raw()) })
-}
-
-/// One `int`-returning Java call, exception cleared on failure.
-fn call_int(
-    env: &mut JNIEnv,
-    receiver: &JObject,
-    name: &str,
-    sig: &str,
-    args: &[JValue],
-) -> Result<i32, String> {
-    let value = match env.call_method(receiver, name, sig, args) {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = env.exception_clear();
-            return Err(format!("{name}: {e}"));
-        }
-    };
-    value.i().map_err(|e| format!("{name}: {e}"))
-}
-
-/// One `void`-returning Java call, exception cleared on failure.
-fn call_void(
-    env: &mut JNIEnv,
-    receiver: &JObject,
-    name: &str,
-    sig: &str,
-    args: &[JValue],
-) -> Result<(), String> {
-    match env.call_method(receiver, name, sig, args) {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            let _ = env.exception_clear();
-            Err(format!("{name}: {e}"))
-        }
-    }
-}
-
-/// A call whose failure is uninteresting (closing a stream, deleting a row we
-/// are abandoning) — but whose exception must still be cleared.
-fn swallow(env: &mut JNIEnv, receiver: &JObject, name: &str, sig: &str, args: &[JValue]) {
-    let _ = call_void(env, receiver, name, sig, args);
-}

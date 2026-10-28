@@ -33,7 +33,11 @@ use uuid::Uuid;
 use crate::settings::SettingsState;
 
 #[cfg(target_os = "android")]
+mod android_content;
+#[cfg(target_os = "android")]
 mod android_downloads;
+#[cfg(target_os = "android")]
+mod android_jni;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -228,11 +232,12 @@ fn guess_mime(name: &str) -> &'static str {
     let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
+        "jpg" | "jpeg" | "jfif" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
         "bmp" => "image/bmp",
         "avif" => "image/avif",
+        "heic" | "heif" => "image/heic",
         "svg" => "image/svg+xml",
         "pdf" => "application/pdf",
         "zip" => "application/zip",
@@ -247,6 +252,70 @@ fn guess_mime(name: &str) -> &'static str {
         "webm" => "video/webm",
         _ => "application/octet-stream",
     }
+}
+
+/// The extension a file of this MIME type normally carries, for a picked file
+/// whose own name has none. The inverse of [`guess_mime`], kept narrow on
+/// purpose: only types a message attachment realistically is.
+fn extension_for_mime(mime: &str) -> Option<&'static str> {
+    match mime {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/bmp" => Some("bmp"),
+        "image/avif" => Some("avif"),
+        "image/heic" => Some("heic"),
+        "image/svg+xml" => Some("svg"),
+        "application/pdf" => Some("pdf"),
+        "application/zip" => Some("zip"),
+        "text/plain" => Some("txt"),
+        "application/json" => Some("json"),
+        "audio/mpeg" => Some("mp3"),
+        "audio/mp4" => Some("m4a"),
+        "audio/wav" | "audio/x-wav" => Some("wav"),
+        "audio/ogg" => Some("ogg"),
+        "audio/flac" | "audio/x-flac" => Some("flac"),
+        "video/mp4" => Some("mp4"),
+        "video/webm" => Some("webm"),
+        _ => None,
+    }
+}
+
+/// Filename and MIME an attachment is stored under. A picked Android URI names
+/// a document, not a file, so the provider is asked what it really is; anything
+/// else falls back to the extension table. A name that comes out of that without
+/// a suffix gets one from the type, so the stored file stays recognizable.
+fn attachment_identity(orig: &str, src: &Path) -> (String, String) {
+    let mut filename = sanitize_filename(orig);
+    let mime = attachment_mime(&filename, src);
+    if !filename.contains('.') {
+        if let Some(ext) = extension_for_mime(&mime) {
+            filename.push('.');
+            filename.push_str(ext);
+        }
+    }
+    (filename, mime)
+}
+
+/// MIME for one attachment. A SAF `content://` source is asked through the
+/// ContentResolver: the provider knows the type of the document itself, where
+/// the name only hints at it (`application/octet-stream` is a provider admitting
+/// it does not know, not an answer).
+fn attachment_mime(filename: &str, src: &Path) -> String {
+    #[cfg(target_os = "android")]
+    {
+        let raw = src.to_string_lossy();
+        if raw.starts_with("content://") || raw.starts_with("android.resource://") {
+            if let Some(mime) = android_content::mime_type(&raw) {
+                if mime.contains('/') && mime != "application/octet-stream" {
+                    return mime;
+                }
+            }
+        }
+    }
+    let _ = src;
+    guess_mime(filename).to_string()
 }
 
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
@@ -389,8 +458,7 @@ pub(crate) fn insert_message(
     };
     for (src, orig) in files {
         let att_uuid = Uuid::new_v4().to_string();
-        let filename = sanitize_filename(orig);
-        let mime = guess_mime(&filename).to_string();
+        let (filename, mime) = attachment_identity(orig, src);
         let stored_name = format!("{att_uuid}--{filename}");
         match std::fs::copy(src, dir.join(&stored_name)) {
             Ok(_) => {
@@ -1013,8 +1081,7 @@ fn enqueue_outbox(
         .map_err(|e| e.to_string())?;
     for (src, orig) in files {
         let att_uuid = Uuid::new_v4().to_string();
-        let filename = sanitize_filename(orig);
-        let mime = guess_mime(&filename).to_string();
+        let (filename, mime) = attachment_identity(orig, src);
         let stored_name = format!("{att_uuid}--{filename}");
         let dest = dir.join(&stored_name);
         if let Err(e) = stage_source(src, &dest) {
@@ -1056,14 +1123,18 @@ fn stage_source(src: &Path, dest: &Path) -> Result<(), String> {
 }
 
 /// Derive a display filename from a picked attachment path. A SAF `content://`
-/// URI percent-encodes the real document tail (`…/primary%3ADCIM%2FCamera%2FIMG.jpg`),
-/// so it is percent-decoded and the last path segment taken; anything else falls
-/// back to the plain filesystem basename.
+/// URI is asked what document it names first: the photo picker's tail is a bare
+/// document id (`…/media/1000000034`), so the last path segment alone produced an
+/// attachment with no name and no extension. A URI whose provider cannot answer,
+/// and a `file://` one, fall back to the percent-decoded tail — which is where a
+/// document picker does put the real name (`…/primary%3ADCIM%2FCamera%2FIMG.jpg`)
+/// — and a real filesystem path to its basename.
 fn derive_attachment_name(raw: &str) -> String {
-    if raw.starts_with("content://")
-        || raw.starts_with("android.resource://")
-        || raw.starts_with("file://")
-    {
+    if is_picked_uri(raw) {
+        #[cfg(target_os = "android")]
+        if let Some(name) = android_content::display_name(raw).filter(|n| !n.trim().is_empty()) {
+            return name.trim().to_string();
+        }
         let decoded = urlencoding::decode(raw)
             .map(|c| c.into_owned())
             .unwrap_or_else(|_| raw.to_string());
@@ -1079,6 +1150,24 @@ fn derive_attachment_name(raw: &str) -> String {
         .unwrap_or_else(|| "file".to_string())
 }
 
+/// Whether a picked path is a URI reference rather than a filesystem path — what
+/// Android's pickers hand back, since they never expose the file's real path.
+fn is_picked_uri(raw: &str) -> bool {
+    raw.starts_with("content://")
+        || raw.starts_with("android.resource://")
+        || raw.starts_with("file://")
+}
+
+/// Name the file the picker just handed back, so a composer can caption a
+/// pending attachment before it is sent. Android answers a pick with a
+/// `content://` URI whose tail is a document id (`…/media/1000000034`), which the
+/// WebView cannot turn into a filename — only the ContentResolver can. Async so
+/// that query never runs on the UI thread.
+#[tauri::command]
+pub async fn chat_attachment_name(path: String) -> String {
+    derive_attachment_name(&path)
+}
+
 /// Read a SAF `content://` URI into `dest` via the Android ContentResolver over
 /// JNI. `openFileDescriptor` yields a native fd copied with `std::io::copy`
 /// (streaming, so large files don't load into RAM); ownership is returned to
@@ -1088,66 +1177,36 @@ fn derive_attachment_name(raw: &str) -> String {
 fn copy_content_uri(uri: &str, dest: &Path) -> Result<(), String> {
     use jni::objects::{JObject, JValue};
 
-    let ctx = ndk_context::android_context();
-    let vm =
-        unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| format!("jni vm: {e}"))?;
+    let (vm, context) = android_jni::android_context()?;
     let mut env = vm
         .attach_current_thread()
         .map_err(|e| format!("jni attach: {e}"))?;
-    let context = unsafe { JObject::from_raw(ctx.context().cast()) };
-    let err = |e: jni::errors::Error| e.to_string();
-
     // android.net.Uri uri = android.net.Uri.parse(path)
-    let uri_str = env.new_string(uri).map_err(err)?;
-    let uri_obj: &JObject = &uri_str;
-    let uri_cls = env.find_class("android/net/Uri").map_err(err)?;
-    let juri = env
-        .call_static_method(
-            uri_cls,
-            "parse",
-            "(Ljava/lang/String;)Landroid/net/Uri;",
-            &[JValue::Object(uri_obj)],
-        )
-        .map_err(err)?
-        .l()
-        .map_err(err)?;
-
+    let juri = android_jni::uri_parse(&mut env, uri)?;
     // ContentResolver r = context.getContentResolver()
-    let resolver = env
-        .call_method(
-            &context,
-            "getContentResolver",
-            "()Landroid/content/ContentResolver;",
-            &[],
-        )
-        .map_err(err)?
-        .l()
-        .map_err(err)?;
+    let resolver = android_jni::call_object(
+        &mut env,
+        &context,
+        "getContentResolver",
+        "()Landroid/content/ContentResolver;",
+        &[],
+    )?;
 
     // ParcelFileDescriptor pfd = r.openFileDescriptor(uri, "r")
-    let mode = env.new_string("r").map_err(err)?;
+    let mode = env.new_string("r").map_err(|e| e.to_string())?;
     let mode_obj: &JObject = &mode;
-    let pfd = env
-        .call_method(
-            &resolver,
-            "openFileDescriptor",
-            "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;",
-            &[JValue::Object(&juri), JValue::Object(mode_obj)],
-        )
-        .map_err(err)?
-        .l()
-        .map_err(err)?;
-    if pfd.is_null() {
-        return Err(format!("openFileDescriptor returned null for {uri}"));
-    }
+    let pfd = android_jni::call_object(
+        &mut env,
+        &resolver,
+        "openFileDescriptor",
+        "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;",
+        &[JValue::Object(&juri), JValue::Object(mode_obj)],
+    )
+    .map_err(|e| format!("openFileDescriptor for {uri}: {e}"))?;
 
     // int fd = pfd.getFd() -> copy the fd straight into dest, then hand the fd
     // back to Java (mem::forget) before closing the descriptor on the JVM side.
-    let fd = env
-        .call_method(&pfd, "getFd", "()I", &[])
-        .map_err(err)?
-        .i()
-        .map_err(err)?;
+    let fd = android_jni::call_int(&mut env, &pfd, "getFd", "()I", &[])?;
     let copied = (|| -> Result<(), String> {
         use std::os::unix::io::FromRawFd;
         let mut src = unsafe { std::fs::File::from_raw_fd(fd) };
@@ -1157,7 +1216,7 @@ fn copy_content_uri(uri: &str, dest: &Path) -> Result<(), String> {
         Ok(())
     })();
 
-    let _ = env.call_method(&pfd, "close", "()V", &[]);
+    android_jni::swallow(&mut env, &pfd, "close", "()V", &[]);
     copied?;
     log::info!("[chat] staged content uri {uri} -> {dest:?}");
     Ok(())

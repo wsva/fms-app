@@ -104,8 +104,9 @@ function isImage(att: ChatAttachment): boolean {
   return att.mime.startsWith("image/");
 }
 
-/** Human label for a picked attachment. Android SAF hands back a `content://`
- *  URI whose tail is percent-encoded (`…/primary%3ADCIM%2FCamera%2FIMG.jpg`), so
+/** Human label for a picked attachment, used only when the backend cannot say
+ *  (see [`pickedAttachmentName`]). Android SAF hands back a `content://` URI
+ *  whose tail is percent-encoded (`…/primary%3ADCIM%2FCamera%2FIMG.jpg`), so
  *  decode it and keep the last path segment; real filesystem paths pass through. */
 function attachmentDisplayName(p: string): string {
   if (p.startsWith("content://") || p.startsWith("file://")) {
@@ -117,6 +118,20 @@ function attachmentDisplayName(p: string): string {
     }
   }
   return p.split(/[\\/]/).pop() || p;
+}
+
+/** What an attachment will be called once sent. Only the backend can answer for
+ *  a phone pick: the picker returns a `content://` URI whose tail is a document
+ *  id (`…/media/1000000034`), so a browser-side guess would name a photo by that
+ *  number — and a name with no extension is a file nothing can open later. */
+async function pickedAttachmentName(path: string): Promise<string> {
+  try {
+    const name = await invoke<string>("chat_attachment_name", { path });
+    if (name.trim()) return name.trim();
+  } catch {
+    /* not fatal: the local guess still captions the chip */
+  }
+  return attachmentDisplayName(path);
 }
 
 function formatTime(iso: string): string {
@@ -505,18 +520,20 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
     try {
       const selected = await open({ multiple: true, title: "Attach files" });
       if (!selected) return;
-      const paths = Array.isArray(selected) ? selected : [selected];
+      const paths = (Array.isArray(selected) ? selected : [selected]).filter(
+        (p): p is string => !!p,
+      );
       // Log the raw picker result: on Android SAF often returns `content://`
       // URIs instead of filesystem paths, which the backend copy cannot read.
       logInfo(`chat: picked ${paths.length} file(s): ${paths.join(" | ")}`, "chat");
+      // Name them before they are sent, so the pending chip reads like the file
+      // the thread will show once the backend has resolved it.
+      const named = await Promise.all(
+        paths.map(async (p) => ({ path: p, name: await pickedAttachmentName(p) })),
+      );
       setPendingFiles((prev) => {
         const seen = new Set(prev.map((p) => p.path));
-        return [
-          ...prev,
-          ...paths
-            .filter((p): p is string => !!p && !seen.has(p))
-            .map((p) => ({ path: p, name: attachmentDisplayName(p) })),
-        ];
+        return [...prev, ...named.filter((n) => !seen.has(n.path))];
       });
     } catch (e) {
       logError(`chat: file picker failed: ${String(e)}`, "chat");
