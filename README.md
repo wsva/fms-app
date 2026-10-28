@@ -23,7 +23,8 @@ FmS turns authentic audio — textbook recordings, audiobooks, podcasts — into
 **dictation and speaking practice**. You import a dataset, the app transcribes it with a local
 speech-to-text model, generates waveforms and cue-level subtitles, and then you practice by
 typing (or speaking) what you hear. Your audio, your progress and your models stay on the device —
-the few features that do talk to the network are listed under [Privacy](#privacy).
+the few features that do talk to the network are listed under [Privacy](#privacy), and what you may
+safely import is covered under [Bring your own content](#bring-your-own-content).
 
 The app is a **Tauri v2** port of the web version at [wsva/fms](https://github.com/wsva/fms),
 and ships for **Windows and Linux** (plus an experimental **Android** client that syncs with a PC).
@@ -98,6 +99,41 @@ audio is cached on disk, so anything already spoken keeps playing offline.
 
 **Planned:** a local TTS engine (Piper-class) as a fallback, which would let Books and Read Aloud
 run with the network switched off. Until then, TTS is the one feature that needs a connection.
+
+## Bring your own content
+
+FmS ships **no datasets** — no audio, no subtitles, no transcripts. It is a player and a drill tool:
+the material you feed it is content you bring, and its licence is yours to respect, the same way a
+video player has no opinion about the film you open.
+
+- **Import what you may use.** Buying an audiobook or a textbook gives you a licence to listen and
+  read, not to transcribe, redistribute or publish. Removing DRM is illegal in most jurisdictions
+  whatever you do with the file afterwards, so don't feed FmS a DRM-stripped file.
+- **Practising is not publishing.** Running STT, building cues and drilling on your own machine is
+  personal use. *Upload* and then *Publish* on the Datasets Sync page is redistribution: the dataset
+  goes to the website, the upload dialog's visibility decides who can pull it (`private` by default,
+  `shared` for subscribed accounts, `public` for everyone), and every audio file, subtitle, cue and
+  transcript in it has to be licensed for that. *Withdraw* takes a published version down but keeps
+  the stored bytes, so it is not an undo for a licensing mistake — check before you publish.
+- **Credit where a licence asks for it.** CC BY and CC BY-SA sources need attribution (and
+  share-alike on derivatives); public-domain sources don't, though naming the source costs nothing.
+
+### Sources you can legally import
+
+None of these are bundled with the app — they are simply places whose terms allow you to download
+the material and practise with it. Check the licence on the individual item, not just the front
+page, and check it for the country you are in.
+
+| Source | What it gives you | Terms |
+|---|---|---|
+| [LibriVox](https://librivox.org) | Volunteer audiobooks in many languages — German, French, Spanish and English classics included | Public domain in the USA; verify the author's status in your own country |
+| [Project Gutenberg](https://www.gutenberg.org) | The text to pair with LibriVox audio, for transcript alignment | Public-domain texts under US law; the Gutenberg header is a trademark licence you can strip |
+| [FSI & Peace Corps courses](https://www.fsi-language-courses.org/) ([mirror](https://yojik.eu)) | Full courses: textbook PDFs plus hours of drill audio, dozens of languages including German | US government works, public domain |
+| [VOA Learning English](https://learningenglish.voanews.com) | Slow, scripted news with transcripts, graded by level | Public domain with credit to VOA — except AP/Reuters/AFP material, which is not |
+| [Wikimedia Commons](https://commons.wikimedia.org) | Spoken Wikipedia articles, pronunciation clips | Per file: CC BY, CC BY-SA or public domain |
+| [Lingua Libre](https://lingualibre.org) | Native-speaker recordings of words and phrases | CC BY-SA 4.0 |
+| [Tatoeba](https://tatoeba.org) | Sentence pairs in 300+ languages, good for card decks | Sentences CC BY 2.0 FR; each recording carries its speaker's own licence |
+| [Internet Archive](https://archive.org) | Old radio, government and public-domain recordings, audiobooks | Mixed — filter to public domain or CC before importing |
 
 ## Download
 
