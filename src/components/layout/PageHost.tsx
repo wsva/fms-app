@@ -10,9 +10,18 @@
 //
 // A page receives `focused` where it previously received the ad-hoc `active`
 // prop, and `onNavigate` for the one page (Datasets Sync) that drives the shell.
+//
+// Scroll offsets are the one piece of state a display toggle does not carry:
+// a pane with no layout box has no scrolling box, so a hidden pane returns at
+// the top. `usePreservedScroll` records and restores them per pane, which is
+// what makes "switching tabs keeps your place" true for every page rather than
+// only for the ones that hold their data in React state.
 // ---------------------------------------------------------------------------
 
+import { useRef } from "react";
+
 import type { TabInstance, TabId } from "@/lib/shell/tabs";
+import { usePreservedScroll } from "@/hooks/usePreservedScroll";
 
 import ModelsPage from "@/components/listen_speak/models/ModelsPage";
 import DictationPage from "@/components/listen_speak/dictation/DictationPage";
@@ -102,21 +111,37 @@ function PageFor({
   }
 }
 
+/** One open instance. Its own component so the scroll memory is per pane. */
+function TabPane({
+  instance,
+  focused,
+  onNavigate,
+}: {
+  instance: TabInstance;
+  focused: boolean;
+  onNavigate: (tab: TabId) => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  usePreservedScroll(ref, focused);
+
+  return (
+    <div ref={ref} style={{ display: focused ? "flex" : "none" }} className="flex-1 min-h-0">
+      <PageFor tabId={instance.tabId} focused={focused} onNavigate={onNavigate} />
+    </div>
+  );
+}
+
 export default function PageHost({ order, focusedId, onNavigate }: PageHostProps) {
   return (
     <>
-      {order.map((inst) => {
-        const focused = inst.instanceId === focusedId;
-        return (
-          <div
-            key={inst.instanceId}
-            style={{ display: focused ? "flex" : "none" }}
-            className="flex-1 min-h-0"
-          >
-            <PageFor tabId={inst.tabId} focused={focused} onNavigate={onNavigate} />
-          </div>
-        );
-      })}
+      {order.map((inst) => (
+        <TabPane
+          key={inst.instanceId}
+          instance={inst}
+          focused={inst.instanceId === focusedId}
+          onNavigate={onNavigate}
+        />
+      ))}
     </>
   );
 }

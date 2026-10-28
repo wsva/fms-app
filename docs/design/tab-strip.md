@@ -289,6 +289,21 @@ props every page now needs:
   action registries (§8). Singleton pages can ignore it and keep passing their
   `TabId`; multi-instance pages must use it.
 
+**Scroll memory (§1's promise, made true).** The `display` toggle keeps a page's
+React state but not its scroll offsets: a pane with no layout box has no
+scrolling box, so a hidden Books page came back at the top of the chapter every
+time. Each instance is therefore wrapped in a `TabPane` that hands its node to
+`hooks/usePreservedScroll.ts`, which records the offset of every scroller inside
+the pane through one capture-phase `scroll` listener and restores them when the
+pane becomes the focused one (in a layout effect, then again on the next frame
+after a re-read settles). Only a pane that *remounts* starts at the top, which is
+correct — a replaced or closed tab has no place to return to.
+
+The complementary half is the refresh side: a visibility-triggered re-read must
+not blank the pane (`usePageRefresh`'s module doc says so), because a spinner in
+place of the content collapses the scroller and discards the offset the hook is
+meant to restore.
+
 ### 4.4 Navigation resolution: focus / open / spawn / replace (pin-protected)
 
 Default policy is **replace**: browsing recycles the current *unpinned* tab. A

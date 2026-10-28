@@ -820,6 +820,15 @@ export function useBookData() {
   // list always, the open book's chapters, and — only when no reorder is
   // pending — the open chapter's sentences (so a refresh never discards unsaved
   // "Save Order" edits). Driven by the shared page refresh, never by a button.
+  //
+  // It is also *silent*: `loading` is the one thing that would make this refresh
+  // destructive. ReadingView swaps the paragraph list for a one-line "Loading…"
+  // while it is set, the reading pane's content collapses with it, and the
+  // browser clamps the pane's scroll offset to 0 — so a learner who switched to
+  // another tab and back would lose the line they were reading, every time. The
+  // spinner therefore belongs to a pane with nothing on it yet and to nothing
+  // else.
+  const paneIsEmpty = data.length === 0;
   const refresh = useCallback(async () => {
     await loadBooks();
     if (!isTauri()) return;
@@ -832,7 +841,7 @@ export function useBookData() {
       }
     }
     if (bookUUID && chapterUUID && !needSave) {
-      setLoading(true);
+      if (paneIsEmpty) setLoading(true);
       try {
         const rows = await invoke<BookSentence[]>("book_list_sentences", {
           bookUuid: bookUUID,
@@ -845,9 +854,9 @@ export function useBookData() {
       } catch (e) {
         setError(String(e));
       }
-      setLoading(false);
+      if (paneIsEmpty) setLoading(false);
     }
-  }, [loadBooks, bookUUID, chapterUUID, needSave, updateData]);
+  }, [loadBooks, bookUUID, chapterUUID, needSave, updateData, paneIsEmpty]);
 
   // ── Understanding: mode + focus ────────────────────────────────
   const setSplitRatio = useCallback((ratio: number) => {

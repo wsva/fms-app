@@ -23,6 +23,12 @@
 // Refresh closures must only re-read. They must never navigate or clear a
 // selection — selections are stored by uuid and resolved from the list, which
 // is what keeps a re-read a no-op for anything the user is in the middle of.
+//
+// A refresh must also never blank what it is refreshing. Flipping the page's own
+// `loading` flag on a visibility-triggered re-read is the usual way to make one
+// destructive: the content unmounts, the pane's scroll offset is clamped away
+// with it, and the page returns at the top. Show a spinner only when there is
+// nothing on screen yet (`useBookData.refresh` is the worked example).
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
