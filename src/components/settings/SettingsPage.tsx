@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import {
   ChevronDown,
   ChevronUp,
@@ -45,20 +46,10 @@ function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-// Compare two dotted numeric versions ("0.1.4" vs "0.1.10"); missing parts count as 0.
-function cmpSemver(a: string, b: string): number {
-  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
-  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
-    if (d !== 0) return d;
-  }
-  return 0;
-}
-
-// Strip a leading "v" so a git tag and a stamped package version compare equal.
-function normVer(v: string): string {
-  return v.trim().replace(/^v/, "");
+// Download sizes for the update row, so the user can judge whether to spend the
+// bandwidth now. One decimal: an installer is tens of MB, not bytes.
+function formatMb(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +96,31 @@ interface WorkspaceSettings {
   // UUID issued once when a workspace is first designated hub.
   role: string;
   cluster_id: string;
+}
+
+/** Mirrors `UpdateStatus` in `src-tauri/src/update.rs`. The version comparison
+ *  and the signature check both happen in Rust: the webview only renders what
+ *  `app_update_check` answered. */
+interface UpdateStatus {
+  current: string;
+  latest: string;
+  available: boolean;
+  notes: string;
+  release_url: string;
+  /** False when this build cannot install updates itself. */
+  supported: boolean;
+  /** "not_appimage" | "requires_signing" while `supported` is false. */
+  unsupported_reason: string | null;
+  /** True for a `tauri dev` run, where checks are disabled outright. */
+  dev: boolean;
+  hint: string;
+}
+
+/** Payload of the `update://progress` event emitted while downloading. */
+interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+  done: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,36 +180,76 @@ export default function SettingsPage() {
       });
   }, []);
 
-  // Latest published GitHub release, fetched at runtime. Offline / blocked -> stays null.
-  const [latestRelease, setLatestRelease] = useState<{ tag: string; url: string } | null>(null);
-  const [releaseState, setReleaseState] = useState<"checking" | "done" | "error">("checking");
+  // Update state. `app_update_check` asks the release manifest and verifies
+  // nothing; the download only starts from the button below. Offline / blocked
+  // lands in "error", the same way the old GitHub API fetch did.
+  const [updateCheck, setUpdateCheck] = useState<{
+    state: "checking" | "done" | "error";
+    status: UpdateStatus | null;
+  }>({ state: "checking", status: null });
+  const [installing, setInstalling] = useState(false);
+  const [installProgress, setInstallProgress] = useState<{
+    downloaded: number;
+    total: number | null;
+  } | null>(null);
+  const [installError, setInstallError] = useState("");
+
+  const checkForUpdate = useCallback(async () => {
+    if (!isTauri()) {
+      setUpdateCheck({ state: "error", status: null });
+      return;
+    }
+    setUpdateCheck((prev) => ({ state: "checking", status: prev.status }));
+    try {
+      const status = await invoke<UpdateStatus>("app_update_check");
+      setUpdateCheck({ state: "done", status });
+    } catch (err) {
+      logError(`settings: update check failed — ${String(err)}`, "settings");
+      setUpdateCheck({ state: "error", status: null });
+    }
+  }, []);
+
   useEffect(() => {
+    void checkForUpdate();
+  }, [checkForUpdate]);
+
+  // Download progress arrives as events from `update.rs`. The last event before
+  // the installer takes over has done=true, which is what turns the button into
+  // "Installing…" — on Windows the process exits there and no promise resolves.
+  useEffect(() => {
+    if (!isTauri()) return;
     let alive = true;
-    fetch("https://api.github.com/repos/wsva/fms-app/releases/latest", {
-      headers: { Accept: "application/vnd.github+json" },
+    let unlisten: (() => void) | undefined;
+    listen<UpdateProgress>("update://progress", ({ payload }) => {
+      setInstallProgress(payload.done ? null : payload);
     })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d: { tag_name?: string; html_url?: string }) => {
-        if (!alive) return;
-        if (d?.tag_name) setLatestRelease({ tag: d.tag_name, url: d.html_url ?? "" });
-        setReleaseState("done");
+      .then((fn) => {
+        if (alive) unlisten = fn;
+        else fn();
       })
-      .catch(() => {
-        if (alive) setReleaseState("error");
-      });
+      .catch((err) =>
+        logError(`settings: update progress listener failed — ${String(err)}`, "settings")
+      );
     return () => {
       alive = false;
+      unlisten?.();
     };
   }, []);
 
-  // Update status: compare the installed tag's base against the latest release.
-  const installedBase = normVer(installedVersion.split("-")[0]);
-  const latestBase = latestRelease ? normVer(latestRelease.tag) : "";
-  const isDevBuild = installedVersion.includes("-g") || installedVersion.endsWith("-dirty");
-  let updateState: "none" | "up-to-date" | "update" | "ahead" = "none";
-  if (latestRelease && installedBase && latestBase) {
-    const c = cmpSemver(installedBase, latestBase);
-    updateState = c < 0 ? "update" : c > 0 ? "ahead" : isDevBuild ? "ahead" : "up-to-date";
+  async function installUpdate() {
+    setInstallError("");
+    setInstalling(true);
+    setInstallProgress(null);
+    try {
+      // Resolves on Linux (the app then re-executes) and never on Windows (the
+      // installer quits the process), so a rejection is the only failure path
+      // that reaches this frame.
+      await invoke("app_update_install");
+    } catch (err) {
+      logError(`settings: update install failed — ${String(err)}`, "settings");
+      setInstallError(String(err));
+      setInstalling(false);
+    }
   }
 
   function selectSection(id: string) {
@@ -739,32 +795,122 @@ export default function SettingsPage() {
             </div>
             <div className="flex items-center gap-3 flex-wrap">
               <span className="text-sm text-text-secondary w-36 shrink-0">Latest release</span>
-              {releaseState === "checking" && (
+              {updateCheck.state === "checking" && (
                 <span className="text-sm text-text-tertiary">Checking…</span>
               )}
-              {releaseState === "error" && (
+              {updateCheck.state === "error" && (
                 <span className="text-sm text-text-tertiary">Unavailable (offline?)</span>
               )}
-              {latestRelease && (
+              {updateCheck.status && updateCheck.status.latest && (
                 <a
-                  href={latestRelease.url || "#"}
+                  href={updateCheck.status.release_url}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-sm font-mono text-accent hover:underline break-all"
                 >
-                  {latestRelease.tag}
+                  v{updateCheck.status.latest}
                 </a>
               )}
-              {updateState === "up-to-date" && (
-                <span className="text-xs px-1.5 py-0.5 rounded bg-green-600/20 text-green-500 shrink-0">Up to date</span>
-              )}
-              {updateState === "update" && (
-                <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-600/20 text-yellow-500 shrink-0">Update available</span>
-              )}
-              {updateState === "ahead" && (
+              {updateCheck.state === "done" && updateCheck.status?.dev && (
                 <span className="text-xs px-1.5 py-0.5 rounded bg-mid-gray/20 text-text-tertiary shrink-0">Development build</span>
               )}
+              {updateCheck.status?.available && (
+                <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-600/20 text-yellow-500 shrink-0">Update available</span>
+              )}
+              {updateCheck.state === "done" &&
+                updateCheck.status &&
+                updateCheck.status.supported &&
+                !updateCheck.status.dev &&
+                !updateCheck.status.available && (
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-green-600/20 text-green-500 shrink-0">Up to date</span>
+                )}
             </div>
+
+            {updateCheck.state === "error" && (
+              <div className="flex items-center gap-3">
+                <span className="w-36 shrink-0" />
+                <button type="button" onClick={() => void checkForUpdate()} className={btnGhost}>
+                  Check again
+                </button>
+              </div>
+            )}
+
+            {/* No self-update path on this install (deb/rpm, unsigned macOS): say
+                what to do instead of offering a button that cannot work. */}
+            {updateCheck.state === "done" && updateCheck.status && !updateCheck.status.supported && (
+              <div className="flex items-start gap-3">
+                <span className="text-sm text-text-secondary w-36 shrink-0">Updates</span>
+                <p className="text-sm text-text-tertiary max-w-md">
+                  This install cannot update itself.{" "}
+                  <a
+                    href={updateCheck.status.release_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-accent hover:underline"
+                  >
+                    Download the newest release
+                  </a>{" "}
+                  instead.
+                </p>
+              </div>
+            )}
+
+            {/* Notify-first: this is the only place a download ever starts. */}
+            {updateCheck.status?.available && (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="text-sm text-text-secondary w-36 shrink-0">Update</span>
+                  <button
+                    type="button"
+                    onClick={() => void installUpdate()}
+                    disabled={installing}
+                    className={btnPrimary}
+                  >
+                    {installing ? "Installing…" : `Download & install v${updateCheck.status.latest}`}
+                  </button>
+                  <a
+                    href={updateCheck.status.release_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-accent hover:underline"
+                  >
+                    Release notes
+                  </a>
+                </div>
+                {installProgress && (
+                  <div className="flex items-center gap-3">
+                    <span className="w-36 shrink-0" />
+                    <div className="h-1.5 w-56 max-w-full overflow-hidden rounded-full bg-border-light">
+                      <div
+                        className="h-full rounded-full bg-accent-bg transition-[width] duration-200"
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            Math.round(
+                              (installProgress.downloaded /
+                                Math.max(1, installProgress.total ?? installProgress.downloaded)) *
+                                100
+                            )
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                    <span className="text-xs text-text-tertiary">
+                      {formatMb(installProgress.downloaded)}
+                      {installProgress.total ? ` / ${formatMb(installProgress.total)}` : ""}
+                    </span>
+                  </div>
+                )}
+                {installing && !installProgress && !installError && (
+                  <p className="text-sm text-text-tertiary">
+                    Downloading and verifying the installer…
+                  </p>
+                )}
+                {installError && (
+                  <p className="text-sm text-red-500 break-words">{installError}</p>
+                )}
+              </div>
+            )}
             <div className="flex items-center gap-3">
               <span className="text-sm text-text-secondary w-36 shrink-0">License</span>
               <a

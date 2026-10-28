@@ -36,6 +36,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "license": "MIT",
     "licenseFile": "../LICENSE",
     "copyright": "Copyright © 2026 wsva",
@@ -52,6 +53,15 @@
     ]
   },
   "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ3RTA0RTE1NEE2NTYwMEMKUldRTVlHVktGVTdnUjM4MHhKZXlmRHBOZnoxL0V5U2Y5bHBQOGxHd09tL0lNSGkzS0U3cnJFOGwK",
+      "endpoints": [
+        "https://github.com/wsva/fms-app/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    },
     "shell": {
       "open": true
     },

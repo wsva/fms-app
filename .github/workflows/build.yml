@@ -13,11 +13,17 @@
 #
 # Deliverables — Actions artifacts, plus the release assets the last job
 # publishes (the tag name on a tag build, the commit sha on a manual one):
-#   FmS_windows_x64_<ref>.exe / .msi
+#   FmS_windows_x64_<ref>.exe             NSIS only: the updater cannot install
+#                                         an MSI, and shipping both would let a
+#                                         user end up with two installs
 #   FmS_linux_amd64_<ref>.AppImage / .deb / .rpm
 #   FmS_android_arm64_<ref>.apk            (or -unsigned.apk, see below)
 #   FmS_macos_arm64_<ref>.dmg              Apple Silicon only
 #   FmS_ios_arm64_<ref>-unsigned.ipa       device arm64 app, unsigned
+#   latest.json                           (tag builds) the updater manifest
+#
+# Each `createUpdaterArtifacts` payload also produces a `.sig` the publish job
+# folds into latest.json; the `.sig` files themselves are not release assets.
 #
 # Why arm64 only for Apple: the `desktop` and `stt` features link ONNX Runtime
 # through ort-sys, whose prebuilt matrix covers aarch64-apple-darwin and
@@ -29,10 +35,20 @@
 # (aarch64-linux-android), so armv7/i686/x86_64 cannot link ONNX. minSdk 24
 # arm64 covers essentially every device in scope.
 #
-# Signing — only Android signs in CI. It needs four repo secrets:
-# ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and
-# ANDROID_KEY_PASSWORD. Without them the job still succeeds but publishes an
-# UNSIGNED APK that Android refuses to install.
+# Signing — Android signs in CI, and every desktop bundle is signed for the
+# updater. Two independent sets of secrets:
+#
+#   Android needs four: ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
+#   ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD. Without them the job still
+#   succeeds but publishes an UNSIGNED APK that Android refuses to install.
+#
+#   The updater needs TAURI_SIGNING_PRIVATE_KEY (and optionally
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD, unused when the key has no password).
+#   `createUpdaterArtifacts` makes the bundler sign or fail, so every desktop
+#   job carries the pair; the matching public key is `plugins.updater.pubkey`
+#   in tauri.conf.json. The private key is the one irreplaceable artifact here:
+#   lose it and installed copies refuse every future update rather than accept
+#   one signed by someone else.
 #
 # The Apple outputs are unsigned: an installable IPA needs an Apple Developer
 # certificate plus provisioning profile, which CI does not have.
@@ -153,6 +169,14 @@ jobs:
             label: Linux
 
     runs-on: ${{ matrix.os }}
+    # The updater's minisign key. `createUpdaterArtifacts: true` in
+    # tauri.conf.json makes the bundler either sign each installer or fail, so
+    # this pair is mandatory here. The password is only read when the key was
+    # generated with one; an unset secret arrives as an empty string, which the
+    # CLI treats as "no password" rather than as a wrong one.
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -264,13 +288,12 @@ jobs:
             *)       ARCH_WIN="$(uname -m)"; ARCH_NIX="$(uname -m)" ;;
           esac
 
-          for f in "$OUT"/nsis/*.exe "$OUT"/msi/*.msi \
+          for f in "$OUT"/nsis/*.exe \
                    "$OUT"/appimage/*.AppImage "$OUT"/deb/*.deb "$OUT"/rpm/*.rpm; do
             [ -f "$f" ] || continue
             ext="${f##*.}"
             case "$f" in
               */nsis/*)     plat=windows; arch="$ARCH_WIN" ;;
-              */msi/*)      plat=windows; arch="$ARCH_WIN" ;;
               */appimage/*) plat=linux;   arch="$ARCH_NIX" ;;
               */deb/*)      plat=linux;   arch="$ARCH_NIX" ;;
               */rpm/*)      plat=linux;   arch="$ARCH_NIX" ;;
@@ -279,6 +302,14 @@ jobs:
             dest="$OUT/FmS_${plat}_${arch}_${REF}.${ext}"
             mv -f "$f" "$dest"
             echo "release asset: $(basename "$dest")"
+            # The updater's signature travels with the payload it signs. Rename
+            # it in lockstep (`<asset>.sig`) so the publish job can pair the two
+            # by name when it builds latest.json - a `.sig` whose basename no
+            # longer matches an asset is silently dropped from the manifest.
+            if [ -f "$f.sig" ]; then
+              mv -f "$f.sig" "$dest.sig"
+              echo "  signature:  $(basename "$dest").sig"
+            fi
           done
 
       - name: Upload artifacts
@@ -287,10 +318,11 @@ jobs:
           name: FmS-${{ runner.os }}-${{ steps.meta.outputs.ref }}
           path: |
             src-tauri/target/release/bundle/*.exe
-            src-tauri/target/release/bundle/*.msi
+            src-tauri/target/release/bundle/*.exe.sig
             src-tauri/target/release/bundle/*.deb
             src-tauri/target/release/bundle/*.rpm
             src-tauri/target/release/bundle/*.AppImage
+            src-tauri/target/release/bundle/*.AppImage.sig
 
   # ──────────────────────────────────────────────
   # Android build (thin client + local STT)
@@ -479,6 +511,13 @@ jobs:
     # the floor for arm64.
     env:
       MACOSX_DEPLOYMENT_TARGET: '11.0'
+      # `createUpdaterArtifacts` applies to this bundle too, so the bundler
+      # signs or fails here exactly as on Windows/Linux. The `.app.tar.gz` and
+      # its `.sig` that macOS emits are simply never collected: this bundle is
+      # unsigned, so the updater cannot install it (see `platform_support()` in
+      # src-tauri/src/update.rs, which reports "requires_signing").
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -548,6 +587,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          # Only the .dmg is collected. `bundle/macos/` also holds the updater's
+          # `FmS.app.tar.gz` payload and its `.sig`; both are deliberately left
+          # behind because an unsigned bundle cannot self-update.
           SRC="$(ls src-tauri/target/release/bundle/dmg/*.dmg 2>/dev/null | head -1 || true)"
           if [ -z "$SRC" ]; then
             echo "::error::tauri build produced no .dmg"
@@ -715,16 +757,30 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Needed only for `scripts/make-latest-json.mjs`; the release itself is
+      # driven by the actions below, which never read the work tree.
+      - uses: actions/checkout@v4
+
       - name: Download the artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
+      # The manifest is what the updater fetches, and its `platforms` entries
+      # must point at the *renamed* release assets, so it can only be built here,
+      # once every bundle has landed. Tag refs only: a manual dispatch publishes
+      # the rolling `latest-build` pre-release, and a rolling installer must
+      # never advertise itself as an update (its version is the 0.1.0
+      # placeholder, so it would also look older than the current stable).
+      - name: Generate the updater manifest
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/make-latest-json.mjs --artifacts artifacts
+
       # Delete rather than upload over: it also drops the previous tag, and the
-      # action below recreates the release at the current commit. There is no
-      # checkout in this job, so `gh` needs GH_REPO to know which repository
-      # to talk to.
+      # action below recreates the release at the current commit. GH_REPO is set
+      # explicitly even though this job checks out, so `gh` cannot be redirected
+      # by anything in the work tree.
       - name: Drop the previous rolling release
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         env:
@@ -754,7 +810,16 @@ jobs:
             **iOS (arm64)** — unsigned `.ipa`. It cannot install as-is; re-sign
             it first (Sideloadly or AltStore with a free Apple ID, Xcode with a
             paid account), then sideload.
-          files: artifacts/*
+          # Enumerated rather than `artifacts/*`: the `.sig` files must reach
+          # the manifest but are not downloadables of their own.
+          files: |
+            artifacts/*.exe
+            artifacts/*.AppImage
+            artifacts/*.deb
+            artifacts/*.rpm
+            artifacts/*.dmg
+            artifacts/*.apk
+            artifacts/*.ipa
           fail_on_unmatched_files: false
 
       - name: Publish the tagged release
@@ -766,4 +831,16 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
-          files: artifacts/*
+          # Enumerated rather than `artifacts/*`, for the same reason as the
+          # rolling release - plus `latest.json`, which is the file the updater
+          # actually fetches and therefore has to be an asset of the release
+          # that `releases/latest` resolves to.
+          files: |
+            artifacts/*.exe
+            artifacts/*.AppImage
+            artifacts/*.deb
+            artifacts/*.rpm
+            artifacts/*.dmg
+            artifacts/*.apk
+            artifacts/*.ipa
+            artifacts/latest.json

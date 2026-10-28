@@ -77,6 +77,10 @@ mod capture;
 mod trash;
 #[cfg(feature = "desktop")]
 mod ocr;
+/// In-app self-update: the check/install pair behind Settings → About and the
+/// `app_update_*` MCP tools. Desktop only, exactly like the installer it drives.
+#[cfg(feature = "desktop")]
+mod update;
 /// What the user is currently looking at, cached for agents: the webview
 /// reports a context patch and the UI action registry, `app_get_ui_state` and
 /// `ui_*` read them back. Desktop-only because both readers (the MCP server and
@@ -205,6 +209,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Second instance launched (e.g., via fms-app:// deep link from browser).
             // Instead of starting a new app, forward the URL to the existing instance.
@@ -228,6 +233,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             app_build_version,
+            update::app_update_check,
+            update::app_update_install,
             models::model_get_status,
             models::model_select_version,
             models::model_set_default,

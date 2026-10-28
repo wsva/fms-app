@@ -389,6 +389,24 @@ impl DatasetMcpServer {
         .to_string()
     }
 
+    #[tool(name = "app_update_check", description = "Report whether a newer FmS release exists, without downloading anything. Returns {current, latest, available, notes, release_url, supported, unsupported_reason, hint}: `current` is the CI-stamped package version this build reports, `available` is true only when `latest` is strictly newer, and `hint` is the next step in words. Notify-first: this tool never installs. Only Windows (NSIS) and a Linux AppImage can self-update (`unsupported_reason` is 'not_appimage' for a deb/rpm install and 'requires_signing' for macOS, where you should hand the user `release_url` instead). A development build and an offline machine both answer available=false; the hint says which. Compare versions on `current`, never on app_version's git_describe.")]
+    async fn app_update_check(&self) -> Result<String, String> {
+        log::info!("[MCP] app_update_check");
+        let status = crate::update::check(&self.app).await?;
+        serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
+    }
+
+    #[tool(name = "app_update_install", description = "Download and install the newest FmS release, then restart the app. THIS ENDS THE SESSION: on Windows the installer has to replace the running executable, so the plugin quits the process before installing and this call never returns; on Linux the app re-executes itself right after. Prefer telling the user they can install it from Settings > About, and only call this when they asked for it. It refuses while the build has no self-update path (see app_update_check) or while a transcription or model download is in flight, since that work would be discarded.")]
+    async fn app_update_install(&self) -> Result<String, String> {
+        log::info!("[MCP] app_update_install");
+        crate::update::install(&self.app).await?;
+        Ok(serde_json::json!({
+            "status": "ok",
+            "message": "Update installed; the app is restarting.",
+        })
+        .to_string())
+    }
+
     #[tool(name = "log_read_file_history", description = "Read archived log entries from the persistent log file (oldest first, includes the rotated backup). Survives app restarts and log_clear, unlike log_get_history. Optional 'limit' returns only the newest N entries.")]
     async fn log_read_file_history(&self, Parameters(param): Parameters<LogHistoryParam>) -> String {
         log::info!("[MCP] log_read_file_history: limit={:?}", param.limit);

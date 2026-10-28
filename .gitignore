@@ -47,5 +47,8 @@ venv/
 learning
 dataset_studio/dataset_exports
 
-# Android release signing material - never commit
+# Release signing material - never commit. Android's keystore, and the
+# updater's minisign keypair (`.signing/updater/`): the public half is already in
+# tauri.conf.json, the private half belongs only in CI secrets plus an offline
+# backup.
 .signing/

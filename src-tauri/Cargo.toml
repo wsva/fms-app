@@ -171,6 +171,12 @@ xcap = { version = "0.9", optional = true }
 [target.'cfg(windows)'.dependencies]
 arboard = { version = "3", optional = true }
 
+# Desktop: in-app self-update (`update.rs`). Target-gated rather than a plain
+# dependency so an Android/iOS build never compiles a plugin that has no
+# installer to drive; the `update` module itself sits behind `desktop`.
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+tauri-plugin-updater = "2"
+
 # Android: read SAF `content://` URIs picked by the file dialog through the
 # ContentResolver (the OS gives no plain filesystem path for them). Both crates
 # are already in the tree via Tauri's Android runtime, so this adds no new

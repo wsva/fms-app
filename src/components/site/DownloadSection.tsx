@@ -36,8 +36,12 @@ type Platform = "windows" | "linux" | "android";
 // .github/workflows/build.yml), but the lowercased-extension test also keeps
 // working for the releases published before that rename, where Tauri's own names
 // (`fms-app_0.1.0_x64-setup.exe`, `fms-app_0.1.0_amd64.deb`) are still attached.
+//
+// Windows matches `.exe` only: the `.msi` target was dropped so that the NSIS
+// installer is the single Windows build, and it is the only one the in-app
+// updater can replace (see README → Updates).
 const PLATFORM_MATCHERS: Record<Platform, ((name: string) => boolean)[]> = {
-  windows: [(n) => n.endsWith(".exe"), (n) => n.endsWith(".msi")],
+  windows: [(n) => n.endsWith(".exe")],
   linux: [
     (n) => n.endsWith(".appimage"),
     (n) => n.endsWith(".deb"),

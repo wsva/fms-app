@@ -172,7 +172,7 @@ Grab a prebuilt installer from the [latest release](https://github.com/wsva/fms-
 
 | Platform | Artifacts | Notes |
 |----------|-----------|-------|
-| Windows  | `.exe` (NSIS), `.msi` | x64 |
+| Windows  | `.exe` (NSIS) | x64 |
 | Linux    | `.AppImage`, `.deb`, `.rpm` | x64 |
 | macOS    | `.dmg` | Apple Silicon only, macOS 11+, unsigned |
 | Android  | `.apk` | arm64 |
@@ -181,6 +181,26 @@ Grab a prebuilt installer from the [latest release](https://github.com/wsva/fms-
 Each asset is named `FmS_<platform>_<arch>_<tag>.<ext>` — `FmS_windows_x64_v0.1.1.exe`,
 `FmS_linux_amd64_v0.1.1.deb`, `FmS_macos_arm64_v0.1.1.dmg` — so the release tag is the only version
 in the name.
+
+### Updates
+
+The app updates itself from **Settings → About**: it reports whether a newer release exists, and
+*Download & install* fetches it, verifies the signature and restarts into it. Nothing installs on its
+own, and nothing is checked at startup — the check runs when you open that panel.
+
+| Platform | In-app update |
+|----------|---------------|
+| Windows (NSIS `.exe`) | Yes |
+| Linux (AppImage) | Yes — only when run from the AppImage; a `.deb`/`.rpm` install shows a link to the release instead |
+| macOS, Android, iOS | No — re-download and reinstall |
+
+Releases up to v0.1.13 shipped an `.msi` as well; that build is gone. **If you installed from an
+`.msi`, uninstall that copy once** and install the current `.exe` — the two are separate installs,
+and only the NSIS one can update itself.
+
+Installers are signed with a minisign key whose public half lives in `tauri.conf.json`, so a release
+whose signature does not verify is refused rather than installed. A bad release is pulled by deleting
+`latest.json` from it — clients then report no update and install nothing.
 
 ### Apple builds
 
