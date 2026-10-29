@@ -47,8 +47,8 @@ Do this on the device that should sync *from* the Hub.
 
 1. Open **Tools → Devices & Hub**.
 2. Under **Hub**, pick the Hub machine:
-   - **Scan** searches your local network (and Tailscale, if you use it) for other machines running FmS and lists them by hostname and address.
-   - **Manual** lets you type the address directly, e.g. `http://192.168.1.20:35711`, if scanning doesn't find the machine (some Wi-Fi networks block the discovery broadcasts FmS uses).
+   - **Scan** searches your local network (and Tailscale, if you use it) for other machines running FmS and lists them by hostname and address. If the network blocks or misroutes the discovery broadcasts FmS normally uses, the scan falls back to asking every address on your local network directly over TCP, so a Hub on the same subnet is still found (such a row is marked `sweep`).
+   - **Manual** lets you type the address directly, e.g. `http://192.168.1.20:35711`, if the Hub lives on a different subnet or scan still finds nothing.
    - Selecting an address saves it and probes the Hub once so this device adopts the Hub's cluster ID (see the **Cluster** line under Current Workspace Status).
 3. Click **Pair**. This is a one-time step, like pairing Bluetooth headphones: a confirmation dialog pops up on the **Hub machine**, showing a short code (for example `4f2a1b`) and the name of the device asking to connect, plus which user account it will sync progress as.
 4. Check that the code on the Hub matches the code shown on your device's Devices & Hub page while it says "Waiting for the PC owner to confirm," then click **Allow** on the Hub.

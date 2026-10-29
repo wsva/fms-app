@@ -109,7 +109,7 @@ interface SyncStatusDetail {
 // A discovered PC returned by the `pc_discover` command.
 interface PcCandidate {
   url: string;
-  source: string; // "lan" | "tailscale" | "saved"
+  source: string; // "lan" | "sweep" | "tailscale" | "saved"
   /** App package name — the same string on every candidate, kept for peers that
    * predate `machine`. */
   name: string;

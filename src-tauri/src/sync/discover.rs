@@ -2,20 +2,26 @@
 //!
 //! Compiled on all platforms; used by the Android thin client and by a desktop
 //! that wants to pull datasets from another desktop. It
-//! finds the PC `web_service` in three ways and returns ranked candidates:
+//! finds the PC `web_service` in four ways and returns ranked candidates:
 //!
 //! 1. **LAN / WLAN** — UDP probe `fms-probe` to the broadcast + multicast group
 //!    on port 35712 and collect the JSON replies (`sync::server::spawn_discovery`).
-//! 2. **Tailscale** — if a tailnet address (100.64.0.0/10) is active, TCP-probe
+//!    Sent once from an unbound socket *and* once from every local address,
+//!    because binding the source address is the only way to pin the egress
+//!    interface — see [`discover_lan`].
+//! 2. **LAN sweep** — `/api/v1/status` over plain TCP on the local /24, used only
+//!    when the probe heard nothing. It sends no broadcast, so it survives every
+//!    network that blocks, filters or misroutes one ([`discover_sweep`]).
+//! 3. **Tailscale** — if a tailnet address (100.64.0.0/10) is active, TCP-probe
 //!    the phone's own tailnet /24 on the HTTP port and validate via
 //!    `GET /api/v1/status`.
-//! 3. **Saved** — revalidate the remembered `pc_url` from settings.
+//! 4. **Saved** — revalidate the remembered `pc_url` from settings.
 //!
 //! Note: receiving WLAN broadcast/multicast on Android additionally requires the
 //! `CHANGE_WIFI_MULTICAST_STATE` permission and a held `MulticastLock`; where
 //! that is unavailable the TCP probe + saved URL paths still work.
 
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use futures_util::future::join_all;
@@ -24,14 +30,18 @@ use tauri::{State};
 
 use crate::settings::SettingsState;
 
-#[allow(dead_code)]
 const DISCOVERY_PORT: u16 = 35712;
 const DEFAULT_HTTP_PORT: u16 = 35711;
+/// The private probe datagram the desktop responder answers
+/// (`sync::server::spawn_discovery`).
+const PROBE: &[u8] = b"fms-probe";
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Candidate {
     pub url: String,
-    /// "lan" | "tailscale" | "saved"
+    /// "lan" | "sweep" | "tailscale" | "saved". `sweep` is the TCP fallback that
+    /// only runs when the broadcast probe came back empty — seeing it names the
+    /// reason: this machine's broadcast never left, or was filtered.
     pub source: String,
     pub name: String,
     /// Hostname the machine advertises. `name` is the *app* name — identical on
@@ -50,7 +60,7 @@ pub struct Candidate {
     pub cluster_id: String,
 }
 
-/// Discover nearby FmS PCs. Returns candidates ranked lan -> tailscale -> saved.
+/// Discover nearby FmS PCs. Returns candidates ranked lan -> sweep -> tailscale -> saved.
 #[tauri::command]
 pub async fn pc_discover(
     settings: State<'_, SettingsState>,
@@ -63,13 +73,30 @@ pub async fn pc_discover(
 
     let mut candidates: Vec<Candidate> = Vec::new();
 
-    // 1. LAN UDP probe (blocking socket on a helper thread).
+    // Every local address this host can source from. It seeds the sweep below and
+    // it is what the self filter compares against, because a multi-homed machine
+    // hears its own beacon from whichever address that interface happens to have.
+    let my_ips = local_addrs();
+
+    // 1. LAN UDP probe (blocking sockets on a helper thread).
     let lan = tauri::async_runtime::spawn_blocking(move || discover_lan(timeout)).await
         .unwrap_or_default();
     candidates.extend(lan);
+    let heard_lan = !candidates.is_empty();
 
-    // 2. Tailscale /24 TCP probe.
-    let ts = discover_tailscale(timeout).await;
+    // 2. The TCP sweep is a fallback, so it only runs when the probe heard
+    //    nothing; it and the Tailscale /24 probe are independent of each other.
+    let (sweep, ts) = tokio::join!(
+        async {
+            if heard_lan {
+                Vec::new()
+            } else {
+                discover_sweep(&my_ips, timeout).await
+            }
+        },
+        discover_tailscale(timeout),
+    );
+    candidates.extend(sweep);
     candidates.extend(ts);
 
     // 3. Saved URL revalidation.
@@ -79,10 +106,9 @@ pub async fn pc_discover(
 
     // Deduplicate by URL, preserving the earlier (higher-ranked) source, and
     // drop candidates that point back at this very machine.
-    let my_ip = local_ip();
     let mut out: Vec<Candidate> = Vec::new();
     for c in candidates {
-        if is_self(&c.url, my_ip) {
+        if is_self(&c.url, &my_ips) {
             log::debug!("[discover] ignoring self candidate {}", c.url);
             continue;
         }
@@ -93,18 +119,58 @@ pub async fn pc_discover(
     Ok(out)
 }
 
-/// Best-effort primary local address (no packet leaves the socket).
-fn local_ip() -> Option<IpAddr> {
+/// Every local address this host can source traffic from, default route first.
+///
+/// The broadcast answer is the one that matters: it is the address the OS would
+/// put in a limited-broadcast datagram, and Windows picks that egress from the
+/// adapter metrics alone. A machine whose best `255.255.255.255/32` route is a
+/// virtual switch (WSL / Hyper-V / a VPN TAP) or the loopback interface therefore
+/// loses every probe silently — its own responder is the only thing that answers
+/// and [`is_self`] drops that. Binding a socket to an address found here is what
+/// pins a probe to a real interface.
+fn local_addrs() -> Vec<IpAddr> {
+    let mut out: Vec<IpAddr> = Vec::new();
+    for target in [
+        "8.8.8.8:80".to_string(),
+        format!("255.255.255.255:{}", DISCOVERY_PORT),
+        format!("224.0.1.87:{}", DISCOVERY_PORT),
+    ] {
+        if let Some(ip) = source_ip_for(&target) {
+            if !out.contains(&ip) {
+                out.push(ip);
+            }
+        }
+    }
+    out
+}
+
+/// The local address the OS would source a datagram to `target` from. No packet
+/// leaves the socket: a UDP `connect` only runs the route lookup.
+fn source_ip_for(target: &str) -> Option<IpAddr> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.connect("8.8.8.8:80").ok()?;
-    Some(sock.local_addr().ok()?.ip())
+    sock.connect(target).ok()?;
+    match sock.local_addr().ok()?.ip() {
+        IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() && !v4.is_link_local() => {
+            Some(IpAddr::V4(v4))
+        }
+        _ => None,
+    }
+}
+
+/// RFC 1918 space — the only subnets the sweep walks. Public and CGNAT addresses
+/// (a VPN tunnel, a tailnet) are deliberately excluded: probing 254 strangers is
+/// not discovery.
+fn is_private_v4(v4: Ipv4Addr) -> bool {
+    let o = v4.octets();
+    o[0] == 10 || (o[0] == 172 && (16..=31).contains(&o[1])) || (o[0] == 192 && o[1] == 168)
 }
 
 /// Does `url` address this machine? A desktop running the sync page also runs
 /// the discovery beacon, so its own web service answers its own broadcast and
 /// multicast probe; without this check the PC would be offered as a sync source
-/// for the datasets it already holds.
-fn is_self(url: &str, my_ip: Option<IpAddr>) -> bool {
+/// for the datasets it already holds. Every local address counts, not just the
+/// default-route one.
+fn is_self(url: &str, my_ips: &[IpAddr]) -> bool {
     let Some(rest) = url.split("://").nth(1) else {
         return false;
     };
@@ -112,9 +178,9 @@ fn is_self(url: &str, my_ip: Option<IpAddr>) -> bool {
     if host == "localhost" || host.starts_with("127.") {
         return true;
     }
-    match (host.parse::<IpAddr>().ok(), my_ip) {
-        (Some(h), Some(m)) => h == m,
-        _ => false,
+    match host.parse::<IpAddr>() {
+        Ok(h) => my_ips.contains(&h),
+        Err(_) => false,
     }
 }
 
@@ -122,33 +188,92 @@ fn is_self(url: &str, my_ip: Option<IpAddr>) -> bool {
 // LAN (WLAN) UDP probe
 // ---------------------------------------------------------------------------
 
-fn discover_lan(timeout: Duration) -> Vec<Candidate> {
-    let mut out = Vec::new();
+/// Say it out loud when the OS would route a limited broadcast through the
+/// loopback interface. The probe then never leaves the machine, the only reply is
+/// the machine's own, [`is_self`] filters it, and the scan shows an empty list
+/// with nothing anywhere to explain it — this warning is the whole diagnosis.
+fn warn_if_broadcast_is_looped() {
     let sock = match UdpSocket::bind("0.0.0.0:0") {
         Ok(s) => s,
-        Err(_) => return out,
+        Err(_) => return,
     };
-    let _ = sock.set_broadcast(true);
-    let _ = sock.set_read_timeout(Some(Duration::from_millis(300)));
+    if sock.connect(format!("255.255.255.255:{}", DISCOVERY_PORT)).is_err() {
+        return;
+    }
+    if sock.local_addr().map(|a| a.ip().is_loopback()).unwrap_or(false) {
+        log::warn!(
+            "[discover] the OS routes limited broadcasts via the loopback interface, so the LAN \
+             probe cannot leave this machine (a virtual/VPN adapter or the loopback route \
+             outranking WLAN is the usual cause) — the /24 sweep is the working path"
+        );
+    }
+}
 
-    // Multicast join so the periodic beacon can also reach us (best-effort).
-    let _ = sock.join_multicast_v4(&[224, 0, 1, 87].into(), &std::net::Ipv4Addr::UNSPECIFIED);
+fn discover_lan(timeout: Duration) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    warn_if_broadcast_is_looped();
 
-    let msg = b"fms-probe";
-    let _ = sock.send_to(msg, "255.255.255.255:35712");
-    let _ = sock.send_to(msg, "224.0.1.87:35712");
+    // One sender per local address, plus the unbound one this app has always
+    // used. Binding pins both the egress interface and the source IP the
+    // responder replies to, which is the entire fix for a multi-homed machine:
+    // an unbound socket lets the OS choose from the route table, and the route
+    // table chooses from adapter metrics.
+    let addrs = local_addrs();
+    let mut senders: Vec<UdpSocket> = Vec::new();
+    for ip in &addrs {
+        match UdpSocket::bind((*ip, 0)) {
+            Ok(s) => senders.push(s),
+            Err(e) => log::debug!("[discover] cannot probe from {}: {}", ip, e),
+        }
+    }
+    let unbound = match UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => Some(s),
+        Err(e) => {
+            log::warn!("[discover] cannot bind an unbound probe socket: {}", e);
+            None
+        }
+    };
+    if let Some(s) = unbound {
+        senders.push(s);
+    }
+    if senders.is_empty() {
+        log::warn!("[discover] no socket to probe from — LAN discovery skipped");
+        return out;
+    }
+
+    for (i, sock) in senders.iter().enumerate() {
+        let _ = sock.set_broadcast(true);
+        let _ = sock.set_read_timeout(Some(Duration::from_millis(200)));
+        if i + 1 == senders.len() {
+            // The multicast join stays on the unbound sender only: it exists so
+            // the periodic beacon can reach us, and a bound socket would narrow
+            // the membership to one interface.
+            let _ = sock.join_multicast_v4(&Ipv4Addr::new(224, 0, 1, 87), &Ipv4Addr::UNSPECIFIED);
+        }
+        let _ = sock.send_to(PROBE, ("255.255.255.255", DISCOVERY_PORT));
+        let _ = sock.send_to(PROBE, ("224.0.1.87", DISCOVERY_PORT));
+    }
+    log::debug!(
+        "[discover] LAN probe sent from {} socket(s), sources {:?}",
+        senders.len(),
+        addrs
+    );
 
     let deadline = Instant::now() + timeout;
     let mut buf = [0u8; 2048];
     while Instant::now() < deadline {
-        if let Ok((n, peer)) = sock.recv_from(&mut buf) {
-            if let Some(c) = parse_beacon(&buf[..n], peer) {
-                if !out.iter().any(|e: &Candidate| e.url == c.url) {
-                    out.push(c);
+        for sock in &senders {
+            if let Ok((n, peer)) = sock.recv_from(&mut buf) {
+                if let Some(c) = parse_beacon(&buf[..n], peer) {
+                    if !out.iter().any(|e: &Candidate| e.url == c.url) {
+                        log::debug!("[discover] LAN reply from {} ({})", c.url, c.machine);
+                        out.push(c);
+                    }
                 }
             }
         }
     }
+    log::debug!("[discover] LAN probe heard {} candidate(s)", out.len());
     out
 }
 
@@ -172,6 +297,88 @@ fn parse_beacon(bytes: &[u8], peer: SocketAddr) -> Option<Candidate> {
         role,
         cluster_id,
     })
+}
+
+// ---------------------------------------------------------------------------
+// LAN sweep (TCP fallback)
+// ---------------------------------------------------------------------------
+
+/// Last-resort LAN discovery over plain TCP: ask `/api/v1/status` on every host of
+/// the local /24.
+///
+/// It runs only when the broadcast probe heard nothing, and it sends no broadcast
+/// at all — which is the point, because every way that probe dies on a real
+/// network is a broadcast problem: a limited broadcast routed into a virtual
+/// switch or the loopback interface, a firewall dropping unicast replies to
+/// broadcast traffic, or a Wi-Fi network that filters broadcasts between clients.
+/// Costs 254 short requests, and only on the scan that needs it.
+///
+/// Only the default HTTP port is tried: a peer whose service moved to another
+/// port is exactly the peer whose saved address is needed anyway.
+async fn discover_sweep(seeds: &[IpAddr], timeout: Duration) -> Vec<Candidate> {
+    let mut hosts: Vec<Ipv4Addr> = Vec::new();
+    for ip in seeds {
+        let IpAddr::V4(v4) = ip else { continue };
+        if !is_private_v4(*v4) {
+            continue;
+        }
+        let o = v4.octets();
+        for host in 1..=254u8 {
+            let candidate = Ipv4Addr::new(o[0], o[1], o[2], host);
+            if candidate != *v4 && !hosts.contains(&candidate) {
+                hosts.push(candidate);
+            }
+        }
+    }
+    if hosts.is_empty() {
+        return Vec::new();
+    }
+
+    // No point spending the whole scan budget per host: an unused address either
+    // refuses at once or never answers at all.
+    let per = timeout.min(Duration::from_millis(900));
+    let client = match reqwest::Client::builder().timeout(per).build() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    log::debug!("[discover] LAN probe silent — sweeping {} host(s) over HTTP", hosts.len());
+
+    let futs: Vec<_> = hosts
+        .into_iter()
+        .map(|host| {
+            let client = client.clone();
+            async move {
+                let url = format!("http://{}:{}/api/v1/status", host, DEFAULT_HTTP_PORT);
+                let r = client.get(&url).send().await.ok()?;
+                if !r.status().is_success() {
+                    return None;
+                }
+                let v: serde_json::Value = r.json().await.ok()?;
+                if v.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+                    return None;
+                }
+                log::debug!("[discover] LAN sweep found {}", url);
+                Some(Candidate {
+                    url: format!("http://{}:{}", host, DEFAULT_HTTP_PORT),
+                    source: "sweep".to_string(),
+                    name: v
+                        .get("app_name")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("FmS PC")
+                        .to_string(),
+                    machine: v.get("machine").and_then(|m| m.as_str()).unwrap_or("").to_string(),
+                    role: v.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string(),
+                    cluster_id: v
+                        .get("cluster_id")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                })
+            }
+        })
+        .collect();
+
+    join_all(futs).await.into_iter().flatten().collect()
 }
 
 // ---------------------------------------------------------------------------
