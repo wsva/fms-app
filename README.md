@@ -3,8 +3,9 @@
   <h1>FmS — fms-app</h1>
   <p><strong>Fremdsprachen machen Spaß!</strong> — Foreign languages are fun.</p>
   <p>
-    Turn the audio you already own into <strong>dictation practice</strong> — on your machine,
-    offline, no account, no per-minute bill.
+    A local language lab: turn the material you already own into <strong>dictation, reading,
+    speaking and vocabulary practice</strong> — on your machine, offline, no account, no per-minute
+    bill.
   </p>
   <p>
     Built first for the German learner heading towards Goethe or TestDaF.
@@ -22,11 +23,20 @@
 
 ## What is this?
 
-FmS turns audio you already own — a textbook's MP3s, an audiobook, a podcast, a lecture recording —
-into **dictation practice**. You import the files, a local speech-to-text model cuts them into
-cue-level subtitles, and then you train by typing what you hear, cue by cue, revealing the reference
-when you are done. No upload, no per-minute bill, no account: the model, the cues and your progress
-live on the disk you already have.
+FmS is a **local-first language lab**. You bring the material you already own — a textbook's MP3s,
+an audiobook, a podcast, a lecture recording, a chapter of prose — and it becomes practice. Five
+modes share one dataset layer, and all five are core: **dictation** (type what you hear), **books**
+(read, look up, understand), **read aloud** (speak and be scored), **cards** (review what you kept)
+and **wiki** (the notes that tie it together). No upload, no per-minute bill, no account: the
+models, the datasets and your progress live on the disk you already have.
+
+**Dictation is where it started.** Import the files, a local speech-to-text model cuts them into
+cue-level subtitles, and you train by typing what you hear, cue by cue, revealing the reference when
+you are done.
+
+**Between sessions it is a toolkit.** The same app recognises text in a screenshot, splits a raw
+text into sentences, reads a PDF, speaks a sentence in a natural voice and keeps a searchable
+wiki — the everyday jobs that earn it a permanent place on your machine.
 
 **Who it's for:** the intermediate German learner — roughly B1 to C1 — working towards the
 Goethe-Zertifikat or TestDaF, who wants to train on *real* speech (a novel read aloud, a news
@@ -54,35 +64,64 @@ and sync it with a PC. Every target is built from this repository by
 
 ## Features
 
-**The dictation loop — the reason this app exists**
-- **Import what you own** — one dataset per book, course or album; `mp3`, `wav`, `m4a`/`m4b`
-  (audiobooks), `ogg`, `flac`, `mp4`, `webm`.
-- **Local subtitles and cues** — on-device STT (Parakeet ONNX, Whisper GGML on desktop) cuts the audio
-  into cues, with multi-pass alignment when you supply `book.txt` or a transcript.
-- **Practise by typing what you hear** — media player with a canvas waveform, cue cards, per-cue
-  progress, large and focus modes, and a word-level hint that lights up the words you missed when you
-  ask for it.
-- **Speak instead of typing** — system-wide voice input: tap the mic (or `Ctrl+C` in a text field)
-  and your speech is transcribed locally and inserted at the cursor.
+**Five practice modes, all of them core** — each with its own dataset type, its own page, and the
+same cross-device sync.
 
-**Supporting tools** — secondary to the dictation loop, never the pitch
-- **Books** — split a text into chapters and sentences, read along with per-sentence TTS, and save the
-  words and sentences you keep in context.
-- **Read Aloud** — record a sentence and have it scored against the target text, with reference audio
-  generated per sentence.
-- **Cards** — separate flashcard datasets with SM-2 review queues, FTS5 search and a hint field,
-  for the vocabulary you collect from your own material.
-- **Dataset Studio** — the staged pipeline behind all of it: import → generate subtitles (STT) →
-  waveforms → database, plus transcript alignment and book splitting.
-- **STT Models** — download, load and manage the local models (Parakeet family via `transcribe-rs`).
-- **Datasets Sync** — pull a dataset from another FmS machine over the LAN or tailnet (phone ↔ PC,
-  PC ↔ PC) with discovery, device pairing, and snapshot progress.
-- **OCR, Edge TTS, Wiki, Workspaces** — capture text from an image, synthesize speech, keep notes,
-  and keep several learners' data apart.
-- **LLM features (no chat window)** — a language model is called from the features that need one:
-  OCR clean-up, word explanations in Books, read-aloud text normalization. Point it at a local
-  Ollama, or at a cloud provider through the goose SDK layer; for open-ended questions use your
-  own model or an attached agent.
+- **Dictation** — import what you own (`mp3`, `wav`, `m4a`/`m4b` (audiobooks), `ogg`, `flac`, `mp4`,
+  `webm`), let on-device STT cut it into cues, then type what you hear: canvas waveform, cue cards,
+  per-cue progress, large and focus modes, and a word-level hint that lights up the words you missed.
+- **Books** — split a text into chapters and sentences, read along with per-sentence TTS, look words
+  up in context, and build its understanding layer: explanations, simplifications, a chapter digest,
+  an argument map, a glossary, and comprehension quizzes.
+- **Read Aloud** — record a text and have it scored on accuracy, fluency and pronunciation against a
+  reference clip you generate with Edge TTS or cut out of your own recording by alignment. Feedback
+  comes from a local model or an attached agent.
+- **Cards** — separate flashcard datasets with SM-2 review queues, FTS5 search, tags and a hint
+  field, for the vocabulary you collect from your own material.
+- **Wiki** — syncable Markdown trees with full-text search: notes, grammar references, transcripts
+  and the links between them, editable on the phone as well as on the PC.
+
+Cards, read-aloud passes and book quizzes all pay into one **XP ledger**.
+
+**The layer they share**
+
+- **One pipeline** — import → subtitles (STT) → waveforms → database, plus transcript alignment and
+  book splitting: one click on the dataset page, or step by step on the **Workflow** page.
+- **Local models** — Parakeet ONNX and Whisper GGML for speech, SaT for sentence splitting, Tesseract
+  for OCR; downloaded, loaded and swapped from the Models page.
+- **Sync** — pull a dataset from another FmS machine over the LAN or tailnet (phone ↔ PC, PC ↔ PC),
+  with discovery, device pairing and snapshot progress.
+- **Nothing is lost by accident** — a destructive action moves the dataset or file into the app
+  trash, where you can restore it.
+
+**Everyday tools — the reason it stays installed**
+
+- **OCR** — drop in a screenshot, a photo of a page or a scanned exercise and get editable text: pick
+  the languages, and the layout comes back as lines and paragraphs instead of a word dump. Words
+  broken across a line break are joined when a downloaded Hunspell dictionary knows the result
+  (`Sprach-` + `verarbeitung` → `Sprachverarbeitung`) and kept as printed when it does not; 15
+  dictionaries are available, a shape rule covers the rest, and an optional LLM pass cleans up
+  obvious errors. Screenshot and clipboard capture are built in.
+- **Edge TTS** — speak any text in a natural voice, in every language the app needs, with no API key
+  (the text itself goes to Microsoft's Edge endpoint; see [Privacy](#privacy)).
+- **Split Text** — run the sentence-segmentation model on any pasted text and get clean sentences
+  back.
+- **PDF Reader** — read documents and handouts without leaving the app.
+- **Simple Words** — mark the words you already know, so word generation and dictation helpers stop
+  offering them.
+- **Voice input** — tap the mic, or press `Ctrl+C` in a text field, and your speech is transcribed
+  locally and inserted at the cursor.
+- **Workspaces** — several learners or several projects, with separate settings, progress and
+  datasets on one machine.
+
+**Agents can drive the app.** The practice modes and the dataset pipeline are exposed as MCP tools,
+so an attached agent can import, generate, audit, score and edit alongside you. The app publishes its
+own agent manual, and a dock in the UI shows what an agent is doing while it works.
+
+**LLM features, no chat window.** A language model is called from the features that need one —
+chapter digests, word explanations in Books, comprehension quizzes, OCR clean-up, read-aloud text
+normalization, and feedback on a take. Point it at a local Ollama, or at a cloud provider through the
+goose SDK layer; for open-ended questions use your own model or an attached agent.
 
 ## Privacy
 
