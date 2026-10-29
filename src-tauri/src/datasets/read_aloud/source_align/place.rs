@@ -52,16 +52,22 @@ pub(super) struct Search {
 
 /// `(first, last, matched)` of every maximal run of aligned pairs, in order.
 ///
-/// The break rule is [`densest_run`]'s, but all the runs are kept: a passage can
-/// match two places in one window, and which of the two to keep is a question
-/// about where the passage *belongs*, not about which run is longer.
-fn runs_of(pairs: &[(usize, usize)]) -> Vec<(usize, usize, usize)> {
+/// A run breaks where the *text* skipped more than [`GUESS_MAX_GAP`] words: that
+/// is the passage reading something else in between, and the stretches either
+/// side of it are separate claims about where it was read.
+///
+/// A jump on the stream side alone is not a break. Both sides of it are still the
+/// same reading; what jumped is the audio, or the transcript's account of it — an
+/// overlapping STT chunk that repeated the last fifteen seconds, a music bridge,
+/// a hallucination the next chunk did not share. Breaking there cut a passage's
+/// head off: the longer half won the run score, so a chapter's second part was
+/// placed at its *middle*, forty seconds past the words it opens with.
+pub(super) fn runs_of(pairs: &[(usize, usize)]) -> Vec<(usize, usize, usize)> {
     let mut runs: Vec<(usize, usize, usize)> = Vec::new();
     let mut from = 0usize;
     for index in 1..=pairs.len() {
-        let breaks = index == pairs.len()
-            || pairs[index].0.saturating_sub(pairs[index - 1].0) > GUESS_MAX_GAP
-            || pairs[index].1.saturating_sub(pairs[index - 1].1) > GUESS_MAX_GAP;
+        let breaks =
+            index == pairs.len() || pairs[index].0.saturating_sub(pairs[index - 1].0) > GUESS_MAX_GAP;
         if breaks {
             if index > from {
                 runs.push((pairs[from].1, pairs[index - 1].1, index - from));

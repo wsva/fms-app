@@ -265,7 +265,7 @@ mod tests {
     use super::index::{decode_peaks, encode_peaks, natural_cmp};
     use super::place::prior_position;
     #[cfg(feature = "stt")]
-    use super::place::{find_predicted, need_for, place_all};
+    use super::place::{find_predicted, need_for, place_all, runs_of};
     use super::*;
 
     /// Chapters ripped with and without zero padding have to agree: a person
@@ -354,6 +354,31 @@ mod tests {
         let found = find_predicted(&reference, &stream, 5000, need).hit.expect("the passage is there");
         assert_eq!(found.from, 5000, "placed at {} instead of the predicted 5000", found.from);
         assert_eq!(found.matched, 15);
+    }
+
+    /// A transcript that repeats itself — what an overlapping STT chunk did at
+    /// every four-minute boundary — is a hole in the audio, not in the text. The
+    /// passage is still one reading either side of it, so the step over the repeat
+    /// must not split the span in two: the longer half would win the run score and
+    /// the passage would be placed a minute past its own first word.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn a_repeated_transcript_does_not_split_the_span() {
+        // Fifteen ref tokens in two stretches, the second of them heard eleven
+        // tokens further on because the repeat sits between them.
+        let pairs: Vec<(usize, usize)> = (0..9)
+            .map(|i| (i, 10 + i))
+            .chain((9..15).map(|i| (i, 20 + i)))
+            .collect();
+        assert_eq!(runs_of(&pairs), vec![(10, 34, 15)]);
+
+        // A hole in the *text* is still a boundary: those words are read
+        // somewhere else, and each stretch is its own claim about where.
+        let pairs: Vec<(usize, usize)> = (0..9)
+            .map(|i| (i, 10 + i))
+            .chain((20..25).map(|i| (i, 40 + i)))
+            .collect();
+        assert_eq!(runs_of(&pairs), vec![(10, 18, 9), (60, 64, 5)]);
     }
 
     /// The gap between two anchors is where the one-liners go: a phrase that

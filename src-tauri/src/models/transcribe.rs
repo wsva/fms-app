@@ -351,19 +351,25 @@ fn transcribe_detailed_chunked(
         // `transcribe_words` adds `offset_secs` to every timestamp it reports.
         let chunk_result = model.transcribe_words(chunk, offset_secs)?;
 
+        // Where the previous chunk's transcript stopped: the end of the last word
+        // it kept. It is deliberately *not* `offset + duration - overlap`, which
+        // is this chunk's own first sample — a timestamp can never precede the
+        // chunk it was measured in, so that comparison dropped nothing and every
+        // overlap was transcribed twice. A four-minute window with fifteen
+        // seconds of it said again is what pushed the passage guess a minute late
+        // on a whole chapter: the repeat split the alignment in two.
+        let resume_from = covered_until_secs;
         for word in chunk_result.segments.unwrap_or_default() {
             if word.text.trim().is_empty() {
                 continue;
             }
             // Already spoken by the previous chunk's tail.
-            if (word.start as f64) < covered_until_secs - CHUNK_DEDUPE_TOLERANCE_SECS {
+            if (word.start as f64) < resume_from - CHUNK_DEDUPE_TOLERANCE_SECS {
                 continue;
             }
+            covered_until_secs = covered_until_secs.max(word.end as f64);
             words.push(TranscriptWord { text: word.text, start: word.start, end: word.end });
         }
-
-        covered_until_secs =
-            (offset_secs + chunk_duration - CHUNK_OVERLAP_SECS).max(covered_until_secs);
 
         log::info!(
             "Chunk {} done: {} total words, covered_until={:.1}s",
@@ -515,17 +521,21 @@ fn transcribe_file_chunked(
 
         // Add segments, deduplicating in overlap regions. A segment boundary is
         // a whole chunk of speech rather than a word, hence the wider tolerance.
+        //
+        // `resume_from` is the end of the last segment kept so far, not
+        // `offset + duration - overlap`: that expression equals this chunk's own
+        // first sample, and no segment can start before the chunk it was measured
+        // in, so it filtered nothing and repeated every overlap in the result.
+        let resume_from = covered_until_secs as f32;
         if let Some(segments) = chunk_result.segments {
             for seg in segments {
-                if seg.start < (covered_until_secs as f32) - SEGMENT_DEDUPE_TOLERANCE_SECS as f32 {
+                if seg.start < resume_from - SEGMENT_DEDUPE_TOLERANCE_SECS as f32 {
                     continue;
                 }
+                covered_until_secs = covered_until_secs.max(seg.end as f64);
                 all_segments.push(seg);
             }
         }
-
-        // Update covered region
-        covered_until_secs = (offset_secs + chunk_duration - CHUNK_OVERLAP_SECS).max(covered_until_secs);
 
         log::info!(
             "Chunk {} done: {} total segments, covered_until={:.1}s",
