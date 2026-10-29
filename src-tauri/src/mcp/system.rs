@@ -188,15 +188,22 @@ impl DatasetMcpServer {
         }
         let ws_dir = state.workspace_dir.lock().unwrap().clone();
         crate::settings::SettingsState::save(&new_settings, ws_dir.as_ref())?;
-        let mcp_flipped = {
+        let (mcp_flipped, role_flipped) = {
             let mut s = state.settings.lock().unwrap();
             let flipped = s.mcp_enabled != new_settings.mcp_enabled;
+            let role_flipped = s.role != new_settings.role;
             *s = new_settings;
-            flipped
+            (flipped, role_flipped)
         };
         let _ = self.app.emit("settings-changed", ());
         if mcp_flipped {
             crate::sync::server::restart_after_mcp_toggle(&self.app).await?;
+        }
+        // `role` is writable here, and only a hub serves: reconcile the listener
+        // so an agent that demotes this workspace is not left with a running
+        // service the role says should not exist.
+        if role_flipped {
+            crate::sync::server::apply_role(self.app.clone()).await;
         }
         Ok(serde_json::json!({
             "status": "ok",

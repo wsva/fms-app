@@ -32,6 +32,9 @@ use crate::settings::SettingsState;
 
 const DISCOVERY_PORT: u16 = 35712;
 const DEFAULT_HTTP_PORT: u16 = 35711;
+/// Host octet the manual-entry suggestion keeps from this machine's own /24.
+/// The user edits this one number instead of typing a whole address.
+const SUGGESTED_HUB_HOST: u8 = 101;
 /// The private probe datagram the desktop responder answers
 /// (`sync::server::spawn_discovery`).
 const PROBE: &[u8] = b"fms-probe";
@@ -50,8 +53,8 @@ pub struct Candidate {
     /// version bump.
     #[serde(default)]
     pub machine: String,
-    /// Sync role advertised by that machine ("hub" | "follower"). Both desktops
-    /// run the web service, so the phone uses this to offer only hubs as sync
+    /// Sync role advertised by that machine ("hub" | "follower"). Only a hub
+    /// serves, so the phone uses this to offer the sources of truth as sync
     /// targets (§3.1). Empty for beacons/status predating the field.
     #[serde(default)]
     pub role: String,
@@ -117,6 +120,31 @@ pub async fn pc_discover(
         }
     }
     Ok(out)
+}
+
+/// The address a Manual hub entry starts from.
+///
+/// Typing a whole URL to reach the machine next door is mostly re-deriving the
+/// one part nobody can guess, so the field opens with this machine's own /24 and
+/// a placeholder host to edit — `http://192.168.100.101:35711` on a 192.168.100.x
+/// LAN. It is a *starting point, never a candidate*: the UI commits only a value
+/// the user actually edited, so the guess can never dial anything by itself.
+#[tauri::command]
+pub fn pc_suggested_hub_url() -> String {
+    let host = local_addrs().into_iter().find_map(|ip| match ip {
+        IpAddr::V4(v4) if is_private_v4(v4) => Some(v4),
+        _ => None,
+    });
+    let suggestion = match host {
+        Some(v4) => {
+            let o = v4.octets();
+            Ipv4Addr::new(o[0], o[1], o[2], SUGGESTED_HUB_HOST)
+        }
+        // No LAN address (offline, or only a VPN up): the classic private range
+        // is as good a guess as any and still shows the shape to correct.
+        None => Ipv4Addr::new(192, 168, 1, SUGGESTED_HUB_HOST),
+    };
+    format!("http://{}:{}", suggestion, DEFAULT_HTTP_PORT)
 }
 
 /// Every local address this host can source traffic from, default route first.

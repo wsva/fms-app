@@ -549,6 +549,8 @@ pub fn run() {
             sync::inbox::sync_inbox_drain,
             sync::client::sync_hub_kind,
             sync::discover::pc_discover,
+            // Starting value for the Manual hub-address field (never connects).
+            sync::discover::pc_suggested_hub_url,
             // Read-only hub wiki browse (works from any follower role/platform).
             sync::client::wiki_hub_list,
             sync::client::wiki_hub_list_dir,
@@ -1002,6 +1004,8 @@ macro_rules! mobile_invoke_handler {
             sync::blobpush::dataset_push_changed_files,
             sync::client::sync_hub_kind,
             sync::discover::pc_discover,
+            // Starting value for the Manual hub-address field (never connects).
+            sync::discover::pc_suggested_hub_url,
             // Read-only hub wiki browse (works from any follower role/platform).
             sync::client::wiki_hub_list,
             sync::client::wiki_hub_list_dir,

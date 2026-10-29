@@ -567,6 +567,11 @@ pub async fn workspace_select(
         settings_state.set_workspace_dir(Some(ws_dir));
     }
 
+    // The role came with that reload, and only a hub serves: switching onto a
+    // follower workspace must stop answering (and onto a hub, start).
+    #[cfg(feature = "desktop")]
+    crate::sync::server::apply_role(app.clone()).await;
+
     // Notify frontend
     let _ = app.emit("workspace-selected", &ws);
 

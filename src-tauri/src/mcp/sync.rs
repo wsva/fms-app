@@ -201,7 +201,7 @@ impl DatasetMcpServer {
         serde_json::to_string_pretty(&status).unwrap_or_default()
     }
 
-    #[tool(name = "web_service_start", description = "Start the web service (HTTP server) with the given config. Default port is 35711. Enables STT, dataset, and TTS endpoints by default.")]
+    #[tool(name = "web_service_start", description = "Start the web service (HTTP server) with the given config. Default port is 35711. Enables STT, dataset, and TTS endpoints by default. Hub-only: the service is what serves this machine's datasets to followers, phones and agents, so a follower workspace refuses this — call settings_set with role='hub' first (the service then starts on its own) rather than overriding the role here.")]
     async fn web_service_start(&self, Parameters(param): Parameters<WebServiceStartParam>) -> Result<String, String> {
         log::info!("[MCP] web_service_start: port={}", param.port);
         let state = self.app.state::<WebServiceState>();

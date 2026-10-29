@@ -133,7 +133,9 @@ src-tauri/src/
 │   ├── client.rs           # Snapshot pull + writeback queue (all platforms; the Android thin client)
 │   ├── discover.rs         # PC auto-discovery: UDP probe, multicast, Tailscale
 │   ├── change_log.rs       # Hub-side append-only change journal (`sync_log` table in the app DB)
-│   ├── server.rs           # PC axum HTTP service hosting REST + MCP, enforces trust zones — desktop
+│   ├── server.rs           # PC axum HTTP service hosting REST + MCP, enforces trust zones — desktop.
+│   │                       #   Hub-only: `auto_start` refuses a follower and `apply_role` reconciles on every
+│   │                       #   role change, so a follower stops listening (and stops advertising)
 │   ├── rest.rs             # `/api/v1` dataset snapshot + batched-writeback endpoints — desktop
 │   └── pairing.rs          # Ed25519 device pairing and trust zones — desktop
 │

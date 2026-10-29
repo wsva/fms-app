@@ -939,6 +939,11 @@ pub async fn settings_set_role(
     *state.settings.lock().unwrap() = s.clone();
     log::info!("[Settings] role set to '{role}' (cluster_id='{}')", s.cluster_id);
     let _ = app.emit("settings-changed", ());
+    // Serving is the hub's job, so the role alone decides whether this machine
+    // answers (see `sync::server::apply_role`): a demotion stops the listener and
+    // its discovery beacon, a promotion starts them.
+    #[cfg(feature = "desktop")]
+    crate::sync::server::apply_role(app.clone()).await;
     Ok(s)
 }
 

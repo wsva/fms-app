@@ -255,11 +255,18 @@ function SyncItem({
     status?.dataset && "datasets",
     status?.tts && "TTS",
   ].filter(Boolean) as string[];
+  // Only a hub serves: a follower keeps the service stopped (the role is the
+  // switch), so the bar must not advertise a hub that this machine is not — it
+  // used to read "Hub :35711" on a follower too, because the word followed the
+  // listener rather than the role.
+  const isHubRole = role === "hub";
 
   return (
     <StatusItem
       label={
-        running
+        !isHubRole
+          ? "This workspace is a follower: it syncs from its hub and serves nothing"
+          : running
           ? `Sync service on port ${status?.port} (serving ${flags.join(", ") || "nothing"})`
           : "Sync service stopped"
       }
@@ -270,13 +277,21 @@ function SyncItem({
       content={
         <>
           <span className={`h-2 w-2 shrink-0 rounded-full ${running ? "bg-green-500" : "bg-gray-400"}`} />
-          <span>{running ? `Hub :${status?.port}` : "No hub"}</span>
+          <span>
+            {isHubRole ? (running ? `Hub :${status?.port}` : "Hub off") : "Follower"}
+          </span>
         </>
       }
     >
-      <StatusMenuHeading>{role === "hub" ? "This device is the hub" : "This device is a follower"}</StatusMenuHeading>
+      <StatusMenuHeading>{isHubRole ? "This device is the hub" : "This device is a follower"}</StatusMenuHeading>
       <StatusMenuBlock>
-        <p className="text-text-primary">{running ? "Serving phones and linked devices" : "Sync service stopped"}</p>
+        <p className="text-text-primary">
+          {isHubRole
+            ? running
+              ? "Serving phones and linked devices"
+              : "Sync service stopped"
+            : "Pulls datasets from its hub and pushes edits back. Nothing is served from this machine."}
+        </p>
         {running && (
           <div className="mt-0.5 flex flex-col gap-0.5 text-[11px] text-text-tertiary">
             {status?.local_url && <p className="select-all truncate">{status.local_url}</p>}
@@ -286,12 +301,24 @@ function SyncItem({
         )}
       </StatusMenuBlock>
       <StatusMenuSep />
-      <StatusMenuRow
-        icon={running ? Square : Play}
-        text={running ? "Stop sync service" : "Start sync service"}
-        disabled={busy}
-        onClick={() => onToggle(!running)}
-      />
+      {/* A follower is offered no start: promoting the workspace on the Devices &
+          Hub page is what turns serving on. A service left running from before the
+          demotion stays stoppable. */}
+      {isHubRole ? (
+        <StatusMenuRow
+          icon={running ? Square : Play}
+          text={running ? "Stop sync service" : "Start sync service"}
+          disabled={busy}
+          onClick={() => onToggle(!running)}
+        />
+      ) : running ? (
+        <StatusMenuRow
+          icon={Square}
+          text="Stop sync service"
+          disabled={busy}
+          onClick={() => onToggle(false)}
+        />
+      ) : null}
       {error && (
         <StatusMenuBlock>
           <p className="break-words text-red-500">{error}</p>

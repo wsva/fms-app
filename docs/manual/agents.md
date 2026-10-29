@@ -21,6 +21,8 @@ Open **Tools → Agent**. The first section, **Attach an agent**, is read-only a
 
 If the status row says the service is stopped, or **Agent surface** further down the same page says the MCP surface is off, no agent will connect. That switch serves `/mcp` and the manual; saving it restarts the local service, which drops an attached agent's tools for a moment until it comes back.
 
+One case is not a fault: only the **Hub** workspace runs the service. On a workspace whose role is **Follower** the row correctly says stopped and there is no endpoint to attach to — set that workspace's role to Hub on **Devices & Hub** if you want an agent to drive *this* machine rather than its Hub.
+
 ## Step 1 — give the agent the address
 
 ### The one sentence (preferred)

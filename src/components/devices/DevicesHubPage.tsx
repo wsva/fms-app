@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
@@ -219,6 +219,19 @@ export default function DevicesHubPage() {
   // ways of choosing a hub never compete for the same slot on a narrow screen.
   const [entryMode, setEntryMode] = useState<"selector" | "manual">("selector");
   const [manualUrl, setManualUrl] = useState("");
+  // Whether the field holds the user's own typing. A prefilled address is a
+  // starting point, not an intent: without this, opening Manual would dial a
+  // guess, and a page refresh would rewrite a half-typed address. The ref
+  // mirrors the flag because `loadSettings` must not re-subscribe to it.
+  const [manualEdited, setManualEdited] = useState(false);
+  const manualEditedRef = useRef(false);
+  // The backend's starting address (`pc_suggested_hub_url`); kept in a ref so
+  // the loaders can fall back to it without taking it as a dependency.
+  const suggestedRef = useRef("");
+  const markManualEdited = useCallback((edited: boolean) => {
+    manualEditedRef.current = edited;
+    setManualEdited(edited);
+  }, []);
 
   // Pairing state (Bluetooth-style device identity, see sync.rs / pairing.rs).
   const [pairing, setPairing] = useState(false);
@@ -261,7 +274,10 @@ export default function DevicesHubPage() {
     try {
       const g = await invoke<GlobalSettings>("settings_get_global");
       setGlobal(g);
-      setManualUrl(g.pc_url ?? "");
+      // Never overwrite an address the user is in the middle of typing. With no
+      // hub saved, the field opens on the suggestion so there is something to
+      // edit instead of a blank box.
+      if (!manualEditedRef.current) setManualUrl(g.pc_url?.trim() || suggestedRef.current);
       return g;
     } catch (e) {
       logError(`Failed to load settings: ${String(e)}`, "devices");
@@ -350,6 +366,15 @@ export default function DevicesHubPage() {
     setMounted(true);
     setMobile(isMobileApp());
     (async () => {
+      // Asked for before the first settings read so that even a fresh install
+      // already opens the Manual field with an address to correct.
+      if (isTauri()) {
+        try {
+          suggestedRef.current = await invoke<string>("pc_suggested_hub_url");
+        } catch (e) {
+          logError(`Failed to get a suggested hub address: ${String(e)}`, "devices");
+        }
+      }
       const g = await loadSettings();
       loadWorkspace();
       loadStatus();
@@ -422,6 +447,9 @@ export default function DevicesHubPage() {
       const next: GlobalSettings = { ...global, pc_url: url };
       setGlobal(next);
       setManualUrl(url);
+      // The address in the field is now the committed one, so the next edit is
+      // what makes it "edited" again.
+      markManualEdited(false);
       try {
         await invoke("settings_set_global", { global: next });
         if (!url) {
@@ -448,22 +476,24 @@ export default function DevicesHubPage() {
         setMessage(`Failed to save PC address: ${String(e)}`);
       }
     },
-    [global, loadStatus],
+    [global, loadStatus, markManualEdited],
   );
 
   // There is no "Use address" button any more: a finished address is itself the
   // gesture. Debounced because `savePc` also probes the hub — committing per
   // keystroke would fire a request for every character and would latch onto
   // mid-typing values like `http://1`, which already parse. Enter and blur commit
-  // immediately. An unchanged or empty field commits nothing, so emptying the
-  // box can never silently disconnect you.
+  // immediately. An unchanged, unedited or empty field commits nothing, so
+  // neither an untouched suggestion nor emptying the box can silently connect or
+  // disconnect you.
   const commitManual = useCallback(() => {
+    if (!manualEdited) return;
     const origin = parseHubOrigin(manualUrl);
     if (origin && origin !== parseHubOrigin(pcUrl)) savePc(origin);
-  }, [manualUrl, pcUrl, savePc]);
+  }, [manualEdited, manualUrl, pcUrl, savePc]);
 
   useEffect(() => {
-    if (entryMode !== "manual") return;
+    if (entryMode !== "manual" || !manualEdited) return;
     const origin = parseHubOrigin(manualUrl);
     // Compare normalized origins on both sides: a stored `pc_url` may carry a
     // trailing slash, and treating that as "different" would make simply opening
@@ -471,7 +501,7 @@ export default function DevicesHubPage() {
     if (!origin || origin === parseHubOrigin(pcUrl)) return;
     const timer = setTimeout(() => savePc(origin), 600);
     return () => clearTimeout(timer);
-  }, [entryMode, manualUrl, pcUrl, savePc]);
+  }, [entryMode, manualEdited, manualUrl, pcUrl, savePc]);
 
   // Ask the hub to pair this device: the owner gets a confirm dialog and the
   // command polls until they answer.
@@ -530,8 +560,10 @@ export default function DevicesHubPage() {
     setMessage("");
     try {
       await invoke("settings_forget_hub");
+      // The reset is the point, so let the reload write the field.
+      markManualEdited(false);
       const g = await loadSettings();
-      setManualUrl(g?.pc_url ?? "");
+      setManualUrl(g?.pc_url ?? suggestedRef.current);
       setStatus(await invoke<SyncStatusDetail>("sync_status").catch(() => null));
       discover();
       setMessage("Forgot the hub. Scan or enter an address to re-pair.");
@@ -624,6 +656,19 @@ export default function DevicesHubPage() {
   // Drives both the manual hint and the auto-commit guard above.
   const manualOrigin = parseHubOrigin(manualUrl);
   const currentHubOrigin = parseHubOrigin(pcUrl);
+  // What the Manual field is saying. Kept out of the JSX because it is a
+  // four-way branch on (complete? edited?) — and an incomplete address has to
+  // say it connects nothing rather than promise a connection that will not run.
+  const manualHint =
+    manualOrigin && manualOrigin === currentHubOrigin
+      ? "Already the connected hub."
+      : manualOrigin
+      ? manualEdited
+        ? "Address complete — connecting…"
+        : "A starting point, not a connection — edit the address to connect."
+      : manualUrl.trim()
+      ? "Not a full address yet, so nothing connects — include the scheme, e.g. http://192.168.1.20:35711"
+      : "Type an address and it connects by itself. An empty field does nothing.";
   // Pairing (and the cluster binding it establishes) is a LAN concept — the
   // website authenticates by account token, not device signature, so there is
   // nothing to pair. Hide the whole pairing row for the website origin.
@@ -791,10 +836,11 @@ export default function DevicesHubPage() {
 
           {/* One slot, two mutually exclusive ways to fill it: the list shows scan
               results and, through its empty entry, the only way to disconnect; Manual
-              swaps in a text field that commits itself once the address is complete.
-              Either way, choosing an address connects it and adopts the hub's cluster.
-              On a narrow (phone) screen the Scan and Manual buttons drop onto their own
-              row under whichever control is showing; from `sm:` up they sit inline. */}
+              swaps in a text field pre-filled with a starting address, committing only
+              once the user has edited it into a complete origin. Either way, choosing
+              an address connects it and adopts the hub's cluster. On a narrow (phone)
+              screen the Scan and Manual buttons drop onto their own row under whichever
+              control is showing; from `sm:` up they sit inline. */}
           <div className="flex flex-col gap-2 pt-1 border-t border-border-light">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
               {entryMode === "manual" ? (
@@ -806,7 +852,10 @@ export default function DevicesHubPage() {
                     autoFocus
                     className="w-full min-w-0 px-3 py-1.5 text-sm border border-border-light rounded-md bg-bg-input text-text-primary"
                     value={manualUrl}
-                    onChange={(e) => setManualUrl(e.target.value)}
+                    onChange={(e) => {
+                      setManualUrl(e.target.value);
+                      markManualEdited(true);
+                    }}
                     onBlur={commitManual}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
@@ -818,16 +867,12 @@ export default function DevicesHubPage() {
                   />
                   <p
                     className={`text-xs leading-relaxed ${
-                      manualOrigin ? "text-text-tertiary" : "text-amber-600 dark:text-amber-400"
+                      manualUrl.trim() && !manualOrigin
+                        ? "text-amber-600 dark:text-amber-400"
+                        : "text-text-tertiary"
                     }`}
                   >
-                    {manualOrigin
-                      ? manualOrigin === currentHubOrigin
-                        ? "Already the connected hub."
-                        : "Address complete — connecting…"
-                      : manualUrl.trim()
-                      ? "Not a full address yet — include the scheme, e.g. http://192.168.1.20:35711"
-                      : "Type an address and it connects by itself. An empty field does nothing — disconnect from the list you get back by pressing Manual."}
+                    {manualHint}
                   </p>
                 </div>
               ) : (
@@ -873,11 +918,17 @@ export default function DevicesHubPage() {
                       ? "bg-bg-hover border-border-default"
                       : "bg-bg-body border-border-light"
                   }`}
-                  onClick={() => setEntryMode((m) => (m === "manual" ? "selector" : "manual"))}
+                  onClick={() => {
+                    const opening = entryMode !== "manual";
+                    setEntryMode(opening ? "manual" : "selector");
+                    // Opening the field is not an edit: a leftover or suggested
+                    // address must never connect by itself.
+                    if (opening) markManualEdited(false);
+                  }}
                   title={
                     entryMode === "manual"
                       ? "Back to the scanned-address list"
-                      : "Type the hub address; it is used as soon as it is complete"
+                      : "Type the hub address; it connects once you edit it into a full URL"
                   }
                 >
                   Manual

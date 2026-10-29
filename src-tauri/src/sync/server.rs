@@ -191,7 +191,20 @@ impl WebServiceState {
 
 /// Auto-start the web service. Called from app setup.
 /// This is a standalone function to avoid borrow checker issues with State + AppHandle.
+///
+/// Only a hub starts. A follower is a client — it pulls from its hub and pushes
+/// edits back — so nothing on it is meant to accept inbound sync traffic, and
+/// serving there would put a machine in every scan whose role says it is not a
+/// source of truth. Empty counts as follower (see `SettingsState::role`), so a
+/// fresh workspace serves nothing until it is promoted on the Devices & Hub page.
 pub async fn auto_start(app: AppHandle) {
+    if !app.state::<SettingsState>().is_hub() {
+        log::info!(
+            "[WebService] not auto-starting: this workspace is a follower, so this machine serves \
+             nothing. Set the role to Hub on the Devices & Hub page to serve phones, datasets and /mcp."
+        );
+        return;
+    }
     let config = WebServiceConfig::default();
     let port = DEFAULT_PORT;
     log::info!("Auto-starting web service on port {}", port);
@@ -241,6 +254,47 @@ pub async fn auto_start(app: AppHandle) {
     log::info!("Web service auto-started on port {}", bound);
 }
 
+/// Reconcile the listener with the current workspace's role: a follower stops
+/// serving, a hub starts. Called at every point the role can change (the role
+/// setter, `settings_set` over MCP, a workspace switch), so the answer follows
+/// the role without a restart.
+///
+/// The discovery responder needs no signal of its own — it stops advertising
+/// whenever `running` is false, so a demoted machine drops out of scans instead
+/// of answering with an `http_port` nothing listens on.
+pub async fn apply_role(app: AppHandle) {
+    let follower = {
+        let settings = app.state::<SettingsState>();
+        !settings.is_hub()
+    };
+    let running = app
+        .try_state::<WebServiceState>()
+        .map(|s| s.running.load(Ordering::SeqCst))
+        .unwrap_or(false);
+
+    if follower {
+        if running {
+            log::info!(
+                "[WebService] role is follower: stopping the web service (a follower serves nothing)"
+            );
+            app.state::<WebServiceState>().stop_inner();
+        }
+        return;
+    }
+    if running {
+        return;
+    }
+
+    // Hub: serve with whatever config the user last chose, not the defaults —
+    // a start that reset the phone-facing flags would silently stop STT/datasets.
+    let config = app.state::<WebServiceState>().config.lock().unwrap().clone();
+    let state = app.state::<WebServiceState>();
+    match state.start_inner(app.clone(), config).await {
+        Ok(status) => log::info!("[WebService] started for the hub role on port {}", status.port),
+        Err(e) => log::warn!("[WebService] failed to start for the hub role: {}", e),
+    }
+}
+
 #[tauri::command]
 pub async fn web_service_get_status(
     state: tauri::State<'_, WebServiceState>,
@@ -254,6 +308,16 @@ pub async fn web_service_start(
     state: tauri::State<'_, WebServiceState>,
     config: WebServiceConfig,
 ) -> Result<WebServiceStatus, String> {
+    // Serving belongs to the hub role (§3.1): a follower that started this would
+    // advertise a source of truth it is not, so the role is the switch and this
+    // refuses with the way to change it (`sync::server::apply_role` does the rest).
+    if !app.state::<SettingsState>().is_hub() {
+        return Err(
+            "this workspace is a follower, so it serves nothing: set its role to Hub on the \
+             Devices & Hub page (or settings_set_role) and the service starts by itself"
+                .to_string(),
+        );
+    }
     state.start_inner(app, config).await
 }
 
@@ -1288,10 +1352,9 @@ pub fn spawn_discovery(app: AppHandle, http_port: u16) {
 
         let name = app.package_info().name.clone();
         // Beacon is rebuilt each tick from live settings so a role/cluster
-        // change (designating this workspace a hub) is reflected without a
-        // restart. Every desktop runs the web service, so the beacon must say
-        // whether *this* one is a hub or a follower (§3.1) — the phone lists
-        // only hubs as connect targets.
+        // change is reflected without a restart. Only a hub serves (see
+        // `auto_start`), and the advertised `role` is still what lets a peer
+        // tell a hub from a follower (§3.1).
         let make_beacon = |app: &AppHandle| -> String {
             let settings = app.state::<SettingsState>();
             serde_json::json!({
@@ -1313,15 +1376,30 @@ pub fn spawn_discovery(app: AppHandle, http_port: u16) {
         let mcast = format!("224.0.1.87:{}", DISCOVERY_PORT);
         let mut buf = [0u8; 2048];
         let mut ticker = tokio::time::interval(Duration::from_secs(30));
+        // Advertise only while the listener is up. Demoting a running hub stops
+        // the web service but leaves this loop holding the UDP port, and a beacon
+        // carrying an `http_port` nothing answers would list this machine in a
+        // scan with a URL that then refuses every connection.
+        let serving = || {
+            app.try_state::<WebServiceState>()
+                .map(|s| s.running.load(Ordering::SeqCst))
+                .unwrap_or(true)
+        };
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
+                    if !serving() {
+                        continue;
+                    }
                     beacon = make_beacon(&app);
                     let _ = socket.send_to(beacon.as_bytes(), bcast.as_str()).await;
                     let _ = socket.send_to(beacon.as_bytes(), mcast.as_str()).await;
                 }
                 r = socket.recv_from(&mut buf) => {
                     if let Ok((n, peer)) = r {
+                        if !serving() {
+                            continue;
+                        }
                         let msg = String::from_utf8_lossy(&buf[..n]);
                         if msg.trim() == "fms-probe" {
                             let _ = socket.send_to(beacon.as_bytes(), peer).await;

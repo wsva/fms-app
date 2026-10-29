@@ -21,7 +21,7 @@ A few rules worth knowing up front:
 
 - Roles belong to a **workspace**, not to the whole app. The same machine can host one workspace that is a Hub and another that is a Follower.
 - A **phone is always a Follower** — it can never serve datasets to other devices. The Hub option only shows up on desktop.
-- Every desktop automatically starts a small network service (on port **35711**) as soon as the app is open. That is what makes it discoverable to other devices — you don't need to turn anything on manually.
+- Only a **Hub** runs the network service (on port **35711**). A **Follower** is a client: it syncs from its Hub and serves nothing, so its service stays off and other devices do not see it in a scan. Promoting a workspace to Hub turns the service on, and demoting it turns the service off again — no restart needed.
 
 ### Recommended setup
 
@@ -37,7 +37,7 @@ A few rules worth knowing up front:
 3. The page now shows a **Cluster** ID (a short code, e.g. `a1b2c3d4`). This ID is generated once, the first time a workspace becomes a Hub, and every follower that pairs with it adopts the same ID so devices never talk to the wrong Hub.
 4. Your section header now reads "**hub · serving datasets to paired devices**" on the Datasets Sync page, and a **Devices paired to me** list appears here — this is where you approve or revoke follower devices later.
 
-You do not need to open any network ports yourself or start a server — the app does this automatically whenever it's running.
+You do not need to open any network ports yourself or start a server — promoting the workspace to Hub turns the service on by itself, and it stays on while that workspace is active.
 
 ---
 
@@ -48,7 +48,7 @@ Do this on the device that should sync *from* the Hub.
 1. Open **Tools → Devices & Hub**.
 2. Under **Hub**, pick the Hub machine:
    - **Scan** searches your local network (and Tailscale, if you use it) for other machines running FmS and lists them by hostname and address. If the network blocks or misroutes the discovery broadcasts FmS normally uses, the scan falls back to asking every address on your local network directly over TCP, so a Hub on the same subnet is still found (such a row is marked `sweep`).
-   - **Manual** lets you type the address directly, e.g. `http://192.168.1.20:35711`, if the Hub lives on a different subnet or scan still finds nothing.
+   - **Manual** lets you type the address directly if the Hub lives on a different subnet or scan still finds nothing. The field comes pre-filled with a starting address on your own subnet — `http://192.168.100.101:35711` on a `192.168.100.x` network — so usually you only correct the last number. It is a starting point, not a connection: nothing is dialled until you edit it, and an incomplete address connects nothing (the line under the field says so in amber).
    - Selecting an address saves it and probes the Hub once so this device adopts the Hub's cluster ID (see the **Cluster** line under Current Workspace Status).
 3. Click **Pair**. This is a one-time step, like pairing Bluetooth headphones: a confirmation dialog pops up on the **Hub machine**, showing a short code (for example `4f2a1b`) and the name of the device asking to connect, plus which user account it will sync progress as.
 4. Check that the code on the Hub matches the code shown on your device's Devices & Hub page while it says "Waiting for the PC owner to confirm," then click **Allow** on the Hub.
