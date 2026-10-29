@@ -84,7 +84,9 @@ fn platform_support() -> (bool, Option<&'static str>) {
 
 /// A `tauri dev` run reports the committed `0.1.0` placeholder, so it would
 /// always look stale against the published manifest — and installing over a
-/// running dev build is never what anyone wants.
+/// running dev build is never what anyone wants. That takes it out of
+/// `available`, not out of the check: the newest published version is still
+/// what a maintainer wants to read in Settings → About.
 fn is_dev_build() -> bool {
     cfg!(debug_assertions)
 }
@@ -115,8 +117,17 @@ fn tag_url(version: &str) -> String {
 }
 
 /// Ask the configured endpoint whether a newer release exists.
+///
+/// A development build reads the manifest like any other — the newest published
+/// version is the number to compare a tag against — but never reports it as
+/// available: the version such a build reports is the committed `0.1.0`
+/// placeholder, so every real release would look newer than it, and `install`
+/// refuses a dev build anyway. Reporting the placeholder *as* the latest release
+/// (which is what copying `current` into `latest` did) is the one answer that is
+/// wrong in both directions.
 pub async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
     let (supported, unsupported_reason) = platform_support();
+    let dev = is_dev_build();
     let mut status = UpdateStatus {
         current: env!("CARGO_PKG_VERSION").to_string(),
         latest: String::new(),
@@ -125,17 +136,12 @@ pub async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
         release_url: RELEASES_PAGE.to_string(),
         supported,
         unsupported_reason: unsupported_reason.map(str::to_string),
-        dev: is_dev_build(),
+        dev,
         hint: String::new(),
     };
 
     if !supported {
         status.hint = "This build cannot update itself; download the newest installer from the releases page instead.".to_string();
-        return Ok(status);
-    }
-    if is_dev_build() {
-        status.latest = status.current.clone();
-        status.hint = "Development build: update checks are disabled.".to_string();
         return Ok(status);
     }
 
@@ -151,15 +157,29 @@ pub async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
             status.latest = update.version.clone();
             status.notes = update.body.unwrap_or_default();
             status.release_url = tag_url(&update.version);
-            status.available = true;
-            status.hint = format!(
-                "FmS {} is available (installed: {}). Call app_update_install to download and install it, or tell the user it is in Settings > About.",
-                update.version, update.current_version
-            );
+            status.available = !dev;
+            status.hint = if dev {
+                format!(
+                    "Development build: the newest published release is {}. This build reports the {} placeholder and will not install an update; use a released build for that.",
+                    update.version, status.current
+                )
+            } else {
+                format!(
+                    "FmS {} is available (installed: {}). Call app_update_install to download and install it, or tell the user it is in Settings > About.",
+                    update.version, update.current_version
+                )
+            };
         }
         None => {
-            status.latest = status.current.clone();
-            status.hint = format!("Already on the newest release ({}).", status.current);
+            status.hint = if dev {
+                format!(
+                    "Development build: nothing newer than {} is published, and this build will not install an update.",
+                    status.current
+                )
+            } else {
+                status.latest = status.current.clone();
+                format!("Already on the newest release ({}).", status.current)
+            };
         }
     }
     Ok(status)

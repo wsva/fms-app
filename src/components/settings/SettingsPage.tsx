@@ -897,6 +897,17 @@ export default function SettingsPage() {
                   v{updateCheck.status.latest}
                 </a>
               )}
+              {/* No version to name: either the manifest advertises nothing newer
+                  (supported platforms only ask), or this build cannot ask at all.
+                  Never fill the gap with the installed version — a development
+                  build would then print its 0.1.0 placeholder as the latest release. */}
+              {updateCheck.state === "done" &&
+                updateCheck.status &&
+                !updateCheck.status.latest && (
+                  <span className="text-sm text-text-tertiary">
+                    {updateCheck.status.supported ? "nothing newer" : "not checked"}
+                  </span>
+                )}
               {updateCheck.state === "done" && updateCheck.status?.dev && (
                 <span className="text-xs px-1.5 py-0.5 rounded bg-mid-gray/20 text-text-tertiary shrink-0">Development build</span>
               )}
