@@ -138,10 +138,11 @@ const MIN_SPAN_SECS: f64 = 0.3;
 const PREVIEW_PAIRS: usize = 400;
 
 /// How much of the surrounding audio a preview keeps beyond the span itself:
-/// half the span's own length on each side, so the words either side of an edge
-/// are in the window and a longer passage buys proportionally more context. The
-/// fixed quarter second this replaced showed the edge and nothing around it.
-const PREVIEW_MARGIN_RATIO: f64 = 0.5;
+/// thirty per cent of the span's own length on each side, so the words either
+/// side of an edge are in the window and a longer passage buys proportionally
+/// more context. The fixed quarter second this replaced showed the edge and
+/// nothing around it.
+const PREVIEW_MARGIN_RATIO: f64 = 0.3;
 
 /// The floor under that ratio: a two-word one-liner still gets a second of
 /// context each side, or there is nothing to judge its edges against.
