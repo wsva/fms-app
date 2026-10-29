@@ -5,9 +5,9 @@
 //! standard clips pronunciation is measured against. So the checks are few, and
 //! each names a defect that would otherwise only show up as a bad score later:
 //!
-//! - `texts_none` — the dataset has no passage, so every per-text check below is
+//! - `texts_none` — the dataset has no text, so every per-text check below is
 //!   vacuously clean (the subject check that a pipeline must bind to);
-//! - `text_empty` — a passage with no readable content, which can never be
+//! - `text_empty` — a text with no readable content, which can never be
 //!   practised;
 //! - `text_duplicate` — two rows with the same content digest, which is what an
 //!   importer run twice leaves behind;
@@ -72,29 +72,29 @@ struct CheckMeta {
 const CHECKS: &[CheckMeta] = &[
     CheckMeta {
         id: "texts_none",
-        label: "Passages",
+        label: "Texts",
         level: "problem",
-        advice: "This dataset has no passage yet, so every per-text finding below proves \
+        advice: "This dataset has no text yet, so every per-text finding below proves \
                   nothing. Import a book with read_aloud_import_texts (dry_run first) or add \
                   one with read_aloud_save_text.",
     },
     CheckMeta {
         id: "text_empty",
-        label: "Passages with no content",
+        label: "Texts with no content",
         level: "problem",
-        advice: "A passage with blank content cannot be read or scored. Fill it in with \
+        advice: "A text with blank content cannot be read or scored. Fill it in with \
                   read_aloud_save_text, or delete the row.",
     },
     CheckMeta {
         id: "text_duplicate",
-        label: "Passages with identical content",
+        label: "Texts with identical content",
         level: "warn",
         advice: "Two rows with the same text — usually an import run twice, or a failed \
                   batch retried on top of itself. Delete the copies you do not want.",
     },
     CheckMeta {
         id: "standard_audio_missing",
-        label: "Passages with no standard audio",
+        label: "Texts with no standard audio",
         level: "warn",
         advice: "Pronunciation is measured against each text's default clip. Generate the \
                   missing ones with read_aloud_standard_audio_generate_all — probe with \
@@ -166,7 +166,7 @@ pub(crate) fn audit(settings: &SettingsState, dataset_uuid: &str) -> Result<Data
     }
 
     // A digest shared by several rows is a duplicate; the digest of a blank row
-    // is skipped above, because "two empty passages" is one problem, not two.
+    // is skipped above, because "two empty texts" is one problem, not two.
     let mut duplicates = Vec::new();
     let mut digests: Vec<&String> = by_digest.keys().collect();
     digests.sort();
@@ -177,7 +177,7 @@ pub(crate) fn audit(settings: &SettingsState, dataset_uuid: &str) -> Result<Data
         }
         for row in group {
             duplicates.push(row.finding(format!(
-                "same content as {} other passage(s) — “{}”",
+                "same content as {} other text(s) — “{}”",
                 group.len() - 1,
                 row.title
             )));
@@ -188,7 +188,7 @@ pub(crate) fn audit(settings: &SettingsState, dataset_uuid: &str) -> Result<Data
     let none = if rows.is_empty() {
         vec![AuditFinding {
             source: "read_text".into(),
-            detail: "no passage in this dataset".into(),
+            detail: "no text in this dataset".into(),
         }]
     } else {
         Vec::new()

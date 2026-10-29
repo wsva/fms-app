@@ -8,10 +8,10 @@ import SpanTrack from "./SpanTrack";
 import { MIN_SPAN, clock, clockHms, clockShort, confidenceTone, parseClock, percent, roundMs } from "./format";
 
 /**
- * One passage, open at full size: the audio in a card on top, the text in a
+ * One text, open at full size: the audio in a card on top, its content in a
  * second card underneath — the same two-panel shape as the queue beside them,
  * with a gap instead of a handle: the audio card is as tall as its contents and
- * only the text scrolls.
+ * only the content scrolls.
  *
  * The audio card closes with one bar, directly under the two edges everything
  * in it acts on: the transport on the left, and on the right the verbs —
@@ -81,7 +81,7 @@ function SpanField({ label, value, disabled, onCommit }: {
 const CONTROL_BOX =
   "inline-flex items-center justify-center rounded-md border cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed";
 
-/** Neutral control: steps, ±0.5 s, Re-guess, the passage chevrons. */
+/** Neutral control: steps, ±0.5 s, Re-guess, the text chevrons. */
 const CONTROL_QUIET = `${CONTROL_BOX} bg-bg-muted border-border-light text-text-primary hover:border-accent-bg hover:bg-bg-hover disabled:hover:border-border-light disabled:hover:bg-bg-muted`;
 
 /** The transport's Play: accent-tinted, so the ear's button is found first. */
@@ -177,10 +177,10 @@ function EdgeRow({
 }
 
 /**
- * Where this passage sits in its recording.
+ * Where this text sits in its recording.
  *
  * Every proposal carries the recording it was placed in, so the whole chapter
- * can be drawn from the rows themselves: one block per passage, gaps where the
+ * can be drawn from the rows themselves: one block per text, gaps where the
  * guess placed nothing. Clicking a block is how you move to a neighbour without
  * going back to the queue — the spatial half of what the list cannot show.
  */
@@ -200,7 +200,7 @@ function ChapterMap({
       {siblings.map((proposal) => {
         if (proposal.status === "refused" || !(proposal.end > proposal.start)) return null;
         const isCurrent = proposal.text_uuid === current;
-        // Three tones: the passage you are on, one that already owns a clip, and
+        // Three tones: the text you are on, one that already owns a clip, and
         // one whose span is only in `proposals.json`.
         const tone = isCurrent
           ? "bg-accent-bg ring-1 ring-accent-bg"
@@ -240,7 +240,7 @@ type Props = {
   emptyHint: string;
   canPrev: boolean;
   canNext: boolean;
-  /** Walk to the previous / next passage of the same recording. */
+  /** Walk to the previous / next text of the same recording. */
   onStep: (direction: -1 | 1) => void;
   onActivateEdge: (edge: Edge) => void;
   onMove: (start: number, end: number) => void;
@@ -261,7 +261,7 @@ type Props = {
   canGuess: boolean;
 };
 
-export default function PassageEditor({
+export default function TextEditor({
   proposal,
   span,
   siblings,
@@ -297,8 +297,8 @@ export default function PassageEditor({
             <Wand2 size={20} className="text-text-tertiary" />
             <p className="text-sm text-text-secondary max-w-[420px]">{emptyHint}</p>
             <p className="text-[11px] text-text-tertiary max-w-[420px]">
-              The Source Audios tab listens to each file once and places the passages; this tab is
-              where a span is checked by ear and saved as the text's clip.
+              The Source Audios tab listens to each file once and places the texts; this tab is
+              where a span is checked by ear and saved as that text's clip.
             </p>
           </div>
         </div>
@@ -343,7 +343,7 @@ export default function PassageEditor({
               </span>
             )}
             {!refused && (
-              <span className="text-text-tertiary" title="Words matched of the passage's words">
+              <span className="text-text-tertiary" title="Words matched of the text's words">
                 {proposal.matched_words}/{proposal.reference_words} w
               </span>
             )}
@@ -352,7 +352,7 @@ export default function PassageEditor({
 
         {refused ? (
           <p className="text-[11px] text-warning-text">
-            {proposal.note || "The guess refused this passage."} A refused passage has no span to
+            {proposal.note || "The guess refused this text."} A refused text has no span to
             move or save — re-guess with another folder, or leave it out.
           </p>
         ) : (
@@ -362,15 +362,15 @@ export default function PassageEditor({
                 <span className="min-w-0 truncate" title={proposal.source_path}>
                   {proposal.source_name}
                   {duration != null && duration > 0 ? ` · ${clockShort(duration)}` : ""}
-                  {position ? ` · passage ${position.index} of ${position.total}` : ""}
+                  {position ? ` · text ${position.index} of ${position.total}` : ""}
                 </span>
                 <span className="ml-auto flex items-center gap-1 shrink-0">
                   <button
                     type="button"
                     onClick={() => onStep(-1)}
                     disabled={!canPrev}
-                    aria-label="Previous passage in this recording"
-                    title="Previous passage in this recording"
+                    aria-label="Previous text in this recording"
+                    title="Previous text in this recording"
                     className={`${CONTROL_QUIET} w-5 h-5`}
                   >
                     <ChevronLeft size={11} />
@@ -379,8 +379,8 @@ export default function PassageEditor({
                     type="button"
                     onClick={() => onStep(1)}
                     disabled={!canNext}
-                    aria-label="Next passage in this recording"
-                    title="Next passage in this recording"
+                    aria-label="Next text in this recording"
+                    title="Next text in this recording"
                     className={`${CONTROL_QUIET} w-5 h-5`}
                   >
                     <ChevronRight size={11} />
@@ -445,7 +445,7 @@ export default function PassageEditor({
         {/* One bar closes the band, directly under the two edges everything in
             it acts on: the transport on the left, the verbs that decide whether
             this span becomes (or has to give way to) a clip on the right. Above
-            the text, so none of them has to be scrolled for. A refused passage
+            the text, so none of them has to be scrolled for. A refused text
             keeps Re-guess here — that is the one thing it can do — and its Save
             explains why it is off. */}
         <div className="flex flex-wrap items-center gap-1.5">

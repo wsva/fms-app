@@ -321,6 +321,23 @@ When adding new colors, define the CSS variable in all 4 theme blocks in `global
 
 ## Key Conventions
 
+### Vocabulary
+
+One noun per concept — in code, UI copy, MCP descriptions and docs. A synonym is a
+second name an agent has to map, and the mapping is never written down anywhere it
+reads.
+
+| Concept | Word |
+|---------|------|
+| One member of a read-aloud dataset: title, note, the content you read | **text** (never "passage") |
+| What you read aloud inside it (`read_text.content`) | **content** |
+| The spelled-out form scoring reads (`normalized_content`) | **reference** |
+| The seconds a text occupies inside one recording | **span** |
+| A text's standard audio | **clip** |
+
+"Passage" survives only as ordinary English for a unit of prose in the Books
+surfaces, which have their own precise nouns (chapter, paragraph, sentence).
+
 ### Rust Backend
 
 - Commands use `State<'_, SettingsState>` to access settings and resolve dataset paths

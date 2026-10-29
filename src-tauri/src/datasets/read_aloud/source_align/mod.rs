@@ -1,11 +1,11 @@
-//! Source alignment: guess every passage's span from a directory of recordings.
+//! Source alignment: guess every text's span from a directory of recordings.
 //!
 //! ## Words used here
 //!
 //! | word | means |
 //! |---|---|
 //! | **recording** | one file outside the dataset (`source_uuid`). A *take* is the learner's own reading and is a different thing. |
-//! | **text** | a passage of the dataset (`read_text`). |
+//! | **text** | a text of the dataset (`read_text`). |
 //! | **span** | the seconds one text occupies inside one recording, with the confidence that it was heard there. |
 //! | **clip** | a text's standard audio: the `read_standard_audio` row pronunciation is measured against. An aligned clip remembers its span; its wav is cut later, on first need. |
 //! | **save** | span → clip row, a few hundred row writes. **Cut** is the expensive half: clip row → wav, and only when something needs to hear it. |
@@ -17,15 +17,15 @@
 //! ## The problem this exists for
 //!
 //! An audiobook's recordings are **outside** the dataset and each holds many
-//! passages. [`super::standard_audio::guess_span`] answers "where is *this* text
+//! texts. [`super::standard_audio::guess_span`] answers "where is *this* text
 //! in *that* file" by decoding and transcribing the whole file, so guessing a
 //! whole dataset that way costs O(texts × files) minutes and throws away the one
 //! fact the bulk case has: the texts are in the same order as the recordings.
 //!
 //! This module pays for the transcription **once per file**, then places the
-//! passages along one global token stream in `order_num`: first the passages long
+//! texts along one global token stream in `order_num`: first the texts long
 //! enough to be found on their own, then everything in the gaps those leave. Each
-//! passage yields a span, the spans are written down as *proposals*, and `apply`
+//! text yields a span, the spans are written down as *proposals*, and `apply`
 //! stores them — as rows, with the wav cut later, the first time something needs
 //! to hear it. There is nothing to judge in between: a span the model placed is
 //! the answer, and there is only a clip to save (and a clip to delete when the
@@ -33,7 +33,7 @@
 //!
 //! ## Why two passes and not one walk
 //!
-//! The first version walked the passages with a cursor that only moved forward
+//! The first version walked the texts with a cursor that only moved forward
 //! and aligned each one against a window growing from that cursor. On a real
 //! audiobook (784 mails, 34 files, 45 000 heard words) it placed five of them.
 //! Three things were wrong, and each one on its own is enough to lose a dataset:
@@ -43,16 +43,16 @@
 //!   it with the words it should have matched — 7 matches where 11 were heard;
 //! * a wider window made that *worse*, but the wider answer overwrote the
 //!   narrower one, so refusing was the only way out of the loop;
-//! * one passage placed in the wrong place moved the cursor past the passages
+//! * one text placed in the wrong place moved the cursor past the texts
 //!   that came after it, and everything behind the cursor refused. 500 of the
 //!   784 refusals in that run were one bad span in the first third of the book.
 //!
 //! So the guess no longer trusts a cursor. It trusts **reading order**: a text's
 //! position is predicted from the words counted before it (`prior_position`),
 //! a semi-global alignment asks "where in this window is this text" without
-//! paying for the rest of the window, and every passage's span is decided
+//! paying for the rest of the window, and every text's span is decided
 //! against that prediction rather than against where its neighbour happened to
-//! land. The passages too short to be evidence on their own are then aligned as
+//! land. The texts too short to be evidence on their own are then aligned as
 //! one block inside the gap their neighbours leave, which cannot put them out of
 //! order even when the phrase they consist of occurs twenty times in the book.
 //!
@@ -100,10 +100,10 @@ const AUDIO_EXTENSIONS: [&str; 12] = [
 /// visible at the crop edges, long enough that ten hours is 1.8M pairs.
 const PEAK_SECONDS: f64 = 0.02;
 
-/// How far from its predicted position a passage is looked for. The tight value
+/// How far from its predicted position a text is looked for. The tight value
 /// is the common case and also what keeps a five-word one-liner from being
 /// matched to the same phrase twenty minutes later; the wide one is the retry
-/// for a passage the prediction put more than a page away.
+/// for a text the prediction put more than a page away.
 const PRIOR_SLACK_TOKENS: usize = 400;
 const PRIOR_WIDE_SLACK_TOKENS: usize = 1500;
 
@@ -123,7 +123,7 @@ const ANCHOR_MIN_WORDS: usize = 12;
 const ANCHOR_MIN_MATCH_RATIO: f64 = 0.7;
 
 /// How many tokens of distance from the predicted position one matched word is
-/// worth when two runs compete for the same passage. At 0.005 a run 400 tokens
+/// worth when two runs compete for the same text. At 0.005 a run 400 tokens
 /// nearer the prediction beats a run that merely matched two more words, which
 /// is the point: both are plausible alignments, and only one is in the right
 /// part of the book.
@@ -139,7 +139,7 @@ const PREVIEW_PAIRS: usize = 400;
 
 /// How much of the surrounding audio a preview keeps beyond the span itself:
 /// thirty per cent of the span's own length on each side, so the words either
-/// side of an edge are in the window and a longer passage buys proportionally
+/// side of an edge are in the window and a longer text buys proportionally
 /// more context. The fixed quarter second this replaced showed the edge and
 /// nothing around it.
 const PREVIEW_MARGIN_RATIO: f64 = 0.3;
@@ -158,7 +158,7 @@ fn round_ms(seconds: f64) -> f64 {
 // Commands
 // ============================================================
 
-/// Register (or list) the recordings that hold this dataset's passages.
+/// Register (or list) the recordings that hold this dataset's texts.
 #[tauri::command]
 pub async fn read_aloud_align_sources(
     settings: State<'_, SettingsState>,
@@ -195,7 +195,7 @@ pub async fn read_aloud_align_transcribe(
     transcribe(&settings, &dataset_uuid, source_uuid.as_deref())
 }
 
-/// Place every passage along the recordings, in order, and write the proposals.
+/// Place every text along the recordings, in order, and write the proposals.
 #[tauri::command]
 pub async fn read_aloud_align_guess(
     settings: State<'_, SettingsState>,
@@ -204,7 +204,7 @@ pub async fn read_aloud_align_guess(
     run(&settings, &dataset_uuid)
 }
 
-/// Re-place one passage, leaving every other row of the proposal set untouched.
+/// Re-place one text, leaving every other row of the proposal set untouched.
 #[tauri::command]
 pub async fn read_aloud_align_guess_one(
     settings: State<'_, SettingsState>,
@@ -233,7 +233,7 @@ pub async fn read_aloud_align_transcript(
     transcript(&settings, &dataset_uuid, &source_uuid)
 }
 
-/// Move one placed passage's span by hand: the page's nudges and typed edges.
+/// Move one placed text's span by hand: the page's nudges and typed edges.
 #[tauri::command]
 pub async fn read_aloud_align_move_span(
     settings: State<'_, SettingsState>,
@@ -307,7 +307,7 @@ mod tests {
         ));
         assert!((start - 9.8).abs() < 1e-9, "start {start}");
 
-        // The previous passage ends at 10.5, so this one may not start before it.
+        // The previous text ends at 10.5, so this one may not start before it.
         let start = round_ms(edges::place_edge(
             &loudness,
             edges::EDGE_FRAME_SECS,
@@ -317,7 +317,7 @@ mod tests {
             10.5,
             100.0,
         ));
-        assert!((start - 10.5).abs() < 1e-9, "start {start} overlaps the previous passage");
+        assert!((start - 10.5).abs() < 1e-9, "start {start} overlaps the previous text");
     }
 
     /// Milli precision, so a typed 12.345 s is stored as 12.345 s.
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(prior_position(5, 0, 1000), 0);
     }
 
-    /// The predicted window decides *which* occurrence: a passage that occurs
+    /// The predicted window decides *which* occurrence: a text that occurs
     /// once near the start and once far later belongs to the one reading order
     /// points at, even though the earlier one scores just as well.
     #[cfg(feature = "stt")]
@@ -351,16 +351,16 @@ mod tests {
             }
         }
         let need = need_for(&reference);
-        let found = find_predicted(&reference, &stream, 5000, need).hit.expect("the passage is there");
+        let found = find_predicted(&reference, &stream, 5000, need).hit.expect("the text is there");
         assert_eq!(found.from, 5000, "placed at {} instead of the predicted 5000", found.from);
         assert_eq!(found.matched, 15);
     }
 
     /// A transcript that repeats itself — what an overlapping STT chunk did at
     /// every four-minute boundary — is a hole in the audio, not in the text. The
-    /// passage is still one reading either side of it, so the step over the repeat
+    /// text is still one reading either side of it, so the step over the repeat
     /// must not split the span in two: the longer half would win the run score and
-    /// the passage would be placed a minute past its own first word.
+    /// the text would be placed a minute past its own first word.
     #[cfg(feature = "stt")]
     #[test]
     fn a_repeated_transcript_does_not_split_the_span() {
@@ -409,7 +409,7 @@ mod tests {
         assert_eq!((last.from, last.to), (197, 210));
     }
 
-    /// A gap that does not hold the passages claiming to be in it leaves them
+    /// A gap that does not hold the texts claiming to be in it leaves them
     /// unplaced rather than stretching them across the audio it does hold.
     #[cfg(feature = "stt")]
     #[test]

@@ -14,7 +14,7 @@ use super::index::{
 };
 use super::{round_ms, MIN_SPAN_SECS, PEAK_SECONDS};
 
-/// What one passage amounts to.
+/// What one text amounts to.
 ///
 /// A file written by the verdict era also carries `state` and `applied_uuid`;
 /// serde ignores both, so an old `proposals.json` needs no migration.
@@ -87,7 +87,7 @@ pub(super) fn load_proposals(dir: &Path) -> ProposalSet {
 // Review
 // ============================================================
 
-/// One proposal as the panel and an agent see it: the span, the passage it is
+/// One proposal as the panel and an agent see it: the span, the text it is
 /// for, and a thumbnail of the audio around it.
 #[derive(Serialize)]
 pub struct ProposalView {
@@ -156,7 +156,7 @@ pub(crate) fn list(settings: &SettingsState, dataset_uuid: &str) -> Result<Value
     let set = load_proposals(&dir);
     let index = load_index(&dir);
 
-    let (titles, passages) = {
+    let (titles, texts) = {
         let conn = open_db(&dir)?;
         let mut stmt = conn
             .prepare("SELECT uuid, title, content FROM read_text")
@@ -185,8 +185,8 @@ pub(crate) fn list(settings: &SettingsState, dataset_uuid: &str) -> Result<Value
     // because a row's badge and its Save verb both depend on it.
     let clips = standard_audio::rows_by_text(&dir)?;
 
-    // One envelope decode per recording, not per passage: a ten-hour book is a
-    // few megabytes of base64 and forty passages would decode it forty times.
+    // One envelope decode per recording, not per text: a ten-hour book is a
+    // few megabytes of base64 and forty texts would decode it forty times.
     let mut cache: HashMap<String, SourceTranscript> = HashMap::new();
     let mut views: Vec<ProposalView> = Vec::with_capacity(set.proposals.len());
     for proposal in &set.proposals {
@@ -242,7 +242,7 @@ pub(crate) fn list(settings: &SettingsState, dataset_uuid: &str) -> Result<Value
         "status": "ok",
         "generated_at": set.generated_at,
         "proposals": views,
-        "passages_total": passages,
+        "texts_total": texts,
         "counts": counts(&set, &clips),
     }))
 }
@@ -313,7 +313,7 @@ pub(crate) fn move_span(
     };
     if proposal.status != "proposed" {
         return Err(format!(
-            "That passage has no span to move: {}",
+            "That text has no span to move: {}",
             if proposal.note.is_empty() {
                 "the guess refused it"
             } else {

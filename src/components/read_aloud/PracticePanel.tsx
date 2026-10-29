@@ -38,7 +38,7 @@ type Props = {
    *  driven from the page toolbar's overflow menu). */
   showNormalized?: boolean;
   /** Every clip this text owns; the panel plays the default one above the
-   *  passage. Loaded by the page for its list badges, so it is handed down
+   *  text. Loaded by the page for its list badges, so it is handed down
    *  rather than fetched again. */
   standardAudio?: ReadStandardAudio[];
   /** `font-family` for the text to read - one of the Playwrite DE school
@@ -218,7 +218,7 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
           </p>
         )}
         {/* The reference heard before it is read: playing it is learning the
-            pacing, so it sits above the passage rather than behind Manage. */}
+            pacing, so it sits above the text rather than behind Manage. */}
         {defaultClip && (
           <StandardAudioPlayer key={defaultClip.uuid} clip={defaultClip} disabled={recorder.recording} />
         )}

@@ -24,20 +24,20 @@ This is optional — you never need the agent to use FmS — but it's what makes
 
 ### Example: build a Read Aloud dataset from an ebook
 
-The agent reaches the same tools you do, so a prompt says *what* to make and *how much* of it and leaves the steps to it. This one ran end to end on a 2 MB EPUB — 75 passages, one probe clip, and nothing generated in bulk until the user answered:
+The agent reaches the same tools you do, so a prompt says *what* to make and *how much* of it and leaves the steps to it. This one ran end to end on a 2 MB EPUB — 75 texts, one probe clip, and nothing generated in bulk until the user answered:
 
 ```
 Use the FmS MCP at http://127.0.0.1:35711/mcp — read /agent.md first, it has a build-read-aloud-from-ebook recipe. Create a read_aloud dataset named kaenguru_offenbarung, language de, from C:\Users\yanan\data\book\Die_Känguru_Offenbarung.epub. Split by the book's TOC (one chapter per text); where a chapter runs longer than a page, split it at the EPUB's own page breaks. Skip TOC entries that are only a heading or an image. Texts only for now — one voice-probe clip, then ask before generating the rest.
 ```
 
 - **The endpoint and `/agent.md` first.** The manual is where the recipes live, so naming it saves the agent from discovering a couple of hundred tools one at a time — and you from writing the steps yourself. `35711` is the port a desktop starts its service on, and the manual it serves names the port that actually got bound, so nothing downstream has to be guessed. An agent that cannot register that many tools up front will fetch the manual and call the endpoint over HTTP instead, which works, and naming the endpoint is what makes it work.
-- **"Split by the TOC … at the EPUB's own page breaks"** is the part only the agent can do. FmS has no EPUB reader, and its own splitter only breaks long *plain prose* into passages, so how an ebook becomes text is the agent's judgement — here, 11 chapters with one text each, the long ones cut at the book's page markers so no passage begins mid‑sentence.
-- **"Skip TOC entries that are only a heading or an image"** heads off the usual ebook failure: a title page or a photo gallery becomes a passage with no prose in it, and the dataset then reports it as an empty text.
+- **"Split by the TOC … at the EPUB's own page breaks"** is the part only the agent can do. FmS has no EPUB reader, and its own splitter only breaks long *plain prose* into texts, so how an ebook becomes text is the agent's judgement — here, 11 chapters with one text each, the long ones cut at the book's page markers so no text begins mid‑sentence.
+- **"Skip TOC entries that are only a heading or an image"** heads off the usual ebook failure: a title page or a photo gallery becomes a text with no prose in it, and the dataset then reports it as an empty text.
 - **"Texts only for now — one voice‑probe clip, then ask"** puts the expensive half behind your approval. The clips are the long part (hours of speech), so the agent makes one and stops: you listen, and if the voice is wrong you say so before the rest exists — changing a preference never re‑voices a clip that already does.
 
 ## Edge Text‑to‑Speech
 
-**Tools → Edge TTS** turns written text into spoken audio using Microsoft Edge's online voices — handy for hearing a passage, generating pronunciation examples, or producing audio you can save.
+**Tools → Edge TTS** turns written text into spoken audio using Microsoft Edge's online voices — handy for hearing a text, generating pronunciation examples, or producing audio you can save.
 
 - Choose a **language** and **voice** (English, Deutsch, Français, Español, Italiano, and more).
 - Type the text, then **preview** it or **synthesize** and **save** the clip.

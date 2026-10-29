@@ -1,16 +1,16 @@
-//! Turn a source file into passages: the step every "build a read-aloud
+//! Turn a source file into texts: the step every "build a read-aloud
 //! dataset from a book" session has to redo by hand.
 //!
 //! The log's agent hand-rolled this four times: it extracted the epub, split the
 //! text, guessed titles, labelled body text with index entries, imported the
-//! table of contents as passage #1, then rebuilt a sizing preview twice. What it
+//! table of contents as text #1, then rebuilt a sizing preview twice. What it
 //! never needed — and what is deliberately *not* here — is epub or PDF parsing:
 //! extraction stays the caller's job. This module owns segmentation, titling and
 //! insertion, so "here is the text" is one call.
 //!
 //! **A deterministic splitter, not `textsplit`.** That module is desktop-gated,
 //! async and model-dependent, and cue-grade boundaries are not what chunking
-//! needs: a passage should be about [`ChunkOptions::target_chars`] long and
+//! needs: a text should be about [`ChunkOptions::target_chars`] long and
 //! should never break mid-word. A pure function that always answers the same
 //! way for the same input is what makes a dry run comparable to the real write.
 //!
@@ -58,14 +58,14 @@ impl SourceFormat {
     }
 }
 
-/// How the plain-text splitter sizes a passage. Only the plain-text and
+/// How the plain-text splitter sizes a text. Only the plain-text and
 /// markdown paths use it: a json payload is already chunked by its author.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ChunkOptions {
-    /// Accumulate paragraphs until a passage reaches roughly this many
+    /// Accumulate paragraphs until a text reaches roughly this many
     /// characters — the log's own measure was a median of ~1,026.
     pub target_chars: usize,
-    /// A passage below this is too short to practise: merge it backwards.
+    /// A text below this is too short to practise: merge it backwards.
     pub min_chars: usize,
     /// A single paragraph above this is broken on sentence boundaries.
     pub max_chars: usize,
@@ -83,7 +83,7 @@ impl Default for ChunkOptions {
 
 impl ChunkOptions {
     /// Clamp a caller's numbers into a workable shape: `min <= target <= max`,
-    /// and nothing so small that every word becomes a passage.
+    /// and nothing so small that every word becomes a text.
     pub(crate) fn sanitised(self) -> Self {
         let min_chars = self.min_chars.clamp(80, 20_000);
         let max_chars = self.max_chars.clamp(min_chars, 40_000);
@@ -96,14 +96,14 @@ impl ChunkOptions {
     }
 }
 
-/// One passage the plan produced, before it is written.
-struct Passage {
+/// One text the plan produced, before it is written.
+struct DraftText {
     title: String,
     note: String,
     content: String,
 }
 
-impl Passage {
+impl DraftText {
     fn chars(&self) -> usize {
         self.content.chars().count()
     }
@@ -185,10 +185,10 @@ fn detect(text: &str, format: SourceFormat, extension: Option<&str>) -> SourceFo
 // The entry point
 // ============================================================
 
-/// Plan (and, unless `dry_run`, write) the passages a source produces.
+/// Plan (and, unless `dry_run`, write) the texts a source produces.
 ///
 /// `dry_run` returns the sizing preview the log's agent rebuilt by hand twice:
-/// how many passages, their character distribution, an estimate of speaking
+/// how many texts, their character distribution, an estimate of speaking
 /// time, and the first few titles with an excerpt.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn import_texts(
@@ -221,21 +221,21 @@ pub(crate) fn import_texts(
         });
 
     let mut skipped: Vec<Value> = Vec::new();
-    let passages = match source.format {
-        SourceFormat::Json => passages_from_json(&source.text, &default_note, &mut skipped)?,
-        _ => passages_from_prose(&source.text, &chunk, &prefix, &default_note),
+    let texts = match source.format {
+        SourceFormat::Json => texts_from_json(&source.text, &default_note, &mut skipped)?,
+        _ => texts_from_prose(&source.text, &chunk, &prefix, &default_note),
     };
-    if passages.is_empty() {
+    if texts.is_empty() {
         return Err(
-            "The source produced no passages. Check that it contains text, or pass `format: json` \
+            "The source produced no texts. Check that it contains text, or pass `format: json` \
              with `[{title, content}]`."
                 .to_string(),
         );
     }
 
-    let plan = sizing(&passages);
+    let plan = sizing(&texts);
     if dry_run {
-        let preview: Vec<Value> = passages
+        let preview: Vec<Value> = texts
             .iter()
             .take(5)
             .map(|p| {
@@ -250,7 +250,7 @@ pub(crate) fn import_texts(
             "status": "ok",
             "dry_run": true,
             "format": format_name(source.format),
-            "texts": passages.len(),
+            "texts": texts.len(),
             "chars": plan.0,
             "total_chars": plan.1,
             "estimate_speaking_seconds": plan.2,
@@ -276,12 +276,12 @@ pub(crate) fn import_texts(
         Some(o) => o,
         None => next_order_num(settings, dataset_uuid)?,
     };
-    let mut rows: Vec<ReadText> = Vec::with_capacity(passages.len());
-    for passage in passages {
+    let mut rows: Vec<ReadText> = Vec::with_capacity(texts.len());
+    for text in texts {
         let draft = TextDraft {
-            title: passage.title,
-            note: passage.note,
-            content: passage.content,
+            title: text.title,
+            note: text.note,
+            content: text.content,
             ..Default::default()
         };
         let row = draft.into_row(dataset_uuid, order);
@@ -325,8 +325,8 @@ fn format_name(format: SourceFormat) -> &'static str {
 }
 
 /// `(chars: {min, median, max}, total_chars, estimate_speaking_seconds)`.
-fn sizing(passages: &[Passage]) -> (Value, i64, i64) {
-    let mut lengths: Vec<usize> = passages.iter().map(Passage::chars).collect();
+fn sizing(texts: &[DraftText]) -> (Value, i64, i64) {
+    let mut lengths: Vec<usize> = texts.iter().map(DraftText::chars).collect();
     lengths.sort_unstable();
     let total: usize = lengths.iter().sum();
     let median = if lengths.is_empty() {
@@ -351,23 +351,23 @@ fn sizing(passages: &[Passage]) -> (Value, i64, i64) {
 // Prose: paragraphs, then sentences
 // ============================================================
 
-/// Split a prose or markdown source into passages.
+/// Split a prose or markdown source into texts.
 ///
 /// Rules, in one place so they can be argued with:
 /// - a blank line ends a paragraph; `#` heading lines are hard boundaries and
-///   keep their text (dropping headings is what made the log's passage #1 the
+///   keep their text (dropping headings is what made the log's text #1 the
 ///   table of contents);
 /// - paragraphs accumulate to `target_chars`;
 /// - a paragraph over `max_chars` breaks on sentence boundaries — after
 ///   `[.!?»"'…]` plus whitespace, never inside a word;
-/// - a passage under `min_chars` at a hard boundary merges into the previous
+/// - a text under `min_chars` at a hard boundary merges into the previous
 ///   one, because a 40-character leftover is not a reading exercise.
-fn passages_from_prose(
+fn texts_from_prose(
     text: &str,
     chunk: &ChunkOptions,
     prefix: &str,
     note: &str,
-) -> Vec<Passage> {
+) -> Vec<DraftText> {
     let blocks = blocks(text, chunk.max_chars);
     let mut chunks: Vec<(Option<String>, String)> = Vec::new();
     let mut current = String::new();
@@ -395,7 +395,7 @@ fn passages_from_prose(
     close(&mut chunks, &mut current, &mut current_heading);
 
     // A leftover below `min_chars` joins its predecessor unless that would
-    // overflow the ceiling by more than one minimum passage.
+    // overflow the ceiling by more than one minimum text.
     let mut merged: Vec<(Option<String>, String)> = Vec::new();
     for (heading, body) in chunks {
         if let Some(previous) = merged.last_mut() {
@@ -417,14 +417,14 @@ fn passages_from_prose(
         .map(|(index, (heading, body))| {
             // A heading is the best title a book offers; the number is the
             // fallback for a source that has none (the log's importer produced
-            // numbered passages that were unreadable in a list).
+            // numbered texts that were unreadable in a list).
             let title = match heading.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
                 Some(heading) if prefix.is_empty() => heading.to_string(),
                 Some(heading) => format!("{} · {}", prefix, heading),
-                None if prefix.is_empty() => format!("Passage {}", index + 1),
+                None if prefix.is_empty() => format!("Text {}", index + 1),
                 None => format!("{} · {}", prefix, index + 1),
             };
-            Passage {
+            DraftText {
                 title,
                 note: note.to_string(),
                 content: body.trim().to_string(),
@@ -600,11 +600,11 @@ fn break_on_spaces(sentence: &str, max_chars: usize) -> Vec<String> {
 /// content}]`), so `texts.json` imports verbatim. A payload that is already
 /// chunked is not re-chunked; items with blank content are reported instead of
 /// dropped silently, because "382 sent, 380 saved" must never be a surprise.
-fn passages_from_json(
+fn texts_from_json(
     text: &str,
     default_note: &str,
     skipped: &mut Vec<Value>,
-) -> Result<Vec<Passage>, String> {
+) -> Result<Vec<DraftText>, String> {
     let value: Value = serde_json::from_str(text)
         .map_err(|e| format!("The json source did not parse: {}", e))?;
     let items = match value {
@@ -613,19 +613,19 @@ fn passages_from_json(
             Some(Value::Array(items)) => items,
             _ => {
                 return Err(
-                    "A json source must be a list of passages, or an object with a `texts` list"
+                    "A json source must be a list of texts, or an object with a `texts` list"
                         .to_string(),
                 )
             }
         },
         _ => {
             return Err(
-                "A json source must be a list of passages, or an object with a `texts` list"
+                "A json source must be a list of texts, or an object with a `texts` list"
                     .to_string(),
             )
         }
     };
-    let mut passages = Vec::new();
+    let mut texts = Vec::new();
     for (index, item) in items.into_iter().enumerate() {
         let Some(object) = item.as_object() else {
             skipped.push(json!({ "index": index, "reason": "not an object" }));
@@ -664,13 +664,13 @@ fn passages_from_json(
                 given
             }
         };
-        passages.push(Passage {
+        texts.push(DraftText {
             title,
             note,
             content,
         });
     }
-    Ok(passages)
+    Ok(texts)
 }
 
 #[cfg(test)]
@@ -678,7 +678,7 @@ mod tests {
     use super::*;
 
     fn prose(text: &str) -> Vec<String> {
-        passages_from_prose(text, &ChunkOptions::default(), "Book", "note")
+        texts_from_prose(text, &ChunkOptions::default(), "Book", "note")
             .into_iter()
             .map(|p| p.content)
             .collect()
@@ -687,23 +687,23 @@ mod tests {
     #[test]
     fn a_heading_is_a_hard_boundary_and_stays_in_the_reading() {
         let text = "Intro paragraph.\n\n# Chapter One\n\nBody of one.\n\n# Chapter Two\n\nBody of two.";
-        let passages = prose(text);
-        assert_eq!(passages.len(), 3, "two headings and an intro: {:?}", passages);
-        assert!(passages[1].starts_with("Chapter One"));
-        assert!(passages[1].contains("Body of one."));
-        assert!(!passages[1].contains("Body of two."));
+        let texts = prose(text);
+        assert_eq!(texts.len(), 3, "two headings and an intro: {:?}", texts);
+        assert!(texts[1].starts_with("Chapter One"));
+        assert!(texts[1].contains("Body of one."));
+        assert!(!texts[1].contains("Body of two."));
     }
 
     #[test]
     fn paragraphs_accumulate_to_the_target_and_never_mid_word() {
         let paragraph = "Ein Satz mit mehreren Wörtern. ".repeat(60);
         let text = format!("{}\n\n{}", paragraph, paragraph);
-        let passages = prose(&text);
-        assert!(passages.len() >= 2);
-        for passage in &passages {
-            assert!(passage.chars().count() <= ChunkOptions::default().max_chars);
+        let texts = prose(&text);
+        assert!(texts.len() >= 2);
+        for text in &texts {
+            assert!(text.chars().count() <= ChunkOptions::default().max_chars);
             // A break inside a word would leave a fragment with no space around it.
-            assert!(!passage.ends_with('-'), "broke inside a word: {:?}", passage);
+            assert!(!text.ends_with('-'), "broke inside a word: {:?}", text);
         }
     }
 
@@ -711,14 +711,14 @@ mod tests {
     fn a_short_leftover_merges_backwards() {
         let long = "Ein langer Absatz. ".repeat(60);
         let text = format!("{}\n\n# Kurz\n\nEnde.", long);
-        let passages = prose(&text);
-        assert_eq!(passages.len(), 1, "the stub joined its predecessor");
+        let texts = prose(&text);
+        assert_eq!(texts.len(), 1, "the stub joined its predecessor");
     }
 
     #[test]
     fn whitespace_is_collapsed_so_lengths_mean_speech() {
-        let passages = prose("Ein   Satz\n  mit\tviel   Leerraum.");
-        assert_eq!(passages, vec!["Ein Satz mit viel Leerraum.".to_string()]);
+        let texts = prose("Ein   Satz\n  mit\tviel   Leerraum.");
+        assert_eq!(texts, vec!["Ein Satz mit viel Leerraum.".to_string()]);
     }
 
     #[test]
@@ -726,10 +726,10 @@ mod tests {
         let source = r#"[{"section":"1","order":1,"title":"Erster","note":"n","content":"Hallo."},
                           {"title":"Leer","content":"   "}]"#;
         let mut skipped = Vec::new();
-        let passages = passages_from_json(source, "note", &mut skipped).unwrap();
-        assert_eq!(passages.len(), 1);
-        assert_eq!(passages[0].title, "Erster");
-        assert_eq!(passages[0].content, "Hallo.");
+        let texts = texts_from_json(source, "note", &mut skipped).unwrap();
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].title, "Erster");
+        assert_eq!(texts[0].content, "Hallo.");
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0]["reason"], "blank content");
     }
@@ -738,8 +738,8 @@ mod tests {
     fn json_without_a_title_falls_back_to_the_first_line() {
         let source = r#"[{"content":"Die Känguru-Offenbarung\n\nEs beginnt."}]"#;
         let mut skipped = Vec::new();
-        let passages = passages_from_json(source, "note", &mut skipped).unwrap();
-        assert_eq!(passages[0].title, "Die Känguru-Offenbarung");
+        let texts = texts_from_json(source, "note", &mut skipped).unwrap();
+        assert_eq!(texts[0].title, "Die Känguru-Offenbarung");
     }
 
     #[test]

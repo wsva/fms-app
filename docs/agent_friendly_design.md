@@ -105,7 +105,7 @@ When a tool returns an error, the message should tell the agent **what to do nex
 ### 8. A write's success value must prove the write
 
 `{"status": "ok"}` is not evidence. An agent cannot tell a call that persisted
-382 passages from one that persisted nothing, and in practice it does not
+382 texts from one that persisted nothing, and in practice it does not
 try — the read-aloud log shows a full 382-text upload reporting `ok` while it
 had written zero rows, because the real error came back as a plain string the
 caller's success check did not recognise.

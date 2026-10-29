@@ -344,8 +344,8 @@ Only start if per-phoneme feedback is required (for example, L2 learners).
 
 ## 7. Test fixtures to prepare (ask the user if missing)
 
-1. A clean ~20 s read of a known passage (reference text provided).
-2. The same passage with 3–5 deliberate word errors (substitutions/omissions).
+1. A clean ~20 s read of a known text (reference text provided).
+2. The same text with 3–5 deliberate word errors (substitutions/omissions).
 3. A read with a repetition, a restart, and a long mid-sentence pause.
 4. A read with 2–3 deliberate mispronunciations that the ASR still decodes as the correct word (to validate Phase 5).
 5. Silence and noise-only clips.

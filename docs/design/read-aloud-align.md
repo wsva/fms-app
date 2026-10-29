@@ -2,14 +2,14 @@
 
 ## The idea
 
-An audiobook dataset is one book and the recordings of it. The texts are the book's passages in reading order; the recordings are chapter files that live **outside** the dataset, in a folder the user already had. Alignment answers one question per passage: *which seconds of which recording are this text?* Everything else the page shows — the waveform, the preview, the confidence, the clip row — is derived from that answer.
+An audiobook dataset is one book and the recordings of it. The texts are the book in reading order; the recordings are chapter files that live **outside** the dataset, in a folder the user already had. Alignment answers one question per text: *which seconds of which recording are this text?* Everything else the page shows — the waveform, the preview, the confidence, the clip row — is derived from that answer.
 
 The model is small, and the vocabulary is half of it:
 
 | word | means |
 |---|---|
 | **recording** | one audio file outside the dataset (`source_uuid`). A *take* is the learner's own reading — a different thing entirely. |
-| **text** | a passage of the dataset (`read_text`). |
+| **text** | one row of `read_text`: one unit to practise, in reading order. |
 | **span** | the seconds one text occupies inside one recording, with the confidence that it was heard there. |
 | **clip** | a text's standard audio: the `read_standard_audio` row pronunciation is measured against. An aligned clip remembers its span; its wav is cut later, on first need. |
 | **save** | span → clip row, a few hundred row writes. **Cut** is the expensive half: clip row → wav, and only when something needs to hear it. |
@@ -20,7 +20,7 @@ Two sentences carry the rest: **a span is the truth and a clip is a cache of it*
 
 ### 1. Delete first
 
-`read_aloud_align_apply` skips any text that already owns a clip and returns it in `skipped` with that clip's uuid. The reason is not caution: a clip cut from an older span holds the seconds its own wav was cut from, so a second row under the same text would leave two claims about one passage, and the one pronunciation is measured against would be whichever the default flag happened to name.
+`read_aloud_align_apply` skips any text that already owns a clip and returns it in `skipped` with that clip's uuid. The reason is not caution: a clip cut from an older span holds the seconds its own wav was cut from, so a second row under the same text would leave two claims about one text, and the one pronunciation is measured against would be whichever the default flag happened to name.
 
 Changing a saved span is therefore **delete the clip, then save again**. The rule is enforced by the clip's existence — not by a flag some writer has to remember to reset, which is exactly what the old `applied_uuid` column was, and why it is gone.
 
@@ -49,14 +49,14 @@ Everything under `<dataset>/align/` is regenerable from the recordings plus the 
 ├── align/                        # derived, device-local, excluded from the sync manifest
 │   ├── sources.json              # registered recordings, playing order, size+mtime per file
 │   ├── <source_uuid>.json        # one recording: word timings + 20 ms peak envelope
-│   └── proposals.json            # one row per passage: the span, its confidence, its status
+│   └── proposals.json            # one row per text: the span, its confidence, its status
 └── data.sqlite3
     └── read_standard_audio       # uuid PK, text_uuid, is_default, text_sha,
                                   #   origin ('align'), source_uuid, start_secs, end_secs,
                                   #   boundaries (the cut wav's edges), note
 ```
 
-An aligned row is a standard-audio row like any other — the span is three columns, not a new table. `origin` says it was cut from a recording, so the UI can label it **Aligned** and the packer knows the wav is a cache. `text_sha` is what makes a clip **Stale** when the text is edited, and a stale clip stops pronunciation scoring rather than grading against a passage nobody is reading.
+An aligned row is a standard-audio row like any other — the span is three columns, not a new table. `origin` says it was cut from a recording, so the UI can label it **Aligned** and the packer knows the wav is a cache. `text_sha` is what makes a clip **Stale** when the text is edited, and a stale clip stops pronunciation scoring rather than grading against a text nobody is reading.
 
 ## The eight commands
 
@@ -67,8 +67,8 @@ Every step is idempotent and resumable, and each has an MCP twin in `mcp/books.r
 | `read_aloud_align_sources` | register (or list) the recordings folder; natural-sorted, cache keyed by file name hash | `sources.json` |
 | `read_aloud_align_transcribe` | cache one file's word timings + peaks; repeat until `remaining` is 0 | `<source_uuid>.json` |
 | `read_aloud_align_transcript` | one cached transcript, word by word (read-only) | — |
-| `read_aloud_align_guess` | place every passage along one global token stream | `proposals.json` |
-| `read_aloud_align_guess_one` | re-place one passage, neighbours untouched | `proposals.json` (one row) |
+| `read_aloud_align_guess` | place every text along one global token stream | `proposals.json` |
+| `read_aloud_align_guess_one` | re-place one text, neighbours untouched | `proposals.json` (one row) |
 | `read_aloud_align_proposals` | rows + texts + preview + the four counts (read-only) | — |
 | `read_aloud_align_move_span` | move one placed span by hand (nudges, typed edges) | `proposals.json` (one row) |
 | `read_aloud_align_apply` | store placed spans whose text has no clip; `text_uuid` for one, omitted for all | `read_standard_audio` only |

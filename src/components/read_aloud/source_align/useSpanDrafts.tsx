@@ -204,7 +204,7 @@ export function useSpanDrafts({
       revealQueue();
       setNote({
         kind: result.refused > 0 ? "warn" : "ok",
-        text: `${result.proposed} of ${result.passages} texts placed (mean ${Math.round(
+        text: `${result.proposed} of ${result.texts} texts placed (mean ${Math.round(
           result.mean_confidence * 100
         )}%), ${result.refused} refused.`,
       });

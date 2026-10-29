@@ -39,7 +39,7 @@ pub(crate) const BOOK_YAML: &str = include_str!("templates/book/build_book_libra
 /// index, sync online. View / agent-facing (actions name real `card_*` tools).
 pub(crate) const CARD_YAML: &str = include_str!("templates/card/setup_card_dataset.yaml");
 
-/// The read-aloud pipeline — import passages from an extracted book, probe one
+/// The read-aloud pipeline — import texts from an extracted book, probe one
 /// clip for a human to listen to, then fill in the rest. It is the first
 /// read-aloud template and therefore its category's *primary* workflow, so its
 /// run id is plain `read_aloud-<uuid>`; every step is gated by

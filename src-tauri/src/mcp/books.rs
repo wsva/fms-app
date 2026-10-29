@@ -271,7 +271,7 @@ struct ReadAloudDatasetParam {
     dataset_uuid: String,
     /// Return the summary listing instead of the full rows: one `chars` count
     /// and one `has_standard_audio` flag per text, no content. This is the shape
-    /// to orient yourself with — the full listing carries every passage.
+    /// to orient yourself with — the full listing carries every text.
     #[serde(default)]
     summary: bool,
     /// Include `content` in the full listing (default true). Ignored by
@@ -301,7 +301,7 @@ struct ReadAloudTextDraftParam {
     /// Source/location note. Defaults to empty.
     #[serde(default)]
     note: String,
-    /// The passage the learner reads. Required, and must not be blank.
+    /// The text the learner reads. Required, and must not be blank.
     content: String,
     /// Derived spoken-form scoring reference (numbers and abbreviations spelled
     /// out). Null until produced; editing `content` resets it to null.
@@ -353,7 +353,7 @@ struct ReadAloudSaveTextParam {
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudSaveTextsParam {
     dataset_uuid: String,
-    /// The passages, in order. `saved + failed` always equals this array's length.
+    /// The texts, in order. `saved + failed` always equals this array's length.
     texts: Vec<ReadAloudTextDraftParam>,
     /// First `order_num` to use. Omit to append after the last text.
     #[serde(default)]
@@ -400,7 +400,7 @@ struct ReadAloudScoreParam {
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudNormalizeParam {
-    /// The passage to normalize (the text's `content`).
+    /// The text to normalize (the text's `content`).
     content: String,
     /// Model to run the prompt with (Ollama, or the configured provider). Omit
     /// or leave empty to get the prompt back on its own.
@@ -415,7 +415,7 @@ struct ReadAloudNormalizeMeasureParam {
     dataset_uuid: String,
     text_uuid: String,
     /// What scoring reads today: the stored `normalized_content` when there is
-    /// one, the passage otherwise.
+    /// one, the text otherwise.
     reference: String,
     candidate: String,
 }
@@ -540,7 +540,7 @@ struct ReadAloudChunkParam {
     /// Paragraphs accumulate to about this many characters (default 1100).
     #[serde(default)]
     target_chars: Option<usize>,
-    /// A shorter leftover merges into the previous passage (default 450).
+    /// A shorter leftover merges into the previous text (default 450).
     #[serde(default)]
     min_chars: Option<usize>,
     /// A longer paragraph breaks on sentence boundaries (default 1900).
@@ -586,10 +586,10 @@ struct ReadAloudStandardAudioGenerateAllParam {
     /// language.
     #[serde(default)]
     voice: Option<String>,
-    /// Only passages that have no clip yet (default true), so a repeat is safe.
+    /// Only texts that have no clip yet (default true), so a repeat is safe.
     #[serde(default = "default_true")]
     only_missing: bool,
-    /// How many passages this call speaks, in `order_num` order (default 10).
+    /// How many texts this call speaks, in `order_num` order (default 10).
     #[serde(default)]
     limit: Option<i64>,
     /// Report what would happen and write nothing.
@@ -684,7 +684,7 @@ struct ReadAloudAlignGuessOneParam {
 #[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudAlignMoveSpanParam {
     dataset_uuid: String,
-    /// The placed passage whose span moves.
+    /// The placed text whose span moves.
     text_uuid: String,
     /// New span start in seconds.
     start: f64,
@@ -1004,7 +1004,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&items).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_create", description = "Create a read-aloud dataset (a collection of passages to practise reading aloud). Pass `name` and optionally `description` and `language` (a tag like `de` or `de-DE`). The language is what makes generation pick the user's preferred voice for that language, so set it here. Pass `family` (see dataset_family) to make it a sibling of the book or dictation set it was recorded from. Returns the dataset metadata with its UUID; `texts_total` is 0 until texts are added.")]
+    #[tool(name = "read_aloud_create", description = "Create a read-aloud dataset (a collection of texts to practise reading aloud). Pass `name` and optionally `description` and `language` (a tag like `de` or `de-DE`). The language is what makes generation pick the user's preferred voice for that language, so set it here. Pass `family` (see dataset_family) to make it a sibling of the book or dictation set it was recorded from. Returns the dataset metadata with its UUID; `texts_total` is 0 until texts are added.")]
     async fn read_aloud_create(&self, Parameters(param): Parameters<ReadAloudCreateParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_create: name={}", param.name);
         let settings = self.app.state::<SettingsState>();
@@ -1042,7 +1042,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Dataset moved to trash", "trashed_to": trashed_to}).to_string())
     }
 
-    #[tool(name = "read_aloud_list_texts", description = "List a dataset's passages. Default: every row in full, ordered — every `content` on the wire, so prefer `summary` when you only need to orient yourself. `summary: true` returns `{count, total_chars, with_standard_audio, without_standard_audio, texts: [{uuid, order_num, title, chars, attempt_count, best_score, has_standard_audio}]}` with no content. `limit`/`offset` page either shape in `order_num` order (the same order `read_aloud_standard_audio_generate_all` walks); `include_content: false` drops `content` from the full shape.")]
+    #[tool(name = "read_aloud_list_texts", description = "List a dataset's texts. Default: every row in full, ordered — every `content` on the wire, so prefer `summary` when you only need to orient yourself. `summary: true` returns `{count, total_chars, with_standard_audio, without_standard_audio, texts: [{uuid, order_num, title, chars, attempt_count, best_score, has_standard_audio}]}` with no content. `limit`/`offset` page either shape in `order_num` order (the same order `read_aloud_standard_audio_generate_all` walks); `include_content: false` drops `content` from the full shape.")]
     async fn read_aloud_list_texts(&self, Parameters(param): Parameters<ReadAloudDatasetParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         if param.summary {
@@ -1076,7 +1076,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({ "dataset_uuid": param.dataset_uuid, "count": total, "texts": page }).to_string())
     }
 
-    #[tool(name = "read_aloud_get_text", description = "Read one passage plus its standard audio in one call: the row (content, normalized_content, note, scores) and `standard_audio: {default_uuid, usable, clips}`. Use this instead of listing a whole dataset to inspect a single text.")]
+    #[tool(name = "read_aloud_get_text", description = "Read one text plus its standard audio in one call: the row (content, normalized_content, note, scores) and `standard_audio: {default_uuid, usable, clips}`. Use this instead of listing a whole dataset to inspect a single text.")]
     async fn read_aloud_get_text(&self, Parameters(param): Parameters<ReadAloudTextRefParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         let text = datasets::read_aloud::get_text(&settings, &param.dataset_uuid, &param.text_uuid)?;
@@ -1098,7 +1098,7 @@ impl DatasetMcpServer {
         .to_string())
     }
 
-    #[tool(name = "read_aloud_save_text", description = "Create or update one passage. Required: `content`. Optional: `title` (defaults to the first line of content), `note`, `normalized_content`, `uuid` (omit to create; pass the uuid of a row you read to update it), `order_num` (omit to append). `created_at`/`updated_at`/`best_score` are server-assigned when omitted, so round-tripping a row you read works unchanged. Returns `{status, uuid, order_num, texts_total}` — `texts_total` is the proof the write landed. For many passages use read_aloud_save_texts, which is one call instead of one per text.")]
+    #[tool(name = "read_aloud_save_text", description = "Create or update one text. Required: `content`. Optional: `title` (defaults to the first line of content), `note`, `normalized_content`, `uuid` (omit to create; pass the uuid of a row you read to update it), `order_num` (omit to append). `created_at`/`updated_at`/`best_score` are server-assigned when omitted, so round-tripping a row you read works unchanged. Returns `{status, uuid, order_num, texts_total}` — `texts_total` is the proof the write landed. For many texts use read_aloud_save_texts, which is one call instead of one per text.")]
     async fn read_aloud_save_text(&self, Parameters(param): Parameters<ReadAloudSaveTextParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         if let Some(error) = param.text.validation_error() {
@@ -1118,7 +1118,7 @@ impl DatasetMcpServer {
         .to_string())
     }
 
-    #[tool(name = "read_aloud_save_texts", description = "Create or update many passages in one call — the bulk form of read_aloud_save_text. Each item takes the same fields (`content` required; `uuid`/`order_num`/timestamps optional). `start_order` sets the first order_num; omitted means append. Returns `{status, sent, saved, failed, errors: [{index, title, error}], texts_total, order_range}`, where `saved + failed` always equals `sent` — check `failed` and `errors[index]` instead of assuming success. Use this for an imported book: one call, one proof.")]
+    #[tool(name = "read_aloud_save_texts", description = "Create or update many texts in one call — the bulk form of read_aloud_save_text. Each item takes the same fields (`content` required; `uuid`/`order_num`/timestamps optional). `start_order` sets the first order_num; omitted means append. Returns `{status, sent, saved, failed, errors: [{index, title, error}], texts_total, order_range}`, where `saved + failed` always equals `sent` — check `failed` and `errors[index]` instead of assuming success. Use this for an imported book: one call, one proof.")]
     async fn read_aloud_save_texts(&self, Parameters(param): Parameters<ReadAloudSaveTextsParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_save_texts: dataset={}, {} texts", param.dataset_uuid, param.texts.len());
         let settings = self.app.state::<SettingsState>();
@@ -1175,7 +1175,7 @@ impl DatasetMcpServer {
         .to_string())
     }
 
-    #[tool(name = "read_aloud_import_texts", description = "Turn a book into passages in one call: pass `source_path` (a file you extracted yourself — this tool does not read epub/PDF) or `source_text`, and it segments, titles and saves them. `format`: auto (default, from the extension and the first character), text, markdown or json. Prose: blank lines end paragraphs, `#` headings are hard boundaries, paragraphs accumulate to `chunk.target_chars` (1100), anything over `chunk.max_chars` (1900) breaks on sentence boundaries, and a stub under `chunk.min_chars` (450) merges backwards. `format: json` takes `[{title, note, content}]` verbatim and reports blank items in `skipped`. `language` is written to info.json so generation picks the right voice. ALWAYS run `dry_run: true` first: it returns `{texts, chars: {min, median, max}, total_chars, estimate_speaking_seconds, preview}` and writes nothing. The real write returns the same `{saved, failed, errors}` partition as read_aloud_save_texts.")]
+    #[tool(name = "read_aloud_import_texts", description = "Turn a book into texts in one call: pass `source_path` (a file you extracted yourself — this tool does not read epub/PDF) or `source_text`, and it segments, titles and saves them. `format`: auto (default, from the extension and the first character), text, markdown or json. Prose: blank lines end paragraphs, `#` headings are hard boundaries, paragraphs accumulate to `chunk.target_chars` (1100), anything over `chunk.max_chars` (1900) breaks on sentence boundaries, and a stub under `chunk.min_chars` (450) merges backwards. `format: json` takes `[{title, note, content}]` verbatim and reports blank items in `skipped`. `language` is written to info.json so generation picks the right voice. ALWAYS run `dry_run: true` first: it returns `{texts, chars: {min, median, max}, total_chars, estimate_speaking_seconds, preview}` and writes nothing. The real write returns the same `{saved, failed, errors}` partition as read_aloud_save_texts.")]
     async fn read_aloud_import_texts(
         &self,
         Parameters(param): Parameters<ReadAloudImportTextsParam>,
@@ -1251,7 +1251,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&v).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_normalize", description = "Turn a passage into its spoken-form scoring reference (`normalized_content`): numbers, cardinals, dates, times, currency, percentages, units and abbreviations spelled out the way they are read aloud, with nothing else changed. The prompt is the app's own, so a candidate from any provider has the same shape. Pass `model` to run it in-app (Ollama, or the configured provider); omit it to receive the `prompt` alone and run it through an external LLM. Nothing is written: save the candidate with read_aloud_save_text, and gate it first with read_aloud_normalize_measure.")]
+    #[tool(name = "read_aloud_normalize", description = "Turn a text into its spoken-form scoring reference (`normalized_content`): numbers, cardinals, dates, times, currency, percentages, units and abbreviations spelled out the way they are read aloud, with nothing else changed. The prompt is the app's own, so a candidate from any provider has the same shape. Pass `model` to run it in-app (Ollama, or the configured provider); omit it to receive the `prompt` alone and run it through an external LLM. Nothing is written: save the candidate with read_aloud_save_text, and gate it first with read_aloud_normalize_measure.")]
     async fn read_aloud_normalize(&self, Parameters(param): Parameters<ReadAloudNormalizeParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_normalize: model={:?}, {} chars", param.model, param.content.len());
         let settings = self.app.state::<SettingsState>();
@@ -1259,7 +1259,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_normalize_measure", description = "Gate a candidate normalization against the user's own recordings of one text: the best score the reference in use today achieves (`baseline`) versus the candidate's (`candidate`), over the same transcripts. `attempts` says how many were compared — 0 means the numbers prove nothing and the text has no practice history yet. Nothing is written and nothing is saved. Keep the candidate only when it is strictly higher; equal means the mismatch was not spelling, lower means it reworded the passage.")]
+    #[tool(name = "read_aloud_normalize_measure", description = "Gate a candidate normalization against the user's own recordings of one text: the best score the reference in use today achieves (`baseline`) versus the candidate's (`candidate`), over the same transcripts. `attempts` says how many were compared — 0 means the numbers prove nothing and the text has no practice history yet. Nothing is written and nothing is saved. Keep the candidate only when it is strictly higher; equal means the mismatch was not spelling, lower means it reworded the text.")]
     async fn read_aloud_normalize_measure(&self, Parameters(param): Parameters<ReadAloudNormalizeMeasureParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         let result = datasets::read_aloud::normalize::measure(
@@ -1272,7 +1272,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_feedback_context", description = "Read-only agent handoff: everything one attempt can tell a model, plus the exact prompt to answer it — `{attempt, passage, language, feedback_language, assessment, phone_detail, evidence, prompt, audio: {path, bytes, duration, format}}`. This is how a recording reaches a model that can hear it: a feedback request the panel posts via `read_aloud_request_feedback` arrives in the mailbox; claim it with `mail_claim`, call this with `include_audio_base64: true` to get the take's bytes inline (refused above 8 MB — read the file at `audio.path` instead) and judge the reading by listening, never by reading a recognizer's transcript. Write the answer back with read_aloud_save_feedback — citing the request's `mail_uuid` and `claim_id` so it lands in the attempt's feedback card and closes the request.")] 
+    #[tool(name = "read_aloud_feedback_context", description = "Read-only agent handoff: everything one attempt can tell a model, plus the exact prompt to answer it — `{attempt, reference, language, feedback_language, assessment, phone_detail, evidence, prompt, audio: {path, bytes, duration, format}}`. This is how a recording reaches a model that can hear it: a feedback request the panel posts via `read_aloud_request_feedback` arrives in the mailbox; claim it with `mail_claim`, call this with `include_audio_base64: true` to get the take's bytes inline (refused above 8 MB — read the file at `audio.path` instead) and judge the reading by listening, never by reading a recognizer's transcript. Write the answer back with read_aloud_save_feedback — citing the request's `mail_uuid` and `claim_id` so it lands in the attempt's feedback card and closes the request.")] 
     async fn read_aloud_feedback_context(&self, Parameters(param): Parameters<ReadAloudFeedbackContextParam>) -> Result<String, String> {
         log::info!(
             "[MCP] read_aloud_feedback_context: dataset={}, attempt={}, audio={}",
@@ -1456,7 +1456,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&clips).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_standard_audio_generate", description = "Synthesise ONE text with Edge TTS and store the result as its standard-audio clip (the reference pronunciation is measured against). `voice` is optional: omit it and the dataset's language decides (see read_aloud_voice_resolve). Returns `{status, clip, voice, voice_locale, voice_source, texts_with_audio, texts_total, remaining, voice_warning?, hint?}` — `remaining` is how many texts still have no clip. The first clip of a text becomes its default and takes effect immediately. PROBE FIRST: generate 2-3 of the first passages, have a human listen, then use read_aloud_standard_audio_generate_all for the rest.")]
+    #[tool(name = "read_aloud_standard_audio_generate", description = "Synthesise ONE text with Edge TTS and store the result as its standard-audio clip (the reference pronunciation is measured against). `voice` is optional: omit it and the dataset's language decides (see read_aloud_voice_resolve). Returns `{status, clip, voice, voice_locale, voice_source, texts_with_audio, texts_total, remaining, voice_warning?, hint?}` — `remaining` is how many texts still have no clip. The first clip of a text becomes its default and takes effect immediately. PROBE FIRST: generate 2-3 of the first texts, have a human listen, then use read_aloud_standard_audio_generate_all for the rest.")]
     async fn read_aloud_standard_audio_generate(
         &self,
         Parameters(param): Parameters<ReadAloudStandardAudioGenerateParam>,
@@ -1530,7 +1530,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&resolution).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_audit", description = "Read-only health check of a read-aloud dataset: the deep version of 'does this look finished?'. Reports named checks with an exact offender `count`, up to 100 offenders (`source` is the text uuid, `detail` says why) and advice: `texts_none` (no passage at all, so every per-text check below proves nothing), `text_empty` (blank content), `text_duplicate` (same content in two rows — usually an import run twice), `standard_audio_missing` (no clip, so pronunciation reports no_reference forever). Also returns `texts`, `texts_with_audio` and the `facts` a workflow's when-guards read. Never writes: repair with read_aloud_standard_audio_generate_all, read_aloud_delete_text or read_aloud_import_texts.")]
+    #[tool(name = "read_aloud_audit", description = "Read-only health check of a read-aloud dataset: the deep version of 'does this look finished?'. Reports named checks with an exact offender `count`, up to 100 offenders (`source` is the text uuid, `detail` says why) and advice: `texts_none` (no text at all, so every per-text check below proves nothing), `text_empty` (blank content), `text_duplicate` (same content in two rows — usually an import run twice), `standard_audio_missing` (no clip, so pronunciation reports no_reference forever). Also returns `texts`, `texts_with_audio` and the `facts` a workflow's when-guards read. Never writes: repair with read_aloud_standard_audio_generate_all, read_aloud_delete_text or read_aloud_import_texts.")]
     async fn read_aloud_audit(
         &self,
         Parameters(param): Parameters<ReadAloudDatasetOnlyParam>,
@@ -1631,7 +1631,7 @@ async fn read_aloud_standard_audio_guess(
         Ok(serde_json::json!({"status": "ok", "message": "Standard audio deleted"}).to_string())
     }
 
-    #[tool(name = "read_aloud_align_sources", description = "Register the folder that holds this dataset's source recordings (an audiobook's chapter files), which is the bulk answer to read_aloud_standard_audio_guess: the recordings live OUTSIDE the dataset and each holds many passages, so transcribing them once beats guessing per text. The scan accepts mp3/m4a/m4b/aac/wav/flac/ogg/oga/opus/wma/mp4/mkv, natural-sorts the names (ch2 before ch10) and records size+mtime; a file whose size or mtime changed loses its cached transcript. Omit `directory` to list what is registered. Returns `{sources: [{uuid, file_name, path, size, modified_ms, duration, words}], source_count, transcribed, pending_transcription}`. Next: read_aloud_align_transcribe.")]
+    #[tool(name = "read_aloud_align_sources", description = "Register the folder that holds this dataset's source recordings (an audiobook's chapter files), which is the bulk answer to read_aloud_standard_audio_guess: the recordings live OUTSIDE the dataset and each holds many texts, so transcribing them once beats guessing per text. The scan accepts mp3/m4a/m4b/aac/wav/flac/ogg/oga/opus/wma/mp4/mkv, natural-sorts the names (ch2 before ch10) and records size+mtime; a file whose size or mtime changed loses its cached transcript. Omit `directory` to list what is registered. Returns `{sources: [{uuid, file_name, path, size, modified_ms, duration, words}], source_count, transcribed, pending_transcription}`. Next: read_aloud_align_transcribe.")]
     async fn read_aloud_align_sources(
         &self,
         Parameters(param): Parameters<ReadAloudAlignSourcesParam>,
@@ -1667,7 +1667,7 @@ async fn read_aloud_standard_audio_guess(
         Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_align_transcript", description = "One recording's cached transcript: what the model heard, word by word with millisecond times. Read-only and free (the cache is already on disk), and it is the honest answer to \"why was this passage placed here?\" — the aligner compared exactly these tokens. `text` is each word after scoring's normalization (lowercased, numbers spelled out), which is the shape the matcher sees. Returns `{source_uuid, file_name, path, duration, peak_seconds, word_count, words: [{start, end, text}]}`. A file with no transcript fails with a message telling the caller to run read_aloud_align_transcribe first. Nothing is decided here: a span becomes standard audio through read_aloud_align_apply.")]
+    #[tool(name = "read_aloud_align_transcript", description = "One recording's cached transcript: what the model heard, word by word with millisecond times. Read-only and free (the cache is already on disk), and it is the honest answer to \"why was this text placed here?\" — the aligner compared exactly these tokens. `text` is each word after scoring's normalization (lowercased, numbers spelled out), which is the shape the matcher sees. Returns `{source_uuid, file_name, path, duration, peak_seconds, word_count, words: [{start, end, text}]}`. A file with no transcript fails with a message telling the caller to run read_aloud_align_transcribe first. Nothing is decided here: a span becomes standard audio through read_aloud_align_apply.")]
     async fn read_aloud_align_transcript(
         &self,
         Parameters(param): Parameters<ReadAloudAlignTranscriptParam>,
@@ -1686,7 +1686,7 @@ async fn read_aloud_standard_audio_guess(
         Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_align_guess", description = "Place EVERY passage of the dataset along the transcribed recordings in one ordered pass, and write the result as proposals. The texts are assumed to be the recordings read in order (that is what an audiobook dataset is), so a monotonic cursor walks the passages in `order_num` over one global token stream: O(texts) alignments instead of O(texts × files) full-file transcriptions. Each proposal is padded either side, snapped to the quietest 20 ms frame within ±150 ms, and clamped so it never overlaps the passage before it; it carries `start`/`end` (ms precision) and `confidence`; a refusal carries its reason in `note`. A passage the model could not place is reported as `refused` with a reason (too few words heard, no recording left, or read across two files) — never as a guess. Re-running keeps the span of every row that did not move. Nothing is written to media/; next: read_aloud_align_proposals, then read_aloud_align_apply.")]
+    #[tool(name = "read_aloud_align_guess", description = "Place EVERY text of the dataset along the transcribed recordings in one ordered pass, and write the result as proposals. The texts are assumed to be the recordings read in order (that is what an audiobook dataset is), so a monotonic cursor walks the texts in `order_num` over one global token stream: O(texts) alignments instead of O(texts × files) full-file transcriptions. Each proposal is padded either side, snapped to the quietest 20 ms frame within ±150 ms, and clamped so it never overlaps the text before it; it carries `start`/`end` (ms precision) and `confidence`; a refusal carries its reason in `note`. A text the model could not place is reported as `refused` with a reason (too few words heard, no recording left, or read across two files) — never as a guess. Re-running keeps the span of every row that did not move. Nothing is written to media/; next: read_aloud_align_proposals, then read_aloud_align_apply.")]
     async fn read_aloud_align_guess(
         &self,
         Parameters(param): Parameters<ReadAloudDatasetOnlyParam>,
@@ -1716,7 +1716,7 @@ async fn read_aloud_standard_audio_guess(
         Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_align_proposals", description = "Read the alignment proposals joined with the passages they are for. Read-only. Each row carries `text_uuid`, `title`, `content`, `status` (proposed|refused), `note`, `source_uuid`, `source_name`, `source_path` (for playback), `start`/`end` in seconds at millisecond precision, `confidence`, `matched_words`/`reference_words`, `clip`, and a `preview` of the surrounding audio ({start, peak_seconds, peaks} as interleaved min/max i8 pairs). `clip` is the standard audio the text ALREADY has ({uuid, kind: tts|upload|align, is_default, start_secs, end_secs, note}) or null: a non-null `clip` means `read_aloud_align_apply` will skip that text (delete first — `docs/design/read-aloud-align.md`). Also returns `generated_at`, `passages_total` and `counts` (`placed`, `refused`, `unsaved` — what a save would still store — and `saved`). IMPORTANT: an agent may present these numbers, but only a human can hear the clip — do not save a span on the caller's behalf unless they asked for it.")]
+    #[tool(name = "read_aloud_align_proposals", description = "Read the alignment proposals joined with the texts they are for. Read-only. Each row carries `text_uuid`, `title`, `content`, `status` (proposed|refused), `note`, `source_uuid`, `source_name`, `source_path` (for playback), `start`/`end` in seconds at millisecond precision, `confidence`, `matched_words`/`reference_words`, `clip`, and a `preview` of the surrounding audio ({start, peak_seconds, peaks} as interleaved min/max i8 pairs). `clip` is the standard audio the text ALREADY has ({uuid, kind: tts|upload|align, is_default, start_secs, end_secs, note}) or null: a non-null `clip` means `read_aloud_align_apply` will skip that text (delete first — `docs/design/read-aloud-align.md`). Also returns `generated_at`, `texts_total` and `counts` (`placed`, `refused`, `unsaved` — what a save would still store — and `saved`). IMPORTANT: an agent may present these numbers, but only a human can hear the clip — do not save a span on the caller's behalf unless they asked for it.")]
     async fn read_aloud_align_proposals(
         &self,
         Parameters(param): Parameters<ReadAloudDatasetOnlyParam>,

@@ -18,9 +18,9 @@ export function useSpanPlayer({
   path,
   span,
 }: {
-  /** The passage in front of the reader. A change stops playback. */
+  /** The text in front of the reader. A change stops playback. */
   textUuid: string | null;
-  /** The recording that passage was placed in; null when there is nothing to play. */
+  /** The recording that text was placed in; null when there is nothing to play. */
   path: string | null;
   /** The span as the fields show it, nudges included. */
   span: { start: number; end: number };
@@ -30,7 +30,7 @@ export function useSpanPlayer({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const boundsRef = useRef<{ from: number; to: number } | null>(null);
   /**
-   * This render's passage and span.
+   * This render's text and span.
    *
    * `togglePlay` is called from a key listener that outlives the render it was
    * made in, so it reads the selection from here rather than from a closure.
@@ -50,7 +50,7 @@ export function useSpanPlayer({
   // Leaving the page must not leave a file playing.
   useEffect(() => stopAudio, [stopAudio]);
 
-  // Another passage is another span: the old playhead would sit over audio that
+  // Another text is another span: the old playhead would sit over audio that
   // is no longer the one on screen.
   useEffect(() => {
     stopAudio();
@@ -59,7 +59,7 @@ export function useSpanPlayer({
 
   /**
    * Play a recording from `from` to `to` — the one entry point, so a caller
-   * holding a file but no placed passage still goes through this element.
+   * holding a file but no placed text still goes through this element.
    */
   const playFrom = useCallback(
     (file: string, from: number, to: number) => {

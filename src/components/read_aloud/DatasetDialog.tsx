@@ -90,7 +90,7 @@ export default function DatasetDialog({ state, onClose, onSaved }: Props) {
             className={field}
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. German A2 passages"
+            placeholder="e.g. German A2 texts"
             autoFocus
           />
         </div>

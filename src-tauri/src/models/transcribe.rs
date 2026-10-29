@@ -356,7 +356,7 @@ fn transcribe_detailed_chunked(
         // is this chunk's own first sample — a timestamp can never precede the
         // chunk it was measured in, so that comparison dropped nothing and every
         // overlap was transcribed twice. A four-minute window with fifteen
-        // seconds of it said again is what pushed the passage guess a minute late
+        // seconds of it said again is what pushed the text guess a minute late
         // on a whole chapter: the repeat split the alignment in two.
         let resume_from = covered_until_secs;
         for word in chunk_result.segments.unwrap_or_default() {

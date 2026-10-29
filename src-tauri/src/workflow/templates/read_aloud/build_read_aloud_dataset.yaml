@@ -12,7 +12,7 @@
 # voice generation uses. `read_aloud_audit.facts.has_language` reports whether
 # that happened, which is why the first step reads it.
 #
-# The pipeline is: measure the dataset, bring the passages in, make ONE clip and
+# The pipeline is: measure the dataset, bring the texts in, make ONE clip and
 # stop for the human to listen, then fill in the rest. That order is the point —
 # a wrong voice or a wrong split is cheapest to fix after one clip, and
 # expensive after three hundred.
@@ -24,7 +24,7 @@
 # `completed` step to be sent back to `ready`.
 #
 # Two checks stay deliberately unbound. `text_empty` has no repairing step (only
-# a human knows what the passage should have said), and `text_duplicate` is a
+# a human knows what the text should have said), and `text_duplicate` is a
 # warn that a legitimate dataset can carry on purpose — binding it to `proves`
 # would demote a correct import of a book that quotes itself.
 #
@@ -44,7 +44,7 @@ steps:
   - id: inspect_source
     title: Inspect dataset
     description: >-
-      Read the dataset before touching it: how many passages exist, how many
+      Read the dataset before touching it: how many texts exist, how many
       already have standard audio, and whether `language` is set — a dataset
       with no language can never resolve a preferred voice, so generation falls
       back to the workspace default. Also reports `text_empty` /
@@ -57,16 +57,16 @@ steps:
       - texts_with_audio
       - has_language
 
-  # ── Stage 2: the passages ───────────────────────────────────────────────────
+  # ── Stage 2: the texts ───────────────────────────────────────────────────
   - id: import_texts
-    title: Import passages
+    title: Import texts
     description: >-
-      Segment a source file you extracted yourself into passages and save them in
+      Segment a source file you extracted yourself into texts and save them in
       one call: prose is split on blank lines, `#` headings are hard boundaries,
       paragraphs accumulate to the target size and anything oversized breaks on
       sentence boundaries. `dry_run: true` first reports the chunk sizes and
       writes nothing. This tool does not read epub/PDF — the text extraction is
-      the caller's job. Already have the passages as JSON? Pass `format: json`
+      the caller's job. Already have the texts as JSON? Pass `format: json`
       with `[{title, note, content}]`.
     action: read_aloud_import_texts
     params:
@@ -76,7 +76,7 @@ steps:
     depends_on:
       - inspect_source
     verify:
-      # The postcondition is "there are passages", and `texts_none` is exactly
+      # The postcondition is "there are texts", and `texts_none` is exactly
       # that check. It is the one id here that needs no per-text partner.
       proves: [texts_none]
     adopt: [texts_none]
@@ -92,7 +92,7 @@ steps:
     title: Generate one clip (listen)
     description: >-
       Generate exactly ONE clip with the resolved voice and STOP. This step
-      claims no `proves:` binding on purpose: a probe leaves every other passage
+      claims no `proves:` binding on purpose: a probe leaves every other text
       without audio, so binding `standard_audio_missing` here would demote it the
       moment it finished. Report `voice`, `voice_locale` and `voice_source`, ask
       the human to listen, and only continue once they are happy — 300 clips in
@@ -121,7 +121,7 @@ steps:
       a work budget, not a policy: a clip takes about 11 s, so 50 is a call you
       can wait on. Read `remaining` from the response and run the step again until
       it is 0 — `workflow_verify` demotes this step back to `ready` while any
-      passage still lacks audio, which is what makes that loop honest instead of a
+      text still lacks audio, which is what makes that loop honest instead of a
       judgement call. Existing clips keep the voice recorded in their note, so
       changing the preference later only affects what this step has not reached.
     action: read_aloud_standard_audio_generate_all

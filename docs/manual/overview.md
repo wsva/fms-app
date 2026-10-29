@@ -8,7 +8,7 @@ FmS turns authentic language material — podcasts, audiobooks, graded readers, 
 |------|-------------|----------|
 | **Dictation** | Listen to a short audio cue and type exactly what you hear; the app checks you against the transcript. | Listening accuracy, spelling, hearing connected speech. |
 | **Books** | Read a text split into chapters and sentences, look up words, and generate vocabulary. | Comprehension and vocabulary in context. |
-| **Read Aloud** | Record yourself reading a passage; speech‑to‑text scores how closely you matched the text. | Pronunciation and fluency. |
+| **Read Aloud** | Record yourself reading a text; speech‑to‑text scores how closely you matched the written words. | Pronunciation and fluency. |
 | **Cards** | Review flashcards with spaced repetition (a proven "remember longer with less review" schedule). | Long‑term vocabulary retention. |
 
 There is also a **Wiki** area for Markdown document collections you can read, edit, search, and keep in sync — useful for notes, grammar references, or bilingual texts.

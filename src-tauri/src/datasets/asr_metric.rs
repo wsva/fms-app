@@ -313,11 +313,11 @@ const STEP_HYPOTHESIS: u8 = 2;
 /// anywhere.
 ///
 /// This is the right comparison for "where in this recording is this text" and
-/// [`aligned_pairs`] is not. The reference is one passage and the hypothesis is
+/// [`aligned_pairs`] is not. The reference is one text and the hypothesis is
 /// a window of the recording, usually several times longer, holding that
-/// passage plus whatever was read before and after it. A global alignment has to
+/// text plus whatever was read before and after it. A global alignment has to
 /// account for every hypothesis token too, so it pays for the surplus with
-/// deletions — and the deletions are cheapest *inside* the passage, which is
+/// deletions — and the deletions are cheapest *inside* the text, which is
 /// exactly where the matched words are. A text that was heard perfectly scores
 /// well under 100 %, and the shorter the text relative to the window the worse
 /// the score: a fifteen-word mail against a four-minute window came back with 7
@@ -946,7 +946,7 @@ fn is_minor(ref_word: &str, hyp_word: &str, cfg: &ScoringConfig) -> bool {
 /// the cat sat` backtracks to the leftmost placement), so looking only
 /// backwards would silently miss every restart.
 ///
-/// Bounded on purpose: a long verbatim repeat is a re-read of the passage, and
+/// Bounded on purpose: a long verbatim repeat is a re-read of the text, and
 /// marking all of it `Repeated` would hide the insertion from the reader.
 fn repeats_preceding(words: &[String], index: usize) -> bool {
     (1..=3).any(|k| {
@@ -1050,11 +1050,11 @@ mod tests {
     }
 
     #[test]
-    fn glocal_ignores_the_words_around_the_passage() {
-        // A window is the passage plus a minute of other reading either side.
+    fn glocal_ignores_the_words_around_the_text() {
+        // A window is the text plus a minute of other reading either side.
         // A global alignment would be charged for every one of those tokens —
         // which is why handing it a wider window used to buy nothing — while
-        // this one starts and ends where the passage does and keeps every word.
+        // this one starts and ends where the text does and keeps every word.
         let reference = words("kein betreff emmi du bist die schoenste frau der welt");
         let mut window = vec!["und".to_string(); 200];
         window.extend(reference.iter().cloned());

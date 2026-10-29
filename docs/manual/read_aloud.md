@@ -1,6 +1,6 @@
 # Read Aloud
 
-Read Aloud is a speaking exercise: you record yourself reading a passage, and FmS uses speech‑to‑text to score how closely what you said matches the written text. It's designed to build pronunciation and fluency, and to let you track improvement over time.
+Read Aloud is a speaking exercise: you record yourself reading a text aloud, and FmS uses speech‑to‑text to score how closely what you said matches the written words. It's designed to build pronunciation and fluency, and to let you track improvement over time.
 
 Three words are used throughout, with one meaning each: an **attempt** is one submission (recording plus transcript plus scores), a **recording** is the audio that attempt captured, and a **standard audio** is a reference clip the *dataset* owns, which pronunciation is measured against.
 
@@ -12,9 +12,9 @@ Open **Read Aloud** from the sidebar and pick a dataset (and, within it, the tex
 
 ## Practicing a text
 
-For the selected text you'll see the passage and a **record** control. When the text has a **standard audio** clip, a player for it sits directly above the passage — listen first to learn the pacing, then record:
+For the selected text you'll see its content and a **record** control. When the text has a **standard audio** clip, a player for it sits directly above the content — listen first to learn the pacing, then record:
 
-1. Read the passage aloud while recording. A **live recognition** panel at the bottom of the page shows the transcript as you speak, so you can see immediately whether the model is hearing you — and whether it is hearing the right thing.
+1. Read the text aloud while recording. A **live recognition** panel at the bottom of the page shows the transcript as you speak, so you can see immediately whether the model is hearing you — and whether it is hearing the right thing.
 2. Stop when finished. FmS transcribes your recording and compares it to the target text.
 3. A **score** badge shows how close you were, colour‑coded so you can see at a glance whether it was strong or needs work.
 
@@ -37,9 +37,9 @@ A text can have several clips — try voices, or keep a human reading beside a s
 
 Each clip is labelled with where it came from — **Edge TTS**, **Upload**, or **Aligned**. An **Aligned** clip is one you made on the **Init Audios** page (the texts view's overflow menu): rather than a file of its own, it remembers that this text runs from one second to another of a longer recording, and its note says so — `Align · lesson01.mp3 · 31.51–44.58 s`. The short clip is cut out of that recording the first time you open the text to hear or score it, so a clip applied a minute ago may have no audio on disk yet; that is normal and it becomes playable as soon as the page opens it. The longer recording is yours and is not part of the dataset, so if it is moved or deleted, the clip says it cannot be cut any more instead of playing silence — align the text again against the recording's new place.
 
-That page gives every text two verbs of its own. **Re-guess** places it again; **Save** stores the span as the text's standard audio. Both sit in one bar under the span's **Start** and **End** rows, above the text, so they are beside the times they change; the transport shares that bar — **Play span** (Space) plays the span, **±0.5 s** plays half a second either side of it. The list on the left is only a list, one line per text. There is no verdict to give in between: a span the speech model placed *is* the answer, and the two edges stay editable until you save. A text that already has a clip says **Clip exists** after its title and again at the head of the passage, and the button beside Save is **Delete clip**: changing the span of a saved text means deleting its clip first, then saving. **Save all clips** stores every placed text that has none and steps over the rest.
+That page gives every text two verbs of its own. **Re-guess** places it again; **Save** stores the span as the text's standard audio. Both sit in one bar under the span's **Start** and **End** rows, above the text, so they are beside the times they change; the transport shares that bar — **Play span** (Space) plays the span, **±0.5 s** plays half a second either side of it. The list on the left is only a list, one line per text. There is no verdict to give in between: a span the speech model placed *is* the answer, and the two edges stay editable until you save. A text that already has a clip says **Clip exists** after its title and again above the content, and the button beside Save is **Delete clip**: changing the span of a saved text means deleting its clip first, then saving. **Save all clips** stores every placed text that has none and steps over the rest.
 
-If you later edit the text, its clip is marked **Stale**: the words no longer match what the clip says, so pronunciation stops being scored until you make a new clip. That is deliberate — grading you against a target for a passage you are no longer reading would be worse than a blank. Nothing is regenerated behind your back.
+If you later edit the text, its clip is marked **Stale**: the words no longer match what the clip says, so pronunciation stops being scored until you make a new clip. That is deliberate — grading you against a target for a text you are no longer reading would be worse than a blank. Nothing is regenerated behind your back.
 
 Clips belong to the dataset, so they travel with it: another device that syncs the dataset gets the same standard audio, and your score means the same thing there. An aligned clip travels as its audio, not as its span: the other device has no copy of your long recording, so the clip is cut here before the dataset is shared or synced.
 
@@ -53,22 +53,22 @@ Every recording you make is saved as an **attempt**. The **attempts panel** list
 
 - Read all three scores — accuracy, fluency and pronunciation — straight off each card, without opening the attempt. A score that could not be measured reads `—`, never a stand‑in number; hover it for the reason.
 - Play back earlier recordings and compare them to now.
-- Watch your scores trend upward as you repeat a passage.
+- Watch your scores trend upward as you repeat a text.
 - **Assess again** an earlier take: it re‑transcribes the recording and recomputes its accuracy, fluency and pronunciation in place. The recording is device‑local, so the action only appears where that recording lives.
 - Navigate between attempts and, where relevant, navigate to the sentences that most need work.
 
 Assessment can take a while (transcription first, then the phoneme model). An **assessment log** docked at the bottom of the attempts page tails each stage as it runs, so the wait is never silent; collapse it to a single line or close it once the run finishes.
 
-Above the history sits a **Standard audio check** card. It scores the text's standard audio itself — the clip your pronunciation is measured against — through the same three axes a take goes through, so you can tell a bad reference from a bad reading. Nothing it produces is stored: no attempt is added and no XP is awarded. Read it as a health check: **accuracy** near 100% means the clip says what the text says, **pronunciation** high means the clip aligns cleanly against itself (a low one points at the phoneme model), and **fluency** paces the clip's own recording. A low accuracy is the finding that matters — that clip would mark down everyone who reads the passage correctly, so regenerate or replace it in **Manage**.
+Above the history sits a **Standard audio check** card. It scores the text's standard audio itself — the clip your pronunciation is measured against — through the same three axes a take goes through, so you can tell a bad reference from a bad reading. Nothing it produces is stored: no attempt is added and no XP is awarded. Read it as a health check: **accuracy** near 100% means the clip says what the text says, **pronunciation** high means the clip aligns cleanly against itself (a low one points at the phoneme model), and **fluency** paces the clip's own recording. A low accuracy is the finding that matters — that clip would mark down everyone who reads the text correctly, so regenerate or replace it in **Manage**.
 
-Re‑reading the same passage is encouraged — repetition with feedback is how fluency builds.
+Re‑reading the same text is encouraged — repetition with feedback is how fluency builds.
 
 ## Creating and editing texts
 
 You can add your own Read Aloud datasets and texts. A dataset dialog manages the collection, and each text is edited on its own page, opened with **Manage** in the practice toolbar (or **New Text** for a fresh one). The page is a short stack of cards, so you can see what you are changing:
 
 - **Details** — title and note.
-- **Text to read** — the passage you record, in the same Markdown editor used in [Wiki](wiki.md).
+- **Text to read** — the content you record, in the same Markdown editor used in [Wiki](wiki.md).
 - **Scoring reference** — a **normalized reference**: a spelling‑out of numbers and abbreviations, which is what scoring and the generated standard audio read when it is set. Under the box, *Scoring will read* names which of the two the scorer will actually use and shows it, so you never have to guess between them. Two buttons fill the box for you: **Generate with Ollama** asks a local model, and **Copy prompt** copies the exact prompt to paste into ChatGPT or any other LLM — its answer goes back into the box. Either way it is still a draft, stored only when you **Save**; and when the text already has recordings, **Measure** scores what is in the box against them so you can see whether it actually helps.
 - **Standard audio** — the reference clips below.
 

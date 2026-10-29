@@ -15,7 +15,7 @@ import { logError } from "@/lib/logger";
 const LOG_MODULE = "read-aloud";
 
 type Props = {
-  /** The passage the prompt quotes. Empty disables both routes. */
+  /** The text the prompt quotes. Empty disables both routes. */
   content: string;
   /** What scoring reads for the *stored* text today — the gate's baseline. */
   baseline: string;
@@ -197,7 +197,7 @@ export default function NormalizeActions({
     if (!isTauri() || !hasText || !model) return;
     setBusy("generate");
     setPrompt("");
-    setNote({ kind: "info", text: `Asking ${model}… a local model can take a minute on a long passage.` });
+    setNote({ kind: "info", text: `Asking ${model}… a local model can take a minute on a long text.` });
     try {
       const res = await invoke<NormalizeResult>("read_aloud_normalize", { content, model });
       const text = (res.candidate ?? "").trim();

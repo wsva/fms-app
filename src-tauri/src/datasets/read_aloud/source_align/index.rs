@@ -206,7 +206,7 @@ fn envelope(samples: &[f32]) -> (Vec<i8>, f64) {
 
 /// A window of the peak envelope around a span: the thumbnail beside one
 /// proposal's row. The window is the span plus thirty per cent of its own
-/// length either side (never less than a second), so the passage's neighbours
+/// length either side (never less than a second), so the text's neighbours
 /// are in view; wide spans are decimated by min/max so the preview keeps the
 /// loudness shape instead of aliasing it away.
 #[derive(Serialize)]
@@ -230,7 +230,7 @@ pub(super) fn preview(transcript: &SourceTranscript, start: f64, end: f64) -> Pr
             peaks: Vec::new(),
         };
     }
-    // Context scales with the passage, not with a stopwatch: a twelve-second
+    // Context scales with the text, not with a stopwatch: a twelve-second
     // span shows about three and a half either side, a two-second one still
     // shows a second. Both ends are clamped to the recording, so a span near the
     // head simply gets a shorter lead-in than it asked for.
@@ -550,7 +550,7 @@ pub(crate) fn transcribe(
 
 /// One recording's cached transcript: what the model heard, word by word.
 ///
-/// This is the page's result pane, and the answer to "why was this passage
+/// This is the page's result pane, and the answer to "why was this text
 /// placed here?" — the alignment compared exactly these tokens, at these
 /// times. Read-only, and free: the cache is already on disk.
 ///

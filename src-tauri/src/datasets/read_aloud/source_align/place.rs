@@ -23,7 +23,7 @@ use super::{
 // Align
 // ============================================================
 
-/// A stretch of the stream that matches a passage.
+/// A stretch of the stream that matches a text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Found {
     /// Absolute index of the run's first and last token in the stream.
@@ -32,7 +32,7 @@ pub(super) struct Found {
     pub(super) matched: usize,
 }
 
-/// What the guess decided about one passage: the span worth proposing, and the
+/// What the guess decided about one text: the span worth proposing, and the
 /// best stretch of the stream pass one saw — kept even when nothing is worth
 /// proposing, because "the model heard 3 of your 5 words" is the difference
 /// between a text that is missing and a model that misheard.
@@ -53,13 +53,13 @@ pub(super) struct Search {
 /// `(first, last, matched)` of every maximal run of aligned pairs, in order.
 ///
 /// A run breaks where the *text* skipped more than [`GUESS_MAX_GAP`] words: that
-/// is the passage reading something else in between, and the stretches either
+/// is the text reading something else in between, and the stretches either
 /// side of it are separate claims about where it was read.
 ///
 /// A jump on the stream side alone is not a break. Both sides of it are still the
 /// same reading; what jumped is the audio, or the transcript's account of it — an
 /// overlapping STT chunk that repeated the last fifteen seconds, a music bridge,
-/// a hallucination the next chunk did not share. Breaking there cut a passage's
+/// a hallucination the next chunk did not share. Breaking there cut a text's
 /// head off: the longer half won the run score, so a chapter's second part was
 /// placed at its *middle*, forty seconds past the words it opens with.
 pub(super) fn runs_of(pairs: &[(usize, usize)]) -> Vec<(usize, usize, usize)> {
@@ -78,14 +78,14 @@ pub(super) fn runs_of(pairs: &[(usize, usize)]) -> Vec<(usize, usize, usize)> {
     runs
 }
 
-/// Where reading order says a passage starts, in stream tokens.
+/// Where reading order says a text starts, in stream tokens.
 ///
-/// A passage's text *is* what a stretch of the recording says, so the number of
+/// A text's text *is* what a stretch of the recording says, so the number of
 /// reference words before it maps onto the stream arithmetically: a book whose
 /// 784 mails hold 44 699 words against 45 828 heard tokens settles at 1:1, and
 /// every mail's expected position follows from the words counted before it. This
 /// is what keeps one bad span from dragging the rest with it — the prediction
-/// does not depend on where the previous passage was put, only on the order the
+/// does not depend on where the previous text was put, only on the order the
 /// texts were written in.
 pub(super) fn prior_position(before: usize, total_reference: usize, total_stream: usize) -> usize {
     if total_reference == 0 || total_stream == 0 {
@@ -101,7 +101,7 @@ fn run_score(found: &Found, expected: usize) -> f64 {
     found.matched as f64 - PRIOR_DISTANCE_PENALTY * found.from.abs_diff(expected) as f64
 }
 
-/// Scan one window: semi-global alignment of the whole passage, then the runs of
+/// Scan one window: semi-global alignment of the whole text, then the runs of
 /// the result, keeping the run that scores best against `expected`.
 fn scan_window(
     reference: &[String],
@@ -128,10 +128,10 @@ fn scan_window(
     search
 }
 
-/// Where one passage is read, judged against the position reading order predicts
+/// Where one text is read, judged against the position reading order predicts
 /// for it.
 ///
-/// Tight window first, wide second. The tight one is where nine passages in ten
+/// Tight window first, wide second. The tight one is where nine texts in ten
 /// are, and it is also what stops an eight-word one-liner from being matched to
 /// the same words twenty minutes later — a match that would otherwise score
 /// just as well.
@@ -156,7 +156,7 @@ pub(super) fn find_predicted(reference: &[String], stream: &[String], expected: 
     Search { hit: None, best }
 }
 
-/// Search forward from `cursor` for the passage's reading.
+/// Search forward from `cursor` for the text's reading.
 ///
 /// The last resort, for the case the prediction cannot serve: the texts are not
 /// the recordings read in order — a sample chapter added in front, half the
@@ -206,7 +206,7 @@ impl Prepared {
     /// Where the stream resumes after `end` of `source`.
     ///
     /// The bulk guess knows this exactly — it holds the token index it stopped
-    /// on — but a one-passage run starts from a stored span, so that span's end
+    /// on — but a one-text run starts from a stored span, so that span's end
     /// time is the only handle it has. Landing a word early costs nothing: an
     /// unmatched prefix is skipped by the alignment.
     fn cursor_after(&self, source: usize, end: f64) -> Option<usize> {
@@ -218,7 +218,7 @@ impl Prepared {
 
 /// Read the recordings and the texts a guess walks.
 ///
-/// Every refusal about *missing* input lives here, so a single passage cannot
+/// Every refusal about *missing* input lives here, so a single text cannot
 /// be answered differently from a bulk run: same registrations, same caches,
 /// same reading order.
 #[cfg(feature = "stt")]
@@ -291,12 +291,12 @@ pub(super) fn need_for(tokens: &[String]) -> usize {
         .max(GUESS_MIN_WORDS.min(tokens.len()))
 }
 
-/// Place every passage along the stream: anchors first, then the gaps.
+/// Place every text along the stream: anchors first, then the gaps.
 ///
-/// Pass one asks every passage long enough to be evidence in itself where it is,
+/// Pass one asks every text long enough to be evidence in itself where it is,
 /// against the position its order predicts. What comes out is an absolute span
 /// with a confidence, and the spans are forced to be increasing, so a wrong one
-/// costs itself and nothing else — it cannot drag the next passage with it the
+/// costs itself and nothing else — it cannot drag the next text with it the
 /// way a shared cursor could.
 ///
 /// Pass two takes the gaps pass one left and aligns everything unplaced in each
@@ -304,12 +304,12 @@ pub(super) fn need_for(tokens: &[String]) -> usize {
 /// where the one-liners go: "40 Sekunden später" is eight words and occurs a
 /// dozen times, so aligning it alone finds *an* occurrence — the block alignment
 /// cannot put it out of order, and it can tell that there is no room here for
-/// the passages that claim to be.
+/// the texts that claim to be.
 ///
-/// A passage that survives both passes unplaced keeps the best run pass one saw,
+/// A text that survives both passes unplaced keeps the best run pass one saw,
 /// so a refusal can still report it heard 5 of the text's 310 words — but that
 /// run is *not* a placement: it is wherever the words happened to occur, which
-/// is not where the passage belongs.
+/// is not where the text belongs.
 #[cfg(feature = "stt")]
 pub(super) fn place_all(stream: &[String], texts: &[Vec<String>]) -> Vec<Guess> {
     let total_reference: usize = texts.iter().map(Vec::len).sum();
@@ -357,14 +357,14 @@ pub(super) fn place_all(stream: &[String], texts: &[Vec<String>]) -> Vec<Guess> 
         .collect()
 }
 
-/// Align one gap's passages as a single block.
+/// Align one gap's texts as a single block.
 ///
 /// The concatenation of their texts is aligned once against the audio between
 /// the two anchors that bound the gap, which makes the answer monotone by
-/// construction: no passage in a block can be placed before another one, and
+/// construction: no text in a block can be placed before another one, and
 /// none can claim audio that belongs to its neighbour. Where the block's own
-/// alignment heard too little of a passage — a gap that does not hold it at all —
-/// that passage stays unplaced instead of being stretched across the gap.
+/// alignment heard too little of a text — a gap that does not hold it at all —
+/// that text stays unplaced instead of being stretched across the gap.
 #[cfg(feature = "stt")]
 fn fill_gap(
     stream: &[String],
@@ -418,7 +418,7 @@ fn fill_gap(
     }
 }
 
-/// A placed (or refused) passage, and the floor the *next* passage in reading
+/// A placed (or refused) text, and the floor the *next* text in reading
 /// order must not start before.
 #[cfg(feature = "stt")]
 struct Placed {
@@ -427,7 +427,7 @@ struct Placed {
 }
 
 /// Turn a found run into a proposal: the padded span, both edges placed in the
-/// pause they belong to, and clamped against the passage before it. Nothing is
+/// pause they belong to, and clamped against the text before it. Nothing is
 /// carried over from a previous run — the same stream gives the same span, so a
 /// re-run only changes what a changed transcript changes.
 #[cfg(feature = "stt")]
@@ -444,7 +444,7 @@ fn span_proposal(
         let mut refusal = Proposal::refusal(
             text_uuid,
             format!(
-                "This passage is read across the boundary between {} and {}. Crop it by hand from the two files.",
+                "This text is read across the boundary between {} and {}. Crop it by hand from the two files.",
                 prepared.index.sources[first_source].file_name,
                 prepared.index.sources[last_source].file_name
             ),
@@ -461,7 +461,7 @@ fn span_proposal(
         return Placed {
             proposal: Proposal::refusal(
                 text_uuid,
-                "The recording this passage matched has no cached transcript.".to_string(),
+                "The recording this text matched has no cached transcript.".to_string(),
             ),
             floor: None,
         };
@@ -512,7 +512,7 @@ fn span_proposal(
             matched_words: found.matched,
             reference_words: tokens.len(),
             status: "proposed".to_string(),
-            // `confidence` already says how much of the passage was heard, so a
+            // `confidence` already says how much of the text was heard, so a
             // placed span has nothing to explain; `note` is a refusal's reason.
             note: String::new(),
         },
@@ -520,9 +520,9 @@ fn span_proposal(
     }
 }
 
-/// Place every passage and write the proposals.
+/// Place every text and write the proposals.
 ///
-/// Every passage is decided from its own position in reading order, so re-running
+/// Every text is decided from its own position in reading order, so re-running
 /// is idempotent — same stream, same spans — except where a transcript changed
 /// under it, and one surprising span costs only itself.
 #[cfg(feature = "stt")]
@@ -609,7 +609,7 @@ pub(crate) fn run(settings: &SettingsState, dataset_uuid: &str) -> Result<Value,
     };
     Ok(json!({
         "status": "ok",
-        "passages": set.proposals.len(),
+        "texts": set.proposals.len(),
         "proposed": proposed,
         "refused": refused,
         "mean_confidence": mean_confidence,
@@ -624,14 +624,14 @@ pub(crate) fn run(_settings: &SettingsState, _dataset_uuid: &str) -> Result<Valu
     Err("This build has no speech recognition, so the spans cannot be guessed.".to_string())
 }
 
-/// Re-place one passage, leaving every other row exactly as it is.
+/// Re-place one text, leaving every other row exactly as it is.
 ///
 /// The bulk guess is the right tool for a set that has never been placed and
 /// the wrong one for a single row: it rewrites the whole file, so a span
 /// somebody nudged by hand would be replaced by the model's opinion of it. This
 /// places only the requested text — at the position its order predicts, along the
 /// same stream the bulk guess reads, and with the end of the nearest earlier
-/// passage as a fallback when that prediction finds nothing — and replaces that
+/// text as a fallback when that prediction finds nothing — and replaces that
 /// one row. Everything else is untouched.
 #[cfg(feature = "stt")]
 pub(crate) fn run_one(
@@ -655,7 +655,7 @@ pub(crate) fn run_one(
         );
     }
 
-    // Where to start looking: the end of the nearest earlier passage that has a
+    // Where to start looking: the end of the nearest earlier text that has a
     // span. Reading order is the only order the guess knows, and it is the one
     // the recordings follow.
     let mut cursor = 0usize;
@@ -689,7 +689,7 @@ pub(crate) fn run_one(
     // The prediction first, the neighbour's end second. The prediction is the
     // better answer — it is where the bulk guess would put this row — and the
     // cursor is only a fallback for a set whose order no longer matches the
-    // recordings, e.g. after passages were added or re-placed by hand.
+    // recordings, e.g. after texts were added or re-placed by hand.
     let every_text: Vec<Vec<String>> = prepared
         .texts
         .iter()

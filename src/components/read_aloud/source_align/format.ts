@@ -49,7 +49,7 @@ export function clockShort(seconds: number): string {
  *
  * Hours are always present, so the two ends of a row can be compared by eye
  * without counting colons, and the column does not change width at the
- * hour mark. The edge fields print this because a reader places a passage by
+ * hour mark. The edge fields print this because a reader places a text by
  * the clock the recording is read in, not by seconds from zero.
  */
 export function clockHms(seconds: number): string {
@@ -84,7 +84,7 @@ export function percent(value: number): number {
   return Math.round(value * 100);
 }
 
-/** How much of the passage was heard, in the colour that admits how much. */
+/** How much of the text was heard, in the colour that admits how much. */
 export function confidenceTone(confidence: number): string {
   if (confidence >= 0.9) return "text-accent-bg";
   if (confidence >= 0.7) return "text-text-secondary";

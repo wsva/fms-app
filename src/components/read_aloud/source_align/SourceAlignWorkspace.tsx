@@ -6,8 +6,8 @@ import { FolderOpen, ListChecks } from "lucide-react";
 import { TabBar, type TabBarItem } from "@/components/ui/toolbar";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
 import { canSave } from "./ClipActions";
-import PassageEditor from "./PassageEditor";
-import PassageQueue, { QUEUE_FILTERS, matchesFilter, type QueueFilter } from "./PassageQueue";
+import TextEditor from "./TextEditor";
+import TextQueue, { QUEUE_FILTERS, matchesFilter, type QueueFilter } from "./TextQueue";
 import SourceAudiosTab from "./SourceAudiosTab";
 import { Splitter, useSplitWidth } from "./Splitter";
 import { COARSE_STEP, MIN_SPAN, NUDGE_STEP, errorText, roundMs } from "./format";
@@ -22,7 +22,7 @@ import { useSpanPlayer } from "./useSpanPlayer";
  * row per recording with its two verbs — listen, read what came back — and the
  * transcript on the right, because "did it hear this right?" is answered by the
  * words and their times, not by a number. **Texts** is the work: the queue on
- * the left — one line per text, no verbs — and one passage open beside it with
+ * the left — one line per text, no verbs — and one text open beside it with
  * its waveform, its typed edges, and the verbs that act on them in a bar under
  * the edges: place it again, and save (or delete) the one clip it is allowed.
  *
@@ -73,7 +73,7 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   /** Which edge the arrow keys move; the fields show it. */
   const [activeEdge, setActiveEdge] = useState<"start" | "end">("start");
 
-  // The seam between the rail and the passage, remembered like the other tab's.
+  // The seam between the rail and the text, remembered like the other tab's.
   const textsSplit = useSplitWidth(TEXTS_SPLIT);
 
   const busyRef = useRef<string | null>(null);
@@ -213,7 +213,7 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   const saveable = spans.filter(canSave).length;
 
   // The selection follows the rows: a filter that hides it, a re-guess that
-  // drops it, or the first load all land on the first passage still visible.
+  // drops it, or the first load all land on the first text still visible.
   useEffect(() => {
     if (selected && visible.some((p) => p.text_uuid === selected)) return;
     setSelected(visible[0]?.text_uuid ?? null);
@@ -255,7 +255,7 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
         }
         return;
       }
-      // The transport keys are for the passage in front of you, and the passage
+      // The transport keys are for the text in front of you, and the text
       // is only in front of you on the Texts tab.
       if (tab !== "texts") return;
       if (!selectedProposal) return;
@@ -362,7 +362,7 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
             className="flex flex-col gap-3 lg:grid lg:h-full lg:min-h-0 lg:gap-0"
             style={textsSplit.columns}
           >
-            <PassageQueue
+            <TextQueue
               proposals={spans}
               visible={visible}
               filter={filter}
@@ -381,13 +381,13 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
 
             <Splitter
               width={textsSplit.width}
-              label="Resize the text list and the passage"
+              label="Resize the text list and the editor"
               onChange={textsSplit.resize}
               onCommit={textsSplit.commit}
               onReset={textsSplit.reset}
             />
 
-            <PassageEditor
+            <TextEditor
               proposal={selectedProposal}
               span={span}
               siblings={siblings}

@@ -2,13 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
 
 /**
- * Wrappers for the `read_aloud_align_*` commands — guessing every passage's
+ * Wrappers for the `read_aloud_align_*` commands — guessing every text's
  * clip from a directory of recordings.
  *
  * The pipeline is `register` → `transcribe` (once per file) → `guess` →
  * `save`/`delete`, and it exists because the per-text "Guess from speech"
- * decodes and transcribes the whole file *per passage*. Here one recording is
- * transcribed once and every passage is placed along it, so the cost is
+ * decodes and transcribes the whole file *per text*. Here one recording is
+ * transcribed once and every text is placed along it, so the cost is
  * O(files) instead of O(texts × files).
  *
  * Every call is guarded so the page still renders in a plain browser: a read
@@ -87,12 +87,12 @@ export interface AlignTranscript {
 
 export interface AlignGuessResult {
   status: string;
-  passages: number;
+  texts: number;
   proposed: number;
   refused: number;
   /** Mean confidence of the proposed spans, 0-1, two decimals. */
   mean_confidence: number;
-  /** Words after the last placed passage — a sign of a recording left out. */
+  /** Words after the last placed text — a sign of a recording left out. */
   unused_words: number;
   sources: number;
   generated_at: string;
@@ -166,7 +166,7 @@ export interface AlignProposals {
   status: string;
   generated_at: string;
   proposals: AlignProposal[];
-  passages_total: number;
+  texts_total: number;
   counts: AlignCounts;
 }
 
@@ -264,7 +264,7 @@ export async function transcribeAlignSource(
  * One recording's cached transcript, word by word.
  *
  * Read-only and free — the cache is already on disk. This is what the guess
- * actually compared, so it answers "why is this passage at that second?"
+ * actually compared, so it answers "why is this text at that second?"
  * better than any number in the queue does.
  */
 export async function readAlignTranscript(
@@ -276,10 +276,10 @@ export async function readAlignTranscript(
 }
 
 /**
- * Place every passage along the recordings, in order, and write the proposals.
+ * Place every text along the recordings, in order, and write the proposals.
  *
  * Read-only with respect to `media/`: it only writes `align/proposals.json`.
- * Passages are walked in `order_num` with a cursor that never moves backwards,
+ * Texts are walked in `order_num` with a cursor that never moves backwards,
  * so a re-run after fixing the folder replaces the proposal set rather than
  * appending to it. A row whose span did not move keeps its saved state; a row
  * that moved is a new answer and starts unsaved.
@@ -290,7 +290,7 @@ export async function guessAlignSpans(datasetUuid: string): Promise<AlignGuessRe
 }
 
 /**
- * Place one passage again, leaving every other span in the file alone.
+ * Place one text again, leaving every other span in the file alone.
  *
  * The whole-set guess rewrites the file, so re-running it to fix one text
  * would also overwrite the edges you had just nudged elsewhere. This one reads
@@ -310,7 +310,7 @@ export async function guessAlignSpanOne(
 }
 
 /**
- * The proposals joined with the passages they are for, plus a thumbnail of the
+ * The proposals joined with the texts they are for, plus a thumbnail of the
  * audio around each span. Read-only, and the only call the panel needs to draw.
  */
 export async function listAlignProposals(datasetUuid: string): Promise<AlignProposals | null> {

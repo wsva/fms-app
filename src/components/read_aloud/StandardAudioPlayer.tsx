@@ -19,7 +19,7 @@ type Props = {
 };
 
 /**
- * A compact player for a text's standard audio, sitting above the passage it
+ * A compact player for a text's standard audio, sitting above the text it
  * reads.
  *
  * This is the *listening* half of the reference: the clip itself is what

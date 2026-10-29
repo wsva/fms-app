@@ -15,7 +15,7 @@ Four grounding decisions shape the whole design:
 3. **The owner preprocesses off-app.** Converting PDFs / DOCX / images / audio to **markdown** is the owner's job, done with whatever tool they like *before* the app sees it. `preprocess/` accepts `.md` and nothing else — the app never parses a binary format, and never has to guess how a foreign format should be read. This removes the single biggest would-be dependency (a server-side document extractor) from v2 entirely.
 4. **A source is a fixed five-part directory** (`original/`, `preprocess/`, `workflow/`, `generate/`, `meta.json`) so the recipe, its state, and its output are all legible in one place.
 
-Restated as the ask: a source is a directory holding several files in several formats. The owner reduces them to text, and a local LLM (e.g. `gemma4:e4b`) rewrites that text into a single readable passage at a target CEFR level (e.g. B2).
+Restated as the ask: a source is a directory holding several files in several formats. The owner reduces them to text, and a local LLM (e.g. `gemma4:e4b`) rewrites that text into a single readable text at a target CEFR level (e.g. B2).
 
 A dataset with a hundred texts is a dataset with a hundred sources. "One document, many texts" is therefore not a feature of the source — it's the owner creating several sources, which is the same outcome arrived at through a step the owner can see, edit, and undo. See [Non-goals](#non-goals) for why the output-side fan-out was deliberately dropped.
 

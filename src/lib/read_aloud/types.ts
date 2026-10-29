@@ -13,7 +13,7 @@ export interface ReadAloudMeta {
   uuid: string;
   name: string;
   description: string;
-  /** The language the passages are written in (`"de"`, `"de-DE"`), empty when
+  /** The language the texts are written in (`"de"`, `"de-DE"`), empty when
    *  unset. It is what a per-language voice preference is looked up by, so an
    *  empty value means no preference can apply. */
   language: string;

@@ -42,7 +42,7 @@ export function matchesFilter(proposal: AlignProposal, filter: QueueFilter): boo
 function StateMark({ proposal }: { proposal: AlignProposal }) {
   if (proposal.status === "refused") {
     return (
-      <span className="shrink-0 text-warning-text" title="The guess refused this passage">
+      <span className="shrink-0 text-warning-text" title="The guess refused this text">
         <AlertTriangle size={11} />
       </span>
     );
@@ -74,7 +74,7 @@ type Props = {
   canGuess: boolean;
 };
 
-export default function PassageQueue({
+export default function TextQueue({
   proposals,
   visible,
   filter,
@@ -255,7 +255,7 @@ export default function PassageQueue({
                 {!refused && (
                   <span
                     className={`shrink-0 text-[10px] tabular-nums ${confidenceTone(proposal.confidence)}`}
-                    title="How much of the passage was heard, in order"
+                    title="How much of the text was heard, in order"
                   >
                     {percent(proposal.confidence)}%
                   </span>

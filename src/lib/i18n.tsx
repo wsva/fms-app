@@ -57,7 +57,7 @@ const dict = {
       "Turn phrases into flashcards and review them with an SM-2 scheduler and full-text search.",
     "features.readaloud.title": "Read-aloud scoring",
     "features.readaloud.desc":
-      "Record yourself reading a passage and get a similarity score from on-device speech recognition.",
+      "Record yourself reading a text and get a similarity score from on-device speech recognition.",
     "features.stt.title": "Local speech recognition",
     "features.stt.desc":
       "Generate subtitles with bundled Parakeet models — everything runs offline on your machine.",

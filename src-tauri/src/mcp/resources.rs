@@ -339,15 +339,15 @@ fn domain_blurb(domain: &str) -> &'static str {
              incremental read; `web_service_start`/`_stop` control the listener."
         }
         "read-aloud" => {
-            "A read-aloud dataset is a set of passages plus optional Edge-TTS clips of them. \
-             Three tables matter: `read_text` (one row per passage, ordered by `order_num`), \
+            "A read-aloud dataset is a set of texts plus optional Edge-TTS clips of them. \
+             Three tables matter: `read_text` (one row per text, ordered by `order_num`), \
              `read_attempt` (per-user practice history) and `read_standard_audio` (clips under \
              `media/<text_uuid>/`). The write shape is the trap: `read_aloud_save_text` takes a \
              draft — `title` and `content` are the only required fields — and the server assigns \
              `uuid`, `order_num` and the timestamps, so a caller that invents them is guessing \
              work the server already did. Bring a whole book with `read_aloud_import_texts` \
              (`dry_run: true` first: it reports the chunk sizes and speaks nothing), then \
-             `read_aloud_standard_audio_generate` one passage and listen before \
+             `read_aloud_standard_audio_generate` one text and listen before \
              `read_aloud_standard_audio_generate_all {limit: 3, only_missing: true}`. The voice \
              is decided by `read_aloud_voice_resolve` before you synthesise anything: it reports \
              which voice would be used, why (`voice_source`), and whether the dataset is missing \

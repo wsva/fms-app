@@ -51,7 +51,7 @@ type Props = {
   audioPath?: string | null;
   /**
    * Language the report is written in. The app's interface is English, so the
-   * explanation is too; the passage's own words stay quoted in its language
+   * explanation is too; the text's own words stay quoted in its language
    * either way.
    */
   language?: string;

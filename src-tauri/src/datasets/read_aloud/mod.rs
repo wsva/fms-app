@@ -745,11 +745,11 @@ pub(crate) fn apply_remote_delete(
     Ok(deleted > 0)
 }
 
-/// Longest title [`fallback_title`] will cut from a passage.
+/// Longest title [`fallback_title`] will cut from a text.
 const TITLE_MAX_CHARS: usize = 60;
 
 /// A readable title for a draft that carries none: the first non-empty line,
-/// shortened. A list of untitled passages is unusable, and the log's importer
+/// shortened. A list of untitled texts is unusable, and the log's importer
 /// hand-rolled exactly this fallback twice — so it lives here once.
 pub(crate) fn fallback_title(content: &str) -> String {
     let line = content
@@ -2015,7 +2015,7 @@ pub struct StandardAudioAssessment {
 /// A healthy clip reads back with high accuracy (what it says is what the text
 /// says) and a high pronunciation score (it is aligned against phones derived
 /// from itself). A low accuracy is the defect worth catching: the reference
-/// audio does not speak the passage, and every learner reading it correctly
+/// audio does not speak the text, and every learner reading it correctly
 /// would be marked down for the difference.
 #[cfg(feature = "stt")]
 pub(crate) async fn assess_standard_audio(

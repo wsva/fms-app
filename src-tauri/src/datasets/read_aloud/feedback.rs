@@ -54,7 +54,7 @@ const MAX_PHONE_WORDS: usize = 6;
 const MAX_PHONES_PER_WORD: usize = 2;
 const MAX_ALIGNMENT_RUNS: usize = 12;
 const MAX_EVIDENCE_PAUSES: usize = 10;
-const MAX_PASSAGE_CHARS: usize = 4000;
+const MAX_REFERENCE_CHARS: usize = 4000;
 const MAX_SUMMARY_CHARS: usize = 4000;
 const MAX_DIAGNOSIS_CHARS: usize = 600;
 const MAX_DRILL_CHARS: usize = 2000;
@@ -196,7 +196,7 @@ pub struct FeedbackContext {
     /// Identity of the attempt: uuid, text, score, transcript, recording path.
     pub attempt: Value,
     /// The reference the scorer compared against (normalized when one exists).
-    pub passage: String,
+    pub reference: String,
     /// The dataset's language tag, empty when it has none.
     pub language: String,
     /// The language the report is asked to be written in.
@@ -268,8 +268,8 @@ fn load_attempt(
 }
 
 /// The reference the scorer compared against: `normalized_content` when set,
-/// the passage otherwise.
-fn passage_for(settings: &SettingsState, dataset_uuid: &str, text_uuid: &str) -> Result<String, String> {
+/// the reference otherwise.
+fn reference_for(settings: &SettingsState, dataset_uuid: &str, text_uuid: &str) -> Result<String, String> {
     let dir = super::find_dataset_dir(settings, dataset_uuid)?;
     super::text_reference(&dir, text_uuid)
 }
@@ -307,7 +307,7 @@ fn audio_facts(
     facts
 }
 
-/// A block quoted verbatim, shortened so one huge passage cannot crowd out the
+/// A block quoted verbatim, shortened so one huge reference cannot crowd out the
 /// measurements the report has to explain.
 fn quoted(text: &str, limit: usize) -> String {
     let flat = text.trim();
@@ -393,7 +393,7 @@ pub(crate) fn describe_reason(reason: PronReason) -> &'static str {
 fn build_evidence(
     target_language: &str,
     feedback_language: &str,
-    passage: &str,
+    reference: &str,
     summary: &AsrScoreSummary,
     stored: Option<&Assessment>,
     phone: Option<&[WordPhones]>,
@@ -402,15 +402,15 @@ fn build_evidence(
     let mut out = String::new();
     out.push_str("READ-ALOUD ATTEMPT EVIDENCE\n");
     out.push_str(&format!(
-        "Passage language: {}\n",
+        "Reference language: {}\n",
         if target_language.is_empty() { "unknown" } else { target_language }
     ));
     out.push_str(&format!("Answer language: {}\n\n", feedback_language));
 
     out.push_str(&format!(
-        "PASSAGE (the reference the scorer compared against; {} words)\n{}\n\n",
-        normalize_words(passage).len(),
-        quoted(passage, MAX_PASSAGE_CHARS)
+        "REFERENCE (what the scorer compared against; {} words)\n{}\n\n",
+        normalize_words(reference).len(),
+        quoted(reference, MAX_REFERENCE_CHARS)
     ));
     // The take itself, not the recognizer's guess at it: the model that
     // answers this prompt hears the recording, so no transcript is dumped here.
@@ -466,7 +466,7 @@ fn build_evidence(
     for (op, label) in [
         (AsrOp::Substitute, "misread"),
         (AsrOp::Delete, "never said"),
-        (AsrOp::Insert, "said but not in the passage"),
+        (AsrOp::Insert, "said but not in the reference"),
     ] {
         let runs = alignment_runs(summary, op);
         if runs.is_empty() {
@@ -476,12 +476,12 @@ fn build_evidence(
         out.push_str(&format!("- {}: {}\n", label, runs.join("; ")));
     }
     if !wrote_runs {
-        out.push_str("- the transcript matched the passage word for word\n");
+        out.push_str("- the transcript matched the reference word for word\n");
     }
     if let Some(stored_score) = stored.map(|a| a.accuracy.score) {
         if (stored_score - summary.score).abs() > 1.0 {
             out.push_str(&format!(
-                "- note: the passage or the metric changed since this take was scored \
+                "- note: the reference or the metric changed since this take was scored \
                  (stored {:.1}, recomputed {:.1}); the score above is the stored one and the \
                  word list was recomputed against the current reference\n",
                 stored_score, summary.score
@@ -588,7 +588,7 @@ fn build_evidence(
     out.push_str("PAUSES — where the silences fell\n");
     match stored {
         Some(a) if !a.pauses.is_empty() => {
-            let ref_words = normalize_words(passage);
+            let ref_words = normalize_words(reference);
             for pause in a.pauses.iter().take(MAX_EVIDENCE_PAUSES) {
                 let after = pause
                     .after_ref
@@ -627,10 +627,10 @@ const INSTRUCTION: &str = r#"You are reviewing one read-aloud practice take in a
 Rules:
 - The evidence below is measured fact. Never invent numbers, words, sounds or timings that are not in it, and quote the ones you use.
 - When an axis says "not measured", say that plainly. Do not guess what the learner did.
-- Judge pronunciation, rhythm and accuracy of the reading. Do not comment on comprehension, grammar, the passage's content, or what the learner should read next.
+- Judge pronunciation, rhythm and accuracy of the reading. Do not comment on comprehension, grammar, the reference's content, or what the learner should read next.
 - Every issue must quote the evidence it comes from (a word, a count, a phone, a time).
 - Every fix must be doable in under five minutes, with no app, tool or partner.
-- Keep target-language words in the passage's language, in quotes.
+- Keep target-language words in the reference's language, in quotes.
 - Write the whole answer in {{language}}.
 - Reply with JSON only, no preamble, no code fences, in this shape:
 {
@@ -727,15 +727,15 @@ async fn phone_detail(
     settings: &SettingsState,
     dataset_uuid: &str,
     text_uuid: &str,
-    passage: &str,
+    reference: &str,
     audio_path: &Option<String>,
 ) -> Option<Vec<WordPhones>> {
     let samples = super::stored_recording(settings, dataset_uuid, audio_path);
     if samples.is_empty() {
         return None;
     }
-    let ref_words = normalize_words(passage);
-    let clip = super::load_default_clip(settings, dataset_uuid, text_uuid, passage);
+    let ref_words = normalize_words(reference);
+    let clip = super::load_default_clip(settings, dataset_uuid, text_uuid, reference);
     let run = super::pronunciation_evidence(settings, ref_words.len(), &samples, &clip).await;
     if run.reason.is_some() || run.tokens.is_empty() {
         return None;
@@ -796,7 +796,7 @@ async fn phone_detail(
     _settings: &SettingsState,
     _dataset_uuid: &str,
     _text_uuid: &str,
-    _passage: &str,
+    _reference: &str,
     _audio_path: &Option<String>,
 ) -> Option<Vec<WordPhones>> {
     None
@@ -820,20 +820,20 @@ pub(crate) async fn context(
 ) -> Result<FeedbackContext, String> {
     let feedback_language = normalize_language(language);
     let attempt = load_attempt(settings, dataset_uuid, attempt_uuid, text_uuid)?;
-    let passage = passage_for(settings, dataset_uuid, &attempt.text_uuid)?;
+    let reference = reference_for(settings, dataset_uuid, &attempt.text_uuid)?;
     let language = dataset_language(settings, dataset_uuid);
-    let summary = score_asr(&passage, &attempt.recognized);
+    let summary = score_asr(&reference, &attempt.recognized);
     let audio = audio_facts(
         settings,
         dataset_uuid,
         &attempt.audio_path,
         attempt.metrics.as_ref().and_then(|m| m.fluency.as_ref()).map(|f| f.duration),
     );
-    let phone = phone_detail(settings, dataset_uuid, &attempt.text_uuid, &passage, &attempt.audio_path).await;
+    let phone = phone_detail(settings, dataset_uuid, &attempt.text_uuid, &reference, &attempt.audio_path).await;
     let evidence = build_evidence(
         &language,
         &feedback_language,
-        &passage,
+        &reference,
         &summary,
         attempt.metrics.as_ref(),
         phone.as_deref(),
@@ -849,7 +849,7 @@ pub(crate) async fn context(
             "audio_path": attempt.audio_path,
             "created_at": attempt.created_at,
         }),
-        passage,
+        reference,
         language,
         feedback_language,
         audio,
@@ -1078,12 +1078,12 @@ mod tests {
     use super::super::fluency::Fluency;
     use super::*;
 
-    fn evidence_for(passage: &str, recognized: &str) -> (AsrScoreSummary, String) {
-        let summary = score_asr(passage, recognized);
+    fn evidence_for(reference: &str, recognized: &str) -> (AsrScoreSummary, String) {
+        let summary = score_asr(reference, recognized);
         let text = build_evidence(
             "de",
             "en",
-            passage,
+            reference,
             &summary,
             None,
             None,
@@ -1136,17 +1136,17 @@ mod tests {
     fn misread_and_inserted_runs_are_named() {
         let (_, evidence) = evidence_for("guten tag wie geht es", "guten tak wie geht es ja");
         assert!(evidence.contains("misread: \"tag\" heard as \"tak\""));
-        assert!(evidence.contains("said but not in the passage: \"ja\""));
+        assert!(evidence.contains("said but not in the reference: \"ja\""));
     }
 
     #[test]
     fn a_measured_axis_is_rendered_from_the_stored_numbers() {
-        let passage = "der hund bellt laut";
-        let summary = score_asr(passage, passage);
+        let reference = "der hund bellt laut";
+        let summary = score_asr(reference, reference);
         let mut assessment = assess(
             &summary,
-            passage,
-            passage,
+            reference,
+            reference,
             &[],
             None,
             PronEvidence::Unavailable(PronReason::ModelMissing),
@@ -1171,7 +1171,7 @@ mod tests {
         let evidence = build_evidence(
             "de",
             "en",
-            passage,
+            reference,
             &summary,
             Some(&assessment),
             None,

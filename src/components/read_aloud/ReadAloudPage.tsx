@@ -1292,9 +1292,9 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
               <p className="text-[11px] text-text-tertiary">
                 <span className="text-text-secondary">Normalized text</span> — numbers and
                 abbreviations spelled out so they match a transcription. Leave it empty to score
-                against the text to read. Editing the passage clears it, because it described the
+                against the text to read. Editing the text clears it, because it described the
                 old wording; emptying this box alone does not, since the stored reference is kept
-                while the passage is unchanged. Generating standard audio reads the same reference,
+                while the text is unchanged. Generating standard audio reads the same reference,
                 so the two always agree.
               </p>
               {/* Two ways to fill the box below: the app's own prompt through a local

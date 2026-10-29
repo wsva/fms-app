@@ -155,7 +155,7 @@ export function useAlignSources({
           kind: "ok",
           text: `Heard ${result.words ?? 0} words in ${result.file_name ?? ""} (${clock(
             result.duration ?? 0
-          )})${repeat ? " — re-guess to re-place this file's passages." : "."}`,
+          )})${repeat ? " — re-guess to re-place this file's texts." : "."}`,
         });
       } finally {
         setListeningUuid(null);
@@ -176,8 +176,8 @@ export function useAlignSources({
           <>
             <span className="text-text-primary">{file.file_name}</span> already has a transcript
             of {(file.words ?? 0).toLocaleString()} words. Listening again replaces it, and the
-            passages already placed from this file keep the spans they were given — place the
-            passages again afterwards.
+            texts already placed from this file keep the spans they were given — place them
+            again afterwards.
           </>
         ),
         confirmLabel: "Listen again",

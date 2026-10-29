@@ -32,7 +32,7 @@ instructions: |-
   - This gate needs recorded attempts. A dataset whose texts have no attempts cannot be measured here - see "Texts with no attempts".
 
   ## Why not the workflow engine
-  Normalization is a coarse, per-text internal loop that lives inside one dataset; the run/resume granularity of the engine does not fit it. (Read-aloud *does* have a check provider now — `read_aloud_audit`, bound by the `build_read_aloud_dataset` template — but those checks describe passages and clips, not normalizations, so they cannot gate this loop.) This recipe therefore drives the atomic MCP tools directly and keeps the gate in *how you call them*, not in a state machine.
+  Normalization is a coarse, per-text internal loop that lives inside one dataset; the run/resume granularity of the engine does not fit it. (Read-aloud *does* have a check provider now — `read_aloud_audit`, bound by the `build_read_aloud_dataset` template — but those checks describe texts and clips, not normalizations, so they cannot gate this loop.) This recipe therefore drives the atomic MCP tools directly and keeps the gate in *how you call them*, not in a state machine.
 
   ## Workflow
 

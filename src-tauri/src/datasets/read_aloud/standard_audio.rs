@@ -1268,7 +1268,7 @@ const SPEAKING_CHARS_PER_SEC: f64 = 12.5;
 /// a second synthesis implementation.
 ///
 /// This is what makes the probe path cheap: `limit: 3` speaks exactly the first
-/// three passages in one call so a human can listen before committing to the
+/// three texts in one call so a human can listen before committing to the
 /// rest, and `only_missing` makes a repeat safe. `dry_run` reports what would
 /// happen and writes nothing. Progress is visible by `remaining` decreasing —
 /// no job machinery, no lease.

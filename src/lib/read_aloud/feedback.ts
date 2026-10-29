@@ -107,7 +107,7 @@ export interface FeedbackAttemptFacts {
 /** Response of `read_aloud_feedback_context` — everything an agent needs. */
 export interface FeedbackContext {
   attempt: FeedbackAttemptFacts;
-  passage: string;
+  reference: string;
   /** The dataset's language tag, empty when it has none. */
   language: string;
   /** The language the report was asked to be written in. */

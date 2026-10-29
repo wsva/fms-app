@@ -38,13 +38,13 @@
 #       - workflow_record
 version: 1.0.0
 title: build-read-aloud-from-ebook
-description: Turn a book you extracted yourself into a read-aloud dataset - create it with a language, import the passages in one bounded call, generate ONE reference clip for the user to listen to, then fill in the rest.
+description: Turn a book you extracted yourself into a read-aloud dataset - create it with a language, import the texts in one bounded call, generate ONE reference clip for the user to listen to, then fill in the rest.
 instructions: |-
   # Build a Read-Aloud Dataset from a Book
 
   ## Goal
   Take a book the user provides as text — an extracted `.txt` / `.md`, or a JSON
-  array of passages — and end with a read-aloud dataset whose passages are
+  array of texts — and end with a read-aloud dataset whose texts are
   segmented, ordered, and spoken by a voice the user actually wants. Stop once,
   in the middle, so a human can listen before you commit to hundreds of clips.
 
@@ -68,7 +68,7 @@ instructions: |-
   If the user named no dataset, call `read_aloud_list`; if several fit, ask which
   one rather than guessing. Then call `read_aloud_audit` with the uuid and read
   three things:
-  - `facts.has_texts` / `texts` — an existing dataset with 380 passages is a
+  - `facts.has_texts` / `texts` — an existing dataset with 380 texts is a
     different job from an empty one. **Never re-import into a dataset that already
     has texts** without asking: the importer appends, so running it twice leaves
     760 rows and a `text_duplicate` warning.
@@ -111,8 +111,8 @@ instructions: |-
   ### Step 3: Size the import before writing it
   Call `read_aloud_import_texts` with `source_path` (or `source_text`) and
   **`dry_run: true`**. It writes nothing and returns:
-  - `texts` — how many passages you will get;
-  - `chars: {min, median, max}` — the passage sizes. A median far from
+  - `texts` — how many texts you will get;
+  - `chars: {min, median, max}` — the text sizes. A median far from
     `chunk.target_chars` means the source has hard boundaries (chapters, headings)
     that dominate the split, which is usually right; a `max` far above
     `chunk.max_chars` means one paragraph never broke.
@@ -120,12 +120,12 @@ instructions: |-
     roughly 12.5 characters per second of speech.
   - `preview` — the first five titles and excerpts.
 
-  Show the user these numbers **before** the real write: "382 passages, median
+  Show the user these numbers **before** the real write: "382 texts, median
   1,026 characters, about 8 hours of audio". A wrong split caught here costs one
   call; caught after 382 clips it costs a night.
 
   Tuning is `chunk: {target_chars, min_chars, max_chars}` (defaults 1100 / 450 /
-  1900). Raise `target_chars` if the user wants longer passages. Never set
+  1900). Raise `target_chars` if the user wants longer texts. Never set
   `min_chars` above `max_chars`.
 
   ### Step 4: Import
@@ -140,7 +140,7 @@ instructions: |-
 
   Titles come from the payload when it has them, otherwise from the markdown
   heading, otherwise `<prefix> · <n>`. Pass `title_prefix` (the book's name) so
-  the passage list is readable; `note` defaults to `Imported from <file name>`.
+  the text list is readable; `note` defaults to `Imported from <file name>`.
 
   ### Step 5: One clip, then a human
   Call `read_aloud_standard_audio_generate_all` with
@@ -162,17 +162,17 @@ instructions: |-
   nine minutes — a call you can wait on. Between calls, report progress as
   "generated N, M remaining" from the response alone; do not re-list 380 texts to
   find out.
-  - `failed[]` names the passages that did not synthesise, with the error. Retry
+  - `failed[]` names the texts that did not synthesise, with the error. Retry
     them once; if they fail again, report them and finish the rest — a few missing
     clips is not a reason to stall the whole dataset.
   - `voice_source` on each call is your proof the voice did not change mid-run.
 
   ### Step 7: Report
   One paragraph: dataset uuid and name, language, voice and why that voice
-  (`voice_source`), passages (`texts_total`, median size), clips generated /
-  remaining, and any passage that failed with its error. Then name the one next
+  (`voice_source`), texts (`texts_total`, median size), clips generated /
+  remaining, and any text that failed with its error. Then name the one next
   call if anything is open: `read_aloud_standard_audio_generate_all` for leftovers,
-  `read_aloud_save_text` for a passage that needs fixing.
+  `read_aloud_save_text` for a text that needs fixing.
 
   ## Rules
   - **The language decides the voice, and it is set once.** Setting it after

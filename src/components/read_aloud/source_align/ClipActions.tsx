@@ -9,7 +9,7 @@ import type { AlignClip, AlignProposal } from "@/lib/read_aloud/sourceAlign";
  * A text owns at most one standard audio, and a save never overwrites one: the
  * clip on disk still holds the seconds its wav was cut from, so the only way to
  * give a text a new span is to delete the clip first. The chip says a clip is
- * there — in the queue, and at the head of the passage — and the button beside
+ * there — in the queue, and at the head of the text — and the button beside
  * it is the one verb that state allows, so Save is never offered for a text
  * whose click would silently do nothing.
  */
@@ -54,7 +54,7 @@ const BUTTON =
   "shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-[11px] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent";
 
 /**
- * Store this passage's span. Off while there is nothing to store — a refusal, or
+ * Store this text's span. Off while there is nothing to store — a refusal, or
  * a text whose clip has to go first — and while another run holds the page; the
  * title says which.
  */
@@ -77,7 +77,7 @@ export function SaveClipButton({
       disabled={blocker !== null}
       title={
         blocker === "refused"
-          ? "The guess refused this passage — there is no span to save"
+          ? "The guess refused this text — there is no span to save"
           : blocker === "has-clip"
             ? "This text already has a clip — delete it first"
             : saving

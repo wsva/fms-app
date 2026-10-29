@@ -73,7 +73,7 @@ struct FeedbackFocusWord { word, ipa: Option<String>, hint, score: Option<f64> }
 
 - the dataset language and the effective reference the scorer used, quoted, with its word count
 - the transcript the recognizer produced, quoted
-- **accuracy**: score, lenient score, WER, reference/correct/near-miss/misread/omitted/inserted/repeated counts, then the alignment runs — `misread: "tag" heard as "tak"`, `never said: "laut"`, `said but not in the passage: "ja"` (capped at 12)
+- **accuracy**: score, lenient score, WER, reference/correct/near-miss/misread/omitted/inserted/repeated counts, then the alignment runs — `misread: "tag" heard as "tak"`, `never said: "laut"`, `said but not in the text: "ja"` (capped at 12)
 - **fluency**: `wcpm` with its band, articulation rate, pause count (long / mid-phrase share), words between pauses, repeats and restarts, the reading span inside the recording — or an explicit "not measured: the speech model gave no word timings for this take…"
 - **pronunciation**: score, weak ratio, the stored weakest words with their GOP — or the stored `unavailable_reason`, rendered in words (`describe_reason`)
 - **phone detail**, when it could be recomputed: `"hund" /h u n t/ 0.31 — weak /u/ 0.12 (heard /o/)`
@@ -82,7 +82,7 @@ struct FeedbackFocusWord { word, ipa: Option<String>, hint, score: Option<f64> }
 
 Two subtleties worth stating, because both are failure modes that look like data:
 
-1. **The stored aggregate and the recomputed runs can disagree.** Storage keeps only the twelve weakest words, so alignment runs are recomputed with `score_asr(passage, recognized)` on every call. If the passage or the metric changed since the take was scored, the aggregate is stale and the evidence says so explicitly (`stored 71.0, recomputed 68.0`) with a note that the word list is the current one.
+1. **The stored aggregate and the recomputed runs can disagree.** Storage keeps only the twelve weakest words, so alignment runs are recomputed with `score_asr(text, recognized)` on every call. If the text or the metric changed since the take was scored, the aggregate is stale and the evidence says so explicitly (`stored 71.0, recomputed 68.0`) with a note that the word list is the current one.
 2. **"Not measured" is a line in the evidence, not silence.** A model with no fluency numbers will invent fluent-sounding advice about pacing unless it is told the axis is blank. `INSTRUCTION` makes that a rule, and each unmeasured axis names itself and its reason.
 
 ## The prompt
@@ -91,9 +91,9 @@ One `INSTRUCTION` constant, `{{language}}` substituted, plus the evidence. The r
 
 - the evidence is measured fact — never invent numbers, words, sounds or timings, and quote what you use
 - when an axis says "not measured", say so plainly rather than guessing what the learner did
-- judge pronunciation, rhythm and accuracy of the reading — **not** comprehension, grammar or the passage's content
+- judge pronunciation, rhythm and accuracy of the reading — **not** comprehension, grammar or the text's content
 - every issue quotes its evidence; every fix is doable in under five minutes with no app, tool or partner
-- keep target-language words quoted, in the passage's language, while writing the whole answer in `{{language}}`
+- keep target-language words quoted, in the text's language, while writing the whole answer in `{{language}}`
 - reply with JSON only, in the given shape, at most 5 issues and 8 focus words
 
 `build_prompt` is shared by the command, the copy-prompt route and the MCP tool, for the same reason `normalize.rs` holds its prompt: identical input has to produce comparable output however it was run.
@@ -187,7 +187,7 @@ Automatic feedback on submit (it is an explicit click: a model call is worth ask
 
 **F3 — Phone detail is recomputed, never stored.** It needs the recording, the phoneme model and the standard clip, all device-local and all already loaded by the scoring pass. Storing it would blow the metrics budget; computing it during submit would slow every submission for a report most takes never ask for. So it runs behind the click, and its absence is not an error.
 
-**F4 — `text_uuid` is optional and cross-checked, not trusted.** The plan required it. Three call sites already know the attempt uuid and the text uuid, so requiring it only adds a way to get the pairing wrong — and a mismatch would silently attach a report to the wrong passage. It is accepted when given, compared against the attempt's own `text_uuid`, and refused when they differ.
+**F4 — `text_uuid` is optional and cross-checked, not trusted.** The plan required it. Three call sites already know the attempt uuid and the text uuid, so requiring it only adds a way to get the pairing wrong — and a mismatch would silently attach a report to the wrong text. It is accepted when given, compared against the attempt's own `text_uuid`, and refused when they differ.
 
 **F5 — Parsing is tolerant in one direction only.** Fences, prose around the object, a truncated tail and prose-instead-of-JSON all survive; JSON that parses but carries no `summary` does not, because a report without its one required field is not something a learner can read. The prose fallback exists for the model that ignored the instruction, not for the model that answered nonsense.
 

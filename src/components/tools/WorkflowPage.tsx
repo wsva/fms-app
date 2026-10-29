@@ -204,7 +204,7 @@ const KIND_META: Record<WorkflowCategory, { label: string; blurb: string; icon: 
   },
   read_aloud: {
     label: "Read aloud",
-    blurb: "Import passages from a book you extracted, probe one clip for a human to listen to, then fill in the rest. Agent-facing.",
+    blurb: "Import texts from a book you extracted, probe one clip for a human to listen to, then fill in the rest. Agent-facing.",
     icon: Mic,
   },
   card: {

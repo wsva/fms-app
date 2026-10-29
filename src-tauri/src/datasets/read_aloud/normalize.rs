@@ -23,7 +23,7 @@ use crate::settings::SettingsState;
 
 use super::open_attempts;
 
-/// Deterministic on purpose: the same passage should normalize the same way
+/// Deterministic on purpose: the same text should normalize the same way
 /// every time, so a second click does not churn a reference that already works.
 const DEFAULT_TEMPERATURE: f32 = 0.0;
 
@@ -31,23 +31,23 @@ const DEFAULT_TEMPERATURE: f32 = 0.0;
 /// transform (surface → spoken form), not an editing pass. Everything the model
 /// is tempted to "improve" — wording, order, grammar, punctuation — scores
 /// worse, so it is forbidden explicitly rather than implied.
-const INSTRUCTION: &str = r#"You rewrite a passage into the form it takes when it is read aloud, to be used as a speech-recognition scoring reference.
+const INSTRUCTION: &str = r#"You rewrite a text into the form it takes when it is read aloud, to be used as a speech-recognition scoring reference.
 
-Rewrite the passage below so that a transcription of someone reading it aloud matches it word for word. Change only how things are spelled out, never what is said:
+Rewrite the text below so that a transcription of someone reading it aloud matches it word for word. Change only how things are spelled out, never what is said:
 
-- Spell out numbers, cardinals and ordinals, in the passage's own language (20 → zwanzig / twenty, 3. → dritte / third).
+- Spell out numbers, cardinals and ordinals, in the text's own language (20 → zwanzig / twenty, 3. → dritte / third).
 - Spell out dates and times (12.05.2024 → zwölfte Mai zweitausendvierundzwanzig / the twelfth of May 2024; 15:30 → fünfzehn Uhr dreißig / three thirty in the afternoon).
 - Spell out currency, percentages, units and math symbols (5 € → fünf Euro / five euros, 20 % → zwanzig Prozent / twenty percent, ± → plus minus).
 - Expand abbreviations the way they are pronounced (vgl. → vergleiche, usw. → und so weiter, bzw. → beziehungsweise, Dr. → Doktor).
-- Keep the passage in its own language: do not translate it.
+- Keep the text in its own language: do not translate it.
 - Leave every other word, all punctuation and all capitalisation exactly as written. Do not reword, reorder, shorten, correct or explain anything.
 
-Reply with the rewritten passage only: no preamble, no commentary, no code fences.
+Reply with the rewritten text only: no preamble, no commentary, no code fences.
 
-Passage:
+Text:
 "#;
 
-/// Build the prompt for one passage. The text is quoted verbatim: the model's
+/// Build the prompt for one text. The text is quoted verbatim: the model's
 /// output is compared against it, so adding or losing anything here shows up as
 /// a score change that has nothing to do with the normalization.
 pub(crate) fn build_prompt(content: &str) -> String {
@@ -56,7 +56,7 @@ pub(crate) fn build_prompt(content: &str) -> String {
 
 /// Strip what a model adds around the answer it was told not to decorate: a
 /// fenced block, a stray heading, trailing whitespace. Inner line breaks are
-/// kept — they are the passage's own paragraphs.
+/// kept — they are the text's own paragraphs.
 pub(crate) fn clean_candidate(raw: &str) -> String {
     let mut body = raw.trim();
     if let Some(rest) = body.strip_prefix("```") {
@@ -101,7 +101,7 @@ pub(crate) async fn generate(
 ) -> Result<NormalizeResult, String> {
     if content.trim().is_empty() {
         return Err(
-            "The text to read is empty, so there is nothing to normalize yet. Write the passage first."
+            "The text to read is empty, so there is nothing to normalize yet. Write the text first."
                 .into(),
         );
     }
@@ -148,7 +148,7 @@ pub struct NormalizeMeasure {
 /// gate from the design, as one call.
 ///
 /// `reference` is what scoring reads today (the stored normalized reference, or
-/// the passage itself), passed in rather than read here so a caller can measure
+/// the text itself), passed in rather than read here so a caller can measure
 /// a draft it is still editing. Nothing is written.
 #[tauri::command]
 pub async fn read_aloud_normalize_measure(
@@ -204,7 +204,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_quotes_the_passage_verbatim() {
+    fn prompt_quotes_the_text_verbatim() {
         let prompt = build_prompt("  Am 3. Mai kostet es 20 %.  ");
         assert!(prompt.ends_with("\nAm 3. Mai kostet es 20 %.\n"));
         assert!(prompt.contains("Do not reword"));

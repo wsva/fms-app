@@ -2,7 +2,7 @@
 //!
 //! A guess knows when the first and the last *word* were read and nothing about
 //! the room around them: the model's word boundaries are coarse, and the audio
-//! between two passages is ambiguous — it is silent, so a cut anywhere inside it
+//! between two texts is ambiguous — it is silent, so a cut anywhere inside it
 //! sounds equally right.
 //!
 //! This module answers the question with the waveform instead of the transcript.
@@ -17,12 +17,12 @@
 //! The pause is not looked for right at the timestamp. A model's word boundary is
 //! only approximately where the word is — it glues a signature to the number that
 //! follows it ("… Rothner" + "18" became one 2.5 s word) and runs a word's end
-//! half a second past its audio — so the gap that separates two passages is often
-//! most of a second from the edge, while a micro-gap *inside* the passage sits
+//! half a second past its audio — so the gap that separates two texts is often
+//! most of a second from the edge, while a micro-gap *inside* the text sits
 //! right next to it. Searching outward from the edge for the first quiet frame
 //! therefore picks the wrong gap, or none at all. The search reaches
-//! [`SEARCH_REACH_SECS`] into the passage and takes the **longest** pause it
-//! finds, which is the one the narrator left between passages.
+//! [`SEARCH_REACH_SECS`] into the text and takes the **longest** pause it
+//! finds, which is the one the narrator left between texts.
 //!
 //! Everything here is pure over a loudness track — one level per 20 ms frame —
 //! so the bulk guess, which only has a cached peak envelope, and the single-file
@@ -35,14 +35,14 @@ use super::vad;
 /// uses, so both guesses look at the audio with the same resolution.
 pub(crate) const EDGE_FRAME_SECS: f64 = 0.02;
 
-/// How far past an edge (into its own passage) a pause may start and still be
+/// How far past an edge (into its own text) a pause may start and still be
 /// searched for: a word boundary that lands half a syllable late must still find
 /// the pause behind it.
 const SNAP_WINDOW_SECS: f64 = 0.15;
 
 /// How far from an edge a pause may be and still belong to it. A model's
 /// word boundaries are loose (see the module doc), so the gap that separates two
-/// passages can be most of a second away from the edge the transcript implies.
+/// texts can be most of a second away from the edge the transcript implies.
 const SEARCH_REACH_SECS: f64 = 1.0;
 
 /// How much of a pause one clip takes at one edge. Half is the whole point: the
@@ -50,7 +50,7 @@ const SEARCH_REACH_SECS: f64 = 1.0;
 const PAUSE_SHARE: f64 = 0.5;
 
 /// The longest pause share a head may take. Measured on a narrated book, the
-/// pause in front of a passage is 0.44 s at the median and 1.1 s at the ninth
+/// pause in front of a text is 0.44 s at the median and 1.1 s at the ninth
 /// decile, so a middle that is not capped at all would open the slow clips with
 /// well over half a second of room, and the slowest with more — dead air, not
 /// context. One second of quiet is already long; the cap sits at the ninth
@@ -62,12 +62,12 @@ const MAX_LEAD_SECS: f64 = 0.8;
 /// the end of the phrase and a hard cut does not.
 const MAX_TAIL_SECS: f64 = 0.9;
 
-/// Which way an edge faces — into the passage it belongs to.
+/// Which way an edge faces — into the text it belongs to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Side {
-    /// The start of a clip: the passage is to the right.
+    /// The start of a clip: the text is to the right.
     Head,
-    /// The end of a clip: the passage is to the left.
+    /// The end of a clip: the text is to the left.
     Tail,
 }
 
@@ -94,10 +94,10 @@ pub(crate) fn loudness_from_envelope(peaks: &[i8]) -> Vec<f32> {
 /// run of quiet frames within [`SEARCH_REACH_SECS`] of it, or `None` when there
 /// is no such run or the "pause" is not one.
 ///
-/// The longest run wins over the nearest one on purpose: a passage is full of
+/// The longest run wins over the nearest one on purpose: a text is full of
 /// 20 ms holes (between two consonants, between a word and its punctuation) and
-/// a transcript edge can land inside the passage, so the nearest quiet frames are
-/// usually not a pause at all. The gap the narrator left between two passages is
+/// a transcript edge can land inside the text, so the nearest quiet frames are
+/// usually not a pause at all. The gap the narrator left between two texts is
 /// the deep one, and it is the one both neighbours should divide.
 ///
 /// A run only counts when speech is on the far side of it, away from the edge.
@@ -122,7 +122,7 @@ pub(crate) fn pause_beside(
     let edge_frame = (edge / frame_secs).round() as isize;
     let near = (SNAP_WINDOW_SECS / frame_secs).round() as isize;
     let far = (SEARCH_REACH_SECS / frame_secs).round() as isize;
-    // The window lies on the passage's side of the edge, with a little slack on
+    // The window lies on the text's side of the edge, with a little slack on
     // the other side: the pause is in front of a head and behind a tail, not the
     // other way round.
     let (window_start, window_end) = match side {
@@ -215,7 +215,7 @@ mod tests {
     fn a_pause_shorter_than_two_pads_is_split_in_the_middle() {
         // 0.3 s of quiet before the word: half of it is 0.15, which is under the
         // 0.2 s pad, so the cut lands in the middle of the pause rather than
-        // 0.2 s before the word — that would reach into the previous passage.
+        // 0.2 s before the word — that would reach into the previous text.
         let loudness = track(&[(SPEECH, 1.0), (QUIET, 0.3), (SPEECH, 1.0)]);
         let cut = place_edge(&loudness, EDGE_FRAME_SECS, 1.3, 0.2, Side::Head, 0.0, 10.0);
         assert!((cut - 1.15).abs() < 1e-6, "cut: {cut}");
@@ -231,12 +231,12 @@ mod tests {
     }
 
     #[test]
-    fn the_pause_that_separates_passages_wins_over_a_micro_gap() {
+    fn the_pause_that_separates_texts_wins_over_a_micro_gap() {
         // The real shape of a misheard boundary: "… Rothner" ends, 1.08 s of
         // quiet, a click, 0.18 s of quiet, and "18" — which the model glued to
-        // the signature, so its word starts 0.47 s *inside* the passage. The
+        // the signature, so its word starts 0.47 s *inside* the text. The
         // nearest quiet frames are the micro-gap; the pause that belongs to this
-        // edge is the long one behind the previous passage's last word.
+        // edge is the long one behind the previous text's last word.
         let loudness = track(&[
             (SPEECH, 1.0),
             (QUIET, 1.08),
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn no_pause_within_reach_falls_back_to_the_pad() {
         // The only pause is 1.5 s behind the edge, further than the search
-        // reaches: that gap separates some other pair of passages.
+        // reaches: that gap separates some other pair of texts.
         let loudness = track(&[(SPEECH, 1.0), (QUIET, 0.5), (SPEECH, 3.0)]);
         let cut = place_edge(&loudness, EDGE_FRAME_SECS, 4.0, 0.2, Side::Head, 0.0, 10.0);
         assert!((cut - 3.8).abs() < 1e-6, "cut: {cut}");
