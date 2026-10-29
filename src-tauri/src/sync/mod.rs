@@ -86,11 +86,14 @@ pub(crate) fn hub_kind(base: &str) -> HubKind {
 ///
 /// * `dataset_journal` — `GET /datasets/{uuid}/changes` row deltas.
 /// * `app_journal` — `GET /app/changes` + `GET /app/state` for the `@app` scope.
+/// * `dataset_ingest` — the write half of the file plane: a follower may push a
+///   whole dataset directory back (`/datasets/{uuid}/ingest*`) and read the hub
+///   DB (`GET /datasets/{uuid}/db`). See `docs/design/dataset-push.md`.
 ///
 /// Phase 7a grows this with `registry_reads`, `chat`, ... as the website host
 /// learns to serve them. A capability the host does not list is refused, never
 /// silently attempted (INV-20).
-pub(crate) const HUB_FEATURES: &[&str] = &["dataset_journal", "app_journal"];
+pub(crate) const HUB_FEATURES: &[&str] = &["dataset_journal", "app_journal", "dataset_ingest"];
 
 /// The `GET /api/v1/cluster` payload — "who am I talking to, and what can it do
 /// for me" (sync-v2.md §7). Serialized by the desktop hub, deserialized by the
@@ -120,6 +123,68 @@ pub(crate) struct ClusterInfo {
 /// breaking, so bump this *with* the guide, and never silently accept a new
 /// field shape. Logged once per website round so a mismatch is on the record.
 pub(crate) const WEBSITE_CONTRACT_VERSION: u32 = 1;
+
+// ---------------------------------------------------------------------------
+// Per-dataset content generation (the "whole-DB was replaced" counter)
+// ---------------------------------------------------------------------------
+
+/// `dataset_content_state` lives in the app-level DB on **both** sides, for the
+/// same reason: the dataset DB is deliberately outside the file plane
+/// (`rest::is_db_file`), so `overall_hash` cannot report a DB-only change.
+///
+/// * On the hub the counter is bumped by an ingest commit — the only writer that
+///   replaces a whole dataset DB from outside.
+/// * On a follower the row records the generation it last installed, so a rise
+///   means "fetch `GET /datasets/{uuid}/db`", and a push records its own result
+///   so the follower does not pull back what it just sent.
+///
+/// It is a separate table rather than a column on `dataset_sync_state` because
+/// that table has eight partial upserts (`INSERT OR REPLACE` naming a subset of
+/// columns), any of which would silently reset a new column to its default.
+pub(crate) fn ensure_content_table(conn: &rusqlite::Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dataset_content_state (\
+            dataset_uuid TEXT PRIMARY KEY,\
+            content_gen  INTEGER NOT NULL DEFAULT 0,\
+            updated_at   TEXT NOT NULL DEFAULT '')",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// The counter as recorded locally; `0` for a dataset that predates it or has
+/// never been ingested. A read error is `0` on purpose — this drives an optional
+/// optimisation ("is the DB newer?"), never a safety decision.
+pub(crate) fn content_gen(conn: &rusqlite::Connection, dataset_uuid: &str) -> i64 {
+    let _ = ensure_content_table(conn);
+    conn.query_row(
+        "SELECT content_gen FROM dataset_content_state WHERE dataset_uuid = ?1",
+        [dataset_uuid],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+/// Record (or raise) a dataset's generation and return the stored value — the
+/// hub's new revision after a commit, or the follower's new baseline after
+/// installing a pushed DB. Monotonic: a lower `gen` never lowers the stored one,
+/// so a stale caller cannot rewind a device into re-fetching.
+pub(crate) fn set_content_gen(
+    conn: &rusqlite::Connection,
+    dataset_uuid: &str,
+    gen: i64,
+) -> Result<i64, String> {
+    ensure_content_table(conn)?;
+    conn.execute(
+        "INSERT INTO dataset_content_state (dataset_uuid, content_gen, updated_at) \
+         VALUES (?1, ?2, datetime('now')) \
+         ON CONFLICT(dataset_uuid) DO UPDATE SET \
+             content_gen = MAX(dataset_content_state.content_gen, excluded.content_gen), \
+             updated_at = excluded.updated_at",
+        rusqlite::params![dataset_uuid, gen],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(content_gen(conn, dataset_uuid))
+}
 
 /// Wire protocol version for the hub<->follower sync REST API and the request
 /// signature format. Carried by `/status`, the discovery beacon, and every

@@ -170,6 +170,53 @@ interface UploadProgress {
   total?: number;
 }
 
+// ---- Follower → hub push (mirrors sync/client/push.rs) ---------------------
+
+/** One push's plan, as `dataset_push_preview` reports it — what the confirm
+    dialog reads before anything is sent. */
+interface PushPreview {
+  dataset_uuid: string;
+  name: string;
+  dataset_type: string;
+  local_dir: string;
+  hub_base: string;
+  creates: number;
+  updates: number;
+  deletes: number;
+  unchanged: number;
+  upload_bytes: number;
+  db_bytes: number;
+  /** The hub's copy moved since this device last synced it. */
+  hub_changed: boolean;
+  no_baseline: boolean;
+  hub_content_gen: number;
+  local_content_gen: number;
+}
+
+/** A push's own progress: bytes streamed to the hub, then `done` clears the row.
+    Tagged `kind: "push"` on the wire so this never collides with the download
+    bar, which shares the event name. */
+interface PushProgress {
+  uuid: string;
+  phase: "push" | "done";
+  sent?: number;
+  total?: number;
+}
+
+/** Every payload that arrives on `dataset-sync-progress`. One channel carries
+    three planes — a download's byte bar (`download`/`extract`/`done`), the
+    per-dataset notices a round emits (`db`, `files`), and a push (`kind:
+    "push"`) — so each listener filters instead of sharing a row, since `sent`
+    and `received` mean different things per plane. */
+interface SyncProgressEvent {
+  uuid: string;
+  phase: SyncProgress["phase"] | PushProgress["phase"] | "db" | "files";
+  kind?: "push";
+  received?: number;
+  total?: number;
+  sent?: number;
+}
+
 /** A dataset that lives on this machine (any type) — an upload candidate. */
 interface LocalDataset {
   uuid: string;
@@ -323,6 +370,13 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   const [uploadTarget, setUploadTarget] = useState<LocalDataset | null>(null);
   const [uploadVisibility, setUploadVisibility] = useState<string>("private");
   const [needsSignIn, setNeedsSignIn] = useState(false);
+
+  // Follower → hub push: the dataset card's "Push to hub" and the toolbar's
+  // page-level push-all. `pushProgress` is keyed by uuid and cleared on `done`,
+  // exactly like the download/upload progress maps above.
+  const [pushProgress, setPushProgress] = useState<Record<string, PushProgress>>({});
+  const [pushingUuid, setPushingUuid] = useState<string>("");
+  const [pushingAll, setPushingAll] = useState(false);
 
   // Owner publish/withdraw surface (§8.4/§11.5 mirror). `publishState` holds each
   // uploaded dataset's live cloud state (probed read-back), `publishBusy` the uuid
@@ -582,21 +636,30 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     if (mounted && isTauri() && marketBranch) loadMarket();
   }, [mounted, marketBranch, loadMarket]);
 
-  // Track snapshot progress events.
+  // Track snapshot progress events. A push reports on this same event name
+  // (`kind: "push"`) and the round's per-dataset `db`/`files` notices carry no
+  // byte progress, so both are left to their own listeners below.
   const progressReq = useRef<(() => void) | undefined>(undefined);
   useEffect(() => {
     if (!isTauri()) return;
-    const un = listen<SyncProgress>("dataset-sync-progress", (evt) => {
+    const un = listen<SyncProgressEvent>("dataset-sync-progress", (evt) => {
       const p = evt.payload;
-      if (p.phase === "done") {
+      if (p.kind === "push") return;
+      // Positive test, so only the two byte phases write a row: `db`/`files` are
+      // notices, and `push` would carry `sent` where the bar reads `received`.
+      if (p.phase === "download" || p.phase === "extract") {
+        const phase = p.phase;
+        setProgress((prev) => ({
+          ...prev,
+          [p.uuid]: { uuid: p.uuid, received: p.received ?? 0, total: p.total ?? 0, phase },
+        }));
+      } else if (p.phase === "done") {
         setProgress((prev) => {
           const next = { ...prev };
           delete next[p.uuid];
           return next;
         });
         setBusyUuid("");
-      } else {
-        setProgress((prev) => ({ ...prev, [p.uuid]: p }));
       }
     });
     un.then((fn) => {
@@ -628,6 +691,37 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     });
     return () => {
       uploadReq.current?.();
+    };
+  }, []);
+
+  // Track follower → hub push progress. Same channel as the download bar, told
+  // apart by `kind: "push"`: the row holds the running byte total, and `done`
+  // clears it (the handler's `finally` clears it too, in case the event is
+  // missed when the page unmounts mid-push).
+  const pushReq = useRef<(() => void) | undefined>(undefined);
+  useEffect(() => {
+    if (!isTauri()) return;
+    const un = listen<SyncProgressEvent>("dataset-sync-progress", (evt) => {
+      const p = evt.payload;
+      if (p.kind !== "push") return;
+      if (p.phase === "done") {
+        setPushProgress((prev) => {
+          const next = { ...prev };
+          delete next[p.uuid];
+          return next;
+        });
+        return;
+      }
+      setPushProgress((prev) => ({
+        ...prev,
+        [p.uuid]: { uuid: p.uuid, phase: "push", sent: p.sent ?? 0, total: p.total ?? 0 },
+      }));
+    });
+    un.then((fn) => {
+      pushReq.current = fn;
+    });
+    return () => {
+      pushReq.current?.();
     };
   }, []);
 
@@ -674,6 +768,113 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       loadStatus();
       loadUploadSurface();
       if (marketBranch) loadMarket();
+    }
+  }
+
+  // ---- Follower → hub push (docs/design/dataset-push.md) ----------------
+
+  // Send one dataset's whole directory up to the LAN hub — the "I downloaded
+  // it, built it here, publish it back" action. Only the files whose digest the
+  // hub lacks are uploaded (untouched media costs nothing), the frozen DB rides
+  // along, and the hub installs the merged tree in two renames. The preview is
+  // the confirm gate: it names exactly what moves and where, so a push is never
+  // a blind overwrite.
+  async function handlePush(ds: { uuid: string; name: string }) {
+    if (pushingUuid || pushingAll) return;
+    setPushingUuid(ds.uuid);
+    setMessage("");
+    try {
+      const p = await invoke<PushPreview>("dataset_push_preview", { uuid: ds.uuid });
+      const what = `${p.creates} new, ${p.updates} changed, ${p.deletes} removed, ${p.unchanged} unchanged`;
+      // `upload_bytes` is the whole payload (`db_bytes` included), so it is the
+      // total the dialog names; the DB is called out separately only because it
+      // is a whole-file replace, not a diff.
+      const dbLine = p.db_bytes > 0 ? `\nDatabase: ${fmtBytes(p.db_bytes)} (replaces the hub's copy).` : "";
+      // The hub's copy moving since this device last saw it is the one case where
+      // a push destroys work nobody here has read; say so before asking.
+      const warn = p.hub_changed
+        ? `\n\nWARNING: the hub's copy changed since this device last synced it (hub revision ${p.hub_content_gen}, this copy last saw ${p.local_content_gen}). Pushing replaces that work — it goes to the hub's trash, it is not merged.`
+        : "";
+      const ok = confirm(
+        `Push “${p.name}” to the hub?\n\n${what}\nUpload: ${fmtBytes(p.upload_bytes)} to ${p.hub_base}${dbLine}${warn}`
+      );
+      if (!ok) return;
+      logInfo(`push: starting "${p.name}" (${p.dataset_uuid}) ${what}`, "datasets");
+      const res = await invoke<{
+        pushed?: boolean;
+        files_sent?: number;
+        files_unchanged?: number;
+        deletes?: number;
+        bytes_sent?: number;
+        content_gen?: number;
+      }>("dataset_push_to_hub", { uuid: ds.uuid, allowHubChanges: p.hub_changed });
+      setMessage(
+        res.pushed
+          ? `Pushed “${p.name}” — ${res.files_sent ?? 0} file(s), ${fmtBytes(res.bytes_sent ?? 0)} (hub revision ${res.content_gen ?? "?"}).`
+          : `“${p.name}” is already identical on the hub — nothing sent.`
+      );
+    } catch (e) {
+      const text = String(e);
+      logError(`push: "${ds.name}" (${ds.uuid}) failed: ${text}`, "datasets");
+      setMessage(`Push failed: ${text}`);
+      if (isTauri()) void showDialog(text, { title: "Push failed", kind: "error" });
+    } finally {
+      setPushingUuid("");
+      setPushProgress((prev) => {
+        const next = { ...prev };
+        delete next[ds.uuid];
+        return next;
+      });
+      loadLocalState();
+      loadStatus();
+      fetchPcDatasets();
+    }
+  }
+
+  // Push every dataset this device authored. Deliberately no `allowHubChanges`:
+  // a batch cannot collect a per-dataset consent, so any hub copy that moved is
+  // reported as failed (with the actionable `hub_changed` message) instead of
+  // being overwritten. Read-only adoptions are skipped by the backend, and one
+  // failure never aborts the rest.
+  async function handlePushAll() {
+    if (pushingAll || pushingUuid) return;
+    if (
+      !confirm(
+        "Push every dataset built on this device to the hub?\n\nOnly the files the hub is missing are uploaded. Copies downloaded from the hub are skipped. Any dataset whose hub copy changed since this device last synced it is reported as failed rather than overwritten — push those individually to confirm."
+      )
+    ) {
+      return;
+    }
+    setPushingAll(true);
+    setMessage("");
+    try {
+      const r = await invoke<{
+        pushed?: number;
+        unchanged?: number;
+        failed?: number;
+        datasets?: { uuid: string; name?: string; status: string; error?: string }[];
+      }>("dataset_push_all", { allowHubChanges: false });
+      const bits = [`${r.pushed ?? 0} pushed`, `${r.unchanged ?? 0} unchanged`];
+      if (r.failed) bits.push(`${r.failed} failed`);
+      setMessage(`Push all done — ${bits.join(", ")}.`);
+      const bad = (r.datasets ?? []).filter((d) => d.status === "failed");
+      if (bad.length && isTauri()) {
+        void showDialog(
+          bad.map((d) => `${d.name || d.uuid}: ${d.error || "failed"}`).join("\n\n"),
+          { title: "Some datasets could not be pushed", kind: "error" }
+        );
+      }
+    } catch (e) {
+      const text = String(e);
+      logError(`push all failed: ${text}`, "datasets");
+      setMessage(`Push all failed: ${text}`);
+      if (isTauri()) void showDialog(text, { title: "Push all failed", kind: "error" });
+    } finally {
+      setPushingAll(false);
+      setPushProgress({});
+      loadLocalState();
+      loadStatus();
+      fetchPcDatasets();
     }
   }
 
@@ -1040,6 +1241,13 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       prog && prog.total > 0
         ? Math.min(100, Math.round((prog.received / prog.total) * 100))
         : 0;
+    // A push's byte bar: same shape as the download bar, its own row so a card
+    // can show one while the other is idle.
+    const pushRow = pushProgress[ds.uuid];
+    const pushPct =
+      pushRow && pushRow.total
+        ? Math.min(100, Math.round(((pushRow.sent ?? 0) / pushRow.total) * 100))
+        : 0;
     const state = detail?.state;
     const meta = state ? STATE_META[state] : null;
     const syncedLine = st
@@ -1097,6 +1305,22 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
                 label={busyUuid === ds.uuid ? "Evicting…" : "Evict"}
               />
             )}
+            {/* Push sends this copy's whole directory up to the hub — the "I
+                built it here, put it back on the hub" action. Needs a LAN hub to
+                send to, and a writable local copy: the backend refuses a
+                read-only download base with an actionable message. */}
+            {!!pcUrl && (state === "downloaded" || state === "needs_resync") && (
+              <ToolbarButton
+                variant="ghost"
+                icon={Upload}
+                className="shrink-0"
+                collapseOnMobile={false}
+                onClick={() => handlePush(ds)}
+                disabled={!!busyUuid || !!pushingUuid || pushingAll}
+                title="Send this dataset's directory to the hub (only the files it is missing)"
+                label={pushingUuid === ds.uuid ? "Pushing…" : "Push"}
+              />
+            )}
           </div>
         </div>
 
@@ -1140,6 +1364,20 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
               {prog.phase === "extract"
                 ? "Extracting…"
                 : `Downloading… ${pct}% (${prog.received} / ${prog.total} bytes)`}
+            </span>
+          </div>
+        )}
+
+        {pushRow && (
+          <div className="flex flex-col gap-1">
+            <div className="h-1.5 w-full rounded bg-bg-hover overflow-hidden">
+              <div
+                className="h-full bg-accent-bg transition-[width]"
+                style={{ width: `${pushPct}%` }}
+              />
+            </div>
+            <span className="text-xs text-text-tertiary">
+              {`Pushing to hub… ${pushPct}% (${fmtBytes(pushRow.sent ?? 0)} / ${fmtBytes(pushRow.total ?? 0)})`}
             </span>
           </div>
         )}
@@ -2197,6 +2435,21 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
         </div>
 
         <div className="ml-auto flex items-center gap-1 shrink-0">
+          {/* Page-level "push everything I built": every writable local dataset in
+              one batch. A follower-only action — a hub is the destination, and a
+              website hub takes the Publish zone's archive upload instead. */}
+          {!isHub && !!pcUrl && (
+            <ToolbarButton
+              variant="ghost"
+              icon={pushingAll ? Loader2 : Upload}
+              iconProps={{ className: pushingAll ? "animate-spin" : undefined }}
+              stacked={mobile}
+              label={pushingAll ? "Pushing…" : "Push all"}
+              title="Push every dataset built on this device to the hub (only the files it is missing)"
+              disabled={pushingAll || !!pushingUuid || syncing}
+              onClick={handlePushAll}
+            />
+          )}
           {/* One round moves everything it can in both directions (writeback
               push + pull deltas + step-7 mirror/file drain). Shown for followers
               always (disabled until a hub is configured), and for any Hub with a

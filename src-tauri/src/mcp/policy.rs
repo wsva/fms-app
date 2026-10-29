@@ -206,7 +206,14 @@ const HUMAN_HANDOFF: [&str; 2] = [
 /// `read_aloud_*` starts with "read", `sync_check_availability` persists the
 /// availability it checks), so this is a list. Anything absent falls through to
 /// [`Tier::Write`] — a new tool is never silently a read.
-const READ_TOOLS: [&str; 93] = [
+///
+/// Also left at the default [`Tier::Write`] on purpose, and recorded here because
+/// both reach *another machine's* disk: `dataset_push_to_hub` and
+/// `dataset_push_all` replace the hub's copy of a dataset, but every file they
+/// overwrite or drop is moved into the hub's app trash first (the ingest commit
+/// reports it as `trashed_to`), so the act is undoable where it happened.
+/// Neither name carries a word from [`DESTRUCTIVE_WORDS`].
+const READ_TOOLS: [&str; 94] = [
     "app_audit_get",
     "app_bootstrap",
     "app_events",
@@ -248,6 +255,7 @@ const READ_TOOLS: [&str; 93] = [
     "dataset_list_files",
     "dataset_list_media",
     "dataset_list_subtitles",
+    "dataset_push_preview",
     "dataset_read_file",
     "hub_kind",
     "hub_local_datasets",

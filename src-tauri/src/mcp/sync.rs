@@ -95,6 +95,25 @@ struct HubUploadParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct DatasetPushParam {
+    /// Local dataset uuid to push to the LAN hub.
+    dataset_uuid: String,
+    /// Explicit consent to replace a hub copy that moved since this device last
+    /// synced it. Without it a push refuses with `hub_changed` instead of
+    /// silently discarding work it has never seen.
+    #[serde(default)]
+    allow_hub_changes: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct DatasetPushAllParam {
+    /// Same consent as `dataset_push_to_hub`, applied to every dataset in the
+    /// batch.
+    #[serde(default)]
+    allow_hub_changes: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct HubKindParam {
     /// Candidate hub address to classify. Empty falls back to the saved pc_url.
     #[serde(default)]
@@ -519,6 +538,42 @@ impl DatasetMcpServer {
         log::info!("[MCP] hub_local_datasets");
         let rows = sync::upload::sync_local_datasets(self.app.state::<SettingsState>()).await?;
         Ok(serde_json::to_string(&rows).unwrap_or_default())
+    }
+
+    #[tool(name = "dataset_push_preview", description = "Dry run of a follower-to-hub dataset push: what would be sent, without sending it. Diffs this device's dataset dir against the LAN hub's manifest (per-file sha256) and reports { creates, updates, deletes, unchanged, upload_bytes, db_bytes, hub_changed, no_baseline, hub_content_gen, local_content_gen }. `hub_changed: true` means the hub's copy moved since this device last synced it, so a push would overwrite work it has never seen. Call this before dataset_push_to_hub. Read-only.")]
+    async fn dataset_push_preview(&self, Parameters(param): Parameters<DatasetPushParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_push_preview: uuid={}", param.dataset_uuid);
+        let v = sync::client::dataset_push_preview(
+            self.app.state::<SettingsState>(),
+            param.dataset_uuid.trim().to_string(),
+        )
+        .await?;
+        Ok(serde_json::to_string(&v).unwrap_or_default())
+    }
+
+    #[tool(name = "dataset_push_to_hub", description = "Push one local dataset's whole directory to the LAN hub, for the case the sync model did not have: a follower pulled a dataset, authored it (imported media, retimed cues, added cards), and wants that work to become the hub's copy. Transport is the file plane reversed — a manifest diff, so unchanged media costs one sha256 and zero bytes — plus the dataset DB on its own route (the DB is the authored content here, and is excluded from the content hash everywhere else). The hub stages the whole tree, re-verifies every digest, moves the replaced files to its app trash, then installs by rename, so it never holds half a dataset. Returns { pushed, files_sent, files_unchanged, deletes, db_sent, bytes_sent, content_gen, overall_hash, trashed_to }. Refuses with 'hub_changed' when the hub's copy moved since this device last synced it unless allow_hub_changes is set; refuses a read-only downloaded base and the built-in Favorites dataset. LAN hub only (use hub_dataset_upload for the website registry).")]
+    async fn dataset_push_to_hub(&self, Parameters(param): Parameters<DatasetPushParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_push_to_hub: uuid={}", param.dataset_uuid);
+        let v = sync::client::dataset_push_to_hub(
+            self.app.clone(),
+            self.app.state::<SettingsState>(),
+            param.dataset_uuid.trim().to_string(),
+            param.allow_hub_changes,
+        )
+        .await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "dataset_push_all", description = "Push every locally-authored dataset that is not a read-only adoption to the LAN hub -- the page-level 'push everything I built'. A per-dataset failure does not abort the batch. Returns { pushed, unchanged, failed, datasets: [{ uuid, name, status: pushed|unchanged|skipped|failed, ... }] }; `status: skipped` with reason `read_only_base` means that copy has nothing authored to send (fork it first). See dataset_push_to_hub for the transport and the hub_changed guard.")]
+    async fn dataset_push_all(&self, Parameters(param): Parameters<DatasetPushAllParam>) -> Result<String, String> {
+        log::info!("[MCP] dataset_push_all");
+        let v = sync::client::dataset_push_all(
+            self.app.clone(),
+            self.app.state::<SettingsState>(),
+            param.allow_hub_changes,
+        )
+        .await?;
+        Ok(v.to_string())
     }
 
     #[tool(name = "hub_kind", description = "Classify a hub address as 'website' (OAuth Bearer, file + card only, no pairing/cluster) or 'lan' (device-HMAC, full protocol). Empty pc_url falls back to the saved setting. Lets an agent tell which affordances apply before talking to it.")]

@@ -134,7 +134,7 @@ impl futures_util::Stream for UploadStream {
 /// Freeze the dataset's SQLite DB into `dest` via the SQLite backup API: one
 /// consistent snapshot, journal stripped (the archive always ships `data.sqlite3`
 /// in this frozen form — guide §4.2).
-fn freeze_db(dir: &Path, dest: &Path) -> Result<(), String> {
+pub(crate) fn freeze_db(dir: &Path, dest: &Path) -> Result<(), String> {
     let src = Connection::open(dir.join("data.sqlite3")).map_err(|e| e.to_string())?;
     let _ = src.pragma_update(None, "journal_mode", "DELETE");
     let mut dst_conn = Connection::open(dest).map_err(|e| e.to_string())?;

@@ -827,6 +827,148 @@ async fn pull_and_apply_dataset_journal(
     false
 }
 
+/// Adopt a dataset DB that another device pushed to the hub
+/// (`docs/design/dataset-push.md`).
+///
+/// The content plane deliberately excludes `data.sqlite3`, so `overall_hash`
+/// cannot report "the whole DB was replaced" — `manifest.content_gen` can. A
+/// number above the one this device last installed means someone pushed authored
+/// cue/card work, and the only way to hold it is to take the DB itself.
+///
+/// Gated on the `dataset_ingest` capability (INV-20): a host that does not serve
+/// `GET /datasets/{uuid}/db` has no pushed DB for us to adopt. A read-only base
+/// is never written — a registry adoption is pinned to a published version
+/// (INV-8) and its archive owns the DB.
+///
+/// Returns `Ok(true)` when a DB was installed.
+async fn adopt_hub_db(
+    app: &AppHandle,
+    settings: &State<'_, SettingsState>,
+    uuid: &str,
+    hub_gen: i64,
+) -> Result<bool, String> {
+    let (dir, _ty) = datasets::find_dataset_dir_typed(settings.inner(), uuid)?;
+    if datasets::is_under_download_root(settings.inner(), &dir) {
+        return Ok(false);
+    }
+    let local_gen = {
+        let conn = datasets::dictation::open_app_db(settings)?;
+        crate::sync::content_gen(&conn, uuid)
+    };
+    if hub_gen <= local_gen {
+        return Ok(false);
+    }
+
+    let base = hub_base_or_account(settings)?;
+    let api_path = format!("/api/v1/datasets/{uuid}/db");
+    let client = crate::auth::hub_client_builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(900))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let req = hub_request(
+        client.get(format!("{base}{api_path}")),
+        settings,
+        "GET",
+        &api_path,
+        "",
+        b"",
+    )
+    .await?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("cannot reach the hub at {base}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(hub_http_error(resp, &api_path).await);
+    }
+    // The revision the bytes actually are, so the recorded generation and the
+    // installed file can never disagree.
+    let gen = resp
+        .headers()
+        .get("x-content-gen")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(hub_gen);
+    let want = resp
+        .headers()
+        .get("x-content-sha256")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    if want.is_empty() {
+        return Err(
+            "the hub served the dataset DB without a digest; refusing to install an \
+             unverified database"
+                .into(),
+        );
+    }
+    if crate::sync::blobpush::sha256_of_bytes(&bytes) != want {
+        return Err(format!(
+            "the dataset DB from the hub did not match its digest {want}; the copy was left as is"
+        ));
+    }
+    // A truncated body, an error page, or a wrong content-type would otherwise be
+    // installed as a database nobody can open.
+    if bytes.len() < 16 || &bytes[..16] != b"SQLite format 3\0" {
+        return Err("the hub's dataset DB is not a SQLite file; the copy was left as is".into());
+    }
+
+    let target = dir.join("data.sqlite3");
+    let mut tmp_os = target.clone().into_os_string();
+    tmp_os.push(format!(".sync-tmp-{}", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp_os);
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("write the dataset DB: {e}"));
+    }
+    // Backup before destroy (app trash), so a wrong adoption is undoable; then
+    // drop the stale sidecars and derived indexes, which describe the *old* DB
+    // and would either replay onto the new one or answer for rows it no longer has.
+    if target.is_file() {
+        if let Err(e) = datasets::media::move_to_trash(&target) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("could not move the old dataset DB to the trash: {e}"));
+        }
+    }
+    for ext in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(dir.join(format!("data.sqlite3{ext}")));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "install the dataset DB: {e} (is the dataset open in another window?)"
+        ));
+    }
+    for rel in [datasets::cards::FTS_DB, datasets::wiki::FTS_DB] {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(dir.join(format!("{rel}{suffix}")));
+        }
+    }
+    {
+        let conn = datasets::dictation::open_app_db(settings)?;
+        crate::sync::set_content_gen(&conn, uuid, gen)?;
+    }
+    let _ = app.emit(
+        "dataset-sync-progress",
+        json!({ "uuid": uuid, "phase": "db", "content_gen": gen, "bytes": bytes.len() }),
+    );
+    log::info!(
+        "[sync] {uuid}: adopted the pushed dataset DB at revision {gen} ({} bytes)",
+        bytes.len()
+    );
+    Ok(true)
+}
+
+/// Record a dataset in the round's `resynced` report once, however many planes
+/// (DB, files) had work for it.
+fn note_resynced(list: &mut Vec<String>, uuid: &str) {
+    if !list.iter().any(|u| u == uuid) {
+        list.push(uuid.to_string());
+    }
+}
+
 /// Non-DB file drift for one dataset (media/vtt/etc. change the manifest hash,
 /// which the row log does not cover): refresh only the files that actually
 /// changed (sync-v2 §7 consumption) rather than re-pulling the whole archive,
@@ -837,15 +979,18 @@ async fn pull_and_apply_dataset_journal(
 /// `cloud_hub` authority. A read-only `registry` adoption keeps the versioned
 /// whole-archive snapshot (a live-tree refresh would break the INV-8 pin, and the
 /// registry manifest carries no per-file map anyway). Any per-file failure falls
-/// back to the snapshot, so a copy always converges. The dataset DB is never
-/// touched here: `overall_hash` and the per-file map both exclude it, and the row
-/// journal owns DB content.
+/// back to the snapshot, so a copy always converges. The dataset DB itself is
+/// never moved by the *file* plan: `overall_hash` and the per-file map both
+/// exclude it. It is the `content_gen` check at the top that adopts a DB another
+/// device pushed, and the row journal that carries in-place row edits.
+#[allow(clippy::too_many_arguments)]
 async fn check_file_drift(
     app: AppHandle,
     settings: State<'_, SettingsState>,
     uuid: String,
     stored_hash: &str,
     upstream_kind: &str,
+    hub_ingest: bool,
     resynced: &mut Vec<String>,
     errors: &mut Vec<Value>,
 ) {
@@ -856,6 +1001,19 @@ async fn check_file_drift(
             return;
         }
     };
+
+    // The DB plane runs first and independently of the file plane: a pushed DB
+    // carries authored cue/card work that no file path can see, and the file
+    // hash below cannot report it.
+    if hub_ingest {
+        let hub_gen = manifest["content_gen"].as_i64().unwrap_or(0);
+        match adopt_hub_db(&app, &settings, &uuid, hub_gen).await {
+            Ok(true) => note_resynced(resynced, &uuid),
+            Ok(false) => {}
+            Err(e) => errors.push(json!({ "uuid": uuid, "stage": "db", "error": e })),
+        }
+    }
+
     let hash = manifest["overall_hash"].as_str().unwrap_or("").to_string();
     if hash.is_empty() || hash == stored_hash {
         return; // no drift (or an unreadable hash — leave the copy as is)
@@ -1182,6 +1340,10 @@ pub async fn sync_round_inner(
     // only when the account advertises `dataset_journal`. Decides whether a
     // cloud-hub dataset rides the row journal or keeps the file-drift-only path.
     let ds_ok = dataset_journal_advertised(&cluster, &base);
+    // Whether the hub serves `GET /datasets/{uuid}/db` for a pushed DB (INV-20:
+    // capability, never a protocol guess — an unlisted feature is "no", and a
+    // pre-ingest hub simply keeps its DB to itself).
+    let hub_ingest = advertises(&cluster, "dataset_ingest");
 
     // 1. Push local edits first so the hub holds our changes before we pull.
     let pushed = writeback_flush_inner(&settings, &cluster).await.unwrap_or_else(|e| {
@@ -1272,7 +1434,11 @@ pub async fn sync_round_inner(
             let journal_synced =
                 ds_ok && (upstream_kind == "cloud_hub" || upstream_kind.is_empty());
             if journal_synced {
-                let consumed = pull_and_apply_dataset_journal(
+                // The row journal and the file/DB planes are independent: a page of
+                // rows arriving says nothing about the media tree or a pushed DB, so
+                // the drift check runs either way (it early-returns when the content
+                // hash already matches).
+                let _journal_consumed = pull_and_apply_dataset_journal(
                     app.clone(),
                     settings.clone(),
                     uuid.clone(),
@@ -1285,18 +1451,17 @@ pub async fn sync_round_inner(
                     &mut errors,
                 )
                 .await;
-                if !consumed {
-                    check_file_drift(
-                        app.clone(),
-                        settings.clone(),
-                        uuid.clone(),
-                        &stored_hash,
-                        &upstream_kind,
-                        &mut resynced,
-                        &mut errors,
-                    )
-                    .await;
-                }
+                check_file_drift(
+                    app.clone(),
+                    settings.clone(),
+                    uuid.clone(),
+                    &stored_hash,
+                    &upstream_kind,
+                    hub_ingest,
+                    &mut resynced,
+                    &mut errors,
+                )
+                .await;
                 continue;
             }
 
@@ -1319,6 +1484,7 @@ pub async fn sync_round_inner(
                     uuid.clone(),
                     &stored_hash,
                     &upstream_kind,
+                    hub_ingest,
                     &mut resynced,
                     &mut errors,
                 )
@@ -1329,8 +1495,9 @@ pub async fn sync_round_inner(
             continue;
         }
 
-        // LAN hub: pull the dataset-scope row journal, then the file-drift check.
-        let consumed = pull_and_apply_dataset_journal(
+        // LAN hub: pull the dataset-scope row journal, then the DB/file-drift check.
+        // Independent planes, so both run (see the cloud-hub branch above).
+        let _journal_consumed = pull_and_apply_dataset_journal(
             app.clone(),
             settings.clone(),
             uuid.clone(),
@@ -1343,21 +1510,20 @@ pub async fn sync_round_inner(
             &mut errors,
         )
         .await;
-        if !consumed {
-            // 4. Non-DB file drift (media/vtt/etc. change the manifest hash, which
-            //    the row log does not cover): move only the changed bytes, falling
-            //    back to one snapshot re-pull when incremental cannot apply.
-            check_file_drift(
-                app.clone(),
-                settings.clone(),
-                uuid.clone(),
-                &stored_hash,
-                &upstream_kind,
-                &mut resynced,
-                &mut errors,
-            )
-            .await;
-        }
+        // 4. DB + non-DB drift (a pushed DB replaces cue/card work; media/vtt
+        //    changes move the manifest hash): move only what changed, falling back
+        //    to one snapshot re-pull when incremental cannot apply.
+        check_file_drift(
+            app.clone(),
+            settings.clone(),
+            uuid.clone(),
+            &stored_hash,
+            &upstream_kind,
+            hub_ingest,
+            &mut resynced,
+            &mut errors,
+        )
+        .await;
     }
 
     // 5. Per-user app data (`dictation` progress + `xp` awards) journals under its

@@ -524,6 +524,10 @@ pub fn run() {
             sync::client::sync_forget_dataset,
             sync::client::pc_pair_start,
             sync::client::pc_pair_reset_identity,
+            // Follower → hub dataset push (`docs/design/dataset-push.md`).
+            sync::client::dataset_push_preview,
+            sync::client::dataset_push_to_hub,
+            sync::client::dataset_push_all,
             // Online dataset market (website catalog; role-agnostic consumption).
             sync::client::market_list,
             sync::client::market_subscribe,
@@ -985,6 +989,10 @@ macro_rules! mobile_invoke_handler {
             sync::client::sync_forget_dataset,
             sync::client::pc_pair_start,
             sync::client::pc_pair_reset_identity,
+            // Follower → hub dataset push (`docs/design/dataset-push.md`).
+            sync::client::dataset_push_preview,
+            sync::client::dataset_push_to_hub,
+            sync::client::dataset_push_all,
             // Online dataset market (website catalog; role-agnostic consumption).
             sync::client::market_list,
             sync::client::market_subscribe,

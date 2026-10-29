@@ -109,6 +109,7 @@ pub(crate) mod writeback;
 pub(crate) mod snapshot;
 pub(crate) mod status;
 pub(crate) mod pairing;
+pub(crate) mod push;
 pub(crate) mod round;
 
 pub(crate) use auth::*;
@@ -120,6 +121,7 @@ pub(crate) use writeback::*;
 pub(crate) use snapshot::*;
 pub(crate) use status::*;
 pub(crate) use pairing::*;
+pub(crate) use push::*;
 pub(crate) use round::*;
 
 // ---------------------------------------------------------------------------

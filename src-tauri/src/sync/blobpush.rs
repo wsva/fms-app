@@ -140,12 +140,107 @@ pub(crate) fn content_tree_hashes(dir: &Path) -> Result<BTreeMap<String, String>
     Ok(map)
 }
 
+// ---------------------------------------------------------------------------
+// Cached variant — the same tree view, without re-hashing unchanged files
+// ---------------------------------------------------------------------------
+//
+// The hub's `/manifest` reuses a `(size, mtime) -> sha256` cache so a poll never
+// re-reads multi-GB media (`rest::cached_file_hash`). A follower pushing its own
+// tree needs the identical shortcut for the same reason: comparing two trees must
+// not cost more than copying one. The table is the hub's `file_hash_cache`
+// (`change_log::ensure_hub_tables`), created here with `IF NOT EXISTS` and the
+// same schema, so a device only ever has one of them.
+
+/// Create the hash cache if this device has never had one (a follower never runs
+/// the hub table setup).
+pub(crate) fn ensure_hash_cache(conn: &rusqlite::Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS file_hash_cache (
+            dataset_uuid TEXT NOT NULL,
+            path         TEXT NOT NULL,
+            size         INTEGER NOT NULL,
+            mtime        INTEGER NOT NULL,
+            sha256       TEXT NOT NULL,
+            PRIMARY KEY (dataset_uuid, path)
+        );",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// sha256 of one file, reusing the recorded digest while `(size, mtime)` is
+/// unchanged and recomputing (then re-recording) otherwise. `cache == None`
+/// hashes every time — the behaviour every pre-cache caller relied on.
+pub(crate) fn cached_hash(
+    cache: Option<&rusqlite::Connection>,
+    dataset_uuid: &str,
+    rel: &str,
+    path: &Path,
+    size: u64,
+    mtime: u64,
+) -> String {
+    if let Some(conn) = cache {
+        let cached: Option<String> = conn
+            .query_row(
+                "SELECT sha256 FROM file_hash_cache \
+                 WHERE dataset_uuid = ?1 AND path = ?2 AND size = ?3 AND mtime = ?4",
+                rusqlite::params![dataset_uuid, rel, size as i64, mtime as i64],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(h) = cached {
+            return h;
+        }
+    }
+    let h = hash_and_size(path).map(|(sha, _)| sha).unwrap_or_default();
+    if let Some(conn) = cache {
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO file_hash_cache (dataset_uuid, path, size, mtime, sha256) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![dataset_uuid, rel, size as i64, mtime as i64, &h],
+        );
+    }
+    h
+}
+
+/// [`content_tree_hashes`] through [`cached_hash`]: same walk, same exclusions,
+/// same digests — only the reads are skipped for files whose `(size, mtime)` the
+/// cache already knows. This is what the push driver diffs against the hub
+/// manifest, so it must stay byte-identical to the uncached recipe.
+pub(crate) fn content_tree_hashes_cached(
+    dir: &Path,
+    dataset_uuid: &str,
+    conn: &rusqlite::Connection,
+) -> Result<BTreeMap<String, String>, String> {
+    let _ = ensure_hash_cache(conn);
+    let mut map = BTreeMap::new();
+    for (rel, abs) in collect_tree(dir) {
+        let meta = std::fs::metadata(&abs).ok();
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let sha = cached_hash(Some(conn), dataset_uuid, &rel, &abs, size, mtime);
+        map.insert(rel, sha);
+    }
+    Ok(map)
+}
+
 /// Hex sha256 of in-memory bytes — the trust-but-verify check on a freshly
 /// fetched file, identical to what [`hash_and_size`] produces for on-disk ones.
 pub(crate) fn sha256_of_bytes(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     format!("{:x}", h.finalize())
+}
+
+/// Hex sha256 of one file on disk. The push driver digests the frozen DB copy
+/// with this, so the digest it declares on the wire is the one the hub
+/// recomputes before installing it.
+pub(crate) fn hash_of_file(path: &Path) -> Result<String, String> {
+    hash_and_size(path).map(|(sha, _)| sha)
 }
 
 /// The tree as `[{path, sha256, size}]` — the phase-1 `files` array and the

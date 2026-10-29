@@ -15,6 +15,11 @@
 //! * `GET  /api/v1/app/changes`                - same page for the per-user app-data scope
 //! * `GET  /api/v1/app/state`                  - one identity's full app-data history (backfill)
 //! * `GET  /api/v1/datasets/{uuid}/snapshot`   - the whole dataset dir as tar.gz
+//! * `POST /api/v1/datasets/{uuid}/ingest`     - declare a follower→hub push (diff plan)
+//! * `PUT  /api/v1/datasets/{uuid}/ingest/file` - stream one pushed file's bytes
+//! * `PUT  /api/v1/datasets/{uuid}/ingest/db`  - stream the pushed frozen dataset DB
+//! * `POST /api/v1/datasets/{uuid}/ingest/commit` - install the staged tree (trash + rename)
+//! * `GET  /api/v1/datasets/{uuid}/db`         - a follower's read of a pushed DB
 //! * `POST /api/v1/sync/changes`               - replay queued writeback changes
 //! * `GET  /api/v1/chat/messages`              - cross-device chat thread page
 //! * `POST /api/v1/chat/message`               - post a chat message (multipart: uuid/text/device_name/file parts)
@@ -37,7 +42,7 @@ use std::time::UNIX_EPOCH;
 use axum::extract::{DefaultBodyLimit, Multipart, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -77,6 +82,21 @@ pub fn router(app: AppHandle) -> Router {
         .route("/app/changes", get(app_changes))
         .route("/app/state", get(app_state))
         .route("/datasets/{uuid}/snapshot", get(snapshot))
+        .route("/datasets/{uuid}/db", get(dataset_db))
+        .route("/datasets/{uuid}/ingest", post(ingest_declare))
+        // Streamed push bodies: the digest rides in the signed query and the
+        // client flags the body "not signed" (`x-fms-stream`), so the zone
+        // guard never buffers it — but axum's own default body limit still
+        // would, hence `disable` on exactly these two routes.
+        .route(
+            "/datasets/{uuid}/ingest/file",
+            put(ingest_file).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/datasets/{uuid}/ingest/db",
+            put(ingest_db).layer(DefaultBodyLimit::disable()),
+        )
+        .route("/datasets/{uuid}/ingest/commit", post(ingest_commit))
         .route("/file", get(file_endpoint))
         .route("/sync/changes", post(sync_changes))
         .route("/chat/messages", get(chat_messages))
@@ -387,6 +407,12 @@ struct Manifest {
     /// so a single row edit does not force a whole-DB file re-download.
     #[serde(default)]
     files: std::collections::BTreeMap<String, String>,
+    /// How many times this dataset's whole DB has been replaced by an ingest
+    /// commit. `overall_hash` cannot report a DB-only change (the DB is excluded
+    /// from it), so a follower compares this number to decide whether the cues it
+    /// holds are stale (`docs/design/dataset-push.md`). A pre-ingest hub is 0.
+    #[serde(default)]
+    content_gen: i64,
 }
 
 /// The dataset SQLite file + its WAL/SHM sidecars are excluded from the hashed
@@ -418,6 +444,8 @@ fn hash_file_contents(path: &Path) -> Result<String, String> {
 /// Cached per-file hash (§3.2): reuse the recorded sha256 while the file's
 /// `(size, mtime)` tuple is unchanged; recompute and upsert otherwise. Skipping
 /// this cache would mean re-hashing multi-GB media on every manifest call.
+/// The recipe lives in `blobpush::cached_hash` because the push driver needs the
+/// byte-identical shortcut for a follower's own tree.
 fn cached_file_hash(
     cache: Option<&rusqlite::Connection>,
     dataset_uuid: &str,
@@ -426,28 +454,7 @@ fn cached_file_hash(
     size: u64,
     mtime: u64,
 ) -> String {
-    if let Some(conn) = cache {
-        let cached: Option<String> = conn
-            .query_row(
-                "SELECT sha256 FROM file_hash_cache \
-                 WHERE dataset_uuid = ?1 AND path = ?2 AND size = ?3 AND mtime = ?4",
-                rusqlite::params![dataset_uuid, rel, size as i64, mtime as i64],
-                |r| r.get(0),
-            )
-            .ok();
-        if let Some(h) = cached {
-            return h;
-        }
-    }
-    let h = hash_file_contents(path).unwrap_or_default();
-    if let Some(conn) = cache {
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO file_hash_cache (dataset_uuid, path, size, mtime, sha256) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![dataset_uuid, rel, size as i64, mtime as i64, &h],
-        );
-    }
-    h
+    crate::sync::blobpush::cached_hash(cache, dataset_uuid, rel, path, size, mtime)
 }
 
 /// Compute the manifest over the **non-DB** file set: file count, total bytes,
@@ -497,6 +504,7 @@ fn compute_manifest(
         updated_at,
         dataset_type,
         files: map,
+        content_gen: 0,
     }
 }
 
@@ -590,6 +598,10 @@ async fn manifest(State(st): State<RestState>, axum::extract::Path(uuid): axum::
     let cache = crate::datasets::dictation::open_app_db(&settings).ok();
     let mut m = compute_manifest(&dir, &uuid, cache.as_ref());
     m.dataset_type = ty.as_str().to_string();
+    m.content_gen = cache
+        .as_ref()
+        .map(|c| sync::content_gen(c, &uuid))
+        .unwrap_or(0);
     (StatusCode::OK, Json(m)).into_response()
 }
 
@@ -988,6 +1000,839 @@ async fn file_endpoint(
         return json_error(StatusCode::NOT_FOUND, "not a file");
     }
     crate::sync::server::stream_file(&target_c, &headers).await
+}
+
+// ---------------------------------------------------------------------------
+// Follower → hub dataset push (`docs/design/dataset-push.md`)
+//
+// Four small routes rather than one archive upload: the file plane already knows
+// every file's sha256, so a push whose media is already on the hub uploads
+// nothing but the changed bytes. The dataset DB travels on its own route because
+// it is deliberately outside that plane (`is_db_file`) — and in this one
+// direction it *is* the authored content (hand-cut cue times).
+//
+// The result is staged as a whole tree and installed by rename, so a failed push
+// can never leave the hub holding half a dataset.
+// ---------------------------------------------------------------------------
+
+/// The staging parent, created beside the dataset directories: inside no dataset
+/// (so it is never hashed, served or listed) and holding no `info.json` (so
+/// discovery never mistakes it for one).
+const INGEST_STAGE_DIR: &str = ".fms-incoming";
+/// An abandoned run directory older than this is pruned on the next declare.
+const INGEST_RUN_TTL_SECS: u64 = 24 * 60 * 60;
+
+#[derive(Serialize, Deserialize, Clone)]
+struct IngestRef {
+    path: String,
+    sha256: String,
+    #[serde(default)]
+    size: u64,
+}
+
+#[derive(Deserialize)]
+struct IngestDeclareReq {
+    run: String,
+    /// The dataset's type. Required only when the hub does not have the dataset
+    /// yet, i.e. when a follower contributes one it created itself.
+    #[serde(default)]
+    dataset_type: String,
+    #[serde(default)]
+    files: Vec<IngestRef>,
+    /// Paths the pushing tree no longer has; they are simply absent from the
+    /// staged tree, so the install drops them with the old directory.
+    #[serde(default)]
+    deletes: Vec<String>,
+    /// The frozen `data.sqlite3` the client wants the hub to adopt.
+    #[serde(default)]
+    db: Option<IngestRef>,
+}
+
+/// What a staging run recorded at declare; `commit` re-checks every claim in it.
+#[derive(Serialize, Deserialize)]
+struct IngestRun {
+    uuid: String,
+    run: String,
+    dataset_type: String,
+    /// The hub revision the client observed, echoed back at commit so a racing
+    /// second push is refused rather than silently winning.
+    content_gen: i64,
+    created_at: i64,
+    files: Vec<IngestRef>,
+    deletes: Vec<String>,
+    db: Option<IngestRef>,
+}
+
+/// Runs currently committing, so two pushes to one dataset cannot interleave
+/// their renames. `std::sync` because the guard is held only across the blocking
+/// install, never across an await.
+fn ingest_commits() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static RUNNING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    RUNNING.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+struct CommitGuard(String);
+
+impl Drop for CommitGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = ingest_commits().lock() {
+            set.remove(&self.0);
+        }
+    }
+}
+
+fn begin_commit(uuid: &str) -> Result<CommitGuard, String> {
+    let mut set = ingest_commits()
+        .lock()
+        .map_err(|_| "ingest lock is poisoned; restart the hub".to_string())?;
+    if !set.insert(uuid.to_string()) {
+        return Err("another push to this dataset is being installed; retry in a moment".into());
+    }
+    Ok(CommitGuard(uuid.to_string()))
+}
+
+/// A run id becomes a path component, so keep it boring.
+fn valid_run(run: &str) -> bool {
+    !run.is_empty() && run.len() <= 40 && run.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Normalize and vet a pushed relative path. Refuses anything that could escape
+/// the dataset directory, and the files that never ride this plane: the DB (its
+/// own route), its sidecars and every derived index.
+fn ingest_rel_path(raw: &str) -> Result<String, String> {
+    if raw.trim().is_empty() {
+        return Err("empty file path".into());
+    }
+    if raw.contains('\\') {
+        return Err(format!("'{raw}': use forward slashes"));
+    }
+    let rel = raw.trim_start_matches('/');
+    for seg in rel.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return Err(format!("'{raw}': not a relative path"));
+        }
+        if seg.contains(':') {
+            return Err(format!("'{raw}': ':' is not valid in a portable file name"));
+        }
+    }
+    if is_db_file(rel) {
+        return Err(format!(
+            "'{raw}': the dataset DB and derived indexes never ride a push"
+        ));
+    }
+    Ok(rel.to_string())
+}
+
+/// `rel/a/b` under `root`, component-wise so Windows gets its own separators and
+/// no single string ever contains a traversal.
+fn rel_to_path(root: &Path, rel: &str) -> PathBuf {
+    let mut p = root.to_path_buf();
+    for seg in rel.split('/') {
+        p.push(seg);
+    }
+    p
+}
+
+/// Resolve the directory a push targets: the hub's resolved writable copy when
+/// it has one, else the default type root (`<datasets>/<type>/<uuid>`), which
+/// commit creates — that is how a follower contributes a dataset it authored.
+fn ingest_target(
+    settings: &SettingsState,
+    uuid: &str,
+    type_hint: &str,
+) -> Result<(PathBuf, datasets::DatasetType, bool), String> {
+    if let Ok((dir, ty)) = datasets::find_dataset_dir_typed(settings, uuid) {
+        return Ok((dir, ty, true));
+    }
+    if type_hint.is_empty() {
+        return Err(format!(
+            "dataset {uuid} is not on this hub; pass dataset_type to contribute it"
+        ));
+    }
+    let ty: datasets::DatasetType = type_hint
+        .parse()
+        .map_err(|_| format!("unknown dataset type '{type_hint}'"))?;
+    datasets::assert_uuid_free(settings, uuid)?;
+    Ok((
+        datasets::datasets_dir(settings).join(ty.as_str()).join(uuid),
+        ty,
+        false,
+    ))
+}
+
+fn ingest_stage(parent: &Path, uuid: &str, run: &str) -> PathBuf {
+    parent
+        .join(INGEST_STAGE_DIR)
+        .join(format!("{uuid}__{run}"))
+}
+
+/// Drop abandoned runs so a cancelled push does not hold disk forever.
+fn prune_stale_runs(parent: &Path) {
+    let Ok(entries) = std::fs::read_dir(parent.join(INGEST_STAGE_DIR)) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for e in entries.flatten() {
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .map(|d| d.as_secs() > INGEST_RUN_TTL_SECS)
+            .unwrap_or(false);
+        if stale {
+            log::info!("[ingest] pruning abandoned run {}", e.path().display());
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+/// Hard-link (copy as fallback) every hub file the push keeps into the staged
+/// tree. Untouched media therefore costs a directory entry rather than a byte
+/// copy, which is what lets the whole install be two renames on one volume.
+fn link_kept_files(
+    hub_dir: &Path,
+    tree: &Path,
+    replaced: &std::collections::HashSet<String>,
+) -> Result<usize, String> {
+    let mut n = 0usize;
+    for (rel, abs) in collect_rel_files(hub_dir) {
+        if replaced.contains(&rel) || is_db_file(&rel) {
+            continue;
+        }
+        let dst = rel_to_path(tree, &rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir '{rel}': {e}"))?;
+        }
+        if std::fs::hard_link(&abs, &dst).is_err() {
+            std::fs::copy(&abs, &dst).map_err(|e| format!("copy '{rel}': {e}"))?;
+        }
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// The declare half: build the staged merge base and report what the client
+/// still owes. Blocking (walks the dataset, hard-links every kept file), so it
+/// runs on the blocking pool.
+#[allow(clippy::too_many_arguments)]
+fn ingest_stage_plan(
+    dir: &Path,
+    uuid: &str,
+    ty: &datasets::DatasetType,
+    exists: bool,
+    run: &str,
+    files: Vec<IngestRef>,
+    deletes: Vec<String>,
+    db: Option<IngestRef>,
+    cache: Option<&rusqlite::Connection>,
+) -> Result<serde_json::Value, String> {
+    let parent = dir
+        .parent()
+        .ok_or_else(|| format!("dataset path '{}' has no parent", dir.display()))?;
+    prune_stale_runs(parent);
+
+    let stage = ingest_stage(parent, uuid, run);
+    let tree = stage.join("tree");
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&tree).map_err(|e| format!("create staging: {e}"))?;
+
+    let hub = if exists {
+        compute_manifest(dir, uuid, cache)
+    } else {
+        // A dataset the hub does not have yet: nothing to diff against, nothing
+        // to keep.
+        compute_manifest(&tree, uuid, cache)
+    };
+    let hub_files = if exists {
+        hub.files.clone()
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    let gen = cache.map(|c| sync::content_gen(c, uuid)).unwrap_or(0);
+
+    let mut need: Vec<String> = Vec::new();
+    let (mut creates, mut updates) = (0usize, 0usize);
+    let mut upload_bytes = 0u64;
+    for f in &files {
+        match hub_files.get(&f.path) {
+            None => {
+                creates += 1;
+                need.push(f.path.clone());
+                upload_bytes += f.size;
+            }
+            Some(sha) if sha == &f.sha256 => {} // already there: upload nothing
+            Some(_) => {
+                updates += 1;
+                need.push(f.path.clone());
+                upload_bytes += f.size;
+            }
+        }
+    }
+
+    // Carry forward every hub file this push neither rewrites nor drops — by
+    // hard link, so untouched media costs a directory entry, not a copy. The
+    // exclusion set is `need ∪ deletes`, *not* the whole declared tree: a file
+    // whose digest already matches is not uploaded, so skipping it here would
+    // make it vanish from the installed tree.
+    let mut replaced: std::collections::HashSet<String> = need.iter().cloned().collect();
+    replaced.extend(deletes.iter().cloned());
+    let linked = if exists {
+        link_kept_files(dir, &tree, &replaced)?
+    } else {
+        0
+    };
+
+    if let Some(d) = &db {
+        upload_bytes += d.size;
+    }
+    let deletes_present = deletes.iter().filter(|d| hub_files.contains_key(*d)).count();
+
+    // A push that carries no DB must not silently drop the hub's: hard-link it
+    // forward like any other untouched file.
+    if db.is_none() && exists {
+        let src = dir.join("data.sqlite3");
+        if src.is_file() {
+            let dst = tree.join("data.sqlite3");
+            if std::fs::hard_link(&src, &dst).is_err() {
+                let _ = std::fs::copy(&src, &dst);
+            }
+        }
+    }
+
+    let record = IngestRun {
+        uuid: uuid.to_string(),
+        run: run.to_string(),
+        dataset_type: ty.as_str().to_string(),
+        content_gen: gen,
+        created_at: chrono::Utc::now().timestamp(),
+        files: files.clone(),
+        deletes: deletes.clone(),
+        db: db.clone(),
+    };
+    let body = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
+    std::fs::write(stage.join("run.json"), body).map_err(|e| format!("write run: {e}"))?;
+
+    Ok(serde_json::json!({
+        "run": run,
+        "need": need,
+        "need_db": db.is_some(),
+        "creates": creates,
+        "updates": updates,
+        "deletes": deletes_present,
+        "unchanged": hub_files.len().saturating_sub(updates + deletes_present),
+        "linked": linked,
+        "upload_bytes": upload_bytes,
+        "content_gen": gen,
+        "hub_file_count": hub_files.len(),
+        "staging": format!("{INGEST_STAGE_DIR}/{uuid}__{run}"),
+    }))
+}
+
+async fn ingest_declare(
+    State(st): State<RestState>,
+    Extension(auth): Extension<sync::pairing::AuthContext>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+    Json(req): Json<IngestDeclareReq>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    if !settings.is_hub() {
+        return json_error(
+            StatusCode::CONFLICT,
+            "this machine is a follower; push to the hub, not to a follower",
+        );
+    }
+    if !valid_run(&req.run) {
+        return json_error(StatusCode::BAD_REQUEST, "run must be 1-40 alphanumerics");
+    }
+    let (dir, ty, exists) = match ingest_target(&settings, &uuid, &req.dataset_type) {
+        Ok(v) => v,
+        Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
+    };
+    if datasets::is_under_download_root(&settings, &dir) {
+        return json_error(
+            StatusCode::CONFLICT,
+            "the hub's copy is a read-only download base — fork it into a writable \
+             location (Datasets page) before pushing over it",
+        );
+    }
+
+    // Vet every name before touching the filesystem.
+    let mut files = Vec::with_capacity(req.files.len());
+    for f in &req.files {
+        match ingest_rel_path(&f.path) {
+            Ok(path) => files.push(IngestRef {
+                path,
+                sha256: f.sha256.trim().to_lowercase(),
+                size: f.size,
+            }),
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+        }
+    }
+    let mut deletes = Vec::with_capacity(req.deletes.len());
+    for d in &req.deletes {
+        match ingest_rel_path(d) {
+            Ok(path) if path == datasets::INFO_FILE => {
+                return json_error(StatusCode::BAD_REQUEST, "info.json is never deleted")
+            }
+            Ok(path) => deletes.push(path),
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+        }
+    }
+    let db = match req.db {
+        Some(d) => {
+            if d.sha256.trim().len() != 64 {
+                return json_error(StatusCode::BAD_REQUEST, "db.sha256 must be 64 hex chars");
+            }
+            Some(IngestRef {
+                path: "data.sqlite3".to_string(),
+                sha256: d.sha256.trim().to_lowercase(),
+                size: d.size,
+            })
+        }
+        None => None,
+    };
+
+    log::info!(
+        "[ingest] declare uuid={uuid} run={} type={} files={} deletes={} db={} device={:?} exists={exists}",
+        req.run,
+        ty.as_str(),
+        files.len(),
+        deletes.len(),
+        db.is_some(),
+        auth.device_id,
+    );
+    let cache = crate::datasets::dictation::open_app_db(&settings).ok();
+    let run = req.run.clone();
+    let plan = tauri::async_runtime::spawn_blocking(move || {
+        ingest_stage_plan(&dir, &uuid, &ty, exists, &run, files, deletes, db, cache.as_ref())
+    })
+    .await;
+    match plan {
+        Ok(Ok(v)) => (StatusCode::OK, Json(v)).into_response(),
+        Ok(Err(e)) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("staging failed: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct IngestPutQuery {
+    run: String,
+    /// The type hint that locates the staging parent for a dataset the hub does
+    /// not have yet (empty is fine once it does).
+    #[serde(default)]
+    dataset_type: String,
+    /// Forward-slash relative path; absent on the `/db` route.
+    #[serde(default)]
+    path: String,
+    /// The digest the bytes must hash to — in the *signed* query, because the
+    /// body itself is not part of the signature.
+    sha: String,
+}
+
+/// Stream a request body into `dest`, hashing as it goes, and refuse a digest
+/// mismatch. Never buffers: media can be multi-GB.
+async fn ingest_write_body(
+    body: axum::body::Body,
+    dest: &Path,
+    want_sha: &str,
+) -> Result<u64, String> {
+    use futures_util::StreamExt as _;
+    use tokio::io::AsyncWriteExt as _;
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let mut file = tokio::fs::File::create(dest).await.map_err(|e| e.to_string())?;
+    let mut h = Sha256::new();
+    let mut total = 0u64;
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("read upload body: {e}"))?;
+        h.update(&chunk);
+        total += chunk.len() as u64;
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+    }
+    file.flush().await.map_err(|e| e.to_string())?;
+    let got = format!("{:x}", h.finalize());
+    if got != want_sha {
+        drop(file);
+        let _ = tokio::fs::remove_file(dest).await;
+        return Err(format!("sha mismatch: expected {want_sha}, received {got}"));
+    }
+    Ok(total)
+}
+
+/// Open the staging run a PUT belongs to, checking it is still the one declared
+/// for this dataset and run id.
+fn open_stage(settings: &SettingsState, uuid: &str, q: &IngestPutQuery) -> Result<PathBuf, String> {
+    if !valid_run(&q.run) {
+        return Err("run must be 1-40 alphanumerics".into());
+    }
+    let (dir, _, _) = ingest_target(settings, uuid, &q.dataset_type)?;
+    let parent = dir
+        .parent()
+        .ok_or_else(|| format!("dataset path '{}' has no parent", dir.display()))?;
+    let stage = ingest_stage(parent, uuid, &q.run);
+    if !stage.join("run.json").is_file() {
+        return Err(format!(
+            "no staging run '{}' for this dataset — call ingest again",
+            q.run
+        ));
+    }
+    Ok(stage)
+}
+
+async fn ingest_file(
+    State(st): State<RestState>,
+    Extension(_auth): Extension<sync::pairing::AuthContext>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+    Query(q): Query<IngestPutQuery>,
+    body: axum::body::Body,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    let rel = match ingest_rel_path(&q.path) {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+    };
+    let stage = match open_stage(&settings, &uuid, &q) {
+        Ok(s) => s,
+        Err(e) => return json_error(StatusCode::CONFLICT, &e),
+    };
+    let dest = rel_to_path(&stage.join("tree"), &rel);
+    match ingest_write_body(body, &dest, q.sha.trim()).await {
+        Ok(bytes) => {
+            log::info!("[ingest] {uuid} <- {rel} ({bytes} bytes)");
+            (StatusCode::OK, Json(serde_json::json!({ "path": rel, "bytes": bytes })))
+                .into_response()
+        }
+        Err(e) => {
+            let code = if e.starts_with("sha mismatch") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            json_error(code, &format!("{rel}: {e}"))
+        }
+    }
+}
+
+async fn ingest_db(
+    State(st): State<RestState>,
+    Extension(_auth): Extension<sync::pairing::AuthContext>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+    Query(q): Query<IngestPutQuery>,
+    body: axum::body::Body,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    let stage = match open_stage(&settings, &uuid, &q) {
+        Ok(s) => s,
+        Err(e) => return json_error(StatusCode::CONFLICT, &e),
+    };
+    // Beside the tree, not inside it: commit moves it in once it has checked the
+    // staged `info.json`, so an abandoned run leaves no `data.sqlite3` in the
+    // tree that the manifest would ignore but a reader could still find.
+    let dest = stage.join("db.sqlite3");
+    match ingest_write_body(body, &dest, q.sha.trim()).await {
+        Ok(bytes) => {
+            log::info!("[ingest] {uuid} <- data.sqlite3 ({bytes} bytes)");
+            (StatusCode::OK, Json(serde_json::json!({ "bytes": bytes }))).into_response()
+        }
+        Err(e) => {
+            let code = if e.starts_with("sha mismatch") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            json_error(code, &format!("data.sqlite3: {e}"))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct IngestCommitReq {
+    run: String,
+    #[serde(default)]
+    dataset_type: String,
+    /// The revision the client saw at declare; a mismatch means another push
+    /// landed in between, so this one must re-plan rather than overwrite it.
+    #[serde(default)]
+    content_gen: i64,
+}
+
+/// The commit half. Blocking: it hashes every staged file, renames the old
+/// directory aside, and installs the staged tree — all on the blocking pool so a
+/// multi-GB verification never stalls the async runtime.
+fn ingest_install(
+    settings: &SettingsState,
+    dir: &Path,
+    uuid: &str,
+    ty: &datasets::DatasetType,
+    exists: bool,
+    run: &str,
+    expect_gen: i64,
+    conn: &rusqlite::Connection,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let conflict = |m: String| (StatusCode::CONFLICT, m);
+    let _guard = begin_commit(uuid).map_err(conflict)?;
+
+    let parent = dir
+        .parent()
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "dataset path has no parent".to_string()))?;
+    let stage = ingest_stage(parent, uuid, run);
+    let raw = std::fs::read(stage.join("run.json")).map_err(|_| {
+        conflict(format!(
+            "no staging run '{run}' for this dataset — it was pruned or never declared; re-run the push"
+        ))
+    })?;
+    let record: IngestRun = serde_json::from_slice(&raw)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("staging record: {e}")))?;
+    if record.uuid != uuid || record.run != run {
+        return Err(conflict("staging run belongs to another dataset".into()));
+    }
+
+    // Two guards, one window: the revision recorded at declare, and the one the
+    // client echoed. Either may be stale if a second push committed meanwhile.
+    let gen_now = sync::content_gen(conn, uuid);
+    if record.content_gen != gen_now || expect_gen != gen_now {
+        return Err(conflict(format!(
+            "the hub's copy changed during this push (revision {gen_now}, this push expected \
+             {} / {expect_gen}); re-run the push",
+            record.content_gen
+        )));
+    }
+    // A dataset that did not exist at declare must still not exist now.
+    if !exists && datasets::find_dataset_dir_typed(settings, uuid).is_ok() {
+        return Err(conflict(
+            "the dataset appeared on the hub while this push was running; re-run it".into(),
+        ));
+    }
+
+    let tree = stage.join("tree");
+    let info = datasets::read_info(&tree).map_err(|e| {
+        conflict(format!(
+            "the pushed copy has no readable info.json ({e}); the dataset dir on the \
+             follower needs one before it can be pushed"
+        ))
+    })?;
+    if info.uuid != uuid {
+        return Err(conflict(format!(
+            "info.json declares uuid '{}' but the push targets '{uuid}'",
+            info.uuid
+        )));
+    }
+    if info.dataset_type != *ty {
+        return Err(conflict(format!(
+            "info.json declares type '{}' but the push targets '{}'",
+            info.dataset_type.as_str(),
+            ty.as_str()
+        )));
+    }
+
+    // Re-verify every claim against the staged bytes: the PUTs checked their own
+    // digests, this checks the tree that is about to become the dataset.
+    for f in &record.files {
+        let p = rel_to_path(&tree, &f.path);
+        if !p.is_file() {
+            return Err(conflict(format!("'{}' was never uploaded", f.path)));
+        }
+        let sha = hash_file_contents(&p)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("'{}': {e}", f.path)))?;
+        if sha != f.sha256 {
+            return Err(conflict(format!(
+                "'{}' does not match the digest this push declared",
+                f.path
+            )));
+        }
+    }
+    for d in &record.deletes {
+        if rel_to_path(&tree, d).exists() {
+            return Err(conflict(format!(
+                "'{d}' was declared deleted but is still in the pushed tree"
+            )));
+        }
+    }
+    if let Some(db) = &record.db {
+        let staged = stage.join("db.sqlite3");
+        let sha = hash_file_contents(&staged).map_err(|e| {
+            conflict(format!("the dataset DB was never uploaded ({e})"))
+        })?;
+        if sha != db.sha256 {
+            return Err(conflict(
+                "the uploaded dataset DB does not match the digest this push declared".into(),
+            ));
+        }
+    }
+
+    // Backup exactly what the push destroys: the files it replaces, the ones it
+    // drops, and the old DB. Everything else survives by hard-link into the new
+    // tree, so trashing it would duplicate bytes to no purpose.
+    let mut trashed: Vec<String> = Vec::new();
+    let mut victims: Vec<String> = record.files.iter().map(|f| f.path.clone()).collect();
+    victims.extend(record.deletes.iter().cloned());
+    victims.sort();
+    victims.dedup();
+    for rel in &victims {
+        let p = rel_to_path(dir, rel);
+        if p.is_file() {
+            match datasets::media::move_to_trash(&p) {
+                Ok(t) => trashed.push(t.display().to_string()),
+                Err(e) => log::warn!("[ingest] {uuid}: could not trash '{rel}': {e}"),
+            }
+        }
+    }
+    if record.db.is_some() {
+        let old_db = dir.join("data.sqlite3");
+        if old_db.is_file() {
+            match datasets::media::move_to_trash(&old_db) {
+                Ok(t) => trashed.push(t.display().to_string()),
+                Err(e) => log::warn!("[ingest] {uuid}: could not trash the old DB: {e}"),
+            }
+        }
+    }
+    if let Some(db) = &record.db {
+        std::fs::rename(stage.join("db.sqlite3"), tree.join("data.sqlite3"))
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("install DB: {e}")))?;
+        let _ = db;
+    }
+
+    // Two renames install the tree. The old directory is moved aside first, so a
+    // failure here can be rolled back instead of leaving the hub with nothing.
+    let prev = stage.join("prev");
+    let moved_aside = if dir.exists() {
+        std::fs::rename(dir, &prev)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("move aside: {e}")))?;
+        true
+    } else {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir: {e}")))?;
+        false
+    };
+    if let Err(e) = std::fs::rename(&tree, dir) {
+        if moved_aside {
+            let _ = std::fs::rename(&prev, dir);
+        }
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("install pushed tree: {e}"),
+        ));
+    }
+    let _ = std::fs::remove_dir_all(&prev);
+
+    let new_gen = sync::set_content_gen(conn, uuid, gen_now + 1)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let m = compute_manifest(dir, uuid, Some(conn));
+    let _ = std::fs::remove_dir_all(&stage);
+    log::info!(
+        "[ingest] {uuid}: installed {} file(s) at revision {new_gen} ({} trashed)",
+        m.file_count,
+        trashed.len()
+    );
+    Ok(serde_json::json!({
+        "content_gen": new_gen,
+        "overall_hash": m.overall_hash,
+        "file_count": m.file_count,
+        "total_bytes": m.total_bytes,
+        "trashed_to": trashed,
+        "created": !exists,
+        "dataset_type": ty.as_str(),
+    }))
+}
+
+async fn ingest_commit(
+    State(st): State<RestState>,
+    Extension(auth): Extension<sync::pairing::AuthContext>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+    Json(req): Json<IngestCommitReq>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    if !settings.is_hub() {
+        return json_error(
+            StatusCode::CONFLICT,
+            "this machine is a follower; push to the hub, not to a follower",
+        );
+    }
+    let (dir, ty, exists) = match ingest_target(&settings, &uuid, &req.dataset_type) {
+        Ok(v) => v,
+        Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
+    };
+    if datasets::is_under_download_root(&settings, &dir) {
+        return json_error(
+            StatusCode::CONFLICT,
+            "the hub's copy is a read-only download base — fork it into a writable \
+             location before pushing over it",
+        );
+    }
+    log::info!(
+        "[ingest] commit uuid={uuid} run={} device={:?}",
+        req.run, auth.device_id
+    );
+    let conn = match crate::datasets::dictation::open_app_db(&settings) {
+        Ok(c) => c,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let run = req.run.clone();
+    let gen = req.content_gen;
+    // The blocking closure owns the app handle rather than a borrow of the router
+    // state: `State` is scoped to this handler frame, the handle is not.
+    let app = st.app.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        let settings = app.state::<SettingsState>();
+        ingest_install(&settings, &dir, &uuid, &ty, exists, &run, gen, &conn)
+    })
+    .await;
+    match out {
+        Ok(Ok(v)) => (StatusCode::OK, Json(v)).into_response(),
+        Ok(Err((code, msg))) => json_error(code, &msg),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("commit failed: {e}"),
+        ),
+    }
+}
+
+/// `GET /datasets/{uuid}/db` — a point-in-time copy of the dataset DB plus the
+/// revision it belongs to, so a follower can adopt a pushed DB without
+/// re-downloading the whole dataset (which is all `overall_hash` could tell it).
+async fn dataset_db(
+    State(st): State<RestState>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    let (dir, _ty) = match datasets::find_dataset_dir_typed(&settings, &uuid) {
+        Ok(d) => d,
+        Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
+    };
+    let gen = crate::datasets::dictation::open_app_db(&settings)
+        .map(|c| sync::content_gen(&c, &uuid))
+        .unwrap_or(0);
+    // `VACUUM INTO` reads one consistent snapshot, so a concurrent write cannot
+    // hand the follower a torn image the way a raw file copy would.
+    let Some(tmp) = snapshot_db_copy(&dir) else {
+        return json_error(StatusCode::NOT_FOUND, "dataset has no data.sqlite3");
+    };
+    let body = match std::fs::read(&tmp) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+        }
+    };
+    let _ = std::fs::remove_file(&tmp);
+    let sha = crate::sync::blobpush::sha256_of_bytes(&body);
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/vnd.sqlite3".to_string()),
+            (header::CONTENT_LENGTH, body.len().to_string()),
+            (header::HeaderName::from_static("x-content-sha256"), sha),
+            (header::HeaderName::from_static("x-content-gen"), gen.to_string()),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

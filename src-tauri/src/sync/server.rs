@@ -640,10 +640,16 @@ async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) ->
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    // Buffer the body only when we must hash it. Streaming multipart uploads
-    // (`/chat/message`) can carry large media and sign an *empty* body
-    // component on both ends, so leave those untouched for the handler.
-    let body_bytes: Vec<u8> = if peer_protocol >= 2 && content_type.starts_with("multipart/") {
+    // Buffer the body only when we must hash it. Streaming uploads can carry
+    // large media and sign an *empty* body component on both ends, so leave
+    // those untouched for the handler:
+    // * multipart (`/chat/message`) — the message uuid carries replay safety;
+    // * `x-fms-stream: 1` — a dataset ingest `PUT` whose content digest rides in
+    //   the *signed* query instead of the body. Fail-closed: a request signed
+    //   over its body would not verify if this flag were added afterwards.
+    let streaming = content_type.starts_with("multipart/")
+        || headers.get("x-fms-stream").is_some_and(|v| v == "1");
+    let body_bytes: Vec<u8> = if peer_protocol >= 2 && streaming {
         Vec::new()
     } else if peer_protocol >= 2 {
         let (parts, body) = req.into_parts();

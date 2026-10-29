@@ -2,8 +2,8 @@
   "name": "features_advertised",
   "invariant": "INV-20 — a host is written to only for scopes it advertises",
   "check": "features",
-  "notes": "The features[] list the desktop hub advertises over GET /api/v1/cluster, read from the single source sync::HUB_FEATURES (so it can never drift from the routes the hub mounts). Today the hub serves exactly two journal scopes; phase 7a grows this list (registry_reads, chat, ...) as the website host learns to serve them, and the same list must then be served unchanged by the website — the cross-host parity assertion INV-20 names.",
+  "notes": "The features[] list the desktop hub advertises over GET /api/v1/cluster, read from the single source sync::HUB_FEATURES (so it can never drift from the routes the hub mounts). Two journal scopes plus `dataset_ingest`, the follower-to-hub write half of the file plane (/datasets/{uuid}/ingest* and GET /datasets/{uuid}/db, see docs/design/dataset-push.md). Phase 7a grows this list (registry_reads, chat, ...) as the website host learns to serve them, and the same list must then be served unchanged by the website — the cross-host parity assertion INV-20 names. That parity cuts both ways: a host that does not mount the ingest routes (today's website) must NOT advertise `dataset_ingest`, because every client default-denies an unadvertised capability rather than probing for it.",
   "expect": {
-    "features": ["dataset_journal", "app_journal"]
+    "features": ["dataset_journal", "app_journal", "dataset_ingest"]
   }
 }
