@@ -49,6 +49,11 @@ modes share one dataset layer, and all five are core: **dictation** (type or spe
 you kept) and **wiki** (the notes that tie it together). No upload, no per-minute bill, no account:
 the models, the datasets and your progress live on the disk you already have.
 
+**One library, several machines.** A desktop holds the authoritative copy and serves it; your phone
+and a second PC follow it, pulling the datasets they need and sending their edits back. Practising on
+any of them keeps the same dictation history, review schedule and XP — so the phone in your pocket is
+the same library, not a copy you have to remember to update.
+
 The [user manual](docs/manual/index.md) covers each mode in depth — start at
 [Getting started](docs/manual/getting_started.md), then read the page for the mode you care about.
 
@@ -120,9 +125,10 @@ fresh dataset has to be prepared before there is anything to practise.
    the slow one on a long audiobook; *Logs* shows it working.
 5. **Practise.** Open the Dictation page and start typing. Everything after that point is optional.
 
-Signing in is optional too: it ties XP to a website account and enables Hub/Follower sync, and
-nothing in the loop above needs it. [Getting started](docs/manual/getting_started.md) is the longer
-version of these five steps.
+Signing in is optional, and it is not what makes a phone work: a hub and its followers talk over your
+LAN or tailnet with a pairing code and no account at all. An account only ties XP to the website and
+lets a hub publish its datasets there. [Getting started](docs/manual/getting_started.md) is the
+longer version of these five steps.
 
 ## Features
 
@@ -147,6 +153,27 @@ same cross-device sync.
 
 Cards, read-aloud passes and book quizzes all pay into one **XP ledger**.
 
+**Cross device — the same library on every machine**
+
+- **A hub and its followers.** A workspace is either the **hub** — the authoritative copy, serving
+  its datasets over the network — or a **follower** that pulls what it wants and pushes edits back.
+  Roles belong to the workspace rather than the app, a phone is always a follower, and the service
+  starts and stops with the role: there is no server to start by hand, and no port to open.
+- **Found, then paired once.** Devices announce themselves on the LAN (with a direct TCP sweep when
+  broadcasts are blocked) and over Tailscale. Pairing is one short code, shown on both screens and
+  approved on the hub; afterwards sync needs no further approval. Loopback and tailnet peers skip
+  pairing entirely, and a hub can revoke a device at any time.
+- **Both halves travel.** Media, subtitles, cues, cards, books, read-aloud takes and wiki pages move
+  as dataset content; dictation history, review scheduling, attempts and XP move as your own state. A
+  conflict keeps the later edit, and a local edit that has not been pushed yet is never overwritten.
+- **A wiki you have not downloaded.** On a follower the Wiki page reads and searches the hub's copies
+  read-only; downloading one is what makes it editable, and the search index is rebuilt locally
+  rather than transferred.
+- **Chat between your own devices.** One thread with attachments, stored on the hub, for sending a
+  file from the PC to the phone.
+
+See [Multiple devices](docs/manual/multiple_devices.md).
+
 **The layer they share**
 
 - **One pipeline** — import → subtitles (STT) → waveforms → database, plus transcript alignment and
@@ -154,9 +181,6 @@ Cards, read-aloud passes and book quizzes all pay into one **XP ledger**.
   [Datasets & the pipeline](docs/manual/datasets.md).
 - **Local models** — Parakeet ONNX and Whisper GGML for speech, SaT for sentence splitting, Tesseract
   for OCR — all downloaded and swapped from the Models page. See [Models](docs/manual/models.md).
-- **Sync** — pull a dataset from another FmS machine over the LAN or tailnet (phone ↔ PC, PC ↔ PC),
-  with discovery, device pairing and snapshot progress (see
-  [Multiple devices](docs/manual/multiple_devices.md)).
 - **Nothing is lost by accident** — a destructive action moves the dataset or file into the app
   trash, where you can restore it.
 
@@ -248,7 +272,7 @@ There is no telemetry, no analytics, no crash reporting, and no account is neede
 | LLM features with Ollama on `localhost` (OCR clean-up, word explanations, read-aloud normalization) | **No** | — |
 | The same LLM features with a cloud provider (`openai`, `anthropic`, `groq`, `databricks`) | Yes — only if you configure a key | The prompt, and the text it asks about |
 | Speaking text aloud: Books, Read Aloud, Understanding panel, TTS page | Yes | The text to be spoken → Microsoft Edge TTS |
-| Dataset sync to another of your devices | To that device only | The dataset snapshot, over your LAN or tailnet |
+| Dataset sync to another of your devices | To that device only | The dataset snapshot and your progress, over your LAN or tailnet |
 | Website account, dataset registry, mirror | Yes — opt-in | Login plus the dataset metadata you publish to `lusworkshop.site` |
 | Model download | Yes — opt-in | A file request to `huggingface.co` or `blob.handy.computer` |
 | Release/update check (Settings → About) | Yes | A request to `api.github.com`; no identifiers beyond the request itself |
