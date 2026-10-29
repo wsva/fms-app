@@ -114,14 +114,58 @@ Cards, read-aloud passes and book quizzes all pay into one **XP ledger**.
 - **Workspaces** — several learners or several projects, with separate settings, progress and
   datasets on one machine.
 
-**Agents can drive the app.** The practice modes and the dataset pipeline are exposed as MCP tools,
-so an attached agent can import, generate, audit, score and edit alongside you. The app publishes its
-own agent manual, and a dock in the UI shows what an agent is doing while it works.
+**Agent-first by design.** The practice modes and the dataset pipeline are exposed to agents as MCP
+tools, alongside everything you can click — see [Built for agents](#built-for-agents).
 
 **LLM features, no chat window.** A language model is called from the features that need one —
 chapter digests, word explanations in Books, comprehension quizzes, OCR clean-up, read-aloud text
 normalization, and feedback on a take. Point it at a local Ollama, or at a cloud provider through the
 goose SDK layer; for open-ended questions use your own model or an attached agent.
+
+## Built for agents
+
+**The bet.** The agent will be the most important software on a personal computer — not a panel
+bolted to the side of an app, but the place most people work from — and knowing how to direct one
+will be a core ability, as running a search engine or a spreadsheet once was. FmS is built on that
+assumption completely rather than cautiously: agent-friendliness is a first-class design constraint
+here, weighted the same as being usable by a human, so a decision that serves only one of the two is
+a decision not yet made. The rules live in
+[`docs/agent_friendly_design.md`](docs/agent_friendly_design.md).
+
+There is a second, more self-interested reason. A language app lives or dies between sessions: the
+learner who has to find the right folder, import, wait, nurse a failed stage and cut reference clips
+by hand eventually stops opening the app at all. Every one of those jobs can be handed to an agent
+already sitting on the same machine. So whatever makes FmS legible to an agent also makes it used —
+the two arguments point the same way, which is why a principle this broad is worth holding to.
+
+What that means in practice:
+
+- **One app, two tenants.** Everything you can do in the UI is also an MCP tool — datasets and the
+  pipeline, dictation and cues, cards and review, books and their understanding layer, read-aloud
+  scoring, wiki, OCR, models, sync, workflows, settings — and the page publishes what the user is
+  looking at and which actions are on screen, so an agent can act on the screen in front of the
+  human rather than guess at it.
+- **The app documents itself.** It serves an agent manual (`/agent.md`, `/agent.json`), its own tool
+  index, MCP resources for the domain rules (`fms://status`, `fms://docs/...`) and ready-made prompt
+  recipes, so an agent that has never seen FmS can find the right call without being taught.
+- **Proof, not trust.** Writes return JSON that proves them — a count, or a server-assigned id — and
+  a bulk call returns `saved` / `failed` summing to what was sent. Errors name the next call to make
+  instead of leaving an agent to guess.
+- **Reversible by default.** Destruction is not gated behind a confirmation parameter: it moves the
+  dataset or file into the app trash, where it can be restored. Every tool carries a tier — `read`,
+  `write`, `destructive`, `ui-control`, `human-handoff` — and every call is written to a journal
+  (`app_audit_get` reads it back), so `mcp_policy = "enforce"` can refuse the last two outright.
+- **Humans stay where they matter.** Work that needs a person — record this take, approve this
+  subtitle, judge whether this reference clip is right — is not forced through a tool call: an agent
+  leaves it as a task in the app, deep-linked to the exact screen, and a workflow that ends in a
+  `human` step stays parked until the task is ticked off, then continues. The agent dock shows the
+  work while it happens.
+
+**What you get from it.** An import that would be an evening of clicking becomes one conversation; a
+pipeline stage that failed can be asked about rather than deciphered; material can be prepared —
+imported, split, spoken with TTS, normalized — while you practise something else. Nothing about it
+moves your data: the agent reaches the app by running on your machine, or over the pairing you
+already use for your phone (see [Privacy](#privacy)).
 
 ## Privacy
 
