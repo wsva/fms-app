@@ -189,7 +189,10 @@ pub async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
 ///
 /// Returns only where the installer can be applied without leaving the
 /// process: on Windows the plugin exits first, so the caller never sees a
-/// result there.
+/// result there. That hand-over is a race the app cannot win by exiting
+/// faster — the installer starts while this process is still tearing down,
+/// and its Restart Manager shutdown of a dying process fails. So the installer
+/// waits for this process to disappear itself; see `nsis/installer-hooks.nsh`.
 pub async fn install(app: &AppHandle) -> Result<(), String> {
     let (supported, _) = platform_support();
     if !supported {
