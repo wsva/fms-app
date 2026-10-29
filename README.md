@@ -23,11 +23,11 @@
 
 <table>
   <tr>
-    <td><img src="docs/img/dictation.png" alt="Dictation: a cue card above the waveform, with the words you missed lit up in it" /></td>
+    <td><img src="docs/img/dictation.png" alt="Dictation: a cue card above the waveform, the words you missed lit up inside it, with the play and mic controls at its edge" /></td>
     <td><img src="docs/img/book.png" alt="Books: a chapter with the understanding panel open beside the text" /></td>
   </tr>
   <tr>
-    <td align="center"><sub>Dictation — type what you hear</sub></td>
+    <td align="center"><sub>Dictation — type or speak what you hear</sub></td>
     <td align="center"><sub>Books — read, with an understanding panel</sub></td>
   </tr>
   <tr>
@@ -44,17 +44,17 @@
 
 FmS is a **local-first language lab**. You bring the material you already own — a textbook's MP3s,
 an audiobook, a podcast, a lecture recording, a chapter of prose — and it becomes practice. Five
-modes share one dataset layer, and all five are core: **dictation** (type what you hear), **books**
-(read, look up, understand), **read aloud** (speak and be scored), **cards** (review what you kept)
-and **wiki** (the notes that tie it together). No upload, no per-minute bill, no account: the
-models, the datasets and your progress live on the disk you already have.
+modes share one dataset layer, and all five are core: **dictation** (type or speak what you hear),
+**books** (read, look up, understand), **read aloud** (speak and be scored), **cards** (review what
+you kept) and **wiki** (the notes that tie it together). No upload, no per-minute bill, no account:
+the models, the datasets and your progress live on the disk you already have.
 
 The [user manual](docs/manual/index.md) covers each mode in depth — start at
 [Getting started](docs/manual/getting_started.md), then read the page for the mode you care about.
 
 **Dictation is where it started.** Import the files, a local speech-to-text model cuts them into
-cue-level subtitles, and you train by typing what you hear, cue by cue, revealing the reference when
-you are done.
+cue-level subtitles, and you train by producing each cue yourself — typed, or spoken into the cue's
+microphone and transcribed by the same model — revealing the reference when you are done.
 
 **Between sessions it is a toolkit.** The same app recognises text in a screenshot, splits a raw
 text into sentences, reads a PDF, speaks a sentence in a natural voice and keeps a searchable
@@ -130,9 +130,10 @@ version of these five steps.
 same cross-device sync.
 
 - **[Dictation](docs/manual/dictation.md)** — import what you own (`mp3`, `wav`, `m4a`/`m4b`
-  audiobooks, `ogg`, `flac`, `mp4`, `webm`), let on-device STT cut it into cues, then type what you
-  hear: canvas waveform, cue cards, per-cue progress, large and focus modes, and a word-level hint
-  that lights up the words you missed.
+  audiobooks, `ogg`, `flac`, `mp4`, `webm`), let on-device STT cut it into cues, then answer each one
+  by typing it or saying it into the cue's mic — the same local model writes down what you said.
+  Canvas waveform, cue cards, per-cue progress, large and focus modes, and a word-level hint that
+  lights up the words you missed.
 - **[Books](docs/manual/books.md)** — split a text into chapters and sentences, read along with
   per-sentence TTS, look words up in context, and build its understanding layer: explanations,
   simplifications, a chapter digest, an argument map, a glossary, and comprehension quizzes.
@@ -174,8 +175,9 @@ Cards, read-aloud passes and book quizzes all pay into one **XP ledger**.
 - **PDF Reader** — read documents and handouts without leaving the app.
 - **Simple Words** — mark the words you already know, so word generation and dictation helpers stop
   offering them.
-- **Voice input** — tap the mic, or press `Ctrl+C` in a text field, and your speech is transcribed
-  locally and inserted at the cursor.
+- **Voice input** — press the mic on a cue (or `Ctrl+C` in any text field) and your speech is
+  transcribed locally and inserted at the cursor. In dictation that is the answering mode: say the
+  cue instead of typing it.
 - **[Workspaces](docs/manual/workspaces_accounts_settings.md)** — several learners or several
   projects, with separate settings, progress and datasets on one machine.
 
