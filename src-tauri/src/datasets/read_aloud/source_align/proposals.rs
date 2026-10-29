@@ -9,7 +9,7 @@ use crate::settings::SettingsState;
 use super::super::standard_audio::{self, StandardAudioRow};
 use super::super::{find_dataset_dir, find_dataset_dir_write, open_db};
 use super::index::{
-    align_dir, load_index, preview, read_json, transcript_path, write_json, Preview,
+    align_dir, load_index, preview, read_json, read_transcript, write_json, Preview,
     SourceTranscript,
 };
 use super::{round_ms, MIN_SPAN_SECS, PEAK_SECONDS};
@@ -198,9 +198,11 @@ pub(crate) fn list(settings: &SettingsState, dataset_uuid: &str) -> Result<Value
         let preview = if proposal.status == "proposed" {
             source.and_then(|source| {
                 let transcript = cache.entry(source.uuid.clone()).or_insert_with(|| {
-                    read_json(&transcript_path(&dir, &source.uuid)).unwrap_or(SourceTranscript {
+                    read_transcript(&dir, source).unwrap_or(SourceTranscript {
                         uuid: source.uuid.clone(),
                         file_name: source.file_name.clone(),
+                        content_hash: source.content_hash.clone(),
+                        size: source.size,
                         duration: source.duration.unwrap_or(0.0),
                         peak_seconds: PEAK_SECONDS,
                         peaks: String::new(),
@@ -226,7 +228,12 @@ pub(crate) fn list(settings: &SettingsState, dataset_uuid: &str) -> Result<Value
                 proposal.note.clone()
             },
             source_uuid: proposal.source_uuid.clone(),
-            source_name: proposal.source_name.clone(),
+            // The binding is what knows the file's current name: an adopted or
+            // renamed recording must not show the name it had on the machine
+            // the cache was written on.
+            source_name: source
+                .map(|source| source.file_name.clone())
+                .unwrap_or_else(|| proposal.source_name.clone()),
             source_path: source.map(|s| s.path.clone()).unwrap_or_default(),
             start: proposal.start,
             end: proposal.end,

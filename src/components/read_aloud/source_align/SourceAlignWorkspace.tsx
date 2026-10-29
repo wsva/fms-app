@@ -438,10 +438,13 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
             busy={busy}
             listeningUuid={sourceList.listeningUuid}
             selected={sourceList.sourceSel}
+            reconcile={sourceList.index?.reconcile ?? null}
+            previousDirectory={sourceList.previousDirectory}
             transcript={sourceList.transcript}
             transcriptBusy={sourceList.transcriptBusy}
             transcriptError={sourceList.transcriptError}
             onPick={sourceList.pickFolder}
+            onReconnect={sourceList.reconnectToPrevious}
             onTranscribeAll={sourceList.transcribeAll}
             onTranscribeFile={sourceList.transcribeOne}
             onStop={sourceList.stopTranscribing}

@@ -34,10 +34,40 @@ export interface AlignSource {
   path: string;
   size: number;
   modified_ms: number;
+  /**
+   * sha256 of the bytes. This — not the path and not the mtime — is what says
+   * a cached transcript describes this file, which is why a folder copied from
+   * another machine keeps every transcript it brought with it.
+   */
+  content_hash: string;
   /** Seconds of audio; `null` until this file is transcribed. */
   duration: number | null;
   /** Spoken words in the cached transcript; `null` when there is no cache. */
   words: number | null;
+}
+
+/**
+ * What a folder pick did to the cache.
+ *
+ * Every file's bytes either matched a transcript this dataset already had
+ * (`reused`), matched one under an older name (`adopted`), or need listening
+ * (`new`). Nothing is deleted: `orphaned` counts cache files no recording in
+ * this folder claims, and they are kept so switching folders back is free.
+ */
+export interface AlignReconcile {
+  directory: string;
+  total: number;
+  reused: number;
+  adopted: number;
+  /** Adopted by file name alone, because the align dir carried no size to check. */
+  adopted_unverified: number;
+  new: number;
+  /** Recordings the previous binding had that this folder does not. */
+  missing: number;
+  /** Cache files no recording here claims — kept, not deleted. */
+  orphaned: number;
+  /** Recordings still here whose position in the playing order moved. */
+  reordered: number;
 }
 
 export interface AlignSourceIndex {
@@ -47,6 +77,8 @@ export interface AlignSourceIndex {
   source_count: number;
   transcribed: number;
   pending_transcription: number;
+  /** What the pick found; `null` when this call only listed. */
+  reconcile: AlignReconcile | null;
 }
 
 export interface AlignTranscribeResult extends AlignSourceIndex {
@@ -224,11 +256,16 @@ export interface AlignApplyResult {
 }
 
 /**
- * Scan a folder for recordings and register them in playing order.
+ * Scan a folder for recordings and bind them to this dataset in playing order.
+ *
+ * Registration connects rather than rebuilds: a recording is identified by the
+ * sha256 of its bytes, so a folder copied to another machine — or renamed, or
+ * moved — keeps the transcript of every file whose content did not change, and
+ * a cache file this dataset already owns is reused however the mtime moved.
+ * The returned `reconcile` block says what the connection found.
  *
  * Omitting `directory` lists what is already registered, which is what the
- * panel calls on mount. Re-picking a folder keeps the transcript of every file
- * that kept its name *and* its size and mtime; anything else is re-transcribed.
+ * panel calls on mount, and hashes nothing.
  */
 export async function registerAlignSources(
   datasetUuid: string,

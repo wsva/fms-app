@@ -66,7 +66,7 @@
 //! of them a tool, so an agent drives the same pipeline a human does in the
 //! Advanced panel.
 
-
+mod cache;
 mod index;
 mod place;
 mod proposals;

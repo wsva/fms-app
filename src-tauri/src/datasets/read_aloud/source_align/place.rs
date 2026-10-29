@@ -10,8 +10,7 @@ use super::super::standard_audio::{
 };
 use super::super::{edges, find_dataset_dir_write, open_db};
 use super::index::{
-    decode_peaks, load_index, read_json, transcript_path, write_json, SourceIndex,
-    SourceTranscript,
+    decode_peaks, load_index, read_transcript, write_json, SourceIndex, SourceTranscript,
 };
 use super::proposals::{counts, load_proposals, proposals_path, Proposal, ProposalSet};
 use super::{
@@ -231,7 +230,7 @@ fn prepare(dir: &Path) -> Result<Prepared, String> {
     let transcripts: Vec<Option<SourceTranscript>> = index
         .sources
         .iter()
-        .map(|source| read_json(&transcript_path(dir, &source.uuid)))
+        .map(|source| read_transcript(dir, source))
         .collect();
     if transcripts.iter().all(Option::is_none) {
         return Err(

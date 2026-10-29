@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -13,6 +14,7 @@ use crate::audio;
 use crate::datasets::asr_metric;
 use crate::settings::SettingsState;
 
+use super::cache;
 use super::super::standard_audio::{self, MAX_SOURCE_SECS};
 use super::super::{find_dataset_dir, find_dataset_dir_write};
 use super::{
@@ -42,6 +44,13 @@ pub struct SourceEntry {
     /// Spoken words in the cached transcript; `None` when there is no cache.
     #[serde(default)]
     pub words: Option<usize>,
+    /// sha256 of the bytes. This — not the path, not the mtime, and not the
+    /// name — is what says a cache describes this file: a copy to another
+    /// machine changes the first two and may change the third, and none of
+    /// that changes a word the model heard. Empty on a dataset written before
+    /// content hashes existed.
+    #[serde(default)]
+    pub content_hash: String,
 }
 
 /// The ordered recording list.
@@ -71,6 +80,14 @@ pub(super) struct SpokenWord {
 pub(super) struct SourceTranscript {
     pub(super) uuid: String,
     pub(super) file_name: String,
+    /// The bytes this cache describes, so the file can be adopted by the align
+    /// index of another machine without consulting `sources.json`.
+    #[serde(default)]
+    pub(super) content_hash: String,
+    /// Byte length of that recording — a cheap "same file?" cross-check when a
+    /// cache arrives without a manifest or a binding.
+    #[serde(default)]
+    pub(super) size: u64,
     pub(super) duration: f64,
     /// Seconds one peak pair covers — stored rather than assumed, so changing
     /// [`PEAK_SECONDS`] does not silently misread old caches.
@@ -79,7 +96,6 @@ pub(super) struct SourceTranscript {
     pub(super) peaks: String,
     pub(super) words: Vec<SpokenWord>,
 }
-
 
 // ============================================================
 // Paths and JSON
@@ -93,10 +109,23 @@ fn sources_path(dir: &Path) -> PathBuf {
     align_dir(dir).join("sources.json")
 }
 
-pub(super) fn transcript_path(dir: &Path, source_uuid: &str) -> PathBuf {
-    align_dir(dir).join(format!("{}.json", source_uuid))
+/// One cached transcript, by cache key: a recording's content hash, or — for a
+/// cache written before hashes existed — its file-name hash.
+pub(super) fn transcript_path(dir: &Path, cache_key: &str) -> PathBuf {
+    align_dir(dir).join(format!("{}.json", cache_key))
 }
 
+/// A recording's cached transcript, by content hash and then — for a dataset
+/// that has not been re-picked since the upgrade — by its file-name hash.
+pub(super) fn read_transcript(dir: &Path, source: &SourceEntry) -> Option<SourceTranscript> {
+    let hash = source.content_hash.trim();
+    if !hash.is_empty() {
+        if let Some(transcript) = read_json(&transcript_path(dir, hash)) {
+            return Some(transcript);
+        }
+    }
+    read_json(&transcript_path(dir, &source.uuid))
+}
 
 /// A missing or unreadable cache reads as "nothing cached yet". Derived data
 /// must never turn into a failure: the next run simply rebuilds it.
@@ -130,23 +159,39 @@ fn save_index(dir: &Path, index: &SourceIndex) -> Result<(), String> {
 // index on this device, or not at all. These two reads are how the clip cache
 // (`standard_audio::materialize`) finds the audio to cut.
 
+/// Where a registered recording is now: the path it was scanned at, or — when
+/// that path is gone — the same file name under the folder the index is bound
+/// to. A folder copied to another machine keeps its recordings and only moves
+/// them, so the second answer is the common one, not the exception.
+fn resolve_source(index: &SourceIndex, entry: &SourceEntry) -> Option<PathBuf> {
+    let stored = PathBuf::from(&entry.path);
+    if stored.is_file() {
+        return Some(stored);
+    }
+    if index.directory.is_empty() {
+        return None;
+    }
+    let relinked = Path::new(&index.directory).join(&entry.file_name);
+    relinked.is_file().then_some(relinked)
+}
+
 /// The recording a stored span names, if it is still where it was registered.
 /// A moved or deleted file answers `None` — a clip is not cut from a guess.
 pub(crate) fn source_file(dir: &Path, source_uuid: &str) -> Option<PathBuf> {
     let index = load_index(dir);
     let entry = index.sources.iter().find(|s| s.uuid == source_uuid)?;
-    let path = PathBuf::from(&entry.path);
-    path.is_file().then_some(path)
+    resolve_source(&index, entry)
 }
 
 /// Every registered recording that is still on this device, for a listing that
 /// wants to know which span clips it could cut without asking one by one.
-pub(crate) fn present_sources(dir: &Path) -> std::collections::HashSet<String> {
-    load_index(dir)
+pub(crate) fn present_sources(dir: &Path) -> HashSet<String> {
+    let index = load_index(dir);
+    index
         .sources
-        .into_iter()
-        .filter(|s| Path::new(&s.path).is_file())
-        .map(|s| s.uuid)
+        .iter()
+        .filter(|source| resolve_source(&index, source).is_some())
+        .map(|source| source.uuid.clone())
         .collect()
 }
 
@@ -277,18 +322,15 @@ fn is_audio_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The recording's identity: the hash of its file name. Two files cannot share
-/// a name in one directory, so this is unique within a dataset and survives a
-/// re-pick that keeps the names — which is exactly when the cache should survive
-/// too.
+/// The file's slot in the dataset: a hash of its name.
+///
+/// Not its identity — [`SourceEntry::content_hash`] is — but the name a stored
+/// span and a clip row use, so keeping it means a copied folder keeps working
+/// without a migration of `proposals.json` or `read_standard_audio`.
 fn source_uuid(file_name: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(file_name.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect()
+    cache::hex_digest(hasher.finalize())
 }
 
 fn fingerprint(path: &Path) -> (u64, u64) {
@@ -354,12 +396,20 @@ fn trim_leading_zeros(digits: &[u8]) -> &[u8] {
 // Register
 // ============================================================
 
-/// Scan `directory` for recordings and record them in playing order.
+/// Bind this dataset to `directory` and reuse every cache the bytes allow.
 ///
-/// A file whose size or mtime changed drops its cached transcript: the bytes it
-/// described are gone, and keeping a stale transcript would put every span in
-/// that file at the wrong second. Omitted `directory` lists what is already
-/// registered, so the panel can render without re-picking.
+/// Registration is a *connect*, not a rebuild. Each file is identified by the
+/// sha256 of its bytes: a recording whose bytes this dataset already heard
+/// keeps its transcript however its mtime moved, whatever it is called now, and
+/// wherever the folder lives — which is what makes a recordings folder plus its
+/// `align/` portable to another machine with no re-recognition. A cache written
+/// before content hashes existed is adopted by file name (and size, when a
+/// previous binding is there to compare against) and renamed to its hash.
+///
+/// Nothing is deleted: a cache for a recording that is no longer in the folder
+/// stays on disk and is reported as `orphaned`, so switching folders is free
+/// and reversible. Omitted `directory` lists what is already registered, so the
+/// panel can render without re-picking — and without hashing anything.
 pub(crate) fn register(
     settings: &SettingsState,
     dataset_uuid: &str,
@@ -367,6 +417,8 @@ pub(crate) fn register(
 ) -> Result<Value, String> {
     let dir = find_dataset_dir_write(settings, dataset_uuid)?;
     let mut index = load_index(&dir);
+    let previous = index.sources.clone();
+    let mut reconcile: Option<Value> = None;
 
     if let Some(given) = directory.map(str::trim).filter(|s| !s.is_empty()) {
         let root = Path::new(given);
@@ -385,48 +437,171 @@ pub(crate) fn register(
         }
         files.sort_by(|a, b| natural_cmp(&file_name_of(a), &file_name_of(b)));
 
+        // What is already cached, read before anything is hashed: the answer to
+        // "do I have this file's transcript?" is a file name, not a decode.
+        let cache = cache::scan(&dir);
+        let mut manifest = cache::load_manifest(&dir);
+        let previous_by_uuid: HashMap<&str, &SourceEntry> = previous
+            .iter()
+            .map(|source| (source.uuid.as_str(), source))
+            .collect();
+
         let mut sources = Vec::with_capacity(files.len());
+        let mut reused = 0usize;
+        let mut adopted = 0usize;
+        let mut adopted_unverified = 0usize;
+        let mut fresh = 0usize;
+
         for path in files {
             let file_name = file_name_of(&path);
             let uuid = source_uuid(&file_name);
+            let path_string = path.to_string_lossy().into_owned();
             let (size, modified_ms) = fingerprint(&path);
-            // Only a file that is byte-for-byte the one transcribed keeps its
-            // cache; anything else had its cache dropped just above.
-            let previous = index
-                .sources
-                .iter()
-                .find(|s| s.uuid == uuid && s.size == size && s.modified_ms == modified_ms && s.words.is_some());
-            if previous.is_none() {
-                let _ = fs::remove_file(transcript_path(&dir, &uuid));
+            let known = previous_by_uuid.get(uuid.as_str()).copied();
+
+            // One sequential read for a file this device has not hashed at this
+            // path, size and mtime before — and none at all for one it has.
+            let content_hash = match known.filter(|source| {
+                source.path == path_string
+                    && source.size == size
+                    && source.modified_ms == modified_ms
+                    && !source.content_hash.is_empty()
+            }) {
+                Some(hashed) => hashed.content_hash.clone(),
+                None => cache::hash_file(&path)
+                    .map_err(|e| format!("Cannot hash {}: {}", file_name, e))?,
+            };
+
+            // A cache named after the file can only be believed when nothing
+            // says the bytes changed: a previous hash that disagrees, or a
+            // previous size that disagrees, is the end of the adoption.
+            let adoptable = match known {
+                Some(previous) if !previous.content_hash.is_empty() => {
+                    previous.content_hash == content_hash
+                }
+                Some(previous) => previous.size == size,
+                None => true,
+            };
+            let reused_here = cache.has(&content_hash);
+            let adopted_here = !reused_here && adoptable && cache.has(&uuid);
+
+            let (duration, words) = if reused_here || adopted_here {
+                cache::facts(&dir, &content_hash, &uuid, known, &manifest)
+                    .map(|(duration, words)| (Some(duration), Some(words)))
+                    .unwrap_or((None, None))
+            } else {
+                (None, None)
+            };
+
+            if reused_here {
+                reused += 1;
+            } else if adopted_here {
+                adopted += 1;
+                // An align dir copied in on its own carries no size to check,
+                // so the name is all the evidence there is. Counted, and said
+                // out loud, rather than presented as proof.
+                if !known.is_some_and(|previous| previous.size == size) {
+                    adopted_unverified += 1;
+                }
+                cache::promote(&dir, &uuid, &content_hash)?;
+            } else {
+                fresh += 1;
             }
+
             sources.push(SourceEntry {
-                duration: previous.and_then(|s| s.duration),
-                words: previous.and_then(|s| s.words),
+                duration,
+                words,
                 uuid,
                 file_name,
-                path: path.to_string_lossy().into_owned(),
+                path: path_string,
                 size,
                 modified_ms,
+                content_hash,
             });
         }
+
+        // One manifest write for the whole folder, and one binding write below.
+        let mut keep: HashSet<String> = HashSet::with_capacity(sources.len() * 2);
+        for source in &sources {
+            keep.insert(source.content_hash.clone());
+            keep.insert(source.uuid.clone());
+            if let (Some(duration), Some(words)) = (source.duration, source.words) {
+                manifest.upsert(cache::ManifestEntry {
+                    content_hash: source.content_hash.clone(),
+                    file_name: source.file_name.clone(),
+                    size: source.size,
+                    duration,
+                    words,
+                });
+            }
+        }
+        manifest.dataset_uuid = dataset_uuid.to_string();
+        manifest.updated_at = crate::datasets::now_stamp();
+        cache::save_manifest(&dir, &manifest)?;
+
+        let new_uuids: HashSet<&str> = sources.iter().map(|s| s.uuid.as_str()).collect();
+        let missing = previous
+            .iter()
+            .filter(|source| !new_uuids.contains(source.uuid.as_str()))
+            .count();
+        let orphaned = cache.orphaned(&keep);
+
+        // Order is what a guess reads — the recordings are one stream — so a
+        // folder that sorts differently than the last one may move every span
+        // after the change. Rank is the position in the whole sorted list, not
+        // among the files both folders hold: a chapter inserted or removed
+        // shifts everything behind it, and that is exactly what invalidates a
+        // span. Only files that survived are counted; the one that moved shows
+        // up below as `missing` and `new` instead.
+        let old_rank: HashMap<&str, usize> = previous
+            .iter()
+            .enumerate()
+            .map(|(rank, source)| (source.uuid.as_str(), rank))
+            .collect();
+        let reordered = sources
+            .iter()
+            .enumerate()
+            .filter(|(position, source)| {
+                old_rank
+                    .get(source.uuid.as_str())
+                    .is_some_and(|rank| rank != position)
+            })
+            .count();
+
         index.directory = root.to_string_lossy().into_owned();
         index.sources = sources;
+
+        reconcile = Some(json!({
+            "directory": index.directory.clone(),
+            "total": index.sources.len(),
+            "reused": reused,
+            "adopted": adopted,
+            "adopted_unverified": adopted_unverified,
+            "new": fresh,
+            "missing": missing,
+            "orphaned": orphaned,
+            "reordered": reordered,
+        }));
     }
 
     save_index(&dir, &index)?;
-    Ok(index_view(&index))
+    Ok(index_view(&index, reconcile))
 }
 
-fn index_view(index: &SourceIndex) -> Value {
+fn index_view(index: &SourceIndex, reconcile: Option<Value>) -> Value {
     let transcribed = index.sources.iter().filter(|s| s.words.is_some()).count();
-    json!({
+    let mut out = json!({
         "status": "ok",
         "directory": index.directory,
         "sources": index.sources,
         "source_count": index.sources.len(),
         "transcribed": transcribed,
         "pending_transcription": index.sources.len() - transcribed,
-    })
+    });
+    if let Value::Object(map) = &mut out {
+        map.insert("reconcile".into(), reconcile.unwrap_or(Value::Null));
+    }
+    out
 }
 
 // ============================================================
@@ -463,7 +638,7 @@ pub(crate) fn transcribe(
             None => {
                 // Nothing left to do: answer in the same shape as a real pass,
                 // so the caller can read `sources` without a special case.
-                let mut out = index_view(&index);
+                let mut out = index_view(&index, None);
                 if let Value::Object(map) = &mut out {
                     map.insert("done".into(), json!(true));
                     map.insert("remaining".into(), json!(0));
@@ -473,13 +648,21 @@ pub(crate) fn transcribe(
         },
     };
 
-    let entry = index.sources[position].clone();
-    let path = PathBuf::from(&entry.path);
-    if !path.is_file() {
+    let mut entry = index.sources[position].clone();
+    let Some(path) = resolve_source(&index, &entry) else {
         return Err(format!(
             "{} is no longer at {}. Re-pick the folder to register it again.",
             entry.file_name, entry.path
         ));
+    };
+
+    // A dataset registered before content hashes existed: hash the one file this
+    // call was about to read anyway, so the cache it writes is named for the
+    // bytes and can travel to another machine.
+    if entry.content_hash.is_empty() {
+        entry.content_hash = cache::hash_file(&path)
+            .map_err(|e| format!("Cannot hash {}: {}", entry.file_name, e))?;
+        index.sources[position].content_hash = entry.content_hash.clone();
     }
 
     log::info!("[ReadAloud] transcribing source {} ({})", entry.file_name, entry.path);
@@ -514,18 +697,35 @@ pub(crate) fn transcribe(
     let transcript = SourceTranscript {
         uuid: entry.uuid.clone(),
         file_name: entry.file_name.clone(),
+        content_hash: entry.content_hash.clone(),
+        size: entry.size,
         duration,
         peak_seconds,
         peaks: encode_peaks(&peaks),
         words,
     };
-    write_json(&transcript_path(&dir, &entry.uuid), &transcript)?;
+    write_json(&transcript_path(&dir, &entry.content_hash), &transcript)?;
     index.sources[position].duration = Some(duration);
     index.sources[position].words = Some(transcript.words.len());
+
+    // The manifest is the cache's own table of contents, written before the
+    // binding: whatever copies this `align/` next can describe itself without
+    // reading a single transcript.
+    let mut manifest = cache::load_manifest(&dir);
+    manifest.dataset_uuid = dataset_uuid.to_string();
+    manifest.updated_at = crate::datasets::now_stamp();
+    manifest.upsert(cache::ManifestEntry {
+        content_hash: entry.content_hash.clone(),
+        file_name: entry.file_name.clone(),
+        size: entry.size,
+        duration,
+        words: transcript.words.len(),
+    });
+    cache::save_manifest(&dir, &manifest)?;
     save_index(&dir, &index)?;
 
     let pending = index.sources.iter().filter(|s| s.words.is_none()).count();
-    let mut out = index_view(&index);
+    let mut out = index_view(&index, None);
     if let Value::Object(map) = &mut out {
         map.insert("done".into(), json!(pending == 0));
         map.insert("remaining".into(), json!(pending));
@@ -571,7 +771,7 @@ pub(crate) fn transcript(
         .ok_or_else(|| {
             format!("No recording with id {source_uuid} is registered — pick the folder again.")
         })?;
-    let cache: SourceTranscript = read_json(&transcript_path(&dir, source_uuid)).ok_or_else(|| {
+    let cache: SourceTranscript = read_transcript(&dir, source).ok_or_else(|| {
         format!(
             "{} has no transcript yet — listen to it first.",
             source.file_name
@@ -598,5 +798,283 @@ pub(crate) fn transcript(
         "word_count": words.len(),
         "words": words,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datasets::read_aloud::tests_support::{dataset_with_text, temp_settings};
+
+    // ---- fixtures -----------------------------------------------------------
+
+    /// A folder of recordings, beside the dataset as the real ones are.
+    fn recordings(workspace: &Path, files: &[(&str, &[u8])]) -> PathBuf {
+        let root = workspace.join("recordings");
+        fs::create_dir_all(&root).unwrap();
+        for (name, bytes) in files {
+            fs::write(root.join(name), bytes).unwrap();
+        }
+        root
+    }
+
+    /// Connect a dataset to a folder, and hand back the view plus where the
+    /// dataset lives.
+    fn connect(settings: &SettingsState, dataset: &str, folder: &Path) -> (Value, PathBuf) {
+        let view = register(settings, dataset, Some(&folder.to_string_lossy())).unwrap();
+        let dir = find_dataset_dir_write(settings, dataset).unwrap();
+        (view, dir)
+    }
+
+    fn count(view: &Value, key: &str) -> u64 {
+        view["reconcile"][key]
+            .as_u64()
+            .unwrap_or_else(|| panic!("reconcile.{key} is missing from {view}"))
+    }
+
+    /// One cached recording, as `transcribe` would have written it. `hash` is
+    /// empty for a cache from a build that had no content hashes.
+    fn cache_for(dir: &Path, key: &str, source: &SourceEntry, hash: &str) {
+        let word = |start: f64, end: f64, text: &str| SpokenWord {
+            start,
+            end,
+            tokens: vec![text.to_string()],
+        };
+        let transcript = SourceTranscript {
+            uuid: source.uuid.clone(),
+            file_name: source.file_name.clone(),
+            content_hash: hash.to_string(),
+            size: source.size,
+            duration: 12.5,
+            peak_seconds: PEAK_SECONDS,
+            peaks: String::new(),
+            words: vec![
+                word(0.0, 0.5, "one"),
+                word(0.5, 1.0, "two"),
+                word(1.0, 1.5, "three"),
+            ],
+        };
+        write_json(&transcript_path(dir, key), &transcript).unwrap();
+    }
+
+    fn only_source(dir: &Path) -> SourceEntry {
+        load_index(dir)
+            .sources
+            .into_iter()
+            .next()
+            .expect("one registered recording")
+    }
+
+    // ---- the cache follows the bytes ----------------------------------------
+
+    /// A cache describes the bytes, not the moment they landed. Forgetting the
+    /// timestamp — what a copy to another machine does — must cost nothing.
+    #[test]
+    fn a_cache_survives_a_changed_mtime() {
+        let (settings, workspace) = temp_settings("align-mtime");
+        let (dataset, _text) = dataset_with_text(&settings, "one two three");
+        let folder = recordings(&workspace, &[("ch1.mp3", b"abcdef"), ("ch2.mp3", b"ghijkl")]);
+
+        let (view, dir) = connect(&settings, &dataset, &folder);
+        assert_eq!(count(&view, "new"), 2);
+        for source in load_index(&dir).sources {
+            let hash = source.content_hash.clone();
+            cache_for(&dir, &hash, &source, &hash);
+        }
+
+        let mut moved = load_index(&dir);
+        for source in &mut moved.sources {
+            source.modified_ms = 0;
+        }
+        save_index(&dir, &moved).unwrap();
+
+        let (view, dir) = connect(&settings, &dataset, &folder);
+        assert_eq!(count(&view, "reused"), 2);
+        assert_eq!(count(&view, "new"), 0);
+        // ...and the recording's size comes back with it. There is no manifest
+        // entry and no previous duration to read, so this one answer is read off
+        // the cache — once, and written to the manifest below.
+        let index = load_index(&dir);
+        assert_eq!(index.sources[0].duration, Some(12.5));
+        assert_eq!(index.sources[0].words, Some(3));
+    }
+
+    /// A cache from before content hashes is adopted and renamed, not rebuilt:
+    /// the words in it describe the same bytes either way.
+    #[test]
+    fn a_legacy_cache_is_adopted_and_promoted() {
+        let (settings, workspace) = temp_settings("align-adopt");
+        let (dataset, _text) = dataset_with_text(&settings, "one two three");
+        let folder = recordings(&workspace, &[("ch1.mp3", b"abcdef")]);
+
+        let (view, dir) = connect(&settings, &dataset, &folder);
+        assert_eq!(count(&view, "new"), 1);
+        let source = only_source(&dir);
+        let legacy = format!("{}.json", source_uuid(&source.file_name));
+        assert_eq!(legacy, format!("{}.json", source.uuid));
+        cache_for(&dir, &source.uuid, &source, "");
+
+        let (view, dir) = connect(&settings, &dataset, &folder);
+        assert_eq!(count(&view, "adopted"), 1);
+        assert_eq!(count(&view, "reused"), 0);
+        // The previous binding had the same size, so the name is not the only
+        // evidence there is.
+        assert_eq!(count(&view, "adopted_unverified"), 0);
+        assert_eq!(count(&view, "new"), 0);
+        // One payload, under the content hash now.
+        let align = align_dir(&dir);
+        assert!(align.join(format!("{}.json", source.content_hash)).is_file());
+        assert!(!align.join(legacy).is_file());
+        assert_eq!(only_source(&dir).words, Some(3));
+
+        // Which means the next connect is an ordinary reuse.
+        let (view, _dir) = connect(&settings, &dataset, &folder);
+        assert_eq!(count(&view, "reused"), 1);
+        assert_eq!(count(&view, "adopted"), 0);
+    }
+
+    /// Same name, different bytes: the cache describes audio that is gone. It is
+    /// neither reused nor adopted — and it is not deleted either.
+    #[test]
+    fn a_re_ripped_file_is_new_and_its_old_cache_is_reported() {
+        let (settings, workspace) = temp_settings("align-rerip");
+        let (dataset, _text) = dataset_with_text(&settings, "one two three");
+        let folder = recordings(&workspace, &[("ch1.mp3", b"aaaaaaaa"), ("ch2.mp3", b"bbbbbbbb")]);
+
+        let (view, dir) = connect(&settings, &dataset, &folder);
+        assert_eq!(count(&view, "new"), 2);
+        let before = load_index(&dir);
+        for source in &before.sources {
+            let hash = source.content_hash.clone();
+            cache_for(&dir, &hash, source, &hash);
+        }
+        let stale = before
+            .sources
+            .iter()
+            .find(|source| source.file_name == "ch1.mp3")
+            .unwrap()
+            .content_hash
+            .clone();
+
+        fs::write(folder.join("ch1.mp3"), b"ZZZZZZZZZZZZ").unwrap();
+        let (view, dir) = connect(&settings, &dataset, &folder);
+        assert_eq!(count(&view, "new"), 1);
+        assert_eq!(count(&view, "reused"), 1);
+        assert_eq!(count(&view, "adopted"), 0);
+        assert_eq!(count(&view, "orphaned"), 1);
+        assert!(align_dir(&dir).join(format!("{}.json", stale)).is_file());
+        let ch1 = load_index(&dir)
+            .sources
+            .into_iter()
+            .find(|source| source.file_name == "ch1.mp3")
+            .unwrap();
+        assert_eq!(ch1.words, None);
+    }
+
+    /// A folder that moved is followed: the stored absolute path is a hint, and
+    /// the binding's folder plus the file name is the answer.
+    #[test]
+    fn a_moved_folder_is_followed() {
+        let (settings, workspace) = temp_settings("align-moved");
+        let (dataset, _text) = dataset_with_text(&settings, "one two three");
+        let original = recordings(&workspace, &[("ch1.mp3", b"abcdef")]);
+        let (_view, dir) = connect(&settings, &dataset, &original);
+        let uuid = only_source(&dir).uuid;
+        assert!(source_file(&dir, &uuid).is_some());
+
+        let moved = workspace.join("recordings-elsewhere");
+        fs::rename(&original, &moved).unwrap();
+        // Every recorded path is a dead string now, so nothing resolves...
+        assert!(source_file(&dir, &uuid).is_none());
+
+        // ...until the binding names the folder it is pointed at.
+        let mut index = load_index(&dir);
+        index.directory = moved.to_string_lossy().into_owned();
+        save_index(&dir, &index).unwrap();
+        assert_eq!(source_file(&dir, &uuid).unwrap(), moved.join("ch1.mp3"));
+    }
+
+    /// A rename that changes where the file sorts moves every span behind it,
+    /// and only the recordings that survived are counted as moved.
+    #[test]
+    fn a_rename_that_changes_the_order_is_reported() {
+        let (settings, workspace) = temp_settings("align-reorder");
+        let (dataset, _text) = dataset_with_text(&settings, "one two three");
+        let folder = recordings(&workspace, &[("ch1.mp3", b"aaa"), ("ch2.mp3", b"bbb")]);
+
+        let (view, dir) = connect(&settings, &dataset, &folder);
+        assert_eq!(count(&view, "reordered"), 0);
+        for source in load_index(&dir).sources {
+            let hash = source.content_hash.clone();
+            cache_for(&dir, &hash, &source, &hash);
+        }
+
+        // `ch2` becomes `ch0`, so `ch1` is no longer first.
+        fs::rename(folder.join("ch2.mp3"), folder.join("ch0.mp3")).unwrap();
+        let (view, _dir) = connect(&settings, &dataset, &folder);
+        assert_eq!(count(&view, "reordered"), 1);
+        // The rename itself costs nothing: both caches are found by their bytes,
+        // so neither file is listened to again. Only the old name is gone.
+        assert_eq!(count(&view, "reused"), 2);
+        assert_eq!(count(&view, "new"), 0);
+        assert_eq!(count(&view, "missing"), 1);
+    }
+
+    // ---- shapes that outlive a build ----------------------------------------
+
+    /// A `sources.json` written before content hashes existed — the fixture the
+    /// standard-audio tests build by hand — still parses.
+    #[test]
+    fn a_legacy_sources_file_still_parses() {
+        let (settings, _workspace) = temp_settings("align-legacy");
+        let (dataset, _text) = dataset_with_text(&settings, "one two three");
+        let dir = find_dataset_dir_write(&settings, &dataset).unwrap();
+        fs::create_dir_all(align_dir(&dir)).unwrap();
+        fs::write(
+            sources_path(&dir),
+            r#"{"directory":"D:/books","sources":[{"uuid":"aa","file_name":"ch1.wav","path":"D:/books/ch1.wav","size":10,"modified_ms":0}]}"#,
+        )
+        .unwrap();
+
+        let index = load_index(&dir);
+        assert_eq!(index.directory, "D:/books");
+        assert_eq!(index.sources.len(), 1);
+        assert_eq!(index.sources[0].content_hash, "");
+        assert_eq!(index.sources[0].duration, None);
+        assert_eq!(index.sources[0].words, None);
+    }
+
+    /// The manifest is the part that travels on its own, so an upsert replaces
+    /// by content hash and a reload reads back what was written.
+    #[test]
+    fn the_manifest_round_trips() {
+        let (settings, _workspace) = temp_settings("align-manifest");
+        let (dataset, _text) = dataset_with_text(&settings, "one two three");
+        let dir = find_dataset_dir_write(&settings, &dataset).unwrap();
+        let entry = |hash: &str, name: &str, words: usize| cache::ManifestEntry {
+            content_hash: hash.to_string(),
+            file_name: name.to_string(),
+            size: 10,
+            duration: 12.5,
+            words,
+        };
+
+        let mut manifest = cache::load_manifest(&dir);
+        assert_eq!(manifest.version, 2);
+        assert!(manifest.entries.is_empty());
+        manifest.upsert(entry("h1", "ch1.mp3", 3));
+        manifest.upsert(entry("h2", "ch2.mp3", 4));
+        cache::save_manifest(&dir, &manifest).unwrap();
+
+        let mut reloaded = cache::load_manifest(&dir);
+        assert_eq!(reloaded.entries.len(), 2);
+        assert_eq!(reloaded.entry("h2").unwrap().words, 4);
+
+        // A rename updates the row instead of adding a second claim about the
+        // same bytes.
+        reloaded.upsert(entry("h1", "renamed.mp3", 9));
+        assert_eq!(reloaded.entries.len(), 2);
+        assert_eq!(reloaded.entry("h1").unwrap().file_name, "renamed.mp3");
+        assert_eq!(reloaded.entry("h1").unwrap().words, 9);
+    }
 }
 

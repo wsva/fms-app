@@ -6,11 +6,12 @@ import {
   FileText,
   FolderOpen,
   Loader2,
+  RotateCcw,
   ScanText,
   Search,
   Square,
 } from "lucide-react";
-import type { AlignSource, AlignTranscript } from "@/lib/read_aloud/sourceAlign";
+import type { AlignReconcile, AlignSource, AlignTranscript } from "@/lib/read_aloud/sourceAlign";
 import { clockHms, clockShort } from "./format";
 import { Splitter, useSplitWidth } from "./Splitter";
 
@@ -58,10 +59,15 @@ type Props = {
   listeningUuid: string | null;
   /** The file whose result is on the right. */
   selected: string | null;
+  /** What the last folder pick found; `null` before one. */
+  reconcile: AlignReconcile | null;
+  /** The folder the current one replaced, when there is one to go back to. */
+  previousDirectory: string;
   transcript: AlignTranscript | null;
   transcriptBusy: boolean;
   transcriptError: string | null;
   onPick: () => void;
+  onReconnect: () => void;
   onTranscribeAll: () => void;
   onTranscribeFile: (sourceUuid: string) => void;
   onStop: () => void;
@@ -77,10 +83,13 @@ export default function SourceAudiosTab({
   busy,
   listeningUuid,
   selected,
+  reconcile,
+  previousDirectory,
   transcript,
   transcriptBusy,
   transcriptError,
   onPick,
+  onReconnect,
   onTranscribeAll,
   onTranscribeFile,
   onStop,
@@ -115,7 +124,17 @@ export default function SourceAudiosTab({
             <p className="text-xs text-text-primary break-all">
               {directory || "No folder picked yet."}
             </p>
-            <div>
+            {reconcile && (
+              <p className="text-[10px] text-text-tertiary tabular-nums">
+                {reconcile.reused.toLocaleString()} kept · {reconcile.adopted.toLocaleString()}{" "}
+                adopted · {reconcile.new.toLocaleString()} new
+                {reconcile.missing > 0 ? ` · ${reconcile.missing} gone` : ""}
+                {reconcile.orphaned > 0
+                  ? ` · ${reconcile.orphaned} cached for another folder`
+                  : ""}
+              </p>
+            )}
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={onPick}
@@ -124,12 +143,24 @@ export default function SourceAudiosTab({
                 title={
                   mobile
                     ? "Picking a folder is a desktop action; this device can read the transcripts"
-                    : "Pick the folder that holds the audiobook's files"
+                    : "Pick the folder that holds the audiobook's files — re-picking keeps every transcript whose bytes did not change"
                 }
               >
                 <FolderOpen size={12} />
                 {directory ? "Change folder" : "Pick folder"}
               </button>
+              {previousDirectory !== "" && previousDirectory !== directory && (
+                <button
+                  type="button"
+                  onClick={onReconnect}
+                  disabled={mobile || busyLabel}
+                  className={NEUTRAL}
+                  title={`Back to ${previousDirectory} — nothing was deleted, so its transcripts are still there`}
+                >
+                  <RotateCcw size={12} />
+                  Back to previous folder
+                </button>
+              )}
             </div>
           </div>
         </section>

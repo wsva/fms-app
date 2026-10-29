@@ -6,6 +6,7 @@ import {
   readAlignTranscript,
   registerAlignSources,
   transcribeAlignSource,
+  type AlignReconcile,
   type AlignSource,
   type AlignSourceIndex,
   type AlignTranscript,
@@ -15,6 +16,45 @@ import { clock, errorText } from "./format";
 
 /** One empty list for the "no index yet" case, so `sources` keeps its identity. */
 const NO_SOURCES: AlignSource[] = [];
+
+/**
+ * What a folder pick amounts to, in one line.
+ *
+ * The useful number is not how many files there are — it is how many of them
+ * this dataset had already heard. A pick that shares nothing with the folder it
+ * replaced is worth a warning before someone presses Transcribe all on the
+ * wrong book; a pick that kept everything is worth saying out loud.
+ */
+function reconcileNote(
+  reconcile: AlignReconcile | null,
+  directory: string,
+  replaced: boolean
+): { kind: "ok" | "warn"; text: string } {
+  if (!reconcile) {
+    return { kind: "ok", text: `Connected to ${directory}.` };
+  }
+  const parts = [`${reconcile.total} recording${reconcile.total === 1 ? "" : "s"}`];
+  if (reconcile.reused > 0) parts.push(`${reconcile.reused} kept`);
+  if (reconcile.adopted > 0) parts.push(`${reconcile.adopted} adopted by content`);
+  if (reconcile.new > 0) parts.push(`${reconcile.new} to listen to`);
+  if (reconcile.missing > 0) parts.push(`${reconcile.missing} no longer here`);
+  const summary = parts.join(" · ");
+
+  const recovered = reconcile.reused + reconcile.adopted;
+  if (reconcile.reordered > 0) {
+    return {
+      kind: "warn",
+      text: `${summary} — the playing order changed, so place the texts again.`,
+    };
+  }
+  if (replaced && recovered === 0) {
+    return {
+      kind: "warn",
+      text: `${summary}. Nothing here was heard before, so every file needs listening — the old cache is kept, so you can go back.`,
+    };
+  }
+  return { kind: "ok", text: `${summary}.` };
+}
 
 /**
  * The Source Audios half of the page: the folder of recordings, their
@@ -44,6 +84,8 @@ export function useAlignSources({
   setSelected: (textUuid: string | null) => void;
 }) {
   const [index, setIndex] = useState<AlignSourceIndex | null>(null);
+  /** The folder the current one replaced, so going back is one click. */
+  const [previousDirectory, setPreviousDirectory] = useState("");
   /** The recording whose result is in the right pane. */
   const [sourceSel, setSourceSel] = useState<string | null>(null);
   /** That recording's cached transcript, read on demand. */
@@ -68,6 +110,30 @@ export function useAlignSources({
     return registered;
   }, [datasetUuid]);
 
+  /**
+   * Connect the dataset to `directory` and say what the connection found.
+   *
+   * A pick is a *connect*, not a rebuild: the backend reuses every cache whose
+   * bytes match, so the answer a person needs is how much of this folder was
+   * already heard. The folder it replaced is remembered because nothing was
+   * deleted — going back is free.
+   */
+  const connect = async (directory: string) => {
+    const was = index?.directory ?? "";
+    const registered = await registerAlignSources(datasetUuid, directory);
+    setIndex(registered);
+    setSelected(null);
+    // Another folder is another set of files: the result on the right would
+    // be from a file this dataset no longer has.
+    setSourceSel(null);
+    setTranscript(null);
+    setTranscriptError(null);
+    const replaced = was !== "" && was !== registered.directory;
+    setPreviousDirectory(replaced ? was : "");
+    setNote(reconcileNote(registered.reconcile, registered.directory, replaced));
+    return registered;
+  };
+
   const pickFolder = () =>
     pipeline("picking", async () => {
       const picked = await open({
@@ -76,21 +142,17 @@ export function useAlignSources({
         title: "Folder that holds the recordings",
       });
       if (typeof picked !== "string") return;
-      const registered = await registerAlignSources(datasetUuid, picked);
-      setIndex(registered);
-      setSelected(null);
-      // Another folder is another set of files: the result on the right would
-      // be from a file this dataset no longer has.
-      setSourceSel(null);
-      setTranscript(null);
-      setTranscriptError(null);
-      setNote({
-        kind: "ok",
-        text: `${registered.source_count} recording${
-          registered.source_count === 1 ? "" : "s"
-        } from ${registered.directory}`,
-      });
+      await connect(picked);
     });
+
+  /** Back to the folder this one replaced — free, because nothing was deleted. */
+  const reconnectToPrevious = () => {
+    const previous = previousDirectory;
+    if (!previous) return;
+    pipeline("picking", async () => {
+      await connect(previous);
+    });
+  };
 
   /**
    * One file per call, so the Stop button is honoured before the next
@@ -199,6 +261,7 @@ export function useAlignSources({
   /** A different dataset is a different folder and a different cache. */
   const reset = useCallback(() => {
     setIndex(null);
+    setPreviousDirectory("");
     setSourceSel(null);
     setTranscript(null);
     setTranscriptError(null);
@@ -212,12 +275,14 @@ export function useAlignSources({
     transcribed,
     words,
     sourceSel,
+    previousDirectory,
     transcript,
     transcriptBusy,
     transcriptError,
     listeningUuid,
     reload,
     pickFolder,
+    reconnectToPrevious,
     transcribeAll,
     transcribeOne,
     openTranscript,
