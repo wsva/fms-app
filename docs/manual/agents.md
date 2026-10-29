@@ -115,6 +115,6 @@ Nothing appears on your phone: agents attach to the desktop's server, so the bot
 
 ## Related
 
-- The dock, LLM chat, and voice: [AI Chat, Agents & Voice](ai_chat_agents.md).
+- The dock, voice, and where the language model is used: [AI Chat, Agents & Voice](ai_chat_agents.md).
 - What a book artifact is, and what the Understand panel does: [Books](books.md).
 - Running FmS on more than one machine: [Using FmS on Multiple Devices](multiple_devices.md).

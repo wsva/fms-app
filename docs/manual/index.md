@@ -27,7 +27,7 @@ This manual is written for learners. It walks you from a fresh install to everyd
 
 ### Content, models & tools
 - [Models](models.md) — speech‑to‑text, text‑splitting, and OCR/TTS model downloads and management.
-- [AI Chat, Agents & Voice](ai_chat_agents.md) — LLM chat, Edge text‑to‑speech, the agent dock and mailbox, and cross‑device chat.
+- [AI Chat, Agents & Voice](ai_chat_agents.md) — where the language model is used, Edge text‑to‑speech, the agent dock and mailbox, and cross‑device chat.
 - [Attaching an Agent](agents.md) — point an MCP-capable agent at FmS, register it in one line, and hand it the prompt that keeps it watching your mailbox.
 - [Tools](tools.md) — OCR, Split Text, PDF Reader, Simple Words, and Logs.
 - [Using FmS on Multiple Devices](multiple_devices.md) — Hub and Follower roles, pairing, dataset sync, and cross‑device chat.

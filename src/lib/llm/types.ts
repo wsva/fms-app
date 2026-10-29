@@ -25,13 +25,6 @@ export interface LlmInstalledModelsResponse {
   installed: OllamaModelInfo[];
 }
 
-/** Progress event emitted during llm_pull_model. */
-export interface PullProgressPayload {
-  status: string;
-  total: number | null;
-  completed: number | null;
-}
-
 /** Response from llm_chat. */
 export interface LlmChatResponse {
   content: string;
@@ -40,7 +33,7 @@ export interface LlmChatResponse {
 }
 
 // ---------------------------------------------------------------------------
-// goose-sdk provider layer (chat streaming)
+// Provider layer
 // ---------------------------------------------------------------------------
 
 /** Inference provider selected in global settings. */
@@ -50,25 +43,6 @@ export type LlmProvider =
   | "anthropic"
   | "groq"
   | "databricks";
-
-/** A streamed text delta emitted as the `llm-chat-chunk` event payload. */
-export interface LlmChatChunk {
-  id: string;
-  text: string;
-}
-
-/** Final token usage emitted as the `llm-chat-done` event payload. */
-export interface LlmChatDone {
-  id: string;
-  prompt_tokens: number;
-  completion_tokens: number;
-}
-
-/** Mid-stream failure emitted as the `llm-chat-error` event payload. */
-export interface LlmChatError {
-  id: string;
-  message: string;
-}
 
 // ---------------------------------------------------------------------------
 // Helpers

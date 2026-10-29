@@ -42,6 +42,7 @@ import {
   type MicDevice,
 } from "@/lib/voice-input";
 import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
+import type { LlmInstalledModelsResponse } from "@/lib/llm/types";
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -212,6 +213,60 @@ export default function SettingsPage() {
   useEffect(() => {
     void checkForUpdate();
   }, [checkForUpdate]);
+
+  // ---- LLM reachability probe ----
+  // The only read-out of "is the model backend up, and what can it answer
+  // with?" in the app. Every LLM caller (OCR clean-up, book word generation,
+  // read-aloud normalization) fails quietly when the backend is down, so this
+  // button is where that question gets an answer.
+  const [llmProbe, setLlmProbe] = useState<
+    | { state: "idle" }
+    | { state: "checking" }
+    | { state: "ok"; detail: string }
+    | { state: "fail"; detail: string }
+  >({ state: "idle" });
+
+  const probeLlm = useCallback(async () => {
+    if (!isTauri()) return;
+    setLlmProbe({ state: "checking" });
+    const provider = globalSettings?.llm_provider ?? "ollama";
+    try {
+      const reachable = await invoke<boolean>("llm_check_connection");
+      if (!reachable) {
+        setLlmProbe({
+          state: "fail",
+          detail:
+            provider === "ollama"
+              ? "Ollama is not answering at that URL. Start it, or fix the URL above, and test again."
+              : "No API key is configured for this provider.",
+        });
+        return;
+      }
+      // Cloud providers are reached over the network with a key; their catalog
+      // is not enumerable locally, so report the model the features will call.
+      if (provider !== "ollama") {
+        const model = (globalSettings?.llm_model ?? "").trim();
+        setLlmProbe({
+          state: "ok",
+          detail: model
+            ? `Reachable. Features will call “${model}”.`
+            : "Key configured, but no default model is set. Features that call the model will fail until one is named.",
+        });
+        return;
+      }
+      const res = await invoke<LlmInstalledModelsResponse>("llm_list_models");
+      const names = res.installed.map((m) => m.name);
+      setLlmProbe({
+        state: "ok",
+        detail:
+          names.length === 0
+            ? "Ollama is running but has no models installed. Pull one from a terminal: ollama pull <model>"
+            : `Ollama is running. ${names.length} model${names.length === 1 ? "" : "s"} installed: ${names.join(", ")}`,
+      });
+    } catch (e) {
+      setLlmProbe({ state: "fail", detail: String(e) });
+    }
+  }, [globalSettings?.llm_provider, globalSettings?.llm_model]);
 
   // Download progress arrives as events from `update.rs`. The last event before
   // the installer takes over has done=true, which is what turns the button into
@@ -620,8 +675,9 @@ export default function SettingsPage() {
           <div className="mb-4">
             <label className="block font-medium mb-1">LLM Provider</label>
             <p className="text-text-secondary text-sm mb-2">
-              Backend used for the chat page and other LLM features (via the goose
-              SDK provider layer). Local Ollama needs no API key.
+              Backend used by the features that call a language model — OCR clean-up,
+              word explanations in Books, read-aloud text normalization — via the goose
+              SDK provider layer. Local Ollama needs no API key.
             </p>
             <select
               className="w-full max-w-md px-3 py-2 border border-border-light rounded-md bg-bg-input text-text-primary"
@@ -658,7 +714,8 @@ export default function SettingsPage() {
             <div className="mb-4">
               <label className="block font-medium mb-1">Default Model</label>
               <p className="text-text-secondary text-sm mb-2">
-                Model name used on the chat page. You can still change it per conversation.
+                Model name used when a feature calls the model. You can still override it
+                per call.
               </p>
               <input
                 type="text"
@@ -692,6 +749,35 @@ export default function SettingsPage() {
             />
           </div>
           )}
+
+          {/* LLM probe — the successor to the removed chat page's model picker:
+              says whether the provider answers and which models it offers. */}
+          <div className="mb-4">
+            <label className="block font-medium mb-1">Connection</label>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                className={btnGhost}
+                onClick={() => void probeLlm()}
+                disabled={llmProbe.state === "checking"}
+              >
+                {llmProbe.state === "checking" ? "Testing…" : "Test connection"}
+              </button>
+              {llmProbe.state === "ok" && (
+                <span className="text-xs text-green-500">OK</span>
+              )}
+              {llmProbe.state === "fail" && (
+                <span className="text-xs text-error-text">Failed</span>
+              )}
+            </div>
+            {(llmProbe.state === "ok" || llmProbe.state === "fail") && (
+              <p
+                className={`text-sm mt-2 ${llmProbe.state === "fail" ? "text-error-text" : "text-text-secondary"}`}
+              >
+                {llmProbe.detail}
+              </p>
+            )}
+          </div>
 
           {/* Model Directory (read-only) */}
           <DirField

@@ -34,8 +34,8 @@ Four themes: **Light** (default), **Dark**, **Solarized**, and **Gruvbox**. Your
 
 These apply to the app as a whole (not per workspace):
 
-- **Ollama URL** — the address of a local Ollama server, used by LLM Chat. See [AI Chat, Agents & Voice](ai_chat_agents.md).
-- **LLM provider, API key, and model** — cloud model settings for chat features, if you don't use a local Ollama.
+- **Ollama URL** — the address of a local Ollama server, used by the features that call a language model (OCR clean‑up, Books word explanations, read‑aloud normalization). See [AI Chat, Agents & Voice](ai_chat_agents.md).
+- **LLM provider, API key, and model** — cloud model settings for those same features, if you don't use a local Ollama. The **Test connection** button next to them reports whether the provider answers and which models it offers.
 - **Model directory** and **selected model** — where speech‑to‑text models are stored and which is the default. See [Models](models.md).
 - **Model unload timeout** — how long an STT model stays resident after use: unload *immediately*, *never*, or after a chosen number of *minutes*. Balances memory against repeated‑use speed.
 - **PC URL and token** — the Hub this device syncs with, and its access token. Usually managed from the Devices & Hub page rather than typed here. See [Multiple Devices](multiple_devices.md).

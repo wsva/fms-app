@@ -77,10 +77,12 @@ and sync it with a PC. Every target is built from this repository by
 - **STT Models** — download, load and manage the local models (Parakeet family via `transcribe-rs`).
 - **Datasets Sync** — pull a dataset from another FmS machine over the LAN or tailnet (phone ↔ PC,
   PC ↔ PC) with discovery, device pairing, and snapshot progress.
-- **LLM Chat** — Ollama locally, or a cloud provider through the goose SDK layer, for explanations
-  and generated practice material.
 - **OCR, Edge TTS, Wiki, Workspaces** — capture text from an image, synthesize speech, keep notes,
   and keep several learners' data apart.
+- **LLM features (no chat window)** — a language model is called from the features that need one:
+  OCR clean-up, word explanations in Books, read-aloud text normalization. Point it at a local
+  Ollama, or at a cloud provider through the goose SDK layer; for open-ended questions use your
+  own model or an attached agent.
 
 ## Privacy
 
@@ -93,8 +95,8 @@ There is no telemetry, no analytics, no crash reporting, and no account is neede
 | Import, STT subtitles, waveforms, cue database, alignment | **No** | — |
 | Dictation, cards, review scheduling, search, XP, wiki | **No** | — |
 | Voice input, read-aloud scoring, OCR, book splitting | **No** | — |
-| LLM chat with Ollama on `localhost` | **No** | — |
-| LLM chat or generated content with a cloud provider (`openai`, `anthropic`, `groq`, `databricks`) | Yes — only if you configure a key | The prompt, and the text it asks about |
+| LLM features with Ollama on `localhost` (OCR clean-up, word explanations, read-aloud normalization) | **No** | — |
+| The same LLM features with a cloud provider (`openai`, `anthropic`, `groq`, `databricks`) | Yes — only if you configure a key | The prompt, and the text it asks about |
 | Speaking text aloud: Books, Read Aloud, Understanding panel, TTS page | Yes | The text to be spoken → Microsoft Edge TTS |
 | Dataset sync to another of your devices | To that device only | The dataset snapshot, over your LAN or tailnet |
 | Website account, dataset registry, mirror | Yes — opt-in | Login plus the dataset metadata you publish to `lusworkshop.site` |

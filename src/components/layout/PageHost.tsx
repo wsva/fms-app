@@ -36,7 +36,6 @@ import TasksPage from "@/components/tools/TasksPage";
 import TtsPage from "@/components/listen_speak/edge_tts/TtsPage";
 import SettingsPage from "@/components/settings/SettingsPage";
 import AgentPage from "@/components/agent/AgentPage";
-import LLMChatPage from "@/components/llm/chat/ChatPage";
 import DeviceChatPage from "@/components/chat/ChatPage";
 import OcrPage from "@/components/ocr/OcrPage";
 import WikiPage from "@/components/wiki/WikiPage";
@@ -91,8 +90,6 @@ function PageFor({
       return <AgentPage />;
     case "settings":
       return <SettingsPage />;
-    case "llm-chat":
-      return <LLMChatPage />;
     case "chat":
       return <DeviceChatPage active={focused} />;
     case "ocr":

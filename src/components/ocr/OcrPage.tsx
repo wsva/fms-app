@@ -168,7 +168,9 @@ export default function OcrPage() {
     );
   }, [availableLangs, langFilter]);
 
-  // LLM model for the plain path's text fixing (shared with the LLM Chat page).
+  // LLM model for the plain path's text fixing. The pick is cached under
+  // `llm_selected_model`, which the text-selection menu's Ask-the-model actions
+  // also read (lib/llm/ask.ts), so one choice serves every LLM feature.
   const [llmModel, setLlmModelState] = useState("");
   const setLlmModel = useCallback((model: string) => {
     setLlmModelState(model);

@@ -150,7 +150,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
-    #[tool(name = "llm_set_provider", description = "Switch the LLM inference provider used by every LLM feature (chat page, OCR fix, word generation). Valid providers: ollama, openai, anthropic, groq, databricks. Optionally set the default model in the same call. Returns the effective provider/model and whether an API key is configured — the key itself is never returned and is set on the Settings page. An unknown provider is refused by name.")]
+    #[tool(name = "llm_set_provider", description = "Switch the LLM inference provider used by every LLM feature (OCR clean-up, book word generation, read-aloud normalization, and the `llm_chat` tool). Valid providers: ollama, openai, anthropic, groq, databricks. Optionally set the default model in the same call. Returns the effective provider/model and whether an API key is configured — the key itself is never returned and is set on the Settings page. An unknown provider is refused by name.")]
     async fn llm_set_provider(&self, Parameters(param): Parameters<LlmSetProviderParam>) -> Result<String, String> {
         log::info!("[MCP] llm_set_provider: provider={} model={:?}", param.provider, param.model);
         let settings = self.app.state::<SettingsState>();

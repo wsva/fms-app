@@ -264,7 +264,7 @@ pub async fn llm_delete_model(state: State<'_, SettingsState>, model: String) ->
 /// On desktop this is backed by the goose-sdk provider layer (multi-provider +
 /// local Ollama via a declarative provider). On other platforms it falls back to
 /// the Ollama HTTP API. The signature and response shape are unchanged, so all
-/// callers (chat page, OCR fix, word generation) keep working.
+/// callers (OCR fix, word generation, read-aloud normalize) keep working.
 ///
 /// `provider` overrides the configured `llm_provider` for this one call (the
 /// caller already names the `model`), so an agent can try a different backend
@@ -309,60 +309,6 @@ pub async fn llm_chat(
         }
         let base_url = get_ollama_url(&state);
         ollama_chat(&base_url, &model, messages, temperature).await
-    }
-}
-
-/// Streaming chat completion. Emits `llm-chat-chunk` events (text deltas) as the
-/// model responds, then a single `llm-chat-done` event with token usage. Errors
-/// mid-stream are emitted as `llm-chat-error`. Every event carries `id` so the
-/// frontend can correlate chunks with the request that produced them.
-#[tauri::command]
-pub async fn llm_chat_stream(
-    app: AppHandle,
-    state: State<'_, SettingsState>,
-    id: String,
-    model: String,
-    messages: Vec<ChatMessage>,
-    system: Option<String>,
-    temperature: Option<f32>,
-) -> Result<(), String> {
-    let temperature = temperature.unwrap_or(0.7);
-    #[cfg(feature = "desktop")]
-    {
-        let (provider, api_key, base_url) = get_llm_config(&state);
-        crate::ai::goose_llm::chat_stream(
-            &app,
-            &id,
-            &provider,
-            &api_key,
-            &base_url,
-            &model,
-            messages,
-            system,
-            temperature,
-        )
-        .await
-    }
-    #[cfg(not(feature = "desktop"))]
-    {
-        use tauri::Emitter;
-        // Fallback: no goose-sdk on this platform. Run the Ollama HTTP path once
-        // and replay it as a single chunk + done event so the frontend streaming
-        // contract still holds.
-        let mut msgs = messages;
-        if let Some(sys) = system {
-            if !sys.trim().is_empty() {
-                msgs.insert(0, ChatMessage { role: "system".to_string(), content: sys });
-            }
-        }
-        let base_url = get_ollama_url(&state);
-        let resp = ollama_chat(&base_url, &model, msgs, temperature).await?;
-        let _ = app.emit("llm-chat-chunk", serde_json::json!({ "id": id, "text": resp.content }));
-        let _ = app.emit(
-            "llm-chat-done",
-            serde_json::json!({ "id": id, "prompt_tokens": resp.prompt_tokens, "completion_tokens": resp.completion_tokens }),
-        );
-        Ok(())
     }
 }
 
@@ -464,7 +410,7 @@ pub async fn llm_complete(
 
 /// Switch the LLM inference provider (and optionally the default model) used by
 /// every LLM feature. Validated against [`LLM_PROVIDERS`] so a typo cannot point
-/// the chat page at a provider that will never answer. Returns the effective
+/// a feature at a provider that will never answer. Returns the effective
 /// provider/model and whether an API key is configured; the key itself is never
 /// returned — it is entered on the Settings page.
 #[tauri::command]

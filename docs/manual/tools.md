@@ -45,8 +45,8 @@ A few items in the Tools group are large enough to deserve dedicated chapters:
 - **Workflow** — the step‑by‑step dataset processing pipeline → [Datasets & the Processing Pipeline](datasets.md).
 - **Models** — speech‑to‑text and other model management → [Models](models.md).
 - **Devices & Hub**, **Datasets Sync** — multi‑device sync → [Using FmS on Multiple Devices](multiple_devices.md).
-- **Cross‑Device Chat**, **LLM Chat**, **Edge TTS** — AI and voice → [AI Chat, Agents & Voice](ai_chat_agents.md).
+- **Cross‑Device Chat**, **Edge TTS** — AI and voice → [AI Chat, Agents & Voice](ai_chat_agents.md).
 
 ## On Android and the website
 
-Several Tools are desktop‑only because they need local file access or local models: **OCR**, **Split Text**, **Simple Words**, **Edge TTS**, **LLM Chat**, **Workflow**, and **Logs** do not appear in the Android thin client. The website has its own smaller tool set (Plan, Learning Stats, PDF Reader) described in [The FmS Website](website.md).
+Several Tools are desktop‑only because they need local file access or local models: **OCR**, **Split Text**, **Simple Words**, **Edge TTS**, **Workflow**, and **Logs** do not appear in the Android thin client. The website has its own smaller tool set (Plan, Learning Stats, PDF Reader) described in [The FmS Website](website.md).

@@ -3,7 +3,7 @@
 /// Replaces the hand-rolled Ollama HTTP client for the *inference* path with
 /// goose-sdk's provider layer, giving multi-provider access (local Ollama via a
 /// declarative provider, plus OpenAI / Anthropic / Groq / Databricks via API
-/// key) and token-by-token streaming.
+/// key) and token usage reporting.
 ///
 /// Model *management* (list/pull/delete) stays on the Ollama HTTP API in
 /// `llm.rs` — goose-sdk provides model access, not model downloads.
@@ -12,9 +12,7 @@ use std::sync::Arc;
 use goose_sdk::bindings::{
     anthropic_provider, databricks_provider, declarative_provider_from_json, groq_provider,
     openai_provider, MessageContent, MessageRole, Provider, ProviderMessage, ProviderModelConfig,
-    StreamChunk,
 };
-use tauri::{AppHandle, Emitter};
 
 use crate::ai::llm::{ChatMessage, LlmChatResponse};
 
@@ -162,65 +160,3 @@ pub async fn chat_once(
     })
 }
 
-/// Streaming completion. Emits `llm-chat-chunk` per text delta, then a single
-/// `llm-chat-done` with token usage. Mid-stream failures emit `llm-chat-error`.
-/// All events carry the caller-supplied `id` so the frontend can correlate.
-pub async fn chat_stream(
-    app: &AppHandle,
-    id: &str,
-    provider: &str,
-    api_key: &str,
-    base_url: &str,
-    model: &str,
-    messages: Vec<ChatMessage>,
-    system_override: Option<String>,
-    temperature: f32,
-) -> Result<(), String> {
-    let provider_obj = build_provider(provider, api_key, base_url)?;
-    let (extracted, goose_messages) = to_goose_messages(messages);
-    let system = resolve_system(extracted, system_override);
-
-    let stream = provider_obj
-        .stream(
-            model_config(model, temperature),
-            system,
-            goose_messages,
-            Vec::new(),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    loop {
-        match stream.next_chunk().await.map_err(|e| e.to_string())? {
-            Some(StreamChunk::TextChunk { text }) => {
-                let _ = app.emit("llm-chat-chunk", serde_json::json!({ "id": id, "text": text }));
-            }
-            Some(StreamChunk::EndChunk { usage }) => {
-                let (prompt_tokens, completion_tokens) = usage_tokens(usage);
-                let _ = app.emit(
-                    "llm-chat-done",
-                    serde_json::json!({ "id": id, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens }),
-                );
-                break;
-            }
-            Some(StreamChunk::ErrorChunk { error }) => {
-                let _ = app.emit(
-                    "llm-chat-error",
-                    serde_json::json!({ "id": id, "message": error.message }),
-                );
-                break;
-            }
-            // Thinking / tool chunks are not surfaced in the plain chat UI.
-            Some(_) => {}
-            None => {
-                let _ = app.emit(
-                    "llm-chat-done",
-                    serde_json::json!({ "id": id, "prompt_tokens": 0, "completion_tokens": 0 }),
-                );
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}

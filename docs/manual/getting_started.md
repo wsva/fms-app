@@ -17,7 +17,7 @@ This page takes you from a fresh install to your first practice session.
 The desktop app is a single window with a **sidebar** that holds every feature:
 
 - **Practice modes at the top** — Dictation, Books, Read Aloud, Cards, Wiki.
-- **Tools** (a collapsible group) — Workspaces, Workflow, Devices & Hub, Datasets Sync, Cross‑Device Chat, Simple Words, Edge TTS, LLM Chat, OCR, Split Text, PDF Reader, Models, and Logs.
+- **Tools** (a collapsible group) — Workspaces, Workflow, Devices & Hub, Datasets Sync, Cross‑Device Chat, Simple Words, Edge TTS, OCR, Split Text, PDF Reader, Models, and Logs.
 - **Settings** at the bottom.
 - Your **account and XP** at the very top: a Login button when you're signed out, and your avatar, level, and XP once signed in.
 

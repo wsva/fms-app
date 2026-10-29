@@ -48,7 +48,8 @@ pub struct AppSettings {
     /// Ollama API base URL (global setting, not workspace-scoped).
     #[serde(default = "default_ollama_url")]
     pub ollama_url: String,
-    /// LLM inference provider for the chat page and other LLM features.
+    /// LLM inference provider for the features that call a language model
+    /// (OCR clean-up, book word generation, read-aloud normalization).
     /// One of: `ollama` (default), `openai`, `anthropic`, `groq`, `databricks`.
     #[serde(default = "default_llm_provider")]
     pub llm_provider: String,

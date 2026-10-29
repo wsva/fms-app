@@ -10,7 +10,6 @@ import {
   Bot,
   Settings,
   Headphones,
-  MessageSquare,
   MessagesSquare,
   Volume2,
   Wrench,
@@ -44,7 +43,6 @@ export type TabId =
   | "simple-words"
   | "models"
   | "edge-tts"
-  | "llm-chat"
   | "chat"
   | "ocr"
   | "split-text"
@@ -102,7 +100,6 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: "agent", label: "Agent", icon: Bot },
       { id: "simple-words", label: "Simple Words", icon: Type },
       { id: "edge-tts", label: "Edge TTS", icon: Volume2 },
-      { id: "llm-chat", label: "LLM Chat", icon: MessageSquare },
       { id: "ocr", label: "OCR", icon: ScanText },
       { id: "split-text", label: "Split Text", icon: ArrowUpDown },
       { id: "pdf-reader", label: "PDF Reader", icon: FileType },
@@ -137,7 +134,7 @@ export const TAB_DEFS: Record<TabId, TabDef> = Object.fromEntries(
 ) as Record<TabId, TabDef>;
 
 // Tabs reachable in the Android thin client. Everything else (OCR,
-// Edge TTS, LLM Chat, Logs, Simple Words, Workflow pipeline) is hidden.
+// Edge TTS, Logs, Simple Words, Workflow pipeline) is hidden.
 // "models" is enabled to verify local STT (transcribe-rs/ONNX) on Android.
 const MOBILE_VISIBLE_TABS: TabId[] = [
   "dictation",

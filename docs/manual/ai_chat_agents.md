@@ -2,13 +2,14 @@
 
 Beyond the practice modes, FmS bundles several AI and voice capabilities. They're grouped here because they share the same underlying language‑model and speech plumbing.
 
-## LLM Chat
+FmS has no chat window of its own. A language model is called from the places that need one:
 
-**Tools → LLM Chat** is a chat interface to a large language model, useful for asking about grammar, usage, translations, or anything language‑related while you study.
+- **Explain a word or a sentence** — select any text anywhere in the app, and the menu that appears offers **Ask the model** actions: explain the word, analyze the sentence, translate, find synonyms, simplify, summarize. The answer appears inside that menu, next to the text you selected.
+- **OCR clean‑up** — rejoin broken lines and correct obvious recognition errors.
+- **Books** — word explanations and other generated material.
+- **Read Aloud** — normalize a source text before generating audio.
 
-- It talks to a local **Ollama** server by default. Point it at your Ollama URL in Settings, choose a model, and start chatting. You can list, pull, and manage Ollama models from here.
-- If you'd rather use a hosted model, set the **LLM provider, API key, and model** in Settings instead.
-- The dock/agent (below) can sit alongside your work so you can ask questions without leaving the page you're on.
+For an open conversation, use the tool in front of you: the Ollama app, or your agent's own window. The **LLM provider** and **Ollama URL** in Settings are what these features call; the **Test connection** button there reports whether the backend answers and which models it has. See [Workspaces, Accounts & Voice settings](workspaces_accounts_settings.md).
 
 ## The Agent Dock and the Mailbox — **Desktop**
 

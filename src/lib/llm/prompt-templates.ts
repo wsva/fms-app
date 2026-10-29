@@ -1,7 +1,7 @@
 /**
- * Prompt templates for LLM Chat prompt builder.
+ * Prompt templates for the text-selection menu's "Ask the model" actions.
  * Each template has localized versions.
- * The {content} placeholder is replaced with user's input.
+ * The {content} placeholder is replaced with the user's input.
  */
 
 export type PromptLanguage = "en" | "de";
@@ -119,9 +119,9 @@ export function buildPrompt(
 /**
  * Build the system-prompt instruction for a template.
  *
- * The chat page maps a selected template onto the model's *system prompt*
+ * The selection menu maps the chosen template onto the model's *system prompt*
  * (goose-sdk takes the system prompt separately from the conversation), so the
- * user's own text stays the user message. Uses the template's explicit `system`
+ * selected text stays the user message. Uses the template's explicit `system`
  * override when present; otherwise derives it from `prompt` by dropping the
  * `{content}` slot and any trailing separator/whitespace.
  */

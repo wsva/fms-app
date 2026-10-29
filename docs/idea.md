@@ -155,7 +155,7 @@ Tauri v2 desktop application.
 Navigation is a single-page shell with a sidebar. Current tabs:
 
 - **Root:** Dictation ✅, Books ✅, Settings ✅
-- **Tools group:** Dictation Datasets ✅, STT Models ✅, Edge TTS ✅, LLM Chat ✅, Web Service ✅
+- **Tools group:** Dictation Datasets ✅, STT Models ✅, Edge TTS ✅, Web Service ✅
 
 Backend modules (`src-tauri/src/`): `model`, `model_download`, `model_list`, `settings`,
 `dataset`, `dictation`, `book`, `tools`, `edge_tts`, `llm`, `llm_model_list`, `auth`, `audio`,

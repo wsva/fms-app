@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Plus, Search, X } from "lucide-react";
+import { Loader2, Plus, Search, Wand2, X } from "lucide-react";
 import { useCardEditor } from "./CardEditorContext";
 import { invoke } from "@tauri-apps/api/core";
 import type { Card } from "@/lib/types";
+import { PROMPT_TEMPLATES } from "@/lib/llm/prompt-templates";
+import { askAboutSelection } from "@/lib/llm/ask";
 
 /**
  * Global text-selection context menu for cards.
@@ -15,6 +17,9 @@ import type { Card } from "@/lib/types";
  *
  * The menu now includes:
  * - An editable input showing the selected text
+ * - Ask-the-model actions: the prompt templates run over the selection, so a
+ *   question about a word or sentence is answered where the text is
+ *   (the app deliberately has no chat page of its own)
  * - A search button to find existing cards with matching questions
  * - Search results displayed as clickable links to jump to existing cards
  * - An "Add to Card" button to create a new card
@@ -48,6 +53,11 @@ export default function CardContextMenu() {
   const [searchResults, setSearchResults] = useState<CardSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [showSearchPanel, setShowSearchPanel] = useState(false);
+  // Ask-the-model state. One question at a time: starting another replaces the
+  // answer, which is what a menu over a fresh selection means.
+  const [asking, setAsking] = useState<string | null>(null);
+  const [answer, setAnswer] = useState("");
+  const [askError, setAskError] = useState("");
   const menuRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const { openCardEditor } = useCardEditor();
@@ -66,6 +76,8 @@ export default function CardContextMenu() {
           setSearchQuery(selText);
           setSearchResults([]);
           setShowSearchPanel(false);
+          setAnswer("");
+          setAskError("");
           setAnchor({ x: rect.left + rect.width / 2, top: rect.top, bottom: rect.bottom });
           return;
         }
@@ -85,6 +97,8 @@ export default function CardContextMenu() {
             setSearchQuery(text);
             setSearchResults([]);
             setShowSearchPanel(false);
+            setAnswer("");
+            setAskError("");
             setAnchor({ x: rect.left + rect.width / 2, top: rect.top, bottom: rect.bottom });
             return;
           }
@@ -208,6 +222,21 @@ export default function CardContextMenu() {
     }
   }
 
+  async function handleAsk(templateId: string) {
+    const text = (searchQuery || selectedText).trim();
+    if (!text) return;
+    setAsking(templateId);
+    setAnswer("");
+    setAskError("");
+    try {
+      setAnswer(await askAboutSelection(templateId, text));
+    } catch (e) {
+      setAskError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAsking(null);
+    }
+  }
+
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -282,6 +311,36 @@ export default function CardContextMenu() {
           ) : null}
         </div>
       )}
+
+      {/* Ask the model — one template over the selection. This is where a
+          "what does this word mean / parse this sentence" question lives: no
+          chat page, no re-pasting, the answer sits against the text. */}
+      <div className="p-3 border-b border-border-default">
+        <div className="flex items-center gap-1.5 mb-1.5 text-xs font-medium text-text-tertiary">
+          <Wand2 size={12} className="shrink-0" />
+          Ask the model
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {PROMPT_TEMPLATES.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => void handleAsk(t.id)}
+              disabled={asking !== null || !(searchQuery || selectedText).trim()}
+              className="px-2 py-1 text-xs rounded border border-border-default bg-bg-muted text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {asking === t.id ? <Loader2 size={12} className="animate-spin" /> : t.name.en}
+            </button>
+          ))}
+        </div>
+        {askError && (
+          <p className="mt-2 text-xs text-error-text">{askError}</p>
+        )}
+        {answer && (
+          <div className="mt-2 max-h-[220px] overflow-y-auto px-2 py-1.5 rounded border border-border-default bg-bg-surface text-xs text-text-primary whitespace-pre-wrap select-text">
+            {answer}
+          </div>
+        )}
+      </div>
 
       {/* Action Buttons */}
       <div className="p-1">
