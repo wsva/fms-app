@@ -15,7 +15,10 @@ use crate::settings::SettingsState;
 
 use super::super::standard_audio::{self, MAX_SOURCE_SECS};
 use super::super::{find_dataset_dir, find_dataset_dir_write};
-use super::{round_ms, AUDIO_EXTENSIONS, PEAK_SECONDS, PREVIEW_MARGIN_SECS, PREVIEW_PAIRS};
+use super::{
+    round_ms, AUDIO_EXTENSIONS, PEAK_SECONDS, PREVIEW_MARGIN_MIN_SECS, PREVIEW_MARGIN_RATIO,
+    PREVIEW_PAIRS,
+};
 
 // ============================================================
 // Stored shapes
@@ -202,8 +205,10 @@ fn envelope(samples: &[f32]) -> (Vec<i8>, f64) {
 }
 
 /// A window of the peak envelope around a span: the thumbnail beside one
-/// proposal's row. Wide spans are decimated by min/max so the preview keeps the
-/// loudness shape instead of aliasing it away.
+/// proposal's row. The window is the span plus half its own length either side
+/// (never less than a second), so the passage's neighbours are in view; wide
+/// spans are decimated by min/max so the preview keeps the loudness shape
+/// instead of aliasing it away.
 #[derive(Serialize)]
 pub struct Preview {
     /// Absolute seconds of the first pair.
@@ -225,8 +230,13 @@ pub(super) fn preview(transcript: &SourceTranscript, start: f64, end: f64) -> Pr
             peaks: Vec::new(),
         };
     }
-    let from = (((start - PREVIEW_MARGIN_SECS) / peak).floor().max(0.0) as usize).min(pairs - 1);
-    let to = (((end + PREVIEW_MARGIN_SECS) / peak).ceil() as usize).clamp(from + 1, pairs);
+    // Context scales with the passage, not with a stopwatch: a twelve-second
+    // span shows six either side, a two-second one still shows a second. Both
+    // ends are clamped to the recording, so a span near the head simply gets a
+    // shorter lead-in than it asked for.
+    let margin = ((end - start).max(0.0) * PREVIEW_MARGIN_RATIO).max(PREVIEW_MARGIN_MIN_SECS);
+    let from = (((start - margin) / peak).floor().max(0.0) as usize).min(pairs - 1);
+    let to = (((end + margin) / peak).ceil() as usize).clamp(from + 1, pairs);
     let stride = (to - from).div_ceil(PREVIEW_PAIRS).max(1);
 
     let mut peaks = Vec::with_capacity(2 * ((to - from) / stride + 1));

@@ -137,8 +137,15 @@ const MIN_SPAN_SECS: f64 = 0.3;
 /// thumbnail, small enough that forty of them are still one response.
 const PREVIEW_PAIRS: usize = 400;
 
-/// How much of the surrounding audio a preview keeps beyond the span itself.
-const PREVIEW_MARGIN_SECS: f64 = 0.25;
+/// How much of the surrounding audio a preview keeps beyond the span itself:
+/// half the span's own length on each side, so the words either side of an edge
+/// are in the window and a longer passage buys proportionally more context. The
+/// fixed quarter second this replaced showed the edge and nothing around it.
+const PREVIEW_MARGIN_RATIO: f64 = 0.5;
+
+/// The floor under that ratio: a two-word one-liner still gets a second of
+/// context each side, or there is nothing to judge its edges against.
+const PREVIEW_MARGIN_MIN_SECS: f64 = 1.0;
 
 /// An edge is judged in milliseconds, so the three files that produce one round
 /// it the same way — a nudge is not allowed to lose precision to its writer.

@@ -43,7 +43,11 @@ function SpanField({ label, value, disabled, onCommit }: {
   };
   return (
     <input
-      className="w-[76px] px-1 py-1 rounded-md bg-bg-muted text-center text-[11px] tabular-nums border border-border-default text-text-primary focus:outline-none focus:border-accent-bg disabled:opacity-50"
+      // An inset well rather than a tinted patch: `bg-input` steps away from the
+      // card in every theme (down in the dark ones, paper in solarized), and the
+      // `border-light` edge plus primary-weight digits are what make a 3-decimal
+      // number read as something you may type into.
+      className="w-[76px] px-1 py-1 rounded-md bg-bg-input text-center text-[11px] font-medium tabular-nums border border-border-light text-text-primary focus:outline-none focus:border-accent-bg focus:ring-1 focus:ring-accent-bg/40 disabled:opacity-50"
       value={draft ?? value.toFixed(3)}
       disabled={disabled}
       aria-label={label}
@@ -63,8 +67,24 @@ function SpanField({ label, value, disabled, onCommit }: {
   );
 }
 
-const STEP_BUTTON =
-  "inline-flex items-center justify-center px-1.5 py-1 rounded-md bg-bg-muted text-text-secondary text-[10px] tabular-nums hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed";
+// ── Control surfaces ─────────────────────────────────────────────────────────
+//
+// Every button under the waveform — the ±10 / ±100 steps, the transport, and
+// Re-guess — is drawn on one of these. `bg-muted` alone is only a shade off the
+// card behind it in all five themes, so the fill was never what made these
+// visible; the `border-light` outline and the primary-weight text are. The
+// transport's Play is the one control tinted with the accent, because it is the
+// verb the whole card exists to serve.
+const CONTROL_BOX =
+  "inline-flex items-center justify-center rounded-md border cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed";
+
+/** Neutral control: steps, ±0.5 s, Re-guess, the passage chevrons. */
+const CONTROL_QUIET = `${CONTROL_BOX} bg-bg-muted border-border-light text-text-primary hover:border-accent-bg hover:bg-bg-hover disabled:hover:border-border-light disabled:hover:bg-bg-muted`;
+
+/** The transport's Play: accent-tinted, so the ear's button is found first. */
+const CONTROL_PLAY = `${CONTROL_BOX} bg-accent-bg/10 border-accent-bg/60 text-accent-bg hover:bg-accent-bg/15 hover:border-accent-bg disabled:hover:border-accent-bg/60 disabled:hover:bg-accent-bg/10`;
+
+const STEP_BUTTON = `${CONTROL_QUIET} px-1.5 py-1 text-[10px] font-medium tabular-nums`;
 
 function EdgeRow({
   edge,
@@ -89,10 +109,10 @@ function EdgeRow({
       onPointerDown={onActivate}
       onFocusCapture={onActivate}
       className={`flex flex-wrap items-center gap-1 rounded-md border px-2 py-1.5 ${
-        active ? "border-accent-bg bg-accent-bg/5" : "border-border-default"
+        active ? "border-accent-bg bg-accent-bg/5" : "border-border-light"
       }`}
     >
-      <span className="w-9 shrink-0 text-[11px] text-text-secondary">{label}</span>
+      <span className="w-9 shrink-0 text-[11px] font-medium text-text-primary">{label}</span>
       <button
         type="button"
         className={STEP_BUTTON}
@@ -346,7 +366,7 @@ export default function PassageEditor({
                     disabled={!canPrev}
                     aria-label="Previous passage in this recording"
                     title="Previous passage in this recording"
-                    className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-bg-muted text-text-secondary hover:bg-bg-hover cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    className={`${CONTROL_QUIET} w-5 h-5`}
                   >
                     <ChevronLeft size={11} />
                   </button>
@@ -356,7 +376,7 @@ export default function PassageEditor({
                     disabled={!canNext}
                     aria-label="Next passage in this recording"
                     title="Next passage in this recording"
-                    className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-bg-muted text-text-secondary hover:bg-bg-hover cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    className={`${CONTROL_QUIET} w-5 h-5`}
                   >
                     <ChevronRight size={11} />
                   </button>
@@ -428,7 +448,7 @@ export default function PassageEditor({
             type="button"
             onClick={() => onPlay(false)}
             disabled={!proposal.source_path}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-bg-muted text-text-secondary text-[11px] hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            className={`${CONTROL_PLAY} gap-1.5 px-2.5 py-1.5 text-[11px] font-medium`}
             title={playing ? "Stop (Space)" : "Play this span (Space)"}
           >
             {playing ? <Square size={11} /> : <Play size={11} />}
@@ -438,7 +458,7 @@ export default function PassageEditor({
             type="button"
             onClick={() => onPlay(true)}
             disabled={!proposal.source_path}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-bg-muted text-text-secondary text-[11px] hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            className={`${CONTROL_QUIET} gap-1 px-2.5 py-1.5 text-[11px] font-medium tabular-nums`}
             title="Play half a second each side, to hear the edge in context"
           >
             ±0.5 s
@@ -456,7 +476,7 @@ export default function PassageEditor({
                   ? "Guess this text again — the other texts keep their spans"
                   : "Listen to at least one recording first — Source Audios tab"
               }
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-border-default bg-bg-muted text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              className={`${CONTROL_QUIET} gap-1.5 px-2.5 py-1.5 text-[11px]`}
             >
               {reguessing ? (
                 <Loader2 size={11} className="animate-spin" />

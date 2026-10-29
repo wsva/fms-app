@@ -7,9 +7,10 @@ import { COARSE_STEP, MIN_SPAN, NUDGE_STEP, clock, roundMs } from "./format";
 /**
  * The audio around one span, at the size a person can work in.
  *
- * The backend sends a *window* — the span plus a quarter second each side, at
- * most a few hundred peak pairs — rather than the whole chapter, so this draws
- * in absolute seconds but only between `preview.start` and the window's end.
+ * The backend sends a *window* — the span plus half its own length each side
+ * (never less than a second), capped at a few hundred peak pairs — rather than
+ * the whole chapter, so this draws in absolute seconds but only between
+ * `preview.start` and the window's end.
  * Everything is painted on one canvas (bars, selection band, ruler); only the
  * two edges and the playhead are DOM, because those are the things a pointer
  * and a tab stop have to reach.
