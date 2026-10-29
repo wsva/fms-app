@@ -5,7 +5,7 @@ import { useState } from "react";
 import type { AlignProposal } from "@/lib/read_aloud/sourceAlign";
 import { ClipChip, DeleteClipButton, SaveClipButton } from "./ClipActions";
 import SpanTrack from "./SpanTrack";
-import { MIN_SPAN, clock, clockShort, confidenceTone, percent, roundMs } from "./format";
+import { MIN_SPAN, clock, clockHms, clockShort, confidenceTone, parseClock, percent, roundMs } from "./format";
 
 /**
  * One passage, open at full size: the audio in a card on top, the text in a
@@ -22,11 +22,14 @@ import { MIN_SPAN, clock, clockShort, confidenceTone, percent, roundMs } from ".
 type Edge = "start" | "end";
 
 /**
- * One edge in seconds, at the millisecond the backend stores.
+ * One edge as `hh:mm:ss.ms` — the clock the recording is read in, at the
+ * millisecond the backend stores.
  *
- * A draft keeps typing from being fought by the formatted value, and the step
- * buttons beside it are the reason this is not a slider: 10 ms is finer than a
- * pixel, and a span edge that is 10 ms late clips a consonant.
+ * A draft keeps typing from being fought by the formatted value. The parser is
+ * the tolerant one in `format.ts`, so a bare `12.5` still means twelve and a
+ * half seconds for the moment a reader types a delta rather than a time, and the
+ * step buttons beside it are the reason this is not a slider: 10 ms is finer
+ * than a pixel, and a span edge that is 10 ms late clips a consonant.
  */
 function SpanField({ label, value, disabled, onCommit }: {
   label: string;
@@ -37,21 +40,21 @@ function SpanField({ label, value, disabled, onCommit }: {
   const [draft, setDraft] = useState<string | null>(null);
   const commit = () => {
     if (draft == null) return;
-    const parsed = Number(draft.replace(",", "."));
+    const parsed = parseClock(draft);
     setDraft(null);
-    if (Number.isFinite(parsed) && Math.abs(parsed - value) > 1e-9) onCommit(parsed);
+    if (parsed != null && Math.abs(parsed - value) > 1e-9) onCommit(parsed);
   };
   return (
     <input
       // An inset well rather than a tinted patch: `bg-input` steps away from the
       // card in every theme (down in the dark ones, paper in solarized), and the
-      // `border-light` edge plus primary-weight digits are what make a 3-decimal
-      // number read as something you may type into.
-      className="w-[76px] px-1 py-1 rounded-md bg-bg-input text-center text-[11px] font-medium tabular-nums border border-border-light text-text-primary focus:outline-none focus:border-accent-bg focus:ring-1 focus:ring-accent-bg/40 disabled:opacity-50"
-      value={draft ?? value.toFixed(3)}
+      // `border-light` edge plus primary-weight digits are what make a whole
+      // clock read as something you may type into.
+      className="w-[92px] px-1 py-1 rounded-md bg-bg-input text-center text-[11px] font-medium tabular-nums border border-border-light text-text-primary focus:outline-none focus:border-accent-bg focus:ring-1 focus:ring-accent-bg/40 disabled:opacity-50"
+      value={draft ?? clockHms(value)}
       disabled={disabled}
       aria-label={label}
-      title={`${label}: seconds, three decimals (${clock(value)})`}
+      title={`${label}: hh:mm:ss.ms — plain seconds work too (${value.toFixed(3)} s)`}
       inputMode="decimal"
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
@@ -166,7 +169,9 @@ function EdgeRow({
       >
         <Crosshair size={11} />
       </button>
-      <span className="ml-auto text-[10px] text-text-tertiary tabular-nums">{clock(value)}</span>
+      {/* No trailing clock readout: the field beside it *is* the clock now, in
+          the same units, so a second copy of the same number would only be
+          something else to read. */}
     </div>
   );
 }

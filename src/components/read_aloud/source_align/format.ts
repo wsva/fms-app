@@ -45,11 +45,12 @@ export function clockShort(seconds: number): string {
 }
 
 /**
- * `00:12:34.567` — the transcript table's clock.
+ * `00:12:34.567` — the transcript table's clock, and the edge fields'.
  *
  * Hours are always present, so the two ends of a row can be compared by eye
  * without counting colons, and the column does not change width at the
- * hour mark.
+ * hour mark. The edge fields print this because a reader places a passage by
+ * the clock the recording is read in, not by seconds from zero.
  */
 export function clockHms(seconds: number): string {
   const s = Math.max(0, seconds);
@@ -57,6 +58,25 @@ export function clockHms(seconds: number): string {
   const minutes = Math.floor((s % 3600) / 60);
   const rest = (s % 60).toFixed(3).padStart(6, "0");
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${rest}`;
+}
+
+/**
+ * `00:12:34.567` back to seconds — the edge fields' parser, and the inverse of
+ * [`clockHms`].
+ *
+ * Tolerant on purpose, because the field is typed into: a bare number is seconds
+ * (`12.5`), one colon is `mm:ss`, two are `hh:mm:ss`, a comma works as the
+ * decimal point, and a component past 60 rolls over instead of being refused.
+ * Anything that does not parse at all is `null` — the caller keeps the value it
+ * had rather than storing a guess.
+ */
+export function parseClock(text: string): number | null {
+  const parts = text.trim().replace(",", ".").split(":");
+  if (parts.length > 3) return null;
+  const numbers = parts.map((part) => (part.trim() === "" ? NaN : Number(part)));
+  if (numbers.some((n) => !Number.isFinite(n) || n < 0)) return null;
+  // The parts are positional: `h:mm:ss` folds to `h * 3600 + mm * 60 + ss`.
+  return roundMs(numbers.reduce((total, n) => total * 60 + n, 0));
 }
 
 /** A percentage as the page prints it: whole numbers, never `86.5 %`. */
