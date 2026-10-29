@@ -21,6 +21,25 @@
 
 ---
 
+<table>
+  <tr>
+    <td><img src="docs/img/dictation.png" alt="Dictation: a cue card above the waveform, with the words you missed lit up in it" /></td>
+    <td><img src="docs/img/book.png" alt="Books: a chapter with the understanding panel open beside the text" /></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Dictation — type what you hear</sub></td>
+    <td align="center"><sub>Books — read, with an understanding panel</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/img/read_aloud.png" alt="Read Aloud: a text with its standard audio clip and the record control" /></td>
+    <td><img src="docs/img/wiki.png" alt="Wiki: Markdown documents with a table of contents and full-text search" /></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Read Aloud — a text and its reference clip</sub></td>
+    <td align="center"><sub>Wiki — Markdown notes, searchable and synced</sub></td>
+  </tr>
+</table>
+
 ## What is this?
 
 FmS is a **local-first language lab**. You bring the material you already own — a textbook's MP3s,
@@ -29,6 +48,9 @@ modes share one dataset layer, and all five are core: **dictation** (type what y
 (read, look up, understand), **read aloud** (speak and be scored), **cards** (review what you kept)
 and **wiki** (the notes that tie it together). No upload, no per-minute bill, no account: the
 models, the datasets and your progress live on the disk you already have.
+
+The [user manual](docs/manual/index.md) covers each mode in depth — start at
+[Getting started](docs/manual/getting_started.md), then read the page for the mode you care about.
 
 **Dictation is where it started.** Import the files, a local speech-to-text model cuts them into
 cue-level subtitles, and you train by typing what you hear, cue by cue, revealing the reference when
@@ -62,39 +84,82 @@ and ships for **Windows, Linux and macOS**, plus **Android and iOS** clients tha
 and sync it with a PC. Every target is built from this repository by
 [GitHub Actions](.github/workflows/build.yml) on each `v*` tag.
 
+## Install and first run
+
+Grab a prebuilt installer from the [latest release](https://github.com/wsva/fms-app/releases/latest):
+
+| Platform | Artifacts | Notes |
+|----------|-----------|-------|
+| Windows  | `.exe` (NSIS) | x64 |
+| Linux    | `.AppImage`, `.deb`, `.rpm` | x64 |
+| macOS    | `.dmg` | Apple Silicon only, macOS 11+, unsigned |
+| Android  | `.apk` | arm64 |
+| iOS      | `.ipa` | arm64, unsigned — re-sign it before it will install |
+
+Each asset is named `FmS_<platform>_<arch>_<tag>.<ext>` — `FmS_windows_x64_v0.1.1.exe`,
+`FmS_linux_amd64_v0.1.1.deb`, `FmS_macos_arm64_v0.1.1.dmg` — so the release tag is the only version
+in the name. Updating, the Apple signing caveats and the per-platform prerequisites are further
+below: [Updates](#updates), [Apple builds](#apple-builds), [Platform notes](#platform-notes).
+
+### First five minutes
+
+FmS ships no content. It has to be told where your material is and what to listen with, and a
+fresh dataset has to be prepared before there is anything to practise.
+
+1. **Point it at a folder.** *Settings → Datasets directory*; every dataset is a folder inside it.
+   The Books, Recordings and Model directories sit on the same page.
+2. **Download a speech model.** *Models*. Choose by language before size: the Moonshine models and
+   Parakeet V2 are English-only, while **Parakeet V3** (456 MB) covers 25 European languages
+   including German and the **Whisper** models cover 90+ in 465 MB to 1.5 GB. The download happens
+   once; after that, transcription is offline.
+3. **Add a dataset.** Copy a folder into the datasets directory, or import it from the Datasets page.
+   It needs an `info.json` — [Datasets](docs/manual/datasets.md) describes the layout, and how to
+   build one from nothing but audio.
+4. **Prepare it.** *Generate Subtitles* → *Generate Waveforms* → *Generate Database*, one stage at a
+   time on the dataset page, or the whole run at once on the **Workflow** page. The subtitle pass is
+   the slow one on a long audiobook; *Logs* shows it working.
+5. **Practise.** Open the Dictation page and start typing. Everything after that point is optional.
+
+Signing in is optional too: it ties XP to a website account and enables Hub/Follower sync, and
+nothing in the loop above needs it. [Getting started](docs/manual/getting_started.md) is the longer
+version of these five steps.
+
 ## Features
 
 **Five practice modes, all of them core** — each with its own dataset type, its own page, and the
 same cross-device sync.
 
-- **Dictation** — import what you own (`mp3`, `wav`, `m4a`/`m4b` (audiobooks), `ogg`, `flac`, `mp4`,
-  `webm`), let on-device STT cut it into cues, then type what you hear: canvas waveform, cue cards,
-  per-cue progress, large and focus modes, and a word-level hint that lights up the words you missed.
-- **Books** — split a text into chapters and sentences, read along with per-sentence TTS, look words
-  up in context, and build its understanding layer: explanations, simplifications, a chapter digest,
-  an argument map, a glossary, and comprehension quizzes.
-- **Read Aloud** — record a text and have it scored on accuracy, fluency and pronunciation against a
-  reference clip you generate with Edge TTS or cut out of your own recording by alignment. Feedback
-  comes from a local model or an attached agent.
-- **Cards** — separate flashcard datasets with SM-2 review queues, FTS5 search, tags and a hint
-  field, for the vocabulary you collect from your own material.
-- **Wiki** — syncable Markdown trees with full-text search: notes, grammar references, transcripts
-  and the links between them, editable on the phone as well as on the PC.
+- **[Dictation](docs/manual/dictation.md)** — import what you own (`mp3`, `wav`, `m4a`/`m4b`
+  audiobooks, `ogg`, `flac`, `mp4`, `webm`), let on-device STT cut it into cues, then type what you
+  hear: canvas waveform, cue cards, per-cue progress, large and focus modes, and a word-level hint
+  that lights up the words you missed.
+- **[Books](docs/manual/books.md)** — split a text into chapters and sentences, read along with
+  per-sentence TTS, look words up in context, and build its understanding layer: explanations,
+  simplifications, a chapter digest, an argument map, a glossary, and comprehension quizzes.
+- **[Read Aloud](docs/manual/read_aloud.md)** — record a text and have it scored on accuracy, fluency
+  and pronunciation against a reference clip you generate with Edge TTS or cut out of your own
+  recording by alignment. Feedback comes from a local model or an attached agent.
+- **[Cards](docs/manual/cards.md)** — separate flashcard datasets with SM-2 review queues, FTS5
+  search, tags and a hint field, for the vocabulary you collect from your own material.
+- **[Wiki](docs/manual/wiki.md)** — syncable Markdown trees with full-text search: notes, grammar
+  references, transcripts and the links between them, editable on the phone as well as on the PC.
 
 Cards, read-aloud passes and book quizzes all pay into one **XP ledger**.
 
 **The layer they share**
 
 - **One pipeline** — import → subtitles (STT) → waveforms → database, plus transcript alignment and
-  book splitting: one click on the dataset page, or step by step on the **Workflow** page.
+  book splitting: one click on the dataset page, or step by step on the **Workflow** page. See
+  [Datasets & the pipeline](docs/manual/datasets.md).
 - **Local models** — Parakeet ONNX and Whisper GGML for speech, SaT for sentence splitting, Tesseract
-  for OCR; downloaded, loaded and swapped from the Models page.
+  for OCR — all downloaded and swapped from the Models page. See [Models](docs/manual/models.md).
 - **Sync** — pull a dataset from another FmS machine over the LAN or tailnet (phone ↔ PC, PC ↔ PC),
-  with discovery, device pairing and snapshot progress.
+  with discovery, device pairing and snapshot progress (see
+  [Multiple devices](docs/manual/multiple_devices.md)).
 - **Nothing is lost by accident** — a destructive action moves the dataset or file into the app
   trash, where you can restore it.
 
-**Everyday tools — the reason it stays installed**
+**[Everyday tools](docs/manual/tools.md) — the reason it stays installed**
 
 - **OCR** — drop in a screenshot, a photo of a page or a scanned exercise and get editable text: pick
   the languages, and the layout comes back as lines and paragraphs instead of a word dump. Words
@@ -111,8 +176,8 @@ Cards, read-aloud passes and book quizzes all pay into one **XP ledger**.
   offering them.
 - **Voice input** — tap the mic, or press `Ctrl+C` in a text field, and your speech is transcribed
   locally and inserted at the cursor.
-- **Workspaces** — several learners or several projects, with separate settings, progress and
-  datasets on one machine.
+- **[Workspaces](docs/manual/workspaces_accounts_settings.md)** — several learners or several
+  projects, with separate settings, progress and datasets on one machine.
 
 **Agent-first by design.** The practice modes and the dataset pipeline are exposed to agents as MCP
 tools, alongside everything you can click — see [Built for agents](#built-for-agents).
@@ -251,23 +316,7 @@ page, and check it for the country you are in.
 | [Tatoeba](https://tatoeba.org) | Sentence pairs in 300+ languages, good for card decks | Sentences CC BY 2.0 FR; each recording carries its speaker's own licence |
 | [Internet Archive](https://archive.org) | Old radio, government and public-domain recordings, audiobooks | Mixed — filter to public domain or CC before importing |
 
-## Download
-
-Grab a prebuilt installer from the [latest release](https://github.com/wsva/fms-app/releases/latest):
-
-| Platform | Artifacts | Notes |
-|----------|-----------|-------|
-| Windows  | `.exe` (NSIS) | x64 |
-| Linux    | `.AppImage`, `.deb`, `.rpm` | x64 |
-| macOS    | `.dmg` | Apple Silicon only, macOS 11+, unsigned |
-| Android  | `.apk` | arm64 |
-| iOS      | `.ipa` | arm64, unsigned — re-sign it before it will install |
-
-Each asset is named `FmS_<platform>_<arch>_<tag>.<ext>` — `FmS_windows_x64_v0.1.1.exe`,
-`FmS_linux_amd64_v0.1.1.deb`, `FmS_macos_arm64_v0.1.1.dmg` — so the release tag is the only version
-in the name.
-
-### Updates
+## Updates
 
 The app updates itself from **Settings → About**: it reports whether a newer release exists, and
 *Download & install* fetches it, verifies the signature and restarts into it. Nothing installs on its
@@ -287,7 +336,7 @@ Installers are signed with a minisign key whose public half lives in `tauri.conf
 whose signature does not verify is refused rather than installed. A bad release is pulled by deleting
 `latest.json` from it — clients then report no update and install nothing.
 
-### Apple builds
+## Apple builds
 
 **Apple Silicon only.** The STT and desktop feature sets link ONNX Runtime through `ort-sys`, whose
 prebuilt binaries cover `aarch64-apple-darwin` and `aarch64-apple-ios` but not Intel Macs, so there
@@ -309,7 +358,7 @@ a PC. What *builds* one — subtitle and waveform generation, transcript alignme
 and the PC-hosted extras (embedded HTTP/MCP server, OCR, screenshot capture, the Goose agent bridge)
 are desktop-only.
 
-### Platform notes
+## Platform notes
 
 - **OCR needs Tesseract on macOS and Linux.** The app runs `tesseract` from `PATH`
   (`brew install tesseract` / `apt install tesseract-ocr`); only the usual Windows install
