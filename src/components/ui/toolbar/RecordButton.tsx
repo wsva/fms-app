@@ -1,7 +1,7 @@
 "use client";
 
 import { Loader2, Square } from "lucide-react";
-import { tbBase, TB_ICON } from "@/lib/ui/toolbar";
+import { tbBase, tbBaseStacked, TB_ICON } from "@/lib/ui/toolbar";
 import { MicGlyph } from "@/components/voice/MicGlyph";
 import { useToolbarMobile } from "./mobile-context";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -21,6 +21,10 @@ type RecordButtonProps = {
  * The read-aloud Record / Stop control. Encapsulates the one solid-red state in
  * the toolbar (recording) so pages no longer hand-roll the base class string.
  * Idle uses the accent CTA color; recording pulses red; busy shows a spinner.
+ *
+ * The label always renders: on a phone it uses the kit's stacked layout (icon
+ * over a `text-xs` label) like every other labeled toolbar button, so the one
+ * primary action on the page is never reduced to a bare microphone glyph.
  */
 export function RecordButton({
   recording = false,
@@ -38,11 +42,12 @@ export function RecordButton({
     ? "bg-red-500 text-white animate-pulse"
     : "bg-accent text-white hover:bg-accent/90";
   const label = recording ? "Stop" : busy ? "Working…" : "Record";
+  const box = mobile ? tbBaseStacked : tbBase;
 
   return (
     <button
       type="button"
-      className={`${tbBase} ${color} ${className}`.trim()}
+      className={`${box} ${color} ${className}`.trim()}
       disabled={disabled}
       title={title ?? (recording ? "Stop recording" : "Record yourself reading")}
       aria-label={label}
@@ -55,7 +60,7 @@ export function RecordButton({
       ) : (
         <MicGlyph size={TB_ICON} />
       )}
-      {!mobile && label}
+      {label}
     </button>
   );
 }
