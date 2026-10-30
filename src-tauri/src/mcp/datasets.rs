@@ -670,49 +670,38 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&info).unwrap_or_default())
     }
 
-    #[tool(name = "dataset_info_update", description = "Update a dataset's info.json metadata — any type. Settable: name, description, language, visibility ('private' | 'shared' | 'public') and owner_id. Empty fields are left unchanged. 'subscribers' is deliberately not settable: the website owns it and a local edit would dirty the dataset for every follower.")]
+    #[tool(name = "dataset_info_update", description = "Update a dataset's info.json metadata — any type. Settable: name, description, language, visibility ('private' | 'shared' | 'public') and owner_id. Empty fields are left unchanged. 'subscribers' is deliberately not settable: the website owns it and a local edit would dirty the dataset for every follower. This is the same body the UI's dataset card uses (the `dataset_update` command), so a downloaded read-only dataset grows a writable local overlay here too instead of being refused.")]
     async fn dataset_info_update(
         &self,
         Parameters(param): Parameters<DatasetInfoUpdateParam>,
     ) -> Result<String, String> {
         log::info!("[MCP] dataset_info_update: uuid={}", param.uuid);
         let settings = self.app.state::<SettingsState>();
-        let (dir, ty) = datasets::find_dataset_dir_typed(&settings, &param.uuid)?;
-        if datasets::is_under_download_root(&settings, &dir) {
-            return Err(format!(
-                "cannot write: '{}' is a read-only base under the download root; editing downloaded datasets arrives in a later update",
-                param.uuid
-            ));
-        }
-        let mut info = datasets::read_info(&dir)?;
-        if !param.name.is_empty() {
-            info.name = param.name.clone();
-        }
-        if !param.description.is_empty() {
-            info.description = param.description.clone();
-        }
-        if !param.language.is_empty() {
-            info.language = param.language.clone();
-        }
-        if !param.visibility.is_empty() {
-            if !matches!(param.visibility.as_str(), "private" | "shared" | "public") {
-                return Err(format!(
-                    "Invalid visibility '{}' (expected private, shared or public)",
-                    param.visibility
-                ));
+        // The agent-facing convention: an empty string means "leave this field
+        // alone", so one field can be set without resending the rest. The UI
+        // expresses the same thing with an absent value (Option). A plain `fn`
+        // rather than a closure, so the borrow is higher-ranked over `v`.
+        fn opt(v: &str) -> Option<&str> {
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
             }
-            info.sharing.visibility = param.visibility.clone();
         }
-        if !param.owner_id.is_empty() {
-            info.sharing.owner_id = param.owner_id.clone();
-        }
-        info.updated_at = datasets::now_stamp();
-        datasets::write_info(&dir, &info)?;
+        let info = datasets::update_info_fields(
+            &settings,
+            &param.uuid,
+            opt(&param.name),
+            opt(&param.description),
+            opt(&param.language),
+            opt(&param.visibility),
+            opt(&param.owner_id),
+        )?;
         let _ = self.app.emit("dataset-list-changed", ());
         log::info!(
             "[MCP] dataset_info_update: {} ({}) updated",
             param.uuid,
-            ty.as_str()
+            info.dataset_type.as_str()
         );
         Ok(serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?)
     }

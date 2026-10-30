@@ -8,7 +8,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore, useLayoutEffect } from "react";
 
 import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui/react";
-import { Trash2, Target, CheckCircle, FolderOpen, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown, Captions } from "lucide-react";
+import { Trash2, Target, CheckCircle, FolderOpen, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown, Captions, Headphones } from "lucide-react";
 import CueEditor from "./components/CueEditor";
 import WaveformCanvas from "./components/WaveformCanvas";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
@@ -30,11 +30,13 @@ import {
     ToolbarMenuItem,
 } from "@/components/ui/toolbar";
 import { LocationsManager } from "@/components/ui/LocationsManager";
+import { DatasetCard } from "@/components/ui/dataset";
 import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import { subscribe, getVoiceError, clearVoiceError } from "@/lib/voice-input";
 import { setUiContext } from "@/lib/agent/ui-context";
 import { reqNum, reqStr, optStr, useAgentActions } from "@/lib/agent/ui-actions";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { logInfo, logError } from "@/lib/logger";
@@ -277,24 +279,30 @@ export default function DictationPage({ active = true, onNavigate }: { active?: 
         const ready = ds.status === "ready";
         const status = ds.status as DatasetStatus;
         return (
-            <button
+            <DatasetCard
                 key={ds.path}
-                className={`text-left p-4 border border-border-default rounded-lg transition-colors ${ready ? "hover:bg-bg-hover cursor-pointer" : "opacity-70 cursor-not-allowed"}`}
+                variant="row"
+                icon={Headphones}
+                name={ds.info.name}
+                description={ds.info.description}
+                readOnly={ds.is_read_only}
                 disabled={!ready}
-                onClick={() => ready && d.setSelectedDatasetUuid(ds.info.uuid)}
                 title={ready ? undefined : "Not ready — generate the database in the Workflow page first"}
-            >
-                <div className="flex items-center gap-2">
-                    <span className="font-medium text-text-primary">{ds.info.name}</span>
-                    <span className={datasetStatusBadgeClasses(status)}>{datasetStatusLabel(status)}</span>
-                    {ds.downloaded && (
-                        <span className="px-2 py-0.5 text-[11px] rounded-md border border-border-light bg-bg-body text-text-secondary">Downloaded{ds.has_local_changes ? " · edited" : ""}</span>
-                    )}
-                </div>
-                {ds.info.description && (
-                    <div className="text-xs text-text-tertiary truncate" title={ds.info.description}>{ds.info.description}</div>
-                )}
-            </button>
+                onOpen={() => d.setSelectedDatasetUuid(ds.info.uuid)}
+                onSave={async (patch) => {
+                    await invoke("dataset_update", { uuid: ds.info.uuid, ...patch });
+                    await emit("dataset-list-changed", {});
+                    d.loadDatasets();
+                }}
+                chips={
+                    <>
+                        <span className={datasetStatusBadgeClasses(status)}>{datasetStatusLabel(status)}</span>
+                        {ds.downloaded && (
+                            <span className="px-2 py-0.5 text-[11px] rounded-md border border-border-light bg-bg-body text-text-secondary">Downloaded{ds.has_local_changes ? " · edited" : ""}</span>
+                        )}
+                    </>
+                }
+            />
         );
     };
 

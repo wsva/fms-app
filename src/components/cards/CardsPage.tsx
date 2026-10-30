@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { usePageRefresh } from "@/lib/refresh/page-refresh";
 import { useDatasetFamily } from "@/hooks/useDatasetFamily";
 import { openDatasetInTab } from "@/lib/nav/open-in-tab";
@@ -41,6 +41,7 @@ import type {
 } from "@/lib/types";
 import { isMobileApp } from "@/lib/platform";
 import { LocationsManager } from "@/components/ui/LocationsManager";
+import { DatasetCard } from "@/components/ui/dataset";
 import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import {
   Toolbar,
@@ -982,9 +983,15 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {datasets.map((ds) => (
-                <button
+                <DatasetCard
                   key={ds.info.uuid}
-                  onClick={() => {
+                  variant="card"
+                  icon={Layers}
+                  name={ds.info.name}
+                  description={ds.info.description}
+                  visibility={ds.info.sharing.visibility}
+                  meta={`${ds.card_count} card${ds.card_count !== 1 ? "s" : ""}`}
+                  onOpen={() => {
                     setSelectedDatasetUuid(ds.info.uuid);
                     setActiveTab("cards");
                     setPage(0);
@@ -992,10 +999,12 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
                     setKeyword("");
                     setSearchScope("dataset");
                   }}
-                  className="text-left p-4 rounded-xl border border-border-default bg-bg-card hover:border-accent-blue/40 transition-colors cursor-pointer flex flex-col gap-1"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-semibold truncate">{ds.info.name}</span>
+                  onSave={async (patch) => {
+                    await invoke("dataset_update", { uuid: ds.info.uuid, ...patch });
+                    await emit("dataset-list-changed", {});
+                    await loadDatasets();
+                  }}
+                  chips={
                     <span
                       className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${
                         ds.info.sharing.visibility === "public"
@@ -1007,14 +1016,8 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
                     >
                       {ds.info.sharing.visibility}
                     </span>
-                  </div>
-                  {ds.info.description && (
-                    <p className="text-xs text-text-secondary line-clamp-2">{ds.info.description}</p>
-                  )}
-                  <span className="text-xs text-text-tertiary">
-                    {ds.card_count} card{ds.card_count !== 1 ? "s" : ""}
-                  </span>
-                </button>
+                  }
+                />
               ))}
             </div>
           )}

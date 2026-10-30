@@ -24,6 +24,10 @@ pub struct BookMeta {
     pub uuid: String,
     /// Display name — the `name` field of the dataset's `info.json`.
     pub name: String,
+    /// Human-facing blurb — the `description` field of the dataset's `info.json`,
+    /// empty when unset. Carried on the listing so the book card can show it
+    /// without a second read of the descriptor.
+    pub description: String,
     /// The `info.json` language (`"de"`, `"de-DE"`), empty when unset. Seeds the
     /// read-aloud voice resolution so an explanation is narrated in the book's
     /// own language — see `read_aloud::standard_audio::resolve_voice`.
@@ -381,6 +385,7 @@ pub(crate) fn list_books(settings: &SettingsState) -> Vec<BookMeta> {
                 books.push(BookMeta {
                     uuid: info.uuid,
                     name: info.name,
+                    description: info.description,
                     language: info.language,
                     path: path.to_string_lossy().into_owned(),
                     created_at: info.created_at,
@@ -437,6 +442,7 @@ pub async fn book_create(
     Ok(BookMeta {
         uuid,
         name,
+        description: info.description.clone(),
         language: info.language.clone(),
         path: dst.to_string_lossy().into_owned(),
         created_at: info.created_at.clone(),

@@ -39,7 +39,7 @@ use serde_json::{Map, Value};
 
 use crate::settings::SettingsState;
 
-use super::{find_dataset_dir_typed, DatasetType};
+use super::{find_dataset_dir_typed, find_dataset_dir_write, DatasetType};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -345,6 +345,68 @@ pub(crate) fn touch_info(dir: &Path) -> Result<(), String> {
     let mut info = read_info(dir)?;
     info.updated_at = now_stamp();
     write_info(dir, &info)
+}
+
+/// Update the descriptor fields a human edits on a dataset card, touching nothing
+/// it was not given: `None` means "leave this field alone", so a caller can rename
+/// a dataset without resending its description.
+///
+/// The descriptor is re-read and re-written whole, so unknown keys (`extra`),
+/// `created_at`, `layer` and the identity fields survive untouched — the same rule
+/// as [`crate::datasets::media::dataset_info_save`]. A dataset under the read-only
+/// download root is forked into a writable overlay first (see
+/// [`find_dataset_dir_write`]), which is what makes the returned descriptor the one
+/// actually on disk.
+///
+/// This is the single body behind both the Tauri command and the MCP
+/// `dataset_info_update` tool, so a human and an agent cannot diverge on which
+/// fields are settable or on what happens to a downloaded base.
+pub(crate) fn update_info_fields(
+    settings: &SettingsState,
+    uuid: &str,
+    name: Option<&str>,
+    description: Option<&str>,
+    language: Option<&str>,
+    visibility: Option<&str>,
+    owner_id: Option<&str>,
+) -> Result<DatasetInfo, String> {
+    let dir = find_dataset_dir_write(settings, uuid)?;
+    let mut info = read_info(&dir)?;
+
+    if let Some(name) = name {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Dataset name must not be empty".into());
+        }
+        info.name = trimmed.to_string();
+    }
+    if let Some(description) = description {
+        // An empty string is a value here: it clears the blurb.
+        info.description = description.trim().to_string();
+    }
+    if let Some(language) = language {
+        info.language = language.trim().to_string();
+    }
+    // "" means "unchanged" for the callers that cannot express absence; the three
+    // real values are the whole vocabulary the sharing block knows.
+    if let Some(visibility) = visibility {
+        if !visibility.is_empty() {
+            if !matches!(visibility, "private" | "shared" | "public") {
+                return Err(format!(
+                    "Invalid visibility '{}' (expected private, shared or public)",
+                    visibility
+                ));
+            }
+            info.sharing.visibility = visibility.to_string();
+        }
+    }
+    if let Some(owner_id) = owner_id {
+        info.sharing.owner_id = owner_id.to_string();
+    }
+
+    info.updated_at = now_stamp();
+    write_info(&dir, &info)?;
+    Ok(info)
 }
 
 /// Refuse a uuid that another dataset — of any type — already claims.

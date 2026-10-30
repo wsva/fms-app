@@ -2,7 +2,10 @@
 
 import { useEffect, useRef } from "react";
 import { BookOpen, Check, Library, X } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import type { useBookData } from "@/hooks/useBookData";
+import { DatasetCard } from "@/components/ui/dataset";
 import ParagraphList from "./ParagraphList";
 import SentenceDrawer from "./SentenceDrawer";
 import ConfirmDialog from "./ConfirmDialog";
@@ -96,14 +99,20 @@ export default function ReadingView({ b }: Props) {
         ) : (
           <div className="flex flex-col gap-2">
             {b.books.map((book) => (
-              <button
+              <DatasetCard
                 key={book.uuid}
-                onClick={() => b.setBookUUID(book.uuid)}
-                className="w-full flex items-center gap-3 px-4 py-3 rounded-lg border border-border-default bg-bg-card hover:bg-bg-hover text-left cursor-pointer transition-colors"
-              >
-                <BookOpen size={18} className="text-text-tertiary shrink-0" />
-                <span className="text-base font-medium text-text-primary truncate">{book.name}</span>
-              </button>
+                variant="row"
+                icon={BookOpen}
+                name={book.name}
+                description={book.description}
+                language={book.language || undefined}
+                onOpen={() => b.setBookUUID(book.uuid)}
+                onSave={async (patch) => {
+                  await invoke("dataset_update", { uuid: book.uuid, ...patch });
+                  await emit("dataset-list-changed", {});
+                  await b.loadBooks();
+                }}
+              />
             ))}
           </div>
         )}

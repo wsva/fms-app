@@ -19,7 +19,7 @@ use super::{
 
 use super::{
     DatasetType, copy_dir_recursive, dataset_roots, datasets_dir, find_dataset_dir_read,
-    find_dataset_dir_typed, find_dataset_dir_write, is_under_download_root, list_media_files,
+    find_dataset_dir_typed, is_under_download_root, list_media_files,
     move_to_trash,
 };
 
@@ -578,7 +578,31 @@ pub async fn dataset_layer_flatten(
 /// Update the mutable descriptive fields of a dataset's `info.json`.
 ///
 /// Identity (`uuid`), layout (`type`/`format`) and history (`created_at`) are not
-/// settable here: changing any of them is a different dataset, not an edit.
+/// settable here: changing any of them is a different dataset, not an edit. The
+/// body lives in [`crate::datasets::update_info_fields`] so the MCP tool
+/// `dataset_info_update` and this command cannot diverge over which fields are
+/// settable or over what happens to a downloaded (read-only) base.
+pub(crate) fn update_dataset(
+    settings: &SettingsState,
+    uuid: &str,
+    name: Option<&str>,
+    description: Option<&str>,
+    language: Option<&str>,
+    visibility: Option<&str>,
+) -> Result<DatasetInfo, String> {
+    crate::datasets::update_info_fields(
+        settings,
+        uuid,
+        name,
+        description,
+        language,
+        visibility,
+        None,
+    )
+}
+
+/// Update a dataset's descriptive fields, returning the descriptor actually
+/// written — the dataset card's flip-to-edit back face binds straight to this.
 #[tauri::command]
 pub async fn dataset_update(
     settings: State<'_, SettingsState>,
@@ -586,22 +610,18 @@ pub async fn dataset_update(
     name: Option<String>,
     description: Option<String>,
     language: Option<String>,
-) -> Result<(), String> {
-    let path = find_dataset_dir_write(&settings, &uuid)?;
-    let mut info = read_info(&path)?;
-
-    if let Some(n) = name {
-        info.name = n;
-    }
-    if let Some(d) = description {
-        info.description = d;
-    }
-    if let Some(l) = language {
-        info.language = l;
-    }
-    info.updated_at = now_stamp();
-
-    write_info(&path, &info)
+    visibility: Option<String>,
+) -> Result<DatasetInfo, String> {
+    let info = update_dataset(
+        &settings,
+        &uuid,
+        name.as_deref(),
+        description.as_deref(),
+        language.as_deref(),
+        visibility.as_deref(),
+    )?;
+    log::info!("Updated info.json metadata for dataset '{}'", info.uuid);
+    Ok(info)
 }
 
 /// Delete a dataset: its whole directory moves into the shared trash rather than

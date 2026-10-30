@@ -14,6 +14,8 @@
 export interface BookMeta {
   uuid: string;
   name: string;
+  /** The info.json `description`, empty when unset — shown on the book card. */
+  description: string;
   /** The info.json language (`"de"`, `"de-DE"`), empty when unset. Seeds the
    *  read-aloud voice resolution so generated text is narrated in the book's
    *  own language. */

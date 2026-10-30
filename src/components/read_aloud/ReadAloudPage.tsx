@@ -26,8 +26,9 @@ import {
   Check,
   AlignLeft,
   LayoutGrid,
+  Mic,
 } from "lucide-react";
-import { MicGlyph } from "@/components/voice/MicGlyph";
+import { emit } from "@tauri-apps/api/event";
 import MdEditor from "@/components/wiki/MdEditor";
 import NormalizeActions from "./NormalizeActions";
 import SourceAlignWorkspace from "./source_align/SourceAlignWorkspace";
@@ -43,6 +44,7 @@ import type {
 } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { usePageRefresh } from "@/lib/refresh/page-refresh";
+import { DatasetCard } from "@/components/ui/dataset";
 import { useAgentActions, reqStr } from "@/lib/agent/ui-actions";
 import { useDatasetFamily } from "@/hooks/useDatasetFamily";
 import { openDatasetInTab } from "@/lib/nav/open-in-tab";
@@ -1485,23 +1487,24 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
             </p>
           ) : (
             datasets.map((d) => (
-              <button
+              <DatasetCard
                 key={d.uuid}
-                className="text-left p-4 border border-border-default rounded-lg transition-colors hover:bg-bg-hover cursor-pointer"
-                onClick={() => {
+                variant="row"
+                icon={Mic}
+                name={d.name}
+                description={d.description}
+                language={d.language || undefined}
+                title={d.path}
+                onOpen={() => {
                   setSelectedDataset(d.uuid);
                   setSelectedText(null);
                 }}
-                title={d.path}
-              >
-                <div className="flex items-center gap-2">
-                  <MicGlyph size={16} />
-                  <span className="font-medium text-text-primary truncate">{d.name}</span>
-                </div>
-                {d.description && (
-                  <div className="text-xs text-text-tertiary truncate mt-1">{d.description}</div>
-                )}
-              </button>
+                onSave={async (patch) => {
+                  await invoke("dataset_update", { uuid: d.uuid, ...patch });
+                  await emit("dataset-list-changed", {});
+                  await loadDatasets();
+                }}
+              />
             ))
           )}
         </div>
