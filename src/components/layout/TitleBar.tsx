@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import {
   Bot,
   Copy,
@@ -206,8 +206,10 @@ export default function TitleBar({
     else window.open(CARD_BASE_URL, "_blank");
   }
 
-  // Hand the current workspace's directory to the OS file explorer and answer
-  // with the path that was revealed. The path comes from the backend
+  // Open the current workspace's directory in the OS file explorer and answer
+  // with the path that was opened. `openPath`, not `revealItemInDir`: the
+  // latter selects the folder inside its parent, while the row promises the
+  // folder itself. The path comes from the backend
   // (`workspace_get_current_dir`) rather than being rebuilt from the uuid here,
   // so the on-disk layout stays the Rust's alone. The menu row sits under the
   // Workspace heading, which only makes sense once a workspace is selected —
@@ -221,7 +223,7 @@ export default function TitleBar({
     if (!isTauri() || !currentWorkspace) return null;
     try {
       const dir = await invoke<string>("workspace_get_current_dir");
-      await revealItemInDir(dir);
+      await openPath(dir);
       return dir;
     } catch (e) {
       logError(`Open workspace directory failed: ${String(e)}`, "titlebar");
@@ -328,7 +330,7 @@ export default function TitleBar({
     {
       id: "titlebar.open-workspace-dir",
       label:
-        "Open the current workspace's directory in the OS file explorer — the File > Workspace menu row. Returns the path that was revealed.",
+        "Open the current workspace's directory in the OS file explorer — the File > Workspace menu row. The browser lands inside the folder. Returns the path that was opened.",
       // `mutate`, not `read`, to agree with the MCP twin `app_open_workspace_dir`
       // (UI_CONTROL): it raises a window on the user's desktop.
       kind: "mutate",

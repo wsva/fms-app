@@ -560,7 +560,7 @@ impl DatasetMcpServer {
     // `workspace_*` tool would fall into the `misc` bucket and fail
     // `every_tool_has_a_domain`), and the command it calls keeps the
     // `workspace_get_current_dir` name because that one only returns a path.
-    #[tool(name = "app_open_workspace_dir", description = "Reveal a workspace's directory in the OS file explorer (Explorer / Finder / xdg) and return its absolute path. Pass workspace_uuid (from workspace_list) to reveal any workspace, or omit it for the one that is open. Nothing on disk changes, but it does put an explorer window on the user's desktop — which is why the policy tier is UI_CONTROL and not a read. Errors with a next-step hint when no workspace is selected or the uuid is unknown; ask the user to pick one on the Workspaces page rather than guessing a path.")]
+    #[tool(name = "app_open_workspace_dir", description = "Open a workspace's directory in the OS file manager (Explorer / Finder / xdg) — the browser lands inside the folder, not on its parent — and return the absolute path. Pass workspace_uuid (from workspace_list) to open any workspace, or omit it for the one that is open. Nothing on disk changes, but it does put an explorer window on the user's desktop — which is why the policy tier is UI_CONTROL and not a read. Errors with a next-step hint when no workspace is selected or the uuid is unknown; ask the user to pick one on the Workspaces page rather than guessing a path.")]
     async fn app_open_workspace_dir(&self, Parameters(param): Parameters<AppOpenWorkspaceDirParam>) -> Result<String, String> {
         let state = self.app.state::<WorkspaceState>();
         let dir = match param.workspace_uuid.as_deref() {
@@ -568,7 +568,9 @@ impl DatasetMcpServer {
             None => crate::workspace::workspace_get_current_dir(state).await?,
         };
         log::info!("[MCP] app_open_workspace_dir: {}", dir);
-        tauri_plugin_opener::reveal_item_in_dir(&dir).map_err(|e| {
+        // `open_path`, not `reveal_item_in_dir`: the latter selects the folder
+        // in its parent, which is one click short of what was asked for.
+        tauri_plugin_opener::open_path(&dir, None::<&str>).map_err(|e| {
             format!("the workspace directory exists but the OS explorer refused to open it: {e}. Path: {dir}")
         })?;
         Ok(serde_json::json!({ "ok": true, "path": dir }).to_string())

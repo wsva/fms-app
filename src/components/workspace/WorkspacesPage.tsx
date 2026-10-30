@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { Button, Input, TextField, Label } from "@heroui/react";
@@ -263,16 +263,18 @@ export default function WorkspacesPage() {
     }
   }
 
-  // Show a workspace's folder in the OS file manager. Desktop only: on Android
+  // Open a workspace's folder in the OS file manager. Desktop only: on Android
   // that directory is app-private, so there is nothing for a file browser to
-  // show. The path comes from the backend — the frontend never builds it from
-  // the uuid, so the layout stays defined in one place (workspace.rs).
+  // show. `openPath` (not `revealItemInDir`) is what lands the browser *inside*
+  // the folder instead of sitting on its parent with the folder selected. The
+  // path comes from the backend — the frontend never builds it from the uuid,
+  // so the layout stays defined in one place (workspace.rs).
   async function handleOpenFolder(ws: Workspace) {
     if (!isTauri()) return;
     try {
       setError(null);
       const dir = await invoke<string>("workspace_get_dir", { uuid: ws.uuid });
-      await revealItemInDir(dir);
+      await openPath(dir);
     } catch (e) {
       setError(`Failed to open the workspace folder: ${e}`);
     }
