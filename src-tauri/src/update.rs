@@ -3,9 +3,11 @@
 //! Notify-first by construction — nothing here installs anything until
 //! `app_update_install` is called, from Settings → About or by an agent
 //! through MCP. The check itself goes through the updater plugin's configured
-//! endpoint (the `latest.json` asset on the newest published release), so the
-//! download is verified against the minisign public key in `tauri.conf.json`:
-//! a compromised host cannot ship a binary.
+//! endpoints — GitHub first, the website mirror as fallback — so a machine
+//! that cannot reach GitHub still learns of (and downloads) the newest
+//! release. Whichever host answers, the download is verified against the
+//! minisign public key in `tauri.conf.json`: the signature covers the bytes,
+//! not the URL, so a compromised host cannot ship a binary.
 //!
 //! Desktop only, and only where the plugin can actually replace the installed
 //! app — see [`platform_support`]. Desktop builds register these two commands
@@ -13,6 +15,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -26,6 +29,16 @@ const EVENT_PROGRESS: &str = "update://progress";
 
 /// Where a human goes when the newest version is not known yet.
 const RELEASES_PAGE: &str = "https://github.com/wsva/fms-app/releases/latest";
+
+/// The website's own download section — the path for a human (and the
+/// updater's fallback endpoint) when GitHub is not reachable from here.
+const DOWNLOAD_PAGE: &str = "https://lusworkshop.site/#download";
+
+/// Per-endpoint request budget. A firewall that blackholes GitHub produces a
+/// hang rather than a refusal, and the plugin only moves to the fallback
+/// endpoint when the first one errors or times out — the 30s default would
+/// make every check feel like the failure.
+const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// What `app_update_check` reports. `hint` is the actionable half — an agent
 /// reads it instead of guessing what to do next.
@@ -141,12 +154,16 @@ pub async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
     };
 
     if !supported {
-        status.hint = "This build cannot update itself; download the newest installer from the releases page instead.".to_string();
+        status.hint = format!(
+            "This build cannot update itself; download the newest installer from {DOWNLOAD_PAGE} or the releases page instead."
+        );
         return Ok(status);
     }
 
     let update = app
-        .updater()
+        .updater_builder()
+        .timeout(ENDPOINT_TIMEOUT)
+        .build()
         .map_err(|e| format!("Updater unavailable: {e}"))?
         .check()
         .await
@@ -196,10 +213,9 @@ pub async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
 pub async fn install(app: &AppHandle) -> Result<(), String> {
     let (supported, _) = platform_support();
     if !supported {
-        return Err(
-            "This build cannot install updates itself; download the newest installer from the releases page instead."
-                .to_string(),
-        );
+        return Err(format!(
+            "This build cannot install updates itself; download the newest installer from {DOWNLOAD_PAGE} (or the releases page) instead."
+        ));
     }
     if is_dev_build() {
         return Err("Update install is disabled in development builds.".to_string());
@@ -222,6 +238,7 @@ pub async fn install(app: &AppHandle) -> Result<(), String> {
 
     let updater = app
         .updater_builder()
+        .timeout(ENDPOINT_TIMEOUT)
         .on_before_exit(|| {
             log::info!("[updater] exiting so the installer can replace the running app");
         })
