@@ -68,6 +68,8 @@ interface GlobalSettings {
   device_id: string;
   device_seed: string;
   selected_model: string;
+  // Carried through unchanged on save: the model root is resolved by the
+  // backend (app_paths), never chosen here, but must not be wiped on writeback.
   model_dir: string;
   model_unload_timeout: ModelUnloadTimeout;
   onboarding_completed: boolean;
@@ -450,31 +452,6 @@ export default function SettingsPage() {
     }
   }
 
-  // ---- Read-only directory field ----
-
-  function DirField({
-    label,
-    description,
-    value,
-  }: {
-    label: string;
-    description: string;
-    value: string;
-  }) {
-    return (
-      <div className="mb-4">
-        <label className="block font-medium mb-1">{label}</label>
-        <p className="text-text-secondary text-sm mb-2">{description}</p>
-        <input
-          type="text"
-          readOnly
-          className="w-full px-3 py-2 border border-border-light rounded-md bg-bg-card text-text-secondary cursor-default"
-          value={value}
-        />
-      </div>
-    );
-  }
-
   return (
     <main className="flex-1 flex flex-col h-full min-h-0 min-w-0">
       <PageHeader title="Settings" />
@@ -761,13 +738,6 @@ export default function SettingsPage() {
               </p>
             )}
           </div>
-
-          {/* Model Directory (read-only) */}
-          <DirField
-            label="STT Model Directory"
-            description="Where STT models are stored. Shared across all workspaces."
-            value={globalSettings?.model_dir ?? ""}
-          />
 
         </section>
 
