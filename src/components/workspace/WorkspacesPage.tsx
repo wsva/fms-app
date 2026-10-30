@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { Button, Input, TextField, Label } from "@heroui/react";
@@ -13,6 +14,7 @@ import {
   Check,
   X,
   FolderOpen,
+  FolderSearch,
   MonitorCheck,
 } from "lucide-react";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
@@ -258,6 +260,21 @@ export default function WorkspacesPage() {
       );
     } catch (e) {
       setError(`Failed to update startup setting: ${e}`);
+    }
+  }
+
+  // Show a workspace's folder in the OS file manager. Desktop only: on Android
+  // that directory is app-private, so there is nothing for a file browser to
+  // show. The path comes from the backend — the frontend never builds it from
+  // the uuid, so the layout stays defined in one place (workspace.rs).
+  async function handleOpenFolder(ws: Workspace) {
+    if (!isTauri()) return;
+    try {
+      setError(null);
+      const dir = await invoke<string>("workspace_get_dir", { uuid: ws.uuid });
+      await revealItemInDir(dir);
+    } catch (e) {
+      setError(`Failed to open the workspace folder: ${e}`);
     }
   }
 
@@ -526,6 +543,13 @@ export default function WorkspacesPage() {
                       className={ws.auto_login ? "text-accent" : "text-text-tertiary"}
                     >
                       <MonitorCheck size={14} /> Startup: {ws.auto_login ? "On" : "Off"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onPress={() => handleOpenFolder(ws)}
+                    >
+                      <FolderSearch size={14} /> Open folder
                     </Button>
                     <Button
                       size="sm"

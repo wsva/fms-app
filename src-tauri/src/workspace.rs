@@ -522,6 +522,24 @@ pub async fn workspace_get_current_dir(
     Ok(workspace_dir(&ws.uuid).to_string_lossy().into_owned())
 }
 
+/// Same path rule for any workspace in the registry, not just the open one —
+/// what the Workspaces page needs to reveal a row in the OS file manager. The
+/// uuid is checked against the registry first, so a stale or forged id cannot
+/// turn into a path the app never created.
+#[tauri::command]
+pub async fn workspace_get_dir(
+    state: State<'_, WorkspaceState>,
+    uuid: String,
+) -> Result<String, String> {
+    let registry = state.registry.lock().unwrap();
+    if !registry.workspaces.iter().any(|w| w.uuid == uuid) {
+        return Err(format!(
+            "no workspace with id '{uuid}' — refresh the list and try again"
+        ));
+    }
+    Ok(workspace_dir(&uuid).to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub async fn workspace_create(
     app: AppHandle,

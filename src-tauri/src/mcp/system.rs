@@ -129,6 +129,14 @@ struct AppStartDictationParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct AppOpenWorkspaceDirParam {
+    /// Workspace uuid from `workspace_list`. Omit it for the workspace that is
+    /// open right now.
+    #[serde(default)]
+    workspace_uuid: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct AppNotifyParam {
     message: String,
 }
@@ -552,10 +560,13 @@ impl DatasetMcpServer {
     // `workspace_*` tool would fall into the `misc` bucket and fail
     // `every_tool_has_a_domain`), and the command it calls keeps the
     // `workspace_get_current_dir` name because that one only returns a path.
-    #[tool(name = "app_open_workspace_dir", description = "Reveal the current workspace's directory in the OS file explorer (Explorer / Finder / xdg) and return its absolute path. Nothing on disk changes, but it does put an explorer window on the user's desktop — which is why the policy tier is UI_CONTROL and not a read. Errors with a next-step hint when no workspace is selected; ask the user to switch or create one on the Workspaces page rather than guessing a path.")]
-    async fn app_open_workspace_dir(&self) -> Result<String, String> {
+    #[tool(name = "app_open_workspace_dir", description = "Reveal a workspace's directory in the OS file explorer (Explorer / Finder / xdg) and return its absolute path. Pass workspace_uuid (from workspace_list) to reveal any workspace, or omit it for the one that is open. Nothing on disk changes, but it does put an explorer window on the user's desktop — which is why the policy tier is UI_CONTROL and not a read. Errors with a next-step hint when no workspace is selected or the uuid is unknown; ask the user to pick one on the Workspaces page rather than guessing a path.")]
+    async fn app_open_workspace_dir(&self, Parameters(param): Parameters<AppOpenWorkspaceDirParam>) -> Result<String, String> {
         let state = self.app.state::<WorkspaceState>();
-        let dir = crate::workspace::workspace_get_current_dir(state).await?;
+        let dir = match param.workspace_uuid.as_deref() {
+            Some(uuid) => crate::workspace::workspace_get_dir(state, uuid.to_string()).await?,
+            None => crate::workspace::workspace_get_current_dir(state).await?,
+        };
         log::info!("[MCP] app_open_workspace_dir: {}", dir);
         tauri_plugin_opener::reveal_item_in_dir(&dir).map_err(|e| {
             format!("the workspace directory exists but the OS explorer refused to open it: {e}. Path: {dir}")

@@ -10,6 +10,7 @@ A **workspace** is a separate, self‑contained learning area with its own datas
 - **Open Workspaces** from **Tools → Workspaces** to create, rename, and switch between them.
 - Each workspace card shows how it relates to the account you're signed in as — badges like **Same user**, **Other user**, or **Unclaimed** help you see which account owns it.
 - A workspace can be marked for **auto‑login**, so FmS returns to it (and its account) on launch.
+- **Open folder** (**Desktop** only) reveals that workspace's directory in your file manager — handy for backing it up or clearing space. On Android the folder is app‑private, so the button is not offered there.
 
 The folders FmS reads are **per workspace** (dataset locations, books, recordings), so switching workspaces switches material. FmS keeps those folders under the workspace directory itself; they are not edited from Settings — a dataset type gains another folder through its own page's **Add dataset location** button.
 
