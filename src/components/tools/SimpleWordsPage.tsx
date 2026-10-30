@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Plus, X, Star, Globe, Play } from "lucide-react";
 import type { CardDatasetSummary } from "@/lib/types";
 import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
+import { usePageRefresh } from "@/lib/refresh/page-refresh";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -52,6 +53,16 @@ export default function SimpleWordsPage() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // The config lives in the workspace directory, and the shell keeps this page
+  // mounted from startup — when the chooser was up, this page's first read saw
+  // no workspace at all. Re-read on activation and whenever the workspace or
+  // the dataset list changes, instead of showing that first (empty) snapshot
+  // for the rest of the session.
+  usePageRefresh("simple-words", {
+    refresh: loadData,
+    events: ["workspace-selected", "dataset-list-changed"],
+  });
 
   const languages = Object.keys(config.languages);
 
@@ -142,8 +153,13 @@ export default function SimpleWordsPage() {
     setError(null);
     setLoading(true);
     try {
-      await invoke("simple_words_save_config", { config });
-      setMessage("Config saved.");
+      // The backend resolves an empty active language to a configured one and
+      // rebuilds the word set, so the answer — not what was posted — is what the
+      // page should show.
+      const info = await invoke<SimpleWordsConfigInfo>("simple_words_save_config", { config });
+      setConfig({ languages: info.languages, active_language: info.active_language });
+      setWordCount(info.word_count);
+      setMessage(`Config saved — ${info.word_count} words in memory.`);
     } catch (e) {
       setError(`Save failed: ${e}`);
     } finally {

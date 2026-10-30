@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -583,6 +583,17 @@ pub async fn workspace_select(
         let ws_dir = workspace_dir(&uuid);
         log::info!("[Workspace] Setting workspace dir for settings: {}", ws_dir.display());
         settings_state.set_workspace_dir(Some(ws_dir));
+    }
+
+    // Simple words keep their config in the workspace directory, and the chooser
+    // path picks one long after startup read it — reload so the page describes
+    // this workspace, not the none/previous one.
+    {
+        let sw_state = app.state::<crate::simple_words::SimpleWordsState>();
+        match crate::simple_words::init_simple_words(&settings_state, &sw_state) {
+            Ok(count) => log::info!("[Workspace] Loaded {} simple words", count),
+            Err(e) => log::warn!("[Workspace] Failed to reload simple words: {}", e),
+        }
     }
 
     // The role came with that reload, and only a hub serves: switching onto a
