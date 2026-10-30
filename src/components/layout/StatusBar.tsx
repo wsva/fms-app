@@ -56,24 +56,24 @@ export type StatusBarNavigate = (tab: string) => void;
 // Models
 // ---------------------------------------------------------------------------
 
-/** Dot color per normalized model state. */
-function dotClass(state: LoadedModelState): string {
+/** The bar's state language: the leading icon's colour, not a dot beside it.
+ *  Green = in memory, blue pulsing = in flight, red = failed, muted = present
+ *  on disk but idle (or nothing there at all — the menu's word tells those two
+ *  apart, and only one of them has a verb).
+ *
+ *  A tinted glyph says the same thing a dot did while costing no width, which
+ *  matters in a bar that is read at a glance and never has room to spare. */
+function stateIconClass(state: LoadedModelState): string {
   switch (state) {
     case "loaded":
-      return "bg-green-500";
+      return "text-green-500";
     case "loading":
-      return "bg-blue-500 animate-pulse";
+      return "text-blue-500 animate-pulse";
     case "error":
-      return "bg-red-500";
-    case "available":
-      return "bg-gray-400";
+      return "text-red-500";
     default:
-      return "bg-gray-300";
+      return "text-text-tertiary";
   }
-}
-
-function StateDot({ state, className = "" }: { state: LoadedModelState; className?: string }) {
-  return <span className={`h-2 w-2 shrink-0 rounded-full ${dotClass(state)} ${className}`} />;
 }
 
 /** Per-family icon so a type is recognizable without reading its label. */
@@ -110,8 +110,8 @@ function actionLabel(m: LoadedModel): string | null {
   return null;
 }
 
-/** The bar shows how many models are in memory; the menu names each family, its
- *  state and the model behind it, so the two never say the same thing twice. */
+/** The bar says whether anything is in memory (the icon's colour); the menu says
+ *  which model each family is on, one row per family. Neither repeats the other. */
 function ModelsItem({
   models,
   onAction,
@@ -126,7 +126,7 @@ function ModelsItem({
   const anyLoading = models.some((m) => m.state === "loading");
   const anyAvailable = models.some((m) => m.state === "available");
 
-  // One dot for the whole group, worst state first: a failure must not be
+  // One colour for the whole group, worst state first: a failure must not be
   // hidden behind a healthy sibling, and "in flight" outranks "settled".
   const state: LoadedModelState = anyError
     ? "error"
@@ -138,8 +138,9 @@ function ModelsItem({
           ? "available"
           : "none";
   // The families are separate resources (STT and text-split live in different
-  // binaries on Android), so a glance asks "how many are in memory?", not
-  // "which one is on" — hence one chip with a count.
+  // binaries on Android), so the chip answers "is anything in memory?" with its
+  // icon's colour rather than a count: how many, and which, is what opening it
+  // is for.
   const detail = models
     .map((m) => `${m.fullName}: ${m.stateText.toLowerCase()}`)
     .join(" · ");
@@ -151,20 +152,16 @@ function ModelsItem({
       align="start"
       active={loaded > 0}
       icon={Cpu}
-      content={
-        <>
-          <StateDot state={state} />
-          <span>Models</span>
-          <span className="shrink-0 opacity-70">({loaded})</span>
-        </>
-      }
+      iconClassName={stateIconClass(state)}
+      content={<span>Models</span>}
     >
       {/* One row per family, and each fact on it exactly once: the name says
-          what it is, one muted line says where it stands (dot + word + the
-          model in use), and the one verb it offers sits at the end of the row.
-          The state used to be written three times — dot, word and a caption —
-          and the action floated between families under a repeated name, which
-          read as the next family's subtitle.
+          what it is, one muted line says where it stands (word + the model in
+          use), and the one verb it offers sits at the end of the row. The state
+          used to be written three times and the action floated between families
+          under a repeated name, which read as the next family's subtitle; the
+          family icon now carries the state as colour, the same way the bar's own
+          icon does.
 
           The body is a fixed width because its widest child is a model id:
           without one the panel would resize itself every time an id changed
@@ -176,11 +173,10 @@ function ModelsItem({
           const FamilyIcon = typeIcon(m.type);
           return (
             <div key={m.type} className="flex items-start gap-2 px-3 py-1.5">
-              <FamilyIcon size={14} className="mt-[3px] shrink-0 opacity-70" />
+              <FamilyIcon size={14} className={`mt-[3px] shrink-0 ${stateIconClass(m.state)}`} />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-text-primary">{m.fullName}</p>
                 <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px]">
-                  <StateDot state={m.state} />
                   <span className={`shrink-0 ${m.state === "error" ? "text-red-500" : "text-text-tertiary"}`}>
                     {m.stateText}
                   </span>
@@ -324,6 +320,11 @@ function SyncItem({
   // used to read "Hub :35711" on a follower too, because the word followed the
   // listener rather than the role.
   const isHubRole = role === "hub";
+  // Same language as the Models chip: the icon's colour is the state, so the
+  // word beside it can stay a name ("Hub", "Follower") instead of repeating
+  // "on"/"off" or spending width on the port — that lives in the menu, next to
+  // the URLs where the number is actually useful.
+  const iconClass = running ? "text-green-500" : "text-text-tertiary";
 
   return (
     <StatusItem
@@ -338,13 +339,9 @@ function SyncItem({
       align="start"
       active={running}
       icon={Server}
+      iconClassName={iconClass}
       content={
-        <>
-          <span className={`h-2 w-2 shrink-0 rounded-full ${running ? "bg-green-500" : "bg-gray-400"}`} />
-          <span>
-            {isHubRole ? (running ? `Hub :${status?.port}` : "Hub off") : "Follower"}
-          </span>
-        </>
+        <span>{isHubRole ? (running ? "Hub" : "Hub off") : "Follower"}</span>
       }
     >
       <StatusMenuHeading>{isHubRole ? "This device is the hub" : "This device is a follower"}</StatusMenuHeading>
