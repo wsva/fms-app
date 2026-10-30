@@ -11,7 +11,6 @@ import {
   Info,
   LayoutGrid,
   Palette,
-  Server,
   Smartphone,
 } from "lucide-react";
 import { MicGlyph } from "@/components/voice/MicGlyph";
@@ -88,16 +87,6 @@ type ModelUnloadTimeout =
   | "never"
   | { minutes: number };
 
-interface WorkspaceSettings {
-  recordings_dir: string;
-  datasets_dir: string;
-  books_dir: string;
-  // Sync role + cluster identity (docs/design/sync.md §3.1). Workspace-
-  // scoped: `role` is "hub"|"follower" (empty ⇒ follower); `cluster_id` is a
-  // UUID issued once when a workspace is first designated hub.
-  role: string;
-  cluster_id: string;
-}
 
 /** Mirrors `UpdateStatus` in `src-tauri/src/update.rs`. The version comparison
  *  and the signature check both happen in Rust: the webview only renders what
@@ -138,7 +127,6 @@ const btnGhost = "px-3 py-1 text-xs rounded-md border border-border-light hover:
 
 export default function SettingsPage() {
   const [globalSettings, setGlobalSettings] = useState<GlobalSettings | null>(null);
-  const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings | null>(null);
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [savedGlobal, setSavedGlobal] = useState(false);
   // Owned by lib/theme so the title bar's View menu and this picker can never
@@ -321,7 +309,6 @@ export default function SettingsPage() {
     // sidebar shell never renders.
     ...(mobile ? [{ id: "bottom-nav", label: "Bottom Nav", icon: Smartphone }] : []),
     { id: "global", label: "Global Settings", icon: Globe },
-    { id: "workspace", label: "Workspace Settings", icon: Server },
     { id: "microphone", label: "Microphone", icon: MicGlyph },
     { id: "about", label: "About", icon: Info },
   ];
@@ -419,12 +406,8 @@ export default function SettingsPage() {
   const fetchSettings = useCallback(async () => {
     if (!isTauri()) return;
     try {
-      const [g, w] = await Promise.all([
-        invoke<GlobalSettings>("settings_get_global"),
-        invoke<WorkspaceSettings>("settings_get_workspace"),
-      ]);
+      const g = await invoke<GlobalSettings>("settings_get_global");
       setGlobalSettings(g);
-      setWorkspaceSettings(w);
     } catch (e) {
       console.error("Failed to load settings:", e);
     }
@@ -786,26 +769,6 @@ export default function SettingsPage() {
             value={globalSettings?.model_dir ?? ""}
           />
 
-        </section>
-
-        {/* ── Workspace Settings section ─────────────────────────── */}
-        <section className={`mb-8${showSection("workspace") ? "" : " hidden"}`}>
-          <h2 className="text-[1.3em] font-semibold mb-2">Workspace Settings</h2>
-          <p className="text-text-secondary text-sm mb-4">
-            These directories are set to default values for the current workspace. Stored in the workspace directory.
-          </p>
-
-          <DirField
-            label="Datasets Directory"
-            description="Where language learning datasets are stored."
-            value={workspaceSettings?.datasets_dir ?? ""}
-          />
-
-          <DirField
-            label="Recordings Directory"
-            description="Where audio recordings are stored."
-            value={workspaceSettings?.recordings_dir ?? ""}
-          />
         </section>
 
         {/* ── Microphone section ─────────────────────────────── */}

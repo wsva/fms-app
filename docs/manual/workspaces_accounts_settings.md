@@ -11,7 +11,7 @@ A **workspace** is a separate, self‑contained learning area with its own datas
 - Each workspace card shows how it relates to the account you're signed in as — badges like **Same user**, **Other user**, or **Unclaimed** help you see which account owns it.
 - A workspace can be marked for **auto‑login**, so FmS returns to it (and its account) on launch.
 
-Folders you set in Settings (datasets, books, recordings, model directory) are **per workspace**, so switching workspaces switches material.
+The folders FmS reads are **per workspace** (dataset locations, books, recordings), so switching workspaces switches material. FmS keeps those folders under the workspace directory itself; they are not edited from Settings — a dataset type gains another folder through its own page's **Add dataset location** button.
 
 ## Accounts & signing in
 
@@ -40,15 +40,6 @@ These apply to the app as a whole (not per workspace):
 - **Model unload timeout** — how long an STT model stays resident after use: unload *immediately*, *never*, or after a chosen number of *minutes*. Balances memory against repeated‑use speed.
 - **PC URL and token** — the Hub this device syncs with, and its access token. Usually managed from the Devices & Hub page rather than typed here. See [Multiple Devices](multiple_devices.md).
 - **Agent / Goose connection** (**Desktop** only) — settings for the AI agent dock. Hidden on Android.
-
-### Workspace Settings
-
-Settings that belong to the current workspace:
-
-- **Datasets directory** — the folder FmS scans for datasets.
-- **Books directory** — used by Books.
-- **Recordings directory** — where Read Aloud stores your recordings.
-- **Sync role** (**Desktop** only) — **Hub** (authoritative, serves datasets) or **Follower** (downloads from a Hub). Phones are always Followers. Changing this is the first step of multi‑device setup; the details live in [Multiple Devices](multiple_devices.md).
 
 ### Microphone
 
