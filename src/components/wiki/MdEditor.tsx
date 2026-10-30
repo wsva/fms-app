@@ -47,6 +47,98 @@ function scrollParent(el: HTMLElement): HTMLElement | null {
     return null;
 }
 
+// Elements whose content starts and ends on its own line. `<br>` is handled
+// apart from these: it ends a line without opening a block around anything.
+const blockTags = new Set([
+    "address", "article", "aside", "blockquote", "dd", "div", "dl", "dt",
+    "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5",
+    "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section",
+    "table", "tbody", "td", "th", "thead", "tr", "ul",
+]);
+
+/** Clipboard HTML → the plain text a Markdown textarea wants.
+ *
+ * Reading `textContent` straight off the fragment cannot work. Clipboard
+ * producers pretty-print their markup, and the newlines *between* tags are
+ * text nodes that survive there — so a pasted block arrived wrapped in blank
+ * lines — while the breaks a reader actually sees (a block boundary, a `<br>`)
+ * survive as nothing at all, which collapses a copied page onto one line. So
+ * the tree is walked instead: the newlines come from the tags, whitespace that
+ * only separates markup is worth at most one space, and `<pre>` content is
+ * left exactly as it was copied.
+ */
+function htmlToPlainText(root: Node): string {
+    const lines: string[] = [];
+    let line = "";
+    let space = false; // whitespace seen at the end of this line, not yet written
+    let written = 0; // content written so far, to tell an empty block apart
+    let pre = false;
+    let preStart = false; // a <pre> whose first newline is markup, not content
+
+    const flush = (blank = false) => {
+        const text = line.replace(/\s+$/, "");
+        if (text || blank) lines.push(text);
+        line = "";
+        space = false;
+    };
+
+    const walk = (node: Node) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+            const raw = node.nodeValue ?? "";
+            if (pre) {
+                const text = preStart && raw.startsWith("\n") ? raw.slice(1) : raw;
+                preStart = false;
+                const [head, ...rest] = text.split("\n");
+                line += head;
+                for (const part of rest) {
+                    flush();
+                    line = part;
+                }
+                if (text) written++;
+                return;
+            }
+            if (!raw.trim()) {
+                // Markup indentation: between two inline tags it renders as a
+                // space, at the start of a line it renders as nothing.
+                if (line) space = true;
+                return;
+            }
+            const text = raw.replace(/\s+/g, " ");
+            line += line ? (space ? " " : "") + text : text.trimStart();
+            space = false;
+            written++;
+            return;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        const el = node as HTMLElement;
+        const tag = el.tagName.toLowerCase();
+        if (tag === "br") {
+            flush(true);
+            return;
+        }
+        const block = blockTags.has(tag);
+        if (block) flush();
+        const writtenBefore = written;
+        const linesBefore = lines.length;
+        if (tag === "pre") {
+            pre = true;
+            preStart = true;
+        }
+        for (const child of Array.from(el.childNodes)) walk(child);
+        if (tag === "pre") pre = false;
+        // A block that produced nothing was an empty paragraph, which reads as
+        // a blank line in the source — keep it, or paragraphs run together.
+        if (block) flush(written === writtenBefore && lines.length === linesBefore);
+    };
+
+    for (const child of Array.from(root.childNodes)) walk(child);
+    flush();
+    // Blank lines at either edge come from the markup, never from the copy.
+    while (lines.length && !lines[0]) lines.shift();
+    while (lines.length && !lines[lines.length - 1]) lines.pop();
+    return lines.join("\n");
+}
+
 const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, fullscreen = false, spellCheck, shortcutsOpen, textareaBgClass = "bg-bg-input" }, forwardedRef) => {
     const innerRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -80,18 +172,21 @@ const MdEditor = forwardRef<HTMLTextAreaElement, Props>(({ value, onChange, full
         const html = e.clipboardData.getData("text/html");
         if (!html) return;
         e.preventDefault();
-        const div = document.createElement("div");
-        div.innerHTML = html;
+        // An inert document, so no script or handler in the pasted markup runs.
+        const doc = new DOMParser().parseFromString(html, "text/html");
         // Rich-text formatting is stripped (the point of this handler), but links
         // must survive as Markdown: a browser address-bar copy puts the page title
         // in the anchor text and the actual URL only in its href, so taking plain
-        // textContent alone would drop the address entirely.
-        for (const a of Array.from(div.querySelectorAll("a[href]"))) {
+        // text alone would drop the address entirely.
+        for (const a of Array.from(doc.querySelectorAll("a[href]"))) {
             const href = a.getAttribute("href") || "";
-            const text = a.textContent?.trim() || "";
+            const text = (a.textContent ?? "").replace(/\s+/g, " ").trim();
             a.replaceWith(text && text !== href ? `[${text}](${href})` : href);
         }
-        replaceRange(e.currentTarget, div.textContent || div.innerText || "");
+        // If the rich flavour held no text at all, let the plain one through
+        // rather than eating the paste.
+        const text = htmlToPlainText(doc.body);
+        replaceRange(e.currentTarget, text || e.clipboardData.getData("text/plain"));
     };
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
