@@ -7,6 +7,7 @@ import {
   Mic,
   Scissors,
   Cpu,
+  MousePointerClick,
   ListTodo,
   Server,
   ExternalLink,
@@ -19,6 +20,12 @@ import { useAgentTasks } from "@/hooks/useAgentTasks";
 import { useSyncStatus, type SyncServiceStatus } from "@/hooks/useSyncStatus";
 import type { AgentTask } from "@/lib/agent/tasks";
 import AgentBadge from "@/components/agent/AgentBadge";
+import { reqBool, useAgentActions } from "@/lib/agent/ui-actions";
+import {
+  getContextMenuEnabled,
+  setContextMenuEnabled,
+  useContextMenuEnabled,
+} from "@/lib/ui/context-menu";
 import {
   dispatchDockToggle,
   DOCK_STATE_DEFAULT,
@@ -391,6 +398,44 @@ function SyncItem({
 }
 
 // ---------------------------------------------------------------------------
+// The text-selection context menu
+// ---------------------------------------------------------------------------
+
+/**
+ * A switch rather than a status: the panel that appears when text is selected
+ * anywhere in the app (`CardContextMenu`) is off until the user asks for it, so
+ * this item says what it will do, not what the app is doing — which is why it
+ * sits in the right group with the mailbox, not in the left one with the state
+ * items. The reason the default is off (and the Android exception) lives in
+ * `lib/ui/context-menu`.
+ *
+ * The state is carried by the icon's colour — green while on, muted while off —
+ * rather than by a word after the label: a status bar is read at a glance, and
+ * the word cost more width than the fact was worth. The word is not lost, it
+ * moved into the tooltip and the accessible name, and `active` still sets
+ * `aria-pressed` — colour alone would be invisible to a screen reader.
+ */
+function ContextMenuItem() {
+  const enabled = useContextMenuEnabled();
+  return (
+    <StatusItem
+      label={`Context menu — ${enabled ? "on" : "off"}`}
+      title={
+        enabled
+          ? "The context menu is on: selecting text offers a menu. Click to stop offering it."
+          : "The context menu is off: selecting text does nothing. Click to offer a menu — add a card, or ask the model about it."
+      }
+      align="end"
+      active={enabled}
+      icon={MousePointerClick}
+      iconClassName={enabled ? "text-green-500" : "text-text-tertiary"}
+      onClick={() => setContextMenuEnabled(!enabled)}
+      content={<span>Context menu</span>}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The bar
 // ---------------------------------------------------------------------------
 
@@ -398,6 +443,29 @@ export default function StatusBar({ onNavigate }: { onNavigate?: StatusBarNaviga
   const { models, runAction } = useLoadedModels();
   const { open: tasks, busy: taskBusy, error: taskError, complete, dismiss } = useAgentTasks(true);
   const { status, role, busy: syncBusy, error: syncError, setRunning } = useSyncStatus(true);
+
+  // The context-menu switch is shell chrome, so an agent reaches it under the
+  // shell's tab like the refresh action `home/page.tsx` registers. The parameter
+  // is optional: with no `on`, the action flips the switch, which is what the
+  // button does.
+  useAgentActions("shell", [
+    {
+      id: "shell.toggle-context-menu",
+      label: "Turn the text-selection context menu on or off (it ships off)",
+      kind: "mutate",
+      params_schema: {
+        on: { type: "boolean", description: "true turns it on, false turns it off; omit to flip it" },
+      },
+      run: (params) => {
+        const on =
+          params.on === undefined
+            ? !getContextMenuEnabled()
+            : reqBool("shell.toggle-context-menu", params, "on");
+        setContextMenuEnabled(on);
+        return { context_menu: on ? "on" : "off" };
+      },
+    },
+  ]);
 
   // Mirror of the agent dock's presentation state, broadcast by the dock itself
   // (see `lib/agent/dock-events`). Assumes the fresh-install shape until the
@@ -450,11 +518,13 @@ export default function StatusBar({ onNavigate }: { onNavigate?: StatusBarNaviga
         />
       </div>
 
-      {/* Right group — the agent dock's permanent entry point: always visible in
-          the bar, unlike the opt-in floating button. It toggles over the
-          `agent-dock-toggle` seam and wears the same attention marker the dock
-          would show, so it is a bare button rather than a menu. */}
+      {/* Right group — the switches and the agent dock's permanent entry point.
+          The mailbox is always visible in the bar, unlike the opt-in floating
+          button: it toggles over the `agent-dock-toggle` seam and wears the
+          same attention marker the dock would show, so it is a bare button
+          rather than a menu. */}
       <div className="ml-auto flex shrink-0 items-stretch pl-1.5">
+        <ContextMenuItem />
         <StatusItem
           label="Agent mailbox"
           title={dock.open ? "Close the agent mailbox" : "Open the agent mailbox (Ctrl+Space)"}

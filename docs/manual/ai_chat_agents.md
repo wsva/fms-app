@@ -4,7 +4,7 @@ Beyond the practice modes, FmS bundles several AI and voice capabilities. They'r
 
 FmS has no chat window of its own. A language model is called from the places that need one:
 
-- **Explain a word or a sentence** — select any text anywhere in the app, and the menu that appears offers **Ask the model** actions: explain the word, analyze the sentence, translate, find synonyms, simplify, summarize. The answer appears inside that menu, next to the text you selected.
+- **Explain a word or a sentence** — select any text anywhere in the app, and the menu that appears offers **Ask the model** actions: explain the word, analyze the sentence, translate, find synonyms, simplify, summarize. The answer appears inside that menu, next to the text you selected. That menu ships **off**, because it lands on text you are in the middle of reading: the status bar's **Context menu** button (**Desktop**) turns it on, and the choice is remembered. On Android there is no status bar to reach the button, so the menu stays on there.
 - **OCR clean‑up** — rejoin broken lines and correct obvious recognition errors.
 - **Books** — word explanations and other generated material.
 - **Read Aloud** — normalize a source text before generating audio.

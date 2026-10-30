@@ -69,6 +69,11 @@ export type StatusItemProps = {
   title?: string;
   /** Leading icon, sized to the bar. */
   icon?: BarIcon;
+  /** Extra classes for that icon — how a switch shows its state without
+   *  spending room on a word (`text-green-500` on, `text-text-tertiary` off).
+   *  Merged after the size and opacity defaults, so a colour wins and the
+   *  opacity rule still applies to it. */
+  iconClassName?: string;
   /** Visible body. Defaults to `label`; pass custom nodes for a live value. */
   content?: ReactNode;
   /** Trailing node — a count or an unread dot, kept out of the a11y name. */
@@ -106,6 +111,7 @@ export function StatusItem({
   label,
   title,
   icon: Icon,
+  iconClassName = "",
   content,
   trailing,
   active = false,
@@ -233,7 +239,7 @@ export function StatusItem({
         }}
         className={`flex h-full items-center gap-1.5 px-1.5 cursor-pointer transition-colors ${tint}`}
       >
-        {Icon && <Icon size={13} className="shrink-0 opacity-80" />}
+        {Icon && <Icon size={13} className={`shrink-0 opacity-80 ${iconClassName}`} />}
         <span className="flex min-w-0 items-center gap-1.5">{content ?? label}</span>
         {trailing}
       </button>

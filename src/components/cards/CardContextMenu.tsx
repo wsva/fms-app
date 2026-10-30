@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Card } from "@/lib/types";
 import { PROMPT_TEMPLATES } from "@/lib/llm/prompt-templates";
 import { askAboutSelection } from "@/lib/llm/ask";
+import { useContextMenuEnabled } from "@/lib/ui/context-menu";
 
 /**
  * Global text-selection context menu for cards.
@@ -26,6 +27,11 @@ import { askAboutSelection } from "@/lib/llm/ask";
  *
  * Mounted once in the app shell. Renders nothing until a selection is made, so
  * the initial server/client trees match (no hydration mismatch).
+ *
+ * It ships switched off: the status bar's **Context menu** button turns it on,
+ * and the choice is remembered (`lib/ui/context-menu`). While it is off this
+ * component attaches no listeners at all — a disabled switch should cost no
+ * `mouseup` handler on every click — and nothing renders.
  */
 
 type MenuAnchor = { x: number; top: number; bottom: number };
@@ -61,8 +67,10 @@ export default function CardContextMenu() {
   const menuRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const { openCardEditor } = useCardEditor();
+  const enabled = useContextMenuEnabled();
 
   useEffect(() => {
+    if (!enabled) return;
     const onMouseUp = (e: MouseEvent) => {
       // Ignore interactions originating inside the menu itself.
       if (menuRef.current?.contains(e.target as Node)) return;
@@ -121,7 +129,7 @@ export default function CardContextMenu() {
       document.removeEventListener("mouseup", onMouseUp);
       document.removeEventListener("pointerdown", onPointerDown);
     };
-  }, []);
+  }, [enabled]);
 
   // Focus the input when the search panel opens
   useEffect(() => {
@@ -247,7 +255,7 @@ export default function CardContextMenu() {
     }
   }
 
-  if (!anchor) return null;
+  if (!enabled || !anchor) return null;
 
   const flip = anchor.top < TOP_MARGIN;
   const style: React.CSSProperties = {
