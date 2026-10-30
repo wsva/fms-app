@@ -28,6 +28,7 @@ One value each. If a surface needs a different one, it is not a card.
 | Padding `sm` | `p-3` | Dense lists: dataset rows, model cards, status rows. |
 | Padding `md` | `p-4` | Grid cards and panels: the card decks, settings sections. |
 | Gap between cards | `gap-2` rows, `gap-3` grids | Same container that lists them. |
+| Glyph | `size={16}`, `shrink-0 text-text-tertiary`, inside the title row | Decorative (`aria-hidden`), one per card, never two. It classifies the *name*, so it sits on the title line rather than in a left gutter beside the whole text block — a gutter reads as labelling the description, and costs that description 24px of a clamped line. |
 
 ## Type scale
 
@@ -71,6 +72,10 @@ consumer, `DatasetCard`; promote it to `ui/card` when a second family needs it.
 - The two faces are absolutely positioned inside a `preserve-3d` wrapper that
   rotates 180°; the wrapper's height transitions between two fixed per-density
   tokens, so nothing is measured at runtime.
+- Because both faces are absolute, the wrapper's min-content height is 0: it
+  carries `shrink-0`, or any flex column that lists the cards squashes every row
+  to a few pixels (the Read Aloud list lost its padding and clipped its names
+  that way). A fixed-height card is never a flex-shrink candidate.
 - The hidden face is `inert`, so tab order never enters it.
 - Entry is a pencil on the front; Esc cancels, Enter submits, a failed save keeps
   the back face open with an inline error.

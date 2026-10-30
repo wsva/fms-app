@@ -74,19 +74,29 @@ export default function DatasetCard({
   const height = HEIGHT[variant];
   const editable = !!onSave && !disabled;
 
+  // The glyph belongs to the name, not to the block under it: it sits on the
+  // title line, and the description and meta keep the full content width — in
+  // `row` density that is 24px more of a single clamped line. See
+  // docs/design/cards.md.
   const main = (
-    <>
-      <Icon size={16} className="shrink-0 text-text-tertiary" aria-hidden />
-      <span className="flex min-w-0 flex-col gap-0.5">
+    <span className="flex min-w-0 flex-col gap-0.5">
+      {/* `items-center` on a (default) row centres the 16px glyph on the
+          name's 20px line box — the vertical axis. `justify-center` would be the
+          horizontal one, and would stop the name being left-aligned and
+          truncating. Kept geometric on purpose: the glyph's ink and the text's
+          ink disagree by a pixel either way, and nobody can nudge that
+          consistently across four pages. */}
+      <span className="flex min-w-0 items-center gap-2">
+        <Icon size={16} className="shrink-0 text-text-tertiary" aria-hidden />
         <span className={TITLE}>{name}</span>
-        {description && (
-          <span className={cn(DESC, variant === "row" ? "line-clamp-1" : "line-clamp-2")}>
-            {description}
-          </span>
-        )}
-        {meta && <span className={META}>{meta}</span>}
       </span>
-    </>
+      {description && (
+        <span className={cn(DESC, variant === "row" ? "line-clamp-1" : "line-clamp-2")}>
+          {description}
+        </span>
+      )}
+      {meta && <span className={META}>{meta}</span>}
+    </span>
   );
 
   return (
@@ -94,7 +104,12 @@ export default function DatasetCard({
       interactive={!!onOpen && !disabled}
       disabled={disabled}
       className={cn(
-        "flip-perspective relative overflow-hidden p-0",
+        // `shrink-0` is load-bearing: both faces are absolutely positioned, so
+        // the card's min-content height is 0 and a scroll column of them will
+        // happily squash every row to a few pixels — which reads as a card with
+        // no vertical padding and names clipped top and bottom. The height is
+        // fixed per density, so it must never be a flex-shrink candidate.
+        "flip-perspective relative shrink-0 overflow-hidden p-0",
         "transition-[height,background-color] duration-200",
         flipped ? height.back : height.front
       )}
