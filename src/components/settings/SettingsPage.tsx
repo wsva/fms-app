@@ -310,7 +310,7 @@ export default function SettingsPage() {
     // Mobile only: this customizes the Android bottom bar, which the desktop
     // sidebar shell never renders.
     ...(mobile ? [{ id: "bottom-nav", label: "Bottom Nav", icon: Smartphone }] : []),
-    { id: "global", label: "Global Settings", icon: Globe },
+    { id: "llm", label: "LLM Settings", icon: Globe },
     { id: "microphone", label: "Microphone", icon: MicGlyph },
     { id: "about", label: "About", icon: Info },
   ];
@@ -610,10 +610,10 @@ export default function SettingsPage() {
           </section>
         )}
 
-        {/* ── Global Settings section ────────────────────────────── */}
-        <section className={`mb-8${showSection("global") ? "" : " hidden"}`}>
+        {/* ── LLM Settings section ───────────────────────────────── */}
+        <section className={`mb-8${showSection("llm") ? "" : " hidden"}`}>
           <div className="flex items-center justify-between mb-2">
-            <h2 className="text-[1.3em] font-semibold">Global Settings</h2>
+            <h2 className="text-[1.3em] font-semibold">LLM Settings</h2>
             <div className="flex items-center gap-2">
               {savedGlobal && (
                 <span className="text-sm text-green-500">Saved!</span>
@@ -628,7 +628,8 @@ export default function SettingsPage() {
             </div>
           </div>
           <p className="text-text-secondary text-sm mb-4">
-            These settings apply across all workspaces. Stored in the global config directory.
+            The language model backend and its credentials. Applies across all
+            workspaces; stored in the global config directory.
           </p>
 
           {/* LLM provider */}
