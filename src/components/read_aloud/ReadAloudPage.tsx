@@ -5,7 +5,6 @@ import type { ReactNode } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import {
   Plus,
-  Pencil,
   Trash2,
   FilePlus,
   FileText,
@@ -84,8 +83,6 @@ import LiveTranscript from "./LiveTranscript";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
 
 const LOG_MODULE = "read-aloud";
-
-type DatasetDialogState = { mode: "create" } | { mode: "edit"; meta: ReadAloudMeta } | null;
 
 /** Recorder state mirrored from PracticePanel: the Record button in the toolbar
  *  reads it, and so does the live transcript dock under the practice pane. */
@@ -261,7 +258,10 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
   // switching texts: a refresh, or an apply from the source-align page.
   const [textClipsKey, setTextClipsKey] = useState(0);
 
-  const [datasetDialog, setDatasetDialog] = useState<DatasetDialogState>(null);
+  // The create dialog. Renaming and re-describing live on the dataset card's
+  // own back face in the list, so there is no second edit surface to keep in
+  // step with it (§ docs/design/cards.md).
+  const [datasetDialog, setDatasetDialog] = useState(false);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   // The attempt history lives on its own page, opened from the practice view's
@@ -989,28 +989,19 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
                 icon={Plus}
                 label="New Dataset"
                 title="New dataset"
-                onClick={() => setDatasetDialog({ mode: "create" })}
+                onClick={() => setDatasetDialog(true)}
               />
             )}
 
-            {viewMode === "texts" && (
-              <>
-                {!mobile && (
-                  <ToolbarButton
-                    icon={FilePlus}
-                    label="New Text"
-                    title="Add text"
-                    onClick={() => startEdit(null)}
-                  />
-                )}
-                <ToolbarButton
-                  icon={Pencil}
-                  label="Edit"
-                  title="Edit dataset"
-                  disabled={!activeDataset}
-                  onClick={() => activeDataset && setDatasetDialog({ mode: "edit", meta: activeDataset })}
-                />
-              </>
+            {/* The dataset's own name and description are edited on the card's
+                back face in the list, so this view only adds texts. */}
+            {viewMode === "texts" && !mobile && (
+              <ToolbarButton
+                icon={FilePlus}
+                label="New Text"
+                title="Add text"
+                onClick={() => startEdit(null)}
+              />
             )}
 
             {viewMode === "practice" && activeText && !attemptsView && (
@@ -1134,7 +1125,7 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
                   Locations
                 </ToolbarMenuItem>
                 {mobile && (
-                  <ToolbarMenuItem icon={Plus} onClick={() => setDatasetDialog({ mode: "create" })}>
+                  <ToolbarMenuItem icon={Plus} onClick={() => setDatasetDialog(true)}>
                     New Dataset
                   </ToolbarMenuItem>
                 )}
@@ -1525,8 +1516,7 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
 
       {datasetDialog && (
         <DatasetDialog
-          state={datasetDialog}
-          onClose={() => setDatasetDialog(null)}
+          onClose={() => setDatasetDialog(false)}
           onSaved={(uuid) => loadDatasets(uuid)}
         />
       )}

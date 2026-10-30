@@ -9,22 +9,22 @@ import { logError } from "@/lib/logger";
 
 const LOG_MODULE = "read-aloud";
 
-export type DatasetDialogState =
-  | { mode: "create" }
-  | { mode: "edit"; meta: ReadAloudMeta };
-
 type Props = {
-  state: DatasetDialogState;
   onClose: () => void;
   /** Called after a successful save with the affected dataset UUID. */
   onSaved: (uuid?: string) => void;
 };
 
-/** Modal to create or rename/describe a read-aloud dataset. */
-export default function DatasetDialog({ state, onClose, onSaved }: Props) {
-  const editing = state.mode === "edit" ? state.meta : null;
-  const [name, setName] = useState(editing?.name ?? "");
-  const [description, setDescription] = useState(editing?.description ?? "");
+/**
+ * Modal to create a read-aloud dataset — only the two fields a new one has.
+ *
+ * There is deliberately no edit mode: renaming and re-describing an existing
+ * dataset happen on the dataset card's own back face in the list, and a second
+ * form over the same two fields is a second thing to keep in step.
+ */
+export default function DatasetDialog({ onClose, onSaved }: Props) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,20 +41,11 @@ export default function DatasetDialog({ state, onClose, onSaved }: Props) {
     setSaving(true);
     setError(null);
     try {
-      if (editing) {
-        await invoke("read_aloud_update", {
-          uuid: editing.uuid,
-          name: name.trim(),
-          description: description.trim(),
-        });
-        onSaved(editing.uuid);
-      } else {
-        const created = await invoke<ReadAloudMeta>("read_aloud_create", {
-          name: name.trim(),
-          description: description.trim(),
-        });
-        onSaved(created.uuid);
-      }
+      const created = await invoke<ReadAloudMeta>("read_aloud_create", {
+        name: name.trim(),
+        description: description.trim(),
+      });
+      onSaved(created.uuid);
       onClose();
     } catch (e) {
       const msg = String(e);
@@ -73,7 +64,7 @@ export default function DatasetDialog({ state, onClose, onSaved }: Props) {
       >
         <div className="flex items-center justify-between">
           <h2 className="text-base font-semibold text-text-primary">
-            {editing ? "Edit dataset" : "New read-aloud dataset"}
+            New read-aloud dataset
           </h2>
           <button
             onClick={onClose}
@@ -119,7 +110,7 @@ export default function DatasetDialog({ state, onClose, onSaved }: Props) {
             disabled={saving}
             className="px-4 py-2 rounded-md text-sm bg-accent-bg text-white hover:bg-accent-bg-hover cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            {saving ? "Saving…" : editing ? "Save" : "Create"}
+            {saving ? "Saving…" : "Create"}
           </button>
         </div>
       </div>
