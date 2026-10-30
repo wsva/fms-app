@@ -33,6 +33,7 @@ import {
 import { isTauri } from "@/lib/platform";
 import { CARD_BASE_URL } from "@/lib/cards";
 import { logError } from "@/lib/logger";
+import { checkForUpdates, describeUpdate, UPDATE_TONE_CLASS, useUpdate } from "@/lib/ui/update";
 import { THEMES } from "@/lib/theme";
 import { useAgentActions, oneOf, reqBool, reqNum } from "@/lib/agent/ui-actions";
 import { useTheme } from "@/hooks/useTheme";
@@ -52,6 +53,7 @@ import {
 } from "./StatusItem";
 import { NAV_GROUPS, type TabId } from "./Sidebar";
 import TitleBarTabs from "./TitleBarTabs";
+import AboutDialog from "@/components/about/AboutDialog";
 import type { TabInstance } from "@/lib/shell/tabs";
 
 /**
@@ -175,6 +177,12 @@ export default function TitleBar({
   } = useWindowControls();
   const { theme, setTheme } = useTheme();
   const zoom = useZoomLevel();
+
+  // The About card, opened from Help. It is owned here because the menu that
+  // opens it is — and the same store feeds the row's trailing slot, so the answer
+  // the menu shows and the answer the card shows are one answer.
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const updateSummary = describeUpdate(useUpdate());
 
   // The dock's presentation state, mirrored off the same broadcast the status
   // bar listens to, so the View menu can show whether the mailbox is open.
@@ -342,6 +350,19 @@ export default function TitleBar({
         }
         const path = await openWorkspaceDir();
         return { path, workspace_uuid: currentWorkspace };
+      },
+    },
+    {
+      id: "titlebar.open-about",
+      label:
+        "Open the About card: which build this is, whether a newer release exists, the changelog when one does, and the links out — the Help > About FmS row. For the version facts alone, `app_update_check` answers without opening anything.",
+      // `mutate`, like the workspace-directory row: it raises a panel over the
+      // page. The check itself is not duplicated here — `app_update_check` is the
+      // MCP verb for that, and this action only reveals the card.
+      kind: "mutate",
+      run: () => {
+        setAboutOpen(true);
+        return { about_open: true };
       },
     },
     {
@@ -537,10 +558,24 @@ export default function TitleBar({
             onClick={() => onNavigate("logs")}
           />
           <StatusMenuSep />
+          {/* Two questions, two rows. "About & updates…" was one row, and it
+              opened the Settings page on its *first* section — you asked what
+              version you were running and got the theme picker. */}
+          <StatusMenuRow icon={Info} text="About FmS…" onClick={() => setAboutOpen(true)} />
+          {/* The answer arrives in the trailing slot, worded by `describeUpdate`
+              so this row and the card cannot describe the same state two ways.
+              `keepOpen` because the answer is the point: the row stays up long
+              enough to be read. */}
           <StatusMenuRow
-            icon={Info}
-            text="About & updates…"
-            onClick={() => onNavigate("settings")}
+            icon={RefreshCw}
+            text="Check for updates"
+            keepOpen
+            trailing={
+              <span className={`shrink-0 text-[11px] ${UPDATE_TONE_CLASS[updateSummary.tone]}`}>
+                {updateSummary.short}
+              </span>
+            }
+            onClick={() => void checkForUpdates()}
           />
         </StatusItem>
       </div>
@@ -576,6 +611,19 @@ export default function TitleBar({
           />
           <WindowButton label="Close" icon={X} onClick={close} danger />
         </div>
+      )}
+
+      {/* In the bar's root rather than beside it, because every menu lives here
+          too; the dialog opts itself out of the drag region and of `select-none`
+          (see its module comment) so the bar's two properties do not reach it. */}
+      {aboutOpen && (
+        <AboutDialog
+          onClose={() => setAboutOpen(false)}
+          onOpenLogs={() => {
+            setAboutOpen(false);
+            onNavigate("logs");
+          }}
+        />
       )}
     </div>
   );

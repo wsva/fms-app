@@ -6,7 +6,7 @@ This page takes you from a fresh install to your first practice session.
 
 **Desktop (Windows / Linux)** — download the installer for your platform from the FmS website or its GitHub releases page and run it. Launching FmS opens the main window with a sidebar on the left.
 
-**Updating** — once installed, the app updates itself. Open **Settings → About** to see whether a newer release exists, then *Download & install*; it verifies the signature and restarts into the new version. This works for the Windows `.exe` and for the Linux AppImage. macOS, Android and iOS have no in-app update — download the new package and install it over the old one.
+**Updating** — once installed, the app updates itself. On desktop, **Help → Check for updates** asks the release manifest and shows the answer in the menu itself; **Help → About FmS** opens the card with the build you are running, what changed in the new one, and the *Download & install* button. The same card is in **Settings → About**. An install verifies the signature and restarts into the new version. This works for the Windows `.exe` and for the Linux AppImage. macOS, Android and iOS have no in-app update — download the new package and install it over the old one.
 
 **Android** — install the FmS APK. The Android app is a lighter "thin client": it is best used to practice and to sync from a computer, and pairs with a desktop **Hub** (see [Multiple Devices](multiple_devices.md)).
 

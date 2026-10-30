@@ -89,7 +89,9 @@ function PageFor({
     case "agent":
       return <AgentPage />;
     case "settings":
-      return <SettingsPage />;
+      // `onNavigate` only for the About card's Logs link — the settings page
+      // changes no other page's state.
+      return <SettingsPage onNavigate={onNavigate} />;
     case "chat":
       return <DeviceChatPage active={focused} />;
     case "ocr":

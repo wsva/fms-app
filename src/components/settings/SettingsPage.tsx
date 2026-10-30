@@ -2,8 +2,6 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getVersion } from "@tauri-apps/api/app";
-import { listen } from "@tauri-apps/api/event";
 import {
   ChevronDown,
   ChevronUp,
@@ -42,14 +40,9 @@ import {
 } from "@/lib/voice-input";
 import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
 import type { LlmInstalledModelsResponse } from "@/lib/llm/types";
+import AboutCard from "@/components/about/AboutCard";
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
-// Download sizes for the update row, so the user can judge whether to spend the
-// bandwidth now. One decimal: an installer is tens of MB, not bytes.
-function formatMb(bytes: number): string {
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,31 +82,10 @@ type ModelUnloadTimeout =
   | "never"
   | { minutes: number };
 
-
-/** Mirrors `UpdateStatus` in `src-tauri/src/update.rs`. The version comparison
- *  and the signature check both happen in Rust: the webview only renders what
- *  `app_update_check` answered. */
-interface UpdateStatus {
-  current: string;
-  latest: string;
-  available: boolean;
-  notes: string;
-  release_url: string;
-  /** False when this build cannot install updates itself. */
-  supported: boolean;
-  /** "not_appimage" | "requires_signing" while `supported` is false. */
-  unsupported_reason: string | null;
-  /** True for a `tauri dev` run, where checks are disabled outright. */
-  dev: boolean;
-  hint: string;
-}
-
-/** Payload of the `update://progress` event emitted while downloading. */
-interface UpdateProgress {
-  downloaded: number;
-  total: number | null;
-  done: boolean;
-}
+// The build identity, the update status and their wording live in
+// `lib/ui/update` now: the About card (here and in the Help dialog) and the Help
+// menu's Check for updates row are three readers of one answer, so none of them
+// can own it. This page only renders the card.
 
 // ---------------------------------------------------------------------------
 // Shared Tailwind class fragments
@@ -127,7 +99,13 @@ const btnGhost = "px-3 py-1 text-xs rounded-md border border-border-light hover:
 // Component
 // ---------------------------------------------------------------------------
 
-export default function SettingsPage() {
+export default function SettingsPage({
+  onNavigate,
+}: {
+  /** Jump the shell to a tab — the same seam the title bar and status bar use.
+   *  Needed here only so the About card's Logs link can reach the Logs page. */
+  onNavigate?: (tab: TabId) => void;
+} = {}) {
   const [globalSettings, setGlobalSettings] = useState<GlobalSettings | null>(null);
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [savedGlobal, setSavedGlobal] = useState(false);
@@ -156,53 +134,6 @@ export default function SettingsPage() {
     minWidth: 160,
   });
   const [activeSection, setActiveSection] = useState("all");
-
-  // Build identity for the About section. `app_build_version` reports the git tag
-  // baked at build time (dev builds) or the CI-stamped package version (released
-  // builds); falls back to getVersion() if the command is unavailable, and stays
-  // empty in the web dev preview (isTauri() false).
-  const [installedVersion, setInstalledVersion] = useState("");
-  useEffect(() => {
-    if (!isTauri()) return;
-    invoke<{ git_describe: string; package_version: string }>("app_build_version")
-      .then(({ git_describe, package_version }) => setInstalledVersion(git_describe || package_version))
-      .catch(() => {
-        getVersion().then(setInstalledVersion).catch(() => {});
-      });
-  }, []);
-
-  // Update state. `app_update_check` asks the release manifest and verifies
-  // nothing; the download only starts from the button below. Offline / blocked
-  // lands in "error", the same way the old GitHub API fetch did.
-  const [updateCheck, setUpdateCheck] = useState<{
-    state: "checking" | "done" | "error";
-    status: UpdateStatus | null;
-  }>({ state: "checking", status: null });
-  const [installing, setInstalling] = useState(false);
-  const [installProgress, setInstallProgress] = useState<{
-    downloaded: number;
-    total: number | null;
-  } | null>(null);
-  const [installError, setInstallError] = useState("");
-
-  const checkForUpdate = useCallback(async () => {
-    if (!isTauri()) {
-      setUpdateCheck({ state: "error", status: null });
-      return;
-    }
-    setUpdateCheck((prev) => ({ state: "checking", status: prev.status }));
-    try {
-      const status = await invoke<UpdateStatus>("app_update_check");
-      setUpdateCheck({ state: "done", status });
-    } catch (err) {
-      logError(`settings: update check failed — ${String(err)}`, "settings");
-      setUpdateCheck({ state: "error", status: null });
-    }
-  }, []);
-
-  useEffect(() => {
-    void checkForUpdate();
-  }, [checkForUpdate]);
 
   // ---- LLM reachability probe ----
   // The only read-out of "is the model backend up, and what can it answer
@@ -257,45 +188,6 @@ export default function SettingsPage() {
       setLlmProbe({ state: "fail", detail: String(e) });
     }
   }, [globalSettings?.llm_provider, globalSettings?.llm_model]);
-
-  // Download progress arrives as events from `update.rs`. The last event before
-  // the installer takes over has done=true, which is what turns the button into
-  // "Installing…" — on Windows the process exits there and no promise resolves.
-  useEffect(() => {
-    if (!isTauri()) return;
-    let alive = true;
-    let unlisten: (() => void) | undefined;
-    listen<UpdateProgress>("update://progress", ({ payload }) => {
-      setInstallProgress(payload.done ? null : payload);
-    })
-      .then((fn) => {
-        if (alive) unlisten = fn;
-        else fn();
-      })
-      .catch((err) =>
-        logError(`settings: update progress listener failed — ${String(err)}`, "settings")
-      );
-    return () => {
-      alive = false;
-      unlisten?.();
-    };
-  }, []);
-
-  async function installUpdate() {
-    setInstallError("");
-    setInstalling(true);
-    setInstallProgress(null);
-    try {
-      // Resolves on Linux (the app then re-executes) and never on Windows (the
-      // installer quits the process), so a rejection is the only failure path
-      // that reaches this frame.
-      await invoke("app_update_install");
-    } catch (err) {
-      logError(`settings: update install failed — ${String(err)}`, "settings");
-      setInstallError(String(err));
-      setInstalling(false);
-    }
-  }
 
   function selectSection(id: string) {
     setActiveSection(id);
@@ -803,157 +695,14 @@ export default function SettingsPage() {
         {/* ── About section ────────────────────────────────── */}
         <section className={`mb-8${showSection("about") ? "" : " hidden"}`}>
           <h2 className="text-[1.3em] font-semibold mb-2">About</h2>
-          <p className="text-text-secondary text-sm mb-4">
-            Application build information.
-          </p>
-          <div className="flex flex-col gap-2 max-w-xl">
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-text-secondary w-36 shrink-0">Installed version</span>
-              <span className="text-sm font-mono text-text-primary break-all">
-                {installedVersion || "unknown"}
-              </span>
-            </div>
-            <div className="flex items-center gap-3 flex-wrap">
-              <span className="text-sm text-text-secondary w-36 shrink-0">Latest release</span>
-              {updateCheck.state === "checking" && (
-                <span className="text-sm text-text-tertiary">Checking…</span>
-              )}
-              {updateCheck.state === "error" && (
-                <span className="text-sm text-text-tertiary">Unavailable (offline?)</span>
-              )}
-              {updateCheck.status && updateCheck.status.latest && (
-                <a
-                  href={updateCheck.status.release_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm font-mono text-accent hover:underline break-all"
-                >
-                  v{updateCheck.status.latest}
-                </a>
-              )}
-              {/* No version to name: either the manifest advertises nothing newer
-                  (supported platforms only ask), or this build cannot ask at all.
-                  Never fill the gap with the installed version — a development
-                  build would then print its 0.1.0 placeholder as the latest release. */}
-              {updateCheck.state === "done" &&
-                updateCheck.status &&
-                !updateCheck.status.latest && (
-                  <span className="text-sm text-text-tertiary">
-                    {updateCheck.status.supported ? "nothing newer" : "not checked"}
-                  </span>
-                )}
-              {updateCheck.state === "done" && updateCheck.status?.dev && (
-                <span className="text-xs px-1.5 py-0.5 rounded bg-mid-gray/20 text-text-tertiary shrink-0">Development build</span>
-              )}
-              {updateCheck.status?.available && (
-                <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-600/20 text-yellow-500 shrink-0">Update available</span>
-              )}
-              {updateCheck.state === "done" &&
-                updateCheck.status &&
-                updateCheck.status.supported &&
-                !updateCheck.status.dev &&
-                !updateCheck.status.available && (
-                  <span className="text-xs px-1.5 py-0.5 rounded bg-green-600/20 text-green-500 shrink-0">Up to date</span>
-                )}
-            </div>
-
-            {updateCheck.state === "error" && (
-              <div className="flex items-center gap-3">
-                <span className="w-36 shrink-0" />
-                <button type="button" onClick={() => void checkForUpdate()} className={btnGhost}>
-                  Check again
-                </button>
-              </div>
-            )}
-
-            {/* No self-update path on this install (deb/rpm, unsigned macOS): say
-                what to do instead of offering a button that cannot work. */}
-            {updateCheck.state === "done" && updateCheck.status && !updateCheck.status.supported && (
-              <div className="flex items-start gap-3">
-                <span className="text-sm text-text-secondary w-36 shrink-0">Updates</span>
-                <p className="text-sm text-text-tertiary max-w-md">
-                  This install cannot update itself.{" "}
-                  <a
-                    href={updateCheck.status.release_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-accent hover:underline"
-                  >
-                    Download the newest release
-                  </a>{" "}
-                  instead.
-                </p>
-              </div>
-            )}
-
-            {/* Notify-first: this is the only place a download ever starts. */}
-            {updateCheck.status?.available && (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-3 flex-wrap">
-                  <span className="text-sm text-text-secondary w-36 shrink-0">Update</span>
-                  <button
-                    type="button"
-                    onClick={() => void installUpdate()}
-                    disabled={installing}
-                    className={btnPrimary}
-                  >
-                    {installing ? "Installing…" : `Download & install v${updateCheck.status.latest}`}
-                  </button>
-                  <a
-                    href={updateCheck.status.release_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm text-accent hover:underline"
-                  >
-                    Release notes
-                  </a>
-                </div>
-                {installProgress && (
-                  <div className="flex items-center gap-3">
-                    <span className="w-36 shrink-0" />
-                    <div className="h-1.5 w-56 max-w-full overflow-hidden rounded-full bg-border-light">
-                      <div
-                        className="h-full rounded-full bg-accent-bg transition-[width] duration-200"
-                        style={{
-                          width: `${Math.min(
-                            100,
-                            Math.round(
-                              (installProgress.downloaded /
-                                Math.max(1, installProgress.total ?? installProgress.downloaded)) *
-                                100
-                            )
-                          )}%`,
-                        }}
-                      />
-                    </div>
-                    <span className="text-xs text-text-tertiary">
-                      {formatMb(installProgress.downloaded)}
-                      {installProgress.total ? ` / ${formatMb(installProgress.total)}` : ""}
-                    </span>
-                  </div>
-                )}
-                {installing && !installProgress && !installError && (
-                  <p className="text-sm text-text-tertiary">
-                    Downloading and verifying the installer…
-                  </p>
-                )}
-                {installError && (
-                  <p className="text-sm text-red-500 break-words">{installError}</p>
-                )}
-              </div>
-            )}
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-text-secondary w-36 shrink-0">License</span>
-              <a
-                href="https://github.com/wsva/fms-app/blob/main/LICENSE"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-sm font-mono text-accent hover:underline"
-              >
-                MIT
-              </a>
-            </div>
-          </div>
+          {/* `active` rather than a mount effect: every section of this page stays
+              mounted (that is what keeps unsaved form state across a switch), so
+              a mount effect here would ask the release manifest long before
+              anyone looked at About. The card asks when it becomes visible. */}
+          <AboutCard
+            active={showSection("about")}
+            onOpenLogs={onNavigate ? () => onNavigate("logs") : undefined}
+          />
         </section>
         </div>
       </div>

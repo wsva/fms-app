@@ -411,7 +411,7 @@ impl DatasetMcpServer {
         serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
     }
 
-    #[tool(name = "app_update_install", description = "Download and install the newest FmS release, then restart the app. THIS ENDS THE SESSION: on Windows the installer has to replace the running executable, so the plugin quits the process before installing and this call never returns; on Linux the app re-executes itself right after. Prefer telling the user they can install it from Settings > About, and only call this when they asked for it. It refuses while the build has no self-update path (see app_update_check) or while a transcription or model download is in flight, since that work would be discarded.")]
+    #[tool(name = "app_update_install", description = "Download and install the newest FmS release, then restart the app. THIS ENDS THE SESSION: on Windows the installer has to replace the running executable, so the plugin quits the process before installing and this call never returns; on Linux the app re-executes itself right after. Prefer telling the user they can install it from Help > About FmS (or Settings > About), and only call this when they asked for it. It refuses while the build has no self-update path (see app_update_check) or while a transcription or model download is in flight, since that work would be discarded.")]
     async fn app_update_install(&self) -> Result<String, String> {
         log::info!("[MCP] app_update_install");
         crate::update::install(&self.app).await?;
