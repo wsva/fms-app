@@ -25,17 +25,15 @@ export type LoadedModelState = "loaded" | "loading" | "available" | "none" | "er
 export interface LoadedModel {
   /** Stable family key: "stt" | "textsplit" | ... */
   type: string;
-  /** Short chip label, e.g. "STT", "Split". */
-  label: string;
-  /** Full family name for the drawer, e.g. "Speech-to-text". */
+  /** Full family name as the status menu shows it, e.g. "Speech-to-text". */
   fullName: string;
   /** Active/selected model id, or null when nothing is present. */
   id: string | null;
   state: LoadedModelState;
-  /** Human word for the drawer: "Loaded", "Loading…", "Available", "Not loaded", "Error". */
+  /** Human word for the status menu: "Loaded", "Loading…", "Available", "Not loaded", "Error".
+   *  The menu states the state once — dot and word — and never repeats it in a
+   *  second caption, so there is nothing else to derive here. */
   stateText: string;
-  /** Caption shown under the name in the drawer. */
-  caption: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,7 +62,6 @@ function notify() {
 /** Map an STT `model_get_status` payload to a normalized `LoadedModel`. */
 function mapStt(res: SttStatus): LoadedModel {
   const status = res.active_status;
-  const id = res.active_version ?? res.selected_version ?? null;
   let state_: LoadedModelState = "none";
   let stateText = "Not loaded";
 
@@ -84,12 +81,14 @@ function mapStt(res: SttStatus): LoadedModel {
 
   return {
     type: "stt",
-    label: "STT",
     fullName: "Speech-to-text",
-    id: res.active_version ?? null,
+    // `selected_version` when nothing is active: it names the model that would
+    // load, which is what the row wants beside "Available". With no model at
+    // all there is nothing honest to show, so the row drops the id instead of
+    // printing a name that is not on disk.
+    id: state_ === "none" ? null : res.active_version || res.selected_version || null,
     state: state_,
     stateText,
-    caption: res.active_version ? "Loaded in memory" : id ? "Downloaded, not loaded" : "No model downloaded",
   };
 }
 
@@ -99,16 +98,10 @@ function mapTextSplit(res: TextSplitStatus): LoadedModel {
   const stateText = res.loaded ? "Loaded" : res.downloaded ? "Available" : "Not downloaded";
   return {
     type: "textsplit",
-    label: "Split",
     fullName: "Text split",
     id: res.loaded || res.downloaded ? res.model_id : null,
     state: state_,
     stateText,
-    caption: res.loaded
-      ? "Resident in memory"
-      : res.downloaded
-        ? "Loads on first use"
-        : "No model downloaded",
   };
 }
 
@@ -171,15 +164,13 @@ function getSnapshot() {
 export function useLoadedModels() {
   const models = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
-  /** Models worth a compact chip: loaded or in progress. */
-  const active = models.filter((m) => m.state === "loaded" || m.state === "loading" || m.state === "error");
-  /** Downloaded-but-idle models, summarized as "+N" in the bar. */
-  const idleCount = models.filter((m) => m.state === "available").length;
-
   /**
-   * Run the drawer action for a family: STT toggles load/stop; text-split
-   * unloads its cached session to free memory (it auto-loads again on demand,
-   * so there is nothing to do when it is not loaded).
+   * Run the one action a family offers. The menu decides which verb to show
+   * (`actionLabel` in StatusBar.tsx); this only carries it out, and it refuses
+   * the same states the menu does, so the two cannot drift into calling
+   * `model_start` on a model that was never downloaded. text-split unloads its
+   * cached session to free memory — it has no load verb, because it loads
+   * itself on first use.
    */
   const runAction = async (type: string) => {
     if (!isTauri()) return;
@@ -189,15 +180,14 @@ export function useLoadedModels() {
       if (type === "stt") {
         if (m.state === "loaded") {
           await invoke("model_stop");
-        } else {
+        } else if (m.state === "available" || m.state === "error") {
           await invoke("model_start");
+        } else {
+          return; // nothing on disk to load, or a load already in flight
         }
       } else if (type === "textsplit") {
-        if (m.state === "loaded") {
-          await invoke("text_split_unload");
-        } else {
-          return; // loads on first use — no manual action
-        }
+        if (m.state !== "loaded") return; // loads on first use — no manual action
+        await invoke("text_split_unload");
       }
       await fetchStatus();
     } catch (e) {
@@ -205,5 +195,5 @@ export function useLoadedModels() {
     }
   };
 
-  return { models, active, idleCount, runAction, refresh: fetchStatus };
+  return { models, runAction, refresh: fetchStatus };
 }

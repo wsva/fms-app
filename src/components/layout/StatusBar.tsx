@@ -4,9 +4,9 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   Play,
   Square,
-  Eject,
   Mic,
   Scissors,
+  Cpu,
   ListTodo,
   Server,
   ExternalLink,
@@ -75,73 +75,130 @@ function typeIcon(type: string): LucideIcon {
   return Mic;
 }
 
+/** A hub model id is `owner/name` (`segment-any-text/sat-3l-sm`). The owner is
+ *  the publisher, not the model, and every model a catalogue ships shares it —
+ *  so the row shows the name alone and keeps the full id in the line's title.
+ *  A plain `stt/<version>` id has no owner and comes back untouched. */
+function modelName(id: string): string {
+  const slash = id.lastIndexOf("/");
+  return slash === -1 ? id : id.slice(slash + 1);
+}
+
 /**
- * The menu action for a model in its current state, or null when there is
- * nothing to offer. STT toggles load/stop; text-split can only be unloaded
- * (it auto-loads on demand), and only while it is resident.
+ * The one verb a family offers right now, or null when there is none.
+ *
+ * A verb is offered only in a state it can honour: STT can be loaded once its
+ * files are on disk (and a failed load can be retried) and stopped while it is
+ * resident; text-split can only be unloaded, because it loads itself on first
+ * use. A button that is offered but cannot succeed is worse than no button — it
+ * costs a click to learn nothing.
  */
-function actionFor(m: LoadedModel): { label: string; Icon: LucideIcon } | null {
+function actionLabel(m: LoadedModel): string | null {
   if (m.type === "stt") {
-    return m.state === "loaded" ? { label: "Stop model", Icon: Square } : { label: "Load model", Icon: Play };
+    if (m.state === "loaded") return "Stop";
+    if (m.state === "available" || m.state === "error") return "Load";
+    return null;
   }
-  if (m.type === "textsplit") {
-    return m.state === "loaded" ? { label: "Unload model", Icon: Eject } : null;
-  }
+  if (m.type === "textsplit") return m.state === "loaded" ? "Unload" : null;
   return null;
 }
 
-/** A hub model id is `owner/name`. The strip is one line and the owner adds
- *  nothing a glance needs — so the chip shows the bare name while `LoadedModel.id`
- *  stays the full id the backend gave, readable in the tooltip and the menu. */
-function shortId(id: string | null): string | null {
-  if (!id) return id;
-  const slash = id.lastIndexOf("/");
-  return slash >= 0 ? id.slice(slash + 1) : id;
-}
-
-function ModelItem({
-  model,
+/** The bar shows how many models are in memory; the menu names each family, its
+ *  state and the model behind it, so the two never say the same thing twice. */
+function ModelsItem({
+  models,
   onAction,
   onNavigate,
 }: {
-  model: LoadedModel;
+  models: LoadedModel[];
   onAction: (type: string) => void;
   onNavigate?: StatusBarNavigate;
 }) {
-  const action = actionFor(model);
+  const loaded = models.filter((m) => m.state === "loaded").length;
+  const anyError = models.some((m) => m.state === "error");
+  const anyLoading = models.some((m) => m.state === "loading");
+  const anyAvailable = models.some((m) => m.state === "available");
+
+  // One dot for the whole group, worst state first: a failure must not be
+  // hidden behind a healthy sibling, and "in flight" outranks "settled".
+  const state: LoadedModelState = anyError
+    ? "error"
+    : anyLoading
+      ? "loading"
+      : loaded > 0
+        ? "loaded"
+        : anyAvailable
+          ? "available"
+          : "none";
+  // The families are separate resources (STT and text-split live in different
+  // binaries on Android), so a glance asks "how many are in memory?", not
+  // "which one is on" — hence one chip with a count.
+  const detail = models
+    .map((m) => `${m.fullName}: ${m.stateText.toLowerCase()}`)
+    .join(" · ");
+
   return (
     <StatusItem
-      label={`${model.fullName}: ${model.id ?? "none"} — ${model.stateText}`}
-      title={`${model.fullName} — ${model.id ?? "none"} · ${model.stateText}`}
+      label={`Models — ${loaded} of ${models.length} loaded`}
+      title={detail}
       align="start"
-      active={model.state === "loaded"}
-      icon={typeIcon(model.type)}
+      active={loaded > 0}
+      icon={Cpu}
       content={
         <>
-          <StateDot state={model.state} />
-          <span className="shrink-0 opacity-70">{model.label}</span>
-          <span className="max-w-[160px] truncate">{shortId(model.id) ?? "—"}</span>
+          <StateDot state={state} />
+          <span>Models</span>
+          <span className="shrink-0 opacity-70">({loaded})</span>
         </>
       }
     >
-      <StatusMenuHeading>{model.fullName}</StatusMenuHeading>
-      <StatusMenuBlock>
-        <div className="flex items-center gap-2">
-          <StateDot state={model.state} />
-          <span className="text-text-primary">{model.stateText}</span>
-          <span className="min-w-0 truncate text-text-tertiary">{model.id ?? "—"}</span>
-        </div>
-        <p className="mt-0.5 text-[11px] text-text-tertiary">{model.caption}</p>
-      </StatusMenuBlock>
+      {/* One row per family, and each fact on it exactly once: the name says
+          what it is, one muted line says where it stands (dot + word + the
+          model in use), and the one verb it offers sits at the end of the row.
+          The state used to be written three times — dot, word and a caption —
+          and the action floated between families under a repeated name, which
+          read as the next family's subtitle.
+
+          The body is a fixed width because its widest child is a model id:
+          without one the panel would resize itself every time an id changed
+          length, and the ids are the only thing here long enough to drag it. */}
+      <div className="w-[268px]">
+        <StatusMenuHeading>Models</StatusMenuHeading>
+        {models.map((m) => {
+          const action = actionLabel(m);
+          const FamilyIcon = typeIcon(m.type);
+          return (
+            <div key={m.type} className="flex items-start gap-2 px-3 py-1.5">
+              <FamilyIcon size={14} className="mt-[3px] shrink-0 opacity-70" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-text-primary">{m.fullName}</p>
+                <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px]">
+                  <StateDot state={m.state} />
+                  <span className={`shrink-0 ${m.state === "error" ? "text-red-500" : "text-text-tertiary"}`}>
+                    {m.stateText}
+                  </span>
+                  {m.id && (
+                    <span className="truncate text-text-tertiary" title={m.id}>
+                      · {modelName(m.id)}
+                    </span>
+                  )}
+                </p>
+              </div>
+              {action && (
+                <button
+                  type="button"
+                  onClick={() => void onAction(m.type)}
+                  className="shrink-0 cursor-pointer rounded border border-border-default px-1.5 py-0.5 text-[11px] text-text-secondary hover:bg-bg-hover"
+                >
+                  {action}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
       <StatusMenuSep />
-      {action && (
-        <StatusMenuRow
-          icon={action.Icon}
-          text={action.label}
-          onClick={() => void onAction(model.type)}
-        />
-      )}
-      <StatusMenuRow icon={ExternalLink} text="Models page…" onClick={() => onNavigate?.("models")} />
+      <StatusMenuRow icon={ExternalLink} text="Manage models…" onClick={() => onNavigate?.("models")} />
     </StatusItem>
   );
 }
@@ -370,9 +427,9 @@ export default function StatusBar({ onNavigate }: { onNavigate?: StatusBarNaviga
           `overflow-hidden` anywhere on this path: it would clip a menu (and
           `overflow-x: hidden` silently turns the other axis into `auto`). */}
       <div className="flex min-w-0 items-stretch">
-        {models.map((m) => (
-          <ModelItem key={m.type} model={m} onAction={runAction} onNavigate={onNavigate} />
-        ))}
+        {models.length > 0 && (
+          <ModelsItem models={models} onAction={runAction} onNavigate={onNavigate} />
+        )}
         {tasks.length > 0 && (
           <TaskItem
             tasks={tasks}
