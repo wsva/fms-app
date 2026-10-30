@@ -55,6 +55,9 @@ pub struct WikiSearchResult {
 pub struct WikiDatasetSummary {
     pub uuid: String,
     pub name: String,
+    /// The `info.json` description, empty when nobody wrote one. The wiki page
+    /// edits it on the dataset card's back face, like every other type.
+    pub description: String,
     pub updated: String,
     pub file_count: usize,
     /// Absolute path of the dataset directory on *this* machine.
@@ -272,6 +275,7 @@ pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<WikiDatasetSummary>
             out.push(WikiDatasetSummary {
                 uuid: info.uuid,
                 name: info.name,
+                description: info.description,
                 updated: info.updated_at,
                 file_count: count_markdown(&path),
                 path: path.to_string_lossy().into_owned(),
@@ -332,6 +336,7 @@ pub(crate) fn create_dataset(
     Ok(WikiDatasetSummary {
         uuid: info.uuid,
         name: info.name,
+        description: info.description.clone(),
         updated: info.updated_at,
         file_count: 0,
         path: dir.to_string_lossy().into_owned(),
@@ -394,6 +399,7 @@ pub(crate) fn import_dir(
     Ok(WikiDatasetSummary {
         uuid: info.uuid.clone(),
         name: info.name.clone(),
+        description: info.description.clone(),
         updated: info.updated_at.clone(),
         file_count: count_markdown(&dir),
         path: dir.to_string_lossy().into_owned(),

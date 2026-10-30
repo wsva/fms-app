@@ -61,7 +61,7 @@ impl DatasetMcpServer {
     // ('' = root, 'notes/idea.md'); writes journal changes for sync.
     // ---------------------------------------------------------------------
 
-    #[tool(name = "wiki_dataset_list", description = "List all wiki datasets (syncable markdown-tree datasets). Returns entries with uuid, name, updated, file_count, path, and location ('local' when stored under the datasets dir, 'linked' when an external folder was converted in place).")]
+    #[tool(name = "wiki_dataset_list", description = "List all wiki datasets (syncable markdown-tree datasets). Returns entries with uuid, name, description, updated, file_count, path, and location ('local' when stored under the datasets dir, 'linked' when an external folder was converted in place). Rename or re-describe one with dataset_info_update — it takes any dataset type.")]
     async fn wiki_dataset_list(&self) -> Result<String, String> {
         log::info!("[MCP] wiki_dataset_list");
         let state = self.app.state::<SettingsState>();

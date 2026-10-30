@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { emit } from "@tauri-apps/api/event";
 import {
   RefreshCw, ArrowLeft, ArrowRight, Cloud, Download, Pencil, Eye,
   Folder, FolderOpen, FileText, BookMarked, FilePlus, FolderPlus, Plus, Trash2,
@@ -29,6 +30,7 @@ import {
 import { CollapsibleSidebar, useCollapsibleSidebar } from "@/components/layout/CollapsibleSidebar";
 import { LocationsManager } from "@/components/ui/LocationsManager";
 import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
+import { DatasetCard } from "@/components/ui/dataset";
 import {
   WikiDatasetSummary, HubWikiList, Selection, WikiSource, WikiFileEntry,
   WikiFileContent, selectionKey,
@@ -1500,19 +1502,34 @@ export default function WikiPage() {
                     </p>
                   ) : (
                     treeDatasets.map((ds) => (
-                      <button
+                      // The wiki's own card shell: glyph + name, the info.json
+                      // description, and a pencil that flips it. The markdown
+                      // count that used to sit on the right said nothing a
+                      // reader acts on, and the path moved into the tooltip —
+                      // the same shape the read-aloud list uses.
+                      <DatasetCard
                         key={ds.uuid}
-                        className="text-left p-4 border border-border-default rounded-lg transition-colors hover:bg-bg-hover cursor-pointer"
-                        onClick={() => goToDatasetDir(ds.uuid, "")}
+                        variant="row"
+                        icon={BookMarked}
+                        name={ds.name}
+                        description={ds.description ?? ""}
                         title={ds.path}
-                      >
-                        <div className="flex items-center gap-2">
-                          <BookMarked size={16} className="shrink-0 text-purple-500" />
-                          <span className="font-medium text-text-primary truncate">{ds.name}</span>
-                          <span className="ml-auto text-xs text-text-tertiary shrink-0">{ds.file_count}</span>
-                        </div>
-                        <div className="text-xs text-text-tertiary truncate mt-1" title={ds.path}>{ds.path}</div>
-                      </button>
+                        onOpen={() => goToDatasetDir(ds.uuid, "")}
+                        // A hub dataset is a remote browse: there is no local
+                        // info.json to write, so it gets no pencil.
+                        onSave={
+                          hubMode
+                            ? undefined
+                            : async (patch) => {
+                                await invoke("dataset_update", {
+                                  uuid: ds.uuid,
+                                  name: patch.name,
+                                  description: patch.description,
+                                });
+                                await emit("dataset-list-changed", {});
+                              }
+                        }
+                      />
                     ))
                   )}
                 </div>

@@ -6,6 +6,8 @@
 export interface WikiDatasetSummary {
   uuid: string;
   name: string;
+  /** `info.json` description; empty when none was written. */
+  description: string;
   updated: string;
   file_count: number;
   path: string;
