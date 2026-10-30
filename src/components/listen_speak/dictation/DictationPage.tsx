@@ -271,8 +271,6 @@ export default function DictationPage({ active = true, onNavigate }: { active?: 
         () => Array.from(datasetsByLocation.keys()).filter((k) => k && !d.locations.some((l) => l.path === k)),
         [datasetsByLocation, d.locations]
     );
-    const readyCount = useMemo(() => d.datasets.filter((ds) => ds.status === "ready").length, [d.datasets]);
-
     // Dataset card with a Ready / Not Ready mark; not-ready datasets cannot be
     // selected until their database is generated on the Datasets page.
     const renderDatasetCard = (ds: DatasetItem) => {
@@ -293,7 +291,9 @@ export default function DictationPage({ active = true, onNavigate }: { active?: 
                         <span className="px-2 py-0.5 text-[11px] rounded-md border border-border-light bg-bg-body text-text-secondary">Downloaded{ds.has_local_changes ? " · edited" : ""}</span>
                     )}
                 </div>
-                <div className="text-xs text-text-tertiary truncate" title={ds.path}>{ds.path}</div>
+                {ds.info.description && (
+                    <div className="text-xs text-text-tertiary truncate" title={ds.info.description}>{ds.info.description}</div>
+                )}
             </button>
         );
     };
@@ -604,13 +604,6 @@ export default function DictationPage({ active = true, onNavigate }: { active?: 
             {/* Datasets view (initial) — grouped by location */}
             {!d.selectedDatasetUuid && (
                 <div className="flex flex-col gap-4 flex-1 min-h-0 overflow-y-auto">
-                    {/* Location summary */}
-                    <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs text-text-tertiary">
-                            {d.locations.length} location{d.locations.length !== 1 ? "s" : ""} · {readyCount} ready / {d.datasets.length} dataset{d.datasets.length !== 1 ? "s" : ""}
-                        </span>
-                    </div>
-
                     {d.locationError && (
                         <div className="p-3 bg-error-bg text-error-text rounded-md text-sm">{d.locationError}</div>
                     )}
@@ -628,15 +621,14 @@ export default function DictationPage({ active = true, onNavigate }: { active?: 
                                         {/* Location header */}
                                         <div className="flex items-center gap-2 px-1">
                                             {loc.is_linked ? (
-                                                <Link2 size={14} className="text-accent shrink-0" />
+                                                <Link2 size={16} className="text-accent shrink-0" />
                                             ) : (
-                                                <Folder size={14} className="text-text-tertiary shrink-0" />
+                                                <Folder size={16} className="text-text-tertiary shrink-0" />
                                             )}
-                                            <span className="text-sm font-semibold text-text-primary shrink-0">{loc.name}</span>
+                                            <span className="text-lg font-semibold text-text-primary shrink-0">{loc.name}</span>
                                             {loc.is_read_only && (
                                                 <span className="shrink-0 text-[11px] px-1.5 py-0.5 rounded border border-border-light bg-bg-body text-text-secondary">app-managed</span>
                                             )}
-                                            <span className="ml-auto text-xs text-text-tertiary shrink-0">{items.length}</span>
                                         </div>
                                         {/* Datasets under this location */}
                                         {items.length === 0 ? (
