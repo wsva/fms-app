@@ -16,6 +16,7 @@ import {
   dismissTask,
   listTasks,
   replayTaskTarget,
+  tapCompletes,
   type AgentTask,
 } from "@/lib/agent/tasks";
 import { useVisiblePolling } from "./useVisiblePolling";
@@ -44,12 +45,17 @@ export function useAgentTasks(active: boolean) {
 
   /** Do the task: jump first (navigation is fire-and-forget and must not wait
    *  on the IPC round trip), then mark it done — which resumes a workflow run
-   *  parked on a `human` step. */
+   *  parked on a `human` step. A capture is only opened: it closes when the
+   *  card it names is saved (`tapCompletes`). */
   const complete = useCallback(
     async (task: AgentTask) => {
       if (busy) return;
       setBusy(task.uuid);
-      replayTaskTarget(task.target);
+      replayTaskTarget(task.target, task.uuid);
+      if (!tapCompletes(task.target)) {
+        setBusy(null);
+        return;
+      }
       try {
         await completeTask(task.uuid);
         await refresh();

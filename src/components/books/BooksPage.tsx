@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { AlignJustify, AlignLeft, Settings2, Zap, FolderOpen, Brain } from "lucide-react";
 import { useBookData } from "@/hooks/useBookData";
-import { usePageRefresh } from "@/lib/refresh/page-refresh";
+import { useIsActiveTab, usePageRefresh } from "@/lib/refresh/page-refresh";
 import { useAgentActions, reqStr } from "@/lib/agent/ui-actions";
+import { clearDocIfOwned, setUiContext } from "@/lib/agent/ui-context";
 import { Toolbar, Breadcrumb, ToolbarButton, ToolbarOverflow, ToolbarMenuItem } from "@/components/ui/toolbar";
 import { LocationsManager } from "@/components/ui/LocationsManager";
 import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
@@ -30,6 +31,17 @@ export default function BooksPage({ onNavigate }: { onNavigate: (tab: TabId) => 
   // (Manage Chapters / Advanced) do not apply and are hidden; only the contextual
   // read actions show on the toolbar right.
   const onChapterPage = b.view === "read" && !!b.chapterUUID;
+
+  // The open chapter, published for the agent's "where am I" and for the card
+  // capture's source line. Only while this tab is on screen: pages stay mounted,
+  // so an un-gated report would keep naming this chapter from another page.
+  const booksActive = useIsActiveTab("books");
+  const chapterDoc =
+    b.bookUUID && b.chapterUUID ? `book:${b.bookUUID}:${b.chapterUUID}` : null;
+  useEffect(() => {
+    if (booksActive && chapterDoc) setUiContext({ active_doc: chapterDoc });
+    else clearDocIfOwned("book");
+  }, [booksActive, chapterDoc]);
 
   // The root "Books" crumb is plain text only while you are on the books library
   // in Read mode (nothing to go back to). Everywhere else — a book is open, or

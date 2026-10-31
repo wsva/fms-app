@@ -13,11 +13,13 @@ import BottomNav from "@/components/layout/BottomNav";
 import PageHost from "@/components/layout/PageHost";
 import WorkspaceChooser from "@/components/workspace/WorkspaceChooser";
 import CardContextMenu from "@/components/cards/CardContextMenu";
+import { useCardEditor } from "@/components/cards/CardEditorContext";
 import AgentDock from "@/components/agent/AgentDock";
 import type { AgentAction } from "@/lib/agent/types";
+import type { Card } from "@/lib/types";
 import { setUiContext } from "@/lib/agent/ui-context";
 import { jsonSafeDetail, runUiAction, useAgentActions } from "@/lib/agent/ui-actions";
-import { dismissToast, notify, useToast } from "@/lib/feedback/toast";
+import { dismissToast, notify, notifyError, useToast } from "@/lib/feedback/toast";
 import { applySubjectToUrl, useTabSubject } from "@/lib/shell/tab-subject";
 import {
   refreshActivePage,
@@ -81,6 +83,7 @@ export default function Home() {
   // a card editor failure happens in a root overlay above this component, and
   // `alert()` was the only way it used to be able to say anything.
   const toast = useToast();
+  const { openCardEditor } = useCardEditor();
 
   useEffect(() => {
     setMobile(isMobileApp());
@@ -231,6 +234,58 @@ export default function Home() {
         case "notify":
           notify(action.message);
           break;
+        case "open-card": {
+          // The card editor is a root overlay, so this needs no navigation: the
+          // page that asked for the card stays mounted underneath, which is the
+          // whole reason a capture can be filed without leaving the document.
+          const datasetUuid = action.dataset_uuid;
+          if (!datasetUuid) {
+            notifyError("open-card needs a dataset_uuid.");
+            break;
+          }
+          // Saving the card completes the todo that opened it. `todo_complete`
+          // is idempotent, so an editor saved three times costs three no-ops.
+          const todoUuid = action.todo_uuid ?? null;
+          const onSave = todoUuid
+            ? () => {
+                void invoke("todo_complete", { uuid: todoUuid }).catch((e: unknown) => {
+                  console.error("todo_complete after card save failed:", e);
+                });
+              }
+            : undefined;
+          void (async () => {
+            try {
+              let card: Card | null = null;
+              if (action.card_uuid) {
+                card = await invoke<Card>("card_get", {
+                  datasetUuid,
+                  cardUuid: action.card_uuid,
+                });
+              } else if (action.prefill) {
+                const prefill = action.prefill;
+                card = {
+                  uuid: "",
+                  question: prefill.question ?? "",
+                  answer: prefill.answer ?? "",
+                  suggestion: prefill.suggestion ?? "",
+                  note: prefill.note ?? "",
+                  familiarity: 0,
+                  question_hash: null,
+                  source_card_uuid: null,
+                  source_dataset_uuid: null,
+                  deleted_at: null,
+                  created_at: "",
+                  updated_at: "",
+                };
+              }
+              // `false` opens every field: whoever replayed this came to write.
+              openCardEditor(datasetUuid, card, onSave, undefined, action.dataset_name, false);
+            } catch (e) {
+              notifyError(`Could not open the card: ${e}`);
+            }
+          })();
+          break;
+        }
         case "invoke-action": {
           // The response half of `ui_invoke_action`. The tool is parked on
           // `correlation_id` waiting for this, so every path — success, thrown
@@ -263,7 +318,7 @@ export default function Home() {
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [openTab]);
+  }, [openTab, openCardEditor]);
 
   // Pairing: ask the PC owner about each request, one at a time. This dialog is
   // the only way a device is ever approved — no bearer secret can replace the
@@ -458,6 +513,19 @@ export default function Home() {
           }`}
         >
           <span>{toast.message}</span>
+          {toast.action && (
+            <button
+              type="button"
+              onClick={() => {
+                const run = toast.action?.run;
+                dismissToast();
+                run?.();
+              }}
+              className="shrink-0 rounded border border-border-default px-2 py-0.5 text-xs font-medium text-text-primary hover:bg-bg-hover"
+            >
+              {toast.action.label}
+            </button>
+          )}
           <button
             type="button"
             aria-label="Dismiss"

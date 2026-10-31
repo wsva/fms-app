@@ -33,7 +33,7 @@ import { LocationsManager } from "@/components/ui/LocationsManager";
 import { DatasetCard } from "@/components/ui/dataset";
 import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import { subscribe, getVoiceError, clearVoiceError } from "@/lib/voice-input";
-import { setUiContext } from "@/lib/agent/ui-context";
+import { clearDatasetUuid, setUiContext } from "@/lib/agent/ui-context";
 import { reqNum, reqStr, optStr, useAgentActions } from "@/lib/agent/ui-actions";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
@@ -65,15 +65,21 @@ export default function DictationPage({ active = true, onNavigate }: { active?: 
         ? d.stateCues.findIndex((c) => c.uuid === d.stateFocusedCueUUID)
         : -1;
     useEffect(() => {
-        setUiContext(
-            active
-                ? {
-                    active_dataset_uuid: d.selectedDatasetUuid || null,
-                    active_media_uuid: d.stateMediaUUID || null,
-                    cue_index: focusedCueIndex >= 0 ? focusedCueIndex : null,
-                }
-                : { active_dataset_uuid: null, active_media_uuid: null, cue_index: null },
-        );
+        if (active) {
+            setUiContext({
+                active_dataset_uuid: d.selectedDatasetUuid || null,
+                active_media_uuid: d.stateMediaUUID || null,
+                cue_index: focusedCueIndex >= 0 ? focusedCueIndex : null,
+            });
+            return;
+        }
+        // `active_dataset_uuid` is shared: the Cards page reports the deck on
+        // screen and the card editor reports the open card, and pages are
+        // toggled inside one commit, so whoever is deactivating may not blank a
+        // key the newly focused page just claimed. The media item and the cue
+        // are this page's alone, so they clear outright.
+        clearDatasetUuid(d.selectedDatasetUuid);
+        setUiContext({ active_media_uuid: null, cue_index: null });
     }, [active, d.selectedDatasetUuid, d.stateMediaUUID, focusedCueIndex]);
 
     // ── Agent-drivable actions ──

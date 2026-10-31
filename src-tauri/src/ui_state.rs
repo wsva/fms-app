@@ -24,7 +24,7 @@ use tokio::sync::oneshot;
 /// error (the `app_navigate` house pattern) rather than silently stored, so a
 /// frontend typo surfaces during development instead of reading back as a
 /// permanent `null` to every agent.
-const KNOWN_KEYS: [&str; 7] = [
+const KNOWN_KEYS: [&str; 8] = [
     "active_tab",
     "active_dataset_uuid",
     "active_media_uuid",
@@ -32,6 +32,14 @@ const KNOWN_KEYS: [&str; 7] = [
     // rather than inside the Cards page, so this is the only way an agent can be
     // told which card the user is looking at.
     "active_card_uuid",
+    // The document the page has open, `<kind>:<uuid>:<ref>`:
+    //   wiki:<wiki-dataset-uuid>:<rel>   rel is the file path inside the dataset
+    //   book:<book-uuid>:<chapter-uuid>
+    //   read_aloud:<dataset-uuid>:<text-uuid>
+    // Dictation publishes none: its media is already `active_media_uuid`. A
+    // `ref` may contain ':', so readers split with splitn(3, ':') and keep the
+    // remainder whole.
+    "active_doc",
     "cue_index",
     "selection",
     "scroll",
@@ -226,8 +234,8 @@ impl UiStateHandle {
 ///
 /// `patch` is merged, not replaced: present keys set (or clear, when `null`),
 /// absent keys are left alone. Valid keys: `active_tab`,
-/// `active_dataset_uuid`, `active_media_uuid`, `active_card_uuid`, `cue_index`,
-/// `selection`, `scroll`. Returns the merged snapshot.
+/// `active_dataset_uuid`, `active_media_uuid`, `active_card_uuid`, `active_doc`,
+/// `cue_index`, `selection`, `scroll`. Returns the merged snapshot.
 #[tauri::command]
 pub async fn agent_report_ui_state(
     state: State<'_, UiStateHandle>,

@@ -31,6 +31,13 @@ export interface UiContextPatch {
    * agent could not tell "this card" from "the deck the list happens to show".
    */
   active_card_uuid?: string | null;
+  /**
+   * The document the page has open, `<kind>:<uuid>:<ref>` — `wiki:<dataset>:
+   * <rel>`, `book:<book>:<chapter>`, `read_aloud:<dataset>:<text>`. Cleared
+   * when that page closes it. A capture reads it to say where it came from;
+   * nothing splits it apart, so a `ref` may contain ':' freely.
+   */
+  active_doc?: string | null;
   /** Index of the cue the user is on within the open media item. */
   cue_index?: number | null;
   /** Highlighted text, when the page has a meaningful selection. */
@@ -70,6 +77,34 @@ export function setUiContext(patch: UiContextPatch): void {
 function scheduleFlush(): void {
   if (!isAgentHost() || timer) return;
   timer = setTimeout(flush, DEBOUNCE_MS);
+}
+
+/**
+ * Clear `active_doc` only when the value on record is still this page's own.
+ *
+ * Several document pages are mounted at once (they are display-toggled), so a
+ * page that loses focus runs its effect in the same commit as the page that
+ * gained it. Without this identity check the order of the two effects would
+ * decide whether the newly opened document survives, and it would sometimes be
+ * wiped by the page that just went off screen.
+ */
+export function clearDocIfOwned(kind: string): void {
+  const cur = current.active_doc;
+  if (!cur || cur.startsWith(`${kind}:`)) setUiContext({ active_doc: null });
+}
+
+/**
+ * Clear `active_dataset_uuid` only while it still names `uuid`.
+ *
+ * Same race as {@link clearDocIfOwned}, for the key Dictation and the card
+ * editor already share: a page must not clear a dataset that another page has
+ * since claimed.
+ */
+export function clearDatasetUuid(uuid: string | null | undefined): void {
+  if (!uuid) return;
+  if (current.active_dataset_uuid === uuid) {
+    setUiContext({ active_dataset_uuid: null });
+  }
 }
 
 function flush(): void {

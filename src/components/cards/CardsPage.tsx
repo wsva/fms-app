@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
-import { usePageRefresh } from "@/lib/refresh/page-refresh";
+import { useIsActiveTab, usePageRefresh } from "@/lib/refresh/page-refresh";
+import { clearDatasetUuid, setUiContext } from "@/lib/agent/ui-context";
 import { useDatasetFamily } from "@/hooks/useDatasetFamily";
 import { openDatasetInTab } from "@/lib/nav/open-in-tab";
 // Aliased: this file already has its own `TabId` for the cards/review/tags modes.
@@ -86,6 +87,19 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   // no crumb.
   const { report: family } = useDatasetFamily(selectedDatasetUuid);
   const bookUuid = family?.anchor && family.anchor !== selectedDatasetUuid ? family.anchor : null;
+
+  // The deck on screen, published while this tab is focused — it is what a card
+  // capture defaults to ("the deck you were looking at"). The clear is an
+  // identity check: the card editor overlay publishes this same key, and a page
+  // going off screen must not wipe a dataset someone else has claimed.
+  const cardsActive = useIsActiveTab("cards");
+  useEffect(() => {
+    if (cardsActive && selectedDatasetUuid) {
+      setUiContext({ active_dataset_uuid: selectedDatasetUuid });
+    } else {
+      clearDatasetUuid(selectedDatasetUuid);
+    }
+  }, [cardsActive, selectedDatasetUuid]);
 
   // Card list state
   const [cards, setCards] = useState<Card[]>([]);

@@ -19,6 +19,7 @@ import { useLoadedModels, type LoadedModel, type LoadedModelState } from "@/hook
 import { useAgentTasks } from "@/hooks/useAgentTasks";
 import { useSyncStatus, type SyncServiceStatus } from "@/hooks/useSyncStatus";
 import type { AgentTask } from "@/lib/agent/tasks";
+import { tapCompletes } from "@/lib/agent/tasks";
 import AgentBadge from "@/components/agent/AgentBadge";
 import { reqBool, useAgentActions } from "@/lib/agent/ui-actions";
 import {
@@ -243,38 +244,44 @@ function TaskItem({
       }
     >
       <StatusMenuHeading>Waiting on you</StatusMenuHeading>
-      {shown.map((t) => (
-        <StatusMenuBlock key={t.uuid}>
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
-              <p className="truncate text-text-primary">{t.title}</p>
-              {t.detail && <p className="text-[11px] text-text-tertiary">{t.detail}</p>}
+      {shown.map((t) => {
+        // A capture is opened, not cleared: it names a card that has not been
+        // written yet, so the button says so and saving that card is what
+        // finishes it (`tapCompletes`).
+        const opensOnly = !tapCompletes(t.target);
+        return (
+          <StatusMenuBlock key={t.uuid}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="truncate text-text-primary">{t.title}</p>
+                {t.detail && <p className="text-[11px] text-text-tertiary">{t.detail}</p>}
+              </div>
+              <div className="flex shrink-0 gap-1">
+                <button
+                  type="button"
+                  className="flex items-center gap-1 rounded border border-border-default px-1.5 py-0.5 text-[11px] text-text-secondary hover:bg-bg-hover disabled:opacity-50"
+                  disabled={busy === t.uuid}
+                  onClick={() => onComplete(t)}
+                  title={opensOnly ? "Jump to it; it closes when you save" : "Jump to it and mark it done"}
+                >
+                  {opensOnly ? <ExternalLink size={12} /> : <Check size={12} />}
+                  {opensOnly ? "Open" : "Done"}
+                </button>
+                <button
+                  type="button"
+                  className="flex items-center gap-1 rounded border border-border-default px-1.5 py-0.5 text-[11px] text-text-tertiary hover:bg-bg-hover disabled:opacity-50"
+                  disabled={busy === t.uuid}
+                  onClick={() => onDismiss(t)}
+                  title="Dismiss without doing it"
+                >
+                  <X size={12} />
+                  Skip
+                </button>
+              </div>
             </div>
-            <div className="flex shrink-0 gap-1">
-              <button
-                type="button"
-                className="flex items-center gap-1 rounded border border-border-default px-1.5 py-0.5 text-[11px] text-text-secondary hover:bg-bg-hover disabled:opacity-50"
-                disabled={busy === t.uuid}
-                onClick={() => onComplete(t)}
-                title="Jump to it and mark it done"
-              >
-                <Check size={12} />
-                Done
-              </button>
-              <button
-                type="button"
-                className="flex items-center gap-1 rounded border border-border-default px-1.5 py-0.5 text-[11px] text-text-tertiary hover:bg-bg-hover disabled:opacity-50"
-                disabled={busy === t.uuid}
-                onClick={() => onDismiss(t)}
-                title="Dismiss without doing it"
-              >
-                <X size={12} />
-                Skip
-              </button>
-            </div>
-          </div>
-        </StatusMenuBlock>
-      ))}
+          </StatusMenuBlock>
+        );
+      })}
       <StatusMenuSep />
       {error && (
         <StatusMenuBlock>

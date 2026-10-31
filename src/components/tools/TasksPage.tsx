@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
 import { Check, Circle, ListTodo, X } from "lucide-react";
 import { PageHeader, Toolbar, ToolbarButton } from "@/components/ui/toolbar";
+import { replayTaskTarget, tapCompletes } from "@/lib/agent/tasks";
 import { usePageRefresh } from "@/lib/refresh/page-refresh";
 
 /** Mirror of `src-tauri/src/todo.rs::Todo` (serialized field names). */
@@ -28,22 +28,16 @@ const PRIORITY_BADGE: Record<string, string> = {
   low: "bg-gray-600/25 text-text-secondary",
 };
 
-/** A todo's `target` is an `agent-action` payload verbatim. Anything carrying a
- *  string `type` is replayed through the shell's existing handler (the same one
- *  `ui_invoke_action` drives), so clicking a todo lands the learner exactly
- *  where the agent meant — no second navigation machinery. */
-function replayTarget(target: unknown): void {
-  if (target && typeof target === "object" && typeof (target as { type?: unknown }).type === "string") {
-    void emit("agent-action", target);
-  }
-}
-
 /**
  * The `tasks` tab: user-facing todos an agent, or a workflow `human` step, left
  * for the learner. Deliberately a tab (unlike the agent dock) so it is reachable
  * on the phone, where the dock does not exist. Clicking an open todo replays its
  * `target` through the shell and marks it done; completing a todo a workflow step
  * is waiting on resumes that run on the backend.
+ *
+ * A capture is the one todo that is opened rather than cleared: it names a card
+ * that has not been written yet, so it closes when that card is saved
+ * (`tapCompletes`).
  */
 export default function TasksPage() {
   const [todos, setTodos] = useState<Todo[]>([]);
@@ -85,7 +79,11 @@ export default function TasksPage() {
       // Jump first: navigation is fire-and-forget and must not wait on the IPC
       // round trip. Then mark done — which, for a workflow hand-off, resumes the
       // parked run on the backend.
-      replayTarget(todo.target);
+      replayTaskTarget(todo.target, todo.uuid);
+      if (!tapCompletes(todo.target)) {
+        setBusy(null);
+        return;
+      }
       try {
         await invoke("todo_complete", { uuid: todo.uuid });
         await refresh();
@@ -161,6 +159,8 @@ export default function TasksPage() {
             {visible.map((todo) => {
               const done = todo.status === "completed";
               const isBusy = busy === todo.uuid;
+              // A capture is opened, not cleared — see `tapCompletes`.
+              const opensOnly = !tapCompletes(todo.target);
               return (
                 <li
                   key={todo.uuid}
@@ -177,9 +177,9 @@ export default function TasksPage() {
                       type="button"
                       onClick={() => void complete(todo)}
                       disabled={isBusy}
-                      title="Do this task and open where it leads"
+                      title={opensOnly ? "Jump to it; it closes when you save" : "Jump to it and mark it done"}
                       className="mt-0.5 shrink-0 text-text-tertiary hover:text-accent cursor-pointer"
-                      aria-label="Complete task"
+                      aria-label={opensOnly ? "Open task" : "Complete task"}
                     >
                       <Circle size={18} />
                     </button>

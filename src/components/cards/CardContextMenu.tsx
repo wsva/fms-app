@@ -9,6 +9,16 @@ import type { Card } from "@/lib/types";
 import { PROMPT_TEMPLATES } from "@/lib/llm/prompt-templates";
 import { askAboutSelection } from "@/lib/llm/ask";
 import { useContextMenuEnabled } from "@/lib/ui/context-menu";
+import { isTauri } from "@/lib/platform";
+import { replayTaskTarget } from "@/lib/agent/tasks";
+import {
+  buildCapture,
+  captureDetail,
+  captureTarget,
+  captureTitle,
+  pickCaptureDeck,
+  type CaptureContext,
+} from "@/lib/cards/capture";
 
 /**
  * Global text-selection context menu for cards.
@@ -53,9 +63,63 @@ const TOP_MARGIN = 56;
 // Rough half-width used to keep the menu inside the viewport.
 const EDGE_MARGIN = 160;
 
+/** What a capture keeps of the field text it was selected from, in characters. */
+const MAX_BLOCK = 2000;
+
+/** Block-level elements whose text reads as "the paragraph this sentence is in". */
+const BLOCK_SELECTOR = "p, li, h1, h2, h3, h4, h5, h6, blockquote, pre, td";
+const HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6";
+
+/** The nearest block-level ancestor of the selection start. */
+function blockElementAt(node: Node | null): Element | null {
+  let el: Element | null = node instanceof Element ? node : (node?.parentElement ?? null);
+  while (el) {
+    if (el.matches(BLOCK_SELECTOR)) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+/**
+ * The nearest heading above `block`, searched outwards.
+ *
+ * Siblings first, then the parent's siblings, and so on: the result is the
+ * closest heading the reader could have scrolled past. A document-wide
+ * `querySelectorAll` would be wrong here — every tab stays mounted, so the last
+ * heading in the DOM often belongs to a page that is not on screen.
+ */
+function nearestHeading(block: Element): string | undefined {
+  for (let node: Element | null = block; node; node = node.parentElement) {
+    for (let sib = node.previousElementSibling; sib; sib = sib.previousElementSibling) {
+      const heads = sib.matches(HEADING_SELECTOR)
+        ? [sib]
+        : Array.from(sib.querySelectorAll(HEADING_SELECTOR));
+      for (let i = heads.length - 1; i >= 0; i -= 1) {
+        const text = (heads[i].textContent ?? "").replace(/\s+/g, " ").trim();
+        if (text) return text;
+      }
+    }
+  }
+  return undefined;
+}
+
+/** The surrounding block, read while the selection still exists. */
+function readBlock(range: Range): CaptureContext {
+  const block = blockElementAt(range.startContainer);
+  if (!block) return { block: "" };
+  return {
+    block: (block.textContent ?? "").slice(0, MAX_BLOCK),
+    heading: nearestHeading(block),
+  };
+}
+
 export default function CardContextMenu() {
   const [anchor, setAnchor] = useState<MenuAnchor | null>(null);
   const [selectedText, setSelectedText] = useState("");
+  // The paragraph and heading around the selection, snapshotted at mouseup:
+  // clicking the menu collapses the selection, so this cannot wait for the
+  // click on "Add as new card".
+  const [captureCtx, setCaptureCtx] = useState<CaptureContext | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<CardSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -79,9 +143,11 @@ export default function CardContextMenu() {
       const sel = window.getSelection();
       const selText = sel?.toString().trim();
       if (selText && sel?.rangeCount) {
-        const rect = sel.getRangeAt(0).getBoundingClientRect();
+        const range = sel.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
         if (rect.width || rect.height) {
           setSelectedText(selText);
+          setCaptureCtx(readBlock(range));
           setSearchQuery(selText);
           setSearchResults([]);
           setShowSearchPanel(false);
@@ -103,6 +169,9 @@ export default function CardContextMenu() {
           if (text) {
             const rect = active.getBoundingClientRect();
             setSelectedText(text);
+            // A field has no paragraphs to point at: its whole value is the
+            // context, and there is no heading to name.
+            setCaptureCtx({ block: active.value.slice(0, MAX_BLOCK) });
             setSearchQuery(text);
             setSearchResults([]);
             setShowSearchPanel(false);
@@ -116,6 +185,7 @@ export default function CardContextMenu() {
 
       // No usable selection — dismiss.
       setAnchor(null);
+      setCaptureCtx(null);
     };
 
     const onPointerDown = (e: MouseEvent) => {
@@ -189,15 +259,29 @@ export default function CardContextMenu() {
     );
   }
 
+  /**
+   * "Add as new card" files a Tasks todo, it does not open the editor.
+   *
+   * The reader selected a sentence while reading; making them write an answer
+   * before they can go back is the interruption this path exists to avoid. The
+   * todo carries everything needed to write the card later — the quote, the
+   * paragraph, and where it came from — and the toast says which deck took it.
+   */
   async function handleAddCard() {
     const text = searchQuery || selectedText;
+    const ctx = captureCtx;
     setAnchor(null);
     if (!text) return;
+    setCaptureCtx(null);
+
+    if (!isTauri()) {
+      notifyError("Adding a card needs the desktop app.");
+      return;
+    }
 
     try {
-      // Get the first available dataset
-      const datasets = await invoke<any[]>("card_dataset_list");
-      if (datasets.length === 0) {
+      const deck = await pickCaptureDeck();
+      if (!deck) {
         // The banner rather than `alert()`: this menu is reached from a text
         // selection anywhere, and a blocking dialog that cannot be styled or
         // read on a phone is the worst way to say "nothing to add to yet".
@@ -205,32 +289,41 @@ export default function CardContextMenu() {
         return;
       }
 
-      const datasetUuid = datasets[0].info.uuid;
+      // How many cards already ask this. The count is a nicety in the detail
+      // line, never a reason to lose the capture.
+      let similar = 0;
+      try {
+        const results = await invoke<CardSearchResult[]>("card_search", {
+          query: text,
+          mode: "question",
+        });
+        similar = results.length;
+      } catch {
+        similar = 0;
+      }
 
-      // Open card editor with pre-filled question
-      openCardEditor(
-        datasetUuid,
-        {
-          uuid: "",
-          question: text,
-          answer: "",
-          suggestion: "",
-          note: "",
-          familiarity: 0,
-          question_hash: null,
-          source_card_uuid: null,
-          source_dataset_uuid: null,
-          deleted_at: null,
-          created_at: "",
-          updated_at: "",
+      const capture = buildCapture(text, ctx ?? { block: text }, deck.info.uuid);
+      const target = captureTarget(capture, deck.info.name);
+
+      const created = await invoke<{ uuid: string }>("todo_add", {
+        title: captureTitle(capture),
+        detail: captureDetail(capture, similar),
+        target,
+        priority: "normal",
+      });
+
+      notify(`Added to Tasks → ${deck.info.name}`, {
+        action: {
+          label: "Edit now",
+          // The same replay the Tasks tab uses, with the same todo id — so
+          // saving from here closes the todo too, and the two paths cannot
+          // drift apart.
+          run: () => replayTaskTarget(target, created.uuid),
         },
-        (savedCard) => {
-          console.log("Card saved from context menu:", savedCard);
-        }
-      );
+      });
     } catch (err) {
-      console.error("Failed to open card editor:", err);
-      notifyError(`Failed to open the card editor: ${err}`);
+      console.error("Failed to capture the selection:", err);
+      notifyError(`Failed to add the card to Tasks: ${err}`);
     }
   }
 

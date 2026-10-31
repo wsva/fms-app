@@ -42,7 +42,8 @@ import type {
   ReadText,
 } from "@/lib/read_aloud/types";
 import { scoreBadgeClasses } from "@/lib/read_aloud/types";
-import { usePageRefresh } from "@/lib/refresh/page-refresh";
+import { useIsActiveTab, usePageRefresh } from "@/lib/refresh/page-refresh";
+import { clearDocIfOwned, setUiContext } from "@/lib/agent/ui-context";
 import { DatasetCard } from "@/components/ui/dataset";
 import { useAgentActions, reqStr } from "@/lib/agent/ui-actions";
 import { useDatasetFamily } from "@/hooks/useDatasetFamily";
@@ -512,6 +513,19 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
         : activeText
           ? "practice"
           : "texts";
+
+  // The text being practised, published for the agent's "where am I" and for the
+  // card capture's source line. Only while this tab is on screen: pages stay
+  // mounted, so an un-gated report would keep naming this text from another page.
+  const readAloudActive = useIsActiveTab("read-aloud");
+  const textDoc =
+    viewMode === "practice" && selectedDataset && activeText
+      ? `read_aloud:${selectedDataset}:${activeText.uuid}`
+      : null;
+  useEffect(() => {
+    if (readAloudActive && textDoc) setUiContext({ active_doc: textDoc });
+    else clearDocIfOwned("read_aloud");
+  }, [readAloudActive, textDoc]);
 
   // One refresh means different things per level, so the view picks the one that
   // re-reads what is actually on screen: the linked directories, the dataset

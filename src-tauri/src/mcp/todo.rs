@@ -54,7 +54,7 @@ struct TodoIdParam {
 
 #[tool_router(router = todo_router, vis = "pub(crate)")]
 impl DatasetMcpServer {
-    #[tool(name = "todo_add", description = "Leave the learner a task in the app's Tasks tab. Use it to hand off work that needs a human (record a take, review a card, approve a subtitle) or to remind them of a next step. `target` optionally carries an agent-action payload that the tab replays on tap, so the todo can deep-link the learner to the exact screen. Todos sync across the learner's devices. Returns the created todo with its uuid.")]
+    #[tool(name = "todo_add", description = "Leave the learner a task in the app's Tasks tab. Use it to hand off work that needs a human (record a take, review a card, approve a subtitle) or to remind them of a next step. `target` optionally carries an agent-action payload that the tab replays on tap, so the todo can deep-link the learner to the exact screen. Todos sync across the learner's devices. Returns the created todo with its uuid. The app itself files one kind of todo: a card capture, written when the learner selects text and chooses 'Add as new card'. It uses `target.type = \"open-card\"` with `prefill.question` set to the selected quote and `completes: \"on_save\"` — such a todo stays open until the card is saved, so never complete it on the learner's behalf for merely opening it. Its `detail` is the quote plus the document it came from.")]
     async fn todo_add(
         &self,
         Parameters(param): Parameters<TodoAddParam>,
@@ -86,7 +86,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&created).unwrap_or_default())
     }
 
-    #[tool(name = "todo_list", description = "Read the learner's todos. Optional `status` filter (open|completed|dismissed); omit it for every non-dismissed todo. Each entry carries its uuid, title, priority, status, and — when a workflow human step created it — source_run_id and step_id.")]
+    #[tool(name = "todo_list", description = "Read the learner's todos. Optional `status` filter (open|completed|dismissed); omit it for every non-dismissed todo. Each entry carries its uuid, title, priority, status, and — when a workflow human step created it — source_run_id and step_id. An entry whose target has `type: \"open-card\"` is a card the learner captured from a text selection while reading: `target.prefill.question` is the quoted text, `target.context` the paragraph around it, `target.source.display` where it came from (tab › document · § heading), and `target.dataset_uuid` the deck the card will join. Those are open writing work, not pending navigation.")]
     async fn todo_list(
         &self,
         Parameters(param): Parameters<TodoListParam>,

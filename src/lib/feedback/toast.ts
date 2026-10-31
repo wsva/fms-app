@@ -23,16 +23,34 @@ import { useSyncExternalStore } from "react";
 
 export type ToastTone = "info" | "error";
 
+/** A button inside the notice. `run` fires once and the notice is dismissed. */
+export type ToastAction = {
+  /** The verb on the button — "Edit now", "Undo". Two words at most. */
+  label: string;
+  run: () => void;
+};
+
 export type Toast = {
   /** The sentence shown verbatim — write it as what to do next, not just what failed. */
   message: string;
   tone: ToastTone;
+  /** An optional button, for notices that name something the reader can go do. */
+  action?: ToastAction;
   /** Monotonic id, so a re-post of the same text still restarts the dismissal. */
   id: number;
 };
 
+export type NotifyOptions = {
+  tone?: ToastTone;
+  action?: ToastAction;
+  /** Override the default lifetime, in milliseconds. */
+  ms?: number;
+};
+
 /** How long a notice stays up. Long enough to read a sentence and start a fix. */
 const DISMISS_MS = 4_000;
+/** A notice with a button asks for a decision, so it may not vanish mid-reach. */
+const DISMISS_WITH_ACTION_MS = 8_000;
 
 let current: Toast | null = null;
 let seq = 0;
@@ -44,14 +62,29 @@ function emit(): void {
 }
 
 /** Show `message` in the shell's banner, replacing whatever was there. */
-export function notify(message: string, tone: ToastTone = "info"): void {
-  current = { message, tone, id: ++seq };
+export function notify(
+  message: string,
+  toneOrOptions: ToastTone | NotifyOptions = "info"
+): void {
+  const opts: NotifyOptions =
+    typeof toneOrOptions === "string" ? { tone: toneOrOptions } : toneOrOptions;
+  current = {
+    message,
+    tone: opts.tone ?? "info",
+    action: opts.action,
+    id: ++seq,
+  };
   if (timer) clearTimeout(timer);
-  timer = setTimeout(() => {
-    timer = null;
-    current = null;
-    emit();
-  }, DISMISS_MS);
+  timer = setTimeout(
+    () => {
+      timer = null;
+      // Drop the action with the notice: a button that outlived its sentence
+      // would fire against state the reader can no longer see.
+      current = null;
+      emit();
+    },
+    opts.ms ?? (opts.action ? DISMISS_WITH_ACTION_MS : DISMISS_MS)
+  );
   emit();
 }
 

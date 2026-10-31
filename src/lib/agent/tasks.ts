@@ -48,13 +48,36 @@ export function dismissTask(uuid: string): Promise<void> {
 /** A task's `target` is an `agent-action` payload verbatim. Anything carrying a
  *  string `type` is replayed through the shell's existing handler (the same one
  *  `ui_invoke_action` drives), so clicking a task lands the learner exactly where
- *  the agent meant — no second navigation machinery. */
-export function replayTaskTarget(target: unknown): void {
+ *  the agent meant — no second navigation machinery.
+ *
+ *  `todoUuid` is handed in by the caller because the payload cannot carry it: a
+ *  capture's target is written by `todo_add`, which is what mints the uuid. It
+ *  is injected only into `open-card`, whose `completes` rule needs to know which
+ *  todo to close. */
+export function replayTaskTarget(target: unknown, todoUuid?: string): void {
   if (
     target &&
     typeof target === "object" &&
     typeof (target as { type?: unknown }).type === "string"
   ) {
-    void emit("agent-action", target);
+    const action = target as { type: string };
+    const payload =
+      todoUuid && action.type === "open-card"
+        ? { ...action, todo_uuid: todoUuid }
+        : target;
+    void emit("agent-action", payload);
   }
+}
+
+/**
+ * Whether tapping a task also completes it.
+ *
+ * Almost always: a todo that deep-links somewhere is done once you get there.
+ * A capture is the exception — it exists to be finished, so its payload says so
+ * and the card editor's save closes it instead. An absent or odd `target` keeps
+ * the old behaviour, because a todo with nothing to open still needs one tap to
+ * get rid of. */
+export function tapCompletes(target: unknown): boolean {
+  if (!target || typeof target !== "object") return true;
+  return (target as { completes?: unknown }).completes !== "on_save";
 }

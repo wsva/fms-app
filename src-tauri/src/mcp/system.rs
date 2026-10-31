@@ -617,7 +617,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({ "ok": true, "action": "notify", "message": param.message }).to_string())
     }
 
-    #[tool(name = "app_get_ui_state", description = "Read what the user is currently looking at: the active tab, the selected dataset, the open media item and cue, any text selection. Call this before navigating or acting so you know where the user is. ui_mounted=false means the webview has not reported yet (app still starting, or window closed) — every other field is then null and you should not treat that as 'nothing selected'.")]
+    #[tool(name = "app_get_ui_state", description = "Read what the user is currently looking at: the active tab, the selected dataset, the open media item and cue, the open document (active_doc, shaped `kind:uuid:ref` — a wiki file, a book chapter, a read-aloud text) and any text selection. Call this before navigating or acting so you know where the user is. ui_mounted=false means the webview has not reported yet (app still starting, or window closed) — every other field is then null and you should not treat that as 'nothing selected'.")]
     async fn app_get_ui_state(&self) -> String {
         let ui = self.app.state::<crate::ui_state::UiStateHandle>();
         let mut out = crate::ui_state::context_json(&ui);

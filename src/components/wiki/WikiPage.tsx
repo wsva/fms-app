@@ -10,8 +10,9 @@ import {
   Folder, FolderOpen, FileText, BookMarked, FilePlus, FolderPlus, Plus, Trash2,
   Save, CircleHelp, Search, ExternalLink, List,
 } from "lucide-react";
-import { usePageRefresh } from "@/lib/refresh/page-refresh";
+import { useIsActiveTab, usePageRefresh } from "@/lib/refresh/page-refresh";
 import { useAgentActions, reqStr } from "@/lib/agent/ui-actions";
+import { clearDocIfOwned, setUiContext } from "@/lib/agent/ui-context";
 import WikiSearch from "./WikiSearch";
 import MdEditor from "./MdEditor";
 import { insertAround, insertAtLineStart } from "./mdEditorInserts";
@@ -204,6 +205,20 @@ export default function WikiPage() {
   // Bumped by the shared page refresh so an open Locations overlay re-reads its
   // own directory list instead of keeping the one it mounted with.
   const [locRefresh, setLocRefresh] = useState(0);
+
+  // The open file, published for the agent's "where am I" and for the card
+  // capture's source line. Gated on being the focused tab: every page stays
+  // mounted, so an un-gated report would keep naming this file while another
+  // page is on screen.
+  const wikiActive = useIsActiveTab("wiki");
+  const docKey =
+    selection && selection.source.rel !== ""
+      ? `wiki:${selection.source.uuid}:${selection.source.rel}`
+      : null;
+  useEffect(() => {
+    if (wikiActive && docKey) setUiContext({ active_doc: docKey });
+    else clearDocIfOwned("wiki");
+  }, [wikiActive, docKey]);
 
   // Hub read-only browse + local wiki datasets.
   const [hubMode, setHubMode] = useState(false);
