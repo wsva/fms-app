@@ -15,9 +15,12 @@
 //      guard catches: the process being killed.
 //   2. Save means save. It writes, re-reads nothing away, keeps the card open
 //      and editable, and says "Saved" in the header. Closing is the user's act.
-//   3. One layout. Fields render through `EditableField` in reading order —
+//   3. One layout. Fields render through `CardFields` in reading order —
 //      question, answer, suggestion, note — and clicking one edits that one.
 //      `viewMode` no longer picks a layout; "edit" is just every field open.
+//      The body is a leaf (`CardFields`) fed by a `CardFieldBinding`, so a card
+//      shown inside a page rather than over one gets the same body; everything
+//      in this file is the chrome around it.
 //   4. Identity. The card it shows is published to the tab strip's subject store
 //      (so the chip names it), into the address bar (so a restored window reopens
 //      it) and into the agent's UI context (so "this card" means something).
@@ -62,7 +65,11 @@ import {
   type TabSubject,
 } from "@/lib/shell/tab-subject";
 import { setUiContext } from "@/lib/agent/ui-context";
-import EditableField from "./EditableField";
+import CardFields, {
+  CARD_FIELD_ORDER,
+  type CardFieldBinding,
+  type CardFieldValues,
+} from "./CardFields";
 import MediaLibrary from "./MediaLibrary";
 import { CollapsibleSidebar, useCollapsibleSidebar } from "@/components/layout/CollapsibleSidebar";
 import {
@@ -132,16 +139,7 @@ function famName(f: number): string {
   return FAMILIARY_RAMP[Math.min(Math.max(f, 0), 6)]?.name ?? "new";
 }
 
-const FIELDS: CardMediaField[] = ["question", "answer", "suggestion", "note"];
-
-type FieldValues = {
-  question: string;
-  answer: string;
-  note: string;
-  suggestion: string;
-};
-
-const valuesOf = (source: Partial<Card> | null): FieldValues => ({
+const valuesOf = (source: Partial<Card> | null): CardFieldValues => ({
   question: source?.question ?? "",
   answer: source?.answer ?? "",
   note: source?.note ?? "",
@@ -164,7 +162,7 @@ function mintCardUuid(): string {
 }
 
 /** The persisted shape of an unsaved card, and the wiki draft's twin. */
-type CardDraft = FieldValues;
+type CardDraft = CardFieldValues;
 
 const draftKeyFor = (datasetUuid: string, cardUuid: string) =>
   `card-draft:${datasetUuid}:${cardUuid}`;
@@ -415,7 +413,7 @@ function CardEditModal({
 
   // The last value read from or written to disk. Every save and every discard
   // re-seeds it; `dirty` is measured against it and nothing else.
-  const baselineRef = useRef<FieldValues>(initial);
+  const baselineRef = useRef<CardFieldValues>(initial);
   const setField: FieldSetter = useCallback((field, value) => {
     if (field === "question") setQuestion(value);
     else if (field === "answer") setAnswer(value);
@@ -423,7 +421,7 @@ function CardEditModal({
     else setSuggestion(value);
   }, []);
 
-  const values: FieldValues = { question, answer, note, suggestion };
+  const values: CardFieldValues = { question, answer, note, suggestion };
   const dirtyField: Record<CardMediaField, boolean> = {
     question: question !== baselineRef.current.question,
     answer: answer !== baselineRef.current.answer,
@@ -432,8 +430,8 @@ function CardEditModal({
   };
   const dirty = useMemo(
     () =>
-      FIELDS.some((f) => values[f] !== baselineRef.current[f]) ||
-      (!saved && FIELDS.some((f) => values[f].trim().length > 0)),
+      CARD_FIELD_ORDER.some((f) => values[f] !== baselineRef.current[f]) ||
+      (!saved && CARD_FIELD_ORDER.some((f) => values[f].trim().length > 0)),
     // `values` is rebuilt every render, so depend on the four fields directly.
     [question, answer, note, suggestion, saved]
   );
@@ -493,7 +491,9 @@ function CardEditModal({
     setMobile(m);
 
     const stored = readDraft(draftKey);
-    if (stored && FIELDS.some((f) => stored[f] !== baselineRef.current[f])) {
+    const restored =
+      !!stored && CARD_FIELD_ORDER.some((f) => stored[f] !== baselineRef.current[f]);
+    if (stored && restored) {
       setQuestion(stored.question);
       setAnswer(stored.answer);
       setNote(stored.note);
@@ -503,9 +503,7 @@ function CardEditModal({
       setEditing({ question: true, answer: true, note: true, suggestion: true });
     }
     if (!m) {
-      const effective = stored && FIELDS.some((f) => stored[f] !== baselineRef.current[f])
-        ? stored.answer
-        : baselineRef.current.answer;
+      const effective = restored ? stored.answer : baselineRef.current.answer;
       setFontScale(effective.length > LONG_ANSWER_CHARS ? "large" : "x2");
     }
   }, [draftKey]);
@@ -579,7 +577,7 @@ function CardEditModal({
   }, [resumeEditing]);
 
   const applyValues = useCallback(
-    (next: FieldValues, asBaseline: boolean) => {
+    (next: CardFieldValues, asBaseline: boolean) => {
       setQuestion(next.question);
       setAnswer(next.answer);
       setNote(next.note);
@@ -794,7 +792,7 @@ function CardEditModal({
       const field = attachFieldRef.current;
       const token = `{{${handle}}}`;
       const strip = (v: string) => v.split(token).join("");
-      const next: FieldValues = {
+      const next: CardFieldValues = {
         question: strip(question),
         answer: strip(answer),
         note: strip(note),
@@ -818,7 +816,7 @@ function CardEditModal({
         if (target) {
           const token = `{{${target.handle}}}`;
           const strip = (v: string) => v.split(token).join("");
-          const next: FieldValues = {
+          const next: CardFieldValues = {
             question: strip(question),
             answer: strip(answer),
             note: strip(note),
@@ -993,7 +991,7 @@ function CardEditModal({
     const out = new Set<string>();
     for (const m of media) {
       const token = `{{${m.handle}}}`;
-      if (!FIELDS.some((f) => values[f].includes(token))) out.add(m.handle);
+      if (!CARD_FIELD_ORDER.some((f) => values[f].includes(token))) out.add(m.handle);
     }
     return out;
   }, [media, question, answer, note, suggestion]);
@@ -1006,40 +1004,38 @@ function CardEditModal({
   const heading = stripAnchors(question).trim().slice(0, 60) || (saved ? "Card" : "New card");
   const canStep = !!queue;
 
-  const fieldProps = (field: CardMediaField) => ({
-    field,
-    value: values[field],
-    editing: editing[field],
-    dirty: dirtyField[field],
+  // The four fields as one leaf: it renders them, this host owns everything
+  // they read and write. The overlay's toolbar, draft, save and exit guard stay
+  // here — a page that shows a card inside its own breadcrumb level passes its
+  // own binding and gets the same body without any of this chrome.
+  const fieldBinding: CardFieldBinding = {
+    values,
+    editing,
+    dirty: dirtyField,
     media,
     datasetPath,
-    attachTarget: attachField === field,
-    dropTarget: dragOver && attachField === field,
-    canAttach: isTauri(),
-    keepEditing: mediaBusy,
-    onChange: (v: string) => {
-      setField(field, v);
+    attachField,
+    dragOver,
+    mediaBusy,
+    onFieldChange: (field, value) => {
+      setField(field, value);
       setAttachField(field);
     },
-    onStartEdit: () => {
+    onStartEdit: (field) => {
       setAttachField(field);
       setFieldEditing(field, true);
       requestAnimationFrame(() => fieldRefs.current[field].current?.focus());
     },
-    onEndEdit: (reason: "commit" | "cancel") => {
-      if (reason === "cancel") {
-        setFieldEditing(field, false);
-        return;
-      }
+    onEndEdit: (field) => {
+      // Committing out of a field is not a save: the text stays in the draft
+      // until the reader saves or the exit guard asks about it.
       setFieldEditing(field, false);
-      // Committing out of a field is not a save. Blur closes the editor and the
-      // text stays in the draft until the user saves or the guard asks.
     },
-    onAttach: (kind: "image" | "audio" | "video") => void attach(kind, field),
-    registerElement: (el: HTMLTextAreaElement | HTMLInputElement | null) => {
+    onAttach: (kind, field) => void attach(kind, field),
+    onRegisterElement: (field, el) => {
       fieldRefs.current[field].current = el;
     },
-  });
+  };
 
   return (
     // Full-screen overlay with the unified page top-area pattern: a PageHeader
@@ -1295,13 +1291,7 @@ function CardEditModal({
                 )}
               </div>
             )}
-            <div className="space-y-6">
-              <EditableField {...fieldProps("question")} label="Question" mode="plain" textClassName="text-3xl font-semibold" placeholder="What do you want to learn?" />
-              <div className="border-t border-border-default" />
-              <EditableField {...fieldProps("answer")} label="Answer" mode="markdown" boxed textClassName="text-base" placeholder="The answer or explanation (Markdown supported)" />
-              <EditableField {...fieldProps("suggestion")} label="Suggestion" mode="plain" singleLine textClassName="text-lg" placeholder="AI suggestion or hint" />
-              <EditableField {...fieldProps("note")} label="Note" mode="markdown" boxed textClassName="text-base" placeholder="Additional notes (Markdown supported)" />
-            </div>
+            <CardFields binding={fieldBinding} />
           </div>
         </div>
         {libraryOpen && (
