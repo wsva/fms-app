@@ -36,6 +36,18 @@ This document describes the redesigned dataset schema with efficient subtitle ve
 
 **Note:** VTT files are no longer stored on disk — all subtitle data lives in the database with full versioning.
 
+**Card datasets** reuse `media/` for per-card attachments, but organize it by
+**card uuid** rather than by lesson subfolder:
+
+```
+<card dataset>/media/<card-uuid>/<original name>
+```
+
+The bytes on disk are the truth about the media; the `card_media` table (in the
+same `data.sqlite3`) is the thin index over that directory — the `{{handle}}`
+anchor, kind, field, order, and playback behaviour. See
+[`design/card-media.md`](./design/card-media.md).
+
 ---
 
 ## Database Schema

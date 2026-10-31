@@ -2261,6 +2261,24 @@ async fn replay(
             }).unwrap_or_default();
             datasets::cards::card_set_tags(settings.clone(), dataset_uuid, card_uuid, tag_uuids).await
         }
+        // A card attachment is dataset content: the row replays here, while its
+        // bytes ride the file manifest (so a row may arrive before its file).
+        "card_media_save" => {
+            datasets::cards::media::apply_remote_save(
+                settings.inner(),
+                &dataset_uuid,
+                &ch.payload,
+            )
+            .map(|_| ())
+        }
+        "card_media_delete" => {
+            datasets::cards::media::apply_remote_delete(
+                settings.inner(),
+                &dataset_uuid,
+                &ch.payload,
+            )
+            .map(|_| ())
+        }
         "book_chapter_save" => {
             let chapter: BookChapter =
                 serde_json::from_value(ch.payload.clone()).map_err(|e| e.to_string())?;

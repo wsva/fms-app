@@ -168,6 +168,18 @@ pub(crate) async fn apply_change(
                 .unwrap_or_default();
             crate::datasets::cards::card_set_tags(settings.clone(), ds, card_uuid, tag_uuids).await.map(|_| true)
         }
+        // A card attachment is dataset content: the row replays here, while its
+        // bytes ride the file manifest (so a row may arrive before its audio).
+        "card_media_save" => crate::datasets::cards::media::apply_remote_save(
+            settings.inner(),
+            &ds,
+            payload,
+        ),
+        "card_media_delete" => crate::datasets::cards::media::apply_remote_delete(
+            settings.inner(),
+            &ds,
+            payload,
+        ),
         "book_chapter_save" => {
             let chapter: BookChapter = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
             crate::datasets::book::book_save_chapter(settings.clone(), ds, chapter).await.map(|_| true)

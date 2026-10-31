@@ -80,3 +80,11 @@ consumer, `DatasetCard`; promote it to `ui/card` when a second family needs it.
 - Entry is a pencil on the front; Esc cancels, Enter submits, a failed save keeps
   the back face open with an inline error.
 - `prefers-reduced-motion` drops the rotation and keeps the cross-fade.
+
+## Related
+
+This file governs the **card component** — the box, its geometry and states. It
+is not the flashcard *feature*: that lives in the Cards page. Card content
+features are documented where they are designed; media attachments (images,
+audio, video on a card's fields) are specified in
+[`card-media.md`](./card-media.md).

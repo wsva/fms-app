@@ -29,17 +29,19 @@ import {
   Layers,
   GraduationCap,
   FolderCog,
+  Paperclip,
   type LucideIcon,
 } from "lucide-react";
 import type {
   CardDatasetSummary,
   Card,
+  CardMedia,
   CardReview,
   CardTag,
   CardTestStats,
   CrossDatasetCard,
 } from "@/lib/types";
-import { isMobileApp } from "@/lib/platform";
+import { isMobileApp, isTauri } from "@/lib/platform";
 import { LocationsManager } from "@/components/ui/LocationsManager";
 import PromptDialog from "@/components/ui/PromptDialog";
 import { DatasetCard } from "@/components/ui/dataset";
@@ -51,7 +53,8 @@ import {
   ToolbarOverflow,
   ToolbarMenuItem,
 } from "@/components/ui/toolbar";
-import MarkdownViewer from "@/components/wiki/markdown/markdown";
+import { stripAnchors, hasAnchor } from "@/lib/media/anchors";
+import MediaField from "./MediaField";
 import { useCardEditor } from "./CardEditorContext";
 import { oneOf, reqStr, optStr, useAgentActions } from "@/lib/agent/ui-actions";
 
@@ -121,6 +124,14 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   // a filter on the session, not navigation — selecting a dataset here does not
   // open it, so the review page stays a page of its own.
   const [reviewScope, setReviewScope] = useState<string>("");
+
+  // Attachments of the card now on the review face, and the dataset dir needed
+  // to resolve their bytes. The review card's source dataset is the scoped one
+  // or, in an all-datasets draw, the one the card names.
+  const [reviewMedia, setReviewMedia] = useState<CardMedia[]>([]);
+  const reviewCardDatasetUuid = reviewScope || reviewDatasetUuid;
+  const reviewDatasetPath =
+    datasets.find((ds) => ds.info.uuid === reviewCardDatasetUuid)?.path || "";
 
   // Tags
   const [tags, setTags] = useState<CardTag[]>([]);
@@ -299,6 +310,35 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
       void loadReviewStats();
     }
   }, [reviewScope, loadReviewStats]);
+
+  // Load the current review card's attachments so its anchored media renders.
+  // `register` reconciles the directory first (a row may arrive before its
+  // bytes via sync), then we read the live rows.
+  useEffect(() => {
+    if (!isTauri() || !reviewCard || !reviewCardDatasetUuid) {
+      setReviewMedia([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        await invoke("card_media_register", {
+          datasetUuid: reviewCardDatasetUuid,
+          cardUuid: reviewCard.uuid,
+        });
+        const rows = await invoke<CardMedia[]>("card_media_list", {
+          datasetUuid: reviewCardDatasetUuid,
+          cardUuid: reviewCard.uuid,
+        });
+        if (!cancelled) setReviewMedia(rows);
+      } catch {
+        if (!cancelled) setReviewMedia([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [reviewCard, reviewCardDatasetUuid]);
 
   useEffect(() => {
     // Review works at the dataset-list root too (all datasets), so it never required
@@ -963,11 +1003,14 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex-1 min-w-0">
                       <p className="text-lg font-medium truncate">
-                        {result.question || "(empty question)"}
+                        {stripAnchors(result.question) || "(empty question)"}
+                        {hasAnchor(result.question) && (
+                          <Paperclip size={12} className="inline ml-1 -translate-y-0.5 text-text-tertiary" />
+                        )}
                       </p>
                       {result.answer && (
                         <p className="text-sm text-text-secondary truncate mt-1">
-                          {result.answer}
+                          {stripAnchors(result.answer)}
                         </p>
                       )}
                     </div>
@@ -1061,7 +1104,10 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
                     >
                       <div className="flex-1 min-w-0">
                         <p className="text-lg font-medium whitespace-normal break-words sm:text-2xl">
-                          {card.question || "(empty question)"}
+                          {stripAnchors(card.question) || "(empty question)"}
+                          {hasAnchor(card.question) && (
+                            <Paperclip size={14} className="inline ml-1 -translate-y-0.5 text-text-tertiary" />
+                          )}
                         </p>
                       </div>
                       <span className="text-xs text-text-tertiary shrink-0">
@@ -1194,25 +1240,50 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
                       /* The prompt is the whole point of this side, so it is sized as a
                           display heading. Parent `break-words` keeps a long German compound
                           wrapping instead of overflowing the card. */
-                      <p className="text-4xl font-bold sm:text-5xl">
-                        {reviewCard.question}
-                      </p>
+                      <div className="text-4xl font-bold sm:text-5xl">
+                        <MediaField
+                          text={reviewCard.question}
+                          media={reviewMedia}
+                          datasetPath={reviewDatasetPath}
+                          mode="plain"
+                          reveal={reviewFlipped}
+                        />
+                      </div>
                     ) : (
                       <>
                         {/* Repeated above the answer for context only, so it stays small —
                             at display size it would compete with what you are reading. */}
-                        <p className="text-lg text-text-secondary mb-2">
-                          {reviewCard.question}
-                        </p>
+                        <div className="text-lg text-text-secondary mb-2">
+                          <MediaField
+                            text={reviewCard.question}
+                            media={reviewMedia}
+                            datasetPath={reviewDatasetPath}
+                            mode="plain"
+                            reveal={reviewFlipped}
+                          />
+                        </div>
                         <div className="border-t border-border-default my-4" />
                         {/* Answers are written in markdown (the card editor says so), so
-                            render them through the same viewer the wiki uses. */}
+                            render them through the same viewer the wiki uses; anchored
+                            media materializes now that the card is flipped. */}
                         <div className="text-xl">
-                          <MarkdownViewer content={reviewCard.answer} />
+                          <MediaField
+                            text={reviewCard.answer}
+                            media={reviewMedia}
+                            datasetPath={reviewDatasetPath}
+                            mode="markdown"
+                            reveal={reviewFlipped}
+                          />
                         </div>
                         {reviewCard.note && (
                           <div className="text-sm mt-4">
-                            <MarkdownViewer content={reviewCard.note} />
+                            <MediaField
+                              text={reviewCard.note}
+                              media={reviewMedia}
+                              datasetPath={reviewDatasetPath}
+                              mode="markdown"
+                              reveal={reviewFlipped}
+                            />
                           </div>
                         )}
                       </>

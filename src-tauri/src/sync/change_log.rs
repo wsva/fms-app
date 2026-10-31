@@ -197,6 +197,14 @@ impl ChangeClass {
             | "card_tag_save"
             | "card_tag_delete"
             | "card_set_tags"
+            // A card attachment is dataset content (row + file under
+            // `media/<card-uuid>/`), keyed by the row's uuid. Same shape as
+            // `read_standard_audio_*`: the row rides this journal, the bytes
+            // ride the file plane (`blobpush`/`snapshot`), so a follower may
+            // legitimately see a row-before-file state and must reconcile via
+            // `card_media_register` rather than fail.
+            | "card_media_save"
+            | "card_media_delete"
             | "book_chapter_save"
             | "book_chapter_delete"
             | "book_sentence_save"
@@ -347,6 +355,11 @@ pub fn object_id_for(kind: &str, payload: &Value, user_key: &str) -> String {
         }
         "card_tag_save" => get("uuid"),
         "card_tag_delete" => get("tag_uuid"),
+        // A card attachment is keyed by its own row uuid on both sides; the
+        // delete payload does not carry the full row, only `media_uuid` (set by
+        // `card_media_delete`) so it can coalesce against the save.
+        "card_media_save" => get("uuid"),
+        "card_media_delete" => get("media_uuid"),
         "book_chapter_save" | "book_chapter_delete"
         | "book_sentence_save" | "book_sentence_delete"
         | "book_word_save" | "book_word_delete"
@@ -726,6 +739,7 @@ pub fn table_for_kind(kind: &str) -> &'static str {
         "dictation" => "listen_dictation",
         "card_save" | "card_delete" | "card_review" | "card_set_tags" => "cards",
         "card_tag_save" | "card_tag_delete" => "card_tags",
+        "card_media_save" | "card_media_delete" => "card_media",
         "book_chapter_save" | "book_chapter_delete" => "book_chapters",
         "book_sentence_save" | "book_sentences_save" | "book_sentence_delete" => "book_sentences",
         "book_word_save" | "book_word_delete" => "book_sentence_words",

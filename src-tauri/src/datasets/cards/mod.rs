@@ -9,6 +9,7 @@
 
 pub(crate) mod review;
 pub(crate) mod sync;
+pub(crate) mod media;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,12 @@ use crate::settings::SettingsState;
 /// keeps it out of the sync manifest structurally; the predicate covers the guards
 /// that work from a dataset-relative path.
 pub(crate) const FTS_DB: &str = "fts5.sqlite3";
+
+/// The dataset-relative directory under which every card's attachments live:
+/// `<dataset>/media/<card-uuid>/<original name>`. Named once so the base/overlay
+/// fork, the sync walker, and the register/resolve seams all read the same
+/// string — the layout is a wire contract (see `docs/design/card-media.md`).
+pub(crate) const MEDIA_DIR: &str = "media";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -236,6 +243,14 @@ fn index_card_in_fts(
     note: &str,
     suggestion: &str,
 ) -> Result<(), String> {
+    // Search matches prose, never `png` or `{{`. Anchors are stripped once here
+    // so every caller — `card_save` on write and `rebuild_fts_index` on a bulk
+    // rescan — gets the same answer without either remembering to preprocess.
+    let q = strip_media_anchors(question);
+    let a = strip_media_anchors(answer);
+    let n = strip_media_anchors(note);
+    let s = strip_media_anchors(suggestion);
+
     // Delete existing entry first (if any)
     conn.execute(
         "DELETE FROM card_fts WHERE dataset_uuid = ?1 AND card_uuid = ?2",
@@ -246,7 +261,7 @@ fn index_card_in_fts(
     // Insert new entry
     conn.execute(
         "INSERT INTO card_fts (dataset_uuid, card_uuid, dataset_name, question, answer, note, suggestion) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![dataset_uuid, card_uuid, dataset_name, question, answer, note, suggestion],
+        rusqlite::params![dataset_uuid, card_uuid, dataset_name, q, a, n, s],
     )
     .map_err(|e| e.to_string())?;
 
@@ -554,6 +569,37 @@ fn create_card_schema(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_card_tag_card ON card_tag(card_uuid);
         CREATE INDEX IF NOT EXISTS idx_card_tag_tag ON card_tag(tag_uuid);
 
+        -- Attachments live as files under `media/<card_uuid>/`; the row is the
+        -- thin metadata index over that directory (the layout is the truth about
+        -- bytes, the row is the truth about meaning — see docs/design/card-media.md).
+        -- Anchor text (`handle`) is what a `{{handle}}` token in the owning field
+        -- resolves against; `rel_path` and `size` are cache, re-probed by the
+        -- register seam on editor open. Soft-delete mirrors `card`/`card_tag` so
+        -- a tombstone travels the sync journal; bytes stay put until an explicit
+        -- sweep or dataset deletion, so undo of a card delete finds its media.
+        CREATE TABLE IF NOT EXISTS card_media (
+            uuid          TEXT PRIMARY KEY,
+            card_uuid     TEXT NOT NULL,
+            field         TEXT NOT NULL DEFAULT 'question',
+            handle        TEXT NOT NULL,
+            rel_path      TEXT NOT NULL,
+            kind          TEXT NOT NULL,
+            title         TEXT NOT NULL DEFAULT '',
+            sort          INTEGER NOT NULL DEFAULT 0,
+            autoplay      INTEGER NOT NULL DEFAULT 0,
+            play_on       TEXT NOT NULL DEFAULT 'tap',
+            duration_ms   INTEGER,
+            width         INTEGER,
+            height        INTEGER,
+            size          INTEGER NOT NULL DEFAULT 0,
+            deleted_at    TEXT,
+            created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            FOREIGN KEY (card_uuid) REFERENCES card(uuid) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_card_media_card ON card_media(card_uuid);
+        CREATE INDEX IF NOT EXISTS idx_card_media_handle ON card_media(card_uuid, handle);
+
         CREATE TABLE IF NOT EXISTS sync_state (
             dataset_uuid    TEXT PRIMARY KEY,
             last_synced_at  TEXT NOT NULL,
@@ -600,6 +646,68 @@ fn compute_question_hash(question: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(normalized.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Remove every `{{handle}}` anchor token from `text` before hashing or
+/// indexing. A card's identity and its search hits are its prose, not its
+/// attachment handles: renaming a handle must not change `question_hash`, and
+/// a search for "png" or `{{` must not hit a card that only has an image
+/// anchor. Emptiness checks deliberately do **not** go through this — a
+/// media-only card's raw text is the token itself, so the `review_eligible`
+/// predicate and the `incomplete` stat (both of which read `length(question)`
+/// on the raw column) already count it as content, and stripping first would
+/// flip that (see plan §5).
+///
+/// Only tokens matching the handle grammar (`^[a-z0-9][a-z0-9-]{0,31}$`) are
+/// removed; a template-literal `{{ other }}` in a card body survives, so a
+/// non-anchor pair of braces the author typed stays visible to the reader.
+pub(crate) fn strip_media_anchors(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Match on ASCII `{` — the opening of a candidate token. Any other byte
+        // is copied as one char (preserving UTF-8 boundaries) and we advance.
+        if bytes[i] == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            if let Some(close) = find_double_close(bytes, i + 2) {
+                // Slice indices are byte offsets on UTF-8; a handle is ASCII by
+                // construction, so `text[i+2..close]` is a valid str here.
+                let inner = &text[i + 2..close];
+                if is_valid_handle(inner) {
+                    i = close + 2;
+                    continue;
+                }
+            }
+        }
+        let ch = text[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn find_double_close(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut j = from;
+    while j + 1 < bytes.len() {
+        if bytes[j] == b'}' && bytes[j + 1] == b'}' {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+/// The `handle` column's grammar, spelled out once so the strip and the
+/// minting side agree. `docs/design/card-media.md` §2 documents it too.
+pub(crate) fn is_valid_handle(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || bytes.len() > 32 {
+        return false;
+    }
+    let first_ok = bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit();
+    first_ok && bytes[1..]
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 
 /// List all card datasets across every configured location.
@@ -1123,7 +1231,9 @@ pub async fn card_save(
     let question_hash = if card.question.trim().is_empty() {
         None
     } else {
-        Some(compute_question_hash(&card.question))
+        // Anchors are stripped before hashing so a handle rename (or a
+        // re-attach under a new slug) does not look like a new card.
+        Some(compute_question_hash(&strip_media_anchors(&card.question)))
     };
 
     conn.execute(
@@ -1266,14 +1376,35 @@ pub async fn card_fork(
         note: source_card.note,
         familiarity: source_card.familiarity,
         question_hash: None, // Will be computed by card_save
-        source_card_uuid: Some(card_uuid),
-        source_dataset_uuid: Some(source_dataset_uuid),
+        source_card_uuid: Some(card_uuid.clone()),
+        source_dataset_uuid: Some(source_dataset_uuid.clone()),
         deleted_at: None,
         created_at: String::new(),
         updated_at: String::new(),
     };
 
-    card_save(settings, target_dataset_uuid, new_card).await
+    let saved = card_save(settings.clone(), target_dataset_uuid.clone(), new_card).await?;
+
+    // Copy attachments so the fork keeps its media. A failure here does not
+    // roll back the fork — the card is still useful as prose alone, and a
+    // partial copy is reported in the log so the user can retry by hand.
+    // Handles are preserved verbatim, so the copied text's `{{handle}}` tokens
+    // resolve unchanged.
+    if let Err(e) = media::copy_attachments_for_fork(
+        settings.inner(),
+        &source_dataset_uuid,
+        &card_uuid,
+        &target_dataset_uuid,
+        &saved.uuid,
+    ) {
+        log::warn!(
+            "[Cards] Fork of card '{}' completed but attachment copy failed: {}",
+            card_uuid,
+            e
+        );
+    }
+
+    Ok(saved)
 }
 
 // ---------------------------------------------------------------------------
@@ -1902,4 +2033,70 @@ pub async fn card_sync_get_changes(
 /// Update the dataset's info.json timestamp.
 fn update_dataset_timestamp(dataset_dir: &Path) -> Result<(), String> {
     touch_info(dataset_dir)
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+
+    #[test]
+    fn strips_a_well_formed_handle() {
+        assert_eq!(strip_media_anchors("What is {{puppy}}?"), "What is ?");
+        assert_eq!(strip_media_anchors("{{a}}"), "");
+        assert_eq!(strip_media_anchors("line 1\n{{clip-2}}\nline 3"), "line 1\n\nline 3");
+    }
+
+    /// A media-only card's raw text is the token itself; the strip empties it,
+    /// so `question_hash` is `None` and the card still counts as content for
+    /// the emptiness checks (which read the raw column, not the stripped form).
+    #[test]
+    fn media_only_question_still_hash() {
+        assert_eq!(strip_media_anchors("{{puppy}}"), "");
+        assert!(strip_media_anchors("{{puppy}}").trim().is_empty());
+    }
+
+    #[test]
+    fn a_rename_of_the_handle_does_not_change_the_stripped_prose() {
+        // The property the plan locks in: swapping the slug cannot flip a card's
+        // dedup identity, because the hash is over prose only.
+        let before = strip_media_anchors("Translate {{img}} now");
+        let after = strip_media_anchors("Translate {{photo-2}} now");
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn non_anchor_braces_survive_the_strip() {
+        // Grammar-guarded: only tokens matching the handle shape are removed,
+        // so a template literal or a malformed slug stays visible to the reader.
+        assert_eq!(strip_media_anchors("{{ Not A Handle }}"), "{{ Not A Handle }}");
+        assert_eq!(strip_media_anchors("{{UPPER}}"), "{{UPPER}}");
+        assert_eq!(strip_media_anchors("{{-bad}}"), "{{-bad}}");
+        // 33 chars is one past the ceiling.
+        let too_long = format!("a{}", "b".repeat(32));
+        assert_eq!(
+            strip_media_anchors(&format!("{{{{{}}}}}", too_long)),
+            format!("{{{{{}}}}}", too_long),
+        );
+    }
+
+    #[test]
+    fn handle_grammar_matches_the_column_contract() {
+        assert!(is_valid_handle("a"));
+        assert!(is_valid_handle("puppy"));
+        assert!(is_valid_handle("clip-2"));
+        assert!(is_valid_handle(&format!("a{}", "-".repeat(31))));
+        assert!(!is_valid_handle(""));
+        assert!(!is_valid_handle("-lead"));
+        assert!(!is_valid_handle("Upper"));
+        assert!(!is_valid_handle("with space"));
+        assert!(!is_valid_handle(&"a".repeat(33)));
+    }
+
+    /// The strip is char-safe: a card with non-ASCII prose on either side of an
+    /// anchor must not panic on a byte-slice boundary.
+    #[test]
+    fn strip_is_utf8_safe() {
+        assert_eq!(strip_media_anchors("Grüße {{img}} Welt"), "Grüße  Welt");
+        assert_eq!(strip_media_anchors("🎵{{song}}🎵"), "🎵🎵");
+    }
 }

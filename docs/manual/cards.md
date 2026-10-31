@@ -43,6 +43,27 @@ The Cards view has a unified **search box**. A scope toggle switches between sea
 
 **Tools → Simple Words** is a companion to Cards. It lets you mark words you already know (drawn from your selected card datasets, per language) so features like word generation and dictation can avoid re‑testing vocabulary you've mastered. See [Tools](tools.md).
 
+## Media attachments
+
+A card's question, answer, note, or suggestion can carry an **image, audio, or
+video** alongside the text. In the card editor (edit mode) use the **Attach**
+button to pick a file, or drag a file onto the window — the copy lands in the
+dataset under `media/<card-uuid>/` and a `{{handle}}` marker is written where
+your cursor sits. The **Library** drawer lists that card's attachments so you can
+place, reorder, or remove them.
+
+- Only formats an Android phone can play are accepted: images `png jpg jpeg gif
+  webp`, audio `mp3 m4a wav ogg`, video `mp4 webm`.
+- An audio or video marked **play on reveal** starts the moment you flip the card
+  in review; only one clip plays at a time.
+- Media that lives on another device but has not synced yet shows a placeholder
+  naming the file rather than vanishing — it fills in once the bytes arrive.
+- Attachments never affect search or de‑duplication: the `{{handle}}` markers are
+  stripped before indexing, so a card is found by its prose, not by `png`.
+
+The editor and reviewer render media block‑by‑block at the marker, so a
+placeholder in the middle of a sentence appears as its own block at that point.
+
 ## Multiple datasets and locations
 
 Card datasets each hold their own deck, tags, and review schedule. You can have many — one per book, per language, or per theme — and add folders of them through the locations manager. Review state (which cards are due) is remembered per card, so your schedule survives switching between decks.

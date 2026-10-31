@@ -26,8 +26,8 @@ use crate::settings::SettingsState;
 
 use super::{
     assert_uuid_free, dataset_roots, fork_base_to_overlay, is_derived_index, is_under_download_root,
-    mint_into, move_to_trash, read_info_opt, touch_info, write_info, DatasetInfo, DatasetType,
-    FORMAT_WIKI, INFO_FILE,
+    kind_of, mint_into, move_to_trash, read_info_opt, touch_info, write_info, DatasetInfo,
+    DatasetType, MediaKind, FORMAT_WIKI, INFO_FILE,
 };
 
 /// The derived FTS index inside a wiki dataset dir. Never synced, never listed.
@@ -81,14 +81,10 @@ pub struct WikiFileEntry {
 /// huge log-like file must never freeze the renderer.
 pub(crate) const MAX_TEXT_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 
-/// Extensions streamed by the webview itself (via the asset protocol), never
-/// decoded into the JSON response.
-const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif"];
-const MEDIA_EXTS: &[&str] = &["mp3", "wav", "m4a", "m4b", "ogg", "opus", "flac", "mp4", "webm", "mov"];
-
 /// One wiki file read, classified for previewing. `kind` is decided by
-/// extension first and by a strict UTF-8 decode second (a `.md` that turns out
-/// binary degrades to `binary`); `content` carries decoded text only for
+/// extension first — through [`super::media_kind`], the one list every surface
+/// shares — and by a strict UTF-8 decode second (a `.md` that turns out binary
+/// degrades to `binary`); `content` carries decoded text only for
 /// `markdown`/`text`. `path` is the absolute file path on *this* machine —
 /// set by local reads so the UI can stream images/media or offer "open with
 /// default app", and deliberately absent from hub REST responses.
@@ -142,15 +138,6 @@ pub(crate) fn is_markdown(name: &str) -> bool {
         .rsplit('.').next()
         .map(|ext| ext.eq_ignore_ascii_case("md"))
         .unwrap_or(false)
-}
-
-/// Lowercased extension of a dataset-relative file name ("" when none; dotfiles
-/// like `.gitignore` have no extension per `Path::extension`).
-fn extension_of(name: &str) -> String {
-    Path::new(name)
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default()
 }
 
 fn is_hidden(name: &str) -> bool {
@@ -486,15 +473,24 @@ pub(crate) fn read_file(settings: &SettingsState, uuid: &str, rel: &str) -> Resu
 /// else is decoded only when it looks like UTF-8 text — a NUL byte in the
 /// first 8 KiB or invalid UTF-8 yields `binary` instead of a raw io error, so
 /// the UI can show a friendly unsupported message.
+///
+/// A streamed file is never opened here at all: its bytes go to the webview
+/// through the asset protocol, which is why a huge video costs this call one
+/// `metadata` and no decode.
 pub(crate) fn read_file_classified(path: &Path, rel: &str) -> Result<WikiFileContent, String> {
     use std::io::Read;
     let size = fs::metadata(path).map_err(|e| e.to_string())?.len();
-    let ext = extension_of(rel);
-    if IMAGE_EXTS.contains(&ext.as_str()) {
-        return Ok(WikiFileContent { kind: "image".into(), content: None, size, truncated: false, path: None });
-    }
-    if MEDIA_EXTS.contains(&ext.as_str()) {
-        return Ok(WikiFileContent { kind: "media".into(), content: None, size, truncated: false, path: None });
+    // Audio and video share one answer here: the viewer picks the element from
+    // the extension itself (see `mediaKindOf` in the frontend's media/kind.ts),
+    // and the distinction this call used to make was not one it acted on.
+    match kind_of(rel) {
+        MediaKind::Image => {
+            return Ok(WikiFileContent { kind: "image".into(), content: None, size, truncated: false, path: None })
+        }
+        MediaKind::Audio | MediaKind::Video => {
+            return Ok(WikiFileContent { kind: "media".into(), content: None, size, truncated: false, path: None })
+        }
+        MediaKind::Other => {}
     }
     // Read one byte past the cap to detect truncation without loading a huge
     // file fully into memory.

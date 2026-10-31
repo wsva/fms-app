@@ -97,6 +97,45 @@ struct CardFtsRebuildParam {
     location: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct CardMediaListParam {
+    dataset_uuid: String,
+    card_uuid: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct CardMediaAddParam {
+    dataset_uuid: String,
+    /// Card the attachment is added to. Must be an existing card (open the
+    /// editor with a minted uuid before attaching, so the media dir can be
+    /// named after it).
+    card_uuid: String,
+    /// Absolute path to a file on this machine. A card accepts only the
+    /// portable set: images `png jpg jpeg gif webp`, audio `mp3 m4a wav ogg`,
+    /// video `mp4 webm` — an Android WebView must be able to play what a PC
+    /// author attached.
+    source_path: String,
+    /// Which field the `{{handle}}` anchor will live in: `question`, `answer`,
+    /// `note`, or `suggestion`.
+    field: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct CardMediaUpdateParam {
+    dataset_uuid: String,
+    /// Full `CardMedia` JSON of the row to update; only `title`, `sort`,
+    /// `autoplay`, `play_on`, `field`, and `handle` are read back. A `handle`
+    /// change rewrites `{{old}}` → `{{new}}` in the owning field of the card
+    /// in the same transaction.
+    media: JsonValue,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct CardMediaDeleteParam {
+    dataset_uuid: String,
+    media_uuid: String,
+}
+
 #[tool_router(router = cards_router, vis = "pub(crate)")]
 impl DatasetMcpServer {
     #[tool(name = "card_dataset_list", description = "List all card datasets from all locations (default + linked directories). Returns UUID, name, description, sharing (visibility, owner_id), card count, and location for each dataset. Metadata edits go through dataset_info_update, which works on every type.")]
@@ -454,5 +493,127 @@ impl DatasetMcpServer {
             }).to_string()),
             None => Ok(serde_json::json!({"dataset_uuid": dataset_uuid, "last_synced_at": null, "message": "Never synced"}).to_string()),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Card media (attachments: image/audio/video under `media/<card-uuid>/`)
+    // ---------------------------------------------------------------------
+    //
+    // Bytes live as files under the dataset dir; the row is a thin index over
+    // that directory (see docs/design/card-media.md). A tool that returns
+    // `present: false` means the row exists but the bytes are on another
+    // device — call `card_media_register` after the sync planes land the file.
+
+    #[tool(name = "card_media_list", description = "List every live attachment of one card: uuid, handle (the `{{anchor}}` slug), rel_path, kind (image|audio|video), title, sort, autoplay, play_on, size, plus `present` (does the file exist on this device?). Ordered by (field, sort, created_at). Never lists a file the table does not know — that is card_media_register's job.")]
+    async fn card_media_list(&self, Parameters(param): Parameters<CardMediaListParam>) -> Result<String, String> {
+        log::info!("[MCP] card_media_list: dataset={}, card={}", param.dataset_uuid, param.card_uuid);
+        let settings = self.app.state::<SettingsState>();
+        let rows = datasets::cards::media::card_media_list(
+            settings,
+            param.dataset_uuid,
+            param.card_uuid,
+        )
+        .await?;
+        let items: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::json!({
+            "uuid": r.uuid,
+            "card_uuid": r.card_uuid,
+            "field": r.field,
+            "handle": r.handle,
+            "rel_path": r.rel_path,
+            "kind": r.kind,
+            "title": r.title,
+            "sort": r.sort,
+            "autoplay": r.autoplay,
+            "play_on": r.play_on,
+            "duration_ms": r.duration_ms,
+            "width": r.width,
+            "height": r.height,
+            "size": r.size,
+            "present": r.present,
+            "path": r.path,
+            "created_at": r.created_at,
+            "updated_at": r.updated_at,
+        })).collect();
+        Ok(serde_json::json!({ "media": items, "count": items.len() }).to_string())
+    }
+
+    #[tool(name = "card_media_add", description = "Copy `source_path` into `<dataset>/media/<card_uuid>/` and attach it to the card's field. Returns the row including `handle`, so the caller can insert `{{handle}}` at the caret in the field text. Refuses an extension outside the card-portable set (image: png/jpg/jpeg/gif/webp, audio: mp3/m4a/wav/ogg, video: mp4/webm) so Android WebView can always play what was authored on a PC. A collision on the file name adds `-2`, `-3`, …")]
+    async fn card_media_add(&self, Parameters(param): Parameters<CardMediaAddParam>) -> Result<String, String> {
+        log::info!(
+            "[MCP] card_media_add: dataset={}, card={}, field={}, source={}",
+            param.dataset_uuid, param.card_uuid, param.field, param.source_path
+        );
+        let settings = self.app.state::<SettingsState>();
+        let row = datasets::cards::media::card_media_add(
+            settings,
+            param.dataset_uuid,
+            param.card_uuid,
+            param.source_path,
+            param.field,
+        )
+        .await?;
+        Ok(serde_json::json!({
+            "status": "ok",
+            "media": {
+                "uuid": row.uuid,
+                "card_uuid": row.card_uuid,
+                "field": row.field,
+                "handle": row.handle,
+                "rel_path": row.rel_path,
+                "kind": row.kind,
+                "title": row.title,
+                "sort": row.sort,
+                "autoplay": row.autoplay,
+                "play_on": row.play_on,
+                "duration_ms": row.duration_ms,
+                "width": row.width,
+                "height": row.height,
+                "size": row.size,
+                "present": row.present,
+                "path": row.path,
+            },
+            "anchor_token": format!("{{{{{}}}}}", row.handle),
+        }).to_string())
+    }
+
+    #[tool(name = "card_media_update", description = "Update one attachment's mutable fields: title, sort, autoplay, play_on (tap|reveal), and handle. A handle change rewrites `{{old}}` → `{{new}}` in the owning field of the card, so the token and the row cannot disagree after a partial write. Identity fields (uuid, card_uuid, rel_path, kind) are read from the stored row and cannot be moved here — use card_media_delete + card_media_add to switch.")]
+    async fn card_media_update(&self, Parameters(param): Parameters<CardMediaUpdateParam>) -> Result<String, String> {
+        log::info!("[MCP] card_media_update: dataset={}", param.dataset_uuid);
+        let settings = self.app.state::<SettingsState>();
+        let media: datasets::cards::media::CardMedia = serde_json::from_value(param.media.into())
+            .map_err(|e| format!("Invalid media JSON: {}", e))?;
+        let row = datasets::cards::media::card_media_update(settings, param.dataset_uuid, media).await?;
+        Ok(serde_json::json!({
+            "status": "ok",
+            "media": {
+                "uuid": row.uuid,
+                "handle": row.handle,
+                "field": row.field,
+                "title": row.title,
+                "sort": row.sort,
+                "autoplay": row.autoplay,
+                "play_on": row.play_on,
+                "rel_path": row.rel_path,
+                "kind": row.kind,
+                "present": row.present,
+                "updated_at": row.updated_at,
+            },
+        }).to_string())
+    }
+
+    #[tool(name = "card_media_delete", description = "Soft-delete an attachment row. The bytes stay put so an undo of a card delete still finds its media — `trashed_to` is null on this response, and bytes are removed only by an explicit sweep or with the dataset itself.")]
+    async fn card_media_delete(&self, Parameters(param): Parameters<CardMediaDeleteParam>) -> Result<String, String> {
+        log::info!("[MCP] card_media_delete: dataset={}, media={}", param.dataset_uuid, param.media_uuid);
+        let settings = self.app.state::<SettingsState>();
+        let out = datasets::cards::media::card_media_delete(settings, param.dataset_uuid, param.media_uuid).await?;
+        Ok(out.to_string())
+    }
+
+    #[tool(name = "card_media_register", description = "Reconcile `<dataset>/media/<card_uuid>/` with the `card_media` table for one card. Reports `imported` (a file with no row became an unanchored attachment), `missing` (a row whose bytes are gone on this device — leave alone until the sync planes deliver them), and `orphaned` (a file the card cannot hold — an unsupported extension, kept on disk, not deleted). Nothing is deleted by this call, matching the read-aloud register() rule.")]
+    async fn card_media_register(&self, Parameters(param): Parameters<CardMediaListParam>) -> Result<String, String> {
+        log::info!("[MCP] card_media_register: dataset={}, card={}", param.dataset_uuid, param.card_uuid);
+        let settings = self.app.state::<SettingsState>();
+        let out = datasets::cards::media::card_media_register(settings, param.dataset_uuid, param.card_uuid).await?;
+        Ok(out.to_string())
     }
 }

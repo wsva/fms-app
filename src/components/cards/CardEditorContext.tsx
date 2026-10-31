@@ -2,11 +2,19 @@
 
 import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, Eye, List, Pencil, Trash2, Type, X } from "lucide-react";
-import type { Card, CardDatasetSummary } from "@/lib/types";
+import { open } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import {
+  Check, Eye, Library, List, Paperclip, Pencil, Trash2, Type, X,
+  Image as ImageIcon, Music2, Video,
+} from "lucide-react";
+import type { Card, CardDatasetSummary, CardMedia, CardMediaField } from "@/lib/types";
 import { isMobileApp, isTauri } from "@/lib/platform";
-import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import { toHTML } from "@/components/wiki/markdown/html";
+import { cardKindOf, cardExtsFor } from "@/lib/media/kind";
+import MediaField from "./MediaField";
+import MediaLibrary from "./MediaLibrary";
 import { CollapsibleSidebar, useCollapsibleSidebar } from "@/components/layout/CollapsibleSidebar";
 import {
   PageHeader,
@@ -43,6 +51,17 @@ const FAM_CLASSES = [
   "bg-fam-6",
 ];
 
+// A dashed uuid matching the Rust `Uuid::new_v4().to_string()` the card table
+// mints, so a pre-minted id is indistinguishable from a backend-minted one.
+function mintCardUuid(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 function CardEditModal({
   card,
   datasetUuid,
@@ -73,7 +92,31 @@ function CardEditModal({
   const [fontScale, setFontScale] = useState<FontScaleKey>("normal");
   // Deferred platform detection (SSR-safe): isMobileApp() must not run during render.
   const [mobile, setMobile] = useState(false);
+
+  // Card uuid, minted up front for a blank card so `media/<card-uuid>/` can be
+  // named before the first save (SQLite FKs are not enforced here, so an
+  // attachment can land ahead of its card row). `card_save` honors a non-empty
+  // uuid, so this is the id the saved card keeps.
+  const [cardUuid] = useState(() =>
+    card?.uuid && card.uuid.length ? card.uuid : mintCardUuid()
+  );
+  const [media, setMedia] = useState<CardMedia[]>([]);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  // Which field an attach or a "place" targets — follows the last-focused field.
+  const [attachField, setAttachField] = useState<CardMediaField>("question");
+  const [mediaBanner, setMediaBanner] = useState("");
+  const [mediaBusy, setMediaBusy] = useState(false);
+
   const answerRef = useRef<HTMLTextAreaElement>(null);
+  const questionRef = useRef<HTMLTextAreaElement>(null);
+  const noteRef = useRef<HTMLTextAreaElement>(null);
+  const suggestionRef = useRef<HTMLInputElement>(null);
+  const fieldRefs = useRef<Record<CardMediaField, React.RefObject<HTMLTextAreaElement | HTMLInputElement | null>>>({ question: questionRef, answer: answerRef, note: noteRef, suggestion: suggestionRef });
+
+  // Absolute dataset dir of the currently selected dataset — the base `resolveSrc`
+  // joins onto for asset-protocol URLs.
+  const datasetPath =
+    datasets.find((ds) => ds.info.uuid === selectedDataset)?.path || "";
 
   // TOC drawer, mirroring the wiki page: the toolbar's TOC button toggles a
   // left drawer hosting the answer's heading tree (drag-resizable split column
@@ -127,6 +170,214 @@ function CardEditModal({
     el.style.height = "0px"; // Reset to force recalculation of actual content height
     el.style.height = `${el.scrollHeight}px`;
   }, [answer]);
+
+  // ---- Card media ----
+
+  const reloadMedia = useCallback(async () => {
+    if (!isTauri() || !cardUuid || !selectedDataset) return;
+    try {
+      const rows = await invoke<CardMedia[]>("card_media_list", { datasetUuid: selectedDataset, cardUuid });
+      setMedia(rows);
+    } catch (e) {
+      console.error("card_media_list failed:", e);
+    }
+  }, [selectedDataset, cardUuid]);
+
+  // Insert `token` at the caret of `field`. Reads the live DOM value so a modal
+  // file dialog opening cannot clobber text typed since this closure was built.
+  const insertToken = useCallback((field: CardMediaField, token: string) => {
+    const setter =
+      field === "question" ? setQuestion :
+      field === "answer" ? setAnswer :
+      field === "note" ? setNote : setSuggestion;
+    const el = fieldRefs.current[field].current;
+    if (!el) {
+      setter((v) => v + token);
+      return;
+    }
+    const value = el.value;
+    const start = el.selectionStart ?? value.length;
+    const end = el.selectionEnd ?? start;
+    setter(value.slice(0, start) + token + value.slice(end));
+    const pos = start + token.length;
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(pos, pos);
+    });
+  }, []);
+
+  const addMediaFromPath = useCallback(
+    async (sourcePath: string, field: CardMediaField) => {
+      if (!isTauri() || !selectedDataset || !cardUuid) return;
+      if (!cardKindOf(sourcePath)) {
+        setMediaBanner("Unsupported file — a card accepts only images, audio, or video in the portable set.");
+        return;
+      }
+      setMediaBusy(true);
+      try {
+        const row = await invoke<CardMedia>("card_media_add", {
+          datasetUuid: selectedDataset,
+          cardUuid,
+          sourcePath,
+          field,
+        });
+        setMedia((prev) => [...prev, row]);
+        insertToken(field, `{{${row.handle}}}`);
+        setMediaBanner("");
+      } catch (e) {
+        setMediaBanner(`Attach failed: ${e}`);
+      } finally {
+        setMediaBusy(false);
+      }
+    },
+    [selectedDataset, cardUuid, insertToken]
+  );
+
+  const attach = useCallback(
+    async (kind: "image" | "audio" | "video") => {
+      if (!isTauri()) return;
+      try {
+        const selected = await open({
+          multiple: false,
+          filters: [{ name: kind, extensions: [...cardExtsFor(kind)] }],
+        });
+        const path = Array.isArray(selected) ? selected[0] : selected;
+        if (path) await addMediaFromPath(path, attachField);
+      } catch (e) {
+        setMediaBanner(`Attach failed: ${e}`);
+      }
+    },
+    [addMediaFromPath, attachField]
+  );
+
+  // Move a handle's token to the focused field: strip it from every field, then
+  // append it to the target. Placement is block-level, so an appended token is
+  // enough — a fresh attach goes to the caret via insertToken instead.
+  const placeMedia = useCallback(
+    (handle: string) => {
+      const token = `{{${handle}}}`;
+      const strip = (v: string) => v.split(token).join("");
+      const vals: Record<CardMediaField, string> = {
+        question: strip(question),
+        answer: strip(answer),
+        note: strip(note),
+        suggestion: strip(suggestion),
+      };
+      vals[attachField] = vals[attachField] + token;
+      setQuestion(vals.question);
+      setAnswer(vals.answer);
+      setNote(vals.note);
+      setSuggestion(vals.suggestion);
+    },
+    [question, answer, note, suggestion, attachField]
+  );
+
+  const deleteMedia = useCallback(
+    async (uuid: string) => {
+      const target = media.find((m) => m.uuid === uuid);
+      try {
+        await invoke("card_media_delete", { datasetUuid: selectedDataset, mediaUuid: uuid });
+        setMedia((prev) => prev.filter((m) => m.uuid !== uuid));
+        if (target) {
+          const token = `{{${target.handle}}}`;
+          const strip = (v: string) => v.split(token).join("");
+          setQuestion((v) => strip(v));
+          setAnswer((v) => strip(v));
+          setNote((v) => strip(v));
+          setSuggestion((v) => strip(v));
+        }
+      } catch (e) {
+        setMediaBanner(`Delete failed: ${e}`);
+      }
+    },
+    [media, selectedDataset]
+  );
+
+  // Reorder within one field's unanchored tail strip by re-writing `sort` to a
+  // spaced sequence after moving the row by `dir`.
+  const moveMedia = useCallback(
+    async (uuid: string, dir: -1 | 1) => {
+      const cur = media.find((m) => m.uuid === uuid);
+      if (!cur) return;
+      const fieldList = media.filter((m) => m.field === cur.field);
+      const i = fieldList.findIndex((m) => m.uuid === uuid);
+      const j = i + dir;
+      if (j < 0 || j >= fieldList.length) return;
+      const reordered = [...fieldList];
+      const [moved] = reordered.splice(i, 1);
+      reordered.splice(j, 0, moved);
+      try {
+        const updated = await Promise.all(
+          reordered.map((m, k) =>
+            invoke<CardMedia>("card_media_update", {
+              datasetUuid: selectedDataset,
+              media: { ...m, sort: k * 10 },
+            })
+          )
+        );
+        const byUuid = new Map(updated.map((r) => [r.uuid, r]));
+        setMedia((prev) => prev.map((m) => byUuid.get(m.uuid) ?? m));
+      } catch (e) {
+        setMediaBanner(`Reorder failed: ${e}`);
+      }
+    },
+    [media, selectedDataset]
+  );
+
+  // On mount (and when the card or dataset changes), reconcile the directory
+  // with the table and load the rows. `missing` (a row whose bytes are on
+  // another device) surfaces as a banner; nothing is deleted by this call.
+  useEffect(() => {
+    if (!isTauri() || !cardUuid || !selectedDataset) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const rec = await invoke<{ imported: CardMedia[]; missing: string[]; orphaned: string[] }>(
+          "card_media_register",
+          { datasetUuid: selectedDataset, cardUuid }
+        );
+        if (cancelled) return;
+        if (rec.missing?.length) {
+          setMediaBanner(
+            `${rec.missing.length} attachment${rec.missing.length > 1 ? "s are" : " is"} not on this device yet (still syncing).`
+          );
+        }
+        await reloadMedia();
+      } catch (e) {
+        console.error("card_media_register failed:", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cardUuid, selectedDataset, reloadMedia]);
+
+  // Native drag-drop of a file onto the window attaches it to the focused
+  // field. Enabling the webview's native drop means HTML5 drop won't fire, so
+  // there is deliberately no separate dropzone (see the design note).
+  useEffect(() => {
+    if (!isTauri() || viewMode) return;
+    let unlisten: UnlistenFn | null = null;
+    let cancelled = false;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type === "drop") {
+          const path = event.payload.paths[0];
+          if (path) void addMediaFromPath(path, attachField);
+        }
+      })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {
+        /* drag-drop unavailable on this platform */
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [viewMode, attachField, addMediaFromPath]);
 
   const selectedDatasetName =
     datasets.find((ds) => ds.info.uuid === selectedDataset)?.info.name || "";
@@ -188,6 +439,23 @@ function CardEditModal({
           Delete, Close). */}
       <Toolbar mobile={mobile}>
         <div className="flex-1 min-w-0" />
+        {!viewMode && isTauri() && (
+          <>
+            <ToolbarSelect icon={Paperclip} label="Attach" value={mediaBusy ? "Attaching…" : "Attach"} disabled={mediaBusy}>
+              <ToolbarMenuItem icon={ImageIcon} onClick={() => void attach("image")}>Image</ToolbarMenuItem>
+              <ToolbarMenuItem icon={Music2} onClick={() => void attach("audio")}>Audio</ToolbarMenuItem>
+              <ToolbarMenuItem icon={Video} onClick={() => void attach("video")}>Video</ToolbarMenuItem>
+            </ToolbarSelect>
+            <ToolbarButton
+              icon={Library}
+              variant="toggleSoft"
+              active={libraryOpen}
+              label="Library"
+              title="Show this card's attachments"
+              onClick={() => setLibraryOpen((v) => !v)}
+            />
+          </>
+        )}
         {viewMode && !!tocNode && (
           <ToolbarButton
             icon={List}
@@ -221,7 +489,7 @@ function CardEditModal({
             disabled={!question.trim()}
             onClick={() =>
               onSave(selectedDataset, {
-                uuid: card?.uuid || "",
+                uuid: cardUuid,
                 question,
                 answer,
                 note,
@@ -259,13 +527,21 @@ function CardEditModal({
           <div className="flex-1 min-h-0 overflow-y-auto">
             <div className="px-4 py-6 sm:px-8" style={scaleStyle}>
               <div className="space-y-6">
-                <h2 className="text-3xl font-semibold break-words">
-                  {question || "(empty question)"}
-                </h2>
+                {question.trim() ? (
+                  <MediaField
+                    text={question}
+                    media={media}
+                    datasetPath={datasetPath}
+                    mode="plain"
+                    textClassName="text-3xl font-semibold"
+                  />
+                ) : (
+                  <h2 className="text-3xl font-semibold break-words">(empty question)</h2>
+                )}
                 <div className="border-t border-border-default" />
                 {answer.trim() ? (
                   <div className="px-4 py-3 rounded-lg border border-border-default bg-bg-surface">
-                    <MarkdownViewer content={answer} />
+                    <MediaField text={answer} media={media} datasetPath={datasetPath} mode="markdown" />
                   </div>
                 ) : (
                   <div className="text-text-tertiary italic">(no answer)</div>
@@ -275,7 +551,13 @@ function CardEditModal({
                     <div className="text-xs uppercase tracking-wide text-text-tertiary mb-2">
                       Suggestion
                     </div>
-                    <div className="text-lg break-words">{suggestion}</div>
+                    <MediaField
+                      text={suggestion}
+                      media={media}
+                      datasetPath={datasetPath}
+                      mode="plain"
+                      textClassName="text-lg"
+                    />
                   </div>
                 )}
                 {note.trim() && (
@@ -284,7 +566,7 @@ function CardEditModal({
                       Note
                     </div>
                     <div className="px-4 py-3 rounded-lg border border-border-default bg-bg-surface">
-                      <MarkdownViewer content={note} />
+                      <MediaField text={note} media={media} datasetPath={datasetPath} mode="markdown" />
                     </div>
                   </div>
                 )}
@@ -293,65 +575,93 @@ function CardEditModal({
           </div>
         </div>
       ) : (
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          <div className="px-4 py-6 sm:px-8" style={scaleStyle}>
-            <div className="space-y-6">
-              <div>
-                <label className={labelCls}>Dataset</label>
-                <select
-                  value={selectedDataset}
-                  onChange={(e) => setSelectedDataset(e.target.value)}
-                  className={`${inputCls} cursor-pointer`}
-                >
-                  {datasets.map((ds) => (
-                    <option key={ds.info.uuid} value={ds.info.uuid}>
-                      {ds.info.name} ({ds.card_count} cards)
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className={labelCls}>Question</label>
-                <textarea
-                  value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                  rows={1}
-                  className={`${inputCls} resize-y`}
-                  placeholder="What do you want to learn?"
-                />
-              </div>
-              <div>
-                <label className={labelCls}>Answer</label>
-                <textarea
-                  ref={setAnswerRef}
-                  value={answer}
-                  onChange={(e) => setAnswer(e.target.value)}
-                  className={`${inputCls} resize-none overflow-hidden min-h-[15rem]`}
-                  placeholder="The answer or explanation (Markdown supported)"
-                />
-              </div>
-              <div>
-                <label className={labelCls}>Suggestion (optional)</label>
-                <input
-                  type="text"
-                  value={suggestion}
-                  onChange={(e) => setSuggestion(e.target.value)}
-                  className={inputCls}
-                  placeholder="AI suggestion or hint"
-                />
-              </div>
-              <div>
-                <label className={labelCls}>Note (optional)</label>
-                <textarea
-                  value={note}
-                  onChange={(e) => setNote(e.target.value)}
-                  rows={3}
-                  className={`${inputCls} resize-y`}
-                  placeholder="Additional notes (Markdown supported)"
-                />
+        <div className="relative flex flex-1 min-h-0 overflow-hidden">
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <div className="px-4 py-6 sm:px-8" style={scaleStyle}>
+              {mediaBanner && (
+                <div className="mb-4 rounded-lg border border-border-default bg-bg-surface px-3 py-2 text-sm text-text-secondary">
+                  {mediaBanner}
+                </div>
+              )}
+              <div className="space-y-6">
+                <div>
+                  <label className={labelCls}>Dataset</label>
+                  <select
+                    value={selectedDataset}
+                    onChange={(e) => setSelectedDataset(e.target.value)}
+                    className={`${inputCls} cursor-pointer`}
+                  >
+                    {datasets.map((ds) => (
+                      <option key={ds.info.uuid} value={ds.info.uuid}>
+                        {ds.info.name} ({ds.card_count} cards)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Question</label>
+                  <textarea
+                    ref={questionRef}
+                    value={question}
+                    onChange={(e) => setQuestion(e.target.value)}
+                    onFocus={() => setAttachField("question")}
+                    rows={1}
+                    className={`${inputCls} resize-y`}
+                    placeholder="What do you want to learn?"
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Answer</label>
+                  <textarea
+                    ref={setAnswerRef}
+                    value={answer}
+                    onChange={(e) => setAnswer(e.target.value)}
+                    onFocus={() => setAttachField("answer")}
+                    className={`${inputCls} resize-none overflow-hidden min-h-[15rem]`}
+                    placeholder="The answer or explanation (Markdown supported)"
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Suggestion (optional)</label>
+                  <input
+                    type="text"
+                    ref={suggestionRef}
+                    value={suggestion}
+                    onChange={(e) => setSuggestion(e.target.value)}
+                    onFocus={() => setAttachField("suggestion")}
+                    className={inputCls}
+                    placeholder="AI suggestion or hint"
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Note (optional)</label>
+                  <textarea
+                    ref={noteRef}
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    onFocus={() => setAttachField("note")}
+                    rows={3}
+                    className={`${inputCls} resize-y`}
+                    placeholder="Additional notes (Markdown supported)"
+                  />
+                </div>
               </div>
             </div>
           </div>
+          {libraryOpen && (
+            <div className="w-72 shrink-0 border-l border-border-default overflow-y-auto bg-bg-card">
+              <div className="px-3 py-2 text-sm font-medium text-text-secondary border-b border-border-default">
+                Attachments · targeting “{attachField}”
+              </div>
+              <MediaLibrary
+                media={media}
+                missingHandles={new Set(media.filter((m) => m.present === false).map((m) => m.handle))}
+                onPlace={placeMedia}
+                onMove={(uuid, dir) => void moveMedia(uuid, dir)}
+                onDelete={(uuid) => void deleteMedia(uuid)}
+              />
+            </div>
+          )}
         </div>
       )}
     </div>

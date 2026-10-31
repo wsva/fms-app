@@ -137,7 +137,7 @@ const DESTRUCTIVE_WORDS: [&str; 14] = [
 /// Tools that carry a destructive word but do not lose anything the user cannot
 /// get back. Each entry is a deliberate decision, not an oversight — the reason
 /// is the tool's own contract.
-const RECOVERABLE: [&str; 17] = [
+const RECOVERABLE: [&str; 18] = [
     // Whole-directory deletes land in the app trash and return `trashed_to`.
     "book_delete",
     "card_dataset_delete",
@@ -156,6 +156,9 @@ const RECOVERABLE: [&str; 17] = [
     // the tombstone.
     "card_delete",
     "card_tag_delete",
+    // Soft-deletes the row; the bytes stay in the dataset dir so an undo of a
+    // card delete still finds its media, and they ride the file sync plane.
+    "card_media_delete",
     // Edits a list, not content — `card_dataset_add_subscriber` is the inverse.
     "card_dataset_remove_subscriber",
     // Unlinks a location; the files on disk are untouched and `dataset_add_dir`
@@ -213,7 +216,7 @@ const HUMAN_HANDOFF: [&str; 2] = [
 /// overwrite or drop is moved into the hub's app trash first (the ingest commit
 /// reports it as `trashed_to`), so the act is undoable where it happened.
 /// Neither name carries a word from [`DESTRUCTIVE_WORDS`].
-const READ_TOOLS: [&str; 94] = [
+const READ_TOOLS: [&str; 96] = [
     "app_audit_get",
     "app_bootstrap",
     "app_events",
@@ -233,6 +236,8 @@ const READ_TOOLS: [&str; 94] = [
     "card_get",
     "card_get_tags",
     "card_list",
+    "card_media_list",
+    "card_media_register",
     "card_search",
     "card_sync_status",
     "card_tag_list",

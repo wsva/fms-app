@@ -164,3 +164,49 @@ export type CardSyncStatus = {
   clock_offset_ms: number;
   pending_push: number;
 };
+
+// ── Card media (attachments) ────────────────────────────────────────────────
+// Mirrors `card_media` in `datasets::cards::media`. Bytes live at
+// `<dataset>/media/<card_uuid>/<file>`; this row is the thin metadata index
+// over that directory — see `docs/design/card-media.md`.
+
+/** What the reader element is: an `<img>`, an `<audio controls>`, a `<video>`. */
+export type CardMediaKind = "image" | "audio" | "video";
+
+/** Which card field the `{{handle}}` anchor lives in (and thus which side of
+ *  a flip it materializes on). */
+export type CardMediaField = "question" | "answer" | "note" | "suggestion";
+
+/** When an audio/video attachment starts playing on its own. `tap` = never
+ *  (only through the native controls); `reveal` = the hook fires when the
+ *  owning side of the card first becomes visible in review. */
+export type CardMediaPlayOn = "tap" | "reveal";
+
+export type CardMedia = {
+  uuid: string;
+  card_uuid: string;
+  field: CardMediaField;
+  /** Anchor slug: `{{handle}}` inside the owning field's text. */
+  handle: string;
+  /** Dataset-relative path, `media/<card_uuid>/<name>`. */
+  rel_path: string;
+  kind: CardMediaKind;
+  /** Alt text / caption. */
+  title: string;
+  /** Order within the unanchored tail strip. */
+  sort: number;
+  autoplay: boolean;
+  play_on: CardMediaPlayOn;
+  duration_ms: number | null;
+  width: number | null;
+  height: number | null;
+  size: number;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+  /** False when the row exists but its bytes do not on this device. Set by
+   *  `card_media_list` from the filesystem; the render seam turns a false into
+   *  a placeholder that names the file, never a silent vanish. */
+  present?: boolean;
+};
+

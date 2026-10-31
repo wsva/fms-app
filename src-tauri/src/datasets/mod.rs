@@ -13,6 +13,7 @@
 //! - [`registry`] — discovery, the summary/detail DTOs, import/update/delete
 //! - [`paths`] — uuid to directory (base vs overlay)
 //! - [`media`] — media enumeration, the `media/`-mirroring paths, trash, sync
+//! - [`media_kind`] — extension-only classification: what a file is before anyone reads it
 //! - [`subtitle`] — STT pass and VTT shaping
 //! - [`waveform`] — symphonia peaks
 //! - [`db`] — `data.sqlite3` schema and cue generation
@@ -30,6 +31,7 @@ pub(crate) mod dictation;
 pub(crate) mod ids;
 pub(crate) mod info;
 pub(crate) mod media;
+pub(crate) mod media_kind;
 pub(crate) mod paths;
 pub(crate) mod read_aloud;
 pub(crate) mod registry;
@@ -80,6 +82,12 @@ pub(crate) use info::scan_datasets;
 // registers each one by the module that now owns it (`datasets::registry::dataset_list`).
 pub(crate) use db::*;
 pub(crate) use media::*;
+// Named rather than globbed: `kind_of` and `extension_of` are short, generic
+// names that a glob would dump into every `datasets::` importer's namespace.
+// The card-specific helpers (`card_kind_of`, `card_exts_for`, the `CARD_*_EXTS`
+// lists) are reached through `datasets::media_kind::…` by the one caller that
+// needs them, so this list stays to what the rest of the crate already names.
+pub(crate) use media_kind::{kind_of, MediaKind};
 pub(crate) use paths::*;
 pub(crate) use registry::*;
 pub(crate) use roots::*;
