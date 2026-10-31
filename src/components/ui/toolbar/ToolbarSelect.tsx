@@ -18,6 +18,9 @@ type ToolbarSelectProps = {
   children: ReactNode;
   disabled?: boolean;
   className?: string;
+  /** Trigger as the glyph alone, with the value left to the title. For controls
+   *  that repeat down a page (a per-row menu) where the words are the noise. */
+  iconOnly?: boolean;
 };
 
 /**
@@ -39,6 +42,7 @@ export function ToolbarSelect({
   children,
   disabled = false,
   className = "",
+  iconOnly = false,
 }: ToolbarSelectProps) {
   const [open, setOpen] = useState(false);
 
@@ -49,9 +53,9 @@ export function ToolbarSelect({
           variant="toggleSoft"
           active={open}
           icon={icon}
-          label={value}
+          label={iconOnly ? undefined : value}
           title={title ?? `${label}: ${value}`}
-          ariaLabel={`${label}: ${value}`}
+          ariaLabel={iconOnly ? (title ?? `${label}: ${value}`) : `${label}: ${value}`}
           disabled={disabled}
           onClick={() => setOpen((v) => !v)}
         />

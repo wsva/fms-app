@@ -53,7 +53,7 @@ import { stripAnchors, hasAnchor } from "@/lib/media/anchors";
 import { notify } from "@/lib/feedback/toast";
 import { setTabSubject, cardSubjectLabel } from "@/lib/shell/tab-subject";
 import MediaField from "./MediaField";
-import { useCardEditor, type CardQueue } from "./CardEditorContext";
+import { CardEditModal, useCardEditor } from "./CardEditorContext";
 import CardLevel from "./CardLevel";
 import CardGradeScale from "./CardGradeScale";
 import { oneOf, reqStr, optStr, useAgentActions } from "@/lib/agent/ui-actions";
@@ -113,19 +113,25 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   const [menuOpen, setMenuOpen] = useState(false);
 
   // Use global card editor
-  const { openCardEditor, refreshCardQueue, isOpen: editorOpen } = useCardEditor();
+  const { openCardEditor, closeCardEditor, isOpen: editorOpen, session } = useCardEditor();
 
   // ---- the card level ----
   //
   // A row click opens the card *in the page* — third crumb, content area, the
-  // page's own toolbar — instead of raising the overlay. The level reads; the
-  // overlay still writes. `index` is the row's position in `cards`, so the
-  // arrows walk the list the reader just scrolled rather than a second order.
+  // page's own toolbar — instead of raising the overlay. The level reads; Edit
+  // turns it into the writer, in the same pane. `index` is the row's position in
+  // `cards`, so the arrows walk the list the reader just scrolled rather than a
+  // second order.
   const [level, setLevel] = useState<{ card: Card; index: number } | null>(null);
   const [levelMedia, setLevelMedia] = useState<CardMedia[]>([]);
   // A rating is a write in flight: the scale and the `1`–`5` keys must not fire
   // twice over a card that is already being graded.
   const [ratingLevel, setRatingLevel] = useState(false);
+  // The card on screen is open for writing: an inline session exists for it. The
+  // page draws that editor, drops its own toolbar and freezes the trail while it
+  // lasts, so the writing row is the only row and nothing can step out from under
+  // a half-typed field.
+  const inlineEditing = !!level && !!session;
 
   // What an agent (and the address bar) is looking at: the deck, and the card
   // inside it when one is open. Published only while the overlay is down — it
@@ -274,9 +280,13 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   );
 
   const exitLevel = useCallback(() => {
+    // A card open for writing is a session, and leaving the level leaves it too;
+    // the editor's own guard is what asks about unsaved text, so this is the
+    // belt for the paths that never reach the editor's Close.
+    closeCardEditor();
     setLevel(null);
     setLevelMedia([]);
-  }, []);
+  }, [closeCardEditor]);
 
   // Load cards when dataset changes
   const loadCards = useCallback(async () => {
@@ -322,34 +332,6 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
 
   // ---- the editor's walk over this list ----
   //
-  // The card editor steps prev/next through the list this page already has: the
-  // same order (`updated_at DESC`), the same filter and keyword, so an arrow key
-  // moves to the row the user can see under the one they opened. It carries uuids
-  // rather than cards so a step re-reads the row from disk instead of replaying a
-  // snapshot the save has already made stale.
-  const queueUuids = useMemo(() => cards.map((c) => c.uuid), [cards]);
-
-  const loadMorePage = useCallback(
-    (dir: -1 | 1) => {
-      // Clamped: a page past the end would load nothing and strand the step that
-      // asked for it. The provider notices an unchanged list and stops there.
-      setPage((p) => {
-        const lastPage = Math.max(0, Math.ceil(totalCards / pageSize) - 1);
-        return Math.min(Math.max(0, p + dir), lastPage);
-      });
-    },
-    [totalCards]
-  );
-
-  const queueFor = useCallback(
-    (index: number): CardQueue => ({
-      uuids: queueUuids,
-      index,
-      loadMore: loadMorePage,
-    }),
-    [queueUuids, loadMorePage]
-  );
-
   // ---- walking the level ----
   //
   // The arrows stop at the ends of this page rather than paging underneath the
@@ -365,10 +347,13 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
     [level, cards, openLevel]
   );
 
-  // Edit is the overlay, on the card on screen, with every field open. A pencil
-  // on one field and the toolbar's Edit are the same request: the overlay has no
-  // field-level door. The save hands the level the card it just wrote, so the
-  // reading half never shows text the disk no longer has.
+  // Edit opens the editor *in the page*, over the card on screen, with every
+  // field open: the level is where a card is addressed, so writing it there
+  // costs no navigation and no scrim to dismiss. The page draws the editor
+  // itself (`session`) and its own toolbar stands down while it does, so there
+  // is one row of actions, not two. No queue: `Prev`/`Next` belong to the reading
+  // row, and a step mid-edit would leave the trail naming one card while the
+  // editor held another.
   const editLevel = useCallback(() => {
     if (!level || !selectedDatasetUuid) return;
     const name = datasets.find((d) => d.info.uuid === selectedDatasetUuid)?.info.name;
@@ -381,12 +366,18 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
           cur && cur.card.uuid === saved.uuid ? { ...cur, card: saved } : cur
         );
       },
-      undefined,
+      // Deleting takes the level down with the card: the trail and the pane
+      // would otherwise keep naming a row that no longer exists.
+      () => {
+        void loadCards();
+        exitLevel();
+      },
       name,
       false,
-      queueFor(level.index)
+      undefined,
+      { inline: true }
     );
-  }, [level, selectedDatasetUuid, datasets, openCardEditor, loadCards, queueFor]);
+  }, [level, selectedDatasetUuid, datasets, openCardEditor, loadCards, exitLevel]);
 
   // Grading from the level, with the deck's own scheduler: `card_test_submit` is
   // what the review page calls, so a card read here counts exactly as much as
@@ -469,20 +460,14 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   // The level is a leaf view: anything that changes which deck, which mode or
   // which search owns the pane takes it down — the Cards crumb, another dataset,
   // an agent action that switches to Review or runs a search. Nothing compares
-  // the level later, so the clear is unconditional.
+  // the level later, so the clear is unconditional. A session open on that card
+  // goes with it, or the provider would hold an inline editor no page draws;
+  // with nothing open this is a no-op.
   useEffect(() => {
+    closeCardEditor();
     setLevel(null);
     setLevelMedia([]);
-  }, [selectedDatasetUuid, activeTab, searchOpen]);
-
-  // Keep the walk current under the editor: a save re-reads the list, a filter
-  // change replaces it, a page turn extends it. The provider ignores this unless
-  // the session was opened *from* a list, so a card reached through the wiki's
-  // text menu never grows arrows into a deck the user is not looking at.
-  useEffect(() => {
-    if (!editorOpen || !selectedDatasetUuid || queueUuids.length === 0) return;
-    refreshCardQueue({ uuids: queueUuids, index: 0, loadMore: loadMorePage });
-  }, [editorOpen, selectedDatasetUuid, queueUuids, loadMorePage, refreshCardQueue]);
+  }, [selectedDatasetUuid, activeTab, searchOpen, closeCardEditor]);
 
   // Which dataset this tab is showing, or which card inside it, for the chip and
   // the address bar. Published only while the editor is closed: the card on
@@ -917,7 +902,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
           for the root-level sub-views. The root "Cards" crumb is the dataset list;
           it becomes a link back to it whenever a dataset or a sub-view owns the page. */}
       <Breadcrumb>
-        {crumbTail ? (
+        {crumbTail && !inlineEditing ? (
           <Breadcrumb.Link
             onClick={() => {
               // A card on screen belongs to the deck's list behind it: from the
@@ -960,13 +945,19 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
           <>
             <Breadcrumb.Sep />
             {/* An open card is one step further in, so the deck stops being the
-                tail and becomes the way back to its list. */}
-            {level ? (
+                tail and becomes the way back to its list — unless the card is
+                being written: the trail is frozen then, because leaving it
+                would unmount the editor under an unsaved draft. `Current` grows
+                by default, so the frozen deck crumb has to opt out: two growers
+                split the bar and drop the card's crumb halfway across it. */}
+            {level && !inlineEditing ? (
               <Breadcrumb.Link truncate title={crumbTail} onClick={exitLevel}>
                 {crumbTail}
               </Breadcrumb.Link>
             ) : (
-              <Breadcrumb.Current title={crumbTail}>{crumbTail}</Breadcrumb.Current>
+              <Breadcrumb.Current grow={false} title={crumbTail}>
+                {crumbTail}
+              </Breadcrumb.Current>
             )}
           </>
         )}
@@ -987,6 +978,10 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
           full-width bar under the breadcrumb): the mode toggles (in a dataset), the
           card's own actions (on an open card), or the dataset-list actions, then
           search, then the overflow menu. */}
+      {/* While a card is being edited the editor's own row is the toolbar: the
+          page's copy would stack under it, and its actions — step, edit — are
+          exactly the ones that must not be reachable mid-edit. */}
+      {!inlineEditing && (
       <Toolbar mobile={mobile}>
         <div className="flex-1 min-w-0" />
         {!showManage && (level ? (
@@ -1162,6 +1157,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
           </ToolbarOverflow>
         ) : null}
       </Toolbar>
+      )}
 
       {error && (
         <div className="mx-2 mt-2 p-2 rounded bg-red-500/10 text-red-500 text-sm sm:mx-6">
@@ -1276,7 +1272,12 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
 
       {/* Manage overlay (location management) when the toolbar Manage toggle is
           on; otherwise the dataset list (no dataset selected) or the dataset detail. */}
-      {level ? (
+      {level && session ? (
+        // The card is open for writing. This is the same editor the overlay
+        // raises; only the surface differs — the page's content area instead of
+        // a scrim over it.
+        <CardEditModal key={session.sessionKey} {...session} />
+      ) : level ? (
         // The card owns the content area, the way a dataset owns it from the list.
         <CardLevel
           card={level.card}

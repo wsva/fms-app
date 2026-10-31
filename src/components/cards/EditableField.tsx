@@ -24,14 +24,14 @@
 //     an in-progress answer and closed the card with it.
 // ---------------------------------------------------------------------------
 
-import { useCallback, useLayoutEffect, useRef } from "react";
+import { useCallback, useLayoutEffect, useRef, type CSSProperties } from "react";
 import {
   Pencil, Paperclip, Image as ImageIcon, Music2, Video, FileQuestion,
 } from "lucide-react";
 import type { CardMedia, CardMediaField } from "@/lib/types";
 import { resolveSrc } from "@/lib/media/anchors";
 import { ToolbarMenuItem, ToolbarSelect } from "@/components/ui/toolbar";
-import MediaField from "./MediaField";
+import MediaField, { type MediaFieldTools } from "./MediaField";
 
 const KIND_ICON = { image: ImageIcon, audio: Music2, video: Video } as const;
 
@@ -51,13 +51,13 @@ type Props = {
   attachTarget: boolean;
   /** A file is being dragged over the window, and would land here. */
   dropTarget?: boolean;
-  /** Render the field on its own bordered surface (answer, note). */
-  boxed?: boolean;
   /** One line: Enter commits instead of inserting a newline (suggestion). */
   singleLine?: boolean;
   placeholder?: string;
   /** Typography shared by both halves. */
   textClassName?: string;
+  /** Font scale, applied to the value alone — never to this field's chrome. */
+  textStyle?: CSSProperties;
   /** Desktop-only: the file pickers need the Tauri dialog plugin. */
   canAttach: boolean;
   /** Ignore a blur while a media dialog is up, or the field would close itself. */
@@ -66,6 +66,9 @@ type Props = {
   onStartEdit: () => void;
   onEndEdit: (reason: "commit" | "cancel") => void;
   onAttach: (kind: "image" | "audio" | "video") => void;
+  /** Upload / Copy / Remove on an attachment's own preview. Absent in hosts that
+   *  only read a card, where a click on the field already means something. */
+  mediaTools?: MediaFieldTools;
   /** Lets the provider insert a token at this field's caret. */
   registerElement: (el: HTMLTextAreaElement | HTMLInputElement | null) => void;
 };
@@ -81,16 +84,17 @@ export default function EditableField({
   datasetPath,
   attachTarget,
   dropTarget = false,
-  boxed = false,
   singleLine = false,
   placeholder,
   textClassName,
+  textStyle,
   canAttach,
   keepEditing = false,
   onChange,
   onStartEdit,
   onEndEdit,
   onAttach,
+  mediaTools,
   registerElement,
 }: Props) {
   const elRef = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null);
@@ -143,43 +147,74 @@ export default function EditableField({
 
   // Shared type between halves is the whole point; `inputCls` only adds the box.
   const typeCls = textClassName ?? "";
-  const surfaceCls = boxed
-    ? "rounded-lg border border-border-default bg-bg-surface"
-    : "rounded-lg border border-transparent";
+  // Every field is a panel on the page's own card surface — the same border and
+  // background the reading level gives it. Editing should change what the page
+  // does, not what it is made of.
+  const surfaceCls = "rounded-xl border border-border-default bg-bg-card";
   const padCls = "px-3 py-2";
 
-  const ring = dropTarget
+  // One border per field: the value element *is* the box, so an open field draws
+  // no ring around the box it already has — that double outline was the old
+  // box-inside-a-box. Only a drag rings, because a drag is transient and has to
+  // win over whatever the field looks like. The attach target is marked on the
+  // label instead: a permanent accent ring reads as focus, and the question wore
+  // one whenever it happened to be the target.
+  const stateCls = dropTarget
     ? "ring-2 ring-accent"
-    : attachTarget
-      ? "ring-1 ring-accent"
-      : editing
-        ? "ring-1 ring-border-default"
-        : "hover:ring-1 hover:ring-accent/40";
+    : editing
+      ? ""
+      : "hover:ring-1 hover:ring-accent/40";
 
   // This field's own attachments, in table order — the strip that makes a
   // `{{handle}}` token legible without decoding it in the text.
   const rows = media.filter((m) => m.field === field);
 
   return (
-    <section className={`group/field relative transition-shadow ${ring}`}>
+    <section className={`group/field relative transition-shadow ${stateCls}`}>
       <header className="flex items-center gap-2 min-h-7 mb-1">
-        <span className="text-xs uppercase tracking-wide text-text-tertiary select-none">
+        {/* The label is a label, not a heading: it rides at word scale and steps
+            back while you read. Hovering or focusing the field brings it up; on a
+            phone there is no hover, so it is simply always there. */}
+        <span
+          className={`select-none text-[11px] uppercase tracking-[0.08em] text-text-tertiary transition-opacity ${
+            editing
+              ? "opacity-70"
+              : "opacity-0 group-hover/field:opacity-100 group-focus-within/field:opacity-100 max-sm:opacity-100"
+          }`}
+        >
           {label}
         </span>
+        {/* Where the toolbar's Attach will land. A glyph, not a ring: it has to
+            be legible without claiming the field is focused. */}
+        {attachTarget && editing && (
+          <span
+            className="flex shrink-0 items-center text-accent"
+            title={`Attachments land in ${label}`}
+          >
+            <Paperclip size={10} aria-hidden />
+          </span>
+        )}
         {dirty && (
           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-bg-muted text-text-secondary select-none">
             unsaved
           </span>
         )}
         <div className="flex-1 min-w-0" />
-        {/* `onMouseDown` preventDefault: a toolbar menu that steals focus would
-            blur the textarea into a commit and unmount its own menu mid-click. */}
-        <div className="flex items-center gap-1" onMouseDown={(e) => e.preventDefault()}>
+        {/* Quiet until the field is addressed, and icon-only when it appears: one
+            labelled Attach row per field made five attach controls on a card, and
+            the toolbar's copy already targets this field. `onMouseDown`
+            preventDefault: a menu that steals focus would blur the textarea into
+            a commit and unmount its own menu mid-click. */}
+        <div
+          className="flex items-center gap-1 opacity-0 transition-opacity group-hover/field:opacity-100 group-focus-within/field:opacity-100 max-sm:opacity-100"
+          onMouseDown={(e) => e.preventDefault()}
+        >
           {editing && canAttach && (
             <ToolbarSelect
+              iconOnly
               icon={Paperclip}
               label={`Attach to ${label}`}
-              value="Attach"
+              value=""
               title={`Attach an image, audio, or video to ${label}`}
             >
               <ToolbarMenuItem icon={ImageIcon} onClick={() => onAttach("image")}>
@@ -199,7 +234,7 @@ export default function EditableField({
               onClick={onStartEdit}
               title={`Edit ${label.toLowerCase()}`}
               aria-label={`Edit ${label.toLowerCase()}`}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-text-tertiary opacity-0 hover:bg-bg-hover hover:text-text-primary focus:opacity-100 group-hover/field:opacity-100 max-sm:opacity-100"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-text-tertiary hover:bg-bg-hover hover:text-text-primary"
             >
               <Pencil size={13} />
             </button>
@@ -219,8 +254,12 @@ export default function EditableField({
                   <li
                     key={m.uuid}
                     title={gone ? `${m.rel_path} — not on this device` : m.rel_path}
+                    // The strip is the staging tray, not a second copy of the
+                    // text: an attachment its token is already in the field for is
+                    // dimmed, and one that is attached but unplaced keeps full
+                    // weight and a dot, because that is the one to act on.
                     className={`flex items-center gap-1 rounded border border-border-default bg-bg-surface px-1.5 py-1 text-[11px] text-text-secondary max-w-[13rem] ${
-                      value.includes(`{{${m.handle}}}`) ? "" : "opacity-60"
+                      value.includes(`{{${m.handle}}}`) ? "opacity-50 hover:opacity-100" : ""
                     }`}
                   >
                     {src && !gone ? (
@@ -231,38 +270,49 @@ export default function EditableField({
                     <span className="truncate">
                       {m.title || m.rel_path.split(/[/\\]/).pop() || m.handle}
                     </span>
+                    {!value.includes(`{{${m.handle}}}`) && (
+                      <span
+                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning-text"
+                        title="Attached, not placed in the text"
+                      />
+                    )}
                   </li>
                 );
               })}
             </ul>
           )}
-          {singleLine ? (
-            <input
-              ref={attachRef as (el: HTMLInputElement | null) => void}
-              type="text"
-              value={value}
-              placeholder={placeholder}
-              onChange={(e) => onChange(e.target.value)}
-              onKeyDown={onKeyDown}
-              onBlur={() => {
-                if (!keepEditing) onEndEdit("commit");
-              }}
-              className={`w-full ${surfaceCls} ${padCls} ${typeCls} bg-bg-surface text-text-primary placeholder:text-text-tertiary outline-none focus:border-accent`}
-            />
-          ) : (
-            <textarea
-              ref={attachRef as (el: HTMLTextAreaElement | null) => void}
-              value={value}
-              placeholder={placeholder}
-              rows={1}
-              onChange={(e) => onChange(e.target.value)}
-              onKeyDown={onKeyDown}
-              onBlur={() => {
-                if (!keepEditing) onEndEdit("commit");
-              }}
-              className={`w-full block resize-none overflow-hidden ${surfaceCls} ${padCls} ${typeCls} bg-bg-surface text-text-primary placeholder:text-text-tertiary outline-none focus:border-accent`}
-            />
-          )}
+          {/* The value is the only thing the font step scales. Zooming an ancestor
+              inflated the label, the chips and the attach control with it, which
+              is why a 160% answer read like a poster. */}
+          <div style={textStyle}>
+            {singleLine ? (
+              <input
+                ref={attachRef as (el: HTMLInputElement | null) => void}
+                type="text"
+                value={value}
+                placeholder={placeholder}
+                onChange={(e) => onChange(e.target.value)}
+                onKeyDown={onKeyDown}
+                onBlur={() => {
+                  if (!keepEditing) onEndEdit("commit");
+                }}
+                className={`w-full ${surfaceCls} ${padCls} ${typeCls} text-text-primary placeholder:text-text-tertiary outline-none focus:border-accent`}
+              />
+            ) : (
+              <textarea
+                ref={attachRef as (el: HTMLTextAreaElement | null) => void}
+                value={value}
+                placeholder={placeholder}
+                rows={1}
+                onChange={(e) => onChange(e.target.value)}
+                onKeyDown={onKeyDown}
+                onBlur={() => {
+                  if (!keepEditing) onEndEdit("commit");
+                }}
+                className={`w-full block resize-none overflow-hidden ${surfaceCls} ${padCls} ${typeCls} text-text-primary placeholder:text-text-tertiary outline-none focus:border-accent`}
+              />
+            )}
+          </div>
         </div>
       ) : (
         // Reading half. Clicking anywhere in it opens this one field, so "edit"
@@ -278,6 +328,7 @@ export default function EditableField({
               onStartEdit();
             }
           }}
+          style={textStyle}
           className={`cursor-text ${surfaceCls} ${padCls} outline-none focus-visible:ring-1 ${
             value.trim() ? "" : "text-text-tertiary italic"
           }`}
@@ -289,6 +340,7 @@ export default function EditableField({
               datasetPath={datasetPath}
               mode={mode}
               textClassName={typeCls}
+              tools={mediaTools}
             />
           ) : (
             <span className={`whitespace-pre-wrap break-words ${typeCls}`}>
@@ -298,8 +350,10 @@ export default function EditableField({
         </div>
       )}
 
-      {attachTarget && (
-        <p className="mt-1 text-right text-[11px] text-text-tertiary select-none">
+      {/* Said only while a file is actually over the field: as a permanent caption
+          it was a promise about a gesture nobody was making. */}
+      {dropTarget && (
+        <p className="mt-1 text-right text-[11px] text-accent select-none">
           attachments land here
         </p>
       )}

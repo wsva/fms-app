@@ -4,13 +4,15 @@
 // The four fields of a card, as one leaf.
 //
 // `EditableField` is the presentational half of a single field; this is the
-// quartet — question, answer, suggestion, note, in reading order, with the rule
-// under the question that separates the prompt from the prose. It is the form
-// half of a card: labels, a boxed surface per field, a pencil in each header.
+// quartet — question, answer, suggestion, note, in reading order. It is the form
+// half of a card: labels, a surface per field, an attach menu in each header.
 // The other half is the reader's — the Cards page's breadcrumb level and the
 // review panel both draw a card without a single label, at display size, and
 // neither goes through this file. That split is deliberate: a card being edited
 // and a card being read are two different objects, and a form is not a page.
+// What they share is the composition — one panel per field, same border, same
+// background as the reading level — so pressing Edit changes what the page does,
+// not what it is.
 //
 // It owns geometry, not state. Values, which fields are open, dirtiness, the
 // draft, save and the exit guard all stay with the host — a field that owned its
@@ -22,7 +24,7 @@
 // produces one from the overlay's own state in a dozen lines.
 // ---------------------------------------------------------------------------
 
-import { Fragment } from "react";
+import { type CSSProperties } from "react";
 import type { CardMedia, CardMediaField } from "@/lib/types";
 import { isTauri } from "@/lib/platform";
 import EditableField from "./EditableField";
@@ -50,6 +52,9 @@ export type CardFieldBinding = {
   attachField: CardMediaField | null;
   /** A file is being dragged over the window and would land in `attachField`. */
   dragOver: boolean;
+  /** The font step, as inline style: the host owns the zoom, the leaf applies it
+   *  to the value text only — labels and controls never scale with the type. */
+  textStyle?: CSSProperties;
   /** A media operation is in flight: a blur must not close the field under it. */
   mediaBusy: boolean;
   onFieldChange: (field: CardMediaField, value: string) => void;
@@ -58,6 +63,12 @@ export type CardFieldBinding = {
   /** Close one field — committed or cancelled is the host's distinction. */
   onEndEdit: (field: CardMediaField) => void;
   onAttach: (kind: CardMediaKind, field: CardMediaField) => void;
+  /** Put a file into `field` through the picker (a preview's Upload). */
+  onMediaUpload: (field: CardMediaField) => void;
+  /** Remove one attachment, and the `{{handle}}` token that points at it. */
+  onMediaRemove: (uuid: string) => void;
+  /** Put one handle on the clipboard. */
+  onMediaCopy: (handle: string) => void;
   /** Hand the mounted editor element back, so the host can insert a token. */
   onRegisterElement: (
     field: CardMediaField,
@@ -73,42 +84,50 @@ export const CARD_FIELD_ORDER: CardMediaField[] = [
   "note",
 ];
 
+/** The field names on their own — the editor's attachments pane names the four
+ *  as placement targets, and the strip and this file must spell them one way. */
+export const CARD_FIELD_LABEL: Record<CardMediaField, string> = {
+  question: "Question",
+  answer: "Answer",
+  suggestion: "Suggestion",
+  note: "Note",
+};
+
 /** Per-field copy and typography: text, not state, so it lives here. */
 const CHROME: Record<
   CardMediaField,
   {
     label: string;
     mode: "plain" | "markdown";
-    boxed?: boolean;
     singleLine?: boolean;
     placeholder: string;
     textClassName: string;
   }
 > = {
   question: {
-    label: "Question",
+    label: CARD_FIELD_LABEL.question,
     mode: "plain",
     placeholder: "What do you want to learn?",
-    textClassName: "text-3xl font-semibold",
+    // Same size as the answer: the question is the prompt, not a headline, and a
+    // 3xl question in a form set every other field at half its weight.
+    textClassName: "text-base font-semibold",
   },
   answer: {
-    label: "Answer",
+    label: CARD_FIELD_LABEL.answer,
     mode: "markdown",
-    boxed: true,
     placeholder: "The answer or explanation (Markdown supported)",
     textClassName: "text-base",
   },
   suggestion: {
-    label: "Suggestion",
+    label: CARD_FIELD_LABEL.suggestion,
     mode: "plain",
     singleLine: true,
     placeholder: "AI suggestion or hint",
     textClassName: "text-lg",
   },
   note: {
-    label: "Note",
+    label: CARD_FIELD_LABEL.note,
     mode: "markdown",
-    boxed: true,
     placeholder: "Additional notes (Markdown supported)",
     textClassName: "text-base",
   },
@@ -121,30 +140,32 @@ export default function CardFields({ binding }: { binding: CardFieldBinding }) {
 
   return (
     <div className="space-y-6">
-      {CARD_FIELD_ORDER.map((field, index) => (
-        <Fragment key={field}>
-          {/* The prompt and the prose are different things: one rule does that
-              job, and it belongs to the order, not to either field. */}
-          {index === 1 && <div className="border-t border-border-default" />}
-          <EditableField
-            {...CHROME[field]}
-            field={field}
-            value={binding.values[field]}
-            editing={binding.editing[field]}
-            dirty={binding.dirty[field]}
-            media={binding.media}
-            datasetPath={binding.datasetPath}
-            attachTarget={binding.attachField === field}
-            dropTarget={binding.dragOver && binding.attachField === field}
-            canAttach={canAttach}
-            keepEditing={binding.mediaBusy}
-            onChange={(value) => binding.onFieldChange(field, value)}
-            onStartEdit={() => binding.onStartEdit(field)}
-            onEndEdit={() => binding.onEndEdit(field)}
-            onAttach={(kind) => binding.onAttach(kind, field)}
-            registerElement={(el) => binding.onRegisterElement(field, el)}
-          />
-        </Fragment>
+      {CARD_FIELD_ORDER.map((field) => (
+        <EditableField
+          {...CHROME[field]}
+          key={field}
+          field={field}
+          value={binding.values[field]}
+          editing={binding.editing[field]}
+          dirty={binding.dirty[field]}
+          media={binding.media}
+          datasetPath={binding.datasetPath}
+          attachTarget={binding.attachField === field}
+          dropTarget={binding.dragOver && binding.attachField === field}
+          canAttach={canAttach}
+          keepEditing={binding.mediaBusy}
+          textStyle={binding.textStyle}
+          onChange={(value) => binding.onFieldChange(field, value)}
+          onStartEdit={() => binding.onStartEdit(field)}
+          onEndEdit={() => binding.onEndEdit(field)}
+          onAttach={(kind) => binding.onAttach(kind, field)}
+          mediaTools={{
+            upload: () => binding.onMediaUpload(field),
+            remove: binding.onMediaRemove,
+            copy: binding.onMediaCopy,
+          }}
+          registerElement={(el) => binding.onRegisterElement(field, el)}
+        />
       ))}
     </div>
   );

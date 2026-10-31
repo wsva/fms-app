@@ -1,8 +1,16 @@
 "use client";
 
 // ---------------------------------------------------------------------------
-// The card editor: one inline-editable reading surface, mounted as a root
-// overlay above whichever tab the shell is showing.
+// The card editor: one inline-editable card surface, served to two hosts.
+//
+// The overlay is the original host: `fixed inset-0`, its own header, floating
+// above whichever tab the shell is showing, because "Add to Card" has to work
+// from a wiki page or a dictation cue without navigating anywhere first. The
+// second host is a page that spreads the provider's `session` into the modal
+// (`inline`): it supplies the surface, the breadcrumb and the name, so the Cards
+// page can put the writer exactly where the reader already is. `inline` decides
+// host chrome only — the state machine, the draft, the guard and the fields are
+// the same object in both.
 //
 // What this file is responsible for, in the order the code below is written:
 //
@@ -14,18 +22,21 @@
 //      answer it. A debounced localStorage draft is the backstop for the case no
 //      guard catches: the process being killed.
 //   2. Save means save. It writes, re-reads nothing away, keeps the card open
-//      and editable, and says "Saved" in the header. Closing is the user's act.
+//      and editable, and says "Saved" in the header — or, inline, where the
+//      header would have been. Closing is the user's act.
 //   3. One layout. Fields render through `CardFields` in reading order —
 //      question, answer, suggestion, note — and clicking one edits that one.
 //      `viewMode` no longer picks a layout; "edit" is just every field open.
 //      The body is a leaf (`CardFields`) fed by a `CardFieldBinding`, so a card
 //      shown inside a page rather than over one gets the same body; everything
-//      in this file is the chrome around it.
+//      in this file is the chrome around it. The strip under the toolbar holds
+//      two views of that body — the fields, and the card's media — because
+//      a row of handles, kinds and their own buttons wants a column, not 288px.
 //   4. Identity. The card it shows is published to the tab strip's subject store
 //      (so the chip names it), into the address bar (so a restored window reopens
 //      it) and into the agent's UI context (so "this card" means something).
 //   5. Standing, decoded. Familiarity is per-user review state — see Phase 5 of
-//      the design note — so the header names the value and the popover rates it
+//      the design note — so the row names the value and the popover rates it
 //      through `card_test_submit`, never through a text write.
 //
 // Attach and draft interact by design, not accident: `card_media_add` writes
@@ -42,16 +53,17 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
-  Check, ChevronLeft, ChevronRight, CircleHelp, Eye, Frown, GraduationCap, Laugh,
-  Library, List, Meh, Paperclip, Pencil, Smile, Trash2, Type, X,
+  Check, ChevronLeft, ChevronRight, CircleHelp, Eye, Film, Frown, GraduationCap, Laugh,
+  List, Meh, Paperclip, Pencil, Smile, Trash2, Type, X,
   Image as ImageIcon, Music2, Video,
 } from "lucide-react";
 import type { Card, CardDatasetSummary, CardMedia, CardMediaField, CardReview } from "@/lib/types";
 import { isMobileApp, isTauri } from "@/lib/platform";
 import { toHTML } from "@/components/wiki/markdown/html";
-import { cardKindOf, cardExtsFor } from "@/lib/media/kind";
+import { cardKindOf, cardExtsFor, CARD_IMAGE_EXTS, CARD_AUDIO_EXTS, CARD_VIDEO_EXTS } from "@/lib/media/kind";
 import { stripAnchors } from "@/lib/media/anchors";
-import { notifyError } from "@/lib/feedback/toast";
+import { copyText } from "@/lib/clipboard";
+import { notify, notifyError } from "@/lib/feedback/toast";
 import {
   canRefreshInstance,
   getActiveTabId,
@@ -66,6 +78,7 @@ import {
 } from "@/lib/shell/tab-subject";
 import { setUiContext } from "@/lib/agent/ui-context";
 import CardFields, {
+  CARD_FIELD_LABEL,
   CARD_FIELD_ORDER,
   type CardFieldBinding,
   type CardFieldValues,
@@ -74,13 +87,19 @@ import MediaLibrary from "./MediaLibrary";
 import { CollapsibleSidebar, useCollapsibleSidebar } from "@/components/layout/CollapsibleSidebar";
 import {
   PageHeader,
+  TabBar,
   Toolbar,
   ToolbarButton,
   ToolbarMenuItem,
   ToolbarSelect,
+  type TabBarItem,
 } from "@/components/ui/toolbar";
 
 type FontScaleKey = "normal" | "large" | "x2";
+
+/** The editor's two views. Tabs, not actions: the same card, read as fields or
+ *  as files. */
+type CardEditorPane = "edit" | "media";
 
 // Font size options: each step renders the content bigger and bolder.
 const FONT_SCALE_MAP: Record<FontScaleKey, { zoom: number; weight: number }> = {
@@ -95,6 +114,14 @@ const FONT_SCALE_LABELS: Record<FontScaleKey, string> = {
   normal: "Normal 100%",
   large: "Large 130%",
   x2: "Large x2 160%",
+};
+
+/** What the trigger shows. A toolbar is a row of words, and "Large x2 160%" in it
+ *  reads as a sentence; the percentage is the value and the menu keeps the names. */
+const FONT_SCALE_SHORT: Record<FontScaleKey, string> = {
+  normal: "100%",
+  large: "130%",
+  x2: "160%",
 };
 
 /** Above this, a card is read rather than glanced at: the biggest step would put
@@ -333,17 +360,7 @@ function ExitSheet({
   );
 }
 
-function CardEditModal({
-  card,
-  datasetUuid,
-  datasets,
-  onSave,
-  onDelete,
-  onClose,
-  initialViewMode,
-  queue,
-  onStep,
-}: {
+export type CardEditModalProps = {
   card: Card | null;
   datasetUuid: string;
   datasets: CardDatasetSummary[];
@@ -356,7 +373,27 @@ function CardEditModal({
   queue: CardQueue | null;
   /** Ask the provider for the neighbouring card. Routed through the guard here. */
   onStep: (dir: -1 | 1) => void;
-}) {
+  /**
+   * Hosted by a page instead of floating over it. Inline drops the scrim, the
+   * safe-area insets and the `PageHeader` — the host's breadcrumb already names
+   * the card, and the host supplies the surface — and keeps everything else:
+   * the writing row, the fields, the attachments and the exit guard.
+   */
+  inline?: boolean;
+};
+
+export function CardEditModal({
+  card,
+  datasetUuid,
+  datasets,
+  onSave,
+  onDelete,
+  onClose,
+  initialViewMode,
+  queue,
+  onStep,
+  inline = false,
+}: CardEditModalProps) {
   const initial = useMemo(() => valuesOf(card), [card]);
   const [selectedDataset, setSelectedDataset] = useState(datasetUuid);
   const [question, setQuestion] = useState(initial.question);
@@ -399,9 +436,13 @@ function CardEditModal({
   const draftKey = draftKeyFor(openDatasetUuid, cardUuid);
 
   const [media, setMedia] = useState<CardMedia[]>([]);
-  const [libraryOpen, setLibraryOpen] = useState(false);
-  // Which field an attach or a Library "Place" targets — follows the last
-  // focused field, and is now *shown* rather than only implied.
+  // Which view is showing. The media view replaces the narrow sidebar this file
+  // used to open on demand: the same rows and the same actions, but with the
+  // width a list of handles, kinds and their controls was always asking for.
+  const [pane, setPane] = useState<CardEditorPane>("edit");
+  // Which field an attach or a Place targets — follows the last focused field,
+  // and is now *shown* rather than only implied. The media view can also set it
+  // directly, since no field is focused while it is open.
   const [attachField, setAttachField] = useState<CardMediaField>("question");
   const [dragOver, setDragOver] = useState(false);
   const [mediaBanner, setMediaBanner] = useState("");
@@ -784,29 +825,6 @@ function CardEditModal({
     [addMediaFromPath]
   );
 
-  // Move a handle's token to the target field: strip it from every field, then
-  // append it to the target. Placement is block-level, so an appended token is
-  // enough — a fresh attach goes to the caret via insertToken instead.
-  const placeMedia = useCallback(
-    (handle: string) => {
-      const field = attachFieldRef.current;
-      const token = `{{${handle}}}`;
-      const strip = (v: string) => v.split(token).join("");
-      const next: CardFieldValues = {
-        question: strip(question),
-        answer: strip(answer),
-        note: strip(note),
-        suggestion: strip(suggestion),
-      };
-      next[field] = next[field] + token;
-      // In reading mode a Place is an edit of that field's text, so the field
-      // opens and the reader sees the token that was just written.
-      setFieldEditing(field, true);
-      applyValues(next, false);
-    },
-    [question, answer, note, suggestion, applyValues, setFieldEditing]
-  );
-
   const deleteMedia = useCallback(
     async (uuid: string) => {
       const target = media.find((m) => m.uuid === uuid);
@@ -831,6 +849,46 @@ function CardEditModal({
     },
     [media, selectedDataset, question, answer, note, suggestion, values, applyValues, setFieldEditing]
   );
+
+  // One picker for every kind the card accepts. The toolbar's Attach asks which
+  // kind first because a filter narrows the dialog; a management view has no such
+  // question — the file's own extension already answers it, and the backend
+  // refuses anything outside the portable set either way.
+  const uploadMedia = useCallback(
+    async (field: CardMediaField) => {
+      if (!isTauri()) return;
+      try {
+        const selected = await open({
+          multiple: false,
+          filters: [
+            {
+              name: "Media",
+              extensions: [...CARD_IMAGE_EXTS, ...CARD_AUDIO_EXTS, ...CARD_VIDEO_EXTS],
+            },
+          ],
+        });
+        const path = Array.isArray(selected) ? selected[0] : selected;
+        if (path) {
+          // Keep the marker honest: uploading from a preview sets the target to
+          // the field that preview sits in, so the next Place agrees with it.
+          setAttachField(field);
+          await addMediaFromPath(path, field);
+        }
+      } catch (e) {
+        setMediaBanner(`Attach failed: ${e}`);
+      }
+    },
+    [addMediaFromPath]
+  );
+
+  // The handle is the one thing a writer types by hand, so a copy button is the
+  // paste half of attaching — and it has to say so when the clipboard refuses,
+  // because that text is exactly what would have been pasted.
+  const copyHandle = useCallback(async (handle: string) => {
+    const text = `{{${handle}}}`;
+    if (await copyText(text)) notify(`Copied ${text}`);
+    else notifyError(`Could not reach the clipboard — type ${text} into a field instead.`);
+  }, []);
 
   // Reorder within one field's unanchored tail strip by re-writing `sort` to a
   // spaced sequence after moving the row by `dir`. Order is a table column, not
@@ -1004,6 +1062,20 @@ function CardEditModal({
   const heading = stripAnchors(question).trim().slice(0, 60) || (saved ? "Card" : "New card");
   const canStep = !!queue;
 
+  // The strip's items. The count answers "how many" before the view is open (a
+  // zero is information), and the dot carries the one state the words cannot: a
+  // row saved with the card whose `{{handle}}` no field holds.
+  const paneItems: TabBarItem<CardEditorPane>[] = [
+    { id: "edit", label: "Edit", icon: Pencil },
+    {
+      id: "media",
+      label: "Media",
+      icon: Film,
+      count: media.length,
+      dot: unplacedHandles.size > 0,
+    },
+  ];
+
   // The four fields as one leaf: it renders them, this host owns everything
   // they read and write. The overlay's toolbar, draft, save and exit guard stay
   // here — a page that shows a card inside its own breadcrumb level passes its
@@ -1016,6 +1088,10 @@ function CardEditModal({
     datasetPath,
     attachField,
     dragOver,
+    textStyle: {
+      zoom: FONT_SCALE_MAP[fontScale].zoom,
+      fontWeight: FONT_SCALE_MAP[fontScale].weight,
+    },
     mediaBusy,
     onFieldChange: (field, value) => {
       setField(field, value);
@@ -1032,6 +1108,9 @@ function CardEditModal({
       setFieldEditing(field, false);
     },
     onAttach: (kind, field) => void attach(kind, field),
+    onMediaUpload: (field) => void uploadMedia(field),
+    onMediaRemove: (uuid) => void deleteMedia(uuid),
+    onMediaCopy: (handle) => void copyHandle(handle),
     onRegisterElement: (field, el) => {
       fieldRefs.current[field].current = el;
     },
@@ -1039,13 +1118,17 @@ function CardEditModal({
 
   return (
     // Full-screen overlay with the unified page top-area pattern: a PageHeader
-    // bar, a Toolbar action row directly beneath it, and a scrolling body.
-    // On a phone the safe-area insets go on the root (same idiom as the mobile
-    // app shell in (app)/home) so the bars sit below the status bar.
+    // bar, a Toolbar action row directly beneath it, and a scrolling body. A
+    // page that hosts the editor instead (`inline`) supplies the surface and
+    // the name, so the row stands directly under its breadcrumb.
     <div
-      className="fixed inset-0 z-50 flex flex-col bg-bg-body"
+      className={
+        inline
+          ? "flex flex-1 min-h-0 flex-col bg-bg-body"
+          : "fixed inset-0 z-50 flex flex-col bg-bg-body"
+      }
       style={
-        mobile
+        mobile && !inline
           ? {
               paddingTop: "env(safe-area-inset-top)",
               paddingBottom: "env(safe-area-inset-bottom)",
@@ -1055,7 +1138,10 @@ function CardEditModal({
     >
       {/* A header row is a name plus status, never a control (see PageHeader):
           the card's question, whether it is on disk, and where it stands. The
-          dataset picker and the rating live in the Toolbar below. */}
+          dataset picker and the rating live in the Toolbar below. Inline has no
+          header at all: the page's breadcrumb is that row, and its last crumb
+          already carries this question. */}
+      {!inline && (
       <PageHeader
         title={heading}
         badge={
@@ -1086,8 +1172,21 @@ function CardEditModal({
           </div>
         }
       />
+      )}
 
       <Toolbar mobile={mobile}>
+        {/* Inline has no header, so the row carries the one thing the header was
+            there to say besides the name: whether this edit is on disk. */}
+        {inline &&
+          (dirty ? (
+            <span className="shrink-0 rounded-full bg-bg-muted px-1.5 py-0.5 text-[10px] text-text-secondary">
+              {saved ? "unsaved changes" : "not saved yet"}
+            </span>
+          ) : savedFlash ? (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-success-bg px-1.5 py-0.5 text-[10px] text-text-primary">
+              <Check size={10} /> Saved
+            </span>
+          ) : null)}
         {/* Dataset picker, in both modes: which deck a card belongs to is a
             property of the card, not of the mode you happen to be in. */}
         <select
@@ -1164,9 +1263,25 @@ function CardEditModal({
           )}
         </ToolbarSelect>
 
+        {/* The rest of what the hidden header used to say, kept together and next
+            to the deck: how practised the card is (the Standing control), when it
+            last changed, and whether what is on screen is on disk (the badge that
+            opens the row). */}
+        {inline && saved && card?.updated_at && (
+          <span
+            className="shrink-0 select-none text-[11px] tabular-nums text-text-tertiary"
+            title="Last updated"
+          >
+            updated {card.updated_at.slice(0, 16).replace("T", " ")}
+          </span>
+        )}
+
         <div className="flex-1 min-w-0" />
 
-        {isTauri() && (
+        {/* Attach on the fields, Upload on the media view: one add-a-file
+            control per view, each asking for what that view already knows (a
+            kind here, a placement target there). */}
+        {isTauri() && pane === "edit" && (
           <>
             <ToolbarSelect
               icon={Paperclip}
@@ -1185,17 +1300,13 @@ function CardEditModal({
                 Video
               </ToolbarMenuItem>
             </ToolbarSelect>
-            <ToolbarButton
-              icon={Library}
-              variant="toggleSoft"
-              active={libraryOpen}
-              label="Library"
-              title="Show this card's attachments"
-              onClick={() => setLibraryOpen((v) => !v)}
-            />
           </>
         )}
-        {!!tocNode && (
+        {/* Two toolbar controls belong to a view, not to the card, so they are
+            offered only on the view that answers them: the TOC toggle opens a
+            column of the fields, and the whole-card mode switch opens fields. A
+            control that changes nothing on screen is worse than an absent one. */}
+        {pane === "edit" && !!tocNode && (
           <ToolbarButton
             icon={List}
             variant="toggleSoft"
@@ -1205,7 +1316,7 @@ function CardEditModal({
             title={tocSidebar.visible ? "Hide table of contents" : "Show table of contents"}
           />
         )}
-        <ToolbarSelect icon={Type} label="Font size" value={FONT_SCALE_LABELS[fontScale]}>
+        <ToolbarSelect icon={Type} label="Font size" value={FONT_SCALE_SHORT[fontScale]}>
           {(Object.keys(FONT_SCALE_MAP) as FontScaleKey[]).map((k) => (
             <ToolbarMenuItem key={k} checked={fontScale === k} onClick={() => setFontScale(k)}>
               {FONT_SCALE_LABELS[k]}
@@ -1215,14 +1326,19 @@ function CardEditModal({
         {/* Mode switch as an action button: in view mode it offers Edit, in
             edit mode it offers View — the label names what the click does, not
             the mode you are in. It now opens and closes every field at once;
-            clicking a single field has always opened that one. */}
+            clicking a single field has always opened that one. Not offered when
+            a page hosts the editor: there, every field is open and the page's own
+            card, one step back, is the reading mode. */}
+        {!inline && pane === "edit" && (
+          <ToolbarButton
+            icon={anyEditing ? Eye : Pencil}
+            label={anyEditing ? "View" : "Edit"}
+            title={anyEditing ? "Close every field" : "Open every field"}
+            onClick={() => setAllEditing(!anyEditing)}
+          />
+        )}
         <ToolbarButton
-          icon={anyEditing ? Eye : Pencil}
-          label={anyEditing ? "View" : "Edit"}
-          title={anyEditing ? "Close every field" : "Open every field"}
-          onClick={() => setAllEditing(!anyEditing)}
-        />
-        <ToolbarButton
+          variant={dirty ? "solid" : "ghost"}
           icon={Check}
           label={saving ? "Saving…" : "Save"}
           disabled={!dirty || saving || !question.trim()}
@@ -1234,84 +1350,127 @@ function CardEditModal({
           onClick={() => void doSave()}
         />
         {onDelete && (
-          <ToolbarButton
-            variant="danger"
-            icon={Trash2}
-            label="Delete"
-            title="Delete this card"
-            onClick={() => setPending({ kind: "delete" })}
-          />
+          <>
+            {/* A rule before the only destructive control on the surface: it is
+                already next to Save, and it should not also be next to Close. */}
+            <span aria-hidden className="mx-0.5 h-5 w-px shrink-0 bg-border-default" />
+            <ToolbarButton
+              variant="danger"
+              icon={Trash2}
+              label="Delete"
+              title="Delete this card"
+              onClick={() => setPending({ kind: "delete" })}
+            />
+          </>
         )}
-        <ToolbarButton icon={X} label="Close" onClick={() => requestExit(onClose)} />
+        <ToolbarButton
+          icon={X}
+          label={inline ? "Done" : "Close"}
+          title={
+            inline
+              ? "Back to the card — unsaved changes are confirmed first"
+              : "Close the editor"
+          }
+          onClick={() => requestExit(onClose)}
+        />
       </Toolbar>
 
-      {/* Body row: the TOC drawer occupies the left (split column on desktop,
-          slide-in on mobile), the card fills the middle, the library the right —
-          anchored under the bars so nothing covers the chrome that opens it. */}
-      <div className="relative flex flex-1 min-h-0 overflow-hidden">
-        {!!tocNode && (
-          <CollapsibleSidebar sidebar={tocSidebar}>
-            <div
-              className="wiki-toc flex-1 min-h-0 overflow-y-auto px-3 py-2"
-              onClick={(e) => {
-                // Mobile: picking a section closes the drawer so the anchor
-                // jump is visible; the desktop column stays put.
-                if ((e.target as HTMLElement).closest("a")) tocSidebar.closeOnSelect();
-              }}
-            >
-              {tocNode}
+      <TabBar
+        label="Card editor sections"
+        items={paneItems}
+        value={pane}
+        onChange={setPane}
+        className="shrink-0 px-4 bg-bg-card"
+      />
+
+      {/* Notices sit between the bars and the body, not inside a view: a media
+          failure is worth the same line whichever tab is open, and a banner that
+          scrolled away with the fields would not be a banner. */}
+      {(mediaBanner || draftRestored) && (
+        <div className="shrink-0 space-y-2 border-b border-border-default px-4 py-2 sm:px-8">
+          {draftRestored && (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-default bg-bg-surface px-3 py-1.5 text-sm text-warning-text">
+              Restored unsaved draft
+              <ToolbarButton
+                variant="ghost"
+                label="Revert to saved"
+                onClick={() => void discardChanges()}
+                title="Discard the draft and edit the saved card instead"
+              />
             </div>
-          </CollapsibleSidebar>
-        )}
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          <div
-            className="px-4 py-6 sm:px-8"
-            style={{
-              zoom: FONT_SCALE_MAP[fontScale].zoom,
-              fontWeight: FONT_SCALE_MAP[fontScale].weight,
-            }}
-          >
-            {(mediaBanner || draftRestored) && (
-              <div className="mb-4 space-y-2">
-                {draftRestored && (
-                  <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-default bg-bg-surface px-3 py-2 text-sm text-warning-text">
-                    Restored unsaved draft
-                    <ToolbarButton
-                      variant="ghost"
-                      label="Revert to saved"
-                      onClick={() => void discardChanges()}
-                      title="Discard the draft and edit the saved card instead"
-                    />
-                  </div>
-                )}
-                {mediaBanner && (
-                  <div className="rounded-lg border border-border-default bg-bg-surface px-3 py-2 text-sm text-text-secondary">
-                    {mediaBanner}
-                  </div>
-                )}
-              </div>
-            )}
-            <CardFields binding={fieldBinding} />
-          </div>
+          )}
+          {mediaBanner && (
+            <div className="rounded-lg border border-border-default bg-bg-surface px-3 py-1.5 text-sm text-text-secondary">
+              {mediaBanner}
+            </div>
+          )}
         </div>
-        {libraryOpen && (
-          <div className="w-72 shrink-0 border-l border-border-default overflow-y-auto bg-bg-card">
-            <div className="px-3 py-2 text-sm font-medium text-text-secondary border-b border-border-default">
-              Attachments · targeting “{attachField}”
-              {unplacedHandles.size > 0 && (
-                <span className="ml-1 text-xs text-warning-text">
-                  · {unplacedHandles.size} attached, not placed
-                </span>
-              )}
+      )}
+
+      {/* Body row: the strip above decides which view; the TOC drawer occupies the
+          left of the edit view (split column on desktop, slide-in on mobile) and
+          the card fills the rest — anchored under the bars so nothing covers the
+          chrome that opens it. */}
+      <div className="relative flex flex-1 min-h-0 overflow-hidden">
+        {pane === "edit" ? (
+          <>
+            {!!tocNode && (
+              <CollapsibleSidebar sidebar={tocSidebar}>
+                <div
+                  className="wiki-toc flex-1 min-h-0 overflow-y-auto px-3 py-2"
+                  onClick={(e) => {
+                    // Mobile: picking a section closes the drawer so the anchor
+                    // jump is visible; the desktop column stays put.
+                    if ((e.target as HTMLElement).closest("a")) tocSidebar.closeOnSelect();
+                  }}
+                >
+                  {tocNode}
+                </div>
+              </CollapsibleSidebar>
+            )}
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              {/* The font step travels inside the fields (see `CardFields`), not
+                  on this wrapper: zooming here scaled the labels, the chips and
+                  the attach controls along with the type, so the chrome grew into
+                  a second headline at the largest step. The width is the pane's,
+                  and all four panels share it, so none ends somewhere different
+                  from the others. */}
+              <div className="px-4 py-6 sm:px-8">
+                <CardFields binding={fieldBinding} />
+              </div>
             </div>
-            <MediaLibrary
-              media={media}
-              missingHandles={missingHandles}
-              unplacedHandles={unplacedHandles}
-              onPlace={placeMedia}
-              onMove={(uuid, dir) => void moveMedia(uuid, dir)}
-              onDelete={(uuid) => void deleteMedia(uuid)}
-            />
+          </>
+        ) : (
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <div className="px-4 py-6 sm:px-8">
+              {/* The management view. No placement control here: a handle is text,
+                  so the way to put one in a field is to copy it and paste it — which
+                  is what the row's Copy button hands you. What the view does still
+                  decide is where a new Upload lands, and that is the last field the
+                  writer touched, so the line above says which one it is. */}
+              {unplacedHandles.size > 0 ? (
+                <p className="mb-4 text-xs text-warning-text">
+                  {unplacedHandles.size} attached, not placed — copy the handle and paste it into a field
+                </p>
+              ) : (
+                <p className="mb-4 text-xs text-text-tertiary">
+                  Uploads land in the {CARD_FIELD_LABEL[attachField].toLowerCase()} field — copy
+                  a handle to place one anywhere else.
+                </p>
+              )}
+              <MediaLibrary
+                media={media}
+                datasetPath={datasetPath}
+                missingHandles={missingHandles}
+                unplacedHandles={unplacedHandles}
+                canUpload={isTauri()}
+                uploadTarget={CARD_FIELD_LABEL[attachField].toLowerCase()}
+                onUpload={() => void uploadMedia(attachField)}
+                onCopy={(handle) => void copyHandle(handle)}
+                onMove={(uuid, dir) => void moveMedia(uuid, dir)}
+                onDelete={(uuid) => void deleteMedia(uuid)}
+              />
+            </div>
           </div>
         )}
       </div>
@@ -1375,7 +1534,13 @@ export type CardEditorState = {
   onDelete?: () => void;
   initialViewMode?: boolean;
   queue: CardQueue | null;
+  /** The page hosting this session draws the editor itself, in its content
+   *  area, instead of the provider floating it over the shell. */
+  inline: boolean;
 };
+
+/** Everything a page needs to host an open editor inline, plus its session key. */
+export type CardEditSession = CardEditModalProps & { sessionKey: string };
 
 export type CardEditorContextType = {
   isOpen: boolean;
@@ -1386,11 +1551,16 @@ export type CardEditorContextType = {
     onDelete?: () => void,
     datasetName?: string,
     initialViewMode?: boolean,
-    queue?: CardQueue
+    queue?: CardQueue,
+    /** `inline` hands the editor to the page instead of floating it. */
+    opts?: { inline?: boolean }
   ) => void;
   closeCardEditor: () => void;
   /** Hand the editor the list it is walking, after every re-read of that list. */
   refreshCardQueue: (queue: CardQueue) => void;
+  /** An open inline session for this page to render, or null. The provider never
+   *  draws an inline session itself — that is what "inline" means. */
+  session: CardEditSession | null;
 };
 
 const CardEditorContext = createContext<CardEditorContextType | null>(null);
@@ -1424,6 +1594,7 @@ const CLOSED: InternalState = {
   queue: null,
   queueable: false,
   pendingStep: null,
+  inline: false,
 };
 
 const queueKey = (q: CardQueue | null) => (q ? q.uuids.join(",") : "");
@@ -1527,7 +1698,8 @@ export function CardEditorProvider({
       onDelete?: () => void,
       datasetName?: string,
       initialViewMode?: boolean,
-      queue?: CardQueue
+      queue?: CardQueue,
+      opts?: { inline?: boolean }
     ) => {
       // Reload datasets to ensure we have the latest card counts
       void loadDatasets().then((list) => {
@@ -1558,6 +1730,7 @@ export function CardEditorProvider({
             initialViewMode,
             queue: queue ?? null,
             queueable: !!queue,
+            inline: !!opts?.inline,
             pendingStep: null,
           };
         });
@@ -1719,20 +1892,47 @@ export function CardEditorProvider({
     }
   }, [closeCardEditor]);
 
+  // What a page hosting an inline session renders. Built from the same four
+  // pieces the overlay is built from, so the two hosts cannot drift: the page
+  // is not a second editor, it is the same one with its chrome supplied by the
+  // breadcrumb and the toolbars around it.
+  const session = useMemo<CardEditSession | null>(
+    () =>
+      state.isOpen && state.inline
+        ? {
+            sessionKey: state.sessionKey,
+            card: state.card,
+            datasetUuid: state.datasetUuid,
+            datasets: state.datasets,
+            onSave: handleSave,
+            onDelete: state.card?.uuid ? handleDelete : undefined,
+            onClose: closeCardEditor,
+            initialViewMode: state.initialViewMode,
+            queue: state.queueable ? state.queue : null,
+            onStep: stepBy,
+            inline: true,
+          }
+        : null,
+    [state, handleSave, handleDelete, closeCardEditor, stepBy]
+  );
+
   const value = useMemo(
     () => ({
       isOpen: state.isOpen,
       openCardEditor,
       closeCardEditor,
       refreshCardQueue,
+      session,
     }),
-    [state.isOpen, openCardEditor, closeCardEditor, refreshCardQueue]
+    [state.isOpen, openCardEditor, closeCardEditor, refreshCardQueue, session]
   );
 
   return (
     <CardEditorContext.Provider value={value}>
       {children}
-      {state.isOpen && (
+      {/* An inline session is the page's to draw; the provider must not also
+          float a copy over it. */}
+      {state.isOpen && !state.inline && (
         <CardEditModal
           // Keyed on the session: a step to another card starts a clean surface,
           // a save does not.

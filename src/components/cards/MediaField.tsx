@@ -17,11 +17,27 @@
 //! `reveal` gates playback: pass the review flip state so `play_on: 'reveal'`
 //! clips fire the moment the answer side becomes visible. It defaults true for
 //! the editor, where everything shown is already revealed.
+//!
+//! `tools` is the editor's offer, resolved per segment: the field it sits in
+//! takes the upload, the row behind the handle takes the removal, the handle
+//! itself takes the copy. Reading hosts pass nothing and get plain media.
 
 import type { CardMedia } from "@/lib/types";
 import { splitAnchors } from "@/lib/media/anchors";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import MediaBlock from "./MediaBlock";
+
+/** What the editor offers on a field's attachments. The field takes the upload,
+ *  the row behind a handle takes the removal, the handle takes the copy — which
+ *  is why the two are named by argument rather than closed over here. */
+export type MediaFieldTools = {
+  /** Add another file to this field. */
+  upload: () => void;
+  /** Remove one attachment by row uuid. */
+  remove: (uuid: string) => void;
+  /** Put one handle on the clipboard. */
+  copy: (handle: string) => void;
+};
 
 type Props = {
   /** Raw field text, anchors included. */
@@ -38,6 +54,8 @@ type Props = {
   textClassName?: string;
   /** Let a click on an image open it at screen size (reading hosts only). */
   zoomable?: boolean;
+  /** Editor host only: what can be done to one of this field's attachments. */
+  tools?: MediaFieldTools;
 };
 
 export default function MediaField({
@@ -48,6 +66,7 @@ export default function MediaField({
   reveal = true,
   textClassName,
   zoomable = false,
+  tools,
 }: Props) {
   const segments = splitAnchors(text, media);
   if (segments.length === 0) return null;
@@ -73,6 +92,15 @@ export default function MediaField({
             datasetPath={datasetPath}
             reveal={reveal}
             zoomable={zoomable}
+            tools={
+              tools && seg.media
+                ? {
+                    upload: tools.upload,
+                    remove: () => tools.remove(seg.media!.uuid),
+                    copy: () => tools.copy(seg.handle),
+                  }
+                : undefined
+            }
           />
         );
       })}

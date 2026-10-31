@@ -21,6 +21,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { copyText } from "@/lib/clipboard";
 import { CARD_BASE_URL } from "@/lib/cards";
 import { isTauri } from "@/lib/platform";
 import {
@@ -47,40 +48,6 @@ interface BuildVersion {
 function openExternal(url: string) {
   if (isTauri()) void openUrl(url).catch(() => {});
   else window.open(url, "_blank", "noopener,noreferrer");
-}
-
-/**
- * Put a string on the clipboard, and say whether it worked.
- *
- * `navigator.clipboard` needs a secure context, and a Tauri webview's origin is
- * not one on every platform — so the hidden-textarea fallback is not legacy
- * politeness, it is the path that works where the modern API refuses. Returns
- * false rather than throwing: the button reports "Copy failed" instead of the
- * version silently going nowhere.
- */
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    /* fall through to the textarea */
-  }
-  try {
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.setAttribute("readonly", "");
-    area.style.position = "fixed";
-    area.style.opacity = "0";
-    document.body.appendChild(area);
-    area.select();
-    const ok = document.execCommand("copy");
-    area.remove();
-    return ok;
-  } catch {
-    return false;
-  }
 }
 
 export default function AboutCard({
