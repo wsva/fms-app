@@ -49,3 +49,7 @@ use the recognized text of standard audio as scoring reference
 
 read-aloud, record > saving > saved
 reperate from transcribing anf scoring
+
+
+add a buuton in toolbar, to practice speaking at anytime
+open a bottom window
