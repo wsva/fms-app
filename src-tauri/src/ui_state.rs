@@ -24,10 +24,14 @@ use tokio::sync::oneshot;
 /// error (the `app_navigate` house pattern) rather than silently stored, so a
 /// frontend typo surfaces during development instead of reading back as a
 /// permanent `null` to every agent.
-const KNOWN_KEYS: [&str; 6] = [
+const KNOWN_KEYS: [&str; 7] = [
     "active_tab",
     "active_dataset_uuid",
     "active_media_uuid",
+    // The card the editor overlay is showing. The editor lives above every tab
+    // rather than inside the Cards page, so this is the only way an agent can be
+    // told which card the user is looking at.
+    "active_card_uuid",
     "cue_index",
     "selection",
     "scroll",
@@ -222,8 +226,8 @@ impl UiStateHandle {
 ///
 /// `patch` is merged, not replaced: present keys set (or clear, when `null`),
 /// absent keys are left alone. Valid keys: `active_tab`,
-/// `active_dataset_uuid`, `active_media_uuid`, `cue_index`, `selection`,
-/// `scroll`. Returns the merged snapshot.
+/// `active_dataset_uuid`, `active_media_uuid`, `active_card_uuid`, `cue_index`,
+/// `selection`, `scroll`. Returns the merged snapshot.
 #[tauri::command]
 pub async fn agent_report_ui_state(
     state: State<'_, UiStateHandle>,

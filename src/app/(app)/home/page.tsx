@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef, useReducer } from "react";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
+import { X } from "lucide-react";
 import { isMobileApp } from "@/lib/platform";
 import Sidebar, { TAB_DEFS, type TabId } from "@/components/layout/Sidebar";
 import TitleBar from "@/components/layout/TitleBar";
@@ -16,6 +17,8 @@ import AgentDock from "@/components/agent/AgentDock";
 import type { AgentAction } from "@/lib/agent/types";
 import { setUiContext } from "@/lib/agent/ui-context";
 import { jsonSafeDetail, runUiAction, useAgentActions } from "@/lib/agent/ui-actions";
+import { dismissToast, notify, useToast } from "@/lib/feedback/toast";
+import { applySubjectToUrl, useTabSubject } from "@/lib/shell/tab-subject";
 import {
   refreshActivePage,
   useActiveTabSource,
@@ -73,21 +76,11 @@ export default function Home() {
   // only dropped once the client has committed the platform-correct layout.
   // `booted` starts false on server and client alike, so hydration matches.
   const [booted, setBooted] = useState(false);
-  // Ephemeral notification banner for the agent's `app_notify` action (the app
-  // has no toast system, so the shell renders a self-dismissing one).
-  const [toast, setToast] = useState<string | null>(null);
-
-  // One banner, two sources: `app_notify` and the refresh shortcut. A second
-  // message restarts the dismissal instead of letting the first timer clear it.
-  const toastTimer = useRef<number | null>(null);
-  const showToast = useCallback((message: string) => {
-    setToast(message);
-    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => {
-      toastTimer.current = null;
-      setToast(null);
-    }, 4000);
-  }, []);
+  // Ephemeral notification banner. It lives in the store rather than here so the
+  // places that need it are not limited to the ones that render inside the shell:
+  // a card editor failure happens in a root overlay above this component, and
+  // `alert()` was the only way it used to be able to say anything.
+  const toast = useToast();
 
   useEffect(() => {
     setMobile(isMobileApp());
@@ -124,7 +117,7 @@ export default function Home() {
           return;
         case "add": {
           if (state.order.length >= MAX_OPEN_TABS) {
-            showToast("Too many tabs open — close one first.");
+            notify("Too many tabs open — close one first.");
             return;
           }
           if (placement.autoPin) {
@@ -135,7 +128,7 @@ export default function Home() {
         }
       }
     },
-    [titleFor, showToast]
+    [titleFor]
   );
 
   // Check workspace state on mount
@@ -236,7 +229,7 @@ export default function Home() {
           break;
         }
         case "notify":
-          showToast(action.message);
+          notify(action.message);
           break;
         case "invoke-action": {
           // The response half of `ui_invoke_action`. The tool is parked on
@@ -270,7 +263,7 @@ export default function Home() {
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [showToast, openTab]);
+  }, [openTab]);
 
   // Pairing: ask the PC owner about each request, one at a time. This dialog is
   // the only way a device is ever approved — no bearer secret can replace the
@@ -314,6 +307,15 @@ export default function Home() {
   // re-indenting the shell.
   useActiveTabSource(activeTab);
 
+  // The address names what is on screen: the focused tab and, when the page (or
+  // the card editor above it) publishes one, its subject — `?tab=cards&dataset=…
+  // &card=…`. Nothing else reads it but the editor's own restore on boot and its
+  // `popstate` listener, so the static export needs no routes for it.
+  const subject = useTabSubject(activeTab);
+  useEffect(() => {
+    applySubjectToUrl(activeTab, subject);
+  }, [activeTab, subject]);
+
   // F5 / Ctrl+R / Cmd+R re-read the page on screen. `preventDefault` is not
   // politeness: a WebView-level reload remounts every page and destroys state
   // the app deliberately keeps alive — including dictation answers, which are
@@ -323,12 +325,12 @@ export default function Home() {
   const refreshActivePageWithToast = useCallback(() => {
     void refreshActivePage("manual").then((outcome) => {
       if (outcome.status === "blocked") {
-        showToast("Not refreshed: this page has unsaved edits.");
+        notify("Not refreshed: this page has unsaved edits.");
       } else if (outcome.status === "none") {
-        showToast("Nothing to refresh on this page.");
+        notify("Nothing to refresh on this page.");
       }
     });
-  }, [showToast]);
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -443,10 +445,27 @@ export default function Home() {
           dock for one commit and its effects would call desktop-only commands. */}
       {booted && !mobile && <AgentDock onNavigate={(tab) => openTab(tab as TabId)} />}
 
-      {/* Agent `app_notify` toast */}
+      {/* The app's one notice banner, fed by `lib/feedback/toast`: the shell
+          renders it, anyone can post to it — including the card editor, which is
+          a root overlay above this component and used to have only `alert()`. */}
       {toast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[9998] px-4 py-2.5 rounded-lg bg-bg-card border border-border-default text-sm text-text-primary shadow-lg max-w-[80%] break-words">
-          {toast}
+        <div
+          role="status"
+          className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-[9998] flex max-w-[80%] items-start gap-2 rounded-lg border px-4 py-2.5 text-sm shadow-lg break-words ${
+            toast.tone === "error"
+              ? "border-error-text/50 bg-error-bg text-error-text"
+              : "border-border-default bg-bg-card text-text-primary"
+          }`}
+        >
+          <span>{toast.message}</span>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            onClick={dismissToast}
+            className="shrink-0 text-text-secondary hover:text-text-primary"
+          >
+            <X className="h-4 w-4" />
+          </button>
         </div>
       )}
 

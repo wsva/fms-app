@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2, Plus, Search, Wand2, X } from "lucide-react";
 import { useCardEditor } from "./CardEditorContext";
+import { notify, notifyError } from "@/lib/feedback/toast";
 import { invoke } from "@tauri-apps/api/core";
 import type { Card } from "@/lib/types";
 import { PROMPT_TEMPLATES } from "@/lib/llm/prompt-templates";
@@ -197,7 +198,10 @@ export default function CardContextMenu() {
       // Get the first available dataset
       const datasets = await invoke<any[]>("card_dataset_list");
       if (datasets.length === 0) {
-        alert("No card datasets found. Please create one first.");
+        // The banner rather than `alert()`: this menu is reached from a text
+        // selection anywhere, and a blocking dialog that cannot be styled or
+        // read on a phone is the worst way to say "nothing to add to yet".
+        notify("No card dataset yet — create one on the Cards page first.");
         return;
       }
 
@@ -226,7 +230,7 @@ export default function CardContextMenu() {
       );
     } catch (err) {
       console.error("Failed to open card editor:", err);
-      alert(`Failed to open card editor: ${err}`);
+      notifyError(`Failed to open the card editor: ${err}`);
     }
   }
 

@@ -25,6 +25,12 @@ export interface UiContextPatch {
   active_tab?: string | null;
   active_dataset_uuid?: string | null;
   active_media_uuid?: string | null;
+  /**
+   * The card on screen, while the card editor overlay is open. The editor is a
+   * root above every tab rather than a page of its own, so without this key an
+   * agent could not tell "this card" from "the deck the list happens to show".
+   */
+  active_card_uuid?: string | null;
   /** Index of the cue the user is on within the open media item. */
   cue_index?: number | null;
   /** Highlighted text, when the page has a meaningful selection. */

@@ -22,12 +22,19 @@ type Props = {
   media: CardMedia[];
   /** Rows whose bytes are missing on this device (present === false), by handle. */
   missingHandles: Set<string>;
+  /**
+   * Rows that are written to the table but whose `{{handle}}` token sits in no
+   * field — attached, not placed. A media write is durable the moment it
+   * happens; the text token that points at it only survives if the card is
+   * saved. Naming the gap here is what keeps that drift from reading as a bug.
+   */
+  unplacedHandles: Set<string>;
   onPlace: (handle: string) => void;
   onMove: (uuid: string, dir: -1 | 1) => void;
   onDelete: (uuid: string) => void;
 };
 
-export default function MediaLibrary({ media, missingHandles, onPlace, onMove, onDelete }: Props) {
+export default function MediaLibrary({ media, missingHandles, unplacedHandles, onPlace, onMove, onDelete }: Props) {
   if (media.length === 0) {
     return (
       <div className="px-3 py-4 text-sm text-text-tertiary">
@@ -41,6 +48,7 @@ export default function MediaLibrary({ media, missingHandles, onPlace, onMove, o
       {media.map((m, i) => {
         const Icon = KIND_ICON[m.kind] ?? FileQuestion;
         const missing = missingHandles.has(m.handle);
+        const unplaced = unplacedHandles.has(m.handle);
         return (
           <div
             key={m.uuid}
@@ -59,13 +67,21 @@ export default function MediaLibrary({ media, missingHandles, onPlace, onMove, o
                   missing
                 </span>
               )}
+              {unplaced && !missing && (
+                <span
+                  className="text-[10px] text-warning-text shrink-0"
+                  title="saved with the card, but no field holds its {{handle}} yet"
+                >
+                  not placed
+                </span>
+              )}
             </div>
             {m.title && <div className="text-xs text-text-secondary truncate">{m.title}</div>}
             <div className="flex items-center gap-1">
               <button
                 type="button"
                 onClick={() => onPlace(m.handle)}
-                title="Place in the focused field"
+                title={unplaced ? "Place this attachment in the target field" : "Move this attachment to the target field"}
                 className="p-1.5 rounded hover:bg-bg-hover text-text-secondary"
               >
                 <CornerDownLeft size={14} />

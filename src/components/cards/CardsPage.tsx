@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -54,8 +54,10 @@ import {
   ToolbarMenuItem,
 } from "@/components/ui/toolbar";
 import { stripAnchors, hasAnchor } from "@/lib/media/anchors";
+import { notify } from "@/lib/feedback/toast";
+import { setTabSubject } from "@/lib/shell/tab-subject";
 import MediaField from "./MediaField";
-import { useCardEditor } from "./CardEditorContext";
+import { useCardEditor, type CardQueue } from "./CardEditorContext";
 import { oneOf, reqStr, optStr, useAgentActions } from "@/lib/agent/ui-actions";
 
 type TabId = "cards" | "review" | "tags";
@@ -107,7 +109,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   const [menuOpen, setMenuOpen] = useState(false);
 
   // Use global card editor
-  const { openCardEditor, isOpen: editorOpen } = useCardEditor();
+  const { openCardEditor, refreshCardQueue, isOpen: editorOpen } = useCardEditor();
 
   // Review state
   const [reviewCard, setReviewCard] = useState<Card | null>(null);
@@ -245,6 +247,63 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
     refresh: handleRefresh,
     events: ["dataset-list-changed"],
   });
+
+  // ---- the editor's walk over this list ----
+  //
+  // The card editor steps prev/next through the list this page already has: the
+  // same order (`updated_at DESC`), the same filter and keyword, so an arrow key
+  // moves to the row the user can see under the one they opened. It carries uuids
+  // rather than cards so a step re-reads the row from disk instead of replaying a
+  // snapshot the save has already made stale.
+  const queueUuids = useMemo(() => cards.map((c) => c.uuid), [cards]);
+
+  const loadMorePage = useCallback(
+    (dir: -1 | 1) => {
+      // Clamped: a page past the end would load nothing and strand the step that
+      // asked for it. The provider notices an unchanged list and stops there.
+      setPage((p) => {
+        const lastPage = Math.max(0, Math.ceil(totalCards / pageSize) - 1);
+        return Math.min(Math.max(0, p + dir), lastPage);
+      });
+    },
+    [totalCards]
+  );
+
+  const queueFor = useCallback(
+    (index: number): CardQueue => ({
+      uuids: queueUuids,
+      index,
+      loadMore: loadMorePage,
+    }),
+    [queueUuids, loadMorePage]
+  );
+
+  // Keep the walk current under the editor: a save re-reads the list, a filter
+  // change replaces it, a page turn extends it. The provider ignores this unless
+  // the session was opened *from* a list, so a card reached through the wiki's
+  // text menu never grows arrows into a deck the user is not looking at.
+  useEffect(() => {
+    if (!editorOpen || !selectedDatasetUuid || queueUuids.length === 0) return;
+    refreshCardQueue({ uuids: queueUuids, index: 0, loadMore: loadMorePage });
+  }, [editorOpen, selectedDatasetUuid, queueUuids, loadMorePage, refreshCardQueue]);
+
+  // Which dataset this tab is showing, for the chip and the address bar. Published
+  // only while the editor is closed: the card on screen is the more specific
+  // answer, and this page re-renders under the overlay on every re-read.
+  useEffect(() => {
+    if (editorOpen) return;
+    if (!selectedDatasetUuid) {
+      setTabSubject("cards", null);
+      return;
+    }
+    const name = datasets.find((d) => d.info.uuid === selectedDatasetUuid)?.info.name;
+    if (!name) return;
+    setTabSubject("cards", {
+      kind: "dataset",
+      datasetUuid: selectedDatasetUuid,
+      datasetName: name,
+    });
+  }, [editorOpen, selectedDatasetUuid, datasets]);
 
   // Load tags when dataset changes
   const loadTags = useCallback(async () => {
@@ -582,7 +641,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
     setRebuildingIndex(true);
     try {
       const count = await invoke<number>("card_fts_rebuild", { location: null });
-      alert(`Search index rebuilt! ${count} cards indexed.`);
+      notify(`Search index rebuilt. ${count} cards indexed.`);
     } catch (e) {
       setError(`Failed to rebuild index: ${e}`);
     } finally {
@@ -993,9 +1052,30 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
                       cardUuid: result.card_uuid,
                     })
                       .then((card) => {
-                        openCardEditor(result.dataset_uuid, card, () => {
-                          handleGlobalSearch();
-                        }, undefined, result.dataset_name);
+                        // The walk stays inside the deck this hit came from: a
+                        // cross-dataset result page mixes decks, and an arrow into
+                        // another one would show a card whose dataset is not the one
+                        // the editor is rooted on.
+                        const uuids = globalSearchResults
+                          .filter((r) => r.dataset_uuid === result.dataset_uuid)
+                          .map((r) => r.card_uuid);
+                        openCardEditor(
+                          result.dataset_uuid,
+                          card,
+                          () => {
+                            handleGlobalSearch();
+                          },
+                          undefined,
+                          result.dataset_name,
+                          undefined,
+                          {
+                            uuids,
+                            index: Math.max(0, uuids.indexOf(result.card_uuid)),
+                            // A search page is whatever the query returned; there is
+                            // no further page to ask for, so the walk ends at its ends.
+                            loadMore: () => {},
+                          }
+                        );
                       })
                       .catch((e) => setError(`Failed to load card: ${e}`));
                   }}
@@ -1093,13 +1173,23 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
                 </p>
               ) : (
                 <div className="space-y-1">
-                  {cards.map((card) => (
+                  {cards.map((card, i) => (
                     <div
                       key={card.uuid}
                       className={`w-full flex items-center gap-2 p-2 rounded-lg hover:bg-mid-gray/10 cursor-pointer sm:gap-3 sm:p-3 ${familiarityColor(card.familiarity)}`}
                       onClick={() => {
                         const selectedDataset = datasets.find((ds) => ds.info.uuid === selectedDatasetUuid);
-                        openCardEditor(selectedDatasetUuid, card, () => loadCards(), undefined, selectedDataset?.info.name);
+                        // The queue is this page's own order, so prev/next walk the
+                        // rows the reader just scrolled past.
+                        openCardEditor(
+                          selectedDatasetUuid,
+                          card,
+                          () => loadCards(),
+                          undefined,
+                          selectedDataset?.info.name,
+                          undefined,
+                          queueFor(i)
+                        );
                       }}
                     >
                       <div className="flex-1 min-w-0">

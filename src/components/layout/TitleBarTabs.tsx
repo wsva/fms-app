@@ -15,6 +15,7 @@
 import { Pin, Plus, X } from "lucide-react";
 import { TAB_DEFS, type TabId } from "@/components/layout/Sidebar";
 import { MULTI_INSTANCE, type TabInstance } from "@/lib/shell/tabs";
+import { subjectLabel, useTabSubject } from "@/lib/shell/tab-subject";
 
 interface TitleBarTabsProps {
   order: TabInstance[];
@@ -35,6 +36,102 @@ function instanceNumber(instanceId: string): number {
   return Number.isFinite(n) ? n : 1;
 }
 
+/**
+ * One chip. A component rather than inline JSX because its label now comes from
+ * the subject store, and a store read needs a hook of its own — a `map` callback
+ * cannot call one. A tab names a page (`inst.title`) until something inside it
+ * is worth naming better: the dataset a Cards page has open, the card the editor
+ * overlay is showing. Then the chip says that and keeps the page title in the
+ * tooltip, so "Cards" becomes "der Lernende · FmS cards — Cards".
+ */
+function TabChip({
+  inst,
+  focused,
+  closable,
+  onFocus,
+  onClose,
+  onTogglePin,
+}: {
+  inst: TabInstance;
+  focused: boolean;
+  closable: boolean;
+  onFocus: (instanceId: string) => void;
+  onClose: (instanceId: string) => void;
+  onTogglePin: (instanceId: string) => void;
+}) {
+  const def = TAB_DEFS[inst.tabId];
+  const Icon = def?.icon;
+  const subject = useTabSubject(inst.tabId);
+  const named = subject ? subjectLabel(subject) : null;
+  const n = instanceNumber(inst.instanceId);
+  const base = n > 1 ? `${inst.title} (${n})` : inst.title;
+  const label = named ?? base;
+  const tip = named ? `${named} — ${base}` : base;
+
+  return (
+    <div
+      role="tab"
+      aria-selected={focused}
+      aria-label={tip}
+      title={tip}
+      data-tauri-drag-region="false"
+      onClick={() => onFocus(inst.instanceId)}
+      // Middle-click closes, the desktop tab convention.
+      onMouseDown={(e) => {
+        if (e.button === 1) {
+          e.preventDefault();
+          onClose(inst.instanceId);
+        }
+      }}
+      className={`group flex shrink-0 cursor-pointer items-center gap-1.5 border-r border-border-default pl-2.5 pr-1.5 text-[12px] select-none ${
+        focused
+          ? "bg-bg-body text-text-primary"
+          : "text-text-secondary hover:bg-bg-hover"
+      }`}
+    >
+      {Icon && <Icon width={13} height={13} className="shrink-0" />}
+      <span className="max-w-[9rem] truncate">{label}</span>
+
+      {/* Pin ("stick") toggle — protects the tab from being replaced. */}
+      <button
+        type="button"
+        aria-pressed={inst.pinned}
+        title={inst.pinned ? "Unpin tab" : "Pin tab (keep it open)"}
+        data-tauri-drag-region="false"
+        onClick={(e) => {
+          e.stopPropagation();
+          onTogglePin(inst.instanceId);
+        }}
+        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-sm transition-colors ${
+          inst.pinned
+            ? "text-accent hover:bg-bg-hover"
+            : "text-text-tertiary opacity-0 group-hover:opacity-100 hover:bg-bg-hover hover:text-text-primary focus:opacity-100"
+        }`}
+      >
+        <Pin size={12} strokeWidth={1.75} fill={inst.pinned ? "currentColor" : "none"} />
+      </button>
+
+      {/* Close — hidden when only one tab is left (the shell never shows an
+          empty content area). */}
+      {closable && (
+        <button
+          type="button"
+          aria-label={`Close ${label}`}
+          title="Close tab"
+          data-tauri-drag-region="false"
+          onClick={(e) => {
+            e.stopPropagation();
+            onClose(inst.instanceId);
+          }}
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-text-tertiary opacity-0 group-hover:opacity-100 hover:bg-error-bg hover:text-error-text focus:opacity-100"
+        >
+          <X size={12} strokeWidth={1.75} />
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function TitleBarTabs({
   order,
   focusedId,
@@ -51,75 +148,17 @@ export default function TitleBarTabs({
       role="tablist"
       aria-label="Open pages"
     >
-      {order.map((inst) => {
-        const def = TAB_DEFS[inst.tabId];
-        const Icon = def?.icon;
-        const focused = inst.instanceId === focusedId;
-        const n = instanceNumber(inst.instanceId);
-        const label = n > 1 ? `${inst.title} (${n})` : inst.title;
-        return (
-          <div
-            key={inst.instanceId}
-            role="tab"
-            aria-selected={focused}
-            title={label}
-            data-tauri-drag-region="false"
-            onClick={() => onFocus(inst.instanceId)}
-            // Middle-click closes, the desktop tab convention.
-            onMouseDown={(e) => {
-              if (e.button === 1) {
-                e.preventDefault();
-                onClose(inst.instanceId);
-              }
-            }}
-            className={`group flex shrink-0 cursor-pointer items-center gap-1.5 border-r border-border-default pl-2.5 pr-1.5 text-[12px] select-none ${
-              focused
-                ? "bg-bg-body text-text-primary"
-                : "text-text-secondary hover:bg-bg-hover"
-            }`}
-          >
-            {Icon && <Icon width={13} height={13} className="shrink-0" />}
-            <span className="max-w-[9rem] truncate">{label}</span>
-
-            {/* Pin ("stick") toggle — protects the tab from being replaced. */}
-            <button
-              type="button"
-              aria-pressed={inst.pinned}
-              title={inst.pinned ? "Unpin tab" : "Pin tab (keep it open)"}
-              data-tauri-drag-region="false"
-              onClick={(e) => {
-                e.stopPropagation();
-                onTogglePin(inst.instanceId);
-              }}
-              className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-sm transition-colors ${
-                inst.pinned
-                  ? "text-accent hover:bg-bg-hover"
-                  : "text-text-tertiary opacity-0 group-hover:opacity-100 hover:bg-bg-hover hover:text-text-primary focus:opacity-100"
-              }`}
-            >
-              <Pin size={12} strokeWidth={1.75} fill={inst.pinned ? "currentColor" : "none"} />
-            </button>
-
-            {/* Close — hidden when only one tab is left (the shell never shows an
-                empty content area). */}
-            {order.length > 1 && (
-              <button
-                type="button"
-                aria-label={`Close ${label}`}
-                title="Close tab"
-                data-tauri-drag-region="false"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onClose(inst.instanceId);
-                }}
-                className="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-text-tertiary opacity-0 group-hover:opacity-100 hover:bg-error-bg hover:text-error-text focus:opacity-100"
-              >
-                <X size={12} strokeWidth={1.75} />
-              </button>
-            )}
-          </div>
-        );
-      })}
+      {order.map((inst) => (
+        <TabChip
+          key={inst.instanceId}
+          inst={inst}
+          focused={inst.instanceId === focusedId}
+          closable={order.length > 1}
+          onFocus={onFocus}
+          onClose={onClose}
+          onTogglePin={onTogglePin}
+        />
+      ))}
 
       {canSpawn && (
         <button

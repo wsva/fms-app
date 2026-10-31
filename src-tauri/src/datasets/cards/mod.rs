@@ -1236,13 +1236,19 @@ pub async fn card_save(
         Some(compute_question_hash(&strip_media_anchors(&card.question)))
     };
 
+    // `familiarity` is written on INSERT only. The standing a reader sees is
+    // `review::FAMILIARITY` — `COALESCE(card_review.familiarity, card.familiarity)`
+    // — so the column is the seed for a card nobody has rated and the fallback for
+    // one with no review row. Overwriting it here would let a plain text edit
+    // promote one user's practice state into the content row and ship it as a
+    // content change; ratings belong to `card_test_submit` alone.
     conn.execute(
         "INSERT INTO card (uuid, question, suggestion, answer, note, familiarity, \
          question_hash, source_card_uuid, source_dataset_uuid, deleted_at, created_at, updated_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11)
          ON CONFLICT(uuid) DO UPDATE SET
             question = ?2, suggestion = ?3, answer = ?4, note = ?5,
-            familiarity = ?6, question_hash = ?7, source_card_uuid = ?8,
+            question_hash = ?7, source_card_uuid = ?8,
             source_dataset_uuid = ?9, updated_at = ?11",
         rusqlite::params![
             uuid,

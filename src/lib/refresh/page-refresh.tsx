@@ -92,6 +92,37 @@ const MIN_RESUME_INTERVAL_MS = 2_000;
 const EVENT_DEBOUNCE_MS = 400;
 
 /**
+ * The guard a root overlay installs while it is open — see `setOverlayGuard`.
+ * Held beside `currentTab` rather than in the registry because an overlay is not
+ * a tab: the card editor sits above whichever tab the shell is showing (it is
+ * reached from the wiki's text-selection menu as much as from the Cards list),
+ * so it belongs to no registration and to *all* of them at once.
+ */
+let overlayGuard: (() => boolean) | null = null;
+
+/**
+ * Let an overlay over the shell participate in the dirty-page policy.
+ *
+ * `openTab` reads `canRefreshInstance(focused)` to decide whether to replace the
+ * focused tab, and `refreshActivePage` reads it to decide whether F5 is safe.
+ * Both ask the *page* — but a page whose editor lives above it in a root overlay
+ * is not where the unsaved work is. An overlay that can lose work installs a
+ * predicate here; every answer then ANDs it in, so a dirty editor over a clean
+ * tab blocks the replace and the refresh like a dirty tab would.
+ *
+ * Pass `null` on unmount. The predicate must read through a ref: it is called
+ * from event handlers, long after the render that installed it.
+ */
+export function setOverlayGuard(fn: (() => boolean) | null): void {
+  overlayGuard = fn;
+}
+
+/** Is whatever is on screen safe to re-read? False only when an overlay says so. */
+function overlayIsClean(): boolean {
+  return overlayGuard ? overlayGuard() : true;
+}
+
+/**
  * Tell the module which tab the shell is showing. Called by the shell during
  * render — before its page children render — so a page resolving `active` in
  * the same pass sees the value that is about to be committed.
@@ -125,6 +156,16 @@ function subscribeTab(notify: () => void): () => void {
 export function useIsActiveTab(tab: string): boolean {
   const getSnapshot = useCallback(() => currentTab === tab, [tab]);
   return useSyncExternalStore(subscribeTab, getSnapshot, () => false);
+}
+
+/**
+ * Which tab the shell is showing, for a caller outside React. The card editor is
+ * a root overlay and has to know what it is drawn over — both to decorate the
+ * right tab chip and to answer the agent's "which card is on screen" against the
+ * page it is actually on.
+ */
+export function getActiveTabId(): string | null {
+  return currentTab;
 }
 
 /**
@@ -256,6 +297,8 @@ export function usePageRefresh(tab: string, options: PageRefreshOptions): void {
  */
 export async function refreshActivePage(reason: RefreshReason): Promise<RefreshOutcome> {
   if (!currentTab) return { status: "none", tab: null };
+  // An overlay's unsaved work outranks the page beneath it, whatever asked.
+  if (!overlayIsClean()) return { status: "blocked", tab: currentTab };
   const registration = registry.get(currentTab);
   if (!registration) return { status: "none", tab: currentTab };
   return await registration.run(reason);
@@ -268,8 +311,13 @@ export async function refreshActivePage(reason: RefreshReason): Promise<RefreshO
  * tab: a `false` here means "auto-pin, do not unmount" (docs/design/tab-strip.md
  * §4.4). `id` is the same key `usePageRefresh` registered under — the focused
  * instance id, which equals the `TabId` for every singleton page.
+ *
+ * A root overlay over the instance is consulted as well: an open card editor
+ * with unsaved text answers `false` for *whichever* tab it is drawn on, which is
+ * what auto-pins that tab instead of replacing it.
  */
 export function canRefreshInstance(id: string): boolean {
+  if (!overlayIsClean()) return false;
   const registration = registry.get(id);
   if (!registration) return true;
   return registration.canRefresh();
