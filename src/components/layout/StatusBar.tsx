@@ -230,20 +230,28 @@ function TaskItem({
   onNavigate?: StatusBarNavigate;
 }) {
   const shown = tasks.slice(0, MENU_TASKS);
+  const count = tasks.length;
+  // The visible text is the label itself (`content` defaults to it), with the
+  // count written into it rather than into a pill beside it: the pill stated
+  // the same number a second time. Tinted only while something is actually
+  // owed, because the chip is always in the bar now — the tint is what
+  // separates "0" from "nothing to see here".
   return (
     <StatusItem
-      label={`${tasks.length} open agent task${tasks.length === 1 ? "" : "s"}`}
-      title="Agent tasks waiting on you"
-      align="start"
-      icon={ListTodo}
-      content={<span>Tasks</span>}
-      trailing={
-        <span className="min-w-[15px] rounded-full bg-accent-bg px-1 text-center text-[10px] font-semibold leading-[15px] text-white">
-          {tasks.length}
-        </span>
+      label={`Tasks - ${count}`}
+      title={
+        count === 0
+          ? "No agent tasks waiting on you"
+          : `${count} agent task${count === 1 ? "" : "s"} waiting on you`
       }
+      align="start"
+      active={count > 0}
+      icon={ListTodo}
     >
       <StatusMenuHeading>Waiting on you</StatusMenuHeading>
+      {shown.length === 0 && (
+        <StatusMenuBlock>Nothing waiting on you.</StatusMenuBlock>
+      )}
       {shown.map((t) => {
         // A capture is opened, not cleared: it names a card that has not been
         // written yet, so the button says so and saving that card is what
@@ -502,16 +510,17 @@ export default function StatusBar({ onNavigate }: { onNavigate?: StatusBarNaviga
         {models.length > 0 && (
           <ModelsItem models={models} onAction={runAction} onNavigate={onNavigate} />
         )}
-        {tasks.length > 0 && (
-          <TaskItem
-            tasks={tasks}
-            busy={taskBusy}
-            error={taskError}
-            onComplete={complete}
-            onDismiss={dismiss}
-            onNavigate={onNavigate}
-          />
-        )}
+        {/* Always in the bar, count and all: the chip is how the bar says
+            whether anything is owed, and a chip that vanished at zero left the
+            learner unable to tell "no tasks" from "no such surface". */}
+        <TaskItem
+          tasks={tasks}
+          busy={taskBusy}
+          error={taskError}
+          onComplete={complete}
+          onDismiss={dismiss}
+          onNavigate={onNavigate}
+        />
         <SyncItem
           status={status}
           role={role}
