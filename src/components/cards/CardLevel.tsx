@@ -77,7 +77,10 @@ export default function CardLevel({ card, media, datasetPath, onEdit }: Props) {
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto">
-      <div className="mx-auto w-full max-w-3xl px-4 py-5 sm:px-6 sm:py-8">
+      {/* Full width, like the deck's own list under it: this is a page, not a
+          modal, and a column narrower than the rows the reader just left would
+          re-teach them the card's geometry for nothing. */}
+      <div className="w-full px-4 py-5 sm:px-6 sm:py-8">
         <CardFields binding={binding} />
 
         {/* What a list row can only imply: the deck's own familiarity score and
