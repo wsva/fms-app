@@ -1,10 +1,14 @@
 // ---------------------------------------------------------------------------
 // The agent TODO surface, frontend side.
 //
-// One place for the `todo_*` commands and the `Todo` shape, because two
+// One place for the `todo_*` commands and the `AgentTask` shape, because two
 // consumers now read the same ledger: the Tasks page (the full list, reachable
 // on the phone) and the status bar (the count and the top of the list, desktop).
 // Before that split each spelled `invoke("todo_list")` out on its own.
+//
+// Note the two nouns: `todo` is only the storage/API identifier (`agent_todo`,
+// `todo_*` commands and MCP tools), while everything the frontend names says
+// task. The vocabulary table in AGENTS.md declares that split.
 // ---------------------------------------------------------------------------
 
 import { invoke } from "@tauri-apps/api/core";

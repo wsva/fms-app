@@ -334,9 +334,18 @@ reads.
 | The spelled-out form scoring reads (`normalized_content`) | **reference** |
 | The seconds a text occupies inside one recording | **span** |
 | A text's standard audio | **clip** |
+| A unit of work an agent or a workflow `human` step leaves the learner | **task** |
 
 "Passage" survives only as ordinary English for a unit of prose in the Books
 surfaces, which have their own precise nouns (chapter, paragraph, sentence).
+
+**One declared layer split:** a **task** is what the UI copy, the design docs
+and the frontend call it ([TasksPage.tsx](./src/components/tools/TasksPage.tsx),
+`AgentTask`, the `tasks` tab id). `todo` is not a second name for it — it is
+only the identifier the storage and API layers own (`src-tauri/src/todo.rs`, the
+`agent_todo` table, the `todo_*` commands and MCP tools), which are published
+names worth keeping stable. Inside frontend code say task throughout; do not
+restate the Rust shape as a second local `Todo` interface.
 
 ### Rust Backend
 
