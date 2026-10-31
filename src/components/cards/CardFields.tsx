@@ -5,10 +5,12 @@
 //
 // `EditableField` is the presentational half of a single field; this is the
 // quartet — question, answer, suggestion, note, in reading order, with the rule
-// under the question that separates the prompt from the prose. It exists
-// because the overlay is not the only place a card is read: the Cards page opens
-// one inside its own breadcrumb level (`CardLevel`), with the page's toolbar
-// rather than the overlay's.
+// under the question that separates the prompt from the prose. It is the form
+// half of a card: labels, a boxed surface per field, a pencil in each header.
+// The other half is the reader's — the Cards page's breadcrumb level and the
+// review panel both draw a card without a single label, at display size, and
+// neither goes through this file. That split is deliberate: a card being edited
+// and a card being read are two different objects, and a form is not a page.
 //
 // It owns geometry, not state. Values, which fields are open, dirtiness, the
 // draft, save and the exit guard all stay with the host — a field that owned its
@@ -16,10 +18,8 @@
 // edit are the same mechanism seen from two ends.
 //
 // The seam is `CardFieldBinding`: everything the leaf reads and every turn it
-// hands back, with nothing about how the host keeps any of it. The overlay
-// produces one from its own state in a dozen lines (`CardEditorContext`); the
-// card level produces a read-only one, and neither copy can drift from the
-// other's rendering because there is only one rendering.
+// hands back, with nothing about how the host keeps any of it. `CardEditorContext`
+// produces one from the overlay's own state in a dozen lines.
 // ---------------------------------------------------------------------------
 
 import { Fragment } from "react";
@@ -52,9 +52,6 @@ export type CardFieldBinding = {
   dragOver: boolean;
   /** A media operation is in flight: a blur must not close the field under it. */
   mediaBusy: boolean;
-  /** Does clicking a field's text open it? Default true. A read-only host says
-   *  false — there, a click selects text and the pencil is the way in. */
-  clickToEdit?: boolean;
   onFieldChange: (field: CardMediaField, value: string) => void;
   /** Open one field for editing. The host focuses it. */
   onStartEdit: (field: CardMediaField) => void;
@@ -140,7 +137,6 @@ export default function CardFields({ binding }: { binding: CardFieldBinding }) {
             attachTarget={binding.attachField === field}
             dropTarget={binding.dragOver && binding.attachField === field}
             canAttach={canAttach}
-            clickToEdit={binding.clickToEdit ?? true}
             keepEditing={binding.mediaBusy}
             onChange={(value) => binding.onFieldChange(field, value)}
             onStartEdit={() => binding.onStartEdit(field)}

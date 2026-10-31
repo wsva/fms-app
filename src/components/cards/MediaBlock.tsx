@@ -13,9 +13,17 @@
 //! `autoplay` flag) fires when `reveal` flips true — the moment a review card
 //! is turned over — and plays through the *mounted* element so the native
 //! controls stay in sync and the one-at-a-time rule holds.
+//!
+//! `zoomable` is the reading host's option: a diagram on a card can be worth a
+//! screen. The editor leaves it off, because there a click on the field already
+//! means "edit this" and two meanings for one click is one too many.
+//!
+//! Images and video are block-level and `mx-auto`: in a prompt they sit centred
+//! under centred text, and in prose a figure belongs on the page's axis, not
+//! flush against the answer's left edge while the heading above it is centred.
 
-import { useEffect, useRef } from "react";
-import { FileQuestion } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { FileQuestion, X } from "lucide-react";
 import type { CardMedia } from "@/lib/types";
 import { resolveSrc } from "@/lib/media/anchors";
 import { useMediaPlay } from "@/hooks/useMediaPlay";
@@ -31,12 +39,21 @@ type Props = {
   datasetPath: string;
   /** Whether the card is currently revealed; gates the `play_on: reveal` fire. */
   reveal?: boolean;
+  /** Let a click on an image open it at screen size (reading hosts only). */
+  zoomable?: boolean;
 };
 
-export default function MediaBlock({ media, handle, missing, datasetPath, reveal = true }: Props) {
+export default function MediaBlock({ media, handle, missing, datasetPath, reveal = true, zoomable = false }: Props) {
   const { manage } = useMediaPlay();
   const audioRef = useRef<HTMLAudioElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  // The zoomed image owns the keyboard while it is up: the backdrop takes focus
+  // and swallows Escape, so closing the picture never also leaves the card.
+  const zoomRef = useRef<HTMLDivElement>(null);
+  const [zoomed, setZoomed] = useState(false);
+  useEffect(() => {
+    if (zoomed) zoomRef.current?.focus();
+  }, [zoomed]);
   // Register whichever mounted element exists with the shared manager, so a
   // second clip pauses this one. Refs are stable across renders of the same
   // kind, so this runs on kind change only.
@@ -82,14 +99,58 @@ export default function MediaBlock({ media, handle, missing, datasetPath, reveal
 
   if (kind === "image") {
     return (
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={src}
-        alt={media.title || handle}
-        title={media.title || undefined}
-        className="max-w-full rounded-md"
-        style={{ height: "auto" }}
-      />
+      <>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={src}
+          alt={media.title || handle}
+          title={media.title || undefined}
+          onClick={
+            zoomable
+              ? (e) => {
+                  e.stopPropagation();
+                  setZoomed(true);
+                }
+              : undefined
+          }
+          className={`block max-w-full rounded-md mx-auto ${zoomable ? "cursor-zoom-in" : ""}`}
+          style={{ height: "auto" }}
+        />
+        {zoomed && (
+          <div
+            ref={zoomRef}
+            tabIndex={-1}
+            role="dialog"
+            aria-modal="true"
+            aria-label={media.title || handle}
+            onClick={() => setZoomed(false)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.stopPropagation();
+                e.preventDefault();
+                setZoomed(false);
+              }
+            }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6 outline-none"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={src}
+              alt={media.title || handle}
+              className="max-h-full max-w-full rounded-md object-contain"
+            />
+            <button
+              type="button"
+              onClick={() => setZoomed(false)}
+              title="Close"
+              aria-label="Close"
+              className="absolute top-4 right-4 flex h-9 w-9 items-center justify-center rounded-md bg-black/50 text-white hover:bg-black/70"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        )}
+      </>
     );
   }
 
@@ -112,7 +173,7 @@ export default function MediaBlock({ media, handle, missing, datasetPath, reveal
       src={src}
       controls
       playsInline
-      className="max-w-full rounded-md"
+      className="block max-w-full rounded-md mx-auto"
       title={media.title || handle}
     />
   );

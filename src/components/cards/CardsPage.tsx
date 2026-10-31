@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { useIsActiveTab, usePageRefresh } from "@/lib/refresh/page-refresh";
@@ -18,11 +17,6 @@ import {
   ChevronLeft,
   ChevronRight,
   FlipHorizontal,
-  CircleHelp,
-  Frown,
-  Meh,
-  Smile,
-  Laugh,
   SkipForward,
   Check,
   X,
@@ -61,6 +55,7 @@ import { setTabSubject, cardSubjectLabel } from "@/lib/shell/tab-subject";
 import MediaField from "./MediaField";
 import { useCardEditor, type CardQueue } from "./CardEditorContext";
 import CardLevel from "./CardLevel";
+import CardGradeScale from "./CardGradeScale";
 import { oneOf, reqStr, optStr, useAgentActions } from "@/lib/agent/ui-actions";
 
 type TabId = "cards" | "review" | "tags";
@@ -128,6 +123,9 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   // arrows walk the list the reader just scrolled rather than a second order.
   const [level, setLevel] = useState<{ card: Card; index: number } | null>(null);
   const [levelMedia, setLevelMedia] = useState<CardMedia[]>([]);
+  // A rating is a write in flight: the scale and the `1`–`5` keys must not fire
+  // twice over a card that is already being graded.
+  const [ratingLevel, setRatingLevel] = useState(false);
 
   // What an agent (and the address bar) is looking at: the deck, and the card
   // inside it when one is open. Published only while the overlay is down — it
@@ -389,6 +387,84 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
       queueFor(level.index)
     );
   }, [level, selectedDatasetUuid, datasets, openCardEditor, loadCards, queueFor]);
+
+  // Grading from the level, with the deck's own scheduler: `card_test_submit` is
+  // what the review page calls, so a card read here counts exactly as much as
+  // one reviewed there — familiarity, interval and next-review date alike. The
+  // card on screen is replaced by the re-read row (the list keeps its own copy
+  // so the deck shows the new score on the way back), and the level stays put:
+  // this page is browsing, not a queue that owes the reader the next card. The
+  // stored review comes back so the level can say what the grade did and when
+  // the card is due again; `null` means nothing was written and nothing should
+  // be announced.
+  const rateLevel = useCallback(
+    async (quality: number): Promise<CardReview | null> => {
+      if (!level || !selectedDatasetUuid || ratingLevel) return null;
+      const { uuid } = level.card;
+      setRatingLevel(true);
+      try {
+        const result = await invoke<CardReview>("card_test_submit", {
+          datasetUuid: selectedDatasetUuid,
+          cardUuid: uuid,
+          quality,
+        });
+        setLevel((cur) =>
+          cur && cur.card.uuid === uuid
+            ? { ...cur, card: { ...cur.card, familiarity: result.familiarity } }
+            : cur
+        );
+        setCards((cur) =>
+          cur.map((c) => (c.uuid === uuid ? { ...c, familiarity: result.familiarity } : c))
+        );
+        return result;
+      } catch (e) {
+        setError(`Failed to rate card: ${e}`);
+        return null;
+      } finally {
+        setRatingLevel(false);
+      }
+    },
+    [level, selectedDatasetUuid, ratingLevel]
+  );
+
+  // The same keys the review page has, on the card level: numbers grade (the
+  // scale at the foot is the mouse answer to them), arrows walk the deck, and
+  // Escape is the breadcrumb. Live only while a card owns the page and no
+  // overlay is up; a keystroke inside a field is left alone, or typing "3" in a
+  // filter would grade the card. A dialog on top owns its own keys — including
+  // the zoomed image, which is focused and must not step the deck under it.
+  useEffect(() => {
+    if (!level || editorOpen) return;
+    function onKey(e: KeyboardEvent) {
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable ||
+          t.closest('[role="dialog"]'))
+      ) {
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        stepLevel(-1);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        stepLevel(1);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        exitLevel();
+      } else if (e.key >= "1" && e.key <= "5") {
+        e.preventDefault();
+        void rateLevel(Number(e.key));
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [level, editorOpen, stepLevel, exitLevel, rateLevel]);
 
   // The level is a leaf view: anything that changes which deck, which mode or
   // which search owns the pane takes it down — the Cards crumb, another dataset,
@@ -1207,6 +1283,8 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
           media={levelMedia}
           datasetPath={selectedDataset?.path ?? ""}
           onEdit={editLevel}
+          language={selectedDataset?.info.language ?? ""}
+          onRate={rateLevel}
         />
       ) : showManage ? (
         <div className="flex-1 min-h-0 overflow-hidden">
@@ -1476,27 +1554,11 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
                   toolbar, so nothing else shares this row. */}
               {reviewCard && (
                 <div className="flex flex-wrap justify-center gap-2">
-                  {/* Icon + label on desktop, icon only below `sm` (see `IconLabel`),
-                      so the scale still fits a phone. The tint and left-to-right order
-                      carry the progression; the face on top names it. */}
-                  {[
-                    { q: 1, label: "Forgot", color: "bg-red-500", Icon: CircleHelp },
-                    { q: 2, label: "Hard", color: "bg-orange-500", Icon: Frown },
-                    { q: 3, label: "Okay", color: "bg-amber-500", Icon: Meh },
-                    { q: 4, label: "Good", color: "bg-cyan-500", Icon: Smile },
-                    { q: 5, label: "Easy", color: "bg-green-500", Icon: Laugh },
-                  ].map((btn) => (
-                    <button
-                      key={btn.q}
-                      onClick={() => submitReview(btn.q)}
-                      title={`${btn.label} (${btn.q})`}
-                      aria-label={btn.label}
-                      className={`flex items-center gap-1.5 px-4 py-2 min-h-11 sm:min-h-0 rounded-lg border border-border-default ${btn.color} text-sm hover:opacity-90`}
-                    >
-                      <btn.Icon size={14} />
-                      <IconLabel>{btn.label}</IconLabel>
-                    </button>
-                  ))}
+                  {/* The same five grades the card level offers, from one
+                      table (`CardGradeScale`): a deck's rating must not depend on
+                      which page the card was on. `solid` here because grading is
+                      this page's whole job. */}
+                  <CardGradeScale onRate={submitReview} />
                 </div>
               )}
             </div>
@@ -1700,15 +1762,6 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
 
 function plural(n: number, singular: string, count: string) {
   return n === 1 ? singular : count;
-}
-
-/**
- * Button caption that disappears below `sm`, so a phone sees the icon alone while the
- * wide layout keeps icon + text. The owning button carries `title`/`aria-label`, so the
- * accessible name and a hover hint do not depend on this span being visible.
- */
-function IconLabel({ children }: { children: ReactNode }) {
-  return <span className="hidden sm:inline">{children}</span>;
 }
 
 /**

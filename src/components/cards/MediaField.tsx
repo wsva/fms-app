@@ -36,6 +36,8 @@ type Props = {
   reveal?: boolean;
   /** Typographic class applied to plain text segments (e.g. the big question). */
   textClassName?: string;
+  /** Let a click on an image open it at screen size (reading hosts only). */
+  zoomable?: boolean;
 };
 
 export default function MediaField({
@@ -45,6 +47,7 @@ export default function MediaField({
   mode = "markdown",
   reveal = true,
   textClassName,
+  zoomable = false,
 }: Props) {
   const segments = splitAnchors(text, media);
   if (segments.length === 0) return null;
@@ -69,6 +72,7 @@ export default function MediaField({
             missing={seg.missing}
             datasetPath={datasetPath}
             reveal={reveal}
+            zoomable={zoomable}
           />
         );
       })}
