@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { useIsActiveTab, usePageRefresh } from "@/lib/refresh/page-refresh";
-import { clearDatasetUuid, setUiContext } from "@/lib/agent/ui-context";
+import { clearDatasetUuid, getUiContext, setUiContext } from "@/lib/agent/ui-context";
 import { useDatasetFamily } from "@/hooks/useDatasetFamily";
 import { openDatasetInTab } from "@/lib/nav/open-in-tab";
 // Aliased: this file already has its own `TabId` for the cards/review/tags modes.
@@ -31,6 +31,7 @@ import {
   GraduationCap,
   FolderCog,
   Paperclip,
+  Pencil,
   type LucideIcon,
 } from "lucide-react";
 import type {
@@ -56,9 +57,10 @@ import {
 } from "@/components/ui/toolbar";
 import { stripAnchors, hasAnchor } from "@/lib/media/anchors";
 import { notify } from "@/lib/feedback/toast";
-import { setTabSubject } from "@/lib/shell/tab-subject";
+import { setTabSubject, cardSubjectLabel } from "@/lib/shell/tab-subject";
 import MediaField from "./MediaField";
 import { useCardEditor, type CardQueue } from "./CardEditorContext";
+import CardLevel from "./CardLevel";
 import { oneOf, reqStr, optStr, useAgentActions } from "@/lib/agent/ui-actions";
 
 type TabId = "cards" | "review" | "tags";
@@ -93,13 +95,6 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   // identity check: the card editor overlay publishes this same key, and a page
   // going off screen must not wipe a dataset someone else has claimed.
   const cardsActive = useIsActiveTab("cards");
-  useEffect(() => {
-    if (cardsActive && selectedDatasetUuid) {
-      setUiContext({ active_dataset_uuid: selectedDatasetUuid });
-    } else {
-      clearDatasetUuid(selectedDatasetUuid);
-    }
-  }, [cardsActive, selectedDatasetUuid]);
 
   // Card list state
   const [cards, setCards] = useState<Card[]>([]);
@@ -124,6 +119,38 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
 
   // Use global card editor
   const { openCardEditor, refreshCardQueue, isOpen: editorOpen } = useCardEditor();
+
+  // ---- the card level ----
+  //
+  // A row click opens the card *in the page* — third crumb, content area, the
+  // page's own toolbar — instead of raising the overlay. The level reads; the
+  // overlay still writes. `index` is the row's position in `cards`, so the
+  // arrows walk the list the reader just scrolled rather than a second order.
+  const [level, setLevel] = useState<{ card: Card; index: number } | null>(null);
+  const [levelMedia, setLevelMedia] = useState<CardMedia[]>([]);
+
+  // What an agent (and the address bar) is looking at: the deck, and the card
+  // inside it when one is open. Published only while the overlay is down — it
+  // publishes both keys itself, and takes them away when it closes in the same
+  // commit, so the page republishes on `editorOpen` rather than being left
+  // blank. The clear is an identity check, like the deck's.
+  const levelCardUuid = level?.card.uuid ?? null;
+  useEffect(() => {
+    if (editorOpen) return;
+    if (cardsActive && selectedDatasetUuid) {
+      setUiContext({
+        active_dataset_uuid: selectedDatasetUuid,
+        active_card_uuid: levelCardUuid,
+      });
+    } else {
+      clearDatasetUuid(selectedDatasetUuid);
+      // By value: a card another surface has since published is not ours to
+      // withdraw.
+      if (levelCardUuid && getUiContext().active_card_uuid === levelCardUuid) {
+        setUiContext({ active_card_uuid: null });
+      }
+    }
+  }, [cardsActive, selectedDatasetUuid, levelCardUuid, editorOpen]);
 
   // Review state
   const [reviewCard, setReviewCard] = useState<Card | null>(null);
@@ -223,6 +250,36 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
     loadDatasets();
   }, [loadDatasets]);
 
+  // ---- entering and leaving the card level ----
+  //
+  // Re-read rather than reuse the row that was clicked: a row can be a save old
+  // (another window, a sync writeback), and the level is where the whole card is
+  // shown. Media comes with it because the reading half renders attachments
+  // inline — `EditableField`'s rendered side draws them; the overlay's strip is
+  // only for the editing side. Defined this early because the shared page
+  // refresh re-reads the card on screen along with the list.
+  const openLevel = useCallback(
+    async (cardUuid: string, index: number) => {
+      if (!selectedDatasetUuid) return;
+      try {
+        const [card, media] = await Promise.all([
+          invoke<Card>("card_get", { datasetUuid: selectedDatasetUuid, cardUuid }),
+          invoke<CardMedia[]>("card_media_list", { datasetUuid: selectedDatasetUuid, cardUuid }),
+        ]);
+        setLevel({ card, index });
+        setLevelMedia(media);
+      } catch (e) {
+        setError(`Failed to open card: ${e}`);
+      }
+    },
+    [selectedDatasetUuid]
+  );
+
+  const exitLevel = useCallback(() => {
+    setLevel(null);
+    setLevelMedia([]);
+  }, []);
+
   // Load cards when dataset changes
   const loadCards = useCallback(async () => {
     if (!selectedDatasetUuid) return;
@@ -247,12 +304,15 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
     }
   }, [loadCards, selectedDatasetUuid]);
 
-  // Re-read everything this page shows — used by the shared page refresh.
+  // Re-read everything this page shows — used by the shared page refresh. The
+  // card on screen is one of the rows, so it is re-read too: a writeback that
+  // landed while it was open must not wait for the reader to step away.
   const handleRefresh = useCallback(() => {
     void loadDatasets();
     if (selectedDatasetUuid) void loadCards();
+    if (level) void openLevel(level.card.uuid, level.index);
     setLocRefresh((n) => n + 1);
-  }, [loadDatasets, loadCards, selectedDatasetUuid]);
+  }, [loadDatasets, loadCards, selectedDatasetUuid, level, openLevel]);
 
   // Keep the dataset/card lists current without a toolbar button: the shared
   // hook re-reads on activation, on app resume and on `dataset-list-changed`.
@@ -292,6 +352,53 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
     [queueUuids, loadMorePage]
   );
 
+  // ---- walking the level ----
+  //
+  // The arrows stop at the ends of this page rather than paging underneath the
+  // reader: `index` belongs to the rows on screen, and a list that reloaded
+  // under an open card would renumber the step they just took.
+  const stepLevel = useCallback(
+    (dir: -1 | 1) => {
+      if (!level) return;
+      const row = cards[level.index + dir];
+      if (!row) return;
+      void openLevel(row.uuid, level.index + dir);
+    },
+    [level, cards, openLevel]
+  );
+
+  // Edit is the overlay, on the card on screen, with every field open. A pencil
+  // on one field and the toolbar's Edit are the same request: the overlay has no
+  // field-level door. The save hands the level the card it just wrote, so the
+  // reading half never shows text the disk no longer has.
+  const editLevel = useCallback(() => {
+    if (!level || !selectedDatasetUuid) return;
+    const name = datasets.find((d) => d.info.uuid === selectedDatasetUuid)?.info.name;
+    openCardEditor(
+      selectedDatasetUuid,
+      level.card,
+      (saved) => {
+        void loadCards();
+        setLevel((cur) =>
+          cur && cur.card.uuid === saved.uuid ? { ...cur, card: saved } : cur
+        );
+      },
+      undefined,
+      name,
+      false,
+      queueFor(level.index)
+    );
+  }, [level, selectedDatasetUuid, datasets, openCardEditor, loadCards, queueFor]);
+
+  // The level is a leaf view: anything that changes which deck, which mode or
+  // which search owns the pane takes it down — the Cards crumb, another dataset,
+  // an agent action that switches to Review or runs a search. Nothing compares
+  // the level later, so the clear is unconditional.
+  useEffect(() => {
+    setLevel(null);
+    setLevelMedia([]);
+  }, [selectedDatasetUuid, activeTab, searchOpen]);
+
   // Keep the walk current under the editor: a save re-reads the list, a filter
   // change replaces it, a page turn extends it. The provider ignores this unless
   // the session was opened *from* a list, so a card reached through the wiki's
@@ -301,23 +408,34 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
     refreshCardQueue({ uuids: queueUuids, index: 0, loadMore: loadMorePage });
   }, [editorOpen, selectedDatasetUuid, queueUuids, loadMorePage, refreshCardQueue]);
 
-  // Which dataset this tab is showing, for the chip and the address bar. Published
-  // only while the editor is closed: the card on screen is the more specific
-  // answer, and this page re-renders under the overlay on every re-read.
+  // Which dataset this tab is showing, or which card inside it, for the chip and
+  // the address bar. Published only while the editor is closed: the card on
+  // screen is the more specific answer, and this page re-renders under the
+  // overlay on every re-read.
   useEffect(() => {
     if (editorOpen) return;
+    const name = datasets.find((d) => d.info.uuid === selectedDatasetUuid)?.info.name;
+    if (level && selectedDatasetUuid) {
+      setTabSubject("cards", {
+        kind: "card",
+        datasetUuid: selectedDatasetUuid,
+        ...(name ? { datasetName: name } : {}),
+        cardUuid: level.card.uuid,
+        label: cardSubjectLabel(stripAnchors(level.card.question)),
+      });
+      return;
+    }
     if (!selectedDatasetUuid) {
       setTabSubject("cards", null);
       return;
     }
-    const name = datasets.find((d) => d.info.uuid === selectedDatasetUuid)?.info.name;
     if (!name) return;
     setTabSubject("cards", {
       kind: "dataset",
       datasetUuid: selectedDatasetUuid,
       datasetName: name,
     });
-  }, [editorOpen, selectedDatasetUuid, datasets]);
+  }, [editorOpen, level, selectedDatasetUuid, datasets]);
 
   // Load tags when dataset changes
   const loadTags = useCallback(async () => {
@@ -718,13 +836,20 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
           queue until a sync round flushes them to the hub. */}
       <PendingWritebackBanner mobile={mobile} />
       {/* Breadcrumb navigation — wiki/dictation-style full-width bar above the
-          toolbar: the Cards › <dataset> trail, or Cards › Locations / Cards › Review
+          toolbar: the Cards › <dataset> trail, one crumb deeper on an open card
+          (Cards › <dataset> › <question>), or Cards › Locations / Cards › Review
           for the root-level sub-views. The root "Cards" crumb is the dataset list;
           it becomes a link back to it whenever a dataset or a sub-view owns the page. */}
       <Breadcrumb>
         {crumbTail ? (
           <Breadcrumb.Link
             onClick={() => {
+              // A card on screen belongs to the deck's list behind it: from the
+              // card level, "Cards" is one step back — not all the way out.
+              if (level) {
+                exitLevel();
+                return;
+              }
               // Inside a dataset, "back to Cards" means the dataset's card list — stay in
               // the dataset and only leave the Review/Tags mode (also unseeding the
               // dataset-scoped session). From any other level it goes to the dataset grid.
@@ -758,17 +883,74 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
         {crumbTail && (
           <>
             <Breadcrumb.Sep />
-            <Breadcrumb.Current title={crumbTail}>{crumbTail}</Breadcrumb.Current>
+            {/* An open card is one step further in, so the deck stops being the
+                tail and becomes the way back to its list. */}
+            {level ? (
+              <Breadcrumb.Link truncate title={crumbTail} onClick={exitLevel}>
+                {crumbTail}
+              </Breadcrumb.Link>
+            ) : (
+              <Breadcrumb.Current title={crumbTail}>{crumbTail}</Breadcrumb.Current>
+            )}
+          </>
+        )}
+        {level && (
+          <>
+            <Breadcrumb.Sep />
+            {/* The card is named the way the tab chip names it: its question,
+                flattened and cut, because a trail crumb is a pointer, not a
+                preview of the answer. */}
+            <Breadcrumb.Current title={stripAnchors(level.card.question)}>
+              {cardSubjectLabel(stripAnchors(level.card.question), 60) || "(empty question)"}
+            </Breadcrumb.Current>
           </>
         )}
       </Breadcrumb>
 
       {/* Toolbar — dataset-level info on the left, actions on the right (Wiki-style
-          full-width bar under the breadcrumb): the mode toggles (in a dataset) or the
-          dataset-list actions, then search, then the overflow menu. */}
+          full-width bar under the breadcrumb): the mode toggles (in a dataset), the
+          card's own actions (on an open card), or the dataset-list actions, then
+          search, then the overflow menu. */}
       <Toolbar mobile={mobile}>
         <div className="flex-1 min-w-0" />
-        {!showManage && (activeTab === "review" ? (
+        {!showManage && (level ? (
+          <>
+            {/* Card-level actions. The deck crumb in the trail is the way back, so
+                these are what a card offers while it owns the pane: step through
+                the rows it came from, and edit it where editing has always been
+                done. Rating stays in Review — a card on screen is being read. */}
+            <ToolbarButton
+              icon={ChevronLeft}
+              label="Prev"
+              title="Previous card"
+              ariaLabel="Previous card"
+              disabled={level.index <= 0}
+              onClick={() => stepLevel(-1)}
+            />
+            <ToolbarButton
+              icon={ChevronRight}
+              label="Next"
+              title="Next card"
+              ariaLabel="Next card"
+              disabled={level.index >= cards.length - 1}
+              onClick={() => stepLevel(1)}
+            />
+            <span
+              className="shrink-0 px-1 text-xs tabular-nums text-text-tertiary select-none"
+              title="Position in this deck"
+            >
+              {/* The deck's own numbering, not the page's: `index` is a row in the
+                  loaded page, so the offset of that page is added back in. */}
+              {page * pageSize + level.index + 1} / {totalCards || cards.length}
+            </span>
+            <ToolbarButton
+              icon={Pencil}
+              label="Edit"
+              title="Edit this card"
+              onClick={editLevel}
+            />
+          </>
+        ) : activeTab === "review" ? (
           <>
             {/* The review page's card-level actions live here. Its own mode toggles
                 and dataset-list actions are hidden while it owns the screen, so the
@@ -857,7 +1039,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
             search directly. Hidden while the Locations overlay or the review page
             owns the content area — the review toolbar shows only Answer/Skip — so
             its active state always matches a visible row. */}
-        {!showManage && activeTab !== "review" && (
+        {!showManage && activeTab !== "review" && !level && (
           <ToolbarButton
             icon={Search}
             variant="toggleSoft"
@@ -917,7 +1099,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
       {/* Search row — page-level, toggled by the toolbar Search button, so it
           works both from the dataset-list root (always "All datasets") and from a
           dataset's Cards view ("This dataset" live filter vs cross-dataset FTS5). */}
-      {searchActive && (
+      {searchActive && !level && (
         <div className="shrink-0 px-2 py-2 flex flex-wrap items-center gap-2 border-b border-border-default sm:px-6">
           {datasetOpen && (
             <div className="flex items-center gap-1 shrink-0">
@@ -1018,7 +1200,15 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
 
       {/* Manage overlay (location management) when the toolbar Manage toggle is
           on; otherwise the dataset list (no dataset selected) or the dataset detail. */}
-      {showManage ? (
+      {level ? (
+        // The card owns the content area, the way a dataset owns it from the list.
+        <CardLevel
+          card={level.card}
+          media={levelMedia}
+          datasetPath={selectedDataset?.path ?? ""}
+          onEdit={editLevel}
+        />
+      ) : showManage ? (
         <div className="flex-1 min-h-0 overflow-hidden">
           <LocationsManager
             datasetType="card"
@@ -1192,18 +1382,9 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
                       key={card.uuid}
                       className={`w-full flex items-center gap-2 p-2 rounded-lg hover:bg-mid-gray/10 cursor-pointer sm:gap-3 sm:p-3 ${familiarityColor(card.familiarity)}`}
                       onClick={() => {
-                        const selectedDataset = datasets.find((ds) => ds.info.uuid === selectedDatasetUuid);
-                        // The queue is this page's own order, so prev/next walk the
-                        // rows the reader just scrolled past.
-                        openCardEditor(
-                          selectedDatasetUuid,
-                          card,
-                          () => loadCards(),
-                          undefined,
-                          selectedDataset?.info.name,
-                          undefined,
-                          queueFor(i)
-                        );
+                        // The row opens the card as a level of this page; the
+                        // arrows then walk these rows (see `stepLevel`).
+                        void openLevel(card.uuid, i);
                       }}
                     >
                       <div className="flex-1 min-w-0">

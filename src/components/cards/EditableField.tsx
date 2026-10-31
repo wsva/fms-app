@@ -60,6 +60,13 @@ type Props = {
   textClassName?: string;
   /** Desktop-only: the file pickers need the Tauri dialog plugin. */
   canAttach: boolean;
+  /**
+   * Does clicking the rendered text open it for editing? True in the editor,
+   * where the whole card is a form. False in a read-only host, where a click is
+   * a click — selecting a word must not raise an editor over the card, and the
+   * pencil in the header is the way in instead.
+   */
+  clickToEdit?: boolean;
   /** Ignore a blur while a media dialog is up, or the field would close itself. */
   keepEditing?: boolean;
   onChange: (value: string) => void;
@@ -86,6 +93,7 @@ export default function EditableField({
   placeholder,
   textClassName,
   canAttach,
+  clickToEdit = true,
   keepEditing = false,
   onChange,
   onStartEdit,
@@ -154,7 +162,9 @@ export default function EditableField({
       ? "ring-1 ring-accent"
       : editing
         ? "ring-1 ring-border-default"
-        : "hover:ring-1 hover:ring-accent/40";
+        : clickToEdit
+          ? "hover:ring-1 hover:ring-accent/40"
+          : "";
 
   // This field's own attachments, in table order — the strip that makes a
   // `{{handle}}` token legible without decoding it in the text.
@@ -267,17 +277,22 @@ export default function EditableField({
       ) : (
         // Reading half. Clicking anywhere in it opens this one field, so "edit"
         // is a place in the card rather than a mode the toolbar switches you into.
+        // A read-only host turns that off: there, the pencil above is the door.
         <div
-          role="button"
-          tabIndex={0}
-          aria-label={`Edit ${label.toLowerCase()}`}
-          onClick={onStartEdit}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              onStartEdit();
-            }
-          }}
+          role={clickToEdit ? "button" : undefined}
+          tabIndex={clickToEdit ? 0 : undefined}
+          aria-label={clickToEdit ? `Edit ${label.toLowerCase()}` : undefined}
+          onClick={clickToEdit ? onStartEdit : undefined}
+          onKeyDown={
+            clickToEdit
+              ? (e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onStartEdit();
+                  }
+                }
+              : undefined
+          }
           className={`cursor-text ${surfaceCls} ${padCls} outline-none focus-visible:ring-1 ${
             value.trim() ? "" : "text-text-tertiary italic"
           }`}
