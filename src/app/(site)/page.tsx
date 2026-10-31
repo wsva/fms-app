@@ -4,7 +4,7 @@ import MarketingPage from "@/components/site/MarketingPage";
 export const metadata: Metadata = {
   title: "FmS — learn a language by listening",
   description:
-    "FmS turns any audio into dictation practice with local speech recognition, spaced-repetition cards, read-aloud scoring and cross-device sync. Free and open source for Windows and Linux.",
+    "FmS turns any audiobook, podcast or course into listening, reading and speaking practice — dictation, books, read-aloud scoring, spaced-repetition cards, wiki notes and an agent-friendly built-in MCP server. Free and open source for Windows and Linux.",
 };
 
 export default function SiteHome() {

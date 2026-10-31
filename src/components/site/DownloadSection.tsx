@@ -155,7 +155,7 @@ export default function DownloadSection({ id = "download" }: { id?: string }) {
                 aria-disabled={disabled || undefined}
                 className={`group flex flex-col rounded-xl border p-5 transition-colors ${
                   isDetected
-                    ? "border-accent bg-accent-bg"
+                    ? "border-accent bg-bg-card ring-1 ring-accent"
                     : "border-border-default bg-bg-card hover:border-accent"
                 } ${disabled ? "opacity-50" : ""}`}
               >

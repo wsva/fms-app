@@ -42,31 +42,33 @@ const dict = {
     "hero.badge": "Free & open source · Windows · Linux",
     "hero.title": "Learn a language by listening, not by scrolling",
     "hero.subtitle":
-      "FmS turns any audio into dictation practice. Import a dataset, generate subtitles locally with on-device speech recognition, and train your ear one cue at a time — with spaced-repetition cards, read-aloud scoring and cross-device sync.",
+      "Import any audiobook, podcast or course — FmS generates subtitles on your device and turns them into listening, reading and speaking practice.",
     "hero.ctaDownload": "Download for free",
     "hero.ctaOpenApp": "Open the app",
     "hero.note": "No account required. Your audio and progress never leave your device.",
+    "hero.techStrip": "Local speech recognition · Peer-to-peer sync",
 
     "features.heading": "Everything you need to train your ear",
     "features.sub": "A desktop-first toolkit built around real listening practice.",
+    "features.link": "Learn more",
     "features.dictation.title": "Dictation practice",
     "features.dictation.desc":
-      "Transcribe what you hear against waveform-synced cues, with instant diffing and per-cue replay.",
-    "features.cards.title": "Spaced repetition",
-    "features.cards.desc":
-      "Turn phrases into flashcards and review them with an SM-2 scheduler and full-text search.",
+      "Type what you hear against waveform-synced cues and see the diff instantly.",
+    "features.books.title": "Books",
+    "features.books.desc":
+      "Split a whole book into chapters and sentences — read, listen and shadow along.",
     "features.readaloud.title": "Read-aloud scoring",
     "features.readaloud.desc":
-      "Record yourself reading a text and get a similarity score from on-device speech recognition.",
-    "features.stt.title": "Local speech recognition",
-    "features.stt.desc":
-      "Generate subtitles with bundled Parakeet models — everything runs offline on your machine.",
-    "features.sync.title": "Cross-device sync",
-    "features.sync.desc":
-      "Pair your phone and PC over the local network or a hub and keep progress in sync.",
+      "Record yourself reading and get instant pronunciation feedback, fully offline.",
+    "features.cards.title": "Spaced repetition",
+    "features.cards.desc":
+      "Turn words and phrases into flashcards with an SM-2 review schedule.",
+    "features.wiki.title": "Wiki notes",
+    "features.wiki.desc":
+      "Keep linked notes for what you learn, searchable across your library.",
     "features.agent.title": "Agent friendly",
     "features.agent.desc":
-      "Every feature is exposed through a built-in MCP server, so AI agents can drive the app too.",
+      "Let an AI agent drive the app — every feature is available through a built-in MCP server.",
 
     "how.heading": "How it works",
     "how.sub": "From raw audio to daily practice in four steps.",
@@ -77,7 +79,7 @@ const dict = {
     "how.step3.title": "Practice dictation",
     "how.step3.desc": "Listen, type what you hear, and compare against the cue.",
     "how.step4.title": "Review & track",
-    "how.step4.desc": "Save cards, schedule reviews and watch your streak grow.",
+    "how.step4.desc": "Save cards and wiki notes, schedule reviews and watch your streak grow.",
 
     "download.heading": "Download FmS",
     "download.sub": "Grab the latest release for your platform. It's free, and the source is open.",
@@ -118,31 +120,33 @@ const dict = {
     "hero.badge": "Kostenlos & Open Source · Windows · Linux",
     "hero.title": "Eine Sprache durch Hören lernen — nicht durch Scrollen",
     "hero.subtitle":
-      "FmS verwandelt jedes Audio in Diktat-Training. Importiere ein Dataset, erzeuge Untertitel lokal mit On-Device-Spracherkennung und trainiere dein Gehör Cue für Cue — mit Spaced-Repetition-Karten, Vorlese-Bewertung und geräteübergreifender Synchronisation.",
+      "Importiere ein Hörbuch, einen Podcast oder einen Kurs — FmS erzeugt Untertitel auf deinem Gerät und macht daraus Hör-, Lese- und Sprechtraining.",
     "hero.ctaDownload": "Kostenlos herunterladen",
     "hero.ctaOpenApp": "App öffnen",
     "hero.note": "Kein Konto nötig. Deine Audiodaten und dein Fortschritt bleiben auf deinem Gerät.",
+    "hero.techStrip": "Lokale Spracherkennung · Peer-to-Peer-Sync",
 
     "features.heading": "Alles, was du fürs Hörtraining brauchst",
     "features.sub": "Ein Desktop-First-Werkzeugkasten rund um echtes Hörverstehen.",
+    "features.link": "Mehr erfahren",
     "features.dictation.title": "Diktat-Training",
     "features.dictation.desc":
-      "Transkribiere Gehörtes gegen wellenform-synchronisierte Cues — mit sofortigem Vergleich und Cue-Wiederholung.",
-    "features.cards.title": "Spaced Repetition",
-    "features.cards.desc":
-      "Verwandle Wendungen in Karteikarten und wiederhole sie mit SM-2-Planer und Volltextsuche.",
+      "Tippe, was du hörst, gegen wellenform-synchronisierte Cues — und sieh sofort den Unterschied.",
+    "features.books.title": "Bücher",
+    "features.books.desc":
+      "Teile ein ganzes Buch in Kapitel und Sätze — lesen, hören und nachsprechen.",
     "features.readaloud.title": "Vorlese-Bewertung",
     "features.readaloud.desc":
-      "Nimm dich beim Vorlesen auf und erhalte eine Ähnlichkeitsbewertung aus der On-Device-Spracherkennung.",
-    "features.stt.title": "Lokale Spracherkennung",
-    "features.stt.desc":
-      "Erzeuge Untertitel mit gebündelten Parakeet-Modellen — alles läuft offline auf deinem Rechner.",
-    "features.sync.title": "Geräteübergreifende Sync",
-    "features.sync.desc":
-      "Kopple Telefon und PC im lokalen Netz oder über einen Hub und halte den Fortschritt synchron.",
+      "Nimm dich beim Vorlesen auf und erhalte sofortige Aussprache-Rückmeldung — komplett offline.",
+    "features.cards.title": "Spaced Repetition",
+    "features.cards.desc":
+      "Verwandle Wörter und Wendungen in Karteikarten mit SM-2-Wiederholungsplan.",
+    "features.wiki.title": "Wiki-Notizen",
+    "features.wiki.desc":
+      "Halte verknüpfte Notizen zu dem fest, was du lernst — durchsuchbar über deine ganze Bibliothek.",
     "features.agent.title": "Agenten-freundlich",
     "features.agent.desc":
-      "Jede Funktion ist über einen eingebauten MCP-Server erreichbar, sodass auch KI-Agenten die App steuern können.",
+      "Lass einen KI-Agenten die App steuern — jede Funktion ist über einen eingebauten MCP-Server verfügbar.",
 
     "how.heading": "So funktioniert's",
     "how.sub": "In vier Schritten vom rohen Audio zur täglichen Übung.",
@@ -153,7 +157,7 @@ const dict = {
     "how.step3.title": "Diktat üben",
     "how.step3.desc": "Hören, tippen was du hörst und mit dem Cue vergleichen.",
     "how.step4.title": "Wiederholen & verfolgen",
-    "how.step4.desc": "Karten speichern, Wiederholungen planen und deinen Streak wachsen sehen.",
+    "how.step4.desc": "Karten und Wiki-Notizen speichern, Wiederholungen planen und deinen Streak wachsen sehen.",
 
     "download.heading": "FmS herunterladen",
     "download.sub": "Hole dir die neueste Version für deine Plattform. Kostenlos und quelloffen.",

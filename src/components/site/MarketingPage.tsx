@@ -12,10 +12,10 @@ import { useEffect, useLayoutEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Headphones,
+  BookOpen,
   Layers,
   Mic,
-  Cpu,
-  RefreshCw,
+  NotebookPen,
   Bot,
   Code2,
   ArrowRight,
@@ -26,6 +26,9 @@ import { useLocale, LOCALES, type DictKey } from "@/lib/i18n";
 import DownloadSection from "./DownloadSection";
 
 const REPO_URL = "https://github.com/wsva/fms-app";
+// The user manual lives in the repo under docs/manual; each feature card links
+// to the page that explains it in depth.
+const MANUAL_URL = `${REPO_URL}/blob/main/docs/manual`;
 
 // useLayoutEffect warns during server prerender, so fall back to useEffect
 // there and use the layout effect only in the browser (where it runs after
@@ -33,13 +36,18 @@ const REPO_URL = "https://github.com/wsva/fms-app";
 const useIsomorphicLayoutEffect =
   typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
-const FEATURES: { titleKey: DictKey; descKey: DictKey; icon: typeof Headphones }[] = [
-  { titleKey: "features.dictation.title", descKey: "features.dictation.desc", icon: Headphones },
-  { titleKey: "features.cards.title", descKey: "features.cards.desc", icon: Layers },
-  { titleKey: "features.readaloud.title", descKey: "features.readaloud.desc", icon: Mic },
-  { titleKey: "features.stt.title", descKey: "features.stt.desc", icon: Cpu },
-  { titleKey: "features.sync.title", descKey: "features.sync.desc", icon: RefreshCw },
-  { titleKey: "features.agent.title", descKey: "features.agent.desc", icon: Bot },
+const FEATURES: {
+  titleKey: DictKey;
+  descKey: DictKey;
+  icon: typeof Headphones;
+  learn: string;
+}[] = [
+  { titleKey: "features.dictation.title", descKey: "features.dictation.desc", icon: Headphones, learn: "dictation.md" },
+  { titleKey: "features.books.title", descKey: "features.books.desc", icon: BookOpen, learn: "books.md" },
+  { titleKey: "features.readaloud.title", descKey: "features.readaloud.desc", icon: Mic, learn: "read_aloud.md" },
+  { titleKey: "features.cards.title", descKey: "features.cards.desc", icon: Layers, learn: "cards.md" },
+  { titleKey: "features.wiki.title", descKey: "features.wiki.desc", icon: NotebookPen, learn: "wiki.md" },
+  { titleKey: "features.agent.title", descKey: "features.agent.desc", icon: Bot, learn: "agents.md" },
 ];
 
 const STEPS: { titleKey: DictKey; descKey: DictKey }[] = [
@@ -65,7 +73,7 @@ function LanguageToggle() {
           aria-pressed={locale === code}
           className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
             locale === code
-              ? "bg-accent text-white"
+              ? "bg-accent text-bg-body"
               : "text-text-secondary hover:text-text-primary"
           }`}
         >
@@ -139,7 +147,7 @@ export default function MarketingPage() {
             <LanguageToggle />
             <a
               href="/home"
-              className="hidden items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover sm:inline-flex"
+              className="hidden items-center gap-1.5 rounded-lg bg-accent-hover px-3.5 py-2 text-sm font-medium text-bg-body transition-colors hover:bg-accent sm:inline-flex"
             >
               {t("nav.openApp")}
               <ArrowRight className="h-4 w-4" />
@@ -162,7 +170,7 @@ export default function MarketingPage() {
             <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
               <a
                 href="#download"
-                className="inline-flex items-center gap-2 rounded-lg bg-accent px-5 py-3 font-medium text-white transition-colors hover:bg-accent-hover"
+                className="inline-flex items-center gap-2 rounded-lg bg-accent-hover px-5 py-3 font-medium text-bg-body transition-colors hover:bg-accent"
               >
                 {t("hero.ctaDownload")}
                 <ArrowRight className="h-4 w-4" />
@@ -175,6 +183,10 @@ export default function MarketingPage() {
               </a>
             </div>
             <p className="mt-6 text-sm text-text-tertiary">{t("hero.note")}</p>
+            <p className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-text-tertiary">
+              <ShieldCheck className="h-4 w-4 text-accent" />
+              {t("hero.techStrip")}
+            </p>
           </div>
         </section>
 
@@ -184,16 +196,25 @@ export default function MarketingPage() {
             <h2 className="text-3xl font-bold sm:text-4xl">{t("features.heading")}</h2>
             <p className="mt-3 max-w-2xl text-text-secondary">{t("features.sub")}</p>
             <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-              {FEATURES.map(({ titleKey, descKey, icon: Icon }) => (
+              {FEATURES.map(({ titleKey, descKey, icon: Icon, learn }) => (
                 <div
                   key={titleKey}
-                  className="rounded-xl border border-border-default bg-bg-card p-6"
+                  className="flex flex-col rounded-xl border border-border-default bg-bg-card p-6"
                 >
-                  <span className="inline-flex h-10 w-10 items-center justify-center rounded-lg bg-accent-bg text-accent">
+                  <span className="inline-flex h-10 w-10 items-center justify-center rounded-lg bg-bg-muted text-accent">
                     <Icon className="h-5 w-5" />
                   </span>
                   <h3 className="mt-4 font-semibold">{t(titleKey)}</h3>
                   <p className="mt-2 text-sm text-text-secondary">{t(descKey)}</p>
+                  <a
+                    href={`${MANUAL_URL}/${learn}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-4 inline-flex items-center gap-1 self-start text-sm font-medium text-accent hover:underline"
+                  >
+                    {t("features.link")}
+                    <ArrowRight className="h-4 w-4" />
+                  </a>
                 </div>
               ))}
             </div>
@@ -211,7 +232,7 @@ export default function MarketingPage() {
             <ol className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
               {STEPS.map(({ titleKey, descKey }, i) => (
                 <li key={titleKey} className="relative rounded-xl border border-border-default bg-bg-card p-6">
-                  <span className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-sm font-bold text-white">
+                  <span className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-sm font-bold text-bg-body">
                     {i + 1}
                   </span>
                   <h3 className="mt-4 font-semibold">{t(titleKey)}</h3>
