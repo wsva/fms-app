@@ -31,6 +31,8 @@ You can add cards directly (the **Add/Plus** action) or edit an existing one in 
 
 A card generally pairs a **question** (the prompt) with an **answer**, and may carry extra fields and tags.
 
+A card is saved into a card dataset — a **deck**. Written on the Cards page, the deck is the one the page is showing. Written over the app (from a selection, a todo, or an agent), the editor has a **Deck** control naming the deck it will write to and letting you choose another while the card is new. Once the card has been saved — or has an attachment, which is stored in the deck that received it — the deck is fixed.
+
 ## Tags
 
 Tags let you group cards — by topic, source, difficulty, or anything you like. Use the **Tags** view to manage them, and tag cards so you can filter and study focused subsets.

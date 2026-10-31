@@ -609,6 +609,11 @@ export default function TitleBar({
             icon={maximized ? Copy : Square}
             onClick={toggleMaximize}
           />
+          {/* No disabled close while a surface covers the shell: the card
+              editor floats at `z-[130]`, above this bar, and the shell is
+              `inert` under it — so this control is neither on screen nor in the
+              tab order while it would be a mis-hit. Quitting from inside a
+              card is Alt+F4. */}
           <WindowButton label="Close" icon={X} onClick={close} danger />
         </div>
       )}

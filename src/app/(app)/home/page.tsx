@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef, useReducer } from "react";
 import { listen, emit } from "@tauri-apps/api/event";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { X } from "lucide-react";
@@ -21,6 +22,7 @@ import { setUiContext } from "@/lib/agent/ui-context";
 import { jsonSafeDetail, runUiAction, useAgentActions } from "@/lib/agent/ui-actions";
 import { dismissToast, notify, notifyError, useToast } from "@/lib/feedback/toast";
 import { applySubjectToUrl, useTabSubject } from "@/lib/shell/tab-subject";
+import { useOverlayOpen } from "@/lib/shell/overlay";
 import {
   refreshActivePage,
   useActiveTabSource,
@@ -84,6 +86,9 @@ export default function Home() {
   // `alert()` was the only way it used to be able to say anything.
   const toast = useToast();
   const { openCardEditor } = useCardEditor();
+  // Whether a surface covering the shell is up — the card editor floating over
+  // it, or a media preview enlarged. `lib/shell/overlay` holds the count.
+  const overlayOpen = useOverlayOpen();
 
   useEffect(() => {
     setMobile(isMobileApp());
@@ -466,6 +471,13 @@ export default function Home() {
       // `fixed` panel: it stops at the row's edges, below the title bar and above
       // the status bar.
       className="flex flex-col h-full"
+      // While a full-window surface is up, the shell is `inert`: the menus, the
+      // tab strip, the window controls, the sidebar, the pages and the dock are
+      // not clickable, not focusable and not announced — out of action rather
+      // than merely covered. `inert` is what makes that true for the keyboard;
+      // z-order alone only stops the mouse, and Tab would otherwise walk into a
+      // File menu nobody can see. The surface floats above this shell's bar.
+      inert={overlayOpen}
       // Edge-to-edge WebView draws under the status bar; push the shell below it.
       style={mobile ? { paddingTop: "env(safe-area-inset-top)" } : undefined}
     >
@@ -502,40 +514,46 @@ export default function Home() {
 
       {/* The app's one notice banner, fed by `lib/feedback/toast`: the shell
           renders it, anyone can post to it — including the card editor, which is
-          a root overlay above this component and used to have only `alert()`. */}
-      {toast && (
-        <div
-          role="status"
-          className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-[9998] flex max-w-[80%] items-start gap-2 rounded-lg border px-4 py-2.5 text-sm shadow-lg break-words ${
-            toast.tone === "error"
-              ? "border-error-text/50 bg-error-bg text-error-text"
-              : "border-border-default bg-bg-card text-text-primary"
-          }`}
-        >
-          <span>{toast.message}</span>
-          {toast.action && (
+          a root overlay above this component and used to have only `alert()`.
+          Portalled out of the shell for that reason: the shell goes `inert`
+          while a surface covers it, and a banner left inside would show its
+          sentence above the card with two dead buttons — the report and its
+          dismissal are the two things that must keep working. */}
+      {toast &&
+        createPortal(
+          <div
+            role="status"
+            className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-[9998] flex max-w-[80%] items-start gap-2 rounded-lg border px-4 py-2.5 text-sm shadow-lg break-words ${
+              toast.tone === "error"
+                ? "border-error-text/50 bg-error-bg text-error-text"
+                : "border-border-default bg-bg-card text-text-primary"
+            }`}
+          >
+            <span>{toast.message}</span>
+            {toast.action && (
+              <button
+                type="button"
+                onClick={() => {
+                  const run = toast.action?.run;
+                  dismissToast();
+                  run?.();
+                }}
+                className="shrink-0 rounded border border-border-default px-2 py-0.5 text-xs font-medium text-text-primary hover:bg-bg-hover"
+              >
+                {toast.action.label}
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => {
-                const run = toast.action?.run;
-                dismissToast();
-                run?.();
-              }}
-              className="shrink-0 rounded border border-border-default px-2 py-0.5 text-xs font-medium text-text-primary hover:bg-bg-hover"
+              aria-label="Dismiss"
+              onClick={dismissToast}
+              className="shrink-0 text-text-secondary hover:text-text-primary"
             >
-              {toast.action.label}
+              <X className="h-4 w-4" />
             </button>
-          )}
-          <button
-            type="button"
-            aria-label="Dismiss"
-            onClick={dismissToast}
-            className="shrink-0 text-text-secondary hover:text-text-primary"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
 
       {/* Boot splash — visible on Android only, see .app-boot-splash in globals.css.
           No `flex` class: display is owned by that rule so the pre-paint

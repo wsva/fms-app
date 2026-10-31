@@ -53,8 +53,11 @@ export function ToolbarOverflow({
         {isOpen && (
           <>
             <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+            {/* Bounded like `ToolbarSelect`'s panel: these menus sit at the end of
+                a page toolbar, so the height they can rely on is the viewport's —
+                past it the list scrolls rather than running off the screen. */}
             <div
-              className="absolute right-0 top-full mt-1 z-50 w-56 rounded-lg border border-border-default bg-bg-card shadow-xl py-1"
+              className="absolute right-0 top-full mt-1 z-50 w-56 max-h-[min(60vh,20rem)] overflow-y-auto overscroll-contain rounded-lg border border-border-default bg-bg-card shadow-xl py-1"
               onMouseLeave={() => setOpen(false)}
             >
               {children}

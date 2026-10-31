@@ -31,10 +31,12 @@
 //! and a second meaning for it would be one too many.
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Clipboard, FileQuestion, Trash2, Upload, X } from "lucide-react";
 import type { CardMedia } from "@/lib/types";
 import { resolveSrc } from "@/lib/media/anchors";
 import { useMediaPlay } from "@/hooks/useMediaPlay";
+import { holdOverlay } from "@/lib/shell/overlay";
 
 /** What the editor can do to one attachment from its own preview. */
 export type MediaBlockTools = {
@@ -115,6 +117,14 @@ export default function MediaBlock({ media, handle, missing, datasetPath, reveal
   useEffect(() => {
     if (zoomed) zoomRef.current?.focus();
   }, [zoomed]);
+  // The enlarged picture's own close is at `top-4 right-4` — the same corner as
+  // the window's, a few pixels under it — and the backdrop covers the shell like
+  // any other full-window surface. Held, the title bar stands its Close down
+  // while the picture is up, so a miss cannot quit the app mid-read.
+  useEffect(() => {
+    if (!zoomed) return;
+    return holdOverlay();
+  }, [zoomed]);
   // Register whichever mounted element exists with the shared manager, so a
   // second clip pauses this one. Refs are stable across renders of the same
   // kind, so this runs on kind change only.
@@ -190,40 +200,47 @@ export default function MediaBlock({ media, handle, missing, datasetPath, reveal
           />
         </div>
         {toolStrip}
-        {zoomed && (
-          <div
-            ref={zoomRef}
-            tabIndex={-1}
-            role="dialog"
-            aria-modal="true"
-            aria-label={media.title || handle}
-            onClick={() => setZoomed(false)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") {
-                e.stopPropagation();
-                e.preventDefault();
-                setZoomed(false);
-              }
-            }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6 outline-none"
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={src}
-              alt={media.title || handle}
-              className="max-h-full max-w-full rounded-md object-contain"
-            />
-            <button
-              type="button"
+        {/* Portalled out of this subtree: a surface that holds the shell's
+            overlay makes the shell `inert` (see `home/page.tsx`), and a lightbox
+            nested inside it would go inert with it — unclosable, with nothing
+            on screen saying why. `z-[130]` also clears the title bar, whose
+            Close sits in the same corner as this one. */}
+        {zoomed &&
+          createPortal(
+            <div
+              ref={zoomRef}
+              tabIndex={-1}
+              role="dialog"
+              aria-modal="true"
+              aria-label={media.title || handle}
               onClick={() => setZoomed(false)}
-              title="Close"
-              aria-label="Close"
-              className="absolute top-4 right-4 flex h-9 w-9 items-center justify-center rounded-md bg-black/50 text-white hover:bg-black/70"
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  setZoomed(false);
+                }
+              }}
+              className="fixed inset-0 z-[130] flex items-center justify-center bg-black/80 p-6 outline-none"
             >
-              <X size={18} />
-            </button>
-          </div>
-        )}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={src}
+                alt={media.title || handle}
+                className="max-h-full max-w-full rounded-md object-contain"
+              />
+              <button
+                type="button"
+                onClick={() => setZoomed(false)}
+                title="Close"
+                aria-label="Close"
+                className="absolute top-4 right-4 flex h-9 w-9 items-center justify-center rounded-md bg-black/50 text-white hover:bg-black/70"
+              >
+                <X size={18} />
+              </button>
+            </div>,
+            document.body,
+          )}
       </div>
     );
   }

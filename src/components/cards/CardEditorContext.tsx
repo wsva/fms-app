@@ -35,10 +35,13 @@
 //   4. Identity. The card it shows is published to the tab strip's subject store
 //      (so the chip names it), into the address bar (so a restored window reopens
 //      it) and into the agent's UI context (so "this card" means something).
-//   5. The card is the only subject. The deck is the breadcrumb above the row,
-//      and standing is review state that Review and the deck's own rows already
-//      own — neither is a control here, because neither is something a writer
-//      changes while writing.
+//   5. Where it saves is named, not assumed. The overlay shows a deck picker:
+//      the shell's breadcrumb is not on screen over it, and a capture can arrive
+//      from a selection, a todo or an agent with only a guess at the deck. A
+//      page that hosts the editor (`inline`) offers no such control — its
+//      breadcrumb already ends in the deck — so the two hosts differ in chrome
+//      only, as everywhere else. Standing is not a control in either: it is
+//      review state that Review and the deck's own rows already own.
 //
 // Upload and draft interact by design, not accident: `card_media_add` writes
 // bytes and a row immediately and durably, while the `{{handle}}` token that
@@ -55,7 +58,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
-  Check, ChevronLeft, ChevronRight, Eye, Film, List, Pencil, Trash2, Type, X,
+  Check, ChevronLeft, ChevronRight, Eye, Film, Layers, List, Pencil, Trash2, Type, X,
 } from "lucide-react";
 import type { Card, CardDatasetSummary, CardMedia, CardMediaField } from "@/lib/types";
 import { isMobileApp, isTauri } from "@/lib/platform";
@@ -77,6 +80,7 @@ import {
   type TabSubject,
 } from "@/lib/shell/tab-subject";
 import { setUiContext } from "@/lib/agent/ui-context";
+import { holdOverlay } from "@/lib/shell/overlay";
 import CardFields, {
   CARD_FIELD_LABEL,
   CARD_FIELD_ORDER,
@@ -326,9 +330,9 @@ export type CardEditModalProps = {
   card: Card | null;
   datasetUuid: string;
   /**
-   * The decks of this location, read for one card's directory and name. There is
-   * no picker: moving a card between decks is a copy (or an agent's write), not
-   * a switch a writer throws while half-way through a sentence.
+   * The decks a save can land in, and the only source of the open card's own
+   * directory and deck name. The overlay's picker lists them; the inline host
+   * reads them for the path and the name alone.
    */
   datasets: CardDatasetSummary[];
   /** Writes the card and returns what the backend stored, or null on failure. */
@@ -362,10 +366,11 @@ export function CardEditModal({
   inline = false,
 }: CardEditModalProps) {
   const initial = useMemo(() => valuesOf(card), [card]);
-  // Frozen at open. The deck a card sits in is a fact about the card, not a
-  // setting of the writer: moving one is a copy (or an agent's `card_save` into
-  // another deck), so this row names no destination to pick.
-  const [selectedDataset] = useState(datasetUuid);
+  // Where a save lands. The overlay lets the writer choose it (see the deck
+  // picker in the toolbar); `inline` passes no control, so here it is simply the
+  // deck the page opened. Either way it is what `doSave` sends and what resolves
+  // `media/<card-uuid>/`, so a change has to be deliberate — see `deckLocked`.
+  const [selectedDataset, setSelectedDataset] = useState(datasetUuid);
   const [question, setQuestion] = useState(initial.question);
   const [answer, setAnswer] = useState(initial.answer);
   const [note, setNote] = useState(initial.note);
@@ -474,6 +479,21 @@ export function CardEditModal({
     datasets.find((ds) => ds.info.uuid === selectedDataset)?.path || "";
   const selectedDatasetName =
     datasets.find((ds) => ds.info.uuid === selectedDataset)?.info.name || "";
+  // The trigger shares its row with Save and Done, and a deck name can be a whole
+  // sentence. The menu lists every deck in full and the title carries the full
+  // name too, so only the trigger's copy is shortened.
+  const deckLabel = !selectedDatasetName
+    ? "No deck"
+    : selectedDatasetName.length > 24
+      ? `${selectedDatasetName.slice(0, 23)}…`
+      : selectedDatasetName;
+  // A deck can be chosen only while nothing about this card is on disk yet. A
+  // save writes the row into the chosen deck, and an attachment is written into
+  // whichever deck was chosen when it was uploaded — so a later change would
+  // strand one of the two in the other deck (the row here, `media/<uuid>/`
+  // there), and no write moves either. Disabled, the picker still answers the
+  // question it was added for: which deck this card is (going to be) in.
+  const deckLocked = saved || media.length > 0;
 
   // TOC drawer, mirroring the wiki page: the toolbar's TOC button toggles a
   // left drawer hosting the answer's heading tree (drag-resizable split column
@@ -563,6 +583,16 @@ export function CardEditModal({
     return () => setOverlayGuard(null);
   }, []);
 
+  // The window's Close sits a few pixels above this surface's Done, and getting
+  // them mixed up does not close the wrong card — it quits the app mid-sentence.
+  // So the shell goes `inert` while this floats (see `home/page.tsx`, which reads
+  // this flag), and the bar is not reachable rather than merely covered; an
+  // inline host is the page itself, with nothing above it to confuse.
+  useEffect(() => {
+    if (inline) return;
+    return holdOverlay();
+  }, [inline]);
+
   useEffect(() => {
     if (!pending) return;
     // The default is the safe, productive one: save what you typed and move on.
@@ -630,9 +660,13 @@ export function CardEditModal({
 
   const doSave = useCallback(async (): Promise<Card | null> => {
     if (!selectedDataset) {
-      // Reachable only when a host opens the writer with no deck behind it; a
-      // card has no picker to answer it with, so the fix is to open the deck.
-      notifyError("This card is not in a deck — open it from a deck's list.");
+      // The overlay's picker answers this, so the message names it; with no decks
+      // at all there is nothing to pick, and the Cards page is the fix.
+      notifyError(
+        datasets.length
+          ? "Choose a deck in the toolbar before saving this card."
+          : "There are no decks yet — create one on the Cards page."
+      );
       return null;
     }
     if (!question.trim()) {
@@ -666,7 +700,7 @@ export function CardEditModal({
     } finally {
       setSaving(false);
     }
-  }, [selectedDataset, onSave, cardUuid, question, answer, note, suggestion, familiarity, draftKey]);
+  }, [selectedDataset, datasets, onSave, cardUuid, question, answer, note, suggestion, familiarity, draftKey]);
 
   // ---- keyboard -----------------------------------------------------------
 
@@ -1071,11 +1105,19 @@ export function CardEditModal({
     // bar, a Toolbar action row directly beneath it, and a scrolling body. A
     // page that hosts the editor instead (`inline`) supplies the surface and
     // the name, so the row stands directly under its breadcrumb.
+    //
+    // Floating, it is the window for as long as it is up. `z-[130]` clears the
+    // title bar (`z-[120]`) and the agent dock (`z-[100]`), and the shell goes
+    // `inert` underneath (see `home/page.tsx`), so the bar's menus and tab
+    // strip, the window controls, the sidebar, the pages and the dock are
+    // neither clickable nor reachable by Tab: the app is not dimmed behind the
+    // card, it is out of action. That is also why the bar's Close needs no
+    // disabled state of its own — while this is up there is no bar to mis-hit.
     <div
       className={
         inline
           ? "flex flex-1 min-h-0 flex-col bg-bg-body"
-          : "fixed inset-0 z-50 flex flex-col bg-bg-body"
+          : "fixed inset-0 z-[130] flex flex-col bg-bg-body"
       }
       style={
         mobile && !inline
@@ -1151,10 +1193,43 @@ export function CardEditModal({
           </>
         )}
 
-        {/* Nothing about the card's bookkeeping sits on the writing row: the
-            deck is the breadcrumb above it, standing is review state that
-            Review and the deck's own rows already show, and "updated" is the
-            disk's answer to a question nobody asks while writing. */}
+        {/* The deck this save lands in, in the overlay only. There is no
+            breadcrumb above the overlay to name it, and the card may have
+            arrived from a selection, a todo or an agent that guessed. It is
+            fixed once the card is saved or has an attachment (`deckLocked`),
+            because no write can move either across decks afterwards. */}
+        {!inline && (
+          <ToolbarSelect
+            icon={Layers}
+            label="Deck"
+            value={deckLabel}
+            // A phone has no room for a deck name in the same row as Save and
+            // Done; the glyph still names the control and the menu still lists
+            // every deck, so only the trigger loses its words.
+            iconOnly={mobile}
+            title={
+              deckLocked
+                ? `Deck: ${selectedDatasetName || "unknown"} — fixed once the card is saved or has an attachment`
+                : `Save into: ${selectedDatasetName || "no deck chosen"}`
+            }
+            disabled={deckLocked}
+          >
+            {datasets.map((ds) => (
+              <ToolbarMenuItem
+                key={ds.info.uuid}
+                checked={ds.info.uuid === selectedDataset}
+                onClick={() => setSelectedDataset(ds.info.uuid)}
+              >
+                {ds.info.name}
+              </ToolbarMenuItem>
+            ))}
+          </ToolbarSelect>
+        )}
+
+        {/* The rest of the bookkeeping stays off this row: standing is review
+            state that Review and the deck's own rows already show, and
+            "updated" is the disk's answer to a question nobody asks while
+            writing. */}
         <div className="flex-1 min-w-0" />
 
         {/* Two toolbar controls belong to a view, not to the card, so they are
