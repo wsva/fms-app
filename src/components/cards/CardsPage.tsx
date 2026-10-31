@@ -41,6 +41,7 @@ import type {
 } from "@/lib/types";
 import { isMobileApp } from "@/lib/platform";
 import { LocationsManager } from "@/components/ui/LocationsManager";
+import PromptDialog from "@/components/ui/PromptDialog";
 import { DatasetCard } from "@/components/ui/dataset";
 import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import {
@@ -123,6 +124,11 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
 
   // Tags
   const [tags, setTags] = useState<CardTag[]>([]);
+
+  // Which themed name-prompt is open (null = none). Native prompt() shows an
+  // OS dialog the theme can't reach, so both "ask for a name" flows — new
+  // dataset, new tag — go through PromptDialog instead.
+  const [promptKind, setPromptKind] = useState<"dataset" | "tag" | null>(null);
 
   // Global search state
   const [globalSearchQuery, setGlobalSearchQuery] = useState("");
@@ -482,18 +488,21 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
     return () => window.removeEventListener("keydown", onKey);
   }, [activeTab, reviewCard, editorOpen, loadNextReview, submitReview]);
 
-  // Create dataset
-  async function createDataset() {
-    const name = prompt("Dataset name:");
-    if (!name) return;
+  // Create dataset — the toolbar button opens the prompt; the submit does the work.
+  function createDataset() {
+    setPromptKind("dataset");
+  }
+
+  async function submitCreateDataset(name: string, description: string) {
     try {
       const result = await invoke<CardDatasetSummary>("card_dataset_create", {
         name,
-        description: null,
+        description: description || null,
         location: null,
       });
       setDatasets((prev) => [...prev, result]);
       setSelectedDatasetUuid(result.info.uuid);
+      setPromptKind(null);
     } catch (e) {
       setError(`Failed to create dataset: ${e}`);
     }
@@ -1251,19 +1260,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold">Tags</h2>
               <button
-                onClick={async () => {
-                  const name = prompt("Tag name:");
-                  if (!name || !selectedDatasetUuid) return;
-                  try {
-                    await invoke("card_tag_save", {
-                      datasetUuid: selectedDatasetUuid,
-                      tag: { uuid: "", name, color: null, deleted_at: null, created_at: "", updated_at: "" },
-                    });
-                    loadTags();
-                  } catch (e) {
-                    setError(`Failed to create tag: ${e}`);
-                  }
-                }}
+                onClick={() => setPromptKind("tag")}
                 className="px-3 py-1 rounded border border-border-default text-sm hover:bg-mid-gray/20"
               >
                 <Plus size={14} className="inline mr-1" />
@@ -1308,6 +1305,38 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
 
           </div>
         </>
+      )}
+
+      {promptKind === "dataset" && (
+        <PromptDialog
+          title="New Dataset"
+          label="Dataset name"
+          placeholder="e.g. German vocabulary"
+          description={{ label: "Description", placeholder: "What is this deck about?" }}
+          onCancel={() => setPromptKind(null)}
+          onSubmit={submitCreateDataset}
+        />
+      )}
+      {promptKind === "tag" && (
+        <PromptDialog
+          title="New Tag"
+          label="Tag name"
+          placeholder="e.g. easy"
+          onCancel={() => setPromptKind(null)}
+          onSubmit={async (name) => {
+            if (!selectedDatasetUuid) return;
+            try {
+              await invoke("card_tag_save", {
+                datasetUuid: selectedDatasetUuid,
+                tag: { uuid: "", name, color: null, deleted_at: null, created_at: "", updated_at: "" },
+              });
+              loadTags();
+              setPromptKind(null);
+            } catch (e) {
+              setError(`Failed to create tag: ${e}`);
+            }
+          }}
+        />
       )}
     </main>
   );
