@@ -35,15 +35,17 @@
 //   4. Identity. The card it shows is published to the tab strip's subject store
 //      (so the chip names it), into the address bar (so a restored window reopens
 //      it) and into the agent's UI context (so "this card" means something).
-//   5. Standing, decoded. Familiarity is per-user review state — see Phase 5 of
-//      the design note — so the row names the value and the popover rates it
-//      through `card_test_submit`, never through a text write.
+//   5. The card is the only subject. The deck is the breadcrumb above the row,
+//      and standing is review state that Review and the deck's own rows already
+//      own — neither is a control here, because neither is something a writer
+//      changes while writing.
 //
-// Attach and draft interact by design, not accident: `card_media_add` writes
+// Upload and draft interact by design, not accident: `card_media_add` writes
 // bytes and a row immediately and durably, while the `{{handle}}` token that
-// points at them lives in text that is only durable once saved. The library
-// therefore reports a row as "attached, not placed" rather than letting the
-// mismatch look like a lost attachment.
+// points at them lives in text that is only durable once saved. The reference
+// is therefore copied and pasted rather than inserted by an attach button, and
+// the media view reports a row as "attached, not placed" rather than letting
+// the mismatch look like a lost attachment.
 // ---------------------------------------------------------------------------
 
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
@@ -53,11 +55,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
-  Check, ChevronLeft, ChevronRight, CircleHelp, Eye, Film, Frown, GraduationCap, Laugh,
-  List, Meh, Paperclip, Pencil, Smile, Trash2, Type, X,
-  Image as ImageIcon, Music2, Video,
+  Check, ChevronLeft, ChevronRight, Eye, Film, List, Pencil, Trash2, Type, X,
 } from "lucide-react";
-import type { Card, CardDatasetSummary, CardMedia, CardMediaField, CardReview } from "@/lib/types";
+import type { Card, CardDatasetSummary, CardMedia, CardMediaField } from "@/lib/types";
 import { isMobileApp, isTauri } from "@/lib/platform";
 import { toHTML } from "@/components/wiki/markdown/html";
 import { cardKindOf, cardExtsFor, CARD_IMAGE_EXTS, CARD_AUDIO_EXTS, CARD_VIDEO_EXTS } from "@/lib/media/kind";
@@ -127,44 +127,6 @@ const FONT_SCALE_SHORT: Record<FontScaleKey, string> = {
 /** Above this, a card is read rather than glanced at: the biggest step would put
  *  several screens of answer under the fold, so a long answer defaults to large. */
 const LONG_ANSWER_CHARS = 600;
-
-// Familiarity tint ramp (theme-aware --fam-* tokens, see globals.css), shared
-// with the Cards list rows. Literal class names keep Tailwind's scanner happy.
-const FAM_CLASSES = [
-  "bg-fam-0",
-  "bg-fam-1",
-  "bg-fam-2",
-  "bg-fam-3",
-  "bg-fam-4",
-  "bg-fam-5",
-  "bg-fam-6",
-];
-
-/** The ramp as `CardsPage.familiarityColor` documents it, so the row tint and
- *  this badge are one vocabulary instead of two guesses. */
-const FAMILIARY_RAMP = [
-  { f: 0, name: "new" },
-  { f: 1, name: "strange" },
-  { f: 2, name: "known" },
-  { f: 3, name: "familiar" },
-  { f: 4, name: "skilled" },
-  { f: 5, name: "practiced" },
-  { f: 6, name: "easy" },
-];
-
-/** The five grades the Review page offers, copied rather than re-invented: same
- *  quality numbers, same words, same colours, so `f=` means one thing anywhere. */
-const GRADES = [
-  { q: 1, label: "Forgot", Icon: CircleHelp },
-  { q: 2, label: "Hard", Icon: Frown },
-  { q: 3, label: "Okay", Icon: Meh },
-  { q: 4, label: "Good", Icon: Smile },
-  { q: 5, label: "Easy", Icon: Laugh },
-] as const;
-
-function famName(f: number): string {
-  return FAMILIARY_RAMP[Math.min(Math.max(f, 0), 6)]?.name ?? "new";
-}
 
 const valuesOf = (source: Partial<Card> | null): CardFieldValues => ({
   question: source?.question ?? "",
@@ -363,6 +325,11 @@ function ExitSheet({
 export type CardEditModalProps = {
   card: Card | null;
   datasetUuid: string;
+  /**
+   * The decks of this location, read for one card's directory and name. There is
+   * no picker: moving a card between decks is a copy (or an agent's write), not
+   * a switch a writer throws while half-way through a sentence.
+   */
   datasets: CardDatasetSummary[];
   /** Writes the card and returns what the backend stored, or null on failure. */
   onSave: (datasetUuid: string, card: Partial<Card>) => Promise<Card | null>;
@@ -395,7 +362,10 @@ export function CardEditModal({
   inline = false,
 }: CardEditModalProps) {
   const initial = useMemo(() => valuesOf(card), [card]);
-  const [selectedDataset, setSelectedDataset] = useState(datasetUuid);
+  // Frozen at open. The deck a card sits in is a fact about the card, not a
+  // setting of the writer: moving one is a copy (or an agent's `card_save` into
+  // another deck), so this row names no destination to pick.
+  const [selectedDataset] = useState(datasetUuid);
   const [question, setQuestion] = useState(initial.question);
   const [answer, setAnswer] = useState(initial.answer);
   const [note, setNote] = useState(initial.note);
@@ -660,7 +630,9 @@ export function CardEditModal({
 
   const doSave = useCallback(async (): Promise<Card | null> => {
     if (!selectedDataset) {
-      notifyError("Pick the dataset this card belongs to first.");
+      // Reachable only when a host opens the writer with no deck behind it; a
+      // card has no picker to answer it with, so the fix is to open the deck.
+      notifyError("This card is not in a deck — open it from a deck's list.");
       return null;
     }
     if (!question.trim()) {
@@ -1013,28 +985,6 @@ export function CardEditModal({
     return () => setUiContext({ active_dataset_uuid: null, active_card_uuid: null });
   }, [selectedDataset, saved, cardUuid]);
 
-  // ---- standing -----------------------------------------------------------
-
-  // A rating is a review event, not a field write: it goes to
-  // `card_test_submit`, which owns the SM-2 state for this user. Repaint from
-  // what it returns rather than guessing the schedule advanced by one.
-  const rate = useCallback(
-    async (quality: number) => {
-      if (!saved || !isTauri()) return;
-      try {
-        const result = await invoke<CardReview>("card_test_submit", {
-          datasetUuid: selectedDataset,
-          cardUuid,
-          quality,
-        });
-        setFamiliarity(result.familiarity);
-      } catch (e) {
-        notifyError(`Rating failed: ${e}`);
-      }
-    },
-    [saved, selectedDataset, cardUuid]
-  );
-
   // ---- derived render inputs ---------------------------------------------
 
   // Build the TOC node from the same content the body renders, so the
@@ -1137,10 +1087,9 @@ export function CardEditModal({
       }
     >
       {/* A header row is a name plus status, never a control (see PageHeader):
-          the card's question, whether it is on disk, and where it stands. The
-          dataset picker and the rating live in the Toolbar below. Inline has no
-          header at all: the page's breadcrumb is that row, and its last crumb
-          already carries this question. */}
+          the card's question and whether it is on disk. Inline has no header at
+          all: the page's breadcrumb is that row, and its last crumb already
+          carries this question. */}
       {!inline && (
       <PageHeader
         title={heading}
@@ -1163,12 +1112,6 @@ export function CardEditModal({
                 unsaved card
               </span>
             )}
-            <span
-              className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${FAM_CLASSES[Math.min(familiarity, 6)]}`}
-              title={`Familiarity ${familiarity} — ${famName(familiarity)}`}
-            >
-              {famName(familiarity)} · {familiarity}
-            </span>
           </div>
         }
       />
@@ -1187,27 +1130,6 @@ export function CardEditModal({
               <Check size={10} /> Saved
             </span>
           ) : null)}
-        {/* Dataset picker, in both modes: which deck a card belongs to is a
-            property of the card, not of the mode you happen to be in. */}
-        <select
-          value={selectedDataset}
-          onChange={(e) => setSelectedDataset(e.target.value)}
-          aria-label="Dataset"
-          title={selectedDatasetName ? `Dataset: ${selectedDatasetName}` : undefined}
-          className="min-w-0 max-w-[12rem] shrink-0 cursor-pointer rounded-lg border border-border-default bg-bg-card px-2 py-1.5 text-sm text-text-primary hover:bg-mid-gray/20"
-        >
-          {!datasets.some((ds) => ds.info.uuid === selectedDataset) && (
-            <option value={selectedDataset}>
-              {selectedDatasetName || (saved ? "(unknown dataset)" : "(unsaved card)")}
-            </option>
-          )}
-          {datasets.map((ds) => (
-            <option key={ds.info.uuid} value={ds.info.uuid}>
-              {ds.info.name} ({ds.card_count} cards)
-            </option>
-          ))}
-        </select>
-
         {/* Prev/next only when there is a list to walk. Opened from a context
             menu or a review jump there is none, and a dead arrow lies. */}
         {canStep && (
@@ -1229,79 +1151,12 @@ export function CardEditModal({
           </>
         )}
 
-        {/* Standing: the legend the ramp uses and the grades that change it. */}
-        <ToolbarSelect
-          icon={GraduationCap}
-          label="Standing"
-          value={`${famName(familiarity)} · ${familiarity}`}
-          title="Familiarity scale — rate this card"
-        >
-          {FAMILIARY_RAMP.map((r) => (
-            <div
-              key={r.f}
-              className="flex items-center gap-2 px-3 py-1 text-sm text-text-secondary"
-            >
-              <span className={`h-3 w-3 shrink-0 rounded-sm ${FAM_CLASSES[r.f]}`} />
-              <span className="w-3 shrink-0 tabular-nums">{r.f}</span>
-              <span>{r.name}</span>
-              {r.f === Math.min(familiarity, 6) && (
-                <Check size={14} className="ml-auto text-accent" />
-              )}
-            </div>
-          ))}
-          <div className="my-1 border-t border-border-default" />
-          {saved ? (
-            GRADES.map((g) => (
-              <ToolbarMenuItem key={g.q} icon={g.Icon} onClick={() => void rate(g.q)}>
-                {g.label} ({g.q})
-              </ToolbarMenuItem>
-            ))
-          ) : (
-            <div className="px-3 py-2 text-sm text-text-tertiary">
-              Rate it after the first review
-            </div>
-          )}
-        </ToolbarSelect>
-
-        {/* The rest of what the hidden header used to say, kept together and next
-            to the deck: how practised the card is (the Standing control), when it
-            last changed, and whether what is on screen is on disk (the badge that
-            opens the row). */}
-        {inline && saved && card?.updated_at && (
-          <span
-            className="shrink-0 select-none text-[11px] tabular-nums text-text-tertiary"
-            title="Last updated"
-          >
-            updated {card.updated_at.slice(0, 16).replace("T", " ")}
-          </span>
-        )}
-
+        {/* Nothing about the card's bookkeeping sits on the writing row: the
+            deck is the breadcrumb above it, standing is review state that
+            Review and the deck's own rows already show, and "updated" is the
+            disk's answer to a question nobody asks while writing. */}
         <div className="flex-1 min-w-0" />
 
-        {/* Attach on the fields, Upload on the media view: one add-a-file
-            control per view, each asking for what that view already knows (a
-            kind here, a placement target there). */}
-        {isTauri() && pane === "edit" && (
-          <>
-            <ToolbarSelect
-              icon={Paperclip}
-              label="Attach"
-              value={mediaBusy ? "Attaching…" : "Attach"}
-              title={`Attach to “${attachField}”`}
-              disabled={mediaBusy}
-            >
-              <ToolbarMenuItem icon={ImageIcon} onClick={() => void attach("image")}>
-                Image
-              </ToolbarMenuItem>
-              <ToolbarMenuItem icon={Music2} onClick={() => void attach("audio")}>
-                Audio
-              </ToolbarMenuItem>
-              <ToolbarMenuItem icon={Video} onClick={() => void attach("video")}>
-                Video
-              </ToolbarMenuItem>
-            </ToolbarSelect>
-          </>
-        )}
         {/* Two toolbar controls belong to a view, not to the card, so they are
             offered only on the view that answers them: the TOC toggle opens a
             column of the fields, and the whole-card mode switch opens fields. A
@@ -1525,8 +1380,7 @@ export type CardEditorState = {
   isOpen: boolean;
   card: Card | null;
   datasetUuid: string;
-  /** The deck the session opened on. `datasetUuid` follows a save into another
-   *  deck; this does not, because it is what the draft key is pinned to. */
+  /** The deck the session opened on, and the one the draft key is pinned to. */
   draftDatasetUuid: string;
   datasetName?: string;
   datasets: CardDatasetSummary[];
@@ -1856,7 +1710,9 @@ export function CardEditorProvider({
         });
         setState((prev) => ({ ...prev, card: savedCard, datasetUuid }));
         stateRef.current.onSave?.(savedCard);
-        // The picker shows counts, so a save into another deck has to re-read them.
+        // A write changes the deck's card count, so the location's summaries are
+        // stale the moment this returns — refresh them here rather than leaving
+        // the number to the next discovery pass.
         void loadDatasets();
         return savedCard;
       } catch (e) {

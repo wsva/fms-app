@@ -126,10 +126,12 @@ re-link on file name, and until then the reader sees the placeholder.
 
 ## Surfaces
 
-- **Editor** (`CardEditorContext.tsx`): the Attach toolbar (Image/Audio/Video,
-  file dialog + native drag-drop) copies bytes and writes `{{handle}}` at the
-  caret of the focused field; the Library drawer lists this card's rows with
-  place / reorder / delete.
+- **Editor** (`CardEditorContext.tsx`): two views. *Edit* is the fields; *Media*
+  is the card's own rows, each previewed with the same `MediaBlock` the field
+  draws, with Upload (one picker over the portable set), Copy (the `{{handle}}`
+  on the clipboard), reorder and Remove. A native drag-drop still lands in the
+  field the writer last touched. Nothing in either view places an attachment:
+  the handle is text, so placing it is pasting it.
 - **Review** (`CardsPage.tsx`): question, answer, and note render through
   `MediaField` with `reveal={reviewFlipped}`, so a `play_on: reveal` clip fires
   at the flip.

@@ -46,11 +46,12 @@ The Cards view has a unified **search box**. A scope toggle switches between sea
 ## Media attachments
 
 A card's question, answer, note, or suggestion can carry an **image, audio, or
-video** alongside the text. In the card editor (edit mode) use the **Attach**
-button to pick a file, or drag a file onto the window — the copy lands in the
-dataset under `media/<card-uuid>/` and a `{{handle}}` marker is written where
-your cursor sits. The **Library** drawer lists that card's attachments so you can
-place, reorder, or remove them.
+video** alongside the text. Open the editor's **Media** view to **Upload** a
+file, or drag a file onto the window — the copy lands in the dataset under
+`media/<card-uuid>/` and gets a `{{handle}}` marker. That marker is text: the
+row's **Copy** button puts it on the clipboard, and pasting it into any field is
+what places the file there. The same view lists the card's attachments with a
+preview of each, so you can reorder or remove them.
 
 - Only formats an Android phone can play are accepted: images `png jpg jpeg gif
   webp`, audio `mp3 m4a wav ogg`, video `mp4 webm`.

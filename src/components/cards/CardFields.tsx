@@ -84,8 +84,8 @@ export const CARD_FIELD_ORDER: CardMediaField[] = [
   "note",
 ];
 
-/** The field names on their own — the editor's attachments pane names the four
- *  as placement targets, and the strip and this file must spell them one way. */
+/** The field names on their own — the media view names the field an upload lands
+ *  in, and the strip and this file must spell the four one way. */
 export const CARD_FIELD_LABEL: Record<CardMediaField, string> = {
   question: "Question",
   answer: "Answer",
