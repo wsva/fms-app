@@ -42,6 +42,15 @@ const FONT_FACES: { family: string; file: string }[] = [
  *  `familyCss`) and as the fallback tail of every script. Matches globals.css. */
 const UI_STACK = "Inter, Avenir, Helvetica, Arial, sans-serif";
 
+/** Which step of the export is running, and how far along it is (0–100). The
+ *  caller paints this into an overlay; every step is also logged, so a silent
+ *  or empty result can be traced to the exact stage in the Log page. */
+export type RaExportProgress = { step: string; message: string; percent: number };
+
+/** Prefix shared by every export log line — greppable in the console and in
+ *  the app log once it is forwarded there. */
+const LOG_TAG = "[exportPdf]";
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -123,43 +132,78 @@ ${pages}
 export async function exportTextsToPdf(
   datasetName: string,
   texts: ReadText[],
-  font: RaPrintFont
+  font: RaPrintFont,
+  onProgress?: (p: RaExportProgress) => void
 ): Promise<void> {
+  const t0 = performance.now();
+  // Each line carries its own elapsed time — the split between our preparation
+  // (ms) and the native print-to-PDF pipeline (the slow part on a big book,
+  // per-page rasterisation of a variable font) is what tells you where to look.
+  const log = (message: string) =>
+    console.info(`${LOG_TAG} +${Math.round(performance.now() - t0)}ms ${message}`);
+  const report = (step: string, message: string, percent: number) => {
+    log(`${step}: ${message} (${percent}%)`);
+    onProgress?.({ step, message, percent });
+  };
+
+  log(`export start: dataset="${datasetName}", texts=${texts.length}, font=${font.familyCss || UI_STACK}`);
+  report("prepare", "Preparing print document…", 5);
   const printable = texts.filter((t) => t.content.trim());
   if (printable.length === 0) throw new Error("This dataset has no texts with content to export.");
+  const totalChars = printable.reduce((n, t) => n + t.content.length, 0);
+  log(`printable texts: ${printable.length}, total content chars: ${totalChars}`);
 
   const iframe = document.createElement("iframe");
   iframe.setAttribute("aria-hidden", "true");
   iframe.style.position = "fixed";
-  iframe.style.right = "0";
-  iframe.style.bottom = "0";
-  iframe.style.width = "0";
-  iframe.style.height = "0";
+  iframe.style.left = "-10000px";
+  iframe.style.top = "0";
+  // A zero-sized or visibility-hidden frame is skipped by the print pipeline's
+  // layout pass — large books then come out of "Save as PDF" as blank pages.
+  // Keep the frame real (an A4-ish box) but parked off-screen instead.
+  iframe.style.width = "794px";
+  iframe.style.height = "1123px";
   iframe.style.border = "0";
-  iframe.style.visibility = "hidden";
   document.body.appendChild(iframe);
 
   try {
     const doc = iframe.contentDocument;
     if (!doc) throw new Error("Could not prepare the print document.");
+    const html = buildDocument(datasetName, printable, font);
+    log(`print document built: ${html.length} chars of HTML`);
     doc.open();
-    doc.write(buildDocument(datasetName, printable, font));
+    doc.write(html);
     doc.close();
 
     // Wait for the script face to be ready, or the first paint prints in the
     // fallback and the handwriting is lost. `document.fonts` is what tells us.
+    report("fonts", "Loading handwriting font…", 35);
     const fonts = (doc as unknown as { fonts?: { ready: Promise<unknown> } }).fonts;
     if (fonts?.ready) {
       await fonts.ready.catch(() => undefined);
     }
+    log("document fonts ready");
+    // Let the off-screen frame get at least one real paint before the print
+    // snapshot is taken; without it a big document can render empty.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    report("layout", "Laying out pages…", 65);
     // One frame for layout to settle after the fonts swap in, then print. The
     // call is synchronous into the native dialog; cleanup is deferred so the
     // snapshot the dialog takes still has the document present.
     await new Promise((resolve) => requestAnimationFrame(resolve));
     iframe.contentWindow?.focus();
+    report("print", "Opening print dialog…", 90);
     iframe.contentWindow?.print();
+    log(`print() returned — dialog shown for ${printable.length} page(s)`);
+    report("done", "Print dialog open — finish in the dialog.", 100);
+  } catch (e) {
+    log(`export failed: ${String(e)}`);
+    throw e;
   } finally {
-    // Give the print pipeline a moment to read the frame before it disappears.
-    setTimeout(() => iframe.remove(), 60_000);
+    // The dialog snapshots the frame when it opens; a short grace period is
+    // enough to cancel a print started in the same tick. (Was 60s — a large
+    // book's frame is heavy to hold in memory for no proven benefit.)
+    setTimeout(() => iframe.remove(), 5_000);
   }
 }

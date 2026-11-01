@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import {
@@ -51,7 +51,7 @@ import { useDatasetFamily } from "@/hooks/useDatasetFamily";
 import { openDatasetInTab } from "@/lib/nav/open-in-tab";
 import type { TabId } from "@/lib/shell/tabs";
 import { rerecognizeAttempt } from "@/lib/read_aloud/rerecognize";
-import { exportTextsToPdf } from "@/lib/read_aloud/exportPdf";
+import { exportTextsToPdf, type RaPrintFont } from "@/lib/read_aloud/exportPdf";
 import { groupByText, hasUsableClip, listStandardAudio } from "@/lib/read_aloud/standardAudio";
 import type { RaFontId, RaSpaceId } from "@/lib/read_aloud/fonts";
 import {
@@ -66,7 +66,8 @@ import {
 } from "@/lib/read_aloud/fonts";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
-import { logError } from "@/lib/logger";
+import { logError, logInfo } from "@/lib/logger";
+import { notify, notifyError } from "@/lib/feedback/toast";
 import {
   Toolbar,
   Breadcrumb,
@@ -282,7 +283,16 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
   const [rerecognizingAttempt, setRerecognizingAttempt] = useState(false);
   // True while the toolbar's "Export PDF" prepares the print document. The print
   // dialog itself is native and blocks, but the face-loading before it is async.
+  // This only disables the trigger (no double-click); the OS print dialog shows
+  // the real progress, so there is deliberately no blocking in-app overlay.
   const [exporting, setExporting] = useState(false);
+  // The Export PDF options dialog. Print-to-PDF cost scales with page count and
+  // glyph complexity, so a big book exports in ranges and may drop the script
+  // face for speed — both chosen here, hence the dialog instead of a direct call.
+  const [exportDialog, setExportDialog] = useState(false);
+  const [exportStart, setExportStart] = useState("1");
+  const [exportEnd, setExportEnd] = useState("");
+  const [exportHandwriting, setExportHandwriting] = useState(true);
   // Toggled by the toolbar's "Compare" button: the attempt detail then shows the
   // text and the recognized transcript side by side, sentence by sentence.
   const [compareView, setCompareView] = useState(false);
@@ -839,21 +849,44 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
     });
   };
 
-  // Export every text of the open dataset to PDF, each on its own page, in the
-  // writing currently chosen. It goes through the webview's print-to-PDF rather
-  // than a PDF library so the handwriting face is faithful — see exportPdf.ts.
-  const exportDatasetPdf = async () => {
-    if (!activeDataset || exporting) return;
+  // The texts a PDF export can carry: same filter exportPdf.ts applies, counted
+  // here so the options dialog can offer a range over real page numbers.
+  const exportableTexts = useMemo(
+    () => texts.filter((t) => t.content.trim()),
+    [texts]
+  );
+
+  const openExportDialog = () => {
+    setExportStart("1");
+    setExportEnd(String(exportableTexts.length));
+    setExportDialog(true);
+  };
+
+  // Export the chosen texts to PDF, each on its own page. It goes through the
+  // webview's print-to-PDF rather than a PDF library so the handwriting face is
+  // faithful — see exportPdf.ts. The heavy multi-page render happens inside the
+  // native OS print dialog (which shows its own progress), so all we owe the user
+  // is a non-blocking acknowledgement of the short preparation window before it.
+  const exportDatasetPdf = async (list: ReadText[], font: RaPrintFont) => {
+    if (!activeDataset || exporting || list.length === 0) return;
+    setExportDialog(false);
     setExporting(true);
     setError(null);
+    logInfo(
+      `export pdf start: dataset="${activeDataset.name}", texts=${list.length}, handwriting=${font.familyCss ? "yes" : "no"}`,
+      LOG_MODULE
+    );
+    notify(
+      `Preparing the print dialog for ${list.length} page(s)… a large book may take a moment in the dialog itself.`
+    );
     try {
-      await exportTextsToPdf(activeDataset.name, texts, {
-        familyCss: raFontOption(raFont).css,
-        spaceCss: raSpaceOption(raSpace).css,
-      });
+      await exportTextsToPdf(activeDataset.name, list, font);
+      logInfo(`export pdf dialog shown: dataset="${activeDataset.name}"`, LOG_MODULE);
+      notify("Print dialog closed — export finished.");
     } catch (e) {
       const msg = String(e);
       logError(`export pdf failed: ${msg}`, LOG_MODULE);
+      notifyError(`PDF export failed: ${msg}`);
       setError(msg);
     } finally {
       setExporting(false);
@@ -1178,14 +1211,15 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
                     New Text
                   </ToolbarMenuItem>
                 )}
-                {/* Print every text of this dataset to a PDF — one per page, in
-                    the writing currently chosen. A dataset-level bulk action, so
+                {/* Print the dataset's texts to a PDF — one per page, in the
+                    writing currently chosen. A dataset-level bulk action, so
                     it lives behind the dots with the other whole-dataset tools;
-                    disabled when there is nothing to export. */}
+                    it opens the options page first (range, plain font), since a
+                    big book prints much slower than a small one. */}
                 <ToolbarMenuItem
                   icon={exporting ? Loader2 : FileDown}
                   disabled={exporting || texts.length === 0}
-                  onClick={() => void exportDatasetPdf()}
+                  onClick={openExportDialog}
                 >
                   Export PDF
                 </ToolbarMenuItem>
@@ -1564,6 +1598,89 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
           seconds={rec.liveSeconds}
         />
       )}
+
+      {/* Export PDF options. The native print-to-PDF pipeline is the slow part
+          on a large book (one A4 page of variable-font glyphs per text), so the
+          entry point asks for a range and offers a plain-writing speed mode
+          instead of firing the whole dataset blindly. */}
+      {exportDialog && (() => {
+        const total = exportableTexts.length;
+        const nStart = Math.min(Math.max(parseInt(exportStart) || 1, 1), Math.max(total, 1));
+        const nEnd = Math.min(Math.max(parseInt(exportEnd) || total, 1), Math.max(total, 1));
+        const from = Math.min(nStart, nEnd);
+        const to = Math.max(nStart, nEnd);
+        const count = total === 0 ? 0 : to - from + 1;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setExportDialog(false)}>
+            <div
+              className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-md flex flex-col gap-3 p-5 border border-border-default"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h2 className="text-base font-semibold text-text-primary">Export PDF</h2>
+              <p className="text-xs text-text-secondary">
+                Each text prints on its own page. The print itself is done by the
+                system dialog — pick “Save as PDF” there.
+              </p>
+              <div className="flex flex-row gap-3">
+                <div className="flex-1">
+                  <label className={labelCls}>From text</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={total}
+                    className={fieldCls}
+                    value={exportStart}
+                    onChange={(e) => setExportStart(e.target.value)}
+                  />
+                </div>
+                <div className="flex-1">
+                  <label className={labelCls}>To text</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={total}
+                    className={fieldCls}
+                    value={exportEnd}
+                    onChange={(e) => setExportEnd(e.target.value)}
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-text-tertiary">
+                {total} exportable text{total === 1 ? "" : "s"} — exporting {count}.
+                A large book is fastest in batches of a few dozen pages.
+              </p>
+              <label className="flex items-center gap-2 text-sm text-text-primary cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={exportHandwriting}
+                  onChange={(e) => setExportHandwriting(e.target.checked)}
+                />
+                Handwriting font (uncheck to export much faster in the plain UI font)
+              </label>
+              <div className="flex justify-end gap-2 mt-1">
+                <button
+                  onClick={() => setExportDialog(false)}
+                  className="px-3 py-2 rounded-md text-sm text-text-secondary hover:bg-bg-hover cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  disabled={exporting || count === 0}
+                  onClick={() =>
+                    void exportDatasetPdf(exportableTexts.slice(from - 1, to), {
+                      familyCss: exportHandwriting ? raFontOption(raFont).css : "",
+                      spaceCss: exportHandwriting ? raSpaceOption(raSpace).css : "",
+                    })
+                  }
+                  className="px-4 py-2 rounded-md text-sm bg-accent-bg text-white hover:bg-accent-bg-hover cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  Export {count} page{count === 1 ? "" : "s"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {datasetDialog && (
         <DatasetDialog
