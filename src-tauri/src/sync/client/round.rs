@@ -402,6 +402,81 @@ pub(crate) async fn pull_missing_attempt_audio(
     Ok(got)
 }
 
+/// How many bounded pull passes one manual backfill press runs before giving up.
+/// Each pass fetches up to `ATTEMPT_AUDIO_PULL_BATCH` recordings, so 200 passes
+/// covers a very large history while still stopping a divergent list from spinning.
+const ATTEMPT_AUDIO_BACKFILL_PASSES: usize = 200;
+
+/// Manual "ship my existing recordings now" bridge (Sync page). The attempt-audio
+/// plane is forward-only: the push leg drains the outbox, which is filled at
+/// submit — so WAVs recorded before the feature existed never queued and never
+/// reached the other side. This runs BOTH directions in one press:
+///
+/// * **up** — queue every local recording still unshipped
+///   ([`datasets::read_aloud::backfill_attempt_audio_outbox`]) and push them to the hub;
+/// * **down** — clear the 404 deny-list (a not-yet-capable hub may have parked the
+///   hub's own recordings as absent) and pull every recording whose row we hold but
+///   whose WAV is missing, looping until drained so one press finishes the job.
+///
+/// Idempotent and best-effort; a hub that does not advertise `attempt_audio`
+/// reports `advertises: false` and the queued rows simply wait. Temporary tool —
+/// removable once every device has caught up (the normal round does both legs then).
+#[tauri::command]
+pub async fn sync_backfill_attempt_audio(
+    settings: State<'_, SettingsState>,
+) -> Result<Value, String> {
+    if hub_base_or_account(&settings).is_err() {
+        return Err("No PC configured. Use Discover PC or set the PC address.".into());
+    }
+    // 1. Queue local recordings that have never been shipped (no-op if none).
+    let queued = datasets::read_aloud::backfill_attempt_audio_outbox(&settings)?;
+    let cluster = fetch_cluster(&settings).await;
+    let advertises = advertises(&cluster, "attempt_audio");
+
+    // 2. Push what is now pending. A hub already holds its own recordings, so it
+    //    skips the self round-trip; an un-upgraded hub cannot accept them anyway.
+    let pushed = if !settings.is_hub() && advertises {
+        flush_attempt_audio_outbox(&settings, &cluster).await?
+    } else {
+        0
+    };
+
+    // 3. Pull the other direction: forget stale 404s, then fetch every recording
+    //    whose row is here but whose WAV is not. `pull_missing_attempt_audio` is
+    //    capped per call, so loop until it reports nothing left (with a hard bound
+    //    so a divergent list cannot spin). A transient network error stops the
+    //    loop and is surfaced, never fatal to what was already transferred.
+    let mut pulled = 0usize;
+    let mut cleared_absent = 0usize;
+    let mut pull_error: Option<String> = None;
+    if advertises {
+        cleared_absent = datasets::read_aloud::reset_attempt_audio_absent(&settings)?;
+        for _ in 0..ATTEMPT_AUDIO_BACKFILL_PASSES {
+            match pull_missing_attempt_audio(&settings, &cluster).await {
+                Ok(0) => break,
+                Ok(n) => pulled += n,
+                Err(e) => {
+                    pull_error = Some(e);
+                    break;
+                }
+            }
+        }
+    }
+
+    log::info!(
+        "[sync] attempt-audio backfill: queued {queued}, pushed {pushed}, pulled {pulled} (cleared {cleared_absent} absent marks, hub advertises attempt_audio: {advertises})"
+    );
+    Ok(json!({
+        "queued": queued,
+        "pushed": pushed,
+        "pulled": pulled,
+        "cleared_absent": cleared_absent,
+        "advertises": advertises,
+        "is_hub": settings.is_hub(),
+        "pull_error": pull_error,
+    }))
+}
+
 /// Upper bound on `/app/state` pages one backfill fetches (the hub caps each page at
 /// 20k rows per table, so 50 pages is far past any real history). A cursor that
 /// never settles means a bug on one side; stopping here marks the import explicitly

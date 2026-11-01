@@ -640,6 +640,50 @@ pub(crate) fn mark_attempt_audio_pushed(settings: &SettingsState, attempt_uuid: 
     Ok(())
 }
 
+/// Queue every locally-held recording that has not been shipped yet, so attempts
+/// made *before* the `attempt_audio` plane existed can catch up. Idempotent —
+/// `INSERT OR IGNORE` leaves a WAV already waiting to upload untouched, so a
+/// repeat click only picks up recordings made since the last run. Returns the
+/// number of attempts newly queued. Only this identity's rows whose `<uuid>.wav`
+/// is actually on disk qualify: a follower that never recorded has nothing to
+/// send, and a row whose recording was evicted is skipped (there are no bytes).
+pub(crate) fn backfill_attempt_audio_outbox(settings: &SettingsState) -> Result<usize, String> {
+    let conn = open_app_attempts(settings)?;
+    let me = workspace_identity(settings);
+    let rows: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT uuid, audio_path FROM read_attempt_event \
+                 WHERE user_id = ?1 AND audio_path IS NOT NULL AND audio_path <> ''",
+            )
+            .map_err(|e| e.to_string())?;
+        let mapped = stmt
+            .query_map(params![me], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        mapped.filter_map(|x| x.ok()).collect()
+    };
+    let dir = audio_dir(settings);
+    let mut queued = 0usize;
+    for (uuid, name) in rows {
+        // The submit path stores `audio_path` as the `<uuid>.wav` basename in
+        // `audio_dir`; resolve the same way the push leg's `pending` query does.
+        let file_name = Path::new(&name)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or(name);
+        if !dir.join(&file_name).exists() && !attempt_audio_file(settings, &uuid).exists() {
+            continue;
+        }
+        queued += conn
+            .execute(
+                "INSERT OR IGNORE INTO read_attempt_audio_outbox (attempt_uuid, file_name, queued_at) VALUES (?1, ?2, ?3)",
+                params![uuid, file_name, now_row_stamp()],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(queued)
+}
+
 /// My attempts whose row is stored here but whose recording is not — the pull
 /// leg's work list, capped by the caller. Legacy dataset-relative `media/…`
 /// paths that resolve to a real file are already covered and skipped.
@@ -698,6 +742,19 @@ fn clear_attempt_audio_absent(settings: &SettingsState, attempt_uuid: &str) -> R
     conn.execute("DELETE FROM read_attempt_audio_absent WHERE attempt_uuid = ?1", params![attempt_uuid])
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Drop the whole 404 deny-list so the pull leg re-probes every attempt again.
+/// The manual backfill uses this before pulling: a device that probed a not-yet-
+/// capable hub would have parked its recordings as "absent" for the TTL, and the
+/// recordings may now exist (pushed by another device, or the hub was upgraded).
+/// Returns how many marks were cleared. Cheap and idempotent.
+pub(crate) fn reset_attempt_audio_absent(settings: &SettingsState) -> Result<usize, String> {
+    let conn = open_app_attempts(settings)?;
+    let n = conn
+        .execute("DELETE FROM read_attempt_audio_absent", [])
+        .map_err(|e| e.to_string())?;
+    Ok(n)
 }
 
 /// The whole attempt-audio picture for one device: how many local recordings are
@@ -3026,5 +3083,34 @@ mod tests {
         mark_attempt_audio_absent(&settings, &a.uuid).unwrap();
         // A fresh 404 keeps the pull leg from re-probing this attempt.
         assert!(!list_attempts_missing_local_audio(&settings).unwrap().iter().any(|(u, _)| u == &a.uuid));
+        // Clearing the deny-list (what the manual backfill does before pulling)
+        // puts it straight back on the work list.
+        assert_eq!(reset_attempt_audio_absent(&settings).unwrap(), 1);
+        assert!(list_attempts_missing_local_audio(&settings).unwrap().iter().any(|(u, _)| u == &a.uuid));
+    }
+
+    #[test]
+    fn backfill_queues_only_local_recordings_and_is_idempotent() {
+        let (settings, _dir) = temp_settings("audio-backfill");
+        let (ds, text) = dataset_with_text(&settings, "hello world");
+
+        // One take whose WAV is on disk (recorded here), one whose recording is gone
+        // (a synced row, or an evicted take). `audio_path` names the file exactly as
+        // the submit path does: `<uuid>.wav`.
+        let mut here = attempt(&text, "local", 80.0);
+        here.audio_path = Some(format!("{}.wav", here.uuid));
+        save_attempt_row(&settings, &ds, &here).unwrap();
+        write_synced_attempt_audio(&settings, &here.uuid, &gzip_bytes(b"audio").unwrap()).unwrap();
+
+        let mut gone = attempt(&text, "local", 70.0);
+        gone.audio_path = Some(format!("{}.wav", gone.uuid));
+        save_attempt_row(&settings, &ds, &gone).unwrap();
+
+        assert_eq!(backfill_attempt_audio_outbox(&settings).unwrap(), 1, "only the present WAV queues");
+        let pending = pending_attempt_audio_uploads(&settings).unwrap();
+        assert_eq!(pending.iter().map(|p| &p.0).collect::<Vec<_>>(), vec![&here.uuid]);
+
+        // Re-running is a no-op: the already-queued take is ignored, nothing new lands.
+        assert_eq!(backfill_attempt_audio_outbox(&settings).unwrap(), 0);
     }
 }

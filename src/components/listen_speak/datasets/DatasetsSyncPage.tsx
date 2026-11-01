@@ -7,7 +7,7 @@ import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
 import { useAuth } from "@/hooks/useAuth";
 import { message as showDialog } from "@tauri-apps/plugin-dialog";
-import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog, Upload, LogIn, Archive } from "lucide-react";
+import { Download, RefreshCw, ArrowUpDown, CloudOff, Trash2, Loader2, ServerCog, Upload, LogIn, Archive, Mic } from "lucide-react";
 import { tbGhost, tbSolid, tbToggle, tbToggleStacked, TB_ICON } from "@/lib/ui/toolbar";
 import { ToolbarButton, PageHeader } from "@/components/ui/toolbar";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -357,6 +357,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   const [unpaired, setUnpaired] = useState(false);
   const [busyUuid, setBusyUuid] = useState<string>("");
   const [syncing, setSyncing] = useState(false);
+  const [backfillingAudio, setBackfillingAudio] = useState(false);
   const [progress, setProgress] = useState<Record<string, SyncProgress>>({});
   const [message, setMessage] = useState<string>("");
 
@@ -768,6 +769,41 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       loadStatus();
       loadUploadSurface();
       if (marketBranch) loadMarket();
+    }
+  }
+
+  // ---- Attempt-recording bridge (temporary): move pre-feature WAVs both ways ----
+
+  // The `attempt_audio` plane is forward-only — recordings made before it existed
+  // were never queued, so they sit on whichever device recorded them and never
+  // cross. This button runs both directions in one press: it uploads this device's
+  // still-unshipped takes to the hub, then forgets stale 404s and pulls down every
+  // recording whose row this device holds but whose WAV is missing (e.g. takes made
+  // on the hub). Re-running is harmless; the normal sync round does the same legs.
+  async function handleBackfillAudio() {
+    if (backfillingAudio || syncing) return;
+    setBackfillingAudio(true);
+    setMessage("");
+    try {
+      const r = await invoke<{
+        queued: number;
+        pushed: number;
+        pulled?: number;
+        cleared_absent?: number;
+        advertises?: boolean;
+        pull_error?: string | null;
+      }>("sync_backfill_attempt_audio");
+      if (r.advertises === false) {
+        setMessage(`Queued ${r.queued} recording(s), but the hub doesn't offer attempt-audio sync yet — update it, then Sync now.`);
+      } else {
+        const bits = [`↑ ${r.pushed} sent`, `↓ ${r.pulled ?? 0} received`];
+        if (r.pull_error) bits.push(`pull stopped: ${r.pull_error}`);
+        setMessage(`Recordings synced — ${bits.join(", ")}.`);
+      }
+    } catch (e) {
+      setMessage(`Recording sync failed: ${String(e)}`);
+    } finally {
+      setBackfillingAudio(false);
     }
   }
 
@@ -2435,6 +2471,21 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
         </div>
 
         <div className="ml-auto flex items-center gap-1 shrink-0">
+          {/* Temporary bridge (follower only): ship read-aloud recordings made
+              before the attempt_audio plane existed up to the hub so other devices
+              can re-assess them. Removable once every device has caught up. */}
+          {!isHub && !!pcUrl && (
+            <ToolbarButton
+              variant="ghost"
+              icon={backfillingAudio ? Loader2 : Mic}
+              iconProps={{ className: backfillingAudio ? "animate-spin" : undefined }}
+              stacked={mobile}
+              label={backfillingAudio ? "Syncing…" : "Sync recordings"}
+              title="Swap read-aloud recordings with the hub both ways: upload the ones only this device has, download the ones only the hub has"
+              disabled={backfillingAudio || syncing}
+              onClick={handleBackfillAudio}
+            />
+          )}
           {/* Page-level "push everything I built": every writable local dataset in
               one batch. A follower-only action — a hub is the destination, and a
               website hub takes the Publish zone's archive upload instead. */}
