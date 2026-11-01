@@ -93,7 +93,16 @@ pub(crate) async fn bind_cluster_after_pairing(
         return None;
     }
     match adopt_or_verify_cluster(settings, &hub_cluster) {
-        Ok(()) => None,
+        Ok(()) => {
+            // The cluster is only half the identity: capture the hub's public key
+            // too, so every later reconnect can be *proven* against it instead of
+            // merely trusting a re-found address (see `hub_identity::verify_hub`).
+            // Same unsigned `/status`, so a hub that predates the fields simply
+            // yields empty strings and nothing is bound — never a wrong key.
+            let (pubkey, fingerprint) = read_hub_identity(base).await;
+            let _ = bind_hub_identity(settings, &pubkey, &fingerprint);
+            None
+        }
         Err(e) => {
             log::warn!("[sync] pair approved but cluster binding refused: {e}");
             Some(e)

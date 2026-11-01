@@ -31,6 +31,7 @@ pub(crate) mod server;
 pub(crate) mod change_log;
 pub(crate) mod client;
 pub(crate) mod discover;
+pub(crate) mod mdns;
 pub(crate) mod publish;
 pub(crate) mod upload;
 pub(crate) mod blobpush;
@@ -93,7 +94,7 @@ pub(crate) fn hub_kind(base: &str) -> HubKind {
 /// Phase 7a grows this with `registry_reads`, `chat`, ... as the website host
 /// learns to serve them. A capability the host does not list is refused, never
 /// silently attempted (INV-20).
-pub(crate) const HUB_FEATURES: &[&str] = &["dataset_journal", "app_journal", "dataset_ingest"];
+pub(crate) const HUB_FEATURES: &[&str] = &["dataset_journal", "app_journal", "dataset_ingest", "hub_identity"];
 
 /// The `GET /api/v1/cluster` payload — "who am I talking to, and what can it do
 /// for me" (sync-v2.md §7). Serialized by the desktop hub, deserialized by the
@@ -123,6 +124,16 @@ pub(crate) struct ClusterInfo {
 /// breaking, so bump this *with* the guide, and never silently accept a new
 /// field shape. Logged once per website round so a mismatch is on the record.
 pub(crate) const WEBSITE_CONTRACT_VERSION: u32 = 1;
+
+/// The exact bytes a hub signs in answer to `POST /api/v1/hub/challenge`, and the
+/// exact bytes a follower verifies the signature against. A domain prefix keeps
+/// these nonces from ever being valid as some other signature, and one shared
+/// definition keeps the two sides byte-for-byte identical (the same discipline as
+/// `client::auth::signed_message`). The `nonce` is a follower-fresh random, so a
+/// captured answer cannot be replayed against a later challenge.
+pub(crate) fn hub_challenge_message(nonce_hex: &str) -> String {
+    format!("fms-hub-challenge\n{nonce_hex}")
+}
 
 // ---------------------------------------------------------------------------
 // Per-dataset content generation (the "whole-DB was replaced" counter)

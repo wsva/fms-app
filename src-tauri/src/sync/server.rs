@@ -156,9 +156,20 @@ impl WebServiceState {
         self.running.store(true, Ordering::SeqCst);
 
         spawn_discovery(app.clone(), bound);
+        // mDNS is the second beacon beside the UDP one, so a hub is findable by
+        // name on a network that filters broadcasts (see `sync::mdns`).
+        crate::sync::mdns::publish_hub(app.clone(), bound);
 
         log::info!("Web service started on port {}", bound);
         Ok(self.build_status())
+    }
+
+    /// Whether a listener is actually up right now. `running` is the single
+    /// switch every advertiser keys off — the UDP beacon skips its broadcast and
+    /// the mDNS publisher unregisters — because a beacon naming a port nothing
+    /// answers puts this machine in a scan with a URL that then refuses.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
     }
 
     pub fn build_status(&self) -> WebServiceStatus {
@@ -250,6 +261,7 @@ pub async fn auto_start(app: AppHandle) {
     state.running.store(true, Ordering::SeqCst);
 
     spawn_discovery(app.clone(), bound);
+    crate::sync::mdns::publish_hub(app.clone(), bound);
 
     log::info!("Web service auto-started on port {}", bound);
 }
@@ -605,6 +617,7 @@ async fn zone_guard(State(st): State<AppState>, mut req: Request, next: Next) ->
     if path == "/api/v1/status"
         || path == "/api/v1/cluster"
         || path.starts_with("/api/v1/pair/")
+        || path == "/api/v1/hub/challenge"
         || path == "/agent.md"
         || path == "/agent.json"
     {
@@ -1373,6 +1386,11 @@ pub fn spawn_discovery(app: AppHandle, http_port: u16) {
                 "ips": [local_ip().unwrap_or_default()],
                 "role": settings.role(),
                 "cluster_id": settings.cluster_id(),
+                // The hub's signing identity, so a follower scanning the LAN can
+                // recognise its remembered hub by fingerprint (not by a moving IP)
+                // and drive `/hub/challenge` to prove it before silently reconnecting.
+                "hub_pubkey": settings.hub_pubkey(),
+                "hub_fingerprint": settings.hub_fingerprint(),
                 "protocol_version": crate::sync::PROTOCOL_VERSION,
             })
             .to_string()

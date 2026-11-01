@@ -216,6 +216,19 @@ const HUMAN_HANDOFF: [&str; 2] = [
 /// overwrite or drop is moved into the hub's app trash first (the ingest commit
 /// reports it as `trashed_to`), so the act is undoable where it happened.
 /// Neither name carries a word from [`DESTRUCTIVE_WORDS`].
+///
+/// Two more deliberate `Write` defaults, recorded so nobody re-litigates them.
+/// Neither carries a destructive word, so neither needs a [`RECOVERABLE`] entry,
+/// and `"enforce"` refuses neither — but both are journalled like everything else.
+///
+/// * `sync_reconnect_hub` is *not* a read, despite finding things: it commits the
+///   address it proved into `pc_url` and reorders `known_hub_urls`. That is
+///   recoverable by construction — the address it replaces stays in the
+///   recent-good list, and calling it again is the way to undo a wrong one —
+///   which is the shape of `Write`, not of `Read` ("observes state and changes
+///   nothing").
+/// * `sync_set_auto_connect` flips one boolean in global settings; its inverse is
+///   the same call with the other value.
 const READ_TOOLS: [&str; 96] = [
     "app_audit_get",
     "app_bootstrap",

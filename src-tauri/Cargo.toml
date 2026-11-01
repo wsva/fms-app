@@ -165,6 +165,13 @@ spellbook = { version = "0.4", optional = true }
 # minimize=false), on every desktop platform. Windows' interactive region pick
 # does not use it — that goes through `ms-screenclip:` (see capture.rs).
 xcap = { version = "0.9", optional = true }
+# The second discovery beacon: a hub publishes `_fms-sync._tcp.local.` and every
+# platform browses it, so a follower can resolve its hub by *name* after the
+# hub's DHCP address moved (see `sync::mdns`). Pure Rust (mio + raw pktinfo
+# sockets), so it needs no system Bonjour/Avahi and builds for Android. `logging`
+# is on to route its debug output into the app's log buffer instead of stderr;
+# the `async` default stays off — we only use the plain channel API.
+mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
 
 # Windows: native snipping via `ms-screenclip:` + clipboard image read, for the
 # interactive region pick.

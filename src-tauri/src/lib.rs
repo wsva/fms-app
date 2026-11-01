@@ -560,6 +560,8 @@ pub fn run() {
             sync::inbox::sync_inbox_drain,
             sync::client::sync_hub_kind,
             sync::discover::pc_discover,
+            // Re-find + reconnect the remembered hub by fingerprint (auto-connect).
+            sync::discover::pc_reconnect_hub,
             // Starting value for the Manual hub-address field (never connects).
             sync::discover::pc_suggested_hub_url,
             // Read-only hub wiki browse (works from any follower role/platform).
@@ -696,6 +698,11 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 sync::server::auto_start(handle).await;
             });
+
+            // A follower re-finds and reconnects its remembered hub by fingerprint
+            // (no-op on a hub, or with nothing remembered), so a hub whose LAN IP
+            // changed since last run is picked up transparently on open.
+            sync::discover::spawn_auto_connect(app.handle().clone());
 
             // Keep the website session alive for as long as the app runs: the
             // hub's access token lives 7 days, so renew it in the background —
@@ -1025,6 +1032,8 @@ macro_rules! mobile_invoke_handler {
             sync::blobpush::dataset_push_changed_files,
             sync::client::sync_hub_kind,
             sync::discover::pc_discover,
+            // Re-find + reconnect the remembered hub by fingerprint (auto-connect).
+            sync::discover::pc_reconnect_hub,
             // Starting value for the Manual hub-address field (never connects).
             sync::discover::pc_suggested_hub_url,
             // Read-only hub wiki browse (works from any follower role/platform).
@@ -1152,6 +1161,11 @@ pub fn run() {
                     Err(e) => log::error!("[Startup] Failed to load simple words: {}", e),
                 }
             }
+
+            // A follower re-finds and reconnects its remembered hub by fingerprint
+            // (no-op on a hub, or with nothing remembered). Placed after workspace
+            // init so the adopted cluster id/key are already loaded from disk.
+            sync::discover::spawn_auto_connect(app.handle().clone());
 
             // Same background session keeper as the desktop build: renew the
             // website access token before its 7-day expiry, so the only way to

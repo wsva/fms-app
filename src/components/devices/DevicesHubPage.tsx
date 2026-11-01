@@ -3,9 +3,20 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
-import { Search, Link2, KeyRound, Unplug, Loader2, Users, ShieldCheck } from "lucide-react";
+import {
+  Search,
+  Link2,
+  KeyRound,
+  Unplug,
+  Loader2,
+  Users,
+  ShieldCheck,
+  RefreshCw,
+  Fingerprint,
+} from "lucide-react";
 import { logInfo, logError } from "@/lib/logger";
 import { PageHeader } from "@/components/ui/toolbar";
 import { useVisiblePolling } from "@/hooks/useVisiblePolling";
@@ -21,6 +32,13 @@ interface GlobalSettings {
   ollama_url: string;
   pc_url: string;
   pc_token: string;
+  /** Recently-good hub base URLs, most-recent-first. Written by the backend when
+   * a reconnect resolves the hub at a new address; carried through this mirror so
+   * a `settings_set_global` round-trip from the Auto-connect toggle cannot drop it. */
+  known_hub_urls?: string[];
+  /** Whether opening the app silently re-finds and reconnects the remembered hub
+   * (see `settings.rs::auto_connect_hub`). */
+  auto_connect_hub?: boolean;
   device_id: string;
   device_seed: string;
   selected_model: string;
@@ -34,6 +52,9 @@ interface GlobalSettings {
 interface WorkspaceSettings {
   role: string;
   cluster_id: string;
+  /** The remembered hub's short signing fingerprint. Read-only: it is bound on
+   * pairing and re-keyed by nothing a caller can write. */
+  hub_fingerprint?: string;
 }
 
 interface HubStatus {
@@ -109,13 +130,32 @@ interface SyncStatusDetail {
 // A discovered PC returned by the `pc_discover` command.
 interface PcCandidate {
   url: string;
-  source: string; // "lan" | "sweep" | "tailscale" | "saved"
+  source: string; // "lan" | "sweep" | "tailscale" | "mdns" | "saved"
   /** App package name — the same string on every candidate, kept for peers that
    * predate `machine`. */
   name: string;
   /** Hostname the peer advertises in its beacon / `/api/v1/status`; empty when
    * it predates the field or the OS reported none. */
   machine?: string;
+  /** "hub" | "follower" — only a hub serves, so a follower row is never a target. */
+  role?: string;
+  /** Cluster the peer belongs to; matched against ours to name "Known hub". */
+  cluster_id?: string;
+  /** Hub signing fingerprint the peer advertises (empty on a pre-identity peer). */
+  hub_fingerprint?: string;
+}
+
+/** What `pc_reconnect_hub` reports: the ladder's outcome, never an error, so
+ * "the hub is offline tonight" is a state and not a failed call. */
+interface ReconnectOutcome {
+  state: "connected" | "not_found" | "no_hub";
+  url?: string;
+  /** Which rung found it: "remembered", "lan", "sweep", "tailscale", "mdns". */
+  source?: string;
+  /** False when the hub predates the challenge route and only its cluster id
+   * matched — connected, but not cryptographically proven. */
+  verified?: boolean;
+  message?: string;
 }
 
 // Result of the `pc_pair_start` command.
@@ -165,6 +205,29 @@ function candidateLabel(c: PcCandidate): string {
     return c.source === "lan" ? host : `${host} · ${c.source}`;
   }
   return `${machine} · ${host}`;
+}
+
+// Is this scanned machine the hub *this* device already belongs to? Match is on
+// `cluster_id` (the stable id a follower adopted at pairing); the fingerprint is
+// the stronger signal when both sides carry one, so it decides a tie the cluster
+// cannot. A peer that predates identity advertises neither and just reads as a
+// plain candidate — never a false "Known hub".
+function isKnownHub(c: PcCandidate, clusterId: string, fingerprint: string): boolean {
+  if (c.role === "follower") return false;
+  if (fingerprint && c.hub_fingerprint === fingerprint) return true;
+  return !!clusterId && c.cluster_id === clusterId;
+}
+
+// Put the remembered hub first so the dropdown's default selection is *our* hub,
+// not merely the first machine that answered. `sort` is stable, so the discovery
+// ladder's own ranking (lan → sweep → tailscale → mdns → saved) is preserved
+// within each group.
+function rankCandidates(list: PcCandidate[], clusterId: string, fingerprint: string): PcCandidate[] {
+  return [...list].sort((a, b) => {
+    const ka = isKnownHub(a, clusterId, fingerprint) ? 0 : 1;
+    const kb = isKnownHub(b, clusterId, fingerprint) ? 0 : 1;
+    return ka - kb;
+  });
 }
 
 // One `Label: value` line of the Current Workspace Status block, with the
@@ -252,6 +315,13 @@ export default function DevicesHubPage() {
   // the backend's `hub_kind` so the compile-time website origin stays the single
   // source of truth. Pairing is a LAN concept — the flow hides for "website".
   const [hubKind, setHubKind] = useState("");
+
+  // Reconnect ladder (follower side): a manual "Reconnect now" and its outcome,
+  // plus the last auto-connect result reported from the backend at startup.
+  const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectNote, setReconnectNote] = useState("");
+  // Whether the auto-connect toggle write is in flight.
+  const [savingAutoConnect, setSavingAutoConnect] = useState(false);
 
   const [message, setMessage] = useState("");
 
@@ -572,6 +642,93 @@ export default function DevicesHubPage() {
     }
   }
 
+  // Re-run the reconnect ladder by hand — the same path the startup
+  // auto-connect takes — so "my hub is powered on but the app opened before its
+  // lease renewed" has a one-tap fix. The backend commits the fresh address and
+  // moves it to the front of the recent-good list, so the next cold start is
+  // cheaper; here we only re-read what that commit changed.
+  const reconnectNow = useCallback(async () => {
+    if (!isTauri() || reconnecting) return;
+    setReconnecting(true);
+    setReconnectNote("");
+    try {
+      const res = await invoke<ReconnectOutcome>("pc_reconnect_hub", { timeoutMs: 3000 });
+      if (res.state === "connected") {
+        setReconnectNote(
+          res.verified === false
+            ? `Reconnected to ${res.url} (${res.source ?? "?"}); this hub predates fingerprint verification, so only its cluster id matched.`
+            : `Reconnected to ${res.url} (${res.source ?? "?"}) — hub key proven.`,
+        );
+      } else if (res.state === "no_hub") {
+        setReconnectNote(res.message || "No hub is remembered on this device.");
+      } else {
+        setReconnectNote("No remembered hub was found on this network.");
+      }
+      markManualEdited(false);
+      await loadSettings();
+      loadStatus();
+    } catch (e) {
+      setReconnectNote(`Reconnect failed: ${String(e)}`);
+    } finally {
+      setReconnecting(false);
+    }
+  }, [reconnecting, loadSettings, loadStatus, markManualEdited]);
+
+  // The toggle writes the global flag through the same whole-object save the
+  // Manual/selector rows use, so `known_hub_urls` and every other field survive
+  // the round-trip instead of being reset by a partial patch.
+  const setAutoConnect = useCallback(
+    async (next: boolean) => {
+      if (!global || savingAutoConnect) return;
+      setSavingAutoConnect(true);
+      const patched: GlobalSettings = { ...global, auto_connect_hub: next };
+      setGlobal(patched);
+      try {
+        await invoke("settings_set_global", { global: patched });
+        setMessage(next ? "The app will re-find your hub when it opens." : "Auto-connect turned off.");
+      } catch (e) {
+        setGlobal(global);
+        setMessage(`Failed to save the auto-connect choice: ${String(e)}`);
+      } finally {
+        setSavingAutoConnect(false);
+        setTimeout(() => setMessage(""), 4000);
+      }
+    },
+    [global, savingAutoConnect],
+  );
+
+  // The startup auto-connect runs before this page may even be opened, and it
+  // commits a new address when it succeeds — so subscribe and re-read rather than
+  // showing a stale "Unreachable" next to a hub the backend has already dialled.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    listen<ReconnectOutcome>("hub-auto-connect", (event) => {
+      const res = event.payload;
+      if (res?.state === "connected") {
+        setReconnectNote(
+          `Reconnected to ${res.url ?? ""} (${res.source ?? "remembered"})` +
+            (res.verified === false ? " — cluster match only, hub key not proven." : " — hub key proven."),
+        );
+      } else if (res?.state === "not_found") {
+        setReconnectNote("Opened without its hub: the remembered hub was not found on this network.");
+      }
+      markManualEdited(false);
+      loadSettings();
+      loadStatus();
+    })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch((e) => logError(`Failed to listen for hub-auto-connect: ${String(e)}`, "devices"));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [loadSettings, loadStatus, markManualEdited]);
+
   // ---- Journal authority (hub side, desktop only, finish 7b) -----------
 
   // Hand one dataset scope's journal authority between this hub and the cloud —
@@ -633,6 +790,22 @@ export default function DevicesHubPage() {
   }
 
   const clusterId = status?.cluster_id || workspaceSettings?.cluster_id || "";
+  // The fingerprint of the hub this device bound at pairing (workspace-scoped,
+  // read-only). It is what the remembered-hub card names and what the scan list
+  // ranks against, so a follower can pick *its* hub out of a LAN full of peers.
+  const hubFingerprint = workspaceSettings?.hub_fingerprint || "";
+  // The remembered hub's hostname, taken from a scan row that matches the
+  // committed address (the status probe reports reachability, not a name). Falls
+  // back to the bare host so the card still labels the hub when none scanned it.
+  const knownHubMachine = (() => {
+    const match = candidates.find((c) => c.url === pcUrl);
+    const m = (match?.machine || match?.name || "").trim();
+    if (m && !GENERIC_CANDIDATE_NAMES.includes(m.toLowerCase())) return m;
+    return pcUrl.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+  })();
+  // Nothing to reconnect to until a cluster is adopted and the hub is a LAN PC
+  // (a website hub lives on the OAuth path, not this ladder).
+  const canReconnect = !isHub && !!clusterId && hubKind !== "website";
   // The hub's own cluster id, advertised on `/status`. Kept separate from our
   // `clusterId` so an unbound device can say *which* hub it has not bound yet.
   const hubCluster = status?.hub.cluster_id || "";
@@ -834,14 +1007,99 @@ export default function DevicesHubPage() {
             </div>
           )}
 
-          {/* One slot, two mutually exclusive ways to fill it: the list shows scan
-              results and, through its empty entry, the only way to disconnect; Manual
-              swaps in a text field pre-filled with a starting address, committing only
-              once the user has edited it into a complete origin. Either way, choosing
-              an address connects it and adopts the hub's cluster. On a narrow (phone)
-              screen the Scan and Manual buttons drop onto their own row under whichever
-              control is showing; from `sm:` up they sit inline. */}
-          <div className="flex flex-col gap-2 pt-1 border-t border-border-light">
+          {/* ── Remembered hub ─────────────────────────────────────
+              The primary path back to *this* device's hub once it has moved: the
+              identity is the fingerprint, so the address below is whatever the
+              ladder last proved, not something anyone typed. Scan and Manual are
+              the fallbacks underneath, for a hub that is not remembered yet. */}
+          {clusterId && (
+            <div className="flex flex-col gap-2 p-3 rounded-md border border-border-light bg-bg-body">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Fingerprint size={14} className="text-text-secondary shrink-0" />
+                <span className="text-sm font-medium text-text-primary">
+                  {knownHubMachine || "Remembered hub"}
+                </span>
+                <span className="px-1.5 py-0.5 rounded bg-bg-hover text-text-secondary font-mono text-xs">
+                  {hubFingerprint ? `fp ${hubFingerprint.slice(0, 6)}` : "fp unknown · predates identity"}
+                </span>
+              </div>
+              <div className="text-xs text-text-tertiary">
+                Cluster <span className="font-mono">{clusterId.slice(0, 8)}</span>
+                {" · now at "}
+                <span className="font-mono">{status?.hub.address || "not resolved"}</span>
+              </div>
+
+              <label className="flex items-start gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 accent-[var(--color-accent,#4f46e5)]"
+                  checked={global?.auto_connect_hub !== false}
+                  disabled={savingAutoConnect}
+                  onChange={(e) => setAutoConnect(e.target.checked)}
+                />
+                <span>
+                  <span className="text-text-primary">Auto-connect on open</span>
+                  <span className="block text-xs text-text-tertiary leading-relaxed">
+                    Re-find this hub by its fingerprint whenever the app starts, and connect without
+                    asking — the address may have changed, the key has not. First pairing still needs
+                    the PC owner to confirm.
+                  </span>
+                </span>
+              </label>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent-bg text-white hover:bg-accent-bg-hover disabled:opacity-50 shrink-0"
+                  onClick={reconnectNow}
+                  disabled={reconnecting || !canReconnect}
+                  title="Run the reconnect ladder now: remembered address, then scan, proving the hub key either way"
+                >
+                  <RefreshCw size={14} className={reconnecting ? "animate-spin" : undefined} />
+                  {reconnecting ? "Reconnecting…" : "Reconnect now"}
+                </button>
+                {!canReconnect && hubKind === "website" && (
+                  <span className="text-xs text-text-tertiary">
+                    This hub is the website, which is found by its fixed domain rather than scanned.
+                  </span>
+                )}
+              </div>
+
+              {reconnectNote && (
+                <div className="text-xs text-text-secondary leading-relaxed">{reconnectNote}</div>
+              )}
+              {(global?.known_hub_urls?.length ?? 0) > 0 && (
+                <details className="text-xs text-text-tertiary">
+                  <summary className="cursor-pointer">
+                    Recently-good addresses ({global?.known_hub_urls?.length})
+                  </summary>
+                  <ul className="mt-1 flex flex-col gap-0.5 pl-4 list-disc">
+                    {(global?.known_hub_urls ?? []).map((u) => (
+                      <li key={u} className="font-mono break-all">
+                        {u}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </div>
+          )}
+
+          {/* Advanced fallback, deliberately below the remembered hub: for a
+              device that has never paired, or a hub whose fingerprint this one
+              does not hold yet. One slot, two mutually exclusive ways to fill it:
+              the list shows scan results and, through its empty entry, the only way
+              to disconnect; Manual swaps in a text field pre-filled with a starting
+              address, committing only once the user has edited it into a complete
+              origin. Either way, choosing an address connects it and adopts the
+              hub's cluster. On a narrow (phone) screen the Scan and Manual buttons
+              drop onto their own row under whichever control is showing; from `sm:`
+              up they sit inline. */}
+          <div className="flex flex-col gap-2 pt-2 border-t border-border-light">
+            <p className="text-xs text-text-tertiary leading-relaxed">
+              {clusterId
+                ? "Advanced: pick a different machine, or type an address the scan cannot find. A hub you have already paired with is re-found by fingerprint above."
+                : "No hub remembered here yet, so scan or type an address to pair with one."}
+            </p>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
               {entryMode === "manual" ? (
                 <div className="flex-1 min-w-0 flex flex-col gap-1">
@@ -885,9 +1143,9 @@ export default function DevicesHubPage() {
                   <option value="">
                     {pcUrl ? "— Disconnect (stops syncing) —" : "Not connected"}
                   </option>
-                  {candidates.map((c) => (
+                  {rankCandidates(candidates, clusterId, hubFingerprint).map((c) => (
                     <option key={c.url} value={c.url}>
-                      {candidateLabel(c)}
+                      {(isKnownHub(c, clusterId, hubFingerprint) ? "★ " : "") + candidateLabel(c)}
                     </option>
                   ))}
                   {pcUrl && !candidates.some((c) => c.url === pcUrl) && (

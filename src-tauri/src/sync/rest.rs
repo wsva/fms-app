@@ -76,6 +76,7 @@ pub fn router(app: AppHandle) -> Router {
         .route("/cluster", get(cluster))
         .route("/pair/request", post(pair_request))
         .route("/pair/status", get(pair_status))
+        .route("/hub/challenge", post(hub_challenge))
         .route("/datasets", get(datasets_list))
         .route("/datasets/{uuid}/manifest", get(manifest))
         .route("/datasets/{uuid}/changes", get(changes))
@@ -138,6 +139,14 @@ struct StatusResp {
     role: String,
     /// Cluster (hub identity group) this workspace belongs to (§3.1).
     cluster_id: String,
+    /// Hex public key of this hub's signing identity, so a follower can bind and
+    /// later verify it cryptographically instead of trusting a reused IP. Additive
+    /// — empty on a hub that predates the field. Pairs with `/hub/challenge`.
+    #[serde(default)]
+    hub_pubkey: String,
+    /// Short fingerprint of [`hub_pubkey`], the human-scannable name of this hub.
+    #[serde(default)]
+    hub_fingerprint: String,
     /// Hostname of this machine, so a scanned candidate can be labelled with
     /// *which* PC it is. Empty if the OS did not report one.
     machine: String,
@@ -168,6 +177,12 @@ async fn status(State(st): State<RestState>) -> Response {
             protocol_version: crate::sync::PROTOCOL_VERSION,
             role: settings.role(),
             cluster_id: settings.cluster_id(),
+            hub_pubkey: settings
+                .settings
+                .lock()
+                .map(|s| s.hub_pubkey.clone())
+                .unwrap_or_default(),
+            hub_fingerprint: settings.hub_fingerprint(),
             machine: crate::sync::machine_name(),
             mcp_enabled: settings
                 .settings
@@ -274,6 +289,61 @@ async fn pair_status(
         Ok(state) => Json(serde_json::json!({ "state": state })).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
+}
+
+#[derive(Deserialize)]
+struct ChallengeReq {
+    nonce_hex: String,
+}
+
+/// "Prove you are the hub I remember" (companion to the advertised
+/// `hub_fingerprint`). Reached unsigned, like `/status` and `/pair/*`: it hands
+/// back nothing but a signature over a *follower-fresh* nonce, which is worthless
+/// to any peer that did not pose with that exact nonce. A follower that has
+/// re-found its hub at a new address calls this to confirm the machine behind the
+/// IP still holds the private key — closing the "learned `cluster_id`, recycled
+/// address" impersonation. A host with no hub key (a follower, or a hub predating
+/// the identity) answers 404, and the follower falls back to cluster_id-only trust.
+async fn hub_challenge(State(st): State<RestState>, Json(body): Json<ChallengeReq>) -> Response {
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+    let settings = st.app.state::<SettingsState>();
+    let hub_seed = settings
+        .settings
+        .lock()
+        .map(|s| s.hub_seed.clone())
+        .unwrap_or_default();
+    if hub_seed.is_empty() {
+        return json_error(StatusCode::NOT_FOUND, "this host holds no hub signing identity");
+    }
+    let nonce = body.nonce_hex.trim();
+    if nonce.is_empty() || nonce.len() > 256 {
+        return json_error(StatusCode::BAD_REQUEST, "nonce_hex must be a non-empty, bounded hex string");
+    }
+    let doc = match sync::pairing::hex_decode(&hub_seed) {
+        Ok(d) => d,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "hub_seed is corrupt"),
+    };
+    let key_pair = match Ed25519KeyPair::from_pkcs8_maybe_unchecked(&doc) {
+        Ok(k) => k,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "hub_seed is not a valid keypair"),
+    };
+    let msg = sync::hub_challenge_message(nonce);
+    let sig = key_pair.sign(msg.as_bytes());
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "sig_hex": sync::pairing::hex_encode(sig.as_ref()),
+            "pubkey_hex": sync::pairing::hex_encode(key_pair.public_key().as_ref()),
+            "cluster_id": settings.cluster_id(),
+            "hub_fingerprint": settings.hub_fingerprint(),
+            "ts": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        })),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

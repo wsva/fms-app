@@ -71,6 +71,19 @@ pub struct AppSettings {
     /// `sync.rs`). Kept only so old settings JSON keeps parsing.
     #[serde(default)]
     pub pc_token: String,
+    /// Recently-good hub base URLs, most-recent-first (capped at 8). `pc_url` is
+    /// the *current* address; this is the short list a cold start retries before
+    /// falling back to a full LAN scan, because a hub whose DHCP lease renewed
+    /// usually still answers on one of these. A follower's own memory, never
+    /// shared. Global, like `pc_url`.
+    #[serde(default)]
+    pub known_hub_urls: Vec<String>,
+    /// Whether a follower should re-find and silently reconnect its remembered
+    /// hub on app open (see `sync::discover::pc_reconnect_hub`). Only meaningful
+    /// once a `cluster_id` is adopted; a device with no hub bound ignores it.
+    /// Global.
+    #[serde(default = "default_true")]
+    pub auto_connect_hub: bool,
     /// This device's pairing identity: first 16 hex chars of SHA-256(pubkey).
     /// Generated lazily on the phone (never entered by the user).
     #[serde(default)]
@@ -96,6 +109,25 @@ pub struct AppSettings {
     /// the hub" ambiguity. Workspace-scoped, not global.
     #[serde(default)]
     pub cluster_id: String,
+    /// Hex-encoded PKCS#8 Ed25519 keypair this workspace holds *as the hub*
+    /// (minted once when it is designated hub, alongside `cluster_id`). Its
+    /// public key is the hub's un-spoofable identity: a follower that learned
+    /// this `cluster_id` cannot answer a signed-nonce challenge without the
+    /// secret, so a recycled IP cannot impersonate the hub. Never set on a
+    /// follower. Workspace-scoped; desktop-only (mobile is always a follower).
+    #[serde(default)]
+    pub hub_seed: String,
+    /// Hex public key of [`AppSettings::hub_seed`]. On a hub this is its own
+    /// identity; on a follower it is the hub's pubkey captured at pairing time
+    /// (trust-on-first-use) and the key every reconnect is verified against.
+    /// Workspace-scoped.
+    #[serde(default)]
+    pub hub_pubkey: String,
+    /// Short human-comparable fingerprint of [`AppSettings::hub_pubkey`] (first
+    /// 6 hex of SHA-256), shown in the UI and the beacon so a peer can say *which*
+    /// hub it remembers by name rather than by an address that moves. Workspace-scoped.
+    #[serde(default)]
+    pub hub_fingerprint: String,
     /// Edge TTS voice a standard-audio generation starts with: the reference
     /// clip read-aloud pronunciation is measured against
     /// (`datasets::read_aloud::standard_audio`). Empty means the built-in
@@ -151,6 +183,12 @@ fn default_mcp_enabled() -> bool {
     true
 }
 
+/// Serde default for a boolean field that is on unless explicitly turned off
+/// (a missing key must not silently disable a feature the user never declined).
+fn default_true() -> bool {
+    true
+}
+
 /// A preferred voice must exist and must speak the language it is filed under.
 ///
 /// `settings_set {tts_voice_by_language: {"de": "en-US-AriaNeural"}}` would
@@ -177,12 +215,13 @@ pub const REDACTED: &str = "***";
 /// process in the loopback trust zone) must never return these verbatim.
 /// `device_seed` is the Ed25519 keypair this device pairs with — leaking it
 /// lets a caller impersonate the device to every peer that trusts it.
-pub const SECRET_FIELDS: [&str; 3] = ["llm_api_key", "pc_token", "device_seed"];
+pub const SECRET_FIELDS: [&str; 4] = ["llm_api_key", "pc_token", "device_seed", "hub_seed"];
 
 /// Fields the app derives itself and therefore refuses to accept from a caller.
 /// Writing `device_seed`/`device_id` would silently re-key the device out from
 /// under every pairing it has.
-pub const DERIVED_FIELDS: [&str; 2] = ["device_seed", "device_id"];
+pub const DERIVED_FIELDS: [&str; 5] =
+    ["device_seed", "device_id", "hub_seed", "hub_pubkey", "hub_fingerprint"];
 
 impl AppSettings {
     /// A JSON view safe to hand to an agent: every set secret replaced by
@@ -276,6 +315,12 @@ pub struct GlobalSettings {
     /// Optional shared token for the PC REST API. DEPRECATED (pairing now).
     #[serde(default)]
     pub pc_token: String,
+    /// Recently-good hub base URLs (see `AppSettings::known_hub_urls`).
+    #[serde(default)]
+    pub known_hub_urls: Vec<String>,
+    /// Silent reconnect of the remembered hub on open (see `AppSettings::auto_connect_hub`).
+    #[serde(default = "default_true")]
+    pub auto_connect_hub: bool,
     /// Device pairing identity (see `AppSettings::device_id`).
     #[serde(default)]
     pub device_id: String,
@@ -320,6 +365,8 @@ impl Default for GlobalSettings {
             llm_model: String::new(),
             pc_url: String::new(),
             pc_token: String::new(),
+            known_hub_urls: Vec::new(),
+            auto_connect_hub: true,
             device_id: String::new(),
             device_seed: String::new(),
             selected_model: String::new(),
@@ -342,6 +389,8 @@ impl GlobalSettings {
             llm_model: s.llm_model.clone(),
             pc_url: s.pc_url.clone(),
             pc_token: s.pc_token.clone(),
+            known_hub_urls: s.known_hub_urls.clone(),
+            auto_connect_hub: s.auto_connect_hub,
             device_id: s.device_id.clone(),
             device_seed: s.device_seed.clone(),
             selected_model: s.selected_model.clone(),
@@ -361,6 +410,8 @@ impl GlobalSettings {
         s.llm_model = self.llm_model.clone();
         s.pc_url = self.pc_url.clone();
         s.pc_token = self.pc_token.clone();
+        s.known_hub_urls = self.known_hub_urls.clone();
+        s.auto_connect_hub = self.auto_connect_hub;
         s.device_id = self.device_id.clone();
         s.device_seed = self.device_seed.clone();
         s.selected_model = self.selected_model.clone();
@@ -391,6 +442,13 @@ pub struct WorkspaceSettings {
     /// Cluster id this workspace belongs to (see `AppSettings::cluster_id`).
     #[serde(default)]
     pub cluster_id: String,
+    /// The remembered hub's short signing fingerprint (see
+    /// `AppSettings::hub_fingerprint`). Read-only in this projection: it is a
+    /// derived identity (in `DERIVED_FIELDS`), so `apply_to` never writes it back
+    /// and a caller cannot re-key the hub through a workspace save — the UI only
+    /// displays it, to name the hub it is about to reconnect to.
+    #[serde(default)]
+    pub hub_fingerprint: String,
     /// Edge TTS voice for the read-aloud pronunciation reference (see
     /// `AppSettings::read_aloud_tts_voice`). Workspace-scoped: it is a reading
     /// preference, and it travels with the rest of a workspace's setup.
@@ -411,6 +469,7 @@ impl Default for WorkspaceSettings {
             books_dir: data_dir.join("datasets").join("book").to_string_lossy().into_owned(),
             role: String::new(),
             cluster_id: String::new(),
+            hub_fingerprint: String::new(),
             read_aloud_tts_voice: String::new(),
             tts_voice_by_language: BTreeMap::new(),
         }
@@ -425,6 +484,7 @@ impl WorkspaceSettings {
             books_dir: s.books_dir.clone(),
             role: s.role.clone(),
             cluster_id: s.cluster_id.clone(),
+            hub_fingerprint: s.hub_fingerprint.clone(),
             read_aloud_tts_voice: s.read_aloud_tts_voice.clone(),
             tts_voice_by_language: s.tts_voice_by_language.clone(),
         }
@@ -459,10 +519,15 @@ impl Default for AppSettings {
             llm_model: String::new(),
             pc_url: String::new(),
             pc_token: String::new(),
+            known_hub_urls: Vec::new(),
+            auto_connect_hub: true,
             device_id: String::new(),
             device_seed: String::new(),
             role: String::new(),
             cluster_id: String::new(),
+            hub_seed: String::new(),
+            hub_pubkey: String::new(),
+            hub_fingerprint: String::new(),
             read_aloud_tts_voice: String::new(),
             tts_voice_by_language: BTreeMap::new(),
             mcp_policy: default_mcp_policy(),
@@ -579,6 +644,18 @@ impl SettingsState {
     /// a hub on first successful signed contact — see docs/design/sync.md §7).
     pub fn cluster_id(&self) -> String {
         self.settings.lock().unwrap().cluster_id.clone()
+    }
+
+    /// The hub public key this workspace holds: its own identity on a hub, or the
+    /// remembered hub's key on a follower (captured at pairing). Empty when
+    /// neither has been established.
+    pub fn hub_pubkey(&self) -> String {
+        self.settings.lock().unwrap().hub_pubkey.clone()
+    }
+
+    /// Short human-comparable fingerprint of [`SettingsState::hub_pubkey`].
+    pub fn hub_fingerprint(&self) -> String {
+        self.settings.lock().unwrap().hub_fingerprint.clone()
     }
 
     /// Currently preferred default STT model ID (global setting; empty = unset).
@@ -935,6 +1012,17 @@ pub async fn settings_set_role(
     if role == "hub" && s.cluster_id.is_empty() {
         s.cluster_id = uuid::Uuid::new_v4().to_string();
     }
+    // A newly-designated hub also mints its signing identity once, so the
+    // `cluster_id` it advertises can later be *proven* rather than merely
+    // claimed (see `sync::rest::hub_challenge` + `client::hub_identity`). Desktop
+    // only: a mobile build can never be the hub, so it never holds a hub key.
+    #[cfg(feature = "desktop")]
+    if role == "hub" && s.hub_seed.is_empty() {
+        let (seed, pubkey, fingerprint) = mint_hub_identity()?;
+        s.hub_seed = seed;
+        s.hub_pubkey = pubkey;
+        s.hub_fingerprint = fingerprint;
+    }
     SettingsState::save(&s, ws_dir.as_ref())?;
     *state.settings.lock().unwrap() = s.clone();
     log::info!("[Settings] role set to '{role}' (cluster_id='{}')", s.cluster_id);
@@ -945,6 +1033,26 @@ pub async fn settings_set_role(
     #[cfg(feature = "desktop")]
     crate::sync::server::apply_role(app.clone()).await;
     Ok(s)
+}
+
+/// Mint a fresh hub signing keypair, returning `(hex PKCS#8 seed, hex pubkey,
+/// short fingerprint)`. Desktop-only: only a hub ever holds this secret. Mirrors
+/// `sync::client::auth::ensure_device_identity`, but for the hub's own identity
+/// rather than a device credential — the key the hub signs `/hub/challenge`
+/// nonces with, and the key a follower verifies on every silent reconnect.
+#[cfg(feature = "desktop")]
+fn mint_hub_identity() -> Result<(String, String, String), String> {
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+    let der = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .to_vec();
+    let key_pair = Ed25519KeyPair::from_pkcs8_maybe_unchecked(&der)
+        .map_err(|e| e.to_string())?;
+    let seed = crate::sync::pairing::hex_encode(&der);
+    let pubkey = crate::sync::pairing::hex_encode(key_pair.public_key().as_ref());
+    let fingerprint = crate::sync::pairing::fingerprint_of_pubkey(&pubkey)?;
+    Ok((seed, pubkey, fingerprint))
 }
 
 /// Trust-on-first-use cluster adoption (§7): a follower stores the `cluster_id`

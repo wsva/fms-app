@@ -26,9 +26,11 @@ use std::time::{Duration, Instant};
 
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
-use tauri::{State};
+use serde_json::json;
+use tauri::{Emitter, Manager, State};
 
 use crate::settings::SettingsState;
+use crate::sync::client::{verify_hub, HubVerify};
 
 const DISCOVERY_PORT: u16 = 35712;
 const DEFAULT_HTTP_PORT: u16 = 35711;
@@ -61,6 +63,11 @@ pub struct Candidate {
     /// Cluster id the machine belongs to (empty when not yet designated).
     #[serde(default)]
     pub cluster_id: String,
+    /// Short hub signing fingerprint the machine advertises (empty on a peer
+    /// predating the field). What lets a follower recognise *its* hub by name
+    /// rather than by an address that moves; the reconnect path verifies it.
+    #[serde(default)]
+    pub hub_fingerprint: String,
 }
 
 /// Discover nearby FmS PCs. Returns candidates ranked lan -> sweep -> tailscale -> saved.
@@ -70,9 +77,16 @@ pub async fn pc_discover(
     timeout_ms: u64,
 ) -> Result<Vec<Candidate>, String> {
     let timeout = Duration::from_millis(if timeout_ms == 0 { 2000 } else { timeout_ms });
+    Ok(discover_all(&settings, timeout).await)
+}
+
+/// The shared discovery ladder, callable from any platform code that holds a
+/// `&SettingsState` (the `pc_discover` command above and `pc_reconnect_hub`).
+/// Reads the remembered `pc_url`/token, probes LAN, sweeps, tailscales and
+/// revalidates the saved URL, then de-dupes and drops self.
+pub async fn discover_all(settings: &SettingsState, timeout: Duration) -> Vec<Candidate> {
     let saved_url = settings.settings.lock().unwrap().pc_url.clone();
     let saved_token = settings.settings.lock().unwrap().pc_token.clone();
-    drop(settings);
 
     let mut candidates: Vec<Candidate> = Vec::new();
 
@@ -102,6 +116,11 @@ pub async fn pc_discover(
     candidates.extend(sweep);
     candidates.extend(ts);
 
+    // 2b. mDNS service records, a second beacon for networks that filter the
+    //     broadcast (see `sync::mdns`). Appended after the probe so a UDP-healthy
+    //     network never pays for it.
+    candidates.extend(crate::sync::mdns::resolve_mdns(timeout).await);
+
     // 3. Saved URL revalidation.
     if let Some(c) = discover_saved(&saved_url, &saved_token, timeout).await {
         candidates.push(c);
@@ -119,7 +138,158 @@ pub async fn pc_discover(
             out.push(c);
         }
     }
-    Ok(out)
+    out
+}
+
+/// Commit a re-found hub address: make it the current `pc_url` and move it to the
+/// front of the recent-good list (capped), so the next cold start retries it
+/// first — the cheapest path back to a hub whose DHCP lease just renewed.
+fn commit_hub(settings: &SettingsState, url: &str) -> Result<(), String> {
+    let ws_dir = settings.workspace_dir.lock().unwrap().clone();
+    let mut s = settings.settings.lock().unwrap().clone();
+    s.pc_url = url.to_string();
+    let mut list: Vec<String> = vec![url.to_string()];
+    for u in s.known_hub_urls.iter() {
+        if u != url && !list.contains(u) {
+            list.push(u.clone());
+        }
+    }
+    list.truncate(8);
+    s.known_hub_urls = list;
+    SettingsState::save(&s, ws_dir.as_ref())?;
+    *settings.settings.lock().unwrap() = s;
+    Ok(())
+}
+
+/// Re-find and (when verified) reconnect the hub this follower remembers, by
+/// fingerprint rather than by address. The ladder:
+/// 1. no adopted `cluster_id` -> nothing is remembered (`state: "no_hub"`);
+/// 2. the current `pc_url` then each recent-good address, cheapest first;
+/// 3. a full LAN sweep, keeping only candidates in our cluster.
+/// A candidate is committed only after [`verify_hub`] proves it (possession of
+/// the remembered hub key, or — for a hub predating the challenge route — a
+/// matching cluster), so a recycled IP or a stolen cluster id never becomes the
+/// new hub by accident. Website origins are left to the existing OAuth path.
+#[tauri::command]
+pub async fn pc_reconnect_hub(
+    settings: State<'_, SettingsState>,
+    timeout_ms: u64,
+) -> Result<serde_json::Value, String> {
+    let timeout = Duration::from_millis(if timeout_ms == 0 { 2000 } else { timeout_ms });
+    Ok(reconnect_hub_core(&settings, timeout).await)
+}
+
+/// The reconnect ladder body, shared by the `pc_reconnect_hub` command and the
+/// startup auto-connect. Resolves (and commits) the remembered hub's current
+/// address, or reports why it could not. Never errors on "not found" — that is a
+/// normal outcome, surfaced as `state`.
+pub async fn reconnect_hub_core(
+    settings: &SettingsState,
+    timeout: Duration,
+) -> serde_json::Value {
+    let (cluster, stored_pubkey, pc_url, known) = {
+        let s = settings.settings.lock().unwrap();
+        (
+            s.cluster_id.clone(),
+            s.hub_pubkey.clone(),
+            s.pc_url.clone(),
+            s.known_hub_urls.clone(),
+        )
+    };
+    if cluster.is_empty() {
+        return json!({ "state": "no_hub", "message": "no hub is remembered on this device" });
+    }
+
+    // 1. Remembered addresses, most-recent-first, each proven before committing.
+    let mut order: Vec<String> = Vec::new();
+    let norm = |u: &str| u.trim().trim_end_matches('/').to_string();
+    if !pc_url.trim().is_empty() {
+        order.push(norm(&pc_url));
+    }
+    for u in &known {
+        let n = norm(u);
+        if !n.is_empty() && !order.contains(&n) {
+            order.push(n);
+        }
+    }
+    for base in &order {
+        if crate::sync::hub_kind(base) == crate::sync::HubKind::Website {
+            continue;
+        }
+        match verify_hub(base, &cluster, &stored_pubkey).await {
+            HubVerify::Proven => {
+                if let Err(e) = commit_hub(settings, base) {
+                    log::warn!("[discover] commit remembered hub {base} failed: {e}");
+                }
+                log::info!("[discover] auto-reconnected to remembered hub {base} (key proven)");
+                return json!({ "state": "connected", "url": base, "source": "remembered", "verified": true });
+            }
+            HubVerify::UnprovenByCluster => {
+                if let Err(e) = commit_hub(settings, base) {
+                    log::warn!("[discover] commit remembered hub {base} failed: {e}");
+                }
+                log::info!("[discover] auto-reconnected to remembered hub {base} (cluster-only)");
+                return json!({ "state": "connected", "url": base, "source": "remembered", "verified": false });
+            }
+            HubVerify::Rejected(e) => log::warn!("[discover] remembered address {base} rejected: {e}"),
+            HubVerify::Unreachable => {}
+        }
+    }
+
+    // 2. Full sweep: only candidates that name our cluster are even attempted.
+    let candidates = discover_all(settings, timeout).await;
+    for c in candidates
+        .iter()
+        .filter(|c| c.role != "follower" && (c.cluster_id.is_empty() || c.cluster_id == cluster))
+    {
+        if crate::sync::hub_kind(&c.url) == crate::sync::HubKind::Website {
+            continue;
+        }
+        match verify_hub(&c.url, &cluster, &stored_pubkey).await {
+            HubVerify::Proven => {
+                if let Err(e) = commit_hub(settings, &c.url) {
+                    log::warn!("[discover] commit re-found hub {} failed: {e}", c.url);
+                }
+                log::info!("[discover] re-found hub {} via {} (key proven)", c.url, c.source);
+                return json!({ "state": "connected", "url": c.url, "source": c.source, "verified": true });
+            }
+            HubVerify::UnprovenByCluster => {
+                if let Err(e) = commit_hub(settings, &c.url) {
+                    log::warn!("[discover] commit re-found hub {} failed: {e}", c.url);
+                }
+                log::info!("[discover] re-found hub {} via {} (cluster-only)", c.url, c.source);
+                return json!({ "state": "connected", "url": c.url, "source": c.source, "verified": false });
+            }
+            HubVerify::Rejected(_) | HubVerify::Unreachable => {}
+        }
+    }
+
+    json!({ "state": "not_found" })
+}
+
+/// Kick a background auto-connect on app open if this is a follower that
+/// remembers a hub and has the feature on. Fired from the Tauri `setup` hook on
+/// desktop and mobile alike; emits `hub-auto-connect` with the [`reconnect_hub_core`]
+/// outcome so the UI can refresh without a manual scan. Does nothing when there
+/// is nothing to reconnect to (no cluster bound, or the toggle is off).
+pub fn spawn_auto_connect(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let (cluster, auto, role) = {
+            let settings = app.state::<SettingsState>();
+            let st = settings.settings.lock().unwrap();
+            (st.cluster_id.clone(), st.auto_connect_hub, st.role.clone())
+        };
+        // Only a follower reconnects *to* a hub. A hub owns its own cluster id and
+        // key, so running the ladder on it would hunt for (and refuse) itself.
+        if role == "hub" || cluster.is_empty() || !auto {
+            return;
+        }
+        let settings = app.state::<SettingsState>();
+        let outcome = reconnect_hub_core(settings.inner(), Duration::from_millis(2000)).await;
+        drop(settings);
+        let _ = app.emit("hub-auto-connect", &outcome);
+        log::info!("[discover] startup auto-connect -> {outcome}");
+    });
 }
 
 /// The address a Manual hub entry starts from.
@@ -317,6 +487,7 @@ fn parse_beacon(bytes: &[u8], peer: SocketAddr) -> Option<Candidate> {
     let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string();
     let cluster_id = v.get("cluster_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
     let machine = v.get("machine").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    let hub_fingerprint = v.get("hub_fingerprint").and_then(|f| f.as_str()).unwrap_or("").to_string();
     Some(Candidate {
         url: format!("http://{}:{}", peer.ip(), port),
         source: "lan".to_string(),
@@ -324,6 +495,7 @@ fn parse_beacon(bytes: &[u8], peer: SocketAddr) -> Option<Candidate> {
         machine,
         role,
         cluster_id,
+        hub_fingerprint,
     })
 }
 
@@ -401,6 +573,7 @@ async fn discover_sweep(seeds: &[IpAddr], timeout: Duration) -> Vec<Candidate> {
                         .and_then(|c| c.as_str())
                         .unwrap_or("")
                         .to_string(),
+                    hub_fingerprint: v.get("hub_fingerprint").and_then(|f| f.as_str()).unwrap_or("").to_string(),
                 })
             }
         })
@@ -461,6 +634,7 @@ async fn discover_tailscale(timeout: Duration) -> Vec<Candidate> {
                     machine: v.get("machine").and_then(|m| m.as_str()).unwrap_or("").to_string(),
                     role: v.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string(),
                     cluster_id: v.get("cluster_id").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                    hub_fingerprint: v.get("hub_fingerprint").and_then(|f| f.as_str()).unwrap_or("").to_string(),
                 })
             }
         })
@@ -498,5 +672,6 @@ async fn discover_saved(url: &str, token: &str, timeout: Duration) -> Option<Can
         machine: v.get("machine").and_then(|m| m.as_str()).unwrap_or("").to_string(),
         role: v.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string(),
         cluster_id: v.get("cluster_id").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+        hub_fingerprint: v.get("hub_fingerprint").and_then(|f| f.as_str()).unwrap_or("").to_string(),
     })
 }

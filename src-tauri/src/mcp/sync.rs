@@ -65,6 +65,20 @@ struct PcUrlParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReconnectHubParam {
+    /// Discovery budget in milliseconds for the sweep rung (0 = the default 2000).
+    /// Ignored entirely when a remembered address answers, which is the cheap path.
+    #[serde(default)]
+    timeout_ms: u64,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct AutoConnectParam {
+    /// Whether opening the app silently re-finds and reconnects the remembered hub.
+    enabled: bool,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct SyncChangesParam {
     /// Dataset uuid whose hub change log to read, or `"@app"` for the app-wide
     /// scope holding per-user dictation progress + XP (`GET /api/v1/app/changes`).
@@ -279,7 +293,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({ "status": "ok", "revoked": param.device_id }).to_string())
     }
 
-    #[tool(name = "pc_sync_scan", description = "Scan the LAN (and tailnet) for other FmS machines that expose the dataset web service. Returns candidates as { url, source, name, machine, role, cluster_id }. `source` is `lan` (broadcast beacon replied), `sweep` (the broadcast heard nothing, so every address on this machine's local /24 was asked over TCP instead — it still means 'found on the LAN', and seeing it is the signal that this machine's broadcasts are blocked, filtered or misrouted), `tailscale` or `saved`. `machine` is the peer's hostname — the only name that distinguishes two rows, since `name` is the app package name (identical everywhere) and may be empty for peers predating it; present candidates as `machine` + `url`, falling back to `url` alone. Machines that have no web service running cannot be found.")]
+    #[tool(name = "pc_sync_scan", description = "Scan the LAN (and tailnet) for other FmS machines that expose the dataset web service. Returns candidates as { url, source, name, machine, role, cluster_id, hub_fingerprint }. `source` is `lan` (broadcast beacon replied), `sweep` (the broadcast heard nothing, so every address on this machine's local /24 was asked over TCP instead — it still means 'found on the LAN', and seeing it is the signal that this machine's broadcasts are blocked, filtered or misrouted), `tailscale`, `mdns` (an `_fms-sync._tcp` service record resolved, which follows a peer across a DHCP change) or `saved`. `machine` is the peer's hostname — the only name that distinguishes two rows, since `name` is the app package name (identical everywhere) and may be empty for peers predating it; present candidates as `machine` + `url`, falling back to `url` alone. `role` says whether that machine serves (only a `hub` is a sync target). When this device already belongs to a cluster, use `cluster_id`/`hub_fingerprint` to pick *its* hub out of the list rather than the first row — or just call `sync_reconnect_hub`, which does exactly that and proves the match. Machines that have no web service running cannot be found.")]
     async fn pc_sync_scan(&self, Parameters(param): Parameters<PcScanParam>) -> Result<String, String> {
         let timeout_ms = if param.timeout_ms == 0 { 2500 } else { param.timeout_ms };
         log::info!("[MCP] pc_sync_scan: timeout_ms={}", timeout_ms);
@@ -290,7 +304,7 @@ impl DatasetMcpServer {
             "next": if candidates.is_empty() {
                 "Enable the web service in Settings on the other machine, then scan again."
             } else {
-                "Call pc_sync_connect with the url you want to sync from."
+                "Call pc_sync_connect with the url you want to sync from, or sync_reconnect_hub to re-find the hub this device already belongs to."
             }
         })
         .to_string())
@@ -341,6 +355,50 @@ impl DatasetMcpServer {
         .to_string())
     }
 
+    #[tool(name = "sync_reconnect_hub", description = "Re-find and reconnect the hub this device already belongs to, by identity rather than by address — the agent-facing equivalent of the app re-finding its hub when a LAN address changed. Walks a ladder: the current pc_url, then each recently-good address in `known_hub_urls`, then a full scan of the LAN/tailnet/mDNS, keeping only peers that name this device's cluster and proving each with the hub's signed challenge before committing. Returns { state: 'connected'|'not_found'|'no_hub', url, source, verified }. `verified: false` means a hub that predates the challenge route matched on cluster id alone. Non-destructive and never wrong: it only ever writes `pc_url` for a host that answered and matched, and reports 'not_found' without touching settings otherwise, so retrying is always safe. Hub addresses are ignored (a hub is not looking for a hub), and a website hub is left to its own OAuth path — use pc_sync_connect for the first connection or to point somewhere new.")]
+    async fn sync_reconnect_hub(&self, Parameters(param): Parameters<ReconnectHubParam>) -> Result<String, String> {
+        let timeout = std::time::Duration::from_millis(if param.timeout_ms == 0 { 2000 } else { param.timeout_ms });
+        log::info!("[MCP] sync_reconnect_hub: timeout_ms={}", timeout.as_millis());
+        let settings = self.app.state::<SettingsState>();
+        let v = crate::sync::discover::reconnect_hub_core(settings.inner(), timeout).await;
+        drop(settings);
+        // The ladder commits the new address itself, so the UI's cached settings
+        // have to be told exactly as `pc_sync_connect` does.
+        let _ = self.app.emit("settings-changed", ());
+        Ok(match v.get("state").and_then(|s| s.as_str()) {
+            Some("connected") => format!(
+                "{v}\n\nnext: call pc_sync_status to confirm the hub, then sync_run_round to pull."
+            ),
+            Some("no_hub") => format!("{v}\n\nnext: nothing is remembered on this device — run pc_sync_scan and pc_sync_connect (or pair) first."),
+            _ => format!("{v}\n\nnext: the remembered hub did not answer anywhere on this network. Check that its web service is running, or run pc_sync_scan to see what is reachable."),
+        })
+    }
+
+    #[tool(name = "sync_set_auto_connect", description = "Turn the startup auto-connect of the remembered hub on or off. When on (the default), opening the app re-finds the hub by its fingerprint and reconnects without asking — the same ladder sync_reconnect_hub runs by hand. Setting it changes nothing about the current connection; it only decides whether the next open hunts for the hub by itself. Read pc_sync_status for the current state.")]
+    async fn sync_set_auto_connect(&self, Parameters(param): Parameters<AutoConnectParam>) -> Result<String, String> {
+        log::info!("[MCP] sync_set_auto_connect: {}", param.enabled);
+        let settings = self.app.state::<SettingsState>();
+        let snapshot = {
+            let mut s = settings.settings.lock().unwrap();
+            s.auto_connect_hub = param.enabled;
+            s.clone()
+        };
+        let ws_dir = settings.workspace_dir.lock().unwrap().clone();
+        SettingsState::save(&snapshot, ws_dir.as_ref())?;
+        let _ = self.app.emit("settings-changed", ());
+        Ok(serde_json::json!({
+            "status": "ok",
+            "auto_connect_hub": param.enabled,
+            "remembered_hub": !snapshot.cluster_id.is_empty(),
+            "next": if param.enabled && snapshot.cluster_id.is_empty() {
+                "On, but nothing is remembered on this device yet, so there is nothing to re-find: pair or connect first."
+            } else {
+                "Done."
+            }
+        })
+        .to_string())
+    }
+
     #[tool(name = "pc_sync_status", description = "Summarise the cross-machine sync setup: the connected source, the datasets it offers, what this machine has already pulled, and queued writeback changes. Read this before pulling anything.")]
     async fn pc_sync_status(&self) -> Result<String, String> {
         log::info!("[MCP] pc_sync_status");
@@ -348,9 +406,20 @@ impl DatasetMcpServer {
         let pc_url = settings.settings.lock().unwrap().pc_url.clone();
         // This machine's sync role/cluster + wire protocol (§3.1) so an agent
         // can tell hub from follower and diagnose mis-pairing before acting.
+        // Read the remembered-hub fields in one lock: `SettingsState`'s accessors
+        // take it themselves, so mixing them with a held guard deadlocks.
+        let (known_hub_urls, auto_connect_hub) = {
+            let s = settings.settings.lock().unwrap();
+            (s.known_hub_urls.clone(), s.auto_connect_hub)
+        };
         let local = serde_json::json!({
             "role": settings.role(),
             "cluster_id": settings.cluster_id(),
+            // The remembered hub's signing identity: two devices in one cluster
+            // can disagree about which address is theirs, but not about this.
+            "hub_fingerprint": settings.hub_fingerprint(),
+            "known_hub_urls": known_hub_urls,
+            "auto_connect_hub": auto_connect_hub,
             "protocol_version": crate::sync::PROTOCOL_VERSION,
         });
         if pc_url.trim().is_empty() {
