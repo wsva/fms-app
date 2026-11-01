@@ -1542,6 +1542,14 @@ pub async fn sync_round_inner(
     // capability, never a protocol guess — an unlisted feature is "no", and a
     // pre-ingest hub simply keeps its DB to itself).
     let hub_ingest = advertises(&cluster, "dataset_ingest");
+    log::info!(
+        "[sync] capability negotiation: cluster={} protocol={:?} app_journal={} dataset_journal={} ingest={}",
+        if cluster.is_some() { "ok" } else { "none" },
+        cluster_protocol,
+        app_ok,
+        ds_ok,
+        hub_ingest,
+    );
 
     // 0. One-time wholesale XP collection (Rule 1): before this round's flush, a
     // newly-paired follower re-journals its entire local ledger so an award its

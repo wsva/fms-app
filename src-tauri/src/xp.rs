@@ -69,6 +69,11 @@ fn open_app_db(settings: &SettingsState) -> Result<Connection, String> {
     let db_path = db_dir.join("app.sqlite3");
     log::debug!("[XP] Opening app DB: {}", db_path.display());
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    // Same app.sqlite3 the sync round and status reads open on their own
+    // connections; wait out a brief concurrent write instead of failing instantly
+    // with "database is locked" (mirrors dictation::open_app_db).
+    conn.busy_timeout(std::time::Duration::from_secs(10))
+        .map_err(|e| e.to_string())?;
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS xp_user (
@@ -271,26 +276,42 @@ pub(crate) fn recompute_totals(settings: &SettingsState, user_id: &str) -> Resul
 /// No new endpoint — it rides the existing `POST /api/v1/sync/changes` writeback.
 pub(crate) fn collect_local_awards_for_push(settings: &SettingsState) -> Result<usize, String> {
     let me = workspace_identity(settings);
-    let conn = open_app_db(settings)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT amount, source, COALESCE(reference_id, ''), COALESCE(dataset_uuid, '') \
-             FROM xp_ledger WHERE user_id = ?1",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([me.as_str()], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })
-        .map_err(|e| e.to_string())?;
+    // Read every ledger row into memory FIRST, then drop the statement and its
+    // connection so the SELECT's SHARED read lock is released before any write.
+    // The loop below calls `commit_change_as` -> `enqueue_change`, which opens its
+    // OWN connection to this same `app.sqlite3` to INSERT into `writeback_queue`.
+    // Holding this read cursor open across those writes is a self-deadlock in
+    // rollback-journal mode: a write can never commit while another connection
+    // holds SHARED, so every row would block for the full busy_timeout and then
+    // fail "database is locked" — no XP ever reached the queue, and the stall made
+    // a sync round look hung. Materializing the rows first breaks the overlap.
+    let rows: Vec<(i64, String, String, String)> = {
+        let conn = open_app_db(settings)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT amount, source, COALESCE(reference_id, ''), COALESCE(dataset_uuid, '') \
+                 FROM xp_ledger WHERE user_id = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let mapped = stmt
+            .query_map([me.as_str()], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    log::info!(
+        "[XP] one-time collection: re-journaling {} local award(s) for user '{}' to push to the Hub",
+        rows.len(),
+        me,
+    );
     let mut enqueued = 0usize;
-    for r in rows.filter_map(|r| r.ok()) {
-        let (amount, source, reference_id, dataset_uuid) = r;
+    for (amount, source, reference_id, dataset_uuid) in rows {
         let payload = serde_json::json!({
             "user_id": me,
             "amount": amount,
@@ -301,12 +322,13 @@ pub(crate) fn collect_local_awards_for_push(settings: &SettingsState) -> Result<
         // A follower `enqueue_change`s this into the writeback queue (the same call
         // `xp_award_internal` makes at award time); the Hub appends to `sync_log`,
         // where the dedup makes a re-collect a no-op. Best-effort per row.
-        if crate::sync::change_log::commit_change_as(
+        match crate::sync::change_log::commit_change_as(
             settings, "xp", &dataset_uuid, &payload, &me,
-        )
-        .is_ok()
-        {
-            enqueued += 1;
+        ) {
+            Ok(()) => enqueued += 1,
+            Err(e) => log::warn!(
+                "[XP] one-time collection: failed to enqueue award (source={source}, ref={reference_id}): {e}"
+            ),
         }
     }
     Ok(enqueued)

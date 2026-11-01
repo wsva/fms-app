@@ -781,6 +781,7 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
     syncRoundStore.begin();
     setMessage("");
     syncRoundStore.setLastMessage("");
+    logInfo("[sync] Sync tapped — invoking sync_run_round", "datasets");
     try {
       const r = await invoke<{
         pushed?: number;
@@ -809,10 +810,12 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
       const done = bits.length ? `Round done — ${bits.join(", ")}.` : "Round done — already up to date.";
       setMessage(done);
       syncRoundStore.setLastMessage(done);
+      logInfo(`[sync] ${done}`, "datasets");
     } catch (e) {
       const failed = `Sync round failed: ${String(e)}`;
       setMessage(failed);
       syncRoundStore.setLastMessage(failed);
+      logError(`[sync] ${failed}`, "datasets");
     } finally {
       syncRoundStore.end();
       loadLocalState();

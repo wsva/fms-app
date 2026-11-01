@@ -133,9 +133,10 @@ pub(crate) fn open_app_db(settings: &SettingsState) -> Result<Connection, String
     // sync-state and upload-surface reads open their own connections against the
     // same file. SQLite's default busy_timeout is 0, so a reader colliding with
     // the round's write transaction used to fail instantly with "database is
-    // locked". Wait instead — these writes are short, so the reader proceeds a
-    // moment later. Mirrors db::open_db_with_logging.
-    conn.busy_timeout(std::time::Duration::from_secs(30))
+    // locked". Wait instead — these writes are short (milliseconds), so the reader
+    // proceeds almost immediately. Bounded at 10s so a pathological long-held
+    // lock surfaces as an error rather than an endless UI stall.
+    conn.busy_timeout(std::time::Duration::from_secs(10))
         .map_err(|e| e.to_string())?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS listen_dictation (

@@ -77,6 +77,10 @@ fn open_app_db(settings: &SettingsState) -> Result<Connection, String> {
     std::fs::create_dir_all(&db_dir).map_err(|e| e.to_string())?;
     let db_path = db_dir.join("app.sqlite3");
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    // Shared app.sqlite3: wait out a brief concurrent write from the sync round
+    // instead of failing instantly (mirrors dictation::open_app_db).
+    conn.busy_timeout(std::time::Duration::from_secs(10))
+        .map_err(|e| e.to_string())?;
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS agent_todo (

@@ -844,7 +844,15 @@ async fn changes(
         crate::sync::change_log::maybe_prune(&conn);
     }
     match crate::sync::change_log::read_changes(&conn, &uuid, after) {
-        Ok(page) => (StatusCode::OK, Json(page)).into_response(),
+        Ok(page) => {
+            log::info!(
+                "[sync] hub served GET /datasets/{uuid}/changes: after={after} -> {} row(s), hub_seq={}, resync_required={}",
+                page.entries.len(),
+                page.hub_seq,
+                page.resync_required,
+            );
+            (StatusCode::OK, Json(page)).into_response()
+        }
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
 }
@@ -874,7 +882,15 @@ async fn app_changes(
         crate::sync::change_log::maybe_prune(&conn);
     }
     match crate::sync::change_log::read_changes(&conn, sync::change_log::APP_SCOPE, after) {
-        Ok(page) => (StatusCode::OK, Json(page)).into_response(),
+        Ok(page) => {
+            log::info!(
+                "[sync] hub served GET /app/changes: after={after} -> {} row(s), hub_seq={}, resync_required={}",
+                page.entries.len(),
+                page.hub_seq,
+                page.resync_required,
+            );
+            (StatusCode::OK, Json(page)).into_response()
+        }
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
 }
