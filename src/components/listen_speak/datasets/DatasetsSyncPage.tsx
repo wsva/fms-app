@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
 import type { LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -329,6 +329,44 @@ interface GlobalSettings {
 // Component
 // ---------------------------------------------------------------------------
 
+// The in-flight sync-round flag lives outside the component on purpose. This page
+// is unmounted whenever the user switches tabs and remounts fresh on the way back,
+// so a `useState` boolean would reset to `false` mid-round and re-arm the Sync
+// button while `sync_run_round` is still running (the invoke promise keeps going
+// in the abandoned closure and only clears it in its `finally`). A module-level
+// store survives the unmount within one JS runtime, and `useSyncExternalStore`
+// lets the remounted component read the live value and subscribe to its completion.
+const syncRoundStore = {
+  running: false,
+  listeners: new Set<() => void>(),
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  },
+  getSnapshot: () => syncRoundStore.running,
+  lastMessage: "",
+  setLastMessage(msg: string) {
+    this.lastMessage = msg;
+  },
+  begin() {
+    if (this.running) return;
+    this.running = true;
+    this.listeners.forEach((l) => l());
+  },
+  end() {
+    if (!this.running) return;
+    this.running = false;
+    this.listeners.forEach((l) => l());
+  },
+};
+// Stable references for `useSyncExternalStore` — inline closures would be a new
+// store to React on every render, forcing a resubscribe each time.
+const subscribeSyncRound = (listener: () => void) => syncRoundStore.subscribe(listener);
+const getSyncRoundSnapshot = () => syncRoundStore.getSnapshot();
+const getSyncRoundServerSnapshot = () => false;
+
 /**
  * Pull datasets from another FmS machine and push local progress back.
  * Reachable from both shells: the Android thin client syncs with its paired PC,
@@ -356,9 +394,17 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   const [listError, setListError] = useState<string>("");
   const [unpaired, setUnpaired] = useState(false);
   const [busyUuid, setBusyUuid] = useState<string>("");
-  const [syncing, setSyncing] = useState(false);
+  // Round-running state lives in the module store above, so navigating away and
+  // back during a round keeps the button disabled (and spinning) until it ends.
+  const syncing = useSyncExternalStore(
+    subscribeSyncRound,
+    getSyncRoundSnapshot,
+    getSyncRoundServerSnapshot, // SSR/hydration snapshot — no round runs outside the webview
+  );
   const [progress, setProgress] = useState<Record<string, SyncProgress>>({});
-  const [message, setMessage] = useState<string>("");
+  // Seed from the store's last round result: a round that finished while the
+  // user was on another page still has its summary shown when they come back.
+  const [message, setMessage] = useState<string>(() => syncRoundStore.lastMessage);
 
   // Website-hub upload surface (T2). Local datasets are the upload candidates;
   // `uploadState` records what this device already pushed ("uploaded vN"); the
@@ -731,9 +777,10 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
   // apply → file-drift fetch → catalog prune. Replaces the old per-dataset
   // Pull / Upload buttons — a round moves everything it can in both directions.
   async function handleSyncNow() {
-    if (syncing) return;
-    setSyncing(true);
+    if (syncRoundStore.running) return;
+    syncRoundStore.begin();
     setMessage("");
+    syncRoundStore.setLastMessage("");
     try {
       const r = await invoke<{
         pushed?: number;
@@ -759,11 +806,15 @@ export default function DatasetsSyncPage({ onNavigate }: { onNavigate?: (tab: st
         bits.push(r.history.complete === false ? `history partial (${h}, retrying)` : `history ${h}`);
       }
       if (r.errors?.length) bits.push(`${r.errors.length} error(s)`);
-      setMessage(bits.length ? `Round done — ${bits.join(", ")}.` : "Round done — already up to date.");
+      const done = bits.length ? `Round done — ${bits.join(", ")}.` : "Round done — already up to date.";
+      setMessage(done);
+      syncRoundStore.setLastMessage(done);
     } catch (e) {
-      setMessage(`Sync round failed: ${String(e)}`);
+      const failed = `Sync round failed: ${String(e)}`;
+      setMessage(failed);
+      syncRoundStore.setLastMessage(failed);
     } finally {
-      setSyncing(false);
+      syncRoundStore.end();
       loadLocalState();
       loadStatus();
       loadUploadSurface();

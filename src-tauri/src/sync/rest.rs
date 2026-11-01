@@ -2208,6 +2208,20 @@ async fn sync_changes(
         results.push(apply_one_change(&mut ledger, &settings, &write_identity, hub_now, &ch).await);
     }
 
+    // Hub-side trace of one writeback batch: what a device sent and how the hub
+    // judged it. A losing LWW push is acked but flagged `rejected`, so count it
+    // apart from a genuine apply; failures stay queued on the follower and retry.
+    if !results.is_empty() {
+        let applied = results.iter().filter(|r| r.ok && r.rejected != Some(true)).count();
+        let rejected = results.iter().filter(|r| r.rejected == Some(true)).count();
+        let failed = results.iter().filter(|r| !r.ok).count();
+        log::info!(
+            "[sync] writeback from device {:?} as {write_identity}: {} change(s) -> applied={applied} rejected={rejected} failed={failed}",
+            auth.device_id,
+            results.len(),
+        );
+    }
+
     (StatusCode::OK, Json(results)).into_response()
 }
 

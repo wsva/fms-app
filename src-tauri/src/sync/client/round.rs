@@ -1463,6 +1463,12 @@ pub async fn sync_round_inner(
     // these two values; every prune-by-absence checks against them (INV-7).
     let (connected_kind, connected_origin) = upstream_of(&base);
     let connected = (connected_kind, connected_origin.as_str());
+    log::info!(
+        "[sync] round start: role={} hub={} (kind={})",
+        if settings.is_hub() { "hub" } else { "follower" },
+        base,
+        connected_kind,
+    );
     if is_website {
         log::info!(
             "[sync] website hub contract v{} round",
@@ -1923,6 +1929,12 @@ pub async fn sync_round_inner(
             obj.insert("inbox_drain".into(), s);
         }
     }
+    log::info!(
+        "[sync] round done: pushed={pushed} held={held} applied={applied} dropped_pending={dropped_total} resynced={} pruned={} errors={}",
+        resynced.len(),
+        pruned.len(),
+        errors.len(),
+    );
     // Persist for the status surface (§19.2): a failure to record must not fail
     // the round, so log at most and still return the result.
     if let Ok(conn) = datasets::dictation::open_app_db(settings.inner()) {
