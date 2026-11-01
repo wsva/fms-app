@@ -203,7 +203,11 @@ export default function SettingsPage({
     // sidebar shell never renders.
     ...(mobile ? [{ id: "bottom-nav", label: "Bottom Nav", icon: Smartphone }] : []),
     { id: "llm", label: "LLM Settings", icon: Globe },
-    { id: "microphone", label: "Microphone", icon: MicGlyph },
+    // Desktop only: this picks/pins among multiple audio input devices, a PC
+    // concern (a virtual device taking over dictation). A phone has one built-in
+    // mic, and the capture path already falls back to the system default when
+    // nothing is pinned — see lib/voice-input micConstraints().
+    ...(mobile ? [] : [{ id: "microphone", label: "Microphone", icon: MicGlyph }]),
     { id: "about", label: "About", icon: Info },
   ];
 
@@ -634,7 +638,8 @@ export default function SettingsPage({
 
         </section>
 
-        {/* ── Microphone section ─────────────────────────────── */}
+        {/* ── Microphone section (desktop only) ──────────────── */}
+        {!mobile && (
         <section className={`mb-8${showSection("microphone") ? "" : " hidden"}`}>
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-[1.3em] font-semibold">Microphone</h2>
@@ -691,6 +696,7 @@ export default function SettingsPage({
           {/* Zoom-style audio check on the currently selected device. */}
           <MicTestPanel />
         </section>
+        )}
 
         {/* ── About section ────────────────────────────────── */}
         <section className={`mb-8${showSection("about") ? "" : " hidden"}`}>
