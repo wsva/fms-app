@@ -539,6 +539,13 @@ pub(crate) async fn pull_app_scope(
     let entries = page["entries"].as_array().cloned().unwrap_or_default();
     let mut applied = 0i64;
     let mut dropped = 0i64;
+    let mut n_xp = 0i64;
+    let mut n_dictation = 0i64;
+    log::info!(
+        "[sync] @app journal: hub returned {} row(s) past cursor {} — folding them in…",
+        entries.len(),
+        after,
+    );
     if !entries.is_empty() {
         let _guard = crate::sync::change_log::ApplyGuard::new();
         let conn = datasets::dictation::open_app_db(settings.inner())?;
@@ -561,7 +568,14 @@ pub(crate) async fn pull_app_scope(
             // `dictation` needs no dataset and `xp` carries its own, so the row is
             // applied with an empty dataset argument.
             match apply_change(settings, "", kind, &payload, user_key).await {
-                Ok(true) => applied += 1,
+                Ok(true) => {
+                    applied += 1;
+                    match kind {
+                        "xp" => n_xp += 1,
+                        "dictation" => n_dictation += 1,
+                        _ => {}
+                    }
+                }
                 Ok(false) => {}
                 Err(e) => errors.push(json!({ "scope": scope, "kind": kind, "error": e })),
             }
@@ -581,6 +595,14 @@ pub(crate) async fn pull_app_scope(
     // fills an empty origin — see [`stamp_app_provenance`].
     let (k, o) = upstream_of(&pc_base(settings.inner()));
     let _ = stamp_app_provenance(&conn, k, &o);
+    log::info!(
+        "[sync] @app journal done: applied {} change(s) — {} XP award(s), {} dictation row(s); cursor {} -> {}",
+        applied,
+        n_xp,
+        n_dictation,
+        after,
+        hub_seq.max(after),
+    );
     Ok(AppPull { applied, needs_history, hub_protocol, dropped_pending: dropped })
 }
 
@@ -1553,10 +1575,13 @@ pub async fn sync_round_inner(
     }
 
     // 1. Push local edits first so the hub holds our changes before we pull.
+    let queued_before = pending_writeback_count(&settings);
+    log::info!("[sync] push leg: {queued_before} local change(s) queued, flushing them to the hub…");
     let pushed = writeback_flush_inner(&settings, &cluster).await.unwrap_or_else(|e| {
         errors.push(json!({ "stage": "push", "error": e }));
         0
     });
+    log::info!("[sync] push leg done: hub acknowledged {pushed} of {queued_before} change(s)");
     // Ship the recordings behind our locally-made attempts now that their rows are
     // up, so the hub can serve them to the other devices (attempt-audio plane).
     // Best-effort: a failure is logged in `errors`, never aborts the round.
@@ -1595,6 +1620,7 @@ pub async fn sync_round_inner(
             catalog_map.insert(u, t);
         }
     }
+    log::info!("[sync] catalog leg: hub advertises {} dataset(s)", catalog_map.len());
 
     // 3. Per already-synced dataset: incremental apply, or a full resync when
     //    the cursor is unknown / a prune gap is reported / files drifted.
@@ -1635,6 +1661,14 @@ pub async fn sync_round_inner(
             }
             continue;
         }
+
+        let ds_type = catalog_map.get(&uuid).cloned().unwrap_or_default();
+        log::info!(
+            "[sync] dataset {} [{}]: syncing rows (cursor {:?}) + files against the hub…",
+            uuid,
+            ds_type,
+            cursor_opt,
+        );
 
         let cursor_is_hash = cursor_opt.is_some() && !stored_hash.is_empty();
         if is_website {
@@ -1751,6 +1785,10 @@ pub async fn sync_round_inner(
             AppPull { applied: 0, needs_history: false, hub_protocol: None, dropped_pending: 0 }
         });
     applied += app.applied;
+    log::info!(
+        "[sync] @app leg: folded {} hub change(s) (dictation progress + XP awards) into the local DB",
+        app.applied
+    );
     // Now that the attempt rows are folded in locally, pull the recordings behind
     // any of my rows whose WAV is missing, so "Assess again" on this device can
     // measure fluency and pronunciation against the real audio. Bounded per round
@@ -1790,6 +1828,11 @@ pub async fn sync_round_inner(
             })
             .unwrap_or(false);
     if app.needs_history || events_owed {
+        log::info!(
+            "[sync] history leg: backfilling the hub's full app history (needs_history={}, events_owed={})…",
+            app.needs_history,
+            events_owed
+        );
         match backfill_app_history(settings.inner(), &cluster, app.hub_protocol, false).await {
             Ok(Some(v)) => history = Some(v),
             // `Ok(None)` = hub predates the endpoint, already stamped. Expected,

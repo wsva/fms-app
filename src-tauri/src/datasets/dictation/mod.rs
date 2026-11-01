@@ -128,6 +128,15 @@ pub(crate) fn open_app_db(settings: &SettingsState) -> Result<Connection, String
     }
     log::debug!("[Dictation] Opening app DB: {}", db_path.display());
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    // The app DB is shared by concurrent callers: a sync round writes the
+    // journal, cursors and the last-round result while the status surface, the
+    // sync-state and upload-surface reads open their own connections against the
+    // same file. SQLite's default busy_timeout is 0, so a reader colliding with
+    // the round's write transaction used to fail instantly with "database is
+    // locked". Wait instead — these writes are short, so the reader proceeds a
+    // moment later. Mirrors db::open_db_with_logging.
+    conn.busy_timeout(std::time::Duration::from_secs(30))
+        .map_err(|e| e.to_string())?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS listen_dictation (
             uuid          TEXT PRIMARY KEY,

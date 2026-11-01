@@ -150,7 +150,15 @@ pub async fn writeback_flush_inner(
     let require_cloud_upstream =
         crate::sync::hub_kind(&base) == crate::sync::HubKind::Website;
 
-    let client = reqwest::Client::new();
+    // Bounded client: an untimed `Client::new()` would await forever on a hub
+    // that accepts the TCP connection but never answers, hanging the whole round
+    // (the Sync button spinning with no further log). Time out so the batch fails
+    // and the round ends with a visible reason instead of stalling silently.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
     let mut flushed = 0usize;
     if app_ok {
         flushed += flush_scope(settings, &client, FlushScope::App).await?;
@@ -277,6 +285,23 @@ async fn flush_scope(
             break;
         }
 
+        // Name what is actually leaving this device, so a stalled or empty push is
+        // legible in the log (e.g. "xp=3" confirms XP awards are being delivered).
+        let scope_tag = if app_scope { "@app" } else { "dataset" };
+        let mut kind_counts: std::collections::BTreeMap<&str, usize> = Default::default();
+        for (_, kind, _, _, _, _) in &batch {
+            *kind_counts.entry(kind.as_str()).or_insert(0) += 1;
+        }
+        let kinds = kind_counts
+            .iter()
+            .map(|(k, n)| format!("{k}={n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        log::info!(
+            "[sync] writeback[{scope_tag}]: POSTing {} queued change(s) [{kinds}] to the hub…",
+            batch.len(),
+        );
+
         // 2. POST the batch. Each change carries the authority epoch this device
         // recorded for its scope (INV-13), so the hub can refuse a write made after
         // a handover it has not yet pulled. `0` until the scope has been handed over,
@@ -342,7 +367,11 @@ async fn flush_scope(
             }
             flushed += acked.len();
         }
-
+        log::info!(
+            "[sync] writeback[{scope_tag}]: hub acknowledged {} of {} change(s)",
+            acked.len(),
+            batch.len(),
+        );
         // No acknowledged items: we cannot make further progress this run.
         if acked.is_empty() {
             break;
