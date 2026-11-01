@@ -26,6 +26,7 @@ import {
   AlignLeft,
   LayoutGrid,
   Mic,
+  FileDown,
 } from "lucide-react";
 import { emit } from "@tauri-apps/api/event";
 import MdEditor from "@/components/wiki/MdEditor";
@@ -50,6 +51,7 @@ import { useDatasetFamily } from "@/hooks/useDatasetFamily";
 import { openDatasetInTab } from "@/lib/nav/open-in-tab";
 import type { TabId } from "@/lib/shell/tabs";
 import { rerecognizeAttempt } from "@/lib/read_aloud/rerecognize";
+import { exportTextsToPdf } from "@/lib/read_aloud/exportPdf";
 import { groupByText, hasUsableClip, listStandardAudio } from "@/lib/read_aloud/standardAudio";
 import type { RaFontId, RaSpaceId } from "@/lib/read_aloud/fonts";
 import {
@@ -278,6 +280,9 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
   const [attemptsRefreshKey, setAttemptsRefreshKey] = useState(0);
   // True while the toolbar's "Assess again" re-transcribes the open attempt.
   const [rerecognizingAttempt, setRerecognizingAttempt] = useState(false);
+  // True while the toolbar's "Export PDF" prepares the print document. The print
+  // dialog itself is native and blocks, but the face-loading before it is async.
+  const [exporting, setExporting] = useState(false);
   // Toggled by the toolbar's "Compare" button: the attempt detail then shows the
   // text and the recognized transcript side by side, sentence by sentence.
   const [compareView, setCompareView] = useState(false);
@@ -834,6 +839,27 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
     });
   };
 
+  // Export every text of the open dataset to PDF, each on its own page, in the
+  // writing currently chosen. It goes through the webview's print-to-PDF rather
+  // than a PDF library so the handwriting face is faithful — see exportPdf.ts.
+  const exportDatasetPdf = async () => {
+    if (!activeDataset || exporting) return;
+    setExporting(true);
+    setError(null);
+    try {
+      await exportTextsToPdf(activeDataset.name, texts, {
+        familyCss: raFontOption(raFont).css,
+        spaceCss: raSpaceOption(raSpace).css,
+      });
+    } catch (e) {
+      const msg = String(e);
+      logError(`export pdf failed: ${msg}`, LOG_MODULE);
+      setError(msg);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const fieldCls =
     "w-full p-2 rounded-md bg-bg-muted border border-border-default text-text-primary text-sm focus:outline-none focus:border-accent-bg";
   const labelCls = "text-xs font-medium text-text-secondary mb-1 block";
@@ -1152,6 +1178,17 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
                     New Text
                   </ToolbarMenuItem>
                 )}
+                {/* Print every text of this dataset to a PDF — one per page, in
+                    the writing currently chosen. A dataset-level bulk action, so
+                    it lives behind the dots with the other whole-dataset tools;
+                    disabled when there is nothing to export. */}
+                <ToolbarMenuItem
+                  icon={exporting ? Loader2 : FileDown}
+                  disabled={exporting || texts.length === 0}
+                  onClick={() => void exportDatasetPdf()}
+                >
+                  Export PDF
+                </ToolbarMenuItem>
                 {/* The dataset's bulk tools are occasional, and they act on the
                     whole dataset rather than on the row under the cursor, so
                     they live behind the dots and open a page of their own. The
