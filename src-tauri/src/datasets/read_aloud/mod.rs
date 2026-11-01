@@ -410,8 +410,11 @@ fn resolve_audio_url(dataset_dir: &Path, audio_dir: &Path, audio_path: &Option<S
 // dataset. So practising a read-only adopted base needs no overlay, never
 // dirties a published hash or a `read_text` row (INV-9), and one user's scores
 // and recordings no longer ride the content channel to everyone who syncs the
-// dataset. Replay is `INSERT OR IGNORE` by event uuid; convergence is set
-// equality, exactly like card reviews (`datasets/cards/review.rs`).
+// dataset. An attempt's *identity* is insert-once by event uuid, but its assessment
+// result (`recognized`/`score`/`metrics_json`) is a mutable State: a replay is a
+// last-write-wins upsert on `updated_at`, so re-running "Assess again" on one device
+// converges every device to the newest result (§17.7). An equal `updated_at` (the
+// author's own echo) is a no-op.
 
 /// One recorded attempt as a per-user event.
 #[derive(Clone, Debug)]
@@ -431,6 +434,11 @@ struct AttemptEvent {
     /// from the device-local recording on demand.
     metrics: Option<String>,
     created_at: String,
+    /// Revision stamp for last-write-wins propagation. A new attempt sets it to
+    /// `created_at`; a re-assessment bumps it to now, so the newer result reaches
+    /// the devices that already hold this uuid. Legacy rows are NULL — every
+    /// comparison reads `COALESCE(updated_at, created_at)`.
+    updated_at: String,
 }
 
 /// Create the event table + migration marker in the app DB. Idempotent, and safe
@@ -502,6 +510,18 @@ fn ensure_attempt_schema(conn: &Connection) -> Result<(), String> {
         .unwrap_or(false);
     if !has_feedback {
         conn.execute("ALTER TABLE read_attempt_event ADD COLUMN feedback_json TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Same lazy shape for the LWW revision stamp. Left NULL on legacy rows: the
+    // read/write paths coalesce it against `created_at`, so an attempt recorded
+    // before result-sync existed still has a well-defined newest-result ordering.
+    let has_updated: bool = conn
+        .prepare("SELECT 1 FROM PRAGMA_table_info('read_attempt_event') WHERE name = 'updated_at'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if !has_updated {
+        conn.execute("ALTER TABLE read_attempt_event ADD COLUMN updated_at TEXT", [])
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -640,50 +660,6 @@ pub(crate) fn mark_attempt_audio_pushed(settings: &SettingsState, attempt_uuid: 
     Ok(())
 }
 
-/// Queue every locally-held recording that has not been shipped yet, so attempts
-/// made *before* the `attempt_audio` plane existed can catch up. Idempotent —
-/// `INSERT OR IGNORE` leaves a WAV already waiting to upload untouched, so a
-/// repeat click only picks up recordings made since the last run. Returns the
-/// number of attempts newly queued. Only this identity's rows whose `<uuid>.wav`
-/// is actually on disk qualify: a follower that never recorded has nothing to
-/// send, and a row whose recording was evicted is skipped (there are no bytes).
-pub(crate) fn backfill_attempt_audio_outbox(settings: &SettingsState) -> Result<usize, String> {
-    let conn = open_app_attempts(settings)?;
-    let me = workspace_identity(settings);
-    let rows: Vec<(String, String)> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT uuid, audio_path FROM read_attempt_event \
-                 WHERE user_id = ?1 AND audio_path IS NOT NULL AND audio_path <> ''",
-            )
-            .map_err(|e| e.to_string())?;
-        let mapped = stmt
-            .query_map(params![me], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        mapped.filter_map(|x| x.ok()).collect()
-    };
-    let dir = audio_dir(settings);
-    let mut queued = 0usize;
-    for (uuid, name) in rows {
-        // The submit path stores `audio_path` as the `<uuid>.wav` basename in
-        // `audio_dir`; resolve the same way the push leg's `pending` query does.
-        let file_name = Path::new(&name)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or(name);
-        if !dir.join(&file_name).exists() && !attempt_audio_file(settings, &uuid).exists() {
-            continue;
-        }
-        queued += conn
-            .execute(
-                "INSERT OR IGNORE INTO read_attempt_audio_outbox (attempt_uuid, file_name, queued_at) VALUES (?1, ?2, ?3)",
-                params![uuid, file_name, now_row_stamp()],
-            )
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(queued)
-}
-
 /// My attempts whose row is stored here but whose recording is not — the pull
 /// leg's work list, capped by the caller. Legacy dataset-relative `media/…`
 /// paths that resolve to a real file are already covered and skipped.
@@ -742,19 +718,6 @@ fn clear_attempt_audio_absent(settings: &SettingsState, attempt_uuid: &str) -> R
     conn.execute("DELETE FROM read_attempt_audio_absent WHERE attempt_uuid = ?1", params![attempt_uuid])
         .map_err(|e| e.to_string())?;
     Ok(())
-}
-
-/// Drop the whole 404 deny-list so the pull leg re-probes every attempt again.
-/// The manual backfill uses this before pulling: a device that probed a not-yet-
-/// capable hub would have parked its recordings as "absent" for the TTL, and the
-/// recordings may now exist (pushed by another device, or the hub was upgraded).
-/// Returns how many marks were cleared. Cheap and idempotent.
-pub(crate) fn reset_attempt_audio_absent(settings: &SettingsState) -> Result<usize, String> {
-    let conn = open_app_attempts(settings)?;
-    let n = conn
-        .execute("DELETE FROM read_attempt_audio_absent", [])
-        .map_err(|e| e.to_string())?;
-    Ok(n)
 }
 
 /// The whole attempt-audio picture for one device: how many local recordings are
@@ -863,15 +826,45 @@ fn migrate_legacy_attempts(conn: &Connection, me: &str, dataset_uuid: &str) -> R
     Ok(())
 }
 
-/// Store one attempt event. `INSERT OR IGNORE` by uuid, so an author receiving
-/// its own echo — or two devices converging on the same attempt — is a no-op.
+/// Store one attempt event on first write. `INSERT OR IGNORE` by uuid, so an
+/// author receiving its own echo — or two devices converging on the same attempt
+/// identity — is a no-op. Used by the local submit path (a fresh take).
 fn append_attempt_event(conn: &Connection, ev: &AttemptEvent) -> Result<bool, String> {
     let changed = conn
         .execute(
             "INSERT OR IGNORE INTO read_attempt_event \
-             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![ev.uuid, ev.user_id, ev.dataset_uuid, ev.text_uuid, ev.audio_path, ev.recognized, ev.score, ev.metrics, ev.created_at],
+             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![ev.uuid, ev.user_id, ev.dataset_uuid, ev.text_uuid, ev.audio_path, ev.recognized, ev.score, ev.metrics, ev.created_at, ev.updated_at],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(changed > 0)
+}
+
+/// Replay one journaled attempt as a last-write-wins upsert on `updated_at`. The
+/// attempt identity is still insert-once (a brand-new event lands whole), but a
+/// re-assessment of an attempt this device already holds now overwrites the
+/// result columns, so "Assess again" on any device converges every device to the
+/// newest result (§17.7). Strict `>` makes an equal-timestamp echo a no-op; the
+/// comparison coalesces a legacy row's NULL revision against its `created_at`.
+/// Only the mutable result columns are updated — the owner, dataset, text and
+/// device-local `audio_path` of the existing row are left alone, and `feedback_json`
+/// is cleared with the numbers it described (mirrors the local re-assess). Returns
+/// whether a row was inserted or updated.
+fn upsert_attempt_event(conn: &Connection, ev: &AttemptEvent) -> Result<bool, String> {
+    let changed = conn
+        .execute(
+            "INSERT INTO read_attempt_event \
+             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+             ON CONFLICT(uuid) DO UPDATE SET \
+             recognized = excluded.recognized, \
+             score = excluded.score, \
+             metrics_json = excluded.metrics_json, \
+             feedback_json = NULL, \
+             updated_at = excluded.updated_at \
+             WHERE excluded.updated_at > COALESCE(read_attempt_event.updated_at, read_attempt_event.created_at)",
+            params![ev.uuid, ev.user_id, ev.dataset_uuid, ev.text_uuid, ev.audio_path, ev.recognized, ev.score, ev.metrics, ev.created_at, ev.updated_at],
         )
         .map_err(|e| e.to_string())?;
     Ok(changed > 0)
@@ -893,6 +886,10 @@ fn attempt_payload(ev: &AttemptEvent) -> Value {
         // PROTOCOL_VERSION bump is needed.
         "metrics": ev.metrics,
         "created_at": ev.created_at,
+        // Optional key (same precedent as `metrics`): a new peer LWW-resolves on
+        // it, an old peer ignores it and keeps its insert-once behavior — so no
+        // PROTOCOL_VERSION bump.
+        "updated_at": ev.updated_at,
     })
 }
 
@@ -918,7 +915,7 @@ pub(crate) fn rows_for_user(
     let conn = open_app_attempts(settings)?;
     let mut stmt = conn
         .prepare(
-            "SELECT rowid, uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at \
+            "SELECT rowid, uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at, COALESCE(updated_at, created_at) \
              FROM read_attempt_event WHERE user_id = ?1 AND rowid > ?2 ORDER BY rowid ASC LIMIT ?3",
         )
         .map_err(|e| e.to_string())?;
@@ -935,6 +932,9 @@ pub(crate) fn rows_for_user(
                 "score": row.get::<_, f64>(7)?,
                 "metrics": row.get::<_, Option<String>>(8)?,
                 "created_at": row.get::<_, String>(9)?,
+                // Coalesced so a legacy row (NULL revision) still carries a stamp a
+                // follower can LWW-resolve against — the newest result wins.
+                "updated_at": row.get::<_, String>(10)?,
             });
             Ok((rowid, value))
         })
@@ -957,10 +957,12 @@ fn canonical_or_now(value: Option<&str>) -> String {
     }
 }
 
-/// Replay one journaled `read_attempt_save`: store the event it describes. The
+/// Replay one journaled `read_attempt_save` as a last-write-wins upsert. The
 /// `@app` scope passes no dataset, so it is read out of the payload (as `xp` and
-/// `card_review` do). Returns `false` when the event was already present — the
-/// normal outcome for the author receiving its own echo, not an error.
+/// `card_review` do). A brand-new event lands whole; a re-assessment of an attempt
+/// already held here overwrites its result only when the incoming `updated_at` is
+/// newer. Returns `false` when nothing was written — the normal outcome for the
+/// author receiving its own echo, not an error.
 pub(crate) fn apply_remote_save(
     settings: &SettingsState,
     dataset_uuid: &str,
@@ -976,6 +978,14 @@ pub(crate) fn apply_remote_save(
     if dataset_uuid.is_empty() {
         return Err("read_attempt_save change carries no dataset_uuid".to_string());
     }
+    // An old peer sends no `updated_at`: fall back to its `created_at`, so the
+    // revision is well defined and a newer re-assessment from a new peer still
+    // wins the strict-`>` comparison.
+    let created_at_raw = payload.get("created_at").and_then(|v| v.as_str());
+    let created_at = canonical_or_now(created_at_raw);
+    let updated_at = canonical_or_now(
+        payload.get("updated_at").and_then(|v| v.as_str()).or(created_at_raw),
+    );
     let ev = AttemptEvent {
         uuid,
         // Per-user history: attribute to the identity the hub bound the device
@@ -994,18 +1004,19 @@ pub(crate) fn apply_remote_save(
             Value::Null | Value::String(_) => None,
             other => Some(other.to_string()),
         }),
-        created_at: canonical_or_now(payload.get("created_at").and_then(|v| v.as_str())),
+        created_at,
+        updated_at,
     };
     let conn = open_app_attempts(settings)?;
-    let inserted = append_attempt_event(&conn, &ev)?;
-    if inserted {
+    let wrote = upsert_attempt_event(&conn, &ev)?;
+    if wrote {
         // Log it onward so other followers receive the same event uuid; the
         // pull-side `ApplyGuard` suppresses this, so it is how a hub fans out.
         let _ = crate::sync::change_log::commit_change_as(
             settings, "read_attempt_save", &dataset_uuid, &attempt_payload(&ev), &ev.user_id,
         );
     }
-    Ok(inserted)
+    Ok(wrote)
 }
 
 /// Replay one journaled `read_attempt_delete`: drop the event for its owner and
@@ -1816,6 +1827,10 @@ async fn update_recognized_inner(
         _ => None,
     };
 
+    // Bump the revision so this newer result wins the last-write-wins comparison
+    // on every device that already holds the attempt (§17.7). `created_at` stays
+    // put — history ordering depends on it.
+    let revised_at = now_row_stamp();
     {
         let conn = open_app_attempts(settings)?;
         conn.execute(
@@ -1823,14 +1838,15 @@ async fn update_recognized_inner(
             // the report quotes the old numbers, so keeping it would show advice
             // that no longer describes this attempt. "Ask again" is one click.
             "UPDATE read_attempt_event SET recognized = ?1, score = ?2, metrics_json = ?3, \
-             feedback_json = NULL \
+             feedback_json = NULL, updated_at = ?6 \
              WHERE uuid = ?4 AND user_id = ?5",
             params![
                 recognized,
                 score,
                 metrics.as_ref().map(|v| v.to_string()),
                 uuid,
-                &me
+                &me,
+                &revised_at
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -1849,11 +1865,11 @@ async fn update_recognized_inner(
         score,
         metrics: metrics.as_ref().map(|v| v.to_string()),
         created_at: canonical_stamp(&created_at),
+        updated_at: revised_at,
     };
-    // Re-journal the save for the change log. Peers replay events by uuid with
-    // INSERT OR IGNORE, so an already-delivered attempt keeps its own copy — the
-    // right outcome, since re-recognition runs against a device-local recording
-    // with a device-local model (§17).
+    // Re-journal the save for the change log. Peers replay it as a last-write-wins
+    // upsert on `updated_at`, so this newer result now overwrites the copy on every
+    // device that already holds the attempt (§17.7).
     let _ = crate::sync::change_log::commit_change_as(
         settings,
         "read_attempt_save",
@@ -1894,6 +1910,10 @@ pub(crate) fn save_attempt_row(
     attempt: &ReadAttempt,
 ) -> Result<(), String> {
     let conn = open_app_attempts(settings)?;
+    // A fresh take is its own newest revision: `updated_at` starts equal to
+    // `created_at`, so a later re-assessment (a strictly newer stamp) is what
+    // propagates over it (§17.7).
+    let created_at = canonical_stamp(&attempt.created_at);
     let ev = AttemptEvent {
         uuid: attempt.uuid.clone(),
         user_id: attempt.user_id.clone(),
@@ -1903,7 +1923,8 @@ pub(crate) fn save_attempt_row(
         recognized: attempt.recognized.clone(),
         score: attempt.score,
         metrics: attempt.metrics.as_ref().map(|v| v.to_string()),
-        created_at: canonical_stamp(&attempt.created_at),
+        created_at: created_at.clone(),
+        updated_at: created_at,
     };
     append_attempt_event(&conn, &ev)?;
     let _ = crate::sync::change_log::commit_change_as(
@@ -2881,10 +2902,45 @@ mod tests {
             .query_row("SELECT user_id FROM read_attempt_event WHERE uuid = ?1", params![uuid], |r| r.get(0))
             .unwrap();
         assert_eq!(owner, "alice");
-        // Replaying the same event (an echo) is a no-op, not a duplicate.
+        // Replaying the same event (an echo) is a no-op, not a duplicate: the
+        // payload carries no `updated_at`, so it falls back to `created_at`, and
+        // a second replay with the equal revision loses the strict-`>` comparison.
         let again = apply_remote_save(&settings, "", &payload, "alice").unwrap();
-        assert!(!again, "replay is INSERT OR IGNORE by event uuid");
+        assert!(!again, "an equal-revision replay is a no-op");
         assert_eq!(event_count(&settings), 1);
+    }
+
+    #[test]
+    fn apply_remote_save_last_write_wins_on_updated_at() {
+        let (settings, _dir) = temp_settings("replay-lww");
+        let (ds, text) = dataset_with_text(&settings, "hello world");
+        let uuid = Uuid::new_v4().to_string();
+        let attempt = |recognized: &str, score: f64, rev: &str| json!({
+            "uuid": uuid, "user_id": "alice", "dataset_uuid": ds, "text_uuid": text,
+            "audio_path": null, "recognized": recognized, "score": score,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": rev,
+        });
+        let read = || -> (String, f64) {
+            let conn = open_app_attempts(&settings).unwrap();
+            conn.query_row(
+                "SELECT recognized, score FROM read_attempt_event WHERE uuid = ?1",
+                params![uuid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+
+        assert!(apply_remote_save(&settings, "", &attempt("first", 50.0, "2026-01-01T00:00:00Z"), "alice").unwrap());
+        assert_eq!(read(), ("first".to_string(), 50.0));
+
+        // A newer re-assessment of the same attempt overwrites the result in place.
+        assert!(apply_remote_save(&settings, "", &attempt("second", 95.0, "2026-01-02T00:00:00Z"), "alice").unwrap());
+        assert_eq!(read(), ("second".to_string(), 95.0));
+        assert_eq!(event_count(&settings), 1, "the update reuses the one row, no duplicate");
+
+        // An older revision is refused: the newest result keeps winning both ways.
+        assert!(!apply_remote_save(&settings, "", &attempt("stale", 10.0, "2026-01-01T12:00:00Z"), "alice").unwrap());
+        assert_eq!(read(), ("second".to_string(), 95.0), "the older write is ignored");
     }
 
     // -- the hub-side state read behind the practice backfill (§17.6 / INV-21) ----
@@ -3081,36 +3137,9 @@ mod tests {
 
         assert!(list_attempts_missing_local_audio(&settings).unwrap().iter().any(|(u, _)| u == &a.uuid));
         mark_attempt_audio_absent(&settings, &a.uuid).unwrap();
-        // A fresh 404 keeps the pull leg from re-probing this attempt.
+        // A fresh 404 keeps the pull leg from re-probing this attempt until the TTL
+        // passes — the mechanism that stops a pre-feature attempt being probed each
+        // round forever.
         assert!(!list_attempts_missing_local_audio(&settings).unwrap().iter().any(|(u, _)| u == &a.uuid));
-        // Clearing the deny-list (what the manual backfill does before pulling)
-        // puts it straight back on the work list.
-        assert_eq!(reset_attempt_audio_absent(&settings).unwrap(), 1);
-        assert!(list_attempts_missing_local_audio(&settings).unwrap().iter().any(|(u, _)| u == &a.uuid));
-    }
-
-    #[test]
-    fn backfill_queues_only_local_recordings_and_is_idempotent() {
-        let (settings, _dir) = temp_settings("audio-backfill");
-        let (ds, text) = dataset_with_text(&settings, "hello world");
-
-        // One take whose WAV is on disk (recorded here), one whose recording is gone
-        // (a synced row, or an evicted take). `audio_path` names the file exactly as
-        // the submit path does: `<uuid>.wav`.
-        let mut here = attempt(&text, "local", 80.0);
-        here.audio_path = Some(format!("{}.wav", here.uuid));
-        save_attempt_row(&settings, &ds, &here).unwrap();
-        write_synced_attempt_audio(&settings, &here.uuid, &gzip_bytes(b"audio").unwrap()).unwrap();
-
-        let mut gone = attempt(&text, "local", 70.0);
-        gone.audio_path = Some(format!("{}.wav", gone.uuid));
-        save_attempt_row(&settings, &ds, &gone).unwrap();
-
-        assert_eq!(backfill_attempt_audio_outbox(&settings).unwrap(), 1, "only the present WAV queues");
-        let pending = pending_attempt_audio_uploads(&settings).unwrap();
-        assert_eq!(pending.iter().map(|p| &p.0).collect::<Vec<_>>(), vec![&here.uuid]);
-
-        // Re-running is a no-op: the already-queued take is ignored, nothing new lands.
-        assert_eq!(backfill_attempt_audio_outbox(&settings).unwrap(), 0);
     }
 }

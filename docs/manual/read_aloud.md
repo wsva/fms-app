@@ -54,7 +54,7 @@ Every recording you make is saved as an **attempt**. The **attempts panel** list
 - Read all three scores — accuracy, fluency and pronunciation — straight off each card, without opening the attempt. A score that could not be measured reads `—`, never a stand‑in number; hover it for the reason.
 - Play back earlier recordings and compare them to now.
 - Watch your scores trend upward as you repeat a text.
-- **Assess again** an earlier take: it re‑transcribes the recording and recomputes its accuracy, fluency and pronunciation in place. The recording travels to your other devices via sync (the `attempt_audio` plane), so once a sync round has delivered it the action works wherever the attempt is — if it is still missing, run a sync to fetch the take.
+- **Assess again** an earlier take: it re‑transcribes the recording and recomputes its accuracy, fluency and pronunciation in place. The recording travels to your other devices via sync (the `attempt_audio` plane), so once a sync round has delivered it the action works wherever the attempt is — if it is still missing, run a sync to fetch the take. The new result syncs back too: after a round, the re-assessed score and metrics appear on every device that holds the attempt, the newest assessment winning.
 - Navigate between attempts and, where relevant, navigate to the sentences that most need work.
 
 Assessment can take a while (transcription first, then the phoneme model). An **assessment log** docked at the bottom of the attempts page tails each stage as it runs, so the wait is never silent; collapse it to a single line or close it once the run finishes.
