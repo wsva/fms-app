@@ -1986,6 +1986,12 @@ pub async fn sync_round_inner(
         pruned.len(),
         errors.len(),
     );
+    // Name every collected error at WARN. The vec otherwise vanishes into the
+    // result JSON's `errors` array, and a round reporting `errors=N` leaves the
+    // reader (human or agent) unable to act on it without opening the JSON.
+    for e in errors.iter() {
+        log::warn!("[sync] round error: {}", serde_json::to_string(e).unwrap_or_default());
+    }
     // Persist for the status surface (§19.2): a failure to record must not fail
     // the round, so log at most and still return the result.
     if let Ok(conn) = datasets::dictation::open_app_db(settings.inner()) {
