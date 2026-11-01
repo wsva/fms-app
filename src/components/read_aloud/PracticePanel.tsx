@@ -10,6 +10,7 @@ import { useRecorder } from "@/components/books/useRecorder";
 import AsrDiff from "@/components/read_aloud/AsrDiff";
 import AssessmentCards from "@/components/read_aloud/AssessmentCards";
 import FeedbackPanel from "@/components/read_aloud/FeedbackPanel";
+import ProgressOverlay from "@/components/read_aloud/ProgressOverlay";
 import StandardAudioPlayer from "@/components/read_aloud/StandardAudioPlayer";
 import { isTauri } from "@/lib/tauri";
 import { logError, logInfo } from "@/lib/logger";
@@ -234,14 +235,8 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
       </section>
 
       {/* Recorder status — the Record button itself lives in the page toolbar.
-          Silent when idle; it appears once the take has ended and the audio is
-          being recognized or scored (while recording, the live dock in the page
-          frame already says what is happening). */}
-      {(recorder.processing || submitting) && (
-        <p className="text-xs text-text-tertiary text-center">
-          {recorder.processing ? "Transcribing…" : "Scoring…"}
-        </p>
-      )}
+          Nothing here while recording (the live dock already says what is
+          happening); once the take ends the overlay below takes over. */}
 
       {error && (
         <div className="p-3 rounded-lg bg-error-bg text-error-text text-sm break-words">{error}</div>
@@ -314,6 +309,13 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
 
       {/* Attempt history lives on its own page now — reached from the toolbar's
           overflow menu ("Show Attempts"). */}
+
+      {/* After the take ends, transcribing and scoring happen behind a modal
+          ring — dimming the window is deliberate: there is nothing else to look
+          at until the score is there. */}
+      {(recorder.processing || submitting) && (
+        <ProgressOverlay label={recorder.processing ? "Transcribing…" : "Scoring…"} />
+      )}
     </div>
   );
 }
