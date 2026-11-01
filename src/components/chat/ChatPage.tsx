@@ -683,7 +683,7 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
           const el = e.currentTarget;
           atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
         }}
-        className="flex-1 min-h-0 overflow-y-auto px-4 py-3 flex flex-col gap-2"
+        className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden px-4 py-3 flex flex-col gap-2"
       >
         {mounted && messages.length === 0 && outbox.length === 0 && failed.length === 0 && (
           <div className="flex-1 flex flex-col items-center justify-center gap-1 text-text-tertiary text-sm">
@@ -701,9 +701,9 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
               return (
                 <div
                   key={m.uuid}
-                  className={`flex flex-col gap-1 max-w-[85%] ${mine ? "self-end items-end" : "self-start items-start"}`}
+                  className={`flex flex-col gap-1 min-w-0 max-w-[85%] ${mine ? "self-end items-end" : "self-start items-start"}`}
                 >
-                  <span className="text-[11px] text-text-tertiary px-1 select-none">
+                  <span className="text-[11px] text-text-tertiary px-1 select-none break-all max-w-full text-left">
                     {m.sender_name} · {formatTime(m.created_at)}
                     {m.pending && (
                       <span className="ml-1 inline-flex items-center gap-0.5">
@@ -713,7 +713,7 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
                   </span>
                   {m.text && (
                     <div
-                      className={`px-3 py-2 rounded-xl text-sm whitespace-pre-wrap break-words ${
+                      className={`px-3 py-2 rounded-xl text-sm whitespace-pre-wrap break-words max-w-full ${
                         mine
                           ? m.pending
                             ? "bg-accent-bg/40 text-text-primary"
@@ -725,7 +725,7 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
                     </div>
                   )}
                   {m.attachments.length > 0 && (
-                    <div className={`flex flex-wrap gap-2 ${mine ? "justify-end" : ""}`}>
+                    <div className={`flex flex-wrap gap-2 max-w-full ${mine ? "justify-end" : ""}`}>
                       {m.attachments.map((att) => (
                         <AttachmentBlock
                           key={att.uuid}
@@ -746,7 +746,7 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
         ))}
 
         {outbox.map((o) => (
-          <div key={o.uuid} className="self-end flex flex-col gap-1 items-end max-w-[85%]">
+          <div key={o.uuid} className="self-end flex flex-col gap-1 items-end min-w-0 max-w-[85%]">
             <span className="text-[11px] text-text-tertiary">sending…</span>
             <div className="px-3 py-2 rounded-xl text-sm bg-accent-bg/40 text-text-primary whitespace-pre-wrap break-words flex items-center gap-2">
               <Loader2 size={14} className="animate-spin shrink-0" />
@@ -756,7 +756,7 @@ export default function DeviceChatPage({ active }: { active: boolean }) {
         ))}
 
         {failed.map((f) => (
-          <div key={f.uuid} className="self-end flex flex-col gap-1 items-end max-w-[85%]">
+          <div key={f.uuid} className="self-end flex flex-col gap-1 items-end min-w-0 max-w-[85%]">
             <span className="text-[11px] text-red-400">not delivered</span>
             <div className="px-3 py-2 rounded-xl text-sm bg-red-500/10 border border-red-500/30 text-text-primary whitespace-pre-wrap break-words">
               {f.text || `${f.files.length} file(s)`}
