@@ -250,16 +250,18 @@ export function describeUpdate(s: UpdateState): UpdateSummary {
       action: { kind: "check", label: "Check now" },
     };
   }
-  // No self-update path on this install (deb/rpm, unsigned macOS): say what to
-  // do instead rather than offer a button that cannot work. The sentence is the
-  // backend's own, since it is the one place that knows the reason.
+  // No self-update path on this install (deb/rpm, unsigned macOS, Android):
+  // say what to do instead rather than offer a button that cannot work. The
+  // sentence is the backend's own, since it is the one place that knows the
+  // reason. Android still asks the manifest, so a newer release shows there too
+  // — as a link to the release page, never as an install button.
   if (!st.supported) {
     return {
-      tone: "neutral",
+      tone: st.available ? "warn" : "neutral",
       sentence: st.hint || "This build cannot update itself.",
       detail: null,
-      short: "manual update",
-      action: { kind: "download", label: "Download release" },
+      short: st.available ? `v${st.latest} available` : "manual update",
+      action: { kind: "download", label: st.available ? `Download v${st.latest}` : "Download release" },
     };
   }
   // `available` is forced false for a dev run, so this has to come first: the

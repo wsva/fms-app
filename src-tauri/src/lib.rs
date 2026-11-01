@@ -78,8 +78,10 @@ mod trash;
 #[cfg(feature = "desktop")]
 mod ocr;
 /// In-app self-update: the check/install pair behind Settings → About and the
-/// `app_update_*` MCP tools. Desktop only, exactly like the installer it drives.
-#[cfg(feature = "desktop")]
+/// `app_update_*` MCP tools. The install (and the updater plugin behind it) is
+/// desktop-only, exactly like the installer it drives; the check compiles
+/// everywhere — mobile builds answer the release manifest over plain HTTP, so
+/// Android can report a newer release and point at its APK.
 mod update;
 /// What the user is currently looking at, cached for agents: the webview
 /// reports a context patch and the UI action registry, `app_get_ui_state` and
@@ -790,6 +792,8 @@ macro_rules! mobile_invoke_handler {
         tauri::generate_handler![
             greet,
             app_build_version,
+            // Check-only: the install needs the updater plugin, a desktop build.
+            update::app_update_check,
             settings::settings_get,
             settings::settings_set,
             settings::settings_get_global,
