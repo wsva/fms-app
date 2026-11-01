@@ -29,10 +29,14 @@ pub(crate) mod tts_ref;
 pub(crate) mod vad;
 
 use std::fs;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -56,6 +60,23 @@ use fluency::TimedWord;
 /// Score thresholds for the scaled XP reward.
 const XP_PASS_SCORE: f64 = 60.0;
 const XP_GOOD_SCORE: f64 = 80.0;
+
+// --- attempt audio sync (the recording behind one attempt travels to the hub) --
+
+/// Cap on one attempt recording's gzipped body, in bytes. A 60 s 16 kHz mono WAV
+/// is ~1.9 MB raw, well under 32 MB gzipped; anything larger is a mistake or a
+/// very long take — refuse it with an actionable error rather than stalling a
+/// sync round on one huge upload.
+pub(crate) const MAX_ATTEMPT_AUDIO_BYTES: usize = 32 * 1024 * 1024;
+/// How many missing local recordings one sync round pulls at most, and the byte
+/// budget behind it. Bounded so a first-time backfill over a long attempt history
+/// cannot turn one round into an unbounded download.
+pub(crate) const ATTEMPT_AUDIO_PULL_BATCH: usize = 20;
+pub(crate) const ATTEMPT_AUDIO_PULL_BYTES: u64 = 32 * 1024 * 1024;
+/// How long the local "the hub has no audio for this attempt" deny-list suppresses
+/// a re-probe. Attempts recorded before this feature have no audio on the hub and
+/// must not be GET-probed on every round for the rest of the device's life.
+const ATTEMPT_AUDIO_ABSENT_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 
 /// Edge TTS voice used for the canonical pronunciation reference when the user
 /// has not chosen one. Multilingual so the same default covers English, German
@@ -438,6 +459,24 @@ fn ensure_attempt_schema(conn: &Connection) -> Result<(), String> {
             user_id      TEXT NOT NULL,
             migrated_at  TEXT NOT NULL,
             PRIMARY KEY (dataset_uuid, user_id)
+        );
+
+        /* Durable push state for the attempt-audio plane: one row per locally
+           recorded attempt whose WAV has not yet reached the hub. Drained during
+           the sync round's push leg and dropped on a 2xx (or when the local file
+           has gone). Primary key keeps a re-submit idempotent. */
+        CREATE TABLE IF NOT EXISTS read_attempt_audio_outbox (
+            attempt_uuid TEXT PRIMARY KEY,
+            file_name    TEXT NOT NULL,
+            queued_at    TEXT NOT NULL
+        );
+
+        /* Device-local deny-list: an attempt the hub answered 404 for (no audio
+           there — e.g. recorded before this feature existed). Checked with a TTL
+           so the pull leg stops re-probing it every round. */
+        CREATE TABLE IF NOT EXISTS read_attempt_audio_absent (
+            attempt_uuid TEXT PRIMARY KEY,
+            checked_at   INTEGER NOT NULL
         );",
     )
     .map_err(|e| e.to_string())?;
@@ -474,6 +513,209 @@ fn ensure_attempt_schema(conn: &Connection) -> Result<(), String> {
 fn audio_dir(settings: &SettingsState) -> PathBuf {
     settings.workspace_subdir("read_aloud_audio", "")
 }
+
+// ============================================================
+// Attempt audio sync — moving one recording between devices
+// ============================================================
+//
+// The attempt *row* has always travelled through the `@app` journal; its WAV used
+// to stay on the recording device (§17), so a PC that received a synced attempt
+// could not re-run the assessment: `stored_recording` found no file and fluency +
+// pronunciation came back empty. This plane closes that gap over a dedicated
+// per-attempt endpoint: the recording device pushes `<uuid>.wav` (gzipped) to the
+// hub, and every other device pulls it during the round when its row is present
+// but its local file is missing. Gzip is the only encoding — no new codec on the
+// phone, and re-assessment still reads a plain WAV out of `audio_dir`.
+
+/// The device-local WAV behind one attempt, by its globally unique uuid. The
+/// submit path writes exactly this file, so push/pull/assess all agree on it.
+pub(crate) fn attempt_audio_file(settings: &SettingsState, attempt_uuid: &str) -> PathBuf {
+    audio_dir(settings).join(format!("{attempt_uuid}.wav"))
+}
+
+/// The owner (`user_id`) of a stored attempt event, when the row is here. The hub
+/// uses it to refuse serving one learner's recording to another (defense in depth
+/// over the unguessable uuid). Empty `audio_path`/no row yields `None`.
+pub(crate) fn attempt_audio_owner(settings: &SettingsState, attempt_uuid: &str) -> Option<String> {
+    let conn = open_app_attempts(settings).ok()?;
+    conn.query_row(
+        "SELECT user_id FROM read_attempt_event WHERE uuid = ?1",
+        params![attempt_uuid],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// gzip `raw` (the wire form of a pushed/pulled recording).
+pub(crate) fn gzip_bytes(raw: &[u8]) -> Result<Vec<u8>, String> {
+    let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(raw).map_err(|e| e.to_string())?;
+    enc.finish().map_err(|e| e.to_string())
+}
+
+/// Inverse of [`gzip_bytes`].
+pub(crate) fn gunzip_bytes(gz: &[u8]) -> Result<Vec<u8>, String> {
+    let mut dec = GzDecoder::new(gz);
+    let mut out = Vec::new();
+    dec.read_to_end(&mut out).map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// Store a synced recording: gunzip the travelling body and write `<uuid>.wav`
+/// atomically into `audio_dir`. Idempotent — a re-pull overwrites with identical
+/// bytes, so a round that fetches the same audio twice is harmless.
+pub(crate) fn write_synced_attempt_audio(
+    settings: &SettingsState,
+    attempt_uuid: &str,
+    gz_bytes: &[u8],
+) -> Result<(), String> {
+    if gz_bytes.len() > MAX_ATTEMPT_AUDIO_BYTES {
+        return Err(format!(
+            "attempt audio for {attempt_uuid} is {} bytes, over the {MAX_ATTEMPT_AUDIO_BYTES}-byte cap",
+            gz_bytes.len()
+        ));
+    }
+    let raw = gunzip_bytes(gz_bytes)?;
+    let dir = audio_dir(settings);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dest = dir.join(format!("{attempt_uuid}.wav"));
+    let tmp = dest.with_extension("wav.syncing");
+    fs::write(&tmp, &raw).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+    // The audio is now here for real — clear any stale deny-list mark.
+    let _ = clear_attempt_audio_absent(settings, attempt_uuid);
+    Ok(())
+}
+
+/// Enqueue a locally recorded attempt's audio for upload. Called from submit after
+/// the WAV is written. `INSERT OR IGNORE` keeps a re-submit idempotent.
+pub(crate) fn enqueue_attempt_audio_upload(
+    settings: &SettingsState,
+    attempt_uuid: &str,
+    file_name: &str,
+) -> Result<(), String> {
+    let conn = open_app_attempts(settings)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO read_attempt_audio_outbox (attempt_uuid, file_name, queued_at) VALUES (?1, ?2, ?3)",
+        params![attempt_uuid, file_name, now_row_stamp()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Pending uploads whose WAV still exists locally: `(attempt_uuid, absolute path)`.
+/// A row whose file is gone is dropped here (nothing to send), so the outbox cannot
+/// grow without bound on a device that evicts its recordings.
+pub(crate) fn pending_attempt_audio_uploads(
+    settings: &SettingsState,
+) -> Result<Vec<(String, PathBuf)>, String> {
+    let conn = open_app_attempts(settings)?;
+    let rows: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT attempt_uuid, file_name FROM read_attempt_audio_outbox ORDER BY queued_at")
+            .map_err(|e| e.to_string())?;
+        let mapped = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        mapped.filter_map(|x| x.ok()).collect()
+    };
+    let dir = audio_dir(settings);
+    let mut out = Vec::new();
+    for (uuid, name) in rows {
+        let path = dir.join(&name);
+        if path.exists() {
+            out.push((uuid, path));
+        } else {
+            let _ = conn.execute("DELETE FROM read_attempt_audio_outbox WHERE attempt_uuid = ?1", params![uuid]);
+        }
+    }
+    Ok(out)
+}
+
+/// Drop an outbox row once the hub has acknowledged the recording.
+pub(crate) fn mark_attempt_audio_pushed(settings: &SettingsState, attempt_uuid: &str) -> Result<(), String> {
+    let conn = open_app_attempts(settings)?;
+    conn.execute("DELETE FROM read_attempt_audio_outbox WHERE attempt_uuid = ?1", params![attempt_uuid])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// My attempts whose row is stored here but whose recording is not — the pull
+/// leg's work list, capped by the caller. Legacy dataset-relative `media/…`
+/// paths that resolve to a real file are already covered and skipped.
+pub(crate) fn list_attempts_missing_local_audio(
+    settings: &SettingsState,
+) -> Result<Vec<(String, String)>, String> {
+    let conn = open_app_attempts(settings)?;
+    let me = workspace_identity(settings);
+    let cutoff = chrono::Utc::now().timestamp() - ATTEMPT_AUDIO_ABSENT_TTL_SECS;
+    let rows: Vec<(String, String, Option<String>)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT a.uuid, a.dataset_uuid, a.audio_path \
+                 FROM read_attempt_event a \
+                 LEFT JOIN read_attempt_audio_absent x ON x.attempt_uuid = a.uuid AND x.checked_at > ?2 \
+                 WHERE a.user_id = ?1 AND a.audio_path IS NOT NULL AND a.audio_path <> '' AND x.attempt_uuid IS NULL \
+                 ORDER BY a.created_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let mapped = stmt
+            .query_map(params![me, cutoff], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))
+            })
+            .map_err(|e| e.to_string())?;
+        mapped.filter_map(|x| x.ok()).collect()
+    };
+    let mut out = Vec::new();
+    for (uuid, _ds, audio_path) in rows {
+        let has_local = audio_path
+            .as_ref()
+            .and_then(|rel| Path::new(rel).file_name())
+            .map(|name| audio_dir(settings).join(name).exists())
+            .unwrap_or(false)
+            || attempt_audio_file(settings, &uuid).exists();
+        if !has_local {
+            out.push((uuid, _ds));
+        }
+    }
+    Ok(out)
+}
+
+/// Remember that the hub has no audio for one attempt (a 404), so the pull leg
+/// stops re-probing it until the TTL passes.
+pub(crate) fn mark_attempt_audio_absent(settings: &SettingsState, attempt_uuid: &str) -> Result<(), String> {
+    let conn = open_app_attempts(settings)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO read_attempt_audio_absent (attempt_uuid, checked_at) VALUES (?1, ?2)",
+        params![attempt_uuid, chrono::Utc::now().timestamp()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn clear_attempt_audio_absent(settings: &SettingsState, attempt_uuid: &str) -> Result<(), String> {
+    let conn = open_app_attempts(settings)?;
+    conn.execute("DELETE FROM read_attempt_audio_absent WHERE attempt_uuid = ?1", params![attempt_uuid])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// The whole attempt-audio picture for one device: how many local recordings are
+/// waiting to upload, how many synced attempts are missing their audio, and the
+/// per-attempt detail an agent needs to explain why a re-assess has no fluency.
+pub(crate) fn attempt_audio_status(settings: &SettingsState) -> Result<Value, String> {
+    let conn = open_app_attempts(settings)?;
+    let pending_uploads: i64 = conn
+        .query_row("SELECT COUNT(*) FROM read_attempt_audio_outbox", [], |r| r.get(0))
+        .unwrap_or(0);
+    let missing = list_attempts_missing_local_audio(settings)?.len();
+    Ok(json!({
+        "pending_uploads": pending_uploads,
+        "missing_local": missing,
+        "max_bytes": MAX_ATTEMPT_AUDIO_BYTES,
+    }))
+}
+
 
 /// Open the app DB with the attempt schema ensured, for the event-only paths
 /// (append, delete, replay) that need no dataset content.
@@ -735,6 +977,10 @@ pub(crate) fn apply_remote_delete(
             let _ = fs::remove_file(audio_dir(settings).join(name));
         }
     }
+    // The attempt is gone — drop its upload bookkeeping so neither the outbox nor
+    // the deny-list outlives the row they describe.
+    let _ = conn.execute("DELETE FROM read_attempt_audio_outbox WHERE attempt_uuid = ?1", params![uuid]);
+    let _ = conn.execute("DELETE FROM read_attempt_audio_absent WHERE attempt_uuid = ?1", params![uuid]);
     let deleted = conn
         .execute("DELETE FROM read_attempt_event WHERE uuid = ?1 AND user_id = ?2", params![uuid, me])
         .map_err(|e| e.to_string())?;
@@ -1383,6 +1629,8 @@ fn delete_attempt_inner(settings: &SettingsState, dataset_uuid: &str, uuid: &str
         params![uuid, &me],
     )
     .map_err(|e| e.to_string())?;
+    let _ = conn.execute("DELETE FROM read_attempt_audio_outbox WHERE attempt_uuid = ?1", params![uuid]);
+    let _ = conn.execute("DELETE FROM read_attempt_audio_absent WHERE attempt_uuid = ?1", params![uuid]);
     let _ = crate::sync::change_log::commit_change_as(
         settings,
         "read_attempt_delete",
@@ -2266,6 +2514,16 @@ pub async fn read_aloud_submit(
     // arrives by.
     save_attempt_row(&settings, &dataset_uuid, &attempt)?;
 
+    // The recording is on disk and the row is journaled; queue the WAV for upload
+    // so the other devices can re-run the assessment against the real audio (the
+    // attempt-audio plane, drained in the sync round). Best-effort: a failed
+    // enqueue must not lose the attempt — the row is already saved.
+    if let Some(name) = attempt.audio_path.as_deref() {
+        if let Err(e) = enqueue_attempt_audio_upload(&settings, &attempt.uuid, name) {
+            log::warn!("read_aloud: could not queue attempt audio upload: {e}");
+        }
+    }
+
     // Scaled XP: 1 XP for passing (>=60), +1 more for a strong read (>=80).
     // Each tier is deduped per text via xp_earned, so repeating never farms XP
     // but improving into a higher tier still rewards the extra point.
@@ -2694,5 +2952,79 @@ mod tests {
         // A read that is byte-identical to the canonical rendering cannot be a
         // poor pronunciation; a low score here means the alignment, not the read.
         assert!(worst > 0.6, "worst word scored {worst:.2}");
+    }
+
+    // -- the attempt_audio plane: gzip seam, outbox, and the pull work list ----
+
+    fn attempt_with_audio(text_uuid: &str, user_id: &str, file_name: &str) -> ReadAttempt {
+        ReadAttempt {
+            audio_path: Some(file_name.to_string()),
+            ..attempt(text_uuid, user_id, 80.0)
+        }
+    }
+
+    #[test]
+    fn synced_recording_roundtrips_and_clears_the_missing_list() {
+        let (settings, _dir) = temp_settings("audio-roundtrip");
+        let (ds, text) = dataset_with_text(&settings, "hello world");
+        let a = attempt_with_audio(&text, "local", "take.wav");
+        save_attempt_row(&settings, &ds, &a).unwrap();
+
+        // The row is here but its WAV is not — the pull leg's work list.
+        let missing = list_attempts_missing_local_audio(&settings).unwrap();
+        assert!(missing.iter().any(|(u, _)| u == &a.uuid), "absent recording should be listed");
+
+        // A gzipped body lands atomically at the canonical path and de-dupes.
+        let raw = b"RIFF fake wav bytes".to_vec();
+        let gz = gzip_bytes(&raw).unwrap();
+        assert_eq!(gunzip_bytes(&gz).unwrap(), raw, "gzip must be lossless");
+        write_synced_attempt_audio(&settings, &a.uuid, &gz).unwrap();
+        assert_eq!(std::fs::read(attempt_audio_file(&settings, &a.uuid)).unwrap(), raw);
+
+        // Now present locally, so it drops off the list.
+        let missing = list_attempts_missing_local_audio(&settings).unwrap();
+        assert!(!missing.iter().any(|(u, _)| u == &a.uuid), "synced recording must not be listed as missing");
+    }
+
+    #[test]
+    fn outbox_enqueue_is_idempotent_and_pending_drops_a_lost_file() {
+        let (settings, _dir) = temp_settings("audio-outbox");
+        let (ds, text) = dataset_with_text(&settings, "hello world");
+        let a = attempt_with_audio(&text, "local", "take.wav");
+        save_attempt_row(&settings, &ds, &a).unwrap();
+
+        let name = format!("{}.wav", a.uuid);
+        enqueue_attempt_audio_upload(&settings, &a.uuid, &name).unwrap();
+        enqueue_attempt_audio_upload(&settings, &a.uuid, &name).unwrap();
+
+        // No file yet: nothing to send, and the row is dropped rather than retried.
+        assert!(pending_attempt_audio_uploads(&settings).unwrap().is_empty());
+        let conn = open_app_attempts(&settings).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM read_attempt_audio_outbox", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "a pending row whose WAV vanished must be pruned");
+
+        // Re-queue with the file present: it surfaces once, then is cleared on push.
+        write_synced_attempt_audio(&settings, &a.uuid, &gzip_bytes(b"audio").unwrap()).unwrap();
+        enqueue_attempt_audio_upload(&settings, &a.uuid, &name).unwrap();
+        let pending = pending_attempt_audio_uploads(&settings).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, a.uuid);
+        mark_attempt_audio_pushed(&settings, &a.uuid).unwrap();
+        assert!(pending_attempt_audio_uploads(&settings).unwrap().is_empty());
+    }
+
+    #[test]
+    fn absent_mark_suppresses_reprobe_until_ttl() {
+        let (settings, _dir) = temp_settings("audio-absent");
+        let (ds, text) = dataset_with_text(&settings, "hello world");
+        let a = attempt_with_audio(&text, "local", "take.wav");
+        save_attempt_row(&settings, &ds, &a).unwrap();
+
+        assert!(list_attempts_missing_local_audio(&settings).unwrap().iter().any(|(u, _)| u == &a.uuid));
+        mark_attempt_audio_absent(&settings, &a.uuid).unwrap();
+        // A fresh 404 keeps the pull leg from re-probing this attempt.
+        assert!(!list_attempts_missing_local_audio(&settings).unwrap().iter().any(|(u, _)| u == &a.uuid));
     }
 }

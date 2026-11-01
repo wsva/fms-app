@@ -82,6 +82,15 @@ pub fn router(app: AppHandle) -> Router {
         .route("/datasets/{uuid}/changes", get(changes))
         .route("/app/changes", get(app_changes))
         .route("/app/state", get(app_state))
+        // The attempt-audio plane (`attempt_audio`): a gzipped WAV for one
+        // read-aloud attempt, so a synced row's recording can be re-assessed on
+        // any device. Body-capped to the shared attempt-audio limit.
+        .route(
+            "/app/attempts/{uuid}/audio",
+            get(get_attempt_audio)
+                .put(put_attempt_audio)
+                .layer(DefaultBodyLimit::max(crate::datasets::read_aloud::MAX_ATTEMPT_AUDIO_BYTES)),
+        )
         .route("/datasets/{uuid}/snapshot", get(snapshot))
         .route("/datasets/{uuid}/db", get(dataset_db))
         .route("/datasets/{uuid}/ingest", post(ingest_declare))
@@ -911,7 +920,9 @@ struct AppStateResp {
     reviews: Vec<serde_json::Value>,
     /// This identity's read-aloud attempt events (`read_attempt_event`),
     /// oldest-first, in the `attempt_payload` shape `apply_remote_save` accepts
-    /// (protocol v6+). `audio_path` is device-local — the row syncs, the WAV does not.
+    /// (protocol v6+). `audio_path` is a device-local file name here — this row
+    /// backfill carries no bytes; the recording itself travels over the separate
+    /// `attempt_audio` plane (`PUT`/`GET /api/v1/app/attempts/{uuid}/audio`).
     attempts: Vec<serde_json::Value>,
     /// Next rowid cursors, `Some` only when that page was full. `None` for both
     /// means the follower has the whole history.
@@ -1020,6 +1031,107 @@ async fn app_state(
         generated_at: chrono::Utc::now().to_rfc3339(),
     };
     (StatusCode::OK, Json(resp)).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Per-attempt recording transport (`attempt_audio` plane)
+//
+// The attempt row rides the `@app` journal; this is how its WAV travels, so a
+// device that only received the row can re-run the assessment against the real
+// audio. The body is a gzipped WAV, stored decompressed at
+// `<read_aloud_audio>/<uuid>.wav` — the same path `stored_recording` reads. gzip
+// is the only encoding: no codec on the phone, plain WAV on every device.
+// ---------------------------------------------------------------------------
+
+/// Read a request body fully into memory, bounded by `max` (the DefaultBodyLimit
+/// layer already caps it; this is a belt-and-suspenders guard with an actionable
+/// message). Used only for the small attempt-audio PUT body.
+async fn read_body_bounded(body: axum::body::Body, max: usize) -> Result<Vec<u8>, String> {
+    use futures_util::StreamExt as _;
+    let mut stream = body.into_data_stream();
+    let mut out = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("read upload body: {e}"))?;
+        if out.len() + chunk.len() > max {
+            return Err(format!("body exceeds the {max}-byte attempt-audio cap"));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+/// `PUT /api/v1/app/attempts/{uuid}/audio` — store one recording the author pushed
+/// up. Keyed by the globally unique attempt uuid; only the owner ever pulls it
+/// back, so a foreign landing is inert, but the write still requires a bound
+/// identity (an unpaired/unbound device cannot push audio).
+async fn put_attempt_audio(
+    State(st): State<RestState>,
+    Extension(auth): Extension<sync::pairing::AuthContext>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+    body: axum::body::Body,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    if Uuid::parse_str(&uuid).is_err() {
+        return json_error(StatusCode::BAD_REQUEST, "invalid attempt id");
+    }
+    let identity = match resolve_write_identity(&auth, "", &settings) {
+        Ok(id) => id,
+        Err(e) => return json_error(StatusCode::FORBIDDEN, &e),
+    };
+    if identity.is_empty() || identity == "local" {
+        return json_error(StatusCode::FORBIDDEN, "unbound device cannot push attempt audio");
+    }
+    let max = crate::datasets::read_aloud::MAX_ATTEMPT_AUDIO_BYTES;
+    // Dedup: a re-push of an already-stored recording is a cheap no-op.
+    let dest = datasets::read_aloud::attempt_audio_file(&settings, &uuid);
+    if dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        return (StatusCode::OK, Json(serde_json::json!({ "stored": false, "deduped": true, "uuid": uuid }))).into_response();
+    }
+    let gz = match read_body_bounded(body, max).await {
+        Ok(b) => b,
+        Err(e) => return json_error(StatusCode::PAYLOAD_TOO_LARGE, &e),
+    };
+    if let Err(e) = datasets::read_aloud::write_synced_attempt_audio(&settings, &uuid, &gz) {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    log::info!("[rest] attempt audio {uuid} <- {bytes} bytes (user {identity})");
+    (StatusCode::OK, Json(serde_json::json!({ "stored": true, "uuid": uuid, "bytes": bytes }))).into_response()
+}
+
+/// `GET /api/v1/app/attempts/{uuid}/audio` — serve one stored recording, gzipped,
+/// to a device that has the row but not the WAV. Serves only to the attempt's
+/// owner (defense in depth over the unguessable uuid); everything else is a 404.
+async fn get_attempt_audio(
+    State(st): State<RestState>,
+    Extension(auth): Extension<sync::pairing::AuthContext>,
+    axum::extract::Path(uuid): axum::extract::Path<String>,
+) -> Response {
+    let settings = st.app.state::<SettingsState>();
+    if Uuid::parse_str(&uuid).is_err() {
+        return json_error(StatusCode::BAD_REQUEST, "invalid attempt id");
+    }
+    let identity = resolve_read_identity(&auth, "", &settings);
+    if let Some(owner) = datasets::read_aloud::attempt_audio_owner(&settings, &uuid) {
+        if owner != identity {
+            return json_error(StatusCode::NOT_FOUND, "no recording for this attempt");
+        }
+    }
+    let path = datasets::read_aloud::attempt_audio_file(&settings, &uuid);
+    let raw = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return json_error(StatusCode::NOT_FOUND, "no recording for this attempt on this hub"),
+    };
+    let gz = match datasets::read_aloud::gzip_bytes(&raw) {
+        Ok(g) => g,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"))],
+        gz,
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

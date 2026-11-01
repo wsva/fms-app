@@ -90,11 +90,20 @@ pub(crate) fn hub_kind(base: &str) -> HubKind {
 /// * `dataset_ingest` — the write half of the file plane: a follower may push a
 ///   whole dataset directory back (`/datasets/{uuid}/ingest*`) and read the hub
 ///   DB (`GET /datasets/{uuid}/db`). See `docs/design/dataset-push.md`.
+/// * `attempt_audio` — the per-user recording behind a read-aloud attempt travels
+///   over `PUT`/`GET /app/attempts/{uuid}/audio`, so a device that only received
+///   the synced row can re-run the assessment against the real audio.
 ///
 /// Phase 7a grows this with `registry_reads`, `chat`, ... as the website host
 /// learns to serve them. A capability the host does not list is refused, never
 /// silently attempted (INV-20).
-pub(crate) const HUB_FEATURES: &[&str] = &["dataset_journal", "app_journal", "dataset_ingest", "hub_identity"];
+pub(crate) const HUB_FEATURES: &[&str] = &[
+    "dataset_journal",
+    "app_journal",
+    "dataset_ingest",
+    "hub_identity",
+    "attempt_audio",
+];
 
 /// The `GET /api/v1/cluster` payload — "who am I talking to, and what can it do
 /// for me" (sync-v2.md §7). Serialized by the desktop hub, deserialized by the

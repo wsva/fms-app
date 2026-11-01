@@ -278,6 +278,130 @@ pub(crate) async fn apply_change(
 }
 
 
+// ---------------------------------------------------------------------------
+// Attempt audio plane (`attempt_audio`, §17 relaxed)
+//
+// The attempt row rides the `@app` journal; these two legs move its WAV so a
+// device that received only the row can re-run the assessment. The recording
+// device pushes its gzipped `<uuid>.wav` up (drain of the local outbox); every
+// other device pulls audio for its rows whose local file is missing. Both are
+// gated on the hub advertising `attempt_audio` (INV-20) and are best-effort: a
+// failure is logged, never fatal to the round.
+// ---------------------------------------------------------------------------
+
+/// Push leg: ship every locally recorded attempt whose WAV has not reached the
+/// hub. Skipped for a hub (it already holds its own recordings — pushing to
+/// itself is wasted bytes) and for a host without the capability.
+pub(crate) async fn flush_attempt_audio_outbox(
+    settings: &SettingsState,
+    cluster: &Option<crate::sync::ClusterInfo>,
+) -> Result<usize, String> {
+    if !advertises(cluster, "attempt_audio") || settings.is_hub() {
+        return Ok(0);
+    }
+    let base = match hub_base_or_account(settings) {
+        Ok(b) => b,
+        Err(_) => return Ok(0),
+    };
+    let pending = datasets::read_aloud::pending_attempt_audio_uploads(settings)?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let client = crate::auth::hub_client_builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut pushed = 0usize;
+    for (uuid, path) in pending {
+        let raw = match std::fs::read(&path) {
+            Ok(b) => b,
+            // The recording is gone locally — nothing to send, drop the row.
+            Err(_) => {
+                let _ = datasets::read_aloud::mark_attempt_audio_pushed(settings, &uuid);
+                continue;
+            }
+        };
+        let gz = match datasets::read_aloud::gzip_bytes(&raw) {
+            Ok(g) => g,
+            Err(e) => {
+                log::warn!("[sync] attempt audio gzip {uuid} failed: {e}");
+                continue;
+            }
+        };
+        let api_path = format!("/api/v1/app/attempts/{uuid}/audio");
+        // Sign the exact gzipped bytes, then move them into the body so the wire
+        // and the v2 signature never diverge.
+        let req = hub_request(client.put(format!("{base}{api_path}")), settings, "PUT", &api_path, "", &gz)
+            .await?
+            .header("content-type", "application/octet-stream")
+            .body(gz);
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let _ = datasets::read_aloud::mark_attempt_audio_pushed(settings, &uuid);
+                pushed += 1;
+            }
+            Ok(resp) => log::warn!("[sync] attempt audio push {uuid} refused: HTTP {}", resp.status()),
+            Err(e) => {
+                log::warn!("[sync] attempt audio push {uuid} unreachable: {e}");
+                // The hub is down; stop and retry the rest next round.
+                break;
+            }
+        }
+    }
+    Ok(pushed)
+}
+
+/// Pull leg: fetch the recording for attempts whose row is stored here but whose
+/// local WAV is missing, capped per round. A hub 404 (no audio there — e.g. an
+/// attempt predating this feature) is remembered with a TTL so it is not re-probed
+/// every round.
+pub(crate) async fn pull_missing_attempt_audio(
+    settings: &SettingsState,
+    cluster: &Option<crate::sync::ClusterInfo>,
+) -> Result<usize, String> {
+    if !advertises(cluster, "attempt_audio") {
+        return Ok(0);
+    }
+    let base = match hub_base_or_account(settings) {
+        Ok(b) => b,
+        Err(_) => return Ok(0),
+    };
+    let missing = datasets::read_aloud::list_attempts_missing_local_audio(settings)?;
+    if missing.is_empty() {
+        return Ok(0);
+    }
+    let client = crate::auth::hub_client_builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut budget = datasets::read_aloud::ATTEMPT_AUDIO_PULL_BYTES;
+    let mut got = 0usize;
+    for (uuid, _ds) in missing.into_iter().take(datasets::read_aloud::ATTEMPT_AUDIO_PULL_BATCH) {
+        let api_path = format!("/api/v1/app/attempts/{uuid}/audio");
+        let req = hub_request(client.get(format!("{base}{api_path}")), settings, "GET", &api_path, "", b"").await?;
+        let resp = req.send().await.map_err(|e| format!("cannot reach hub at {base}: {e}"))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            let _ = datasets::read_aloud::mark_attempt_audio_absent(settings, &uuid);
+            continue;
+        }
+        if !status.is_success() {
+            return Err(hub_http_error(resp, &api_path).await);
+        }
+        let gz = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
+        if gz.len() as u64 > budget {
+            log::info!("[sync] attempt-audio pull byte budget met; deferring the rest");
+            break;
+        }
+        datasets::read_aloud::write_synced_attempt_audio(settings, &uuid, &gz)?;
+        budget = budget.saturating_sub(gz.len() as u64);
+        got += 1;
+    }
+    Ok(got)
+}
+
 /// Upper bound on `/app/state` pages one backfill fetches (the hub caps each page at
 /// 20k rows per table, so 50 pages is far past any real history). A cursor that
 /// never settles means a bug on one side; stopping here marks the import explicitly
@@ -1362,6 +1486,12 @@ pub async fn sync_round_inner(
         errors.push(json!({ "stage": "push", "error": e }));
         0
     });
+    // Ship the recordings behind our locally-made attempts now that their rows are
+    // up, so the hub can serve them to the other devices (attempt-audio plane).
+    // Best-effort: a failure is logged in `errors`, never aborts the round.
+    if let Err(e) = flush_attempt_audio_outbox(&settings, &cluster).await {
+        errors.push(json!({ "stage": "push", "scope": "@app", "sub": "attempt_audio", "error": e }));
+    }
     // INV-20: a non-empty queue against a host that does not advertise the app
     // journal is no longer silent — report it as held so the status surface can
     // show "N changes waiting for a hub that accepts them" instead of nothing.
@@ -1550,6 +1680,13 @@ pub async fn sync_round_inner(
             AppPull { applied: 0, needs_history: false, hub_protocol: None, dropped_pending: 0 }
         });
     applied += app.applied;
+    // Now that the attempt rows are folded in locally, pull the recordings behind
+    // any of my rows whose WAV is missing, so "Assess again" on this device can
+    // measure fluency and pronunciation against the real audio. Bounded per round
+    // and best-effort — a failure never aborts the round.
+    if let Err(e) = pull_missing_attempt_audio(&settings, &cluster).await {
+        errors.push(json!({ "scope": "@app", "stage": "attempt_audio", "error": e }));
+    }
     // INV-14: total un-pushed local edits dropped to a newer hub entry this round,
     // across both journal scopes. A nonzero value is a red flag, not a statistic
     // (§19.2), so log it per scope (§19.1) and carry it on the round result.

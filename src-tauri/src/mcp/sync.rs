@@ -234,6 +234,14 @@ impl DatasetMcpServer {
         serde_json::to_string_pretty(&status).unwrap_or_default()
     }
 
+    #[tool(name = "attempt_audio_status", description = "Report the read-aloud attempt-audio plane for THIS device: how many locally recorded attempts are still waiting to upload to the hub (`pending_uploads`) and how many of my synced attempts are missing their recording locally (`missing_local`). A nonzero `missing_local` is why 'assess again' on such an attempt returns no fluency or pronunciation — the row synced but its WAV has not arrived yet (the hub must advertise `attempt_audio`, and a sync round must run). Returns { pending_uploads, missing_local, max_bytes }.")]
+    async fn attempt_audio_status(&self) -> Result<String, String> {
+        log::info!("[MCP] attempt_audio_status");
+        let settings = self.app.state::<SettingsState>();
+        let v = crate::datasets::read_aloud::attempt_audio_status(&settings)?;
+        Ok(v.to_string())
+    }
+
     #[tool(name = "web_service_start", description = "Start the web service (HTTP server) with the given config. Default port is 35711. Enables STT, dataset, and TTS endpoints by default. Hub-only: the service is what serves this machine's datasets to followers, phones and agents, so a follower workspace refuses this — call settings_set with role='hub' first (the service then starts on its own) rather than overriding the role here.")]
     async fn web_service_start(&self, Parameters(param): Parameters<WebServiceStartParam>) -> Result<String, String> {
         log::info!("[MCP] web_service_start: port={}", param.port);
