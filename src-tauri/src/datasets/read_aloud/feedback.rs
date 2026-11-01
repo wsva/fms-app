@@ -860,8 +860,10 @@ pub(crate) async fn context(
     })
 }
 
-/// Write one report onto the attempt row. Device-local on purpose: no journal,
-/// no protocol version, no other device's business.
+/// Write one report onto the attempt row and re-journal it, so the advice rides
+/// the same last-write-wins path as the result and reaches every device (§17.7).
+/// [`super::journal_feedback`] reads the owner's live row first, so a feedback
+/// touch never ships a score newer than this device already holds.
 fn persist(
     settings: &SettingsState,
     attempt_uuid: &str,
@@ -876,21 +878,7 @@ fn persist(
             MAX_REPORT_BYTES
         ));
     }
-    let me = crate::auth::workspace_identity(settings);
-    let conn = super::open_app_attempts(settings)?;
-    let changed = conn
-        .execute(
-            "UPDATE read_attempt_event SET feedback_json = ?1 WHERE uuid = ?2 AND user_id = ?3",
-            params![raw, attempt_uuid, &me],
-        )
-        .map_err(|e| e.to_string())?;
-    if changed == 0 {
-        return Err(format!(
-            "Attempt {} was not found for this user, so the report was not stored.",
-            attempt_uuid
-        ));
-    }
-    Ok(())
+    super::journal_feedback(settings, attempt_uuid, &raw)
 }
 
 /// The mailbox's stable address for one attempt's feedback: the agent route

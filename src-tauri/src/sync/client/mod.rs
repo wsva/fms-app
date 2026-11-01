@@ -393,6 +393,44 @@ pub async fn writeback_flush(settings: State<'_, SettingsState>) -> Result<usize
     writeback_flush_inner(&settings, &cluster).await
 }
 
+/// Manual repair for a follower whose XP never reached the Hub (the Rule-1 gap the
+/// convergence warning surfaces): re-journal the whole local `xp_ledger` and flush
+/// it in one go, so awards stranded by a lost writeback or earned before pairing
+/// are collected. The Hub dedups on `(user, source, reference_id)`, so an
+/// already-delivered award is a no-op and this can never double-count. `force`
+/// re-pushes even when the one-time collection stamp is already set; without it a
+/// device that already collected just flushes whatever is still queued. On the Hub
+/// itself it is a no-op — the Hub is the ledger's authoritative copy.
+#[tauri::command]
+pub async fn sync_push_all_xp(
+    settings: State<'_, SettingsState>,
+    force: Option<bool>,
+) -> Result<Value, String> {
+    let force = force.unwrap_or(false);
+    if settings.is_hub() {
+        return Ok(json!({ "skipped": "hub", "enqueued": 0, "pushed": 0 }));
+    }
+    let already_collected = match datasets::dictation::open_app_db(&settings) {
+        Ok(conn) => {
+            let _ = ensure_sync_tables(&conn);
+            xp_collected_at(&conn).is_some()
+        }
+        Err(_) => false,
+    };
+    let mut enqueued = 0usize;
+    if force || !already_collected {
+        enqueued = crate::xp::collect_local_awards_for_push(&settings)?;
+        // Stamp so the automatic round collection does not re-run after a manual push.
+        if let Ok(conn) = datasets::dictation::open_app_db(&settings) {
+            let _ = ensure_sync_tables(&conn);
+            let _ = set_xp_collected_at(&conn);
+        }
+    }
+    let cluster = fetch_cluster(&settings).await;
+    let pushed = writeback_flush_inner(&settings, &cluster).await?;
+    Ok(json!({ "enqueued": enqueued, "pushed": pushed, "forced": force }))
+}
+
 #[tauri::command]
 pub async fn dataset_sync_state(
     settings: State<'_, SettingsState>,

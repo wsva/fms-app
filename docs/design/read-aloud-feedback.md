@@ -114,7 +114,7 @@ This is on demand, behind the explicit click, so it never slows a submission, an
 
 ## Storage and sync
 
-Additive, local, no protocol change:
+Additive column, optional payload key, no protocol change:
 
 ```sql
 ALTER TABLE read_attempt_event ADD COLUMN feedback_json TEXT
@@ -122,15 +122,9 @@ ALTER TABLE read_attempt_event ADD COLUMN feedback_json TEXT
 
 applied idempotently in `ensure_attempt_schema`, exactly like `metrics_json`. `ReadAttempt.feedback` is populated by `read_aloud_list_attempts` and `None` from `read_aloud_submit`.
 
-`feedback_json` is deliberately **not** in `attempt_payload`, `rows_for_user` or `apply_remote_save`:
+The report **rides the attempt's last-write-wins row** (sync-v2.md §17.7): `feedback` is an optional key in `attempt_payload`, is read back in `apply_remote_save`, and is served by `rows_for_user` (index 11) so a backfill recovers the advice, not just the numbers. `feedback::persist` no longer writes a bare `UPDATE`; it calls `journal_feedback`, which reads the owner's live row, bumps `updated_at`, and re-journals `read_attempt_save` with the report — so the write reaches every device. Because it re-sends the row's current transcript/score/metrics unchanged, a feedback touch can only win the `updated_at` contest on the strength of the feedback it is actually writing; it never ships a result newer than this device holds. A re-assessment sends no `feedback`, so `feedback_json = excluded.feedback_json` clears the stale report (which quoted the old numbers) on every device. An old peer ignores the key, so there is no `PROTOCOL_VERSION` bump.
 
-- it is derived from one device's model (or one agent's reading) and one device's recording, so two devices would legitimately produce two different reports for the same attempt
-- it costs one click to regenerate
-- it must not grow journal traffic with megabytes of prose
-
-So it is not journaled and not synced, and a peer that knows nothing about the column simply never sees it.
-
-`read_aloud_save_feedback` writes with a direct `UPDATE … WHERE uuid = ? AND user_id = ?`, so an agent's report lands on the user's own attempt and nowhere else.
+The one-claim-per-attempt cost note still holds: the report is capped at `MAX_REPORT_BYTES`, so the extra journal traffic is bounded, not megabytes of prose. `read_aloud_save_feedback` therefore writes the user's own attempt *and* propagates it, rather than leaving it device-local.
 
 ## The commands and the MCP tools
 
@@ -181,7 +175,7 @@ Automatic feedback on submit (it is an explicit click: a model call is worth ask
 
 ## Decision log
 
-**F1 — The report is derived output, so it does not sync.** The tempting shape was a journalled artifact like a book's understanding layer. But a report is a function of *(attempt, evidence, model)*: two devices with different models would produce different answers, and the answer can be regenerated for free. Journaling it would add cost and conflict for no shared state, so it stays a local column. This is the same reasoning that keeps `metrics_json` compact — but the opposite conclusion about scope, because metrics travel and feedback does not.
+**F1 — The report rides the attempt row, so it syncs (revised).** The original call was to keep it a device-local column, reasoning that a report is a function of *(attempt, evidence, model)* and two devices could produce different answers. But the attempt row already resolves a similar contest by last-write-wins, and a report that only ever appears on the one device that asked for it is a Rule-1 gap — the Hub is meant to hold all of the user's data, and every follower converges to it. So `feedback` is now an optional key on the existing `read_attempt_save` row (no new kind, no version bump): the newest write wins, a re-assessment clears it with the numbers it quoted, and the size cap keeps the extra journal traffic bounded. This is the same reasoning that keeps `metrics_json` compact — and now the same conclusion about scope, because both travel on the one mutable row.
 
 **F2 — Evidence is recomputed for the word runs, stored for the aggregates.** `metrics_json` keeps only the twelve weakest words, so the alignment runs the report needs are not there. Re-scoring the stored transcript is cheap and exact, so the runs are recomputed on every call. When the two disagree by more than a point the evidence says which one is which rather than silently picking — a stale reference is a real state (a text's normalized form may have changed) and the model has to know.
 

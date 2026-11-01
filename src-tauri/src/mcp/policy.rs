@@ -229,7 +229,7 @@ const HUMAN_HANDOFF: [&str; 2] = [
 ///   nothing").
 /// * `sync_set_auto_connect` flips one boolean in global settings; its inverse is
 ///   the same call with the other value.
-const READ_TOOLS: [&str; 97] = [
+const READ_TOOLS: [&str; 98] = [
     "app_audit_get",
     "app_bootstrap",
     "app_events",
@@ -312,6 +312,12 @@ const READ_TOOLS: [&str; 97] = [
     "sync_changes_since",
     "sync_diagnose_queue",
     "sync_status_detail",
+    // Collects a follower's local XP ledger onto the Hub. Non-destructive and
+    // idempotent on both ends: the Hub dedups on (user, source, reference_id), so a
+    // re-run re-enqueues nothing new and never inflates either total. It enqueues
+    // local changes, but every one is a Counter the Hub collapses — the shape of a
+    // repair, not a mutation to guard.
+    "sync_xp_push_all",
     "todo_list",
     "tts_list_voices",
     "ui_list_actions",

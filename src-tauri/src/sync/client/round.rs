@@ -23,6 +23,7 @@ use crate::sync::client::sync_state::{
     app_cursor, app_events_history_backfilled, app_history_backfilled, ensure_sync_tables,
     reset_cursors_without_provenance, set_app_cursor, set_app_epoch, set_app_events_history_backfilled,
     set_app_history_backfilled, set_dataset_epoch, set_last_round, set_resync_reason, stamp_app_provenance, upstream_of,
+    set_xp_collected_at, xp_collected_at,
 };
 use crate::sync::client::cluster::{
     app_journal_advertised, advertises, dataset_journal_advertised, fetch_cluster, HISTORY_PROTOCOL,
@@ -731,6 +732,17 @@ pub(crate) async fn backfill_app_history(
             // event uuid (INV-23), so a locally-authored-but-unpushed event and the
             // hub's copy converge to one row — the same reason the xp half skips it.
             for row in &reviews {
+                // A review whose card dataset is not installed here can never be
+                // applied — `apply_remote` resolves the dataset dir and fails.
+                // That is not a transient fault to retry: counting it as a
+                // `failure` would keep `complete` false forever, so the whole
+                // history import re-runs every round and never settles. Skip it
+                // instead; a later `force` (once the dataset appears) recovers it.
+                let ds = row["dataset_uuid"].as_str().unwrap_or("").to_string();
+                if !ds.is_empty() && datasets::cards::find_card_dataset_dir(settings, &ds).is_err() {
+                    skipped += 1;
+                    continue;
+                }
                 match datasets::cards::review::apply_remote(settings, "", row, &user_key) {
                     Ok(true) => reviews_applied += 1,
                     Ok(false) => skipped += 1,
@@ -783,6 +795,24 @@ pub(crate) async fn backfill_app_history(
         }
     }
 
+    // Convergence invariant (sync-v2.md §17.6): a follower's total is
+    // `hub_total + sum(pending)`, so once its writeback queue is empty the two
+    // MUST agree. If the queue is drained but they differ, awards the follower
+    // made before pairing (or stranded by a rejected batch) are sitting in no
+    // queue and never reached the Hub's ledger — the silent Rule-1 gap. Report
+    // the gap and name the repair (`sync_push_all_xp(force)` re-enqueues the
+    // whole local ledger so the next flush collects it).
+    if !settings.is_hub() && hub_total.is_some() {
+        let pending = crate::sync::client::writeback::pending_xp_delta(settings, &user_key).unwrap_or(-1);
+        if pending == 0 && Some(lifetime_xp) != hub_total {
+            log::warn!(
+                "[sync] XP diverged with an empty queue: this follower holds {lifetime_xp}, hub holds {:?}; \
+                 awards are stranded and unrecoverable by the delta path — run sync_push_all_xp(force=true)",
+                hub_total
+            );
+        }
+    }
+
     let result = json!({
         "user_key": user_key,
         "progress_rows": progress_rows,
@@ -797,6 +827,10 @@ pub(crate) async fn backfill_app_history(
         "pages": pages,
         "lifetime_xp": lifetime_xp,
         "hub_lifetime_xp": hub_total,
+        // Positive when the Hub is behind this follower's deduped ledger (a Rule-1
+        // collection gap); reporting only, never a value either side trusts over
+        // its own recomputed total.
+        "xp_divergence": hub_total.map(|h| h - lifetime_xp),
         "complete": complete,
         "events_available": matches!(proto, Some(p) if p >= EVENTS_PROTOCOL),
         "events_backfilled": app_events_history_backfilled(&conn).is_some(),
@@ -1480,6 +1514,37 @@ pub async fn sync_round_inner(
     // capability, never a protocol guess — an unlisted feature is "no", and a
     // pre-ingest hub simply keeps its DB to itself).
     let hub_ingest = advertises(&cluster, "dataset_ingest");
+
+    // 0. One-time wholesale XP collection (Rule 1): before this round's flush, a
+    // newly-paired follower re-journals its entire local ledger so an award its
+    // incremental push never delivered (earned before pairing, or stranded by a
+    // rejected batch) still reaches the Hub. The Hub dedups on
+    // (user, source, reference_id), so already-delivered awards are no-ops. Gated
+    // on the `app_journal` plane being advertised and a stamp that has not run, so
+    // the freshly enqueued rows ride this same round's flush and never re-churn.
+    if !settings.is_hub() && app_ok {
+        let owed = {
+            match datasets::dictation::open_app_db(settings.inner()) {
+                Ok(conn) => {
+                    let _ = ensure_sync_tables(&conn);
+                    xp_collected_at(&conn).is_none()
+                }
+                Err(_) => false,
+            }
+        };
+        if owed {
+            match crate::xp::collect_local_awards_for_push(&settings) {
+                Ok(n) => {
+                    log::info!("[sync] one-time XP collection: re-enqueued {n} local award(s) for the Hub");
+                    if let Ok(conn) = datasets::dictation::open_app_db(settings.inner()) {
+                        let _ = ensure_sync_tables(&conn);
+                        let _ = set_xp_collected_at(&conn);
+                    }
+                }
+                Err(e) => log::warn!("[sync] one-time XP collection failed: {e}"),
+            }
+        }
+    }
 
     // 1. Push local edits first so the hub holds our changes before we pull.
     let pushed = writeback_flush_inner(&settings, &cluster).await.unwrap_or_else(|e| {

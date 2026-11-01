@@ -138,6 +138,12 @@ pub(crate) fn ensure_sync_tables(conn: &Connection) -> Result<(), String> {
     // the single-row table, a dataset keyed by uuid alongside the cursor.
     ensure_column(conn, "dataset_sync_state", "epoch", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "app_sync_state", "epoch", "INTEGER NOT NULL DEFAULT 0")?;
+    // Migration: one-time wholesale XP collection stamp. A follower re-journals its
+    // entire local ledger once (so an award its incremental push never delivered
+    // still reaches the Hub); this nullable column records when that ran, so the
+    // collection rides the first round after link and never re-churns. NULL = never
+    // collected (the truth for every pre-existing device — they get the one-time push).
+    ensure_column(conn, "app_sync_state", "xp_collected_at", "TEXT")?;
     Ok(())
 }
 
@@ -352,6 +358,32 @@ pub(crate) fn set_app_events_history_backfilled(conn: &Connection) -> Result<(),
         "INSERT INTO app_sync_state (id, events_backfilled_at, updated_at) \
          VALUES (1, datetime('now'), datetime('now')) \
          ON CONFLICT(id) DO UPDATE SET events_backfilled_at = excluded.events_backfilled_at, updated_at = excluded.updated_at",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// When this device last ran the one-time wholesale XP collection (`None` = never,
+/// so its full local ledger is still owed to the Hub). See
+/// [`crate::xp::collect_local_awards_for_push`].
+pub(crate) fn xp_collected_at(conn: &Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT xp_collected_at FROM app_sync_state WHERE id = 1",
+        [],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .unwrap_or(None)
+}
+
+/// Stamp the wholesale XP collection as done, separately from the backfill stamps:
+/// the collection is a once-per-device push of the follower's own ledger, and a
+/// fresh (unlinked-then-linked) device must run it exactly once before its flush.
+pub(crate) fn set_xp_collected_at(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO app_sync_state (id, xp_collected_at, updated_at) \
+         VALUES (1, datetime('now'), datetime('now')) \
+         ON CONFLICT(id) DO UPDATE SET xp_collected_at = excluded.xp_collected_at, updated_at = excluded.updated_at",
         [],
     )
     .map_err(|e| e.to_string())?;

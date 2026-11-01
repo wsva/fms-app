@@ -433,6 +433,12 @@ struct AttemptEvent {
     /// Per-frame and per-phone arrays are never stored — they are re-derived
     /// from the device-local recording on demand.
     metrics: Option<String>,
+    /// The agent/LLM feedback report (`feedback::FeedbackReport` as JSON text).
+    /// Optional payload key: it travels on the same last-write-wins row as the
+    /// result, so a feedback write reaches every device; a re-assessment clears
+    /// it (the report quotes the numbers it was derived from). An old peer
+    /// ignores the key, so no `PROTOCOL_VERSION` bump.
+    feedback: Option<String>,
     created_at: String,
     /// Revision stamp for last-write-wins propagation. A new attempt sets it to
     /// `created_at`; a re-assessment bumps it to now, so the newer result reaches
@@ -855,16 +861,16 @@ fn upsert_attempt_event(conn: &Connection, ev: &AttemptEvent) -> Result<bool, St
     let changed = conn
         .execute(
             "INSERT INTO read_attempt_event \
-             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, feedback_json, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
              ON CONFLICT(uuid) DO UPDATE SET \
              recognized = excluded.recognized, \
              score = excluded.score, \
              metrics_json = excluded.metrics_json, \
-             feedback_json = NULL, \
+             feedback_json = excluded.feedback_json, \
              updated_at = excluded.updated_at \
              WHERE excluded.updated_at > COALESCE(read_attempt_event.updated_at, read_attempt_event.created_at)",
-            params![ev.uuid, ev.user_id, ev.dataset_uuid, ev.text_uuid, ev.audio_path, ev.recognized, ev.score, ev.metrics, ev.created_at, ev.updated_at],
+            params![ev.uuid, ev.user_id, ev.dataset_uuid, ev.text_uuid, ev.audio_path, ev.recognized, ev.score, ev.metrics, ev.feedback, ev.created_at, ev.updated_at],
         )
         .map_err(|e| e.to_string())?;
     Ok(changed > 0)
@@ -890,6 +896,10 @@ fn attempt_payload(ev: &AttemptEvent) -> Value {
         // it, an old peer ignores it and keeps its insert-once behavior — so no
         // PROTOCOL_VERSION bump.
         "updated_at": ev.updated_at,
+        // Optional key: the feedback report rides the same LWW row as the result.
+        // A newer feedback write overwrites an older one on every device; a
+        // re-assessment (which sends no `feedback`) clears it.
+        "feedback": ev.feedback,
     })
 }
 
@@ -915,7 +925,7 @@ pub(crate) fn rows_for_user(
     let conn = open_app_attempts(settings)?;
     let mut stmt = conn
         .prepare(
-            "SELECT rowid, uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at, COALESCE(updated_at, created_at) \
+            "SELECT rowid, uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at, COALESCE(updated_at, created_at), feedback_json \
              FROM read_attempt_event WHERE user_id = ?1 AND rowid > ?2 ORDER BY rowid ASC LIMIT ?3",
         )
         .map_err(|e| e.to_string())?;
@@ -935,6 +945,9 @@ pub(crate) fn rows_for_user(
                 // Coalesced so a legacy row (NULL revision) still carries a stamp a
                 // follower can LWW-resolve against — the newest result wins.
                 "updated_at": row.get::<_, String>(10)?,
+                // Optional key: the feedback report, so a backfilled device also
+                // recovers the agent's advice, not just the numbers.
+                "feedback": row.get::<_, Option<String>>(11)?,
             });
             Ok((rowid, value))
         })
@@ -1000,6 +1013,13 @@ pub(crate) fn apply_remote_save(
         // serialisation, so re-reading it on another device yields the same
         // metrics card instead of a re-typed object.
         metrics: payload.get("metrics").and_then(|v| match v {
+            Value::String(s) if !s.is_empty() => Some(s.clone()),
+            Value::Null | Value::String(_) => None,
+            other => Some(other.to_string()),
+        }),
+        // Same treatment as `metrics`: the feedback report is kept as the JSON
+        // text it travelled as, so a re-read yields the identical report.
+        feedback: payload.get("feedback").and_then(|v| match v {
             Value::String(s) if !s.is_empty() => Some(s.clone()),
             Value::Null | Value::String(_) => None,
             other => Some(other.to_string()),
@@ -1864,6 +1884,10 @@ async fn update_recognized_inner(
         recognized: recognized.to_string(),
         score,
         metrics: metrics.as_ref().map(|v| v.to_string()),
+        // A re-assess clears the feedback (the UPDATE sets `feedback_json = NULL`:
+        // the report quoted the old numbers), and journaling `None` propagates that
+        // clear to every device.
+        feedback: None,
         created_at: canonical_stamp(&created_at),
         updated_at: revised_at,
     };
@@ -1923,6 +1947,9 @@ pub(crate) fn save_attempt_row(
         recognized: attempt.recognized.clone(),
         score: attempt.score,
         metrics: attempt.metrics.as_ref().map(|v| v.to_string()),
+        // A fresh take has no feedback yet; a later feedback write re-journals the
+        // row with it (§17.7).
+        feedback: None,
         created_at: created_at.clone(),
         updated_at: created_at,
     };
@@ -1931,6 +1958,73 @@ pub(crate) fn save_attempt_row(
         settings,
         "read_attempt_save",
         dataset_uuid,
+        &attempt_payload(&ev),
+        &ev.user_id,
+    );
+    Ok(())
+}
+
+/// Write one attempt's feedback report and re-journal the whole row, so the
+/// advice travels on the same last-write-wins path as the result (§17.7). The
+/// live row is read first and its transcript/score/metrics are re-sent unchanged
+/// alongside the new feedback — a feedback touch never ships a value newer than
+/// this device already holds, so it can only win the `updated_at` contest on the
+/// strength of the write it is actually making. Errors when the attempt is not
+/// the caller's, mirroring the guard the old bare `UPDATE` relied on.
+pub(crate) fn journal_feedback(
+    settings: &SettingsState,
+    attempt_uuid: &str,
+    feedback_json: &str,
+) -> Result<(), String> {
+    let me = workspace_identity(settings);
+    let conn = open_app_attempts(settings)?;
+    let (user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics, created_at): (
+        String, String, String, Option<String>, String, f64, Option<String>, String,
+    ) = conn.query_row(
+        "SELECT user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at \
+         FROM read_attempt_event WHERE uuid = ?1 AND user_id = ?2",
+        params![attempt_uuid, &me],
+        |r| Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, f64>(5)?,
+            r.get::<_, Option<String>>(6)?,
+            r.get::<_, String>(7)?,
+        )),
+    )
+    .map_err(|_| format!(
+        "Attempt {} was not found for this user, so the report was not stored.",
+        attempt_uuid
+    ))?;
+
+    // Bump the revision: the feedback write is the newest touch on this row.
+    let revised_at = now_row_stamp();
+    conn.execute(
+        "UPDATE read_attempt_event SET feedback_json = ?1, updated_at = ?2 WHERE uuid = ?3 AND user_id = ?4",
+        params![feedback_json, &revised_at, attempt_uuid, &me],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let ev = AttemptEvent {
+        uuid: attempt_uuid.to_string(),
+        user_id,
+        dataset_uuid: dataset_uuid.clone(),
+        text_uuid,
+        audio_path,
+        recognized,
+        score,
+        metrics,
+        feedback: Some(feedback_json.to_string()),
+        created_at: canonical_stamp(&created_at),
+        updated_at: revised_at,
+    };
+    let _ = crate::sync::change_log::commit_change_as(
+        settings,
+        "read_attempt_save",
+        &dataset_uuid,
         &attempt_payload(&ev),
         &ev.user_id,
     );
@@ -2941,6 +3035,53 @@ mod tests {
         // An older revision is refused: the newest result keeps winning both ways.
         assert!(!apply_remote_save(&settings, "", &attempt("stale", 10.0, "2026-01-01T12:00:00Z"), "alice").unwrap());
         assert_eq!(read(), ("second".to_string(), 95.0), "the older write is ignored");
+    }
+
+    #[test]
+    fn feedback_rides_the_attempt_row_last_write_wins() {
+        let (settings, _dir) = temp_settings("feedback-lww");
+        let (ds, text) = dataset_with_text(&settings, "hello world");
+        let uuid = Uuid::new_v4().to_string();
+        // A payload builder that can carry, or omit, the optional `feedback` key.
+        let attempt = |rev: &str, feedback: Option<&str>| {
+            let mut v = json!({
+                "uuid": uuid, "user_id": "alice", "dataset_uuid": ds, "text_uuid": text,
+                "audio_path": null, "recognized": "hello world", "score": 90.0,
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": rev,
+            });
+            // A re-assessment sends no `feedback` key at all; the replay must then
+            // clear it, exactly as the local re-assess does.
+            if let Some(f) = feedback {
+                v["feedback"] = json!(f);
+            }
+            v
+        };
+        let read_feedback = || -> Option<String> {
+            let conn = open_app_attempts(&settings).unwrap();
+            conn.query_row(
+                "SELECT feedback_json FROM read_attempt_event WHERE uuid = ?1",
+                params![uuid],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .unwrap()
+        };
+
+        // A fresh attempt carries no feedback.
+        assert!(apply_remote_save(&settings, "", &attempt("2026-01-01T00:00:00Z", None), "alice").unwrap());
+        assert_eq!(read_feedback(), None);
+
+        // A feedback write on a newer revision stores it.
+        assert!(apply_remote_save(&settings, "", &attempt("2026-01-02T00:00:00Z", Some("{\"summary\":\"slow\"}")), "alice").unwrap());
+        assert_eq!(read_feedback().as_deref(), Some("{\"summary\":\"slow\"}"));
+
+        // A newer feedback write overwrites the older one.
+        assert!(apply_remote_save(&settings, "", &attempt("2026-01-03T00:00:00Z", Some("{\"summary\":\"better\"}")), "alice").unwrap());
+        assert_eq!(read_feedback().as_deref(), Some("{\"summary\":\"better\"}"));
+        assert_eq!(event_count(&settings), 1, "feedback updates reuse the one row");
+
+        // A re-assessment (no `feedback` key, newer revision) clears it everywhere.
+        assert!(apply_remote_save(&settings, "", &attempt("2026-01-04T00:00:00Z", None), "alice").unwrap());
+        assert_eq!(read_feedback(), None, "a re-assess drops the stale report");
     }
 
     // -- the hub-side state read behind the practice backfill (§17.6 / INV-21) ----

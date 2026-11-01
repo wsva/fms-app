@@ -257,6 +257,61 @@ pub(crate) fn recompute_totals(settings: &SettingsState, user_id: &str) -> Resul
     recompute_user_total(&conn, user_id).map(|(total, _level)| total)
 }
 
+/// Wholesale follower→Hub XP collection: re-journal every `xp_ledger` row this
+/// device holds for the workspace identity, so an award that a follower's
+/// incremental push never delivered (a lost writeback, a device that earned XP
+/// before the hub link existed) still reaches the Hub (Rule 1: the Hub stores all
+/// of the user's data). It builds the exact [`xp_award_internal`] payload —
+/// `{user_id, amount, source, reference_id, dataset_uuid}` — and commits it as an
+/// `xp` change, which enqueues on a follower for the next flush. The Hub replays
+/// it idempotently: `xp_award_internal` dedups on `(user, source, reference_id)`,
+/// so an award already present is a no-op and the re-run never double-counts.
+/// Returns the number of rows enqueued. On the Hub itself it is a harmless no-op
+/// (its own awards are already in its ledger); callers gate on `!is_hub()`.
+/// No new endpoint — it rides the existing `POST /api/v1/sync/changes` writeback.
+pub(crate) fn collect_local_awards_for_push(settings: &SettingsState) -> Result<usize, String> {
+    let me = workspace_identity(settings);
+    let conn = open_app_db(settings)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT amount, source, COALESCE(reference_id, ''), COALESCE(dataset_uuid, '') \
+             FROM xp_ledger WHERE user_id = ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([me.as_str()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut enqueued = 0usize;
+    for r in rows.filter_map(|r| r.ok()) {
+        let (amount, source, reference_id, dataset_uuid) = r;
+        let payload = serde_json::json!({
+            "user_id": me,
+            "amount": amount,
+            "source": source,
+            "reference_id": reference_id,
+            "dataset_uuid": dataset_uuid,
+        });
+        // A follower `enqueue_change`s this into the writeback queue (the same call
+        // `xp_award_internal` makes at award time); the Hub appends to `sync_log`,
+        // where the dedup makes a re-collect a no-op. Best-effort per row.
+        if crate::sync::change_log::commit_change_as(
+            settings, "xp", &dataset_uuid, &payload, &me,
+        )
+        .is_ok()
+        {
+            enqueued += 1;
+        }
+    }
+    Ok(enqueued)
+}
+
 /// The stored total for `user_id` (0 when the user has no row yet or the read
 /// fails — the callers only use it for reporting).
 // Hub-side read: only `rest.rs` calls it, so the mobile build has no caller.
@@ -580,4 +635,50 @@ pub async fn xp_award_reading_chapter(
         let _ = app.emit("xp-earned", &result);
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A follower-scoped settings state over a fresh temp dir. Default role is
+    /// `follower`, so `commit_change_as` enqueues rather than logging to itself.
+    fn temp_settings(tag: &str) -> (SettingsState, std::path::PathBuf) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fms-xp-test-{tag}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = SettingsState::new();
+        settings.set_workspace_dir(Some(dir.clone()));
+        (settings, dir)
+    }
+
+    #[test]
+    fn collect_re_enqueues_the_whole_ledger_and_dedups_on_replay() {
+        let (settings, _dir) = temp_settings("xp-collect");
+        let me = workspace_identity(&settings);
+        // Two distinct awards through the production path (each writes one ledger
+        // row and enqueues its own delta, exactly as a real earn does).
+        xp_award_internal(&settings, &me, 3, "reading_sentence", "s1", None).unwrap();
+        xp_award_internal(&settings, &me, 5, "reading_chapter", "c1", None).unwrap();
+
+        // Wholesale collection re-journals every ledger row this device holds, so a
+        // follower's stranded award still reaches the Hub.
+        let n = collect_local_awards_for_push(&settings).unwrap();
+        assert_eq!(n, 2, "both local awards are enqueued for the Hub");
+
+        // The safety property the collection relies on: replaying an award the
+        // (Hub) already holds is a no-op on (user, source, reference_id) — so the
+        // re-push can never double-count, and re-running collection adds no rows.
+        let replay = xp_award_internal(&settings, &me, 3, "reading_sentence", "s1", None).unwrap();
+        assert!(!replay.is_new, "a re-collected award dedups, never re-awards");
+        assert_eq!(recompute_totals(&settings, &me).unwrap(), 8, "the total is unchanged by the replay");
+
+        // A second collection is still safe: it re-enqueues, and every enqueue
+        // dedups on replay, so the recomputed total stays put.
+        assert_eq!(collect_local_awards_for_push(&settings).unwrap(), 2);
+        assert_eq!(recompute_totals(&settings, &me).unwrap(), 8, "re-collection never inflates the total");
+    }
 }

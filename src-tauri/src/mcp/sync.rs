@@ -128,6 +128,15 @@ struct DatasetPushAllParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct SyncPushAllXpParam {
+    /// Re-push the whole local ledger even when this device already completed its
+    /// one-time collection. Without it an already-collected device only flushes
+    /// what is still queued.
+    #[serde(default)]
+    force: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct HubKindParam {
     /// Candidate hub address to classify. Empty falls back to the saved pc_url.
     #[serde(default)]
@@ -561,6 +570,13 @@ impl DatasetMcpServer {
     async fn sync_history_backfill(&self) -> Result<String, String> {
         log::info!("[MCP] sync_history_backfill");
         let v = sync::client::sync_backfill_history(self.app.state::<SettingsState>()).await?;
+        Ok(v.to_string())
+    }
+
+    #[tool(name = "sync_xp_push_all", description = "Collect this follower's whole local XP ledger onto the Hub (Rule 1: the Hub stores all of the user's data). Re-journals every local `xp_ledger` row as an `xp` change and flushes it, so awards stranded by a lost writeback or earned before pairing — the gap the `xp_divergence` / 'XP diverged with an empty queue' signal in a round result surfaces — finally reach the Hub's ledger. The Hub replays idempotently (dedup on user+source+reference_id), so an already-delivered award is a no-op and this can never double-count or inflate either total; re-running is safe. `force` (default false) re-pushes even when this device already completed its automatic one-time collection. A no-op on the Hub itself, which is the authoritative copy. Returns { enqueued, pushed, forced } — follow with sync_run_round or sync_status_detail to confirm `lifetime_xp` now equals `hub_lifetime_xp`.")]
+    async fn sync_xp_push_all(&self, Parameters(param): Parameters<SyncPushAllXpParam>) -> Result<String, String> {
+        log::info!("[MCP] sync_xp_push_all: force={:?}", param.force);
+        let v = sync::client::sync_push_all_xp(self.app.state::<SettingsState>(), param.force).await?;
         Ok(v.to_string())
     }
 
