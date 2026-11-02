@@ -417,8 +417,14 @@ export default function SentenceDrawer({
       className="fixed inset-0 z-50 flex flex-col justify-end bg-black/40"
       onClick={onClose}
     >
+      {/* The panel takes 80% of the overlay rather than 80vh: global page zoom
+          sets `zoom` on <html>, which multiplies viewport units and so overshoots
+          the window at any level above 100% (see usePageZoom). A percentage
+          resolves against the already-corrected viewport, keeping the drawer's
+          bottom edge inside the window — the header stays reachable, the body
+          scrolls — no matter how far the page is zoomed in. */}
       <div
-        className="bg-bg-elevated rounded-t-2xl shadow-2xl w-full h-[80vh] flex flex-col border-t border-border-default [&_*]:![font-size:inherit] [&_*]:![font-weight:inherit]"
+        className="bg-bg-elevated rounded-t-2xl shadow-2xl w-full h-[80%] flex flex-col border-t border-border-default [&_*]:![font-size:inherit] [&_*]:![font-weight:inherit]"
         style={{ fontSize: DRAWER_FONT_SCALES[drawerFontScale].size, fontWeight: DRAWER_FONT_SCALES[drawerFontScale].weight }}
         onClick={(e) => e.stopPropagation()}
       >
