@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Play, Square } from "lucide-react";
+import { Play, Repeat, Square } from "lucide-react";
 import type { ReadStandardAudio } from "@/lib/read_aloud/types";
 
 /** `m:ss` — the shape a clip's length reads in next to a progress bar. */
@@ -24,8 +24,9 @@ type Props = {
  *
  * This is the *listening* half of the reference: the clip itself is what
  * pronunciation is measured against, and hearing it before recording is how a
- * reader learns the intended pacing. It plays and seeks only — every change to
- * the clips themselves stays on the Manage page's Standard audio card.
+ * reader learns the intended pacing. It plays, seeks and loops only — every
+ * change to the clips themselves stays on the Manage page's Standard audio
+ * card.
  */
 export default function StandardAudioPlayer({ clip, disabled = false }: Props) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -34,6 +35,9 @@ export default function StandardAudioPlayer({ clip, disabled = false }: Props) {
   // null here; metadata is what fills it in.
   const [duration, setDuration] = useState(clip.duration ?? 0);
   const [currentTime, setCurrentTime] = useState(0);
+  // Repeating the reference is how a reader shadows it, so the loop is a
+  // first-class control rather than something to re-click through.
+  const [loop, setLoop] = useState(false);
 
   const stop = useCallback(() => {
     const el = audioRef.current;
@@ -50,6 +54,11 @@ export default function StandardAudioPlayer({ clip, disabled = false }: Props) {
 
   // Never leave the reference playing behind the practice pane.
   useEffect(() => () => audioRef.current?.pause(), []);
+
+  // Keep the element's own loop in step so it restarts seamlessly at the end.
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.loop = loop;
+  }, [loop]);
 
   const toggle = () => {
     const el = audioRef.current;
@@ -86,6 +95,22 @@ export default function StandardAudioPlayer({ clip, disabled = false }: Props) {
         className="shrink-0 flex items-center justify-center w-8 h-8 rounded-full bg-accent-bg text-white cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
       >
         {playing ? <Square size={13} /> : <Play size={15} className="ml-0.5" />}
+      </button>
+
+      <button
+        type="button"
+        onClick={() => setLoop((v) => !v)}
+        disabled={disabled}
+        aria-label={loop ? "Stop looping standard audio" : "Loop standard audio"}
+        aria-pressed={loop}
+        title={loop ? "Looping — plays repeatedly" : "Play once"}
+        className={`shrink-0 flex items-center justify-center w-8 h-8 rounded-full cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+          loop
+            ? "bg-accent-bg/15 text-accent-bg border border-accent-bg/60"
+            : "bg-bg-input text-text-secondary border border-border-light hover:text-accent-bg"
+        }`}
+      >
+        <Repeat size={14} />
       </button>
 
       <div className="flex flex-col gap-1 flex-1 min-w-0">
@@ -125,6 +150,10 @@ export default function StandardAudioPlayer({ clip, disabled = false }: Props) {
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => {
+          if (loop) {
+            setCurrentTime(0);
+            return;
+          }
           setPlaying(false);
           setCurrentTime(0);
         }}
