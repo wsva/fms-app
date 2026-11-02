@@ -22,7 +22,8 @@ Reading through sentences correctly earns XP, with a bonus for finishing a chapt
 
 Tapping a sentence opens the **sentence drawer** — a panel for working closely with that sentence. Here you can:
 
-- See and play the sentence's audio.
+- Edit the sentence's text, with the special characters, smart quotes and auto‑replace rules that a language's typography needs.
+- **Voice input** — press the microphone and speak; what the model recognises is written into the sentence's text, where you correct it before saving. The take itself is not kept: no audio file is added to the book and no transcript is stored alongside the sentence.
 - Break the sentence into **words** and look them up.
 - Add vocabulary you want to remember to your **cards** (linking what you read to spaced repetition — see [Cards](cards.md)).
 

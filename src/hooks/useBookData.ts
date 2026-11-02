@@ -86,9 +86,7 @@ export function useBookData() {
   const [drawer, setDrawer] = useState<DrawerState>(null);
   const [drawerUUID, setDrawerUUID] = useState("");
   const [drawerContent, setDrawerContent] = useState("");
-  const [drawerRecognized, setDrawerRecognized] = useState("");
   const [drawerBgColor, setDrawerBgColor] = useState<string | null>(null);
-  const [drawerAudio, setDrawerAudio] = useState<{ rel: string; url: string } | null>(null);
 
   const flatChapters = useMemo(() => flattenChapters(chaptersFlat), [chaptersFlat]);
   const paragraphs = useMemo(() => groupIntoParagraphs(data), [data]);
@@ -260,24 +258,21 @@ export function useBookData() {
     load();
   }, [chapterUUID, bookUUID, updateData]);
 
-  // ── Recording ──────────────────────────────────────────────────
+  // ── Voice input ────────────────────────────────────────────────
+  // A take is an input method, not an artifact: nothing is written to the book's
+  // media dir and the transcript is not stored on the sentence. What the model
+  // heard is appended to the content field, where the reader edits it before
+  // Save — the same way the chat composer folds a transcript into its input.
   const handleRecordResult = useCallback(
-    async ({ wavBase64, text }: { wavBase64: string; text: string }) => {
-      if (!bookUUID || !isTauri()) return;
-      try {
-        const res = await invoke<AudioWriteResult>("book_write_audio", {
-          bookUuid: bookUUID,
-          name: `${drawerUUID}.wav`,
-          wavBase64,
-        });
-        setDrawerAudio({ rel: res.rel_path, url: res.abs_path });
-        setDrawerRecognized(text);
-        setDrawerContent((c) => (c ? c : text));
-      } catch (e) {
-        setError(`Failed to save recording: ${e}`);
+    // Only the transcript is of interest now — the WAV is dropped, not stored.
+    ({ text }: { text: string }) => {
+      if (!text.trim()) {
+        setError("No speech recognized — speak a little closer and try again.");
+        return;
       }
+      setDrawerContent((c) => (c.trim() ? `${c.trimEnd()} ${text.trim()}` : text.trim()));
     },
-    [bookUUID, drawerUUID]
+    []
   );
 
   const recorder = useRecorder(handleRecordResult, (msg) => setError(msg));
@@ -287,78 +282,40 @@ export function useBookData() {
     setDrawer({ mode: "edit", sentence });
     setDrawerUUID(sentence.uuid);
     setDrawerContent(sentence.content ?? "");
-    setDrawerRecognized(sentence.recognized ?? "");
     setDrawerBgColor(sentence.bg_color ?? null);
-    setDrawerAudio(
-      sentence.audio_path && sentence.audio_url
-        ? { rel: sentence.audio_path, url: sentence.audio_url }
-        : null
-    );
   };
 
   const openInsertDrawer = (insertBeforeUUID: string | null) => {
     setDrawer({ mode: "add", insertBeforeUUID });
     setDrawerUUID(getUUID());
     setDrawerContent("");
-    setDrawerRecognized("");
     setDrawerBgColor(null);
-    setDrawerAudio(null);
   };
 
   const openAddDrawer = (para: Paragraph) => openInsertDrawer(para.breakSentence?.uuid ?? null);
 
-  const closeDrawer = async () => {
-    // Discard orphan audio recorded for a new sentence that was never saved.
-    if (drawer?.mode === "add" && drawerAudio && isTauri()) {
-      try {
-        await invoke("book_delete_audio", { bookUuid: bookUUID, relPath: drawerAudio.rel });
-      } catch {
-        /* ignore */
-      }
-    }
+  const closeDrawer = () => {
     setDrawer(null);
     setDrawerContent("");
-    setDrawerRecognized("");
     setDrawerBgColor(null);
-    setDrawerAudio(null);
   };
 
-  const clearDrawer = async () => {
+  const clearDrawer = () => {
     if (drawer?.mode !== "add") return;
-    // Discard orphan audio before resetting.
-    if (drawerAudio && isTauri()) {
-      try {
-        await invoke("book_delete_audio", { bookUuid: bookUUID, relPath: drawerAudio.rel });
-      } catch {
-        /* ignore */
-      }
-    }
     setDrawerUUID(getUUID());
     setDrawerContent("");
-    setDrawerRecognized("");
     setDrawerBgColor(null);
-    setDrawerAudio(null);
   };
 
-  const discardDrawer = async () => {
+  const discardDrawer = () => {
     if (drawer?.mode === "edit") {
       // Revert to original sentence values
       const s = drawer.sentence;
       setDrawerContent(s.content ?? "");
-      setDrawerRecognized(s.recognized ?? "");
       setDrawerBgColor(s.bg_color ?? null);
-      setDrawerAudio(
-        s.audio_path && s.audio_url
-          ? { rel: s.audio_path, url: s.audio_url }
-          : null
-      );
     } else if (drawer?.mode === "add") {
-      await clearDrawer();
+      clearDrawer();
     }
-  };
-
-  const playDrawerAudio = () => {
-    if (drawerAudio?.url) new Audio(convertFileSrc(drawerAudio.url)).play();
   };
 
   // ── Renumber helper (immer freeze-safe) ────────────────────────
@@ -392,9 +349,13 @@ export function useBookData() {
         order_num: insertIndex + 1,
         content: drawerContent,
         sentence_type: "text",
-        audio_path: drawerAudio?.rel ?? null,
-        audio_url: drawerAudio?.url ?? null,
-        recognized: drawerRecognized || null,
+        // A sentence the drawer creates has no audio: audio belongs to the
+        // paragraph (uploaded or synthesized), not to a single sentence.
+        audio_path: null,
+        audio_url: null,
+        // Voice input is not stored as a transcript any more, so a new sentence
+        // has none; the column stays for rows written before.
+        recognized: null,
         bg_color: drawerBgColor,
         created_at: now,
         updated_at: now,
@@ -427,9 +388,7 @@ export function useBookData() {
 
       setDrawer(null);
       setDrawerContent("");
-      setDrawerRecognized("");
       setDrawerBgColor(null);
-      setDrawerAudio(null);
     } catch (e) {
       setError(`Save failed: ${e}`);
     }
@@ -443,12 +402,11 @@ export function useBookData() {
     setError("");
     const sentence = drawer.sentence;
     try {
+      // Whatever audio and transcript the sentence already carried ride the
+      // spread untouched — the drawer edits text and color only.
       const updated: SentenceClient = {
         ...sentence,
         content: drawerContent,
-        recognized: drawerRecognized || null,
-        audio_path: drawerAudio?.rel ?? null,
-        audio_url: drawerAudio?.url ?? null,
         bg_color: drawerBgColor,
         updated_at: nowIso(),
         hasLocalAudio: false,
@@ -467,9 +425,7 @@ export function useBookData() {
       });
       setDrawer(null);
       setDrawerContent("");
-      setDrawerRecognized("");
       setDrawerBgColor(null);
-      setDrawerAudio(null);
     } catch (e) {
       setError(`Save failed: ${e}`);
     }
@@ -1214,10 +1170,8 @@ export function useBookData() {
     drawerUUID,
     drawerContent,
     setDrawerContent,
-    drawerRecognized,
     drawerBgColor,
     setDrawerBgColor,
-    drawerAudio,
     recorder,
     // derived
     selectedBook,
@@ -1231,7 +1185,6 @@ export function useBookData() {
     closeDrawer,
     clearDrawer,
     discardDrawer,
-    playDrawerAudio,
     handleSaveAdd,
     handleSaveEdit,
     handleDelete,

@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  Play,
   X,
   MoreVertical,
   Trash2,
@@ -22,7 +21,6 @@ import { isMobileApp } from "@/lib/platform";
 import { logInfo } from "@/lib/logger";
 import { BG_COLORS } from "./utils";
 import { getUUID } from "./utils";
-import { highlightDifferences } from "./diff";
 import WordGenSettings from "./WordGenSettings";
 import {
   parseWordGenResponse,
@@ -93,10 +91,8 @@ const PAIRED_CHARS: { left: string; right: string; hint: string }[] = [
 
 type Props = {
   drawer: DrawerState;
-  recognized: string;
   content: string;
   onContentChange: (v: string) => void;
-  hasAudio: boolean;
   saving: boolean;
   recording: boolean;
   processing: boolean;
@@ -107,8 +103,8 @@ type Props = {
   terms?: BookTerm[];
   onClose: () => void;
   onClear: () => void;
-  onPlay: () => void;
-  onToggleRecording: () => void;
+  /** Speak into the microphone; the transcript goes into the content field. */
+  onVoiceInput: () => void;
   onSaveAdd: () => void;
   onSaveEdit: () => void;
   onDiscard: () => void;
@@ -121,10 +117,8 @@ type Props = {
 
 export default function SentenceDrawer({
   drawer,
-  recognized,
   content,
   onContentChange,
-  hasAudio,
   saving,
   recording,
   processing,
@@ -134,8 +128,7 @@ export default function SentenceDrawer({
   terms = [],
   onClose,
   onClear,
-  onPlay,
-  onToggleRecording,
+  onVoiceInput,
   onSaveAdd,
   onSaveEdit,
   onDiscard,
@@ -550,23 +543,21 @@ export default function SentenceDrawer({
 
         {/* Body */}
         <div className="flex flex-col gap-3 p-4 flex-1 min-h-0 overflow-y-auto">
-          {/* Audio + Recording */}
+          {/* Voice input — the take is not kept. What is recognized fills the
+              content field below, where it is edited before saving. */}
           <div className="flex flex-row flex-wrap items-center gap-2">
-            {hasAudio && (
-              <button
-                className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-bg-muted border border-border-default text-sm hover:bg-bg-hover cursor-pointer"
-                onClick={onPlay}
-              >
-                <Play size={16} /> Play
-              </button>
-            )}
             <button
               className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-bg-muted border border-border-default text-sm hover:bg-bg-hover disabled:opacity-50 cursor-pointer"
               disabled={!recording && processing}
-              onClick={onToggleRecording}
+              onClick={onVoiceInput}
+              title={
+                recording
+                  ? "Stop \u2014 the microphone is live"
+                  : "Speak, and the recognized text is written into the field below"
+              }
             >
               <MicGlyph size={16} />
-              {recording ? "Stop" : processing ? "Processing\u2026" : "Record"}
+              {recording ? "Stop" : processing ? "Recognizing\u2026" : "Voice input"}
             </button>
             {drawer.mode === "add" && (
               <button
@@ -577,15 +568,6 @@ export default function SentenceDrawer({
               </button>
             )}
           </div>
-
-          {/* STT diff */}
-          {hasAudio && recognized && (
-            <div
-              className="bg-bg-muted rounded p-2 text-text-primary text-xl"
-            >
-              {highlightDifferences(content, recognized)}
-            </div>
-          )}
 
           {/* Special characters + auto-replace */}
           <div className="flex flex-row flex-wrap items-center gap-1">

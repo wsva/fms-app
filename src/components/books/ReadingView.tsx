@@ -25,7 +25,7 @@ export default function ReadingView({ b }: Props) {
   const {
     bookUUID, chapterUUID, flatChapters, mobile,
     loading, saving, error, setError, viewMode, paragraphs,
-    drawer, drawerContent, drawerRecognized, drawerBgColor, drawerAudio, recorder,
+    drawer, drawerContent, drawerBgColor, recorder,
     deleteTarget, setDeleteTarget, confirmDeleteSentence, setConfirmDeleteSentence,
     editSentence, nextUUID,
   } = b;
@@ -260,12 +260,10 @@ export default function ReadingView({ b }: Props) {
       {/* Sentence drawer */}
       <SentenceDrawer
         drawer={drawer}
-        recognized={drawerRecognized}
         content={drawerContent}
         onContentChange={b.setDrawerContent}
         bgColor={drawerBgColor}
         onBgColorChange={b.setDrawerBgColor}
-        hasAudio={!!drawerAudio}
         bookUUID={bookUUID}
         terms={b.terms}
         saving={saving}
@@ -274,8 +272,7 @@ export default function ReadingView({ b }: Props) {
         onClose={b.closeDrawer}
         onClear={b.clearDrawer}
         onDiscard={b.discardDrawer}
-        onPlay={b.playDrawerAudio}
-        onToggleRecording={recorder.toggle}
+        onVoiceInput={recorder.toggle}
         onSaveAdd={b.handleSaveAdd}
         onSaveEdit={b.handleSaveEdit}
         onDelete={b.handleDelete}
