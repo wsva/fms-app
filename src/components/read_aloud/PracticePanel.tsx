@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Play, RotateCcw, Wand2 } from "lucide-react";
 import type { ReadAloudSubmitResult, ReadAttempt, ReadStandardAudio, ReadText } from "@/lib/read_aloud/types";
@@ -13,6 +13,7 @@ import FeedbackPanel from "@/components/read_aloud/FeedbackPanel";
 import ProgressOverlay from "@/components/read_aloud/ProgressOverlay";
 import StandardAudioPlayer from "@/components/read_aloud/StandardAudioPlayer";
 import { isTauri } from "@/lib/tauri";
+import { acquireAudioSrc, releaseAudioSrc } from "@/lib/media/audioSrc";
 import { logError, logInfo } from "@/lib/logger";
 
 const LOG_MODULE = "read-aloud";
@@ -55,9 +56,14 @@ type Props = {
   onRecorder?: (ctl: RecorderCtl | null) => void;
 };
 
-function playUrl(url?: string | null) {
+async function playUrl(url?: string | null) {
   if (!url) return;
-  new Audio(convertFileSrc(url)).play().catch(() => {});
+  const src = await acquireAudioSrc(url);
+  const el = new Audio(src);
+  // The fire-and-forget player keeps no ref, so release the blob as soon as
+  // the take is done (or the play fails) rather than leaking it.
+  el.onended = () => releaseAudioSrc(src);
+  el.play().catch(() => releaseAudioSrc(src));
 }
 
 /**

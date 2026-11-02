@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle, Check, Loader2, Play, Square, Trash2, Upload, Wand2 } from "lucide-react";
@@ -18,6 +18,7 @@ import {
   setDefaultStandardAudio,
 } from "@/lib/read_aloud/standardAudio";
 import { isMobileApp } from "@/lib/platform";
+import { acquireAudioSrc, releaseAudioSrc } from "@/lib/media/audioSrc";
 import { localeLabel, voiceName } from "@/lib/edge_tts/voices";
 import { isTauri } from "@/lib/tauri";
 import { logError } from "@/lib/logger";
@@ -146,6 +147,11 @@ export default function StandardAudioSection({
 
   // Playback of a stored clip
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  // The resolved source behind the element (asset URL on desktop, blob on
+  // Android) so the blob can be revoked; `playToken` guards the gap between the
+  // tap and the async source arriving so a stop during it releases the blob.
+  const clipSrcRef = useRef<string>("");
+  const playTokenRef = useRef(0);
   const [playingUuid, setPlayingUuid] = useState<string | null>(null);
 
   // Deleting a clip removes its audio file for good, and deleting the one in
@@ -260,12 +266,15 @@ export default function StandardAudioSection({
   };
 
   const stopAudio = useCallback(() => {
+    playTokenRef.current += 1;
     const el = audioRef.current;
     if (el) {
       el.pause();
       el.currentTime = 0;
       audioRef.current = null;
     }
+    releaseAudioSrc(clipSrcRef.current);
+    clipSrcRef.current = "";
     setPlayingUuid(null);
   }, []);
 
@@ -278,14 +287,20 @@ export default function StandardAudioSection({
         return;
       }
       if (!clip.audio_url) return;
-      const el = new Audio(convertFileSrc(clip.audio_url));
-      audioRef.current = el;
-      el.onended = () => {
-        audioRef.current = null;
-        setPlayingUuid(null);
-      };
+      const token = ++playTokenRef.current;
       setPlayingUuid(clip.uuid);
-      el.play().catch(() => stopAudio());
+      void (async () => {
+        const src = await acquireAudioSrc(clip.audio_url);
+        if (token !== playTokenRef.current) {
+          releaseAudioSrc(src);
+          return;
+        }
+        const el = new Audio(src);
+        audioRef.current = el;
+        clipSrcRef.current = src;
+        el.onended = () => stopAudio();
+        el.play().catch(() => stopAudio());
+      })();
     },
     [stopAudio]
   );

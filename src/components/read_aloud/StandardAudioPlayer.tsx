@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { Play, Repeat, Square } from "lucide-react";
+import { acquireAudioSrc, releaseAudioSrc } from "@/lib/media/audioSrc";
 import type { ReadStandardAudio } from "@/lib/read_aloud/types";
 
 /** `m:ss` — the shape a clip's length reads in next to a progress bar. */
@@ -38,6 +38,31 @@ export default function StandardAudioPlayer({ clip, disabled = false }: Props) {
   // Repeating the reference is how a reader shadows it, so the loop is a
   // first-class control rather than something to re-click through.
   const [loop, setLoop] = useState(false);
+  // Resolved through the shared helper: the asset URL on desktop, a blob URL
+  // on Android (see acquireAudioSrc for why the WAV needs a blob there).
+  const [src, setSrc] = useState("");
+
+  // The clip can change while this player stays mounted, so each load revokes
+  // the previous source before installing the next one.
+  useEffect(() => {
+    let cancelled = false;
+    let acquired = "";
+    void (async () => {
+      const resolved = await acquireAudioSrc(clip.audio_url);
+      if (cancelled) {
+        releaseAudioSrc(resolved);
+        return;
+      }
+      acquired = resolved;
+      setSrc(resolved);
+    })();
+    return () => {
+      cancelled = true;
+      audioRef.current?.pause();
+      releaseAudioSrc(acquired);
+      setSrc("");
+    };
+  }, [clip.audio_url]);
 
   const stop = useCallback(() => {
     const el = audioRef.current;
@@ -140,7 +165,7 @@ export default function StandardAudioPlayer({ clip, disabled = false }: Props) {
       <audio
         ref={audioRef}
         className="hidden"
-        src={convertFileSrc(clip.audio_url ?? "")}
+        src={src || undefined}
         preload="metadata"
         onLoadedMetadata={(e) => {
           const d = e.currentTarget.duration;

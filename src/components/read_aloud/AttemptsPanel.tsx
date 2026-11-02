@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   Play,
@@ -25,6 +25,7 @@ import { highlightDifferences } from "@/components/books/diff";
 import { lcs } from "@/lib/listen/lcs";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
+import { acquireAudioSrc, releaseAudioSrc } from "@/lib/media/audioSrc";
 import { logError } from "@/lib/logger";
 
 const LOG_MODULE = "read-aloud";
@@ -53,9 +54,14 @@ type Props = {
   standardAudioAvailable?: boolean;
 };
 
-function playUrl(url?: string | null) {
+async function playUrl(url?: string | null) {
   if (!url) return;
-  new Audio(convertFileSrc(url)).play().catch(() => {});
+  const src = await acquireAudioSrc(url);
+  const el = new Audio(src);
+  // Fire-and-forget: no ref is kept, so release the blob when the take ends or
+  // the play fails rather than leaking it.
+  el.onended = () => releaseAudioSrc(src);
+  el.play().catch(() => releaseAudioSrc(src));
 }
 
 function formatWhen(iso: string): string {

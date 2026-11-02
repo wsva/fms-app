@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import {
   Plus,
   Trash2,
@@ -66,6 +66,7 @@ import {
 } from "@/lib/read_aloud/fonts";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
+import { acquireAudioSrc, releaseAudioSrc } from "@/lib/media/audioSrc";
 import { logError, logInfo } from "@/lib/logger";
 import { notify, notifyError } from "@/lib/feedback/toast";
 import {
@@ -316,9 +317,16 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
   // when navigating away from the attempt, and on unmount — instead of running
   // fire-and-forget.
   const attemptAudioRef = useRef<HTMLAudioElement | null>(null);
+  // The resolved source (asset or blob URL) behind the element, so a blob can
+  // be revoked when playback stops. `playTokenRef` guards the gap between the
+  // tap and the async source arriving: a stop or a second play during that gap
+  // bumps the token, and the in-flight load sees it and releases its own blob.
+  const attemptSrcRef = useRef<string>("");
+  const playTokenRef = useRef(0);
   const [playingAttempt, setPlayingAttempt] = useState(false);
 
   const stopAttemptAudio = useCallback(() => {
+    playTokenRef.current += 1;
     const el = attemptAudioRef.current;
     if (el) {
       el.onended = null;
@@ -326,28 +334,33 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
       el.currentTime = 0;
       attemptAudioRef.current = null;
     }
+    releaseAudioSrc(attemptSrcRef.current);
+    attemptSrcRef.current = "";
     setPlayingAttempt(false);
   }, []);
 
   const toggleAttemptPlay = useCallback(
     (url?: string | null) => {
-      // Already playing → stop (toggle off), regardless of which attempt.
+      // Already playing (or mid-start) → stop (toggle off), whichever attempt.
       if (attemptAudioRef.current) {
         stopAttemptAudio();
         return;
       }
       if (!url) return;
-      const el = new Audio(convertFileSrc(url));
-      attemptAudioRef.current = el;
-      el.onended = () => {
-        attemptAudioRef.current = null;
-        setPlayingAttempt(false);
-      };
+      const token = ++playTokenRef.current;
       setPlayingAttempt(true);
-      el.play().catch(() => {
-        attemptAudioRef.current = null;
-        setPlayingAttempt(false);
-      });
+      void (async () => {
+        const src = await acquireAudioSrc(url);
+        if (token !== playTokenRef.current) {
+          releaseAudioSrc(src);
+          return;
+        }
+        const el = new Audio(src);
+        attemptAudioRef.current = el;
+        attemptSrcRef.current = src;
+        el.onended = () => stopAttemptAudio();
+        el.play().catch(() => stopAttemptAudio());
+      })();
     },
     [stopAttemptAudio]
   );
