@@ -251,6 +251,20 @@ export default function SentenceDrawer({
     });
   };
 
+  // Ctrl+C is the app's voice-input gesture, the same one the dictation field
+  // answers: with a selection it stays the ordinary copy, with none it starts
+  // the take — and pressing it again stops it, as the button does. Handled here
+  // rather than by the global shortcut in lib/voice-input because this drawer
+  // records through its own `useRecorder`; the field's `data-no-voice` is what
+  // keeps the built-in pipeline from running a second take alongside this one.
+  const handleContentKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!e.ctrlKey || (e.key !== "c" && e.key !== "C")) return;
+    const el = e.currentTarget;
+    if ((el.selectionStart ?? 0) !== (el.selectionEnd ?? 0)) return; // a selection copies
+    e.preventDefault();
+    onVoiceInput();
+  };
+
   const flushPendingWords = async () => {
     while (pendingWordsRef.current.length > 0) {
       const w = pendingWordsRef.current[0];
@@ -549,32 +563,6 @@ export default function SentenceDrawer({
 
         {/* Body */}
         <div className="flex flex-col gap-3 p-4 flex-1 min-h-0 overflow-y-auto">
-          {/* Voice input — the take is not kept. What is recognized fills the
-              content field below, where it is edited before saving. */}
-          <div className="flex flex-row flex-wrap items-center gap-2">
-            <button
-              className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-bg-muted border border-border-default text-sm hover:bg-bg-hover disabled:opacity-50 cursor-pointer"
-              disabled={!recording && processing}
-              onClick={onVoiceInput}
-              title={
-                recording
-                  ? "Stop \u2014 the microphone is live"
-                  : "Speak, and the recognized text is written into the field below"
-              }
-            >
-              <MicGlyph size={16} />
-              {recording ? "Stop" : processing ? "Recognizing\u2026" : "Voice input"}
-            </button>
-            {drawer.mode === "add" && (
-              <button
-                className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-red-500/10 border border-red-500/20 text-sm text-red-500 hover:bg-red-500/20 cursor-pointer"
-                onClick={onClear}
-              >
-                <RotateCcw size={14} /> Clear
-              </button>
-            )}
-          </div>
-
           {/* Special characters + auto-replace */}
           <div className="flex flex-row flex-wrap items-center gap-1">
             {SPECIAL_CHARS.map(({ char, hint }) => (
@@ -630,7 +618,35 @@ export default function SentenceDrawer({
             rows={3}
             value={content}
             onChange={(e) => onContentChange(e.target.value)}
+            onKeyDown={handleContentKeyDown}
           />
+
+          {/* Voice input — the take is not kept. What is recognized fills the
+              content field above, where it is edited before saving. Both sit
+              under that field, at its end, as the ways into and out of it. */}
+          <div className="flex flex-row flex-wrap items-center justify-end gap-2">
+            <button
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-bg-muted border border-border-default text-sm hover:bg-bg-hover disabled:opacity-50 cursor-pointer"
+              disabled={!recording && processing}
+              onClick={onVoiceInput}
+              title={
+                recording
+                  ? "Stop \u2014 the microphone is live. Shortcut: Ctrl+C (no selection)"
+                  : "Speak, and the recognized text is written into the field above. Shortcut: Ctrl+C (no selection)"
+              }
+            >
+              <MicGlyph size={16} />
+              {recording ? "Stop" : processing ? "Recognizing\u2026" : "Voice input"}
+            </button>
+            {drawer.mode === "add" && (
+              <button
+                className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-red-500/10 border border-red-500/20 text-sm text-red-500 hover:bg-red-500/20 cursor-pointer"
+                onClick={onClear}
+              >
+                <RotateCcw size={14} /> Clear
+              </button>
+            )}
+          </div>
 
           {/* Background color selector */}
           <div className="flex flex-row items-center gap-2">

@@ -3,7 +3,9 @@
  * and base64-encodes for the Rust `model_transcribe` command.
  *
  * Supports global usage: tracks the currently focused input element and provides
- * a subscription-based state system for toolbar buttons, plus a global Ctrl+C shortcut.
+ * a subscription-based state system for toolbar buttons, plus a global Ctrl+C
+ * shortcut — which a field may decline with `data-no-voice` when it records
+ * through its own pipeline.
  *
  * Capture runs on one of two backends (see `openMicCapture`): the MediaRecorder
  * pipeline the desktop app has always used, and a raw Web Audio PCM path for
@@ -761,6 +763,11 @@ if (typeof document !== "undefined") {
       // anywhere on the page once an input had been focused earlier.
       const el = document.activeElement;
       if (isTextInput(el)) {
+        // `data-no-voice` is a field declining this pipeline because it drives
+        // its own recorder — the books sentence drawer, whose Ctrl+C starts a
+        // `useRecorder` take. Running both would open the microphone twice and
+        // land two transcripts in the same field.
+        if (el.hasAttribute("data-no-voice")) return;
         if ((el.selectionStart ?? 0) !== (el.selectionEnd ?? 0)) return; // has selection → normal copy
         focusedElement = el;
         e.preventDefault();
