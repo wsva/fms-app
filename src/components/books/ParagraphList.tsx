@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { Play, Copy, Upload, Trash2, Plus, FileDown, Brain } from "lucide-react";
+import { Play, Square, Copy, Upload, Trash2, Plus, FileDown, Brain } from "lucide-react";
 import type { Paragraph, SentenceClient } from "@/lib/read/types";
+import { useMediaPlay } from "@/hooks/useMediaPlay";
 import { sentenceBgClass } from "./utils";
 
 type Props = {
@@ -23,9 +23,34 @@ type Props = {
   onImport: (para: Paragraph, text: string) => void;
 };
 
-function playUrl(url?: string | null) {
-  if (!url) return;
-  new Audio(convertFileSrc(url)).play();
+/** The paragraph's audio control, which is the same clip's **Stop** button while
+ *  that clip sounds. Playing through `useMediaPlay` means one clip at a time
+ *  app-wide, and the button whose clip got interrupted reverts on its own. */
+function ParagraphAudioButton({
+  url,
+  playing,
+  onToggle,
+  pad,
+}: {
+  url?: string | null;
+  playing: unknown;
+  onToggle: (url: string | null | undefined, token: unknown) => void;
+  pad: string;
+}) {
+  const isPlaying = !!url && playing === url;
+  return (
+    <button
+      title={isPlaying ? "Stop paragraph audio" : "Play paragraph audio"}
+      className={`${pad} rounded hover:bg-bg-hover ${
+        isPlaying ? "text-accent" : "text-text-secondary"
+      } cursor-pointer`}
+      // The clip is its own token: a second press stops it rather than starting
+      // an overlapping copy of it.
+      onClick={() => onToggle(url, url)}
+    >
+      {isPlaying ? <Square size={16} /> : <Play size={16} />}
+    </button>
+  );
 }
 
 export default function ParagraphList({
@@ -42,6 +67,9 @@ export default function ParagraphList({
   onParagraphAudio,
   onImport,
 }: Props) {
+  // One clip plays at a time across the app, and the paragraph whose clip is
+  // sounding gets the Stop button (see useMediaPlay).
+  const { playing, toggle } = useMediaPlay();
   const [importIdx, setImportIdx] = useState<number | null>(null);
   const [importText, setImportText] = useState("");
   // Comfortable tap targets on narrow touch screens; compact on desktop.
@@ -94,13 +122,12 @@ export default function ParagraphList({
                 </button>
               )}
               {para.breakSentence?.audio_path && (
-                <button
-                  title="Play paragraph audio"
-                  className={`${iconPad} rounded hover:bg-bg-hover text-text-secondary cursor-pointer`}
-                  onClick={() => playUrl(para.breakSentence?.audio_url)}
-                >
-                  <Play size={16} />
-                </button>
+                <ParagraphAudioButton
+                  url={para.breakSentence?.audio_url}
+                  playing={playing}
+                  onToggle={toggle}
+                  pad={iconPad}
+                />
               )}
               <button
                 title={para.breakSentence?.audio_path ? "Replace audio" : "Upload audio"}

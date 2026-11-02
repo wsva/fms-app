@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useImmer } from "use-immer";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
@@ -34,6 +34,7 @@ import type { CardDatasetSummary } from "@/lib/types";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
 import { useRecorder } from "@/components/books/useRecorder";
+import { playUrl } from "@/hooks/useMediaPlay";
 import { getUUID, nowIso } from "@/components/books/utils";
 
 export type BookView = "read" | "manage" | "advanced";
@@ -936,7 +937,9 @@ export function useBookData() {
               updated_at: nowIso(),
             };
         });
-        new Audio(convertFileSrc(res.abs_path)).play();
+        // Through the shared one-at-a-time player, so a synthesised listen does
+        // not talk over the paragraph clip that may already be sounding.
+        playUrl(res.abs_path);
       } catch (e) {
         setError(`Listen failed: ${e}`);
       }

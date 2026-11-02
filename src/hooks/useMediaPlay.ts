@@ -5,18 +5,24 @@
 //! The rule: any mounted `<audio>` or `<video>` element that opts into the
 //! manager (via `useMediaPlay().manage(ref.current)` — or the standalone
 //! `manageMedia(el)` for non-hook callers) is paused the moment any other
-//! managed element starts playing. This is what the four `function playUrl()`
-//! helpers in AttemptsPanel / ParagraphList / PracticePanel / useBookData were
-//! supposed to be doing but were not: `new Audio(url).play()` there spawns a
-//! fresh element each call, so a second click overlaps the first. Card media
-//! render sites must go through this hook — do not add a fifth `playUrl`.
+//! managed element starts playing. This is what the `function playUrl()`
+//! helpers in AttemptsPanel / PracticePanel still do wrong: `new Audio(url).play()`
+//! there spawns a fresh element each call, so a second click overlaps the first.
+//! Media render sites must go through this hook — do not add another `playUrl`.
 //!
 //! `playUrl(url)` on the hook is the fire-and-forget trigger for the reveal
 //! case (a card flips and its anchored audio should start without a native
-//! click). It goes through a module-scoped singleton `<audio>` so even
-//! programmatic plays coexist with the mounted elements the manager watches.
+//! click). It goes through the same one-programmatic-element rule as the mounted
+//! elements, so a reveal cannot talk over a clip a button started.
+//!
+//! `togglePlay(url, token)` is the version a play button uses: the same rule,
+//! but each play is tagged with a token that says *which* control started it,
+//! and the token is published, so that control shows Stop while its own clip
+//! sounds and reverts on its own when the clip ends or something else takes it
+//! over. Pressing the same control twice stops it — never a second overlapping
+//! copy.
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
 
@@ -41,8 +47,8 @@ export function unmanageMedia(el: HTMLMediaElement | null | undefined): void {
   managed.delete(el);
 }
 
-/** Pause every managed element except `keep` (used by the reveal hook so a
- *  newly playing element does not pause itself before `play()` resolves). */
+/** Pause every managed element but the one that fired. Registered as a `play`
+ *  listener, so `this` is the element that started. */
 function onPlay(this: HTMLMediaElement) {
   const self = this;
   for (const other of managed) {
@@ -56,38 +62,129 @@ function onPlay(this: HTMLMediaElement) {
   }
 }
 
-// One hidden `<audio>` element backs `playUrl` so programmatic plays respect
-// the same one-at-a-time rule as the mounted elements.
-let singleton: HTMLAudioElement | null = null;
-
-/** Absolute filesystem path (not a URL) → `convertFileSrc` → play. Returns
- *  nothing; a missing file or a non-desktop runtime is a silent no-op, which
- *  is what the reveal trigger wants (a card flip should not throw because a
- *  video file lives on another device). */
-export function playUrl(absPath: string | null | undefined): void {
-  if (!absPath || !isTauri()) return;
-  let src: string;
+/** Absolute filesystem path (not a URL) → an asset URL, or null if this clip
+ *  cannot be played here (no path, a non-desktop runtime, a bad path). */
+function resolveSrc(absPath: string | null | undefined): string | null {
+  if (!absPath || !isTauri()) return null;
   try {
-    src = convertFileSrc(absPath);
+    return convertFileSrc(absPath);
   } catch {
-    return;
+    return null;
   }
-  if (!singleton) singleton = new Audio();
-  // Pause any mounted element that was mid-play; the singleton is not in the
-  // `managed` set so it does not fire `onPlay` on itself.
-  for (const other of managed) {
-    if (!other.paused) {
-      try {
-        other.pause();
-      } catch {
-        /* ignore */
-      }
-    }
+}
+
+// The element behind programmatic plays (`playUrl`, `togglePlay`) — at most one
+// alive at a time. Each play gets a *fresh* element and retires the previous
+// one: swapping `src` on a playing element fires a `pause` and an `ended` of
+// its own, which a play button would misread as "my clip stopped".
+let active: Play | null = null;
+
+type Play = {
+  el: HTMLAudioElement;
+  /** The token `togglePlay` started this with; null for a tokenless `playUrl`. */
+  token: unknown;
+  /** Drops the lifecycle listeners; filled in by whoever armed them. */
+  detach: () => void;
+};
+
+// The token of the clip now sounding from a play button, and the subscribers
+// that render Stop off it. Anything works as a token — a media path is a good
+// one, since the question a button asks is exactly "is this the clip that is
+// sounding?"
+let playingToken: unknown = null;
+const playbackListeners = new Set<() => void>();
+
+function setPlayingToken(token: unknown): void {
+  if (playingToken === token) return;
+  playingToken = token;
+  for (const fn of [...playbackListeners]) fn();
+}
+
+function subscribePlayback(fn: () => void): () => void {
+  playbackListeners.add(fn);
+  return () => {
+    playbackListeners.delete(fn);
+  };
+}
+
+function getPlayingToken(): unknown {
+  return playingToken;
+}
+
+/** No server playback: nothing is sounding while the page is being rendered. */
+function getPlayingTokenOnServer(): unknown {
+  return null;
+}
+
+/** Pause and forget the live programmatic play. Its listeners leave with it, so
+ *  the `pause` this provokes cannot be mistaken for a clip stopping elsewhere.
+ *  `keepToken` is set only when a new play is taking over in the same breath. */
+function retirePlay(keepToken = false): void {
+  const play = active;
+  if (!play) return;
+  active = null;
+  play.detach();
+  unmanageMedia(play.el);
+  try {
+    play.el.pause();
+  } catch {
+    /* ignore */
   }
-  singleton.src = src;
-  singleton.play().catch(() => {
+  if (!keepToken) setPlayingToken(null);
+}
+
+/** Start an element as the live play: registered with the manager, so its own
+ *  `play` event pauses every mounted element and any mounted element starting
+ *  pauses it. */
+function startPlay(play: Play): void {
+  retirePlay(play.token !== null);
+  manageMedia(play.el);
+  active = play;
+}
+
+export function playUrl(absPath: string | null | undefined): void {
+  const src = resolveSrc(absPath);
+  if (!src) return;
+  const el = new Audio(src);
+  startPlay({ el, token: null, detach: () => {} });
+  el.play().catch(() => {
     /* a missing file, a blocked autoplay, or an aborted play all land here;
      * none is a user-facing error worth surfacing. */
+  });
+}
+
+/**
+ * The play/stop toggle a button drives: start `absPath` tagged with `token`, or
+ * — if that same token is already what sounds — stop it. Pressing a control
+ * twice therefore never produces two overlapping copies, and pressing another
+ * one takes the single live play over (the first clip stops, and its button
+ * reverts by itself, because `playingToken` moved on). A `token` unique to the
+ * control is what makes the published token mean "*this* one is sounding".
+ */
+export function togglePlay(absPath: string | null | undefined, token: unknown): void {
+  if (active && active.token === token) {
+    retirePlay();
+    return;
+  }
+  const src = resolveSrc(absPath);
+  if (!src) return;
+  const el = new Audio(src);
+  const play: Play = { el, token, detach: () => {} };
+  // However this clip stops — it ended, the button asked for Stop, a mounted
+  // element took over — the token it was started with is no longer sounding.
+  const stopped = () => {
+    if (active === play) retirePlay();
+  };
+  el.addEventListener("ended", stopped);
+  el.addEventListener("pause", stopped);
+  play.detach = () => {
+    el.removeEventListener("ended", stopped);
+    el.removeEventListener("pause", stopped);
+  };
+  startPlay(play);
+  setPlayingToken(token);
+  el.play().catch(() => {
+    if (active === play) retirePlay();
   });
 }
 
@@ -95,10 +192,16 @@ export type UseMediaPlay = {
   /** Attach a mounted `<audio>` / `<video>` element to the manager. Call from
    *  an effect with the element ref; the hook unregisters on unmount. */
   manage: (el: HTMLMediaElement | null) => void;
-  /** Fire-and-forget a resolved absolute path through the singleton — used by
+  /** Fire-and-forget a resolved absolute path through the live play — used by
    *  `play_on: reveal` triggers. */
   playUrl: (absPath: string | null | undefined) => void;
-  /** Pause everything this hook knows about, mounted and singleton. */
+  /** Start a clip tagged with `token`, or stop it if that token already
+   *  sounds. Pair with `playing` to render a play/stop toggle. */
+  toggle: (absPath: string | null | undefined, token: unknown) => void;
+  /** The token of the clip currently sounding, or null — the value that lets a
+   *  button say Stop for *its* clip only. */
+  playing: unknown;
+  /** Pause everything this hook knows about, mounted and programmatic. */
   stop: () => void;
 };
 
@@ -119,17 +222,24 @@ export function useMediaPlay(): UseMediaPlay {
     playUrl(absPath);
   }, []);
 
+  const toggle = useCallback(
+    (absPath: string | null | undefined, token: unknown) => {
+      togglePlay(absPath, token);
+    },
+    []
+  );
+
+  // Subscribe to the live play's lifecycle, so a Stop button follows the audio
+  // rather than the last click.
+  const playing = useSyncExternalStore(subscribePlayback, getPlayingToken, getPlayingTokenOnServer);
+
   const stop = useCallback(() => {
+    retirePlay();
+    // The live play is managed too, but it is retired above; this loop is for
+    // the mounted elements.
     for (const el of managed) {
       try {
         el.pause();
-      } catch {
-        /* ignore */
-      }
-    }
-    if (singleton) {
-      try {
-        singleton.pause();
       } catch {
         /* ignore */
       }
@@ -144,5 +254,5 @@ export function useMediaPlay(): UseMediaPlay {
     };
   }, []);
 
-  return { manage, playUrl: playUrlCb, stop };
+  return { manage, playUrl: playUrlCb, toggle, playing, stop };
 }

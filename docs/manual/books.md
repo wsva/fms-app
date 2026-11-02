@@ -14,7 +14,7 @@ The main **Reading view** shows the current chapter as a sequence of sentences. 
 
 - **Navigate chapters** — move to the previous/next chapter, or open the chapter list.
 - **Adjust text layout** — switch alignment/justification to suit the text and your screen.
-- **Play audio** — listen to a sentence's recording when the book has sentence‑level audio, so reading and listening reinforce each other.
+- **Play audio** — the ¶ button on a paragraph plays its recording and turns into **Stop** while it sounds. Only one clip plays at a time: starting another stops the one that was, and its button reverts.
 
 Reading through sentences correctly earns XP, with a bonus for finishing a chapter.
 
