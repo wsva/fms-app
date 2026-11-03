@@ -1,11 +1,13 @@
 import { createElement, type ReactNode } from "react";
 import { TOC } from "./toc";
 
-// Only allow safe URL schemes; block javascript: and data: hrefs.
-// Also allow fms-app://wiki/ for internal wiki links.
+// Block script-ish / host-side schemes; let everything else through so a
+// relative link ("foo.md", "../dir/foo.md", "./foo.md", "#anchor", an http
+// URL, or an fms-app://wiki/ internal link) keeps its real href. The wiki
+// viewer routes the safe ones; the rest open externally as usual.
 function sanitizeUrl(url: string): string {
     const s = url.trim();
-    return /^(https?:\/\/|\/|#|\.\/|fms-app:\/\/wiki\/)/.test(s) ? s : "#";
+    return /^(javascript|data|vbscript|file):/i.test(s) ? "#" : s;
 }
 
 // ============================================================
@@ -286,6 +288,24 @@ function parseBlocks(text: string, keyStart = 0): ReactNode[] {
     return result;
 }
 
+// GitHub-style anchor slug for a heading, so relative manual pages can link
+// to "#attempts-and-history" and the like. The plain title text is what gets
+// slugged — strip inline markup, lowercase, drop punctuation, spaces to "-".
+// The manual is set with typographic hyphens/dashes ("read‑aloud") and
+// non-breaking spaces while its hand-written anchors use plain ASCII
+// ("read-aloud"), so fold those to their ASCII forms first, or the two never
+// match and the jump lands nowhere.
+function headingSlug(title: string): string {
+    return title
+        .replace(/[*_`~]/g, "")
+        .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+        .replace(/[\u2010-\u2015\u2212]/g, "-")
+        .replace(/[\u00A0\u202F\u2007\u2009]/g, " ")
+        .trim().toLowerCase()
+        .replace(/[^\w\s-]/g, "")
+        .replace(/\s+/g, "-");
+}
+
 // ============================================================
 // Main export
 // ============================================================
@@ -295,6 +315,7 @@ export function toHTML(content: string): { toc: ReactNode; body: ReactNode[] } {
     const bodyElements: ReactNode[] = [];
     let buffer = "";
     let inCodeBlock = false;
+    const slugCounts = new Map<string, number>();
 
     const flushBuffer = () => {
         if (buffer.trim() !== "") {
@@ -326,8 +347,16 @@ export function toHTML(content: string): { toc: ReactNode; body: ReactNode[] } {
             const sec = toc.newSection(depth);
             toc.add(title, sec, false);
             const level = Math.min(depth + 1, 6) as 1 | 2 | 3 | 4 | 5 | 6;
+            // Named anchor beside the numbered id: an empty span carrying the
+            // slug, so headings keep their single `sec-N` text-free id while
+            // `[...](page.md#some-heading)` links resolve to something.
+            const slug = headingSlug(title);
+            const seen = slugCounts.get(slug) ?? 0;
+            slugCounts.set(slug, seen + 1);
+            const slugId = seen === 0 ? slug : `${slug}-${seen}`;
             bodyElements.push(
                 createElement(`h${level}`, { key: `h-${bodyElements.length}`, id: `sec-${sec.toString()}` },
+                    slug ? createElement("span", { id: slugId, className: "heading-anchor" }) : null,
                     createElement("span", { className: `section-number-${level}` }, sec.toString()),
                     " ",
                     ...parseInline(title)

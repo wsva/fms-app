@@ -52,6 +52,24 @@ function normalizeWikiRel(relativePath: string): string {
   return relativePath.replace(/^\.?\//, "").replace(/\\/g, "/");
 }
 
+// Resolve a relative .md link against the directory of the document carrying
+// it (the browser's own <a href="../x.md"> rule), so manual-style links written
+// next to their target file — "datasets.md", "../design/foo.md" — land on the
+// right file instead of the dataset root. An fms-app://wiki/ path arrives with
+// an empty base and stays dataset-root-relative, as before.
+function resolveWikiRel(target: string, currentRel: string): string {
+  const clean = target.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (clean.startsWith("/")) return clean.replace(/^\/+/, "");
+  const base = currentRel.includes("/") ? currentRel.split("/").slice(0, -1) : [];
+  const parts = currentRel ? [...base] : [];
+  for (const seg of clean.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") parts.pop();
+    else parts.push(seg);
+  }
+  return parts.join("/");
+}
+
 // Backend sanitize_rel rejects these; mirror the guard in the UI so a name
 // prompt can't produce a path the backend would refuse.
 function sanitizeName(raw: string): string {
@@ -312,6 +330,9 @@ export default function WikiPage() {
   const [historyIndex, setHistoryIndex] = useState(0);
   const historyIndexRef = useRef(0);
   const isHistoryNavRef = useRef(false);
+  // Anchor carried over by a "page.md#section" link, jumped to once the
+  // target file has finished loading and rendering.
+  const pendingAnchorRef = useRef<string | null>(null);
 
   useEffect(() => {
     historyIndexRef.current = historyIndex;
@@ -466,10 +487,20 @@ export default function WikiPage() {
   }, [goBack, goForward, editing]);
 
   // Handle wiki link clicks within markdown content. Resolve against the
-  // selected dataset dir (or the hub root in Hub mode).
+  // selected dataset dir (or the hub root in Hub mode). A relative .md link
+  // from the manual carries its own anchor suffix ("page.md#section"), and
+  // plain "#section" jumps are handled inside the renderer without ever
+  // reaching here — see MarkdownViewer's click interception.
   const handleWikiLink = useCallback((relativePath: string) => {
-    const rel = normalizeWikiRel(relativePath);
+    const hashAt = relativePath.indexOf("#");
+    const anchor = hashAt >= 0 ? relativePath.slice(hashAt + 1) : "";
+    const path = hashAt >= 0 ? relativePath.slice(0, hashAt) : relativePath;
     const cur = selection?.source;
+    const rel = path.startsWith("/")
+      ? normalizeWikiRel(path)
+      : resolveWikiRel(path, cur?.kind === "dataset" || cur?.kind === "hub-dataset" ? cur.rel : "");
+    if (!rel) return;
+    pendingAnchorRef.current = anchor || null;
     if (cur && cur.kind === "dataset") {
       loadSelection({ source: { kind: "dataset", uuid: cur.uuid, rel }, label: rel.split("/").pop() || rel }, true);
       return;
@@ -478,6 +509,28 @@ export default function WikiPage() {
       loadSelection({ source: { kind: "hub-dataset", uuid: cur.uuid, rel, name: cur.name }, label: rel.split("/").pop() || rel }, true);
     }
   }, [selection, loadSelection]);
+
+  // After a linked file lands, scroll to the anchor its link carried. The
+  // renderer builds its body in a downstream effect (a couple of commits after
+  // fileContent changes), so a single frame is not enough — poll for the
+  // heading id until it appears, up to a short deadline, then give up.
+  useEffect(() => {
+    const anchor = pendingAnchorRef.current;
+    if (!anchor || isLoading || error) return;
+    pendingAnchorRef.current = null;
+    const deadline = performance.now() + 1500;
+    let raf = 0;
+    const jump = () => {
+      const el = document.getElementById(anchor);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+      } else if (performance.now() < deadline) {
+        raf = requestAnimationFrame(jump);
+      }
+    };
+    raf = requestAnimationFrame(jump);
+    return () => cancelAnimationFrame(raf);
+  }, [isLoading, error, fileContent]);
 
   // Whether the current selection is an editable local dataset file. The
   // backend only ever writes .md, so non-markdown files are view-only here.
