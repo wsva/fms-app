@@ -222,7 +222,15 @@ fn rpc_message(body: &str, id: i64) -> Option<Value> {
         return (v.get("jsonrpc")?.as_i64() == Some(2)).then_some(v);
     }
     for line in body.lines() {
-        let payload = line.trim_start().strip_prefix("data:")?.trim();
+        // A `data:` line carries a JSON-RPC payload; `id:`/`retry:` fields and
+        // `:` comment/priming lines are part of the SSE framing and must be
+        // *skipped*, not treated as a fatal parse stop — the real reply for the
+        // tool call is on a later `data:` line, so bailing here would discard a
+        // hub response that arrived perfectly.
+        let Some(rest) = line.trim_start().strip_prefix("data:") else {
+            continue;
+        };
+        let payload = rest.trim();
         if payload.is_empty() {
             continue;
         }

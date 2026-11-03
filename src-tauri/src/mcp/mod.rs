@@ -257,9 +257,28 @@ pub fn create_mcp_service(app: AppHandle) -> StreamableHttpService<DatasetMcpSer
     let server = DatasetMcpServer { app };
     let ct = CancellationToken::new();
     
+    // rmcp defaults to a loopback-only `Host` allow-list (a DNS-rebinding guard
+    // for locally running servers). That is redundant here and wrong for a hub:
+    // the real boundary is the outer `zone_guard` middleware in `sync::server`,
+    // which applies the loopback Host check itself and requires a device
+    // signature from untrusted peers, deciding trust from the TCP peer address
+    // rather than a forgeable header. Left on, it would reject a follower (or
+    // the read-aloud assessment offload) reaching the hub over its LAN IP with
+    // "disallowed Host header", so we disable it and let `zone_guard` decide.
+    //
+    // rmcp also caps the POST body at 4 MiB on its own, separate from the axum
+    // `DefaultBodyLimit` the `/mcp` route raises to 34 MiB. A read-aloud take is
+    // posted whole as base64 inside the JSON-RPC body, so a longer recording
+    // would clear the axum limit yet trip rmcp's with "413 Payload Too Large".
+    // Raise it to the same 34 MiB so the two limits agree and the call reaches
+    // the tool.
+    let config = StreamableHttpServerConfig::default()
+        .with_cancellation_token(ct)
+        .disable_allowed_hosts()
+        .with_max_request_body_bytes(34 * 1024 * 1024);
     StreamableHttpService::new(
         move || Ok(server.clone()),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default().with_cancellation_token(ct),
+        config,
     )
 }
