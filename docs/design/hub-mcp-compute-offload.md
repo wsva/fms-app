@@ -156,6 +156,26 @@ twins of the same question. A capability not advertised is never attempted — d
 remote machine should consult install state first, exactly as message-bus.md INV-B4 requires
 of a bus request.
 
+### 4.5 Re-assessing an old attempt rides the same two seams (built)
+
+"Assess again" already meant *re-transcribe this attempt's own recording and overwrite what
+was derived from it, leaving the recording alone* — the recording is device-local, so the work
+has always been bound to the machine holding the WAV. §4.1's tool changes only where the
+transcription runs, so the re-assessment needs no new seam: the follower reads the attempt's
+WAV off its own disk and posts it inline exactly as a fresh take does, and
+`read_aloud_rerecognize` gained the same optional `assessment` + `via` pair §4.3 gave submit —
+passed, this device stores the measurement and skips its own model passes; absent, it scores
+locally as before. Provenance lands in the same `metrics.provenance.via` key, so the attempt
+detail says "Scored on the Hub" whichever flow produced it.
+
+Two decisions worth keeping visible. The **pointer path is still unwired** here: an attempt
+whose WAV reached the hub is *not* re-scored by `attempt_uuid`, because the follower already
+holds the recording and the inline call is one round trip with no sync dependency (§3's
+argument, unchanged). And every entry point onto the action — the attempts list's per-row
+button, the attempt detail's, the page toolbar's — shares **one** route, dialog pair and busy
+owner: two of them running independently would let a hub reply and a local pass overwrite the
+same attempt row in whichever order they happened to land.
+
 ## 5. Vocabulary
 
 | Term | Definition |
@@ -206,8 +226,8 @@ links, and re-scoring all belong there.
 ## 9. Phasing, and when the bus argument reopens
 
 1. **Pilot** — §4.1 + §4.3 + §4.2 minimal (one tool, inline path only), PracticePanel offers
-   "score on hub", fallback always on. Desktop UI may adopt the same seam to re-score old
-   attempts via the pointer path.
+   "score on hub", fallback always on. Re-scoring old attempts adopted the same seam through
+   the inline path (§4.5); the pointer path (`attempt_uuid`) is still unwired.
 2. **Hardening** — capability pre-check (§4.4), payload limits (§6), provenance surfaced in
    the attempt detail view.
 3. **Reopen message-bus.md only when** one of these is actually needed: more than one serving

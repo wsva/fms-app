@@ -19,9 +19,12 @@ type Props = {
   onLocal: () => void;
   /** Drop the take without scoring it. */
   onDiscard: () => void;
+  /** What that quiet exit is called. Re-assessing an existing take discards
+   *  nothing, so the caller naming it says so; defaults to the take's wording. */
+  discardLabel?: string;
 };
 
-export default function ScoringChoiceDialog({ onHub, onLocal, onDiscard }: Props) {
+export default function ScoringChoiceDialog({ onHub, onLocal, onDiscard, discardLabel = "Discard take" }: Props) {
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
       <div className="flex w-full max-w-sm flex-col gap-3 rounded-2xl bg-bg-card p-6 shadow-xl">
@@ -57,7 +60,7 @@ export default function ScoringChoiceDialog({ onHub, onLocal, onDiscard }: Props
           onClick={onDiscard}
           className="self-center mt-1 text-xs text-text-tertiary hover:text-text-primary cursor-pointer"
         >
-          Discard take
+          {discardLabel}
         </button>
       </div>
     </div>

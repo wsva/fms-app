@@ -22,6 +22,9 @@ type Props = {
   onLocal?: () => void;
   /** Error-phase action: drop the take. */
   onDiscard?: () => void;
+  /** What that exit is called — a re-assessment discards nothing, so the caller
+   *  naming it says so. Defaults to the take's wording. */
+  discardLabel?: string;
 };
 
 type StepState = "pending" | "active" | "done";
@@ -65,7 +68,7 @@ function Step({ state, label }: { state: StepState; label: string }) {
  * between exactly those two: the choice that started it and the result that
  * follows it.
  */
-export default function HubStatusOverlay({ stage, error, onCancel, onLocal, onDiscard }: Props) {
+export default function HubStatusOverlay({ stage, error, onCancel, onLocal, onDiscard, discardLabel = "Discard take" }: Props) {
   const sending: StepState =
     stage === "sending" ? "active" : stage === "waiting" || stage === "done" ? "done" : "pending";
   const awaiting: StepState =
@@ -96,7 +99,7 @@ export default function HubStatusOverlay({ stage, error, onCancel, onLocal, onDi
                 onClick={onDiscard}
                 className="self-center mt-1 text-xs text-text-tertiary hover:text-text-primary cursor-pointer"
               >
-                Discard take
+                {discardLabel}
               </button>
             )}
           </>

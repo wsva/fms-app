@@ -12,6 +12,7 @@ import AssessmentCards from "@/components/read_aloud/AssessmentCards";
 import FeedbackPanel from "@/components/read_aloud/FeedbackPanel";
 import ProgressOverlay from "@/components/read_aloud/ProgressOverlay";
 import HubStatusOverlay, { type HubStage } from "@/components/read_aloud/HubStatusOverlay";
+import { textReference } from "@/components/read_aloud/useAssessAgain";
 import ScoringChoiceDialog from "@/components/read_aloud/ScoringChoiceDialog";
 import StandardAudioPlayer from "@/components/read_aloud/StandardAudioPlayer";
 import { isTauri } from "@/lib/tauri";
@@ -268,7 +269,8 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
             wav_base64: wavBase64,
             // The phone's own reference, the same resolution order the hub
             // applies to its row — the fallback for a text not yet synced here.
-            content: text.normalized_content ?? text.content,
+            // `textReference` is that one rule, shared with "Assess again".
+            content: textReference(text),
           },
         });
         if (token !== hubCallToken.current) return; // cancelled while in flight

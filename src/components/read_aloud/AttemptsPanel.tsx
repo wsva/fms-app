@@ -15,8 +15,8 @@ import {
   AudioLines,
 } from "lucide-react";
 import type { ReadAttempt, ReadText, StandardAudioAssessment } from "@/lib/read_aloud/types";
-import { rerecognizeAttempt } from "@/lib/read_aloud/rerecognize";
 import { assessStandardAudio } from "@/lib/read_aloud/standardAudio";
+import { textReference, type AssessAgain } from "@/components/read_aloud/useAssessAgain";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
 import AssessmentCards, { PauseRibbon, ScoreAxes } from "@/components/read_aloud/AssessmentCards";
 import AssessmentLogPanel from "@/components/read_aloud/AssessmentLogPanel";
@@ -52,6 +52,11 @@ type Props = {
   /** Whether this text has a usable standard clip on this device, so the
    *  reference self-test card knows if it has anything to score. */
   standardAudioAvailable?: boolean;
+  /** The one "Assess again" route — which machine measures it, the dialogs that
+   *  say so, and the busy state. Owned by the page, because its toolbar offers
+   *  the same action: two owners could run a hub call and a local pass over one
+   *  attempt at the same time and have the later reply land last. */
+  assessAgain: AssessAgain;
 };
 
 async function playUrl(url?: string | null) {
@@ -443,13 +448,11 @@ export default function AttemptsPanel({
   refreshKey,
   compare,
   standardAudioAvailable = false,
+  assessAgain,
 }: Props) {
   const [attempts, setAttempts] = useState<ReadAttempt[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
-  // The attempt currently being re-recognized (its uuid), so the row can show a
-  // spinner and other rows disable while the model runs.
-  const [rerecognizing, setRerecognizing] = useState<string | null>(null);
   // The reference self-test: its last result, whether it is running, and why it
   // failed. Held here rather than in the card so switching texts clears it
   // without a remount.
@@ -508,27 +511,12 @@ export default function AttemptsPanel({
     });
   };
 
-  // Re-run STT over an existing recording and refresh its transcript + score in
-  // place. The recording itself is untouched — only the recognized text changes.
-  // The WAV is device-local, so this is only offered when a.audio_url resolves on
-  // this machine. The work itself lives in `rerecognizeAttempt`, shared with the
-  // attempt page's toolbar button; it also feeds the live assessment log.
-  const assessAgain = async (a: ReadAttempt) => {
-    if (!isTauri() || !a.audio_url) return;
-    setRerecognizing(a.uuid);
-    setError(null);
-    try {
-      await rerecognizeAttempt(datasetUuid, a);
-      await loadAttempts();
-      onChanged?.();
-    } catch (e) {
-      const msg = String(e);
-      logError(`assess again failed: ${msg}`, LOG_MODULE);
-      setError(msg);
-    } finally {
-      setRerecognizing(null);
-    }
-  };
+  // Re-running STT over an existing recording, and refreshing its transcript +
+  // score in place, is the `useAssessAgain` route the page owns: it decides
+  // which machine measures the take, holds the dialogs that say so, and reports
+  // the stages to the live assessment log. The recording itself is never
+  // touched. The WAV is device-local, so this is only offered when a.audio_url
+  // resolves on this machine.
 
   // A different text is a different clip and a different reference, so the last
   // self-test says nothing about it.
@@ -561,8 +549,9 @@ export default function AttemptsPanel({
   // behind the numbers the cards show.
   const bestScore = attempts.length > 0 ? Math.max(...attempts.map((a) => a.score)) : null;
   // Scoring — and the diff below — uses the normalized reference when set, else
-  // the text to read. Mirror that so the highlighting matches the score.
-  const reference = text.normalized_content?.trim() ? text.normalized_content : text.content;
+  // the text to read. `textReference` is the one resolution of that rule, shared
+  // with the backend and with what a re-assessment sends to the hub.
+  const reference = textReference(text);
 
   // Keep the page's breadcrumb crumb in sync with the resolved attempt.
   useEffect(() => {
@@ -589,6 +578,12 @@ export default function AttemptsPanel({
                 <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-bg-muted text-text-tertiary tabular-nums">
                   {formatLength(selectedAttempt.metrics.fluency.duration)}
                 </span>
+              )}
+              {/* The row says which machine measured it: the provenance key lives
+                  inside the stored metrics, so this survives a sync to any device
+                  and needs no local state of its own. */}
+              {selectedAttempt.metrics?.provenance?.via === "hub" && (
+                <span className="text-xs text-text-tertiary">Scored on the Hub</span>
               )}
             </div>
 
@@ -625,8 +620,12 @@ export default function AttemptsPanel({
               stored={selectedAttempt.feedback ?? null}
               measured={selectedAttempt.metrics != null}
               audioPath={selectedAttempt.audio_url ?? null}
-              disabled={rerecognizing !== null}
-              onAssessAgain={selectedAttempt.audio_url ? () => void assessAgain(selectedAttempt) : undefined}
+              disabled={assessAgain.busy}
+              onAssessAgain={
+                selectedAttempt.audio_url
+                  ? () => assessAgain.ask(selectedAttempt, reference)
+                  : undefined
+              }
             />
 
             {/* Compare mode (toolbar "Compare") pairs the texts sentence by
@@ -735,11 +734,11 @@ export default function AttemptsPanel({
                     key={a.uuid}
                     attempt={a}
                     best={attempts.length > 1 && a.score === bestScore}
-                    busy={rerecognizing === a.uuid}
-                    blocked={rerecognizing !== null}
+                    busy={assessAgain.activeUuid === a.uuid}
+                    blocked={assessAgain.busy}
                     onOpen={() => onSelectUuid(a.uuid)}
                     onPlay={a.audio_url ? () => playUrl(a.audio_url) : undefined}
-                    onAssess={a.audio_url ? () => void assessAgain(a) : undefined}
+                    onAssess={a.audio_url ? () => assessAgain.ask(a, reference) : undefined}
                     onDelete={() => deleteAttempt(a)}
                   />
                 ))}

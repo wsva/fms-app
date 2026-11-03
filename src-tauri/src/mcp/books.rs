@@ -390,6 +390,18 @@ struct ReadAloudRerecognizeParam {
     /// pronunciation but reports fluency as not measured.
     #[serde(default)]
     words: Option<Vec<McpTimedWord>>,
+    /// A three-axis `assessment` already measured elsewhere (the `assessment`
+    /// field of the hub's `read_aloud_assess_take` reply). Pass it with `via`
+    /// and this device stores the re-assessment as measured instead of re-
+    /// running its own model passes over the recording. Typed as JSON because
+    /// `Assessment` itself carries no `JsonSchema`.
+    #[serde(default)]
+    assessment: Option<JsonValue>,
+    /// Where the passed `assessment` was measured (e.g. `"hub"`). Stored as an
+    /// additive provenance key inside the attempt's metrics; ignored without
+    /// `assessment`.
+    #[serde(default)]
+    via: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -1257,7 +1269,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Attempt deleted"}).to_string())
     }
 
-    #[tool(name = "read_aloud_rerecognize", description = "Overwrite an existing attempt's transcript with a freshly recognized one and recompute its score against the current reference, in place. The recording is left untouched — pass the transcript produced by re-transcribing the attempt's device-local WAV (via model_transcribe_detailed, whose `words` go straight into this tool's `words` parameter) with the loaded STT model. Use this to refresh a take whose recognition was poor or predates a model change. Returns the updated attempt (score and recomputed metrics included).")]
+    #[tool(name = "read_aloud_rerecognize", description = "Overwrite an existing attempt's transcript with a freshly recognized one and recompute its score against the current reference, in place. The recording is left untouched — pass the transcript produced by re-transcribing the attempt's device-local WAV (via model_transcribe_detailed, whose `words` go straight into this tool's `words` parameter) with the loaded STT model. Use this to refresh a take whose recognition was poor or predates a model change. Pass `assessment` (the `assessment` field of a hub's read_aloud_assess_take reply) with `via` to re-assess from a measurement taken elsewhere: this device then skips its own STT-derived scoring and journals provenance with the attempt. Returns the updated attempt (score and recomputed metrics included).")]
     async fn read_aloud_rerecognize(&self, Parameters(param): Parameters<ReadAloudRerecognizeParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_rerecognize: dataset={}, attempt={}", param.dataset_uuid, param.uuid);
         let settings = self.app.state::<SettingsState>();
@@ -1267,6 +1279,8 @@ impl DatasetMcpServer {
             param.uuid,
             param.recognized,
             timed_words(param.words),
+            param.assessment.map(serde_json::Value::from),
+            param.via,
         )
         .await?;
         Ok(serde_json::to_string_pretty(&attempt).unwrap_or_default())
@@ -1407,7 +1421,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_assess_take", description = "Score one whole take on this machine — STT included — from the WAV alone: transcribe `wav_base64` with the loaded model, then run the same three-axis assess pass read_aloud_assess uses. This is the follower's compute offload (docs/design/hub-mcp-compute-offload.md): a phone posts its recording here instead of running the model itself. Unlike read_aloud_assess, which takes an already-recognized transcript, nothing is pre-computed. The reference resolves from this machine's own `read_text` row first; `content` is the fallback for a text not yet synced. Persists nothing — the caller saves through read_aloud_submit with the returned `assessment` and `via` — and answers `{recognized, words, assessment, headline, provenance}`. Refusals name the next step: no STT model loaded (`model_download`), a take over 32 MB, an unknown text without `content`.")]
+    #[tool(name = "read_aloud_assess_take", description = "Score one whole take on this machine — STT included — from the WAV alone: transcribe `wav_base64` with the loaded model, then run the same three-axis assess pass read_aloud_assess uses. This is the follower's compute offload (docs/design/hub-mcp-compute-offload.md): a phone posts its recording here instead of running the model itself. Unlike read_aloud_assess, which takes an already-recognized transcript, nothing is pre-computed. The reference resolves from this machine's own `read_text` row first; `content` is the fallback for a text not yet synced. Persists nothing — the caller saves through read_aloud_submit (a fresh take) or read_aloud_rerecognize (an existing attempt re-assessed from its own recording) with the returned `assessment` and `via` — and answers `{recognized, words, assessment, headline, provenance}`. Refusals name the next step: no STT model loaded (`model_download`), a take over 32 MB, an unknown text without `content`.")]
     async fn read_aloud_assess_take(&self, Parameters(param): Parameters<ReadAloudAssessTakeParam>) -> Result<String, String> {
         log::info!(
             "[MCP] read_aloud_assess_take: dataset={}, text={}",

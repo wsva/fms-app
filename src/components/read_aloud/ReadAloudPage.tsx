@@ -50,7 +50,7 @@ import { useAgentActions, reqStr } from "@/lib/agent/ui-actions";
 import { useDatasetFamily } from "@/hooks/useDatasetFamily";
 import { openDatasetInTab } from "@/lib/nav/open-in-tab";
 import type { TabId } from "@/lib/shell/tabs";
-import { rerecognizeAttempt } from "@/lib/read_aloud/rerecognize";
+import { useAssessAgain, textReference } from "@/components/read_aloud/useAssessAgain";
 import { exportTextsToPdf, type RaPrintFont } from "@/lib/read_aloud/exportPdf";
 import { groupByText, hasUsableClip, listStandardAudio } from "@/lib/read_aloud/standardAudio";
 import type { RaFontId, RaSpaceId } from "@/lib/read_aloud/fonts";
@@ -283,8 +283,6 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
   const handleSelectAttempt = useCallback((a: ReadAttempt | null) => setSelectedAttempt(a), []);
   // Bumped after the toolbar deletes the open attempt so AttemptsPanel reloads.
   const [attemptsRefreshKey, setAttemptsRefreshKey] = useState(0);
-  // True while the toolbar's "Assess again" re-transcribes the open attempt.
-  const [rerecognizingAttempt, setRerecognizingAttempt] = useState(false);
   // True while the toolbar's "Export PDF" prepares the print document. The print
   // dialog itself is native and blocks, but the face-loading before it is async.
   // This only disables the trigger (no double-click); the OS print dialog shows
@@ -801,31 +799,21 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
     return () => observer.disconnect();
   }, [editing]);
 
-  // Re-transcribe the open attempt with the current model. The same work as the
-  // attempts list's per-row button, reached from the attempt page's toolbar so
-  // the reader does not have to navigate back to the list to redo one take.
-  // `rerecognizeAttempt` decides which model and reports each stage to the live
-  // assessment log; see the note there.
-  const assessSelectedAgain = async () => {
-    if (!isTauri() || !selectedAttempt || !selectedDataset) return;
-    const a = selectedAttempt;
-    setRerecognizingAttempt(true);
-    setError(null);
-    try {
-      await rerecognizeAttempt(selectedDataset, a);
+  // Re-assessing an open attempt is the same decision as recording one: which
+  // machine measures it. The route lives in one hook owned here, because the
+  // toolbar and the attempts panel's rows offer the same action and must not run
+  // two over one attempt; its dialogs render with the attempts view below.
+  const assessAgain = useAssessAgain({
+    datasetUuid: selectedDataset,
+    onDone: async () => {
       // Transcript, score and assessment all changed: reload the list (which
       // re-reports the open attempt upward, so the detail panel and the
       // breadcrumb both see the new numbers) and the text's best score.
       setAttemptsRefreshKey((k) => k + 1);
       await loadTexts(selectedDataset);
-    } catch (e) {
-      const msg = String(e);
-      logError(`assess again failed: ${msg}`, LOG_MODULE);
-      setError(msg);
-    } finally {
-      setRerecognizingAttempt(false);
-    }
-  };
+    },
+    onError: (msg) => setError(msg),
+  });
 
   // Delete the attempt currently open in the detail panel. The button lives in
   // the toolbar; AttemptsPanel reloads via the bumped `attemptsRefreshKey`.
@@ -1170,12 +1158,12 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
                 />
                 {selectedAttempt.audio_url && (
                   <ToolbarButton
-                    icon={rerecognizingAttempt ? Loader2 : RefreshCw}
-                    iconProps={rerecognizingAttempt ? { className: "animate-spin" } : undefined}
+                    icon={assessAgain.busy ? Loader2 : RefreshCw}
+                    iconProps={assessAgain.busy ? { className: "animate-spin" } : undefined}
                     label="Assess again"
-                    title="Assess again (re-transcribe this recording with the current model and score it again)"
-                    disabled={rerecognizingAttempt}
-                    onClick={() => void assessSelectedAgain()}
+                    title="Assess again (re-transcribe this recording and score it again, here or on the hub)"
+                    disabled={assessAgain.busy}
+                    onClick={() => assessAgain.ask(selectedAttempt, textReference(activeText))}
                   />
                 )}
                 {selectedAttempt.audio_url && (
@@ -1479,8 +1467,9 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
           </div>
         </div>
       ) : attemptsView && activeDataset && activeText ? (
-        // The page-level error is where the toolbar's Assess again reports a
-        // failure; the panel owns its own row-level errors.
+        // The page-level error is where a failed re-assessment reports itself —
+        // from the toolbar or a row, since one route answers both; the panel
+        // owns its own row-level errors.
         <>
           {error && (
             <div className="mx-4 mt-4 p-3 bg-error-bg text-error-text rounded-md text-sm break-words">
@@ -1497,7 +1486,11 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
             refreshKey={attemptsRefreshKey}
             compare={compareView}
             standardAudioAvailable={hasUsableClip(activeTextClips)}
+            assessAgain={assessAgain}
           />
+          {/* The choice and the hub's status, wherever the re-assessment was
+              pressed from: one pair of dialogs, owned by the hook above. */}
+          {assessAgain.ui}
         </>
       ) : viewMode === "practice" && activeDataset && activeText ? (
         <PracticePanel

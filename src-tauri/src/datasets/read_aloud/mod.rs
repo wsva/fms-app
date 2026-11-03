@@ -1735,6 +1735,11 @@ fn delete_attempt_inner(settings: &SettingsState, dataset_uuid: &str, uuid: &str
 /// it) changes — so this is the seam the UI's "Assess again" button (and the
 /// matching MCP tool) writes through after it re-transcribes the device-local
 /// WAV with the loaded STT model.
+///
+/// A follower that had the hub measure the take passes that `assessment` (the
+/// hub's `read_aloud_assess_take` reply) plus `via` here, exactly as
+/// [`read_aloud_submit`] does: this device skips its own model passes and stores
+/// the measurement as taken, journalling the provenance with the attempt.
 #[tauri::command]
 pub async fn read_aloud_rerecognize(
     settings: State<'_, SettingsState>,
@@ -1742,8 +1747,19 @@ pub async fn read_aloud_rerecognize(
     uuid: String,
     recognized: String,
     words: Option<Vec<TimedWord>>,
+    assessment: Option<Value>,
+    via: Option<String>,
 ) -> Result<ReadAttempt, String> {
-    update_recognized_inner(&settings, &dataset_uuid, &uuid, &recognized, words.as_deref()).await
+    update_recognized_inner(
+        &settings,
+        &dataset_uuid,
+        &uuid,
+        &recognized,
+        words.as_deref(),
+        assessment,
+        via.as_deref(),
+    )
+    .await
 }
 
 /// Decode the device-local recording behind an attempt, when it is still here.
@@ -1785,6 +1801,8 @@ async fn update_recognized_inner(
     uuid: &str,
     recognized: &str,
     words: Option<&[TimedWord]>,
+    assessment: Option<Value>,
+    via: Option<&str>,
 ) -> Result<ReadAttempt, String> {
     let me = workspace_identity(settings);
 
@@ -1820,21 +1838,27 @@ async fn update_recognized_inner(
         uuid, score
     );
 
-    // Re-derive the metrics from the recording that is still on this device.
-    // A missing WAV leaves fluency and pronunciation unmeasured — the score
-    // still updates, which is what "assess again" means.
-    let samples = stored_recording(settings, dataset_uuid, &audio_path);
-    log::info!(
-        "read_aloud: attempt {} — recording decoded ({} samples)",
-        uuid,
-        samples.len()
-    );
-    let clip = match reference.as_deref() {
-        Some(reference) => load_default_clip(settings, dataset_uuid, &text_uuid, reference),
-        None => standard_audio::DefaultClip::Missing,
+    // A passed assessment wins: it was measured on the hub and is stored as
+    // measured, so the recording is never decoded and no local model runs. The
+    // parse *is* the version guard, same as [`read_aloud_submit`]'s.
+    let passed: Option<Assessment> = match assessment {
+        Some(v) => Some(parse_passed_assessment(v)?),
+        None => None,
     };
-    let metrics = match (summary.as_ref(), reference.as_deref()) {
-        (Some(summary), Some(reference)) => {
+
+    let metrics = match (passed, summary.as_ref(), reference.as_deref()) {
+        (Some(assessment), _, _) => stored_metrics(Some(metrics_with_provenance(&assessment, via))),
+        (None, Some(summary), Some(reference)) => {
+            // Re-derive the metrics from the recording that is still on this device.
+            // A missing WAV leaves fluency and pronunciation unmeasured — the score
+            // still updates, which is what "assess again" means.
+            let samples = stored_recording(settings, dataset_uuid, &audio_path);
+            log::info!(
+                "read_aloud: attempt {} — recording decoded ({} samples)",
+                uuid,
+                samples.len()
+            );
+            let clip = load_default_clip(settings, dataset_uuid, &text_uuid, reference);
             log::info!(
                 "read_aloud: attempt {} — measuring fluency and pronunciation",
                 uuid
@@ -2491,15 +2515,21 @@ pub(crate) async fn assess_take(
     )
     .await;
 
-    let mut value = assessment.to_value();
-    value["headline"] = json!(assessment.headline());
-    value["recognized"] = json!(recognized);
-    value["words"] = json!(words.unwrap_or_default());
-    value["provenance"] = json!({
-        "stt_model": model_state.active_version.lock().unwrap().clone(),
-        "schema_version": assessment.schema_version,
-    });
-    Ok(value)
+    // The reply is the shape its own tool description promises (docs/design/
+    // hub-mcp-compute-offload.md §4.1): the axes under `assessment`, in exactly
+    // the JSON [`read_aloud_submit`] and [`read_aloud_rerecognize`] take back as
+    // a passed measurement, with the transcript and its word timings beside it
+    // for a caller that would rather re-score locally than trust the reply.
+    Ok(json!({
+        "recognized": recognized,
+        "words": words.unwrap_or_default(),
+        "headline": assessment.headline(),
+        "assessment": assessment.to_value(),
+        "provenance": {
+            "stt_model": model_state.active_version.lock().unwrap().clone(),
+            "schema_version": assessment.schema_version,
+        },
+    }))
 }
 
 /// Score one whole take (transcribe + three axes) for a follower device.
@@ -2745,7 +2775,7 @@ pub async fn read_aloud_submit(
     wav_base64: String,
     recognized: String,
     words: Option<Vec<TimedWord>>,
-    assessment_json: Option<Value>,
+    assessment: Option<Value>,
     via: Option<String>,
 ) -> Result<ReadAloudSubmitResult, String> {
     let dir = find_dataset_dir(&settings, &dataset_uuid)?;
@@ -2759,7 +2789,7 @@ pub async fn read_aloud_submit(
     // A hub-measured assessment is stored as measured. The parse *is* the
     // version guard: `metrics_json` is compacted from the same shape the hub
     // returned, so a foreign one fails here and says what to do instead.
-    let passed: Option<Assessment> = match assessment_json {
+    let passed: Option<Assessment> = match assessment {
         Some(v) => Some(parse_passed_assessment(v)?),
         None => None,
     };

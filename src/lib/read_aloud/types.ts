@@ -254,6 +254,10 @@ export interface Assessment {
   words: WordAssessment[];
   /** At most 24 when read back from storage. */
   pauses: Pause[];
+  /** Present when another machine measured these axes: `via` names it (`"hub"`),
+   *  so a reader knows whose models produced the numbers. Additive inside the
+   *  stored metrics — a peer that ignores the key still reads the scores. */
+  provenance?: { via?: string } | null;
 }
 
 /**
