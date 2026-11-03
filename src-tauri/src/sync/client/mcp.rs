@@ -219,7 +219,10 @@ fn rpc_message(body: &str, id: i64) -> Option<Value> {
     let trimmed = body.trim_start();
     if trimmed.starts_with('{') {
         let v: Value = serde_json::from_str(trimmed).ok()?;
-        return (v.get("jsonrpc")?.as_i64() == Some(2)).then_some(v);
+        // `jsonrpc` is the string "2.0", never a number — test for presence
+        // (as `bridge.rs` does), not an integer value, or a well-formed reply
+        // is rejected and the call reports "no JSON-RPC message".
+        return (is_jsonrpc(&v) && message_id(&v) == Some(id)).then_some(v);
     }
     for line in body.lines() {
         // A `data:` line carries a JSON-RPC payload; `id:`/`retry:` fields and
@@ -235,13 +238,25 @@ fn rpc_message(body: &str, id: i64) -> Option<Value> {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(payload) else { continue };
-        if v.get("jsonrpc").and_then(|j| j.as_i64()) == Some(2)
-            && v.get("id").and_then(|i| i.as_i64()) == Some(id)
-        {
+        if is_jsonrpc(&v) && message_id(&v) == Some(id) {
             return Some(v);
         }
     }
     None
+}
+
+/// A payload is a JSON-RPC message when it carries the `jsonrpc` field. The
+/// value is the string "2.0", so presence is the test — comparing it as an
+/// integer is what made every valid hub reply read as "no message".
+fn is_jsonrpc(v: &Value) -> bool {
+    v.get("jsonrpc").is_some()
+}
+
+/// A message's numeric `id`, if it has one. The tool-call reply carries the
+/// integer id we posted, so this is what selects it from other stream events
+/// (notifications, progress) that share the transport but not the id.
+fn message_id(v: &Value) -> Option<i64> {
+    v.get("id").and_then(|i| i.as_i64())
 }
 
 /// The first text content part of a `tools/call` result, if any.
@@ -289,6 +304,20 @@ mod tests {
         let msg = rpc_message(body, 2).expect("message");
         let text = first_text_content(msg.get("result").unwrap()).expect("text");
         assert_eq!(text, "{\"ok\":true}");
+    }
+
+    /// The real hub reply shape: an SSE priming block (`data:`/`id:`/`retry:`/
+    /// comment lines) before the `data:` payload, whose `jsonrpc` is the string
+    /// "2.0". The old code rejected this because it compared `jsonrpc` as an
+    /// integer and bailed on the first non-`data:` line, so the call reported a
+    /// perfectly good response as "no JSON-RPC message".
+    #[test]
+    fn string_jsonrpc_and_priming_framing_are_handled() {
+        let body = "data:\r\nid: 0/0\r\nretry: 3000\r\n\r\n:\r\n:\r\n\r\n\
+                    data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"recognized\\\":\\\"Doch nicht nur dort\\\"}\"}]}}\r\n";
+        let msg = rpc_message(body, 2).expect("the tool reply is found despite string jsonrpc");
+        let text = first_text_content(msg.get("result").unwrap()).expect("text");
+        assert!(text.contains("Doch nicht nur dort"));
     }
 
     #[test]
