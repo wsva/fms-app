@@ -1072,24 +1072,48 @@ pub fn run() {
         .manage(simple_words::SimpleWordsState::new());
 
     // STT builds additionally manage ModelState and register the `model_*`
-    // commands (see the mobile section header comment above).
+    // commands (see the mobile section header comment above). `model_download_hf`
+    // joins them: it is the HF-catalog downloader, and on a phone it is the only
+    // route to the pronunciation model's ~600 MB weights.
+    // A `phoneme` build (default-enabled, so every Tauri CLI Android build) also
+    // registers the pronunciation model's status/delete pair — the Models page's
+    // Pronunciation section drives exactly these three commands.
     #[cfg(feature = "stt")]
-    let builder = builder
-        .manage(models::ModelState::new())
-        .invoke_handler(mobile_invoke_handler!(
-            models::model_get_status,
-            models::model_select_version,
-            models::model_set_default,
-            models::model_download,
-            models::model_start,
-            models::model_stop,
-            models::model_delete,
-            models::model_cancel_download,
-            models::model_transcribe,
-            models::model_transcribe_detailed,
-            models::index::model_index_get,
-            models::index::model_index_refresh
-        ));
+    let builder = builder.manage(models::ModelState::new());
+    #[cfg(all(feature = "stt", feature = "phoneme"))]
+    let builder = builder.invoke_handler(mobile_invoke_handler!(
+        models::model_get_status,
+        models::model_select_version,
+        models::model_set_default,
+        models::model_download,
+        models::model_start,
+        models::model_stop,
+        models::model_delete,
+        models::model_cancel_download,
+        models::model_transcribe,
+        models::model_transcribe_detailed,
+        models::index::model_index_get,
+        models::index::model_index_refresh,
+        models::model_download_hf,
+        datasets::read_aloud::read_aloud_phoneme_model_status,
+        datasets::read_aloud::read_aloud_phoneme_model_delete
+    ));
+    #[cfg(all(feature = "stt", not(feature = "phoneme")))]
+    let builder = builder.invoke_handler(mobile_invoke_handler!(
+        models::model_get_status,
+        models::model_select_version,
+        models::model_set_default,
+        models::model_download,
+        models::model_start,
+        models::model_stop,
+        models::model_delete,
+        models::model_cancel_download,
+        models::model_transcribe,
+        models::model_transcribe_detailed,
+        models::index::model_index_get,
+        models::index::model_index_refresh,
+        models::model_download_hf
+    ));
     #[cfg(not(feature = "stt"))]
     let builder = builder.invoke_handler(mobile_invoke_handler!());
 

@@ -165,7 +165,9 @@ export default function ModelsPage() {
   // ---- Pronunciation (phoneme) model status ----
 
   const fetchPhoneme = useCallback(async () => {
-    if (!isTauri() || isMobileApp()) return;
+    // `read_aloud_phoneme_model_status` is registered on mobile too: the phoneme
+    // cargo feature is default-enabled so it reaches the Android build.
+    if (!isTauri()) return;
     try {
       const res = await invoke<{ installed_dir: string | null; models: CatalogModelInfo[] }>(
         "read_aloud_phoneme_model_status"
@@ -178,7 +180,12 @@ export default function ModelsPage() {
   }, []);
 
   useEffect(() => {
-    if (isMobileApp()) return;
+    // Text-split is desktop-only (the `textsplit` feature is off on mobile);
+    // the pronunciation model is available on both.
+    if (isMobileApp()) {
+      fetchPhoneme();
+      return;
+    }
     setDesktop(true);
     fetchTextSplit();
     fetchPhoneme();
@@ -193,10 +200,8 @@ export default function ModelsPage() {
     });
     const unlistenChanged = listen("model-status-changed", () => {
       fetchStatus();
-      if (!isMobileApp()) {
-        fetchTextSplit();
-        fetchPhoneme();
-      }
+      if (!isMobileApp()) fetchTextSplit();
+      fetchPhoneme();
     });
     return () => {
       unlistenProgress.then((fn) => fn());
@@ -598,8 +603,8 @@ export default function ModelsPage() {
           </section>
         )}
 
-        {/* ─── Pronunciation (phoneme) Model Section — desktop only ─── */}
-        {desktop && phonemeModels.length > 0 && (
+        {/* ─── Pronunciation (phoneme) Model Section — desktop and Android ─── */}
+        {phonemeModels.length > 0 && (
           <section className="mb-6">
             <div className="flex items-center gap-2 mb-1">
               <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary">Pronunciation</h2>
