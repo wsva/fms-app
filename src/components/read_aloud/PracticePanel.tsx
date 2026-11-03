@@ -11,6 +11,7 @@ import AsrDiff from "@/components/read_aloud/AsrDiff";
 import AssessmentCards from "@/components/read_aloud/AssessmentCards";
 import FeedbackPanel from "@/components/read_aloud/FeedbackPanel";
 import ProgressOverlay from "@/components/read_aloud/ProgressOverlay";
+import HubStatusOverlay, { type HubStage } from "@/components/read_aloud/HubStatusOverlay";
 import ScoringChoiceDialog from "@/components/read_aloud/ScoringChoiceDialog";
 import StandardAudioPlayer from "@/components/read_aloud/StandardAudioPlayer";
 import { isTauri } from "@/lib/tauri";
@@ -91,7 +92,11 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
   // The ended take, held while the choice or the hub call is in flight; one
   // submit path finishes it, whichever way it was scored.
   const [pendingWav, setPendingWav] = useState<string | null>(null);
-  const [scoringRemote, setScoringRemote] = useState(false);
+  // The hub call's visible lifecycle: the status overlay stays open from the
+  // choice tap through sending → waiting → complete (or the error with its
+  // one-tap way back), and only then yields to the result card.
+  const [hubStage, setHubStage] = useState<HubStage | null>(null);
+  const [hubError, setHubError] = useState<string | null>(null);
   // The local route runs `transcribeTake` outside the hook (the hook deferred
   // it), so the "Transcribing…" phase belongs to the panel here.
   const [transcribingLocal, setTranscribingLocal] = useState(false);
@@ -106,7 +111,8 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
     setError(null);
     setChoiceOpen(false);
     setPendingWav(null);
-    setScoringRemote(false);
+    setHubStage(null);
+    setHubError(null);
     setTranscribingLocal(false);
     setHubScored(false);
   }, [text.uuid]);
@@ -149,6 +155,19 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
       unlisten.then((fn) => fn());
     };
   }, [result?.attempt.uuid, datasetUuid, text.uuid]);
+
+  // The backend reports the one milestone the client cannot see from the
+  // outside: the tool call leaving the handshake and going up to the hub.
+  // Until that event lands, the overlay honestly says "sending".
+  useEffect(() => {
+    if (!isTauri() || hubStage !== "sending") return;
+    const unlisten = listen<string>("hub-mcp-phase", (e) => {
+      if (e.payload === "waiting") setHubStage((s) => (s === "sending" ? "waiting" : s));
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [hubStage]);
 
   // One finish for both routes: persist, score-land, XP. A passed assessment
   // was measured on the hub and is stored as measured (with `via` provenance
@@ -236,7 +255,8 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
   const runHub = useCallback(
     async (wavBase64: string) => {
       setChoiceOpen(false);
-      setScoringRemote(true);
+      setHubError(null);
+      setHubStage("sending");
       setError(null);
       const token = ++hubCallToken.current;
       try {
@@ -252,6 +272,9 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
           },
         });
         if (token !== hubCallToken.current) return; // cancelled while in flight
+        // The reply is in; the overlay says so while this device finishes
+        // saving, and only the landed result takes it down.
+        setHubStage("done");
         await finishSubmit({
           wavBase64,
           recognized: reply.recognized,
@@ -259,15 +282,15 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
           assessment: reply.assessment,
           via: "hub",
         });
+        if (token === hubCallToken.current) setHubStage(null);
       } catch (e) {
         if (token !== hubCallToken.current) return;
         const msg = String(e);
         logError(`hub scoring failed: ${msg}`, LOG_MODULE);
-        setError(msg);
-        setPendingWav(null);
-        setChoiceOpen(true);
-      } finally {
-        if (token === hubCallToken.current) setScoringRemote(false);
+        // The take stays held: the overlay's error state offers the local
+        // score (and the discard) without re-asking the choice first.
+        setHubError(msg);
+        setHubStage("error");
       }
     },
     [datasetUuid, text, finishSubmit]
@@ -320,7 +343,7 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
     recorder.processing ||
     transcribingLocal ||
     submitting ||
-    scoringRemote ||
+    hubStage !== null ||
     choiceOpen;
   const score = result?.score ?? null;
 
@@ -491,9 +514,10 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
       {/* After the take ends, transcribing and scoring happen behind a modal
           ring — dimming the window is deliberate: there is nothing else to look
           at until the score is there. On a follower the ring yields first to
-          the scoring-choice dialog; while the hub measures the take, the ring
-          offers the way back to a local score (a cold model load there can run
-          minutes). */}
+          the scoring-choice dialog; once the hub is picked, the status overlay
+          keeps that dialog's place for the whole call — sending, waiting, the
+          error with its local escape, complete while the result is saved (a
+          cold model load on the hub can run minutes behind "waiting"). */}
       {choiceOpen && pendingWav !== null && (
         <ScoringChoiceDialog
           onHub={() => void runHub(pendingWav)}
@@ -504,26 +528,51 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
           }}
         />
       )}
-      {(recorder.preparing || recorder.processing || transcribingLocal || submitting || scoringRemote) && (
+      {(recorder.preparing || recorder.processing || transcribingLocal || (submitting && hubStage === null)) && (
         <ProgressOverlay
           label={
             recorder.preparing
               ? "Preparing…"
               : recorder.processing || transcribingLocal
               ? "Transcribing…"
-              : scoringRemote
-              ? "Scoring on the hub…"
               : "Scoring…"
           }
-          onCancel={scoringRemote ? () => {
-            // The abandoned call persists nothing on the hub, so walking away
-            // mid-flight cannot strand anything: the dialog simply re-asks.
-            // Bumping the token makes the late reply drop on the floor.
-            hubCallToken.current += 1;
-            setScoringRemote(false);
-            setChoiceOpen(true);
-          } : undefined}
-          cancelLabel="On this device instead"
+        />
+      )}
+      {hubStage !== null && (
+        <HubStatusOverlay
+          stage={hubStage}
+          error={hubError}
+          onCancel={
+            hubStage === "sending" || hubStage === "waiting"
+              ? () => {
+                  // The abandoned call persists nothing on the hub, so walking
+                  // away mid-flight cannot strand anything: the dialog simply
+                  // re-asks. Bumping the token makes the late reply drop.
+                  hubCallToken.current += 1;
+                  setHubStage(null);
+                  setChoiceOpen(true);
+                }
+              : undefined
+          }
+          onLocal={
+            hubStage === "error" && pendingWav !== null
+              ? () => {
+                  setHubStage(null);
+                  setHubError(null);
+                  void runLocal(pendingWav);
+                }
+              : undefined
+          }
+          onDiscard={
+            hubStage === "error"
+              ? () => {
+                  setHubStage(null);
+                  setHubError(null);
+                  setPendingWav(null);
+                }
+              : undefined
+          }
         />
       )}
     </div>

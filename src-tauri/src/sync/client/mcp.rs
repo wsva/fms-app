@@ -20,7 +20,7 @@
 //! `hub_request` would silently degrade to anonymous on that origin.
 
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::settings::SettingsState;
 
@@ -40,16 +40,21 @@ const PROTOCOL_VERSION: &str = "2025-03-26";
 /// of FmS's own tools) comes back as that parsed `Value`; anything else comes
 /// back as the raw text. Timeouts: the hub may sit behind a cold model load, so
 /// a call runs up to 300 s — the UI names the escape long before that.
+/// The overlay is fed milestones rather than left on one spinner:
+/// `hub-mcp-phase` events ("waiting" when the tool call is dispatched) let
+/// the follower separate "sending to the hub" from "waiting for the hub
+/// response".
 #[tauri::command]
 pub async fn hub_mcp_call(
+    app: tauri::AppHandle,
     settings: State<'_, SettingsState>,
     tool: String,
     args: Value,
 ) -> Result<Value, String> {
-    hub_mcp_call_inner(&settings, &tool, args).await
+    hub_mcp_call_inner(&app, &settings, &tool, args).await
 }
 
-async fn hub_mcp_call_inner(settings: &SettingsState, tool: &str, args: Value) -> Result<Value, String> {
+async fn hub_mcp_call_inner(app: &tauri::AppHandle, settings: &SettingsState, tool: &str, args: Value) -> Result<Value, String> {
     if tool.trim().is_empty() {
         return Err("No tool named for the hub call.".to_string());
     }
@@ -113,6 +118,9 @@ async fn hub_mcp_call_inner(settings: &SettingsState, tool: &str, args: Value) -
         "method": "tools/call",
         "params": { "name": tool, "arguments": args },
     });
+    // Everything the client can still see is over: from here the bytes are
+    // uploading and the hub is computing, however long each of those takes.
+    let _ = app.emit("hub-mcp-phase", "waiting");
     let (mut status_code, mut body) = {
         let (s, _, b) = mcp_post(&client, settings, &url, session.as_deref(), &call).await?;
         (s, b)
