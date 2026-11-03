@@ -235,6 +235,15 @@ pub const MODELS: &[HfModelDef] = &[
     //   * the per-language `vocab.json` files in that repo are pruned to a single
     //     language's phones, so the full 392-entry map is fetched from the
     //     upstream PyTorch repo via `vocab_repo` instead.
+    //
+    // The int8 entry is a quantization of the same upstream base
+    // (`facebook/wav2vec2-lv-60-espeak-cv-ft`), so it emits the identical 392-
+    // phone inventory and needs the identical `vocab_repo` fetch — its own repo
+    // ships only `wav2vec2_int8.onnx`. Roughly a third smaller than the fp16
+    // export, which is the honest trade for phone-sized storage and a slower
+    // CPU-only inference pass. When both are installed, `find_model_dir` takes
+    // the alphabetically-first directory (Hochien before duyentq), so deleting
+    // the fp16 one is how you pin the int8.
     HfModelDef {
         id: DEFAULT_PHONEME_MODEL_ID,
         name: "Wav2Vec2 Phoneme (IPA)",
@@ -245,6 +254,18 @@ pub const MODELS: &[HfModelDef] = &[
         tokenizer_repo: None,
         vocab_repo: Some("facebook/wav2vec2-lv-60-espeak-cv-ft"),
         size_mb: 603,
+        languages: &[],
+    },
+    HfModelDef {
+        id: "duyentq/sonari-wav2vec2-phoneme-int8",
+        name: "Wav2Vec2 Phoneme (int8)",
+        description: "Quantized phone-level model for read-aloud pronunciation scoring. Same 392 IPA phones, ~3× smaller download",
+        model_type: "onnx-phoneme",
+        folder: "phoneme/duyentq/sonari-wav2vec2-phoneme-int8",
+        files: &[HfModelFile { path: "wav2vec2_int8.onnx", size_bytes: 355_352_992 }],
+        tokenizer_repo: None,
+        vocab_repo: Some("facebook/wav2vec2-lv-60-espeak-cv-ft"),
+        size_mb: 339,
         languages: &[],
     },
 ];
