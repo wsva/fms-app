@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Monitor } from "lucide-react";
+import { Check } from "lucide-react";
 
 /** The phases a hub scoring call passes through, as the follower sees them.
  *  `sending` covers the connect + handshake + upload the client starts;
@@ -15,16 +15,10 @@ type Props = {
   /** The hub's error text, shown when `stage === "error"` (already actionable —
    *  e.g. "no hub configured — set the PC address on Devices & Hub"). */
   error?: string | null;
-  /** The escape while the call is in flight: bump the token so the late
-   *  reply lands nowhere, and re-ask the choice. */
-  onCancel?: () => void;
-  /** Error-phase action: score the held take on this device. */
-  onLocal?: () => void;
-  /** Error-phase action: drop the take. */
-  onDiscard?: () => void;
-  /** What that exit is called — a re-assessment discards nothing, so the caller
-   *  naming it says so. Defaults to the take's wording. */
-  discardLabel?: string;
+  /** The one way out, in every phase: stop watching this call and leave the take
+   *  as it is. The recording was stored before the call started, so walking away
+   *  costs nothing — measuring it later is the attempt row's "Assess again". */
+  onLater: () => void;
 };
 
 type StepState = "pending" | "active" | "done";
@@ -62,13 +56,19 @@ function Step({ state, label }: { state: StepState; label: string }) {
  * The hub call's status dialog on a follower: it stays open across the whole
  * remote scoring, naming the phase the call is in — sending, waiting for the
  * hub's answer, complete — and, when the call fails, holding the hub's error
- * text with the way back to a local score one tap away.
+ * text.
+ *
+ * It offers exactly one exit, "Not now", because there is nothing left to
+ * protect: the take was saved before this call started, so cancelling, failing
+ * or simply closing the app leaves a recorded — if unmeasured — attempt, and
+ * "Assess again" on its row finishes the job whenever the learner wants.
+ * Scoring here or on this device is chosen one dialog earlier, not from here.
  *
  * Same chrome as `ScoringChoiceDialog` and `ProgressOverlay`, because it sits
  * between exactly those two: the choice that started it and the result that
  * follows it.
  */
-export default function HubStatusOverlay({ stage, error, onCancel, onLocal, onDiscard, discardLabel = "Discard take" }: Props) {
+export default function HubStatusOverlay({ stage, error, onLater }: Props) {
   const sending: StepState =
     stage === "sending" ? "active" : stage === "waiting" || stage === "done" ? "done" : "pending";
   const awaiting: StepState =
@@ -83,25 +83,10 @@ export default function HubStatusOverlay({ stage, error, onCancel, onLocal, onDi
               <div className="font-medium">Error invoking the hub</div>
               <div className="mt-1 text-xs">{error}</div>
             </div>
-            {onLocal && (
-              <button
-                onClick={onLocal}
-                className="flex items-center gap-2.5 rounded-xl bg-accent-bg/10 p-3 text-left cursor-pointer hover:bg-accent-bg/20"
-              >
-                <Monitor size={18} className="shrink-0 text-accent-bg" />
-                <span className="text-sm font-medium text-text-primary">
-                  Score it on this device instead
-                </span>
-              </button>
-            )}
-            {onDiscard && (
-              <button
-                onClick={onDiscard}
-                className="self-center mt-1 text-xs text-text-tertiary hover:text-text-primary cursor-pointer"
-              >
-                {discardLabel}
-              </button>
-            )}
+            <p className="text-xs text-text-tertiary">
+              Your recording is saved. Score it later with “Assess again” on its
+              attempt.
+            </p>
           </>
         ) : (
           <>
@@ -117,16 +102,14 @@ export default function HubStatusOverlay({ stage, error, onCancel, onLocal, onDi
                 </span>
               </div>
             )}
-            {onCancel && (
-              <button
-                onClick={onCancel}
-                className="self-center mt-1 text-xs text-text-tertiary hover:text-text-primary cursor-pointer"
-              >
-                On this device instead
-              </button>
-            )}
           </>
         )}
+        <button
+          onClick={onLater}
+          className="self-center mt-1 text-xs text-text-tertiary hover:text-text-primary cursor-pointer"
+        >
+          Not now
+        </button>
       </div>
     </div>
   );

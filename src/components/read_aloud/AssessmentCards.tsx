@@ -9,7 +9,7 @@ import { GOOD_SCORE, PASS_SCORE } from "@/lib/read_aloud/types";
  *
  * Each axis is rendered independently and may say "not measured" — an absent
  * axis is never replaced by a proxy number. Used by the practice view right
- * after submitting, and by the attempts view from the stored `metrics`.
+ * after a take is measured, and by the attempts view from the stored `metrics`.
  */
 export default function AssessmentCards({ assessment }: { assessment: Assessment }) {
   const { accuracy, fluency, pronunciation } = assessment;
@@ -106,19 +106,27 @@ export type ScoreAxesSize = "sm" | "md";
  * The attempts list shows it on every card, so a take is scanned by its three
  * numbers instead of only its accuracy; an attempt with no stored assessment
  * shows what it can and reads "—" for the rest, never a substitute number.
+ * Accuracy is the one axis re-derived from the transcript on read, so a take
+ * with a transcript has a real accuracy even unmeasured — and a take with *no*
+ * transcript has none, and reads "—" rather than a 0% nobody measured.
  * Tooltips carry the detail the cards carry at full size.
  */
 export function ScoreAxes({
   score,
   metrics,
+  recognized,
   size = "sm",
   className = "",
 }: {
-  /** Accuracy 0–100 — the one score every attempt has. */
+  /** Accuracy 0–100 — re-scored from the transcript on read, so even an
+   *  unmeasured take shows the one number it has. */
   score: number;
-  /** Absent for a take recorded before assessment existed, or whose recording
-   *  is gone. */
+  /** Absent for a take saved before anything measured it, one recorded before
+   *  assessment existed, or one whose recording is gone. */
   metrics?: Assessment | null;
+  /** The take's transcript. Without one there is nothing accuracy was computed
+   *  from, so accuracy shows the gap instead of `score`. */
+  recognized?: string | null;
   size?: ScoreAxesSize;
   className?: string;
 }) {
@@ -126,24 +134,32 @@ export function ScoreAxes({
   const fluency = metrics?.fluency ?? null;
   const pronunciation = metrics?.pronunciation ?? null;
   const pronPercent = pronunciation?.score != null ? pronunciation.score * 100 : null;
+  // A take with a stored assessment has numbers whether or not it was
+  // transcribed; one with neither has nothing yet measured, and showing its
+  // default 0 would be exactly the stand-in number this strip promises never to
+  // invent.
+  const hasAccuracy = metrics != null || Boolean(recognized?.trim());
   // A take with no assessment at all has no per-axis reason to give, only the
   // way to measure one.
   const unmeasured =
-    "Not measured — this take has no stored assessment (it predates the three-axis " +
-    "score, or its recording is gone). Use Assess again to measure it.";
+    "Not measured — this take has no stored assessment (it was saved before anything " +
+    "measured it, it predates the three-axis score, or its recording is gone). Use " +
+    "Assess again to measure it.";
 
   const axes: ScoreAxis[] = [
     {
       key: "accuracy",
       label: "Accuracy",
-      value: String(Math.round(score)),
-      unit: "%",
-      tone: percentTone(score),
+      value: hasAccuracy ? String(Math.round(score)) : "—",
+      unit: hasAccuracy ? "%" : undefined,
+      tone: hasAccuracy ? percentTone(score) : "text-text-tertiary",
       title: accuracy
         ? `${accuracy.counts.correct} of ${accuracy.counts.ref} words correct · ${Math.round(
             accuracy.wer * 100
           )}% WER${accuracy.lenient_score > accuracy.score ? ` · ${Math.round(accuracy.lenient_score)}% lenient` : ""}`
-        : "Share of the text's words the transcript got right.",
+        : hasAccuracy
+        ? "Share of the text's words the transcript got right."
+        : unmeasured,
     },
     {
       key: "fluency",

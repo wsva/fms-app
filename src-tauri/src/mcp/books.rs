@@ -520,6 +520,20 @@ struct ReadAloudAssessTakeParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudSaveTakeParam {
+    dataset_uuid: String,
+    text_uuid: String,
+    /// Optional base64-encoded 16kHz mono WAV of the reading.
+    #[serde(default)]
+    wav_base64: String,
+    /// The transcript this device already has, when it transcribed while the
+    /// take was being recorded. Measuring overwrites it with what the models
+    /// heard, so omitting it costs nothing but an empty row until then.
+    #[serde(default)]
+    recognized: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudSubmitParam {
     dataset_uuid: String,
     text_uuid: String,
@@ -1269,11 +1283,12 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Attempt deleted"}).to_string())
     }
 
-    #[tool(name = "read_aloud_rerecognize", description = "Overwrite an existing attempt's transcript with a freshly recognized one and recompute its score against the current reference, in place. The recording is left untouched — pass the transcript produced by re-transcribing the attempt's device-local WAV (via model_transcribe_detailed, whose `words` go straight into this tool's `words` parameter) with the loaded STT model. Use this to refresh a take whose recognition was poor or predates a model change. Pass `assessment` (the `assessment` field of a hub's read_aloud_assess_take reply) with `via` to re-assess from a measurement taken elsewhere: this device then skips its own STT-derived scoring and journals provenance with the attempt. Returns the updated attempt (score and recomputed metrics included).")]
+    #[tool(name = "read_aloud_rerecognize", description = "Measure an existing attempt: overwrite its transcript with a freshly recognized one, score it against the current reference, store the three axes and award the scaled XP the new score earns (+1 at score >= 60, +1 more at >= 80, each tier deduped per text), all in place. The recording is left untouched — pass the transcript produced by re-transcribing the attempt's device-local WAV (via model_transcribe_detailed, whose `words` go straight into this tool's `words` parameter) with the loaded STT model. This is both the UI's 'Assess again' and the scoring half of a fresh take saved by read_aloud_save_take, so it is how an attempt that was stored unmeasured gets its numbers. Pass `assessment` (the `assessment` field of a hub's read_aloud_assess_take reply) with `via` to measure from a take measured elsewhere: this device then skips its own model passes and journals provenance with the attempt. Returns the same result shape as read_aloud_submit (score, summary, attempt, assessment, XP awarded).")]
     async fn read_aloud_rerecognize(&self, Parameters(param): Parameters<ReadAloudRerecognizeParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_rerecognize: dataset={}, attempt={}", param.dataset_uuid, param.uuid);
         let settings = self.app.state::<SettingsState>();
-        let attempt = datasets::read_aloud::read_aloud_rerecognize(
+        let result = datasets::read_aloud::read_aloud_rerecognize(
+            self.app.clone(),
             settings,
             param.dataset_uuid,
             param.uuid,
@@ -1283,7 +1298,7 @@ impl DatasetMcpServer {
             param.via,
         )
         .await?;
-        Ok(serde_json::to_string_pretty(&attempt).unwrap_or_default())
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
     #[tool(name = "read_aloud_score", description = "Compute the WIP-based ASR score (0-100) and the word-level alignment (wer, mer, hits/substitutions/deletions/insertions, chunks) between a reference text and a recognized transcript, without persisting anything. Score >= 60 passes. Use the chunks to see exactly which words were misread, inserted, or skipped. Also returned inside read_aloud_submit results.")]
@@ -1442,7 +1457,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&value).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_submit", description = "Submit a reading attempt: stores the (optional) recording, scores the recognized transcript against the reference text with the WIP-based ASR metric, assesses fluency and pronunciation from the WAV, saves the attempt, and awards scaled XP (1 XP at score >= 60, +1 more at >= 80). Pass `words` (from model_transcribe_detailed) to get the fluency axis. Pass `assessment` (the reply of a hub's read_aloud_assess_take) with `via` to store a take measured elsewhere: this device then skips its own model passes and journals provenance with the attempt. Returns the score, the full scoring summary (alignment chunks included), the three-axis `assessment`, the saved attempt (with `metrics`), and XP awarded.")]
+    #[tool(name = "read_aloud_submit", description = "Submit a reading attempt as one call: save the take, then measure it — read_aloud_save_take followed by read_aloud_rerecognize over the same bodies, for a caller that wants one atomic call rather than two. Stores the (optional) recording, scores the recognized transcript against the reference text with the WIP-based ASR metric, assesses fluency and pronunciation from the stored WAV, and awards scaled XP (1 XP at score >= 60, +1 more at >= 80). Pass `words` (from model_transcribe_detailed) to get the fluency axis. Pass `assessment` (the reply of a hub's read_aloud_assess_take) with `via` to store a take measured elsewhere: this device then skips its own model passes and journals provenance with the attempt. Returns the score, the full scoring summary (alignment chunks included), the three-axis `assessment`, the saved attempt (with `metrics`), and XP awarded. Prefer the two-step route when measuring can fail or take minutes: a take saved by read_aloud_submit is only stored once its measurement succeeded, so an abandoned hub call loses it.")]
     async fn read_aloud_submit(&self, Parameters(param): Parameters<ReadAloudSubmitParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_submit: dataset={}, text={}", param.dataset_uuid, param.text_uuid);
         let settings = self.app.state::<SettingsState>();
@@ -1459,6 +1474,21 @@ impl DatasetMcpServer {
         )
         .await?;
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_save_take", description = "Make an ended take durable before anything measures it: store the recording and the attempt row (with `recognized` when this device already has a transcript) and answer the saved attempt. Nothing is scored — the numbers come from read_aloud_rerecognize, the same call the UI's 'Assess again' uses — so a take saved here and never measured carries no `metrics` and reads as unmeasured rather than as a 0% read. XP is awarded by the measuring call, not here. Use this instead of read_aloud_submit whenever measuring may fail or take minutes (a hub scoring call, a cold model): the recording then survives the failure and the scoring stays retryable.")]
+    async fn read_aloud_save_take(&self, Parameters(param): Parameters<ReadAloudSaveTakeParam>) -> Result<String, String> {
+        log::info!("[MCP] read_aloud_save_take: dataset={}, text={}", param.dataset_uuid, param.text_uuid);
+        let settings = self.app.state::<SettingsState>();
+        let attempt = datasets::read_aloud::read_aloud_save_take(
+            settings,
+            param.dataset_uuid,
+            param.text_uuid,
+            param.wav_base64,
+            param.recognized,
+        )
+        .await?;
+        Ok(serde_json::to_string_pretty(&attempt).unwrap_or_default())
     }
 
     #[tool(name = "read_aloud_model_status", description = "Report whether the pronunciation (phoneme) model that read_aloud_assess and read_aloud_submit score against is installed, the directory it loads from, the download catalog (size + per-model state), and a `hint` naming the next step. This axis is independent of the STT model: a Parakeet model gives fluency, this gives pronunciation. Call this before read_aloud_model_download.")]

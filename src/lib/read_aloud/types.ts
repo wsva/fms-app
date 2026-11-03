@@ -108,14 +108,19 @@ export interface AsrScoreSummary {
   chunks: AsrChunk[];
 }
 
-/** Result of submitting a recorded attempt. */
+/** Result of measuring an attempt (the scoring half of a take, and "Assess
+ *  again"). A take saved by `read_aloud_save_take` has no result of its own
+ *  until this lands. */
 export interface ReadAloudSubmitResult {
   score: number;
-  /** WER/MER, H/S/D/I counts and the alignment chunks to highlight. */
-  summary: AsrScoreSummary;
+  /** WER/MER, H/S/D/I counts and the alignment chunks to highlight. Absent only
+   *  when there was no reference to align against — the attempt then carries no
+   *  `metrics` either, and the UI shows it as unmeasured. */
+  summary: AsrScoreSummary | null;
   attempt: ReadAttempt;
-  /** Accuracy (the same number as `score`), fluency and pronunciation. */
-  assessment: Assessment;
+  /** Accuracy (the same number as `score`), fluency and pronunciation. Absent
+   *  for the same reason as `summary`. */
+  assessment: Assessment | null;
   xp_awarded: number;
   lifetime_xp: number;
   level: number;

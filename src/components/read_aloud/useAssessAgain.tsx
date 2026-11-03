@@ -50,6 +50,8 @@ export type AssessAgain = {
  *
  * Both routes leave the recording untouched and change only the transcript and
  * what is derived from it; see `rerecognizeAttempt` / `rerecognizeAttemptOnHub`.
+ * Neither can lose anything: an attempt is only ever measured in place, so
+ * walking away mid-call — or a hub that fails — leaves the row as it was.
  */
 export function useAssessAgain({
   datasetUuid,
@@ -63,8 +65,8 @@ export function useAssessAgain({
   onError: (msg: string) => void;
 }): AssessAgain {
   const [role, setRole] = useState<string | null>(null);
-  // The held attempt, from the choice tap through the whole hub call: an error
-  // mid-flight keeps it, so "on this device instead" costs one tap.
+  // The attempt in flight, from the choice tap through the whole hub call: its
+  // row shows the spinner, and the other entry points stand aside for it.
   const [pending, setPending] = useState<Pending | null>(null);
   const [choiceOpen, setChoiceOpen] = useState(false);
   const [hubStage, setHubStage] = useState<HubStage | null>(null);
@@ -142,8 +144,9 @@ export function useAssessAgain({
       if (token !== hubToken.current) return;
       const msg = String(e);
       logError(`hub assess again failed: ${msg}`, LOG_MODULE);
-      // The attempt stays held: the overlay's error state offers the local
-      // re-assessment and the way out, without re-asking the choice first.
+      // The attempt stays held and unchanged: the overlay names the failure and
+      // leaves the way out at "Not now" — pressing "Assess again" afterwards
+      // re-asks where it should be measured.
       setHubError(msg);
       setHubStage("error");
     }
@@ -171,49 +174,30 @@ export function useAssessAgain({
     [role, runLocal]
   );
 
+  // "Not now", from either dialog: stop watching this call and leave the attempt
+  // exactly as it was. Only its numbers are pending — the recording is on disk —
+  // so nothing is stranded by walking away, and the row's own "Assess again" can
+  // be pressed whenever the learner wants. Bumping the token makes a hub reply
+  // that arrives afterwards drop instead of overwriting this choice.
+  const walkAway = useCallback(() => {
+    hubToken.current += 1;
+    setChoiceOpen(false);
+    setHubStage(null);
+    setHubError(null);
+    setPending(null);
+  }, []);
+
   const ui = (
     <>
       {choiceOpen && pending && (
         <ScoringChoiceDialog
           onHub={() => void runHub(pending)}
           onLocal={() => void runLocal(pending)}
-          onDiscard={() => {
-            setChoiceOpen(false);
-            setPending(null);
-          }}
-          discardLabel="Not now"
+          onLater={walkAway}
         />
       )}
       {hubStage !== null && (
-        <HubStatusOverlay
-          stage={hubStage}
-          error={hubError}
-          onCancel={
-            hubStage === "sending" || hubStage === "waiting"
-              ? () => {
-                  // The abandoned call persists nothing on the hub, so walking
-                  // away mid-flight cannot strand anything: the dialog simply
-                  // re-asks. Bumping the token makes the late reply drop.
-                  hubToken.current += 1;
-                  setHubStage(null);
-                  setChoiceOpen(true);
-                }
-              : undefined
-          }
-          onLocal={
-            hubStage === "error" && pending ? () => void runLocal(pending) : undefined
-          }
-          onDiscard={
-            hubStage === "error"
-              ? () => {
-                  setHubStage(null);
-                  setHubError(null);
-                  setPending(null);
-                }
-              : undefined
-          }
-          discardLabel="Leave it as it is"
-        />
+        <HubStatusOverlay stage={hubStage} error={hubError} onLater={walkAway} />
       )}
     </>
   );

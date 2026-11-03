@@ -47,8 +47,8 @@ use uuid::Uuid;
 use crate::auth::workspace_identity;
 use crate::datasets::{
     assert_uuid_free, canonical_stamp, dataset_roots, fork_base_to_overlay, is_under_download_root,
-    mint_into, move_to_trash, now_row_stamp, now_stamp, read_info, read_info_opt, short, touch_info,
-    write_info, DatasetInfo, DatasetType, FORMAT_READ_ALOUD, INFO_FILE,
+    mint_into, move_to_trash, now_row_stamp, now_stamp, read_info, read_info_opt, row_stamp_at,
+    short, touch_info, write_info, DatasetInfo, DatasetType, FORMAT_READ_ALOUD, INFO_FILE,
 };
 use crate::settings::SettingsState;
 use crate::datasets::asr_metric::{score_asr, score_value, AsrScoreSummary};
@@ -258,12 +258,15 @@ pub struct ReadAttempt {
 pub struct ReadAloudSubmitResult {
     pub score: f64,
     /// The full scoring picture (WER/MER, H/S/D/I, alignment chunks) for the
-    /// submitted transcript.
-    pub summary: AsrScoreSummary,
+    /// submitted transcript. Absent only when there was no reference to align
+    /// against — the attempt then carries no `metrics` either, and the UI shows
+    /// it as unmeasured rather than inventing a picture.
+    pub summary: Option<AsrScoreSummary>,
     pub attempt: ReadAttempt,
     /// Accuracy (unchanged WIP), fluency and pronunciation for this attempt. The
-    /// accuracy number is byte-identical to `score` — see `assess.rs`.
-    pub assessment: Assessment,
+    /// accuracy number is byte-identical to `score` — see `assess.rs`. Absent for
+    /// the same reason as `summary`.
+    pub assessment: Option<Assessment>,
     /// XP awarded for this submission (0 when below threshold or already earned).
     pub xp_awarded: i64,
     pub lifetime_xp: i64,
@@ -1729,19 +1732,23 @@ fn delete_attempt_inner(settings: &SettingsState, dataset_uuid: &str, uuid: &str
     Ok(())
 }
 
-/// Re-run recognition for an existing attempt: overwrite its transcript,
-/// re-score and re-assess it against the current reference, in place. The
-/// recording is untouched — only the transcript (and everything derived from
-/// it) changes — so this is the seam the UI's "Assess again" button (and the
-/// matching MCP tool) writes through after it re-transcribes the device-local
-/// WAV with the loaded STT model.
+/// Measure an existing attempt: overwrite its transcript, score it against the
+/// current reference and store the three axes, in place. The recording is
+/// untouched — only what was heard, and everything derived from it, changes — so
+/// this is the seam both flows write through: the UI's "Assess again" button, and
+/// the scoring half of a fresh take, whose recording [`read_aloud_save_take`] has
+/// already made durable (see the note there on why saving comes first).
 ///
 /// A follower that had the hub measure the take passes that `assessment` (the
 /// hub's `read_aloud_assess_take` reply) plus `via` here, exactly as
 /// [`read_aloud_submit`] does: this device skips its own model passes and stores
 /// the measurement as taken, journalling the provenance with the attempt.
+///
+/// This is where XP is awarded: the number that earns it is the one measured
+/// here, whether that lands seconds after the take or days later on a retry.
 #[tauri::command]
 pub async fn read_aloud_rerecognize(
+    app: tauri::AppHandle,
     settings: State<'_, SettingsState>,
     dataset_uuid: String,
     uuid: String,
@@ -1749,8 +1756,9 @@ pub async fn read_aloud_rerecognize(
     words: Option<Vec<TimedWord>>,
     assessment: Option<Value>,
     via: Option<String>,
-) -> Result<ReadAttempt, String> {
+) -> Result<ReadAloudSubmitResult, String> {
     update_recognized_inner(
+        &app,
         &settings,
         &dataset_uuid,
         &uuid,
@@ -1788,14 +1796,21 @@ fn stored_recording(
     }
 }
 
-/// Shared body of [`read_aloud_rerecognize`]: overwrite one of my attempt events'
-/// transcript, re-score and re-assess it against the effective reference, and
-/// re-journal the save. Never touches the dataset directory or the recording.
+/// Shared body of [`read_aloud_rerecognize`]: measure one of my attempt events —
+/// overwrite its transcript, score it against the effective reference, store the
+/// three axes, award the XP the new number earns, and re-journal the save. Never
+/// touches the dataset directory or the recording.
+///
+/// This is the scoring half of both flows: the fresh take calls it after
+/// [`read_aloud_save_take`] made the recording durable, "Assess again" calls it
+/// directly. Consequently a take that is saved but never measured simply has no
+/// `metrics` — the UI reads it as unmeasured and the retry is one press away.
 ///
 /// The read and the write take their own short-lived connections: the
 /// assessment in between is async, and a `rusqlite::Connection` must not be
 /// held across an await point.
 async fn update_recognized_inner(
+    app: &tauri::AppHandle,
     settings: &SettingsState,
     dataset_uuid: &str,
     uuid: &str,
@@ -1803,25 +1818,35 @@ async fn update_recognized_inner(
     words: Option<&[TimedWord]>,
     assessment: Option<Value>,
     via: Option<&str>,
-) -> Result<ReadAttempt, String> {
+) -> Result<ReadAloudSubmitResult, String> {
     let me = workspace_identity(settings);
 
     // Load the event (must belong to me) plus its text's reference for scoring.
-    let (text_uuid, audio_path, created_at, content, normalized): (
+    // `updated_at` comes along because the revision this write stamps must be
+    // strictly newer than it — see [`next_revision`].
+    let (text_uuid, audio_path, created_at, current_rev, content, normalized): (
         String,
         Option<String>,
         String,
+        Option<String>,
         Option<String>,
         Option<String>,
     ) = {
         let ctx = open_attempts(settings, dataset_uuid)?;
         ctx.conn
             .query_row(
-                "SELECT a.text_uuid, a.audio_path, a.created_at, t.content, t.normalized_content \
+                "SELECT a.text_uuid, a.audio_path, a.created_at, a.updated_at, t.content, t.normalized_content \
                  FROM app.read_attempt_event a LEFT JOIN read_text t ON t.uuid = a.text_uuid \
                  WHERE a.uuid = ?1 AND a.user_id = ?2",
                 params![uuid, &me],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                )),
             )
             .map_err(|_| format!("Attempt {} not found", uuid))?
     };
@@ -1846,8 +1871,14 @@ async fn update_recognized_inner(
         None => None,
     };
 
-    let metrics = match (passed, summary.as_ref(), reference.as_deref()) {
-        (Some(assessment), _, _) => stored_metrics(Some(metrics_with_provenance(&assessment, via))),
+    // The three axes as this call produced them: taken as measured from the hub,
+    // re-derived from this device's recording, or absent when there was no
+    // reference to measure against. Provenance rides inside the stored text as an
+    // additive key, and `metrics_with_provenance` writing nothing for a blank
+    // `via` is what keeps a locally measured row shaped exactly as it was before
+    // a hub could measure one.
+    let measured: Option<Assessment> = match (passed, summary.as_ref(), reference.as_deref()) {
+        (Some(assessment), _, _) => Some(assessment),
         (None, Some(summary), Some(reference)) => {
             // Re-derive the metrics from the recording that is still on this device.
             // A missing WAV leaves fluency and pronunciation unmeasured — the score
@@ -1866,15 +1897,18 @@ async fn update_recognized_inner(
             let assessment =
                 assess_attempt(settings, summary, reference, recognized, &samples, words, &clip).await;
             log::info!("read_aloud: attempt {} — assessment computed", uuid);
-            stored_metrics(Some(assessment.metrics_json()))
+            Some(assessment)
         }
         _ => None,
     };
+    let metrics = measured
+        .as_ref()
+        .and_then(|a| stored_metrics(Some(metrics_with_provenance(a, via))));
 
     // Bump the revision so this newer result wins the last-write-wins comparison
     // on every device that already holds the attempt (§17.7). `created_at` stays
     // put — history ordering depends on it.
-    let revised_at = now_row_stamp();
+    let revised_at = next_revision(current_rev.as_deref());
     {
         let conn = open_app_attempts(settings)?;
         conn.execute(
@@ -1931,18 +1965,103 @@ async fn update_recognized_inner(
         uuid, score
     );
 
-    Ok(ReadAttempt {
-        uuid: uuid.to_string(),
-        text_uuid,
-        user_id: me,
-        audio_url,
-        audio_path,
-        recognized: recognized.to_string(),
+    // XP is awarded for the measured number, so it is earned here — seconds after
+    // the take or days later on a retry, whichever call produced the score.
+    let (xp_awarded, lifetime_xp, level) =
+        award_xp_for_score(settings, &me, dataset_uuid, &text_uuid, score)?;
+    if xp_awarded > 0 {
+        let _ = app.emit(
+            "xp-earned",
+            XpAwardResult {
+                xp_awarded,
+                lifetime_xp,
+                level,
+                is_new: true,
+            },
+        );
+    }
+
+    Ok(ReadAloudSubmitResult {
         score,
-        metrics,
-        feedback: None,
-        created_at,
+        summary,
+        assessment: measured,
+        attempt: ReadAttempt {
+            uuid: uuid.to_string(),
+            text_uuid,
+            user_id: me,
+            audio_url,
+            audio_path,
+            recognized: recognized.to_string(),
+            score,
+            metrics,
+            feedback: None,
+            created_at,
+        },
+        xp_awarded,
+        lifetime_xp,
+        level,
     })
+}
+
+/// The revision this row deserves: `now`, unless the stored one has not been
+/// outpaced yet — which the save-then-measure pair can hit inside its first
+/// millisecond. Peers only accept a strictly newer `updated_at` (§17.7), so a
+/// write that stamped equal to the previous one would be silently dropped and
+/// the measurement would never travel. A stamp this build cannot read is left
+/// behind in favour of `now`: garbage stays visible rather than being smoothed
+/// into a plausible instant.
+fn next_revision(current: Option<&str>) -> String {
+    let now = now_row_stamp();
+    let Some(raw) = current.filter(|c| !c.is_empty()) else {
+        return now;
+    };
+    let current = canonical_stamp(raw);
+    match chrono::DateTime::parse_from_rfc3339(&current) {
+        Ok(dt) => {
+            let stored = dt.with_timezone(&chrono::Utc);
+            if stored < chrono::Utc::now() {
+                now
+            } else {
+                row_stamp_at(stored + chrono::Duration::milliseconds(1))
+            }
+        }
+        Err(_) => now,
+    }
+}
+
+/// The scaled XP a measured score earns: +1 for passing, +1 more for a strong
+/// read. Each tier is deduped per text through the XP ledger's reference id, so
+/// repeating a take farms nothing while improving into the next tier still pays.
+/// Returns `(awarded, lifetime_xp, level)`.
+fn award_xp_for_score(
+    settings: &SettingsState,
+    user_id: &str,
+    dataset_uuid: &str,
+    text_uuid: &str,
+    score: f64,
+) -> Result<(i64, i64, i64), String> {
+    let mut total_awarded = 0i64;
+    let mut last: Option<XpAwardResult> = None;
+    for (threshold, tier) in [(XP_PASS_SCORE, "pass"), (XP_GOOD_SCORE, "good")] {
+        if score < threshold {
+            continue;
+        }
+        let r = xp_award_internal(
+            settings,
+            user_id,
+            1,
+            "read_aloud",
+            &format!("{}:{}", text_uuid, tier),
+            Some(dataset_uuid),
+        )?;
+        total_awarded += r.xp_awarded;
+        last = Some(r);
+    }
+    let (lifetime_xp, level) = last
+        .as_ref()
+        .map(|r| (r.lifetime_xp, r.level))
+        .unwrap_or((0, 1));
+    Ok((total_awarded, lifetime_xp, level))
 }
 
 /// Persist one attempt as a per-user event in the app DB and journal it under
@@ -2750,12 +2869,111 @@ pub async fn read_aloud_phoneme_model_delete(
     Ok(())
 }
 
-/// Submit a recorded attempt: persist the audio, score it against the reference
-/// text, store the attempt, and award scaled XP when the score passes.
+/// Make an ended take durable *before* anything measures it: write the recording
+/// to the per-user audio dir and store the attempt row with whatever transcript
+/// this device already holds. Nothing is scored here — accuracy, fluency and
+/// pronunciation all come from the measure step ([`read_aloud_rerecognize`], the
+/// same call "Assess again" uses).
+///
+/// The order is the point. A hub call that can run minutes, a model that fails to
+/// load, or a learner who closes the app mid-flight used to cost them the
+/// recording. Once this returns, the take is saved and its WAV is queued for the
+/// audio plane, so scoring becomes an update that can be retried at leisure
+/// rather than the one chance to keep the take at all.
+#[tauri::command]
+pub async fn read_aloud_save_take(
+    settings: State<'_, SettingsState>,
+    dataset_uuid: String,
+    text_uuid: String,
+    wav_base64: String,
+    recognized: Option<String>,
+) -> Result<ReadAttempt, String> {
+    save_take_inner(
+        &settings,
+        &dataset_uuid,
+        &text_uuid,
+        &wav_base64,
+        recognized.as_deref().unwrap_or(""),
+    )
+}
+
+/// Shared body of [`read_aloud_save_take`] and the first half of
+/// [`read_aloud_submit`]: store the recording and the row, queue the WAV for the
+/// audio plane, and hand the attempt back for measuring. `recognized` may be
+/// empty (a follower that has not transcribed yet); the measure step overwrites
+/// it with what the models actually heard.
+fn save_take_inner(
+    settings: &SettingsState,
+    dataset_uuid: &str,
+    text_uuid: &str,
+    wav_base64: &str,
+    recognized: &str,
+) -> Result<ReadAttempt, String> {
+    // The text has to exist to be read aloud against. The reference itself is
+    // resolved by the measure step, so this is a validity check only.
+    let dir = find_dataset_dir(settings, dataset_uuid)?;
+    text_reference(&dir, text_uuid)?;
+
+    // Persist the recording in the per-user audio dir — never inside the dataset,
+    // so an attempt stays out of the shared manifest and needs no overlay (§17).
+    let attempt_uuid = Uuid::new_v4().to_string();
+    let file_name = format!("{}.wav", attempt_uuid);
+    let audio_root = audio_dir(settings);
+    let audio_path = if wav_base64.trim().is_empty() {
+        None
+    } else {
+        fs::create_dir_all(&audio_root).map_err(|e| e.to_string())?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(wav_base64.trim())
+            .map_err(|e| format!("Invalid base64 audio: {}", e))?;
+        fs::write(audio_root.join(&file_name), &bytes).map_err(|e| e.to_string())?;
+        Some(file_name)
+    };
+    let audio_url = audio_path
+        .as_ref()
+        .map(|f| audio_root.join(f).to_string_lossy().into_owned());
+
+    let attempt = ReadAttempt {
+        uuid: attempt_uuid,
+        text_uuid: text_uuid.to_string(),
+        user_id: workspace_identity(settings),
+        audio_url: audio_url.clone(),
+        audio_path: audio_path.clone(),
+        // A take that has not been measured yet carries no numbers: the stored
+        // score stays 0 until the measure step writes the real one, and the
+        // absent `metrics` is what the UI reads as "Not measured" rather than as
+        // a 0% read. list_attempts re-scores the transcript on read anyway.
+        recognized: recognized.to_string(),
+        score: 0.0,
+        metrics: None,
+        feedback: None,
+        created_at: now_row_stamp(),
+    };
+    // Event write + `@app` change journal, through the same path a synced attempt
+    // arrives by.
+    save_attempt_row(settings, dataset_uuid, &attempt)?;
+
+    // The recording is on disk and the row is journaled; queue the WAV for upload
+    // so the other devices can re-run the assessment against the real audio (the
+    // attempt-audio plane, drained in the sync round). Best-effort: a failed
+    // enqueue must not lose the attempt — the row is already saved.
+    if let Some(name) = attempt.audio_path.as_deref() {
+        if let Err(e) = enqueue_attempt_audio_upload(settings, &attempt.uuid, name) {
+            log::warn!("read_aloud: could not queue attempt audio upload: {e}");
+        }
+    }
+    Ok(attempt)
+}
+
+/// Submit a recorded attempt as one call: save the take, then measure it — the
+/// two halves the UI now runs separately (so a cancelled assessment keeps the
+/// recording) composed over the same bodies for a caller that wants one atomic
+/// call. `read_aloud_save_take` followed by `read_aloud_rerecognize` does exactly
+/// what this does, in two steps.
 ///
 /// The frontend records + runs STT (via `model_transcribe_detailed`) and passes
 /// the WAV (base64), the recognized text and, when the model gave any, the word
-/// timings here so scoring, storage and XP all happen atomically on the backend.
+/// timings here so scoring, storage and XP all happen on the backend.
 ///
 /// The accuracy score is unchanged by the three-axis work: `score` is still the
 /// WIP number XP and `best_score` have always used.
@@ -2764,7 +2982,7 @@ pub async fn read_aloud_phoneme_model_delete(
 /// hub's `read_aloud_assess_take` reply) plus `via` here: the three-axis
 /// measure is skipped, the given assessment is stored as-is, and provenance
 /// lands as an additive `provenance` key inside `metrics_json`. Absent, the
-/// device measures the take itself — exact previous behavior.
+/// device measures the take itself.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn read_aloud_submit(
@@ -2778,149 +2996,18 @@ pub async fn read_aloud_submit(
     assessment: Option<Value>,
     via: Option<String>,
 ) -> Result<ReadAloudSubmitResult, String> {
-    let dir = find_dataset_dir(&settings, &dataset_uuid)?;
-
-    // Load the reference text (read-only). Practising never writes to the dataset.
-    let content = text_reference(&dir, &text_uuid)?;
-
-    let summary = score_asr(&content, &recognized);
-    let score = summary.score;
-
-    // A hub-measured assessment is stored as measured. The parse *is* the
-    // version guard: `metrics_json` is compacted from the same shape the hub
-    // returned, so a foreign one fails here and says what to do instead.
-    let passed: Option<Assessment> = match assessment {
-        Some(v) => Some(parse_passed_assessment(v)?),
-        None => None,
-    };
-
-    let assessment = match passed {
-        Some(a) => a,
-        None => {
-            // The recorder writes 16 kHz mono; a decode failure must not lose the
-            // attempt, so it degrades to "no fluency" instead of failing the
-            // submission.
-            let samples = decode_samples(&wav_base64).unwrap_or_else(|e| {
-                log::warn!("read_aloud: recording could not be decoded for fluency: {}", e);
-                Vec::new()
-            });
-            let clip = load_default_clip(&settings, &dataset_uuid, &text_uuid, &content);
-            assess_attempt(
-                &settings,
-                &summary,
-                &content,
-                &recognized,
-                &samples,
-                words.as_deref(),
-                &clip,
-            )
-            .await
-        }
-    };
-
-    // Persist the recording in the per-user audio dir — never inside the dataset,
-    // so an attempt stays out of the shared manifest and needs no overlay (§17).
-    let attempt_uuid = Uuid::new_v4().to_string();
-    let file_name = format!("{}.wav", attempt_uuid);
-    let audio_root = audio_dir(&settings);
-    let audio_path = if wav_base64.trim().is_empty() {
-        None
-    } else {
-        fs::create_dir_all(&audio_root).map_err(|e| e.to_string())?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(wav_base64.trim())
-            .map_err(|e| format!("Invalid base64 audio: {}", e))?;
-        fs::write(audio_root.join(&file_name), &bytes).map_err(|e| e.to_string())?;
-        Some(file_name)
-    };
-
-    let user_id = workspace_identity(&settings);
-    let now = now_row_stamp();
-
-    // Compact, then — for a remotely measured take — stamp provenance as an
-    // additive key peers that do not know it simply drop.
-    let stored = metrics_with_provenance(&assessment, via.as_deref());
-
-    let attempt = ReadAttempt {
-        uuid: attempt_uuid,
-        text_uuid: text_uuid.clone(),
-        user_id: user_id.clone(),
-        audio_url: audio_path.as_ref().map(|f| audio_root.join(f).to_string_lossy().into_owned()),
-        audio_path,
-        recognized,
-        score,
-        metrics: stored_metrics(Some(stored)),
-        feedback: None,
-        created_at: now,
-    };
-    // Event write + `@app` change journal, through the same path a synced attempt
-    // arrives by.
-    save_attempt_row(&settings, &dataset_uuid, &attempt)?;
-
-    // The recording is on disk and the row is journaled; queue the WAV for upload
-    // so the other devices can re-run the assessment against the real audio (the
-    // attempt-audio plane, drained in the sync round). Best-effort: a failed
-    // enqueue must not lose the attempt — the row is already saved.
-    if let Some(name) = attempt.audio_path.as_deref() {
-        if let Err(e) = enqueue_attempt_audio_upload(&settings, &attempt.uuid, name) {
-            log::warn!("read_aloud: could not queue attempt audio upload: {e}");
-        }
-    }
-
-    // Scaled XP: 1 XP for passing (>=60), +1 more for a strong read (>=80).
-    // Each tier is deduped per text via xp_earned, so repeating never farms XP
-    // but improving into a higher tier still rewards the extra point.
-    let mut total_awarded = 0i64;
-    let mut last: Option<XpAwardResult> = None;
-    if score >= XP_PASS_SCORE {
-        let r = xp_award_internal(
-            &settings,
-            &user_id,
-            1,
-            "read_aloud",
-            &format!("{}:pass", text_uuid),
-            Some(dataset_uuid.as_str()),
-        )?;
-        total_awarded += r.xp_awarded;
-        last = Some(r);
-    }
-    if score >= XP_GOOD_SCORE {
-        let r = xp_award_internal(
-            &settings,
-            &user_id,
-            1,
-            "read_aloud",
-            &format!("{}:good", text_uuid),
-            Some(dataset_uuid.as_str()),
-        )?;
-        total_awarded += r.xp_awarded;
-        last = Some(r);
-    }
-
-    let (lifetime_xp, level) = last
-        .as_ref()
-        .map(|r| (r.lifetime_xp, r.level))
-        .unwrap_or((0, 1));
-
-    if total_awarded > 0 {
-        let combined = XpAwardResult {
-            xp_awarded: total_awarded,
-            lifetime_xp,
-            level,
-            is_new: true,
-        };
-        let _ = app.emit("xp-earned", &combined);
-    }
-
-    Ok(ReadAloudSubmitResult {
-        score,
-        summary,
-        attempt,
+    let saved = save_take_inner(&settings, &dataset_uuid, &text_uuid, &wav_base64, &recognized)?;
+    update_recognized_inner(
+        &app,
+        &settings,
+        &dataset_uuid,
+        &saved.uuid,
+        &recognized,
+        words.as_deref(),
         assessment,
-        xp_awarded: total_awarded,
-        lifetime_xp,
-        level,
-    })
+        via.as_deref(),
+    )
+    .await
 }
 
 /// Parse an assessment measured by another device (`read_aloud_submit`'s

@@ -80,6 +80,13 @@ function formatLength(seconds: number): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
+/** An empty transcript says one of two things: nothing was heard, or nothing has
+ *  been heard *yet* — a take saved before any measurement was run over it. */
+function transcriptOf(attempt: ReadAttempt): string {
+  if (attempt.recognized) return attempt.recognized;
+  return attempt.metrics == null ? "(not transcribed yet)" : "(no speech recognized)";
+}
+
 /** Split text into sentences, keeping terminal punctuation with its sentence. */
 function splitSentences(text: string): string[] {
   const cleaned = text.replace(/\s+/g, " ").trim();
@@ -380,6 +387,17 @@ function AttemptCard({
             best
           </span>
         )}
+        {/* Saved without numbers — the take ended, but nothing measured it (the
+            learner chose "Not now", or the measuring failed). One press of
+            "Assess again" finishes it. */}
+        {attempt.metrics == null && (
+          <span
+            className="text-[10px] px-1.5 py-0.5 rounded-full bg-bg-muted text-text-tertiary shrink-0"
+            title="No measurement stored for this take. Use Assess again to score it."
+          >
+            not measured
+          </span>
+        )}
         <div className="flex-1 min-w-0" />
         {onPlay && (
           <button
@@ -420,13 +438,17 @@ function AttemptCard({
       </div>
 
       {/* The point of the card: all three scores, whatever was measurable. */}
-      <ScoreAxes score={attempt.score} metrics={attempt.metrics} />
+      <ScoreAxes
+        score={attempt.score}
+        metrics={attempt.metrics}
+        recognized={attempt.recognized}
+      />
 
       <p
         className="text-xs text-text-secondary break-words line-clamp-2"
         title={attempt.recognized}
       >
-        {attempt.recognized || "(no speech recognized)"}
+        {transcriptOf(attempt)}
       </p>
     </li>
   );
@@ -585,6 +607,14 @@ export default function AttemptsPanel({
               {selectedAttempt.metrics?.provenance?.via === "hub" && (
                 <span className="text-xs text-text-tertiary">Scored on the Hub</span>
               )}
+              {selectedAttempt.metrics == null && (
+                <span
+                  className="text-[10px] px-1.5 py-0.5 rounded-full bg-bg-muted text-text-tertiary shrink-0"
+                  title="No measurement stored for this take. Use Assess again to score it."
+                >
+                  not measured
+                </span>
+              )}
             </div>
 
             {/* The take's scores. With a stored assessment the cards carry the
@@ -605,7 +635,12 @@ export default function AttemptsPanel({
                 />
               </section>
             ) : (
-              <ScoreAxes score={selectedAttempt.score} metrics={null} size="md" />
+              <ScoreAxes
+                score={selectedAttempt.score}
+                metrics={null}
+                recognized={selectedAttempt.recognized}
+                size="md"
+              />
             )}
 
             {/* What to do about those numbers. A stored report is shown as it
@@ -636,7 +671,7 @@ export default function AttemptsPanel({
               <section className="flex flex-col gap-1 min-w-0">
                 <h3 className="text-xs font-medium text-text-secondary">Recognized text</h3>
                 <div className="p-4 rounded-xl bg-bg-muted text-text-primary text-base leading-relaxed whitespace-pre-wrap break-words">
-                  {selectedAttempt.recognized || "(no speech recognized)"}
+                  {transcriptOf(selectedAttempt)}
                 </div>
               </section>
             )}

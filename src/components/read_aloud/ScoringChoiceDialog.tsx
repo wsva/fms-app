@@ -11,20 +11,22 @@ import { Monitor, Server } from "lucide-react";
  * (docs/design/hub-mcp-compute-offload.md). So the choice is the learner's,
  * asked per take and answered by one tap; nothing here decides or remembers.
  *
+ * The third line is not an exit from the take but from the question: the
+ * recording is already saved by the time this dialog appears, so "Not now"
+ * keeps it and leaves it unmeasured until "Assess again" is pressed on its row.
+ *
  * The chrome matches `ProgressOverlay`: it appears exactly where that ring
  * would have, dimming the same window.
  */
 type Props = {
   onHub: () => void;
   onLocal: () => void;
-  /** Drop the take without scoring it. */
-  onDiscard: () => void;
-  /** What that quiet exit is called. Re-assessing an existing take discards
-   *  nothing, so the caller naming it says so; defaults to the take's wording. */
-  discardLabel?: string;
+  /** Leave the take unscored for now. Nothing is thrown away — the attempt is
+   *  already stored, only its numbers are waiting. */
+  onLater: () => void;
 };
 
-export default function ScoringChoiceDialog({ onHub, onLocal, onDiscard, discardLabel = "Discard take" }: Props) {
+export default function ScoringChoiceDialog({ onHub, onLocal, onLater }: Props) {
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
       <div className="flex w-full max-w-sm flex-col gap-3 rounded-2xl bg-bg-card p-6 shadow-xl">
@@ -57,10 +59,10 @@ export default function ScoringChoiceDialog({ onHub, onLocal, onDiscard, discard
           </span>
         </button>
         <button
-          onClick={onDiscard}
+          onClick={onLater}
           className="self-center mt-1 text-xs text-text-tertiary hover:text-text-primary cursor-pointer"
         >
-          {discardLabel}
+          Not now
         </button>
       </div>
     </div>

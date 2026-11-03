@@ -15,8 +15,9 @@ Open **Read Aloud** from the sidebar and pick a dataset (and, within it, the tex
 For the selected text you'll see its content and a **record** control. When the text has a **standard audio** clip, a player for it sits directly above the content — listen first to learn the pacing, then record:
 
 1. Read the text aloud while recording. A **live recognition** panel at the bottom of the page shows the transcript as you speak, so you can see immediately whether the model is hearing you — and whether it is hearing the right thing.
-2. Stop when finished. FmS transcribes your recording and compares it to the target text.
-3. A **score** badge shows how close you were, colour‑coded so you can see at a glance whether it was strong or needs work.
+2. Stop when finished. Your recording is **saved first**, before anything measures it, so a scoring run that fails, is cancelled or sits minutes behind a cold model never costs you the take. It is in [the attempts history](#attempts-and-history) straight away, marked **not measured** until its numbers arrive.
+3. FmS transcribes your recording and compares it to the target text. On a **Follower** — a phone, or a second PC beside your **Hub** — a dialog asks *where* it should be measured: **On the Hub**, where the full models run, or **On this device**. **Not now** is always the way out: the take stays saved and unmeasured, and [**Assess again**](#attempts-and-history) scores it whenever you like.
+4. A **score** badge shows how close you were, colour‑coded so you can see at a glance whether it was strong or needs work.
 
 The live panel is read‑only: it is there to catch a silent microphone or a model in the wrong language while there is still time to start over. The attempt itself always ends with **Stop**.
 
@@ -49,12 +50,12 @@ The **diff view** lines up the written text against what was recognised from you
 
 ## Attempts and history
 
-Every recording you make is saved as an **attempt**. The **attempts panel** lists your previous attempts for a text so you can:
+Every recording you make is saved as an **attempt** — saved the moment you press **Stop**, before anything is scored, so nothing you recorded can be lost to a failed or abandoned measurement. The **attempts panel** lists your previous attempts for a text so you can:
 
-- Read all three scores — accuracy, fluency and pronunciation — straight off each card, without opening the attempt. A score that could not be measured reads `—`, never a stand‑in number; hover it for the reason.
+- Read all three scores — accuracy, fluency and pronunciation — straight off each card, without opening the attempt. A score that could not be measured reads `—`, never a stand‑in number; hover it for the reason. A take whose measurement is still outstanding — you chose **Not now**, or the scoring did not finish — carries a **not measured** chip, and its transcript reads **not transcribed yet** until something runs over it.
 - Play back earlier recordings and compare them to now.
 - Watch your scores trend upward as you repeat a text.
-- **Assess again** an earlier take: it re‑transcribes the recording and recomputes its accuracy, fluency and pronunciation in place. The recording travels to your other devices via sync (the `attempt_audio` plane), so once a sync round has delivered it the action works wherever the attempt is — if it is still missing, run a sync to fetch the take. The new result syncs back too: after a round, the re-assessed score and metrics appear on every device that holds the attempt, the newest assessment winning. An **Ask agent** feedback report rides the same row, so it reaches your other devices as well — and because it quotes the numbers it was written from, re-assessing a take clears the now-stale report on every device (asking again is one click).
+- **Assess again** an earlier take: it re‑transcribes the recording and recomputes its accuracy, fluency and pronunciation in place — the same measurement a fresh take gets, so it is also how a **not measured** attempt finally gets its numbers. The recording travels to your other devices via sync (the `attempt_audio` plane), so once a sync round has delivered it the action works wherever the attempt is — if it is still missing, run a sync to fetch the take. The new result syncs back too: after a round, the re-assessed score and metrics appear on every device that holds the attempt, the newest assessment winning. An **Ask agent** feedback report rides the same row, so it reaches your other devices as well — and because it quotes the numbers it was written from, re-assessing a take clears the now-stale report on every device (asking again is one click).
 - Navigate between attempts and, where relevant, navigate to the sentences that most need work.
 
 Assessment can take a while (transcription first, then the phoneme model). An **assessment log** docked at the bottom of the attempts page tails each stage as it runs, so the wait is never silent; collapse it to a single line or close it once the run finishes.
@@ -80,7 +81,7 @@ A whole book is better delegated than typed: an agent can extract the text, spli
 
 ## XP
 
-Completing read‑aloud attempts contributes to your progress, and XP earned here (like the other modes) is recorded centrally and can sync across devices when you use a Hub.
+Completing read‑aloud attempts contributes to your progress, and XP earned here (like the other modes) is recorded centrally and can sync across devices when you use a Hub. XP follows the *measurement*, not the recording: a take earns its +1 (at 60%) and +1 more (at 80%) when its score is computed, so an attempt you left **not measured** earns nothing until **Assess again** gives it a number.
 
 ## Related
 
