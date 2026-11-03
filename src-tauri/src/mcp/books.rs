@@ -490,6 +490,24 @@ struct ReadAloudAssessParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct ReadAloudAssessTakeParam {
+    /// The dataset the text belongs to on this hub. Pronunciation is measured
+    /// against the text's standard audio, which lives in the dataset.
+    dataset_uuid: String,
+    /// The text that was read. Its default standard clip is the reference;
+    /// without one the axis reports `no_reference`.
+    text_uuid: String,
+    /// Base64 of the 16 kHz mono WAV take. The hub transcribes it with its
+    /// loaded STT model — this is the call that sheds that work off a phone.
+    wav_base64: String,
+    /// Fallback reference for a text the hub has not seen yet (authored on the
+    /// follower, not yet synced). The hub's own `read_text` row wins when it
+    /// exists; without either the call fails naming the next step.
+    #[serde(default)]
+    content: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct ReadAloudSubmitParam {
     dataset_uuid: String,
     text_uuid: String,
@@ -502,6 +520,17 @@ struct ReadAloudSubmitParam {
     /// `recognized`. Needed for the fluency axis; omit and it is not measured.
     #[serde(default)]
     words: Option<Vec<McpTimedWord>>,
+    /// A three-axis `assessment` already measured elsewhere (the reply of the
+    /// hub's `read_aloud_assess_take`). Pass it with `via` and this device
+    /// stores it as measured instead of re-running the model passes. Typed as
+    /// JSON because `Assessment` itself carries no `JsonSchema`.
+    #[serde(default)]
+    assessment: Option<JsonValue>,
+    /// Where the passed `assessment` was measured (e.g. `"hub"`). Stored as an
+    /// additive provenance key inside the attempt's metrics; ignored without
+    /// `assessment`.
+    #[serde(default)]
+    via: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -1378,7 +1407,28 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_submit", description = "Submit a reading attempt: stores the (optional) recording, scores the recognized transcript against the reference text with the WIP-based ASR metric, assesses fluency and pronunciation from the WAV, saves the attempt, and awards scaled XP (1 XP at score >= 60, +1 more at >= 80). Pass `words` (from model_transcribe_detailed) to get the fluency axis. Returns the score, the full scoring summary (alignment chunks included), the three-axis `assessment`, the saved attempt (with `metrics`), and XP awarded.")]
+    #[tool(name = "read_aloud_assess_take", description = "Score one whole take on this machine — STT included — from the WAV alone: transcribe `wav_base64` with the loaded model, then run the same three-axis assess pass read_aloud_assess uses. This is the follower's compute offload (docs/design/hub-mcp-compute-offload.md): a phone posts its recording here instead of running the model itself. Unlike read_aloud_assess, which takes an already-recognized transcript, nothing is pre-computed. The reference resolves from this machine's own `read_text` row first; `content` is the fallback for a text not yet synced. Persists nothing — the caller saves through read_aloud_submit with the returned `assessment` and `via` — and answers `{recognized, words, assessment, headline, provenance}`. Refusals name the next step: no STT model loaded (`model_download`), a take over 32 MB, an unknown text without `content`.")]
+    async fn read_aloud_assess_take(&self, Parameters(param): Parameters<ReadAloudAssessTakeParam>) -> Result<String, String> {
+        log::info!(
+            "[MCP] read_aloud_assess_take: dataset={}, text={}",
+            param.dataset_uuid,
+            param.text_uuid
+        );
+        let settings = self.app.state::<SettingsState>();
+        let model_state = self.app.state::<crate::models::ModelState>();
+        let value = datasets::read_aloud::assess_take(
+            &settings,
+            &model_state,
+            &param.dataset_uuid,
+            &param.text_uuid,
+            &param.wav_base64,
+            param.content.as_deref(),
+        )
+        .await?;
+        Ok(serde_json::to_string_pretty(&value).unwrap_or_default())
+    }
+
+    #[tool(name = "read_aloud_submit", description = "Submit a reading attempt: stores the (optional) recording, scores the recognized transcript against the reference text with the WIP-based ASR metric, assesses fluency and pronunciation from the WAV, saves the attempt, and awards scaled XP (1 XP at score >= 60, +1 more at >= 80). Pass `words` (from model_transcribe_detailed) to get the fluency axis. Pass `assessment` (the reply of a hub's read_aloud_assess_take) with `via` to store a take measured elsewhere: this device then skips its own model passes and journals provenance with the attempt. Returns the score, the full scoring summary (alignment chunks included), the three-axis `assessment`, the saved attempt (with `metrics`), and XP awarded.")]
     async fn read_aloud_submit(&self, Parameters(param): Parameters<ReadAloudSubmitParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_submit: dataset={}, text={}", param.dataset_uuid, param.text_uuid);
         let settings = self.app.state::<SettingsState>();
@@ -1390,6 +1440,8 @@ impl DatasetMcpServer {
             param.wav_base64,
             param.recognized,
             timed_words(param.words),
+            param.assessment.map(serde_json::Value::from),
+            param.via,
         )
         .await?;
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())

@@ -257,6 +257,19 @@ export interface Assessment {
 }
 
 /**
+ * The reply of the hub's `read_aloud_assess_take` (via `hub_mcp_call`): the
+ * take transcribed and three-axis scored on the hub machine, persisted on
+ * neither side until the follower submits it. `assessment` is the compact
+ * hub-side JSON the submit pass-through stores as measured.
+ */
+export interface HubAssessResult {
+  recognized: string;
+  /** Word timings when the hub's model gave them; empty means fluency not measured. */
+  words: { text: string; start: number; end: number }[] | null;
+  assessment: Assessment;
+}
+
+/**
  * The result of scoring a text's own standard audio: the clip is treated as the
  * "recording" and scored against the text, so the reference can be checked
  * before a learner is measured against it. Nothing is stored.

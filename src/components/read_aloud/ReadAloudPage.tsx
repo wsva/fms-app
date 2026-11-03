@@ -95,6 +95,8 @@ type RecorderMirror = {
   ready: boolean;
   recording: boolean;
   busy: boolean;
+  /** Record was pressed; the recorder is opening (the ring says "Preparing…"). */
+  preparing: boolean;
   liveText: string;
   liveBusy: boolean;
   liveSeconds: number;
@@ -104,6 +106,7 @@ const NO_RECORDER: RecorderMirror = {
   ready: false,
   recording: false,
   busy: false,
+  preparing: false,
   liveText: "",
   liveBusy: false,
   liveSeconds: 0,
@@ -392,6 +395,7 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
       ready: true,
       recording: ctl.recording,
       busy: ctl.busy,
+      preparing: ctl.preparing,
       liveText: ctl.liveText,
       liveBusy: ctl.liveBusy,
       liveSeconds: ctl.liveSeconds,

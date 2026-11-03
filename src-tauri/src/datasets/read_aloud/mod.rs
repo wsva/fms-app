@@ -2415,6 +2415,121 @@ pub async fn read_aloud_assess(
     .await)
 }
 
+/// The follower's compute offload (docs/design/hub-mcp-compute-offload.md §4.1):
+/// score one whole take on the hub — STT included — from the WAV alone.
+///
+/// Unlike [`read_aloud_assess`], which takes an already-recognized transcript
+/// and so leaves the model work on the phone, this transcribes the recording
+/// with the hub's loaded model, then runs the same three-axis assess pass. It
+/// persists nothing: the phone saves the attempt through `read_aloud_submit`
+/// and keeps authorship (the journal, the XP and the audio plane stay put).
+///
+/// The reference resolves the same way [`read_aloud_submit`] resolves it — the
+/// hub's own `read_text` row first, the caller-passed `content` only as a
+/// fallback for a text authored on the follower and not yet synced.
+#[cfg(feature = "stt")]
+pub(crate) async fn assess_take(
+    settings: &SettingsState,
+    model_state: &crate::models::ModelState,
+    dataset_uuid: &str,
+    text_uuid: &str,
+    wav_base64: &str,
+    content: Option<&str>,
+) -> Result<Value, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(wav_base64.trim())
+        .map_err(|e| format!("Invalid base64 audio: {}", e))?;
+    if bytes.len() > MAX_ATTEMPT_AUDIO_BYTES {
+        return Err(format!(
+            "The recording is {} MB, above the {} MB cap for one take — sync it to the hub and \
+             re-score it from the stored attempt instead",
+            bytes.len() / (1024 * 1024),
+            MAX_ATTEMPT_AUDIO_BYTES / (1024 * 1024)
+        ));
+    }
+    // Name the next step before the transcribe call rather than after: an
+    // unloaded model with no downloadable default is the one refusal this tool
+    // can answer for.
+    crate::models::engine::ensure_model_loaded(model_state)
+        .map_err(|_| "No STT model is loaded on this hub and none could be auto-loaded — \
+                     download one on the Models page (model_download)")?;
+
+    let samples = decode_samples(wav_base64)?;
+    let detailed = crate::models::transcribe::transcribe_samples_detailed(model_state, &samples)?;
+    let words: Vec<TimedWord> = detailed
+        .words
+        .iter()
+        .map(|w| TimedWord { text: w.text.clone(), start: w.start as f64, end: w.end as f64 })
+        .collect();
+    let words = (!words.is_empty()).then_some(words);
+    let recognized = detailed.text;
+
+    let dir = find_dataset_dir(settings, dataset_uuid)?;
+    let reference = match text_reference(&dir, text_uuid) {
+        Ok(r) => r,
+        Err(e) => match content.map(str::trim).filter(|c| !c.is_empty()) {
+            Some(c) => c.to_string(),
+            None => {
+                return Err(format!(
+                    "The dataset/text was not found on this hub ({e}) — sync it first or pass the \
+                     reference text as `content`"
+                ));
+            }
+        },
+    };
+
+    let summary = score_asr(&reference, &recognized);
+    let clip = load_default_clip(settings, dataset_uuid, text_uuid, &reference);
+    let assessment = assess_attempt(
+        settings,
+        &summary,
+        &reference,
+        &recognized,
+        &samples,
+        words.as_deref(),
+        &clip,
+    )
+    .await;
+
+    let mut value = assessment.to_value();
+    value["headline"] = json!(assessment.headline());
+    value["recognized"] = json!(recognized);
+    value["words"] = json!(words.unwrap_or_default());
+    value["provenance"] = json!({
+        "stt_model": model_state.active_version.lock().unwrap().clone(),
+        "schema_version": assessment.schema_version,
+    });
+    Ok(value)
+}
+
+/// Score one whole take (transcribe + three axes) for a follower device.
+///
+/// Desktop-registered: this is the hub's side of the offload, and the hub is a
+/// desktop machine. [`assess_take`] for what the call does.
+// Hub-side command: only the desktop handler list and the MCP tool call it.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+#[cfg(feature = "stt")]
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn read_aloud_assess_take(
+    settings: State<'_, SettingsState>,
+    model_state: State<'_, crate::models::ModelState>,
+    dataset_uuid: String,
+    text_uuid: String,
+    wav_base64: String,
+    content: Option<String>,
+) -> Result<Value, String> {
+    assess_take(
+        settings.inner(),
+        model_state.inner(),
+        &dataset_uuid,
+        &text_uuid,
+        &wav_base64,
+        content.as_deref(),
+    )
+    .await
+}
+
 /// What scoring a text's own standard audio produced: the clip's transcript, the
 /// reference it was scored against, and the same three-axis picture a take gets.
 #[derive(Serialize)]
@@ -2614,7 +2729,14 @@ pub async fn read_aloud_phoneme_model_delete(
 ///
 /// The accuracy score is unchanged by the three-axis work: `score` is still the
 /// WIP number XP and `best_score` have always used.
+///
+/// A follower that scored its take on the hub passes that `assessment` (the
+/// hub's `read_aloud_assess_take` reply) plus `via` here: the three-axis
+/// measure is skipped, the given assessment is stored as-is, and provenance
+/// lands as an additive `provenance` key inside `metrics_json`. Absent, the
+/// device measures the take itself — exact previous behavior.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn read_aloud_submit(
     app: tauri::AppHandle,
     settings: State<'_, SettingsState>,
@@ -2623,6 +2745,8 @@ pub async fn read_aloud_submit(
     wav_base64: String,
     recognized: String,
     words: Option<Vec<TimedWord>>,
+    assessment_json: Option<Value>,
+    via: Option<String>,
 ) -> Result<ReadAloudSubmitResult, String> {
     let dir = find_dataset_dir(&settings, &dataset_uuid)?;
 
@@ -2632,24 +2756,37 @@ pub async fn read_aloud_submit(
     let summary = score_asr(&content, &recognized);
     let score = summary.score;
 
-    // The recorder writes 16 kHz mono; a decode failure must not lose the attempt,
-    // so it degrades to "no fluency" instead of failing the submission.
-    let samples = decode_samples(&wav_base64).unwrap_or_else(|e| {
-        log::warn!("read_aloud: recording could not be decoded for fluency: {}", e);
-        Vec::new()
-    });
+    // A hub-measured assessment is stored as measured. The parse *is* the
+    // version guard: `metrics_json` is compacted from the same shape the hub
+    // returned, so a foreign one fails here and says what to do instead.
+    let passed: Option<Assessment> = match assessment_json {
+        Some(v) => Some(parse_passed_assessment(v)?),
+        None => None,
+    };
 
-    let clip = load_default_clip(&settings, &dataset_uuid, &text_uuid, &content);
-    let assessment = assess_attempt(
-        &settings,
-        &summary,
-        &content,
-        &recognized,
-        &samples,
-        words.as_deref(),
-        &clip,
-    )
-    .await;
+    let assessment = match passed {
+        Some(a) => a,
+        None => {
+            // The recorder writes 16 kHz mono; a decode failure must not lose the
+            // attempt, so it degrades to "no fluency" instead of failing the
+            // submission.
+            let samples = decode_samples(&wav_base64).unwrap_or_else(|e| {
+                log::warn!("read_aloud: recording could not be decoded for fluency: {}", e);
+                Vec::new()
+            });
+            let clip = load_default_clip(&settings, &dataset_uuid, &text_uuid, &content);
+            assess_attempt(
+                &settings,
+                &summary,
+                &content,
+                &recognized,
+                &samples,
+                words.as_deref(),
+                &clip,
+            )
+            .await
+        }
+    };
 
     // Persist the recording in the per-user audio dir — never inside the dataset,
     // so an attempt stays out of the shared manifest and needs no overlay (§17).
@@ -2670,6 +2807,10 @@ pub async fn read_aloud_submit(
     let user_id = workspace_identity(&settings);
     let now = now_row_stamp();
 
+    // Compact, then — for a remotely measured take — stamp provenance as an
+    // additive key peers that do not know it simply drop.
+    let stored = metrics_with_provenance(&assessment, via.as_deref());
+
     let attempt = ReadAttempt {
         uuid: attempt_uuid,
         text_uuid: text_uuid.clone(),
@@ -2678,7 +2819,7 @@ pub async fn read_aloud_submit(
         audio_path,
         recognized,
         score,
-        metrics: stored_metrics(Some(assessment.metrics_json())),
+        metrics: stored_metrics(Some(stored)),
         feedback: None,
         created_at: now,
     };
@@ -2750,6 +2891,41 @@ pub async fn read_aloud_submit(
         lifetime_xp,
         level,
     })
+}
+
+/// Parse an assessment measured by another device (`read_aloud_submit`'s
+/// pass-through). The parse *is* the version guard: required fields fail a
+/// foreign shape, and the stamped `schema_version` must match this build's.
+/// Every refusal names the one useful next step — re-score on this device.
+fn parse_passed_assessment(v: Value) -> Result<Assessment, String> {
+    let a: Assessment = serde_json::from_value(v).map_err(|e| {
+        format!(
+            "The hub measured this take with an incompatible app version ({e}) — \
+             re-score it on this device"
+        )
+    })?;
+    if a.schema_version != assess::SCHEMA_VERSION {
+        return Err(format!(
+            "The hub measured this take with schema v{}; this device reads v{} — \
+             re-score it on this device",
+            a.schema_version, assess::SCHEMA_VERSION
+        ));
+    }
+    Ok(a)
+}
+
+/// The compact metrics text, with `via` provenance as an additive key when the
+/// take was measured elsewhere. Peers that do not know the key simply drop it
+/// (the convention of the compact-metrics shape, ~2 KB row budget kept).
+fn metrics_with_provenance(assessment: &Assessment, via: Option<&str>) -> String {
+    let mut stored = assessment.metrics_json();
+    if let Some(via) = via.map(str::trim).filter(|v| !v.is_empty()) {
+        if let Ok(mut v) = serde_json::from_str::<Value>(&stored) {
+            v["provenance"] = json!({ "via": via });
+            stored = v.to_string();
+        }
+    }
+    stored
 }
 
 /// Fixtures shared by this group's tests. A module rather than copies: the
@@ -2868,6 +3044,56 @@ mod tests {
         assert_eq!(texts.len(), 1);
         assert_eq!(texts[0].attempt_count, 1);
         assert!(texts[0].best_score.is_some());
+    }
+
+    // -- the hub pass-through: store as measured, guard the version -------------
+
+    /// A hub-shaped assessment reply: what `read_aloud_assess_take` answers and
+    /// `read_aloud_submit` receives as `assessment`.
+    fn hub_assessment_json(score: f64) -> Value {
+        json!({
+            "schema_version": assess::SCHEMA_VERSION,
+            "capabilities": { "word_timings": true, "gop": false, "tts_reference": false },
+            "accuracy": {
+                "score": score,
+                "lenient_score": score,
+                "wer": 0.0,
+                "counts": { "ref": 2, "correct": 2, "minor": 0, "substituted": 0, "omitted": 0, "inserted": 0, "repeated": 0 }
+            },
+            "fluency": null,
+            "pronunciation": { "score": null, "method": null, "weak_ratio": null, "unavailable_reason": "model_missing" },
+            "words": [],
+            "pauses": []
+        })
+    }
+
+    #[test]
+    fn a_passed_assessment_parses_and_is_stored_as_measured() {
+        let a = parse_passed_assessment(hub_assessment_json(88.0)).expect("hub reply parses");
+        assert_eq!(a.accuracy.score, 88.0);
+
+        // Provenance is additive: the measured numbers ride along untouched.
+        let stored = metrics_with_provenance(&a, Some("hub"));
+        let v: Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(v["provenance"]["via"], "hub");
+        assert_eq!(v["accuracy"]["score"], 88.0);
+
+        // No `via` (or a blank one) — no key, exact previous metrics shape.
+        assert!(metrics_with_provenance(&a, None).find("provenance").is_none());
+        assert!(metrics_with_provenance(&a, Some(" ")).find("provenance").is_none());
+    }
+
+    #[test]
+    fn a_foreign_assessment_is_refused_with_the_next_step() {
+        // A garbled shape fails the parse, naming the re-score escape…
+        let e = parse_passed_assessment(json!({ "nonsense": true })).unwrap_err();
+        assert!(e.contains("re-score it on this device"), "{e}");
+        // …and so does a schema this build cannot read, even when it parses.
+        let e = parse_passed_assessment(hub_assessment_json(88.0)
+            .as_object().cloned().unwrap()
+            .into_iter().map(|(k, v)| { let v = if k == "schema_version" { json!(99) } else { v }; (k, v) })
+            .collect::<serde_json::Map<_, _>>().into()).unwrap_err();
+        assert!(e.contains("schema v99") && e.contains("re-score it on this device"), "{e}");
     }
 
     #[test]

@@ -229,7 +229,7 @@ const HUMAN_HANDOFF: [&str; 2] = [
 ///   nothing").
 /// * `sync_set_auto_connect` flips one boolean in global settings; its inverse is
 ///   the same call with the other value.
-const READ_TOOLS: [&str; 98] = [
+const READ_TOOLS: [&str; 99] = [
     "app_audit_get",
     "app_bootstrap",
     "app_events",
@@ -295,6 +295,7 @@ const READ_TOOLS: [&str; 98] = [
     "pc_sync_status",
     "read_aloud_align_proposals",
     "read_aloud_align_transcript",
+    "read_aloud_assess_take",
     "read_aloud_audit",
     "read_aloud_feedback_context",
     "read_aloud_get_text",

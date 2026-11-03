@@ -1,16 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Play, RotateCcw, Wand2 } from "lucide-react";
-import type { ReadAloudSubmitResult, ReadAttempt, ReadStandardAudio, ReadText } from "@/lib/read_aloud/types";
+import type { HubAssessResult, ReadAloudSubmitResult, ReadAttempt, ReadStandardAudio, ReadText } from "@/lib/read_aloud/types";
 import { GOOD_SCORE, PASS_SCORE, scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { useRecorder } from "@/components/books/useRecorder";
 import AsrDiff from "@/components/read_aloud/AsrDiff";
 import AssessmentCards from "@/components/read_aloud/AssessmentCards";
 import FeedbackPanel from "@/components/read_aloud/FeedbackPanel";
 import ProgressOverlay from "@/components/read_aloud/ProgressOverlay";
+import ScoringChoiceDialog from "@/components/read_aloud/ScoringChoiceDialog";
 import StandardAudioPlayer from "@/components/read_aloud/StandardAudioPlayer";
 import { isTauri } from "@/lib/tauri";
 import { acquireAudioSrc, releaseAudioSrc } from "@/lib/media/audioSrc";
@@ -25,6 +26,8 @@ export type RecorderCtl = {
   toggle: () => void;
   recording: boolean;
   busy: boolean;
+  /** Record was pressed; the microphone (and, on a hub, the model) is opening. */
+  preparing: boolean;
   /** The transcript recognized so far, while `recording` is true. */
   liveText: string;
   /** A stretch of the take is being recognized right now. */
@@ -79,12 +82,47 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
   const [result, setResult] = useState<ReadAloudSubmitResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // This workspace's role, read once: a hub scores locally with no choice (its
+  // models are its own); a follower is asked where each take should be measured
+  // — even with no hub configured, because the hub option's failure then names
+  // the missing configuration, which is more useful than no dialog at all.
+  const [role, setRole] = useState<string | null>(null);
+  const [choiceOpen, setChoiceOpen] = useState(false);
+  // The ended take, held while the choice or the hub call is in flight; one
+  // submit path finishes it, whichever way it was scored.
+  const [pendingWav, setPendingWav] = useState<string | null>(null);
+  const [scoringRemote, setScoringRemote] = useState(false);
+  // The local route runs `transcribeTake` outside the hook (the hook deferred
+  // it), so the "Transcribing…" phase belongs to the panel here.
+  const [transcribingLocal, setTranscribingLocal] = useState(false);
+  // Provenance of the on-screen result: the hub line is shown only for a take
+  // the hub actually measured (the attempt's stored metrics carry the same
+  // `provenance.via` key for every device that reads the row later).
+  const [hubScored, setHubScored] = useState(false);
 
   // Reset transient state whenever the selected text changes.
   useEffect(() => {
     setResult(null);
     setError(null);
+    setChoiceOpen(false);
+    setPendingWav(null);
+    setScoringRemote(false);
+    setTranscribingLocal(false);
+    setHubScored(false);
   }, [text.uuid]);
+
+  useEffect(() => {
+    if (!isTauri()) {
+      setRole("hub"); // browser dev shell: everything is local here
+      return;
+    }
+    invoke<{ role: string }>("settings_get_workspace")
+      .then((w) => setRole(w.role))
+      .catch((e) => {
+        logError(`role lookup failed: ${String(e)} — treating this device as a hub`, LOG_MODULE);
+        setRole("hub");
+      });
+  }, []);
 
   // A delegated feedback report is written back out of band by an attached
   // agent (via `read_aloud_save_feedback`, which emits this event). When it
@@ -112,37 +150,41 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
     };
   }, [result?.attempt.uuid, datasetUuid, text.uuid]);
 
-  const handleResult = useCallback(
-    async ({
-      wavBase64,
-      text: recognized,
-      words,
-    }: {
+  // One finish for both routes: persist, score-land, XP. A passed assessment
+  // was measured on the hub and is stored as measured (with `via` provenance
+  // journalled inside the attempt's metrics); absent, this device measures it.
+  const finishSubmit = useCallback(
+    async (payload: {
       wavBase64: string;
-      text: string;
-      words?: { text: string; start: number; end: number }[];
+      recognized: string;
+      words?: { text: string; start: number; end: number }[] | null;
+      assessment?: unknown;
+      via?: string;
     }) => {
-      if (!isTauri()) return;
       setSubmitting(true);
       setError(null);
       try {
         const res = await invoke<ReadAloudSubmitResult>("read_aloud_submit", {
           datasetUuid,
           textUuid: text.uuid,
-          wavBase64,
-          recognized,
-          // Word timings (when the model reports them) are what fluency is
+          wavBase64: payload.wavBase64,
+          recognized: payload.recognized,
+          // Word timings (when a model reported them) are what fluency is
           // measured from — without them that axis is reported as not measured.
-          words: words ?? null,
+          words: payload.words ?? null,
+          assessment: payload.assessment ?? null,
+          via: payload.via ?? null,
         });
         const a = res.assessment;
         logInfo(
-          `submit: score=${res.score.toFixed(1)} xp=+${res.xp_awarded} recognized="${recognized}"` +
+          `submit: score=${res.score.toFixed(1)} xp=+${res.xp_awarded} via=${payload.via ?? "local"}` +
+            ` recognized="${payload.recognized}"` +
             ` fluency=${a.fluency ? `${Math.round(a.fluency.wcpm)} wcpm` : "not measured"}` +
             ` pron=${a.pronunciation.score != null ? Math.round(a.pronunciation.score * 100) : "not measured"}`,
           LOG_MODULE
         );
         setResult(res);
+        setHubScored(payload.via === "hub");
         onScored();
       } catch (e) {
         const msg = String(e);
@@ -150,14 +192,136 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
         setError(msg);
       } finally {
         setSubmitting(false);
+        setPendingWav(null);
       }
     },
     [datasetUuid, text.uuid, onScored]
   );
 
-  const recorder = useRecorder(handleResult, (msg) => setError(msg), { live: true });
+  // The local route: recognize on this device (the hook deferred it), then the
+  // shared submit — today's exact path, one command after the model call.
+  const runLocal = useCallback(
+    async (wavBase64: string) => {
+      setChoiceOpen(false);
+      setHubScored(false);
+      setTranscribingLocal(true);
+      try {
+        const detailed = await recorderRef.current.transcribeTake(wavBase64);
+        await finishSubmit({
+          wavBase64,
+          recognized: (detailed.text || "").trim(),
+          words: detailed.words ?? null,
+        });
+      } catch (e) {
+        setChoiceOpen(false);
+        setPendingWav(null);
+        const msg = String(e);
+        logError(`local scoring failed: ${msg}`, LOG_MODULE);
+        setError(msg);
+      } finally {
+        setTranscribingLocal(false);
+      }
+    },
+    [finishSubmit]
+  );
 
-  const busy = recorder.processing || submitting;
+  // Bumped when a hub score is abandoned (cancel) or fails: the reply of the
+  // abandoned call must not land an attempt the learner walked away from.
+  const hubCallToken = useRef(0);
+
+  // The hub route (Variant B, docs/design/hub-mcp-compute-offload.md): post the
+  // WAV to the hub's MCP, get the measured take back, persist it here. The hub
+  // persists nothing — this device stays the author. A failure names the next
+  // step and re-opens the choice, so "This device" is one tap away.
+  const runHub = useCallback(
+    async (wavBase64: string) => {
+      setChoiceOpen(false);
+      setScoringRemote(true);
+      setError(null);
+      const token = ++hubCallToken.current;
+      try {
+        const reply = await invoke<HubAssessResult>("hub_mcp_call", {
+          tool: "read_aloud_assess_take",
+          args: {
+            dataset_uuid: datasetUuid,
+            text_uuid: text.uuid,
+            wav_base64: wavBase64,
+            // The phone's own reference, the same resolution order the hub
+            // applies to its row — the fallback for a text not yet synced here.
+            content: text.normalized_content ?? text.content,
+          },
+        });
+        if (token !== hubCallToken.current) return; // cancelled while in flight
+        await finishSubmit({
+          wavBase64,
+          recognized: reply.recognized,
+          words: reply.words ?? null,
+          assessment: reply.assessment,
+          via: "hub",
+        });
+      } catch (e) {
+        if (token !== hubCallToken.current) return;
+        const msg = String(e);
+        logError(`hub scoring failed: ${msg}`, LOG_MODULE);
+        setError(msg);
+        setPendingWav(null);
+        setChoiceOpen(true);
+      } finally {
+        if (token === hubCallToken.current) setScoringRemote(false);
+      }
+    },
+    [datasetUuid, text, finishSubmit]
+  );
+
+  // The recorder's deferred end-of-take: a hub role just scores locally; a
+  // follower is asked. (Without `deferTranscribe` the hook fills `text`/`words`
+  // itself and never sets `captured` — only the hub role could change mid-take,
+  // so handle both shapes.)
+  const handleResult = useCallback(
+    async ({
+      wavBase64,
+      text: recognized,
+      words,
+      captured,
+    }: {
+      wavBase64: string;
+      text: string;
+      words?: { text: string; start: number; end: number }[];
+      captured?: boolean;
+    }) => {
+      if (!isTauri()) return;
+      setError(null);
+      if (role === "hub" || !captured) {
+        await finishSubmit({ wavBase64, recognized, words: words ?? null });
+        return;
+      }
+      setPendingWav(wavBase64);
+      setChoiceOpen(true);
+    },
+    [role, finishSubmit]
+  );
+
+  // The role decides the recorder's shape before the first render that could
+  // press Record: a follower sheds the on-device model (`preloadModel: false`
+  // also closes the live preview, which would auto-load it) and ends its take
+  // at the WAV; the hub pre-loads and transcribes as it always has.
+  const recorder = useRecorder(handleResult, (msg) => setError(msg), {
+    live: true,
+    deferTranscribe: role !== "hub",
+    preloadModel: role === "hub",
+  });
+  // `runLocal` needs the hook's `transcribeTake` but the hook is built after
+  // the routes; this ref closes the cycle without rebuilding either.
+  const recorderRef = useRef(recorder);
+  recorderRef.current = recorder;
+
+  const busy =
+    recorder.preparing ||
+    recorder.processing ||
+    transcribingLocal ||
+    submitting ||
+    scoringRemote ||
+    choiceOpen;
   const score = result?.score ?? null;
 
   // The clip scoring would read: the default one, or — if its wav is not on
@@ -182,24 +346,29 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
 
   // Surface the recorder to the page frame: publish the latest toggle/status and
   // live preview whenever they change, and clear it on unmount so the Record
-  // button disables and the dock closes.
+  // button disables and the dock closes. Nothing is published until the role
+  // resolves: a fast first click would otherwise pick the wrong `preloadModel`.
   useEffect(() => {
+    if (role === null) return;
     onRecorder?.({
       toggle: recorder.toggle,
       recording: recorder.recording,
       busy,
+      preparing: recorder.preparing,
       liveText: recorder.liveText,
       liveBusy: recorder.liveBusy,
       liveSeconds: recorder.liveSeconds,
     });
   }, [
     onRecorder,
+    role,
     recorder.toggle,
     recorder.recording,
-    busy,
+    recorder.preparing,
     recorder.liveText,
     recorder.liveBusy,
     recorder.liveSeconds,
+    busy,
   ]);
 
   useEffect(() => () => onRecorder?.(null), [onRecorder]);
@@ -262,6 +431,9 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
                 ? "Passed — nice work."
                 : "Below 60% — give it another try."}
             </span>
+            {hubScored && (
+              <span className="text-xs text-text-tertiary">Scored on the Hub</span>
+            )}
             {result.xp_awarded > 0 && (
               <span className="ml-auto text-sm font-semibold text-yellow-500">
                 +{result.xp_awarded} XP
@@ -318,9 +490,41 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
 
       {/* After the take ends, transcribing and scoring happen behind a modal
           ring — dimming the window is deliberate: there is nothing else to look
-          at until the score is there. */}
-      {(recorder.processing || submitting) && (
-        <ProgressOverlay label={recorder.processing ? "Transcribing…" : "Scoring…"} />
+          at until the score is there. On a follower the ring yields first to
+          the scoring-choice dialog; while the hub measures the take, the ring
+          offers the way back to a local score (a cold model load there can run
+          minutes). */}
+      {choiceOpen && pendingWav !== null && (
+        <ScoringChoiceDialog
+          onHub={() => void runHub(pendingWav)}
+          onLocal={() => void runLocal(pendingWav)}
+          onDiscard={() => {
+            setChoiceOpen(false);
+            setPendingWav(null);
+          }}
+        />
+      )}
+      {(recorder.preparing || recorder.processing || transcribingLocal || submitting || scoringRemote) && (
+        <ProgressOverlay
+          label={
+            recorder.preparing
+              ? "Preparing…"
+              : recorder.processing || transcribingLocal
+              ? "Transcribing…"
+              : scoringRemote
+              ? "Scoring on the hub…"
+              : "Scoring…"
+          }
+          onCancel={scoringRemote ? () => {
+            // The abandoned call persists nothing on the hub, so walking away
+            // mid-flight cannot strand anything: the dialog simply re-asks.
+            // Bumping the token makes the late reply drop on the floor.
+            hubCallToken.current += 1;
+            setScoringRemote(false);
+            setChoiceOpen(true);
+          } : undefined}
+          cancelLabel="On this device instead"
+        />
       )}
     </div>
   );

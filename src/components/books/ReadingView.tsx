@@ -257,7 +257,9 @@ export default function ReadingView({ b }: Props) {
         </div>
       )}
 
-      {/* Sentence drawer */}
+      {/* Sentence drawer. It keeps one busy flag: preparing (the model preload)
+          used to ride inside `processing`; folded back in so Voice input still
+          disables and reads "Recognizing…" while the recorder opens. */}
       <SentenceDrawer
         drawer={drawer}
         content={drawerContent}
@@ -268,7 +270,7 @@ export default function ReadingView({ b }: Props) {
         terms={b.terms}
         saving={saving}
         recording={recorder.recording}
-        processing={recorder.processing}
+        processing={recorder.processing || recorder.preparing}
         onClose={b.closeDrawer}
         onClear={b.clearDrawer}
         onDiscard={b.discardDrawer}

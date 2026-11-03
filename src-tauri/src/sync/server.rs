@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Multipart, Path as AxPath, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path as AxPath, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
@@ -448,10 +448,15 @@ fn build_router(app: AppHandle, config: WebServiceConfig) -> Router {
         // MCP server + the two manual routes that describe it. Registering the
         // manual while `/mcp` is off would advertise a door that is not there.
         let mcp_service = crate::mcp::create_mcp_service(app);
+        // The follower's inline scoring call posts a whole take as base64
+        // inside the JSON-RPC body (hub-mcp-compute-offload.md §6.5): axum's
+        // 2 MiB default would 413 a 60 s read before the tool ever ran. The
+        // cap is the attempt-audio limit plus base64 inflation.
         r = r
             .route("/agent.md", get(agent_md_handler))
             .route("/agent.json", get(agent_json_handler))
-            .nest_service("/mcp", mcp_service);
+            .nest_service("/mcp", mcp_service)
+            .layer(DefaultBodyLimit::max(34 * 1024 * 1024));
         log::info!("[WebService] MCP surface enabled (/mcp, /agent.md, /agent.json)");
     } else {
         log::info!("[WebService] MCP surface disabled by mcp_enabled=false; /mcp 404s");

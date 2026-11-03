@@ -13,12 +13,21 @@
 type Props = {
   /** The phase to name inside the ring, e.g. "Transcribing…". */
   label: string;
+  /**
+   * A quiet escape under the ring, e.g. "On this device instead" while a hub
+   * scores: a cold model load there can run minutes behind this indeterminate
+   * ring, so the wait must never be a dead end. Omit it for phases the user
+   * cannot usefully leave (a local transcribe simply has to finish).
+   */
+  onCancel?: () => void;
+  /** The escape's label, shown only with `onCancel`. */
+  cancelLabel?: string;
 };
 
-export default function ProgressOverlay({ label }: Props) {
+export default function ProgressOverlay({ label, onCancel, cancelLabel }: Props) {
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
-      <div className="flex flex-col items-center rounded-2xl bg-bg-card px-8 py-6 shadow-xl">
+      <div className="flex flex-col items-center gap-3 rounded-2xl bg-bg-card px-8 py-6 shadow-xl">
         {/* The ring is wide on purpose: the phase name fits inside it on one
             line, which is where the eye already is when the arc spins. */}
         <div className="relative h-40 w-40">
@@ -32,6 +41,14 @@ export default function ProgressOverlay({ label }: Props) {
             {label}
           </span>
         </div>
+        {onCancel && (
+          <button
+            onClick={onCancel}
+            className="text-xs text-text-tertiary hover:text-text-primary cursor-pointer"
+          >
+            {cancelLabel ?? "Cancel"}
+          </button>
+        )}
       </div>
     </div>
   );

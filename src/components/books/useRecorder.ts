@@ -25,6 +25,12 @@ export type RecorderResult = {
    * fluency is reported as not measured.
    */
   words?: RecorderWord[];
+  /**
+   * Set when the hook was built with `deferTranscribe`: the take ended and the
+   * WAV is ready, but nothing was recognized — the caller routes the recording
+   * (transcribe on-device via `transcribeTake`, or score it elsewhere).
+   */
+  captured?: boolean;
 };
 
 /** One word of the transcript with its position in the take, in seconds. */
@@ -101,15 +107,31 @@ function chooseLiveCut(fresh: Float32Array): number {
  * accumulates in `liveText`, so the reader can see what was heard before the
  * take ends. The take itself still ends with `stop`, which recognizes the whole
  * recording in one pass and is what the caller is handed.
+ *
+ * Read-aloud routing (hub scoring) reshapes the two busy phases:
+ * * `preparing` covers the press of Record until the microphone is open — the
+ *   model preload included — so the overlay can say "Preparing…" instead of
+ *   borrowing "Transcribing…" for a phase that has not transcribed anything.
+ * * `preloadModel: false` skips the model check/load entirely (a follower that
+ *   means to shed the STT work must not auto-load the model it is shedding);
+ *   the live preview needs the on-device model, so it stays off in this mode
+ *   while `liveSeconds` still ticks.
+ * * `deferTranscribe: true` ends the take at the WAV: the caller receives
+ *   `{ wavBase64, captured: true }` and runs `transcribeTake` itself when the
+ *   recording is to be recognized on this device.
  */
 export function useRecorder(
   onResult: (r: RecorderResult) => void,
   onError: (msg: string) => void,
-  options?: { live?: boolean }
+  options?: { live?: boolean; deferTranscribe?: boolean; preloadModel?: boolean }
 ) {
   const live = options?.live === true;
+  const deferTranscribe = options?.deferTranscribe === true;
+  const preloadModel = options?.preloadModel !== false;
   const [recording, setRecording] = useState(false);
   const [processing, setProcessing] = useState(false);
+  // Record was pressed; the microphone (and, unless shed, the model) is opening.
+  const [preparing, setPreparing] = useState(false);
   // Live preview: what the model has recognized of the take so far.
   const [liveText, setLiveText] = useState("");
   const [liveBusy, setLiveBusy] = useState(false);
@@ -140,6 +162,9 @@ export function useRecorder(
    * The final pass: same model, but asking for word timings as well as text.
    * Runs once per take (the live preview keeps using the cheap text-only call),
    * because timings are only meaningful for the whole recording.
+   *
+   * Exported as `transcribeTake` for a deferred caller: the local option of
+   * the read-aloud scoring choice runs exactly this on-device path.
    */
   const transcribeDetailed = useCallback(
     (wavBase64: string) =>
@@ -217,16 +242,19 @@ export function useRecorder(
     }
 
     try {
-      // Ensure the STT model is loaded before recording.
-      setProcessing(true);
-      const status = await invoke<{ active_version: string | null }>("model_get_status");
-      logInfo(`recording: model status = ${status.active_version ?? "nothing loaded"}`, LOG_MODULE);
-      if (!status.active_version) {
-        const loadedAt = Date.now();
-        await invoke("model_start");
-        logInfo(`recording: STT model loaded in ${Date.now() - loadedAt} ms`, LOG_MODULE);
+      // Prepare: open the microphone, and — unless the caller sheds the STT
+      // work — make sure the model is loaded before recording. This phase is
+      // `preparing`, not `processing`: nothing has been transcribed yet.
+      setPreparing(true);
+      if (preloadModel) {
+        const status = await invoke<{ active_version: string | null }>("model_get_status");
+        logInfo(`recording: model status = ${status.active_version ?? "nothing loaded"}`, LOG_MODULE);
+        if (!status.active_version) {
+          const loadedAt = Date.now();
+          await invoke("model_start");
+          logInfo(`recording: STT model loaded in ${Date.now() - loadedAt} ms`, LOG_MODULE);
+        }
       }
-      setProcessing(false);
 
       const capture = await openMicCapture({ live });
       logInfo(
@@ -243,6 +271,7 @@ export function useRecorder(
       const stopped = new Promise<void>((resolve) => {
         requestStopRef.current = resolve;
       });
+      setPreparing(false);
       setRecording(true);
 
       // Everything after the press of Stop runs off that gate.
@@ -252,7 +281,9 @@ export function useRecorder(
           () => setLiveSeconds(Math.floor((Date.now() - startedAt) / 1000)),
           500
         );
-        if (live) void runLiveLoop(capture);
+        // The live loop recognizes on-device; a caller shedding the model work
+        // cannot run it (it would auto-load exactly what it is shedding).
+        if (live && preloadModel) void runLiveLoop(capture);
         try {
           await stopped;
           liveStopRef.current = true;
@@ -274,6 +305,20 @@ export function useRecorder(
           );
           const wav = encodeWav(samples, 16000);
           const wavBase64 = arrayBufferToBase64(wav);
+          if (deferTranscribe) {
+            // Hand the recording to the caller unrouted-by-us: the silent-take
+            // check below needs the model, so the caller's own transcribe or
+            // hub score is where a silent take surfaces.
+            logInfo(
+              `recording: ${(samples.length / 16000).toFixed(2)} s captured as ${(
+                wav.byteLength / 1024
+              ).toFixed(0)} KB of WAV — transcription deferred to the caller`,
+              LOG_MODULE
+            );
+            cbRef.current.onResult({ wavBase64, text: "", captured: true });
+            return;
+          }
+          setProcessing(true);
           logInfo(
             `recording: ${(samples.length / 16000).toFixed(2)} s captured as ${(
               wav.byteLength / 1024
@@ -309,27 +354,41 @@ export function useRecorder(
           clearInterval(elapsed);
           requestStopRef.current = null;
           setProcessing(false);
+          setPreparing(false);
           setRecording(false);
           setLiveBusy(false);
         }
       })();
     } catch (err) {
+      setPreparing(false);
       setProcessing(false);
       const msg = describeMicError(err);
       logError(`recording: could not start — ${msg}`, LOG_MODULE);
       cbRef.current.onError(msg);
     }
-  }, [live, runLiveLoop, transcribe, transcribeDetailed]);
+  }, [live, preloadModel, deferTranscribe, runLiveLoop, transcribe, transcribeDetailed]);
 
   const stop = useCallback(() => {
     requestStopRef.current?.();
   }, []);
 
+  /** The deferred local path: recognize a handed-back WAV on this device. */
+  const transcribeTake = useCallback(
+    async (wavBase64: string) => {
+      const detailed = await transcribeDetailed(wavBase64);
+      return {
+        text: detailed.text ?? "",
+        words: detailed.capabilities?.word_timings ? detailed.words : undefined,
+      };
+    },
+    [transcribeDetailed]
+  );
+
   const toggle = useCallback(() => {
-    if (processing) return;
+    if (preparing || processing) return;
     if (recording) stop();
     else start();
-  }, [recording, processing, start, stop]);
+  }, [recording, preparing, processing, start, stop]);
 
-  return { recording, processing, toggle, liveText, liveBusy, liveSeconds };
+  return { recording, processing, preparing, toggle, transcribeTake, liveText, liveBusy, liveSeconds };
 }

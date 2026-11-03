@@ -404,6 +404,8 @@ pub fn run() {
             sync::server::web_service_start,
             sync::server::web_service_stop,
             sync::server::sync_handover_epoch,
+            // The hub side of the follower's scoring offload — desktop only.
+            datasets::read_aloud::read_aloud_assess_take,
             ocr::ocr_recognize,
             ocr::ocr_recognize_tsv,
             ocr::ocr_list_languages,
@@ -534,6 +536,8 @@ pub fn run() {
             sync::client::sync_forget_dataset,
             sync::client::pc_pair_start,
             sync::client::pc_pair_reset_identity,
+            // Follower → hub MCP compute call (`docs/design/hub-mcp-compute-offload.md`).
+            sync::client::mcp::hub_mcp_call,
             // Follower → hub dataset push (`docs/design/dataset-push.md`).
             sync::client::dataset_push_preview,
             sync::client::dataset_push_to_hub,
@@ -1015,6 +1019,8 @@ macro_rules! mobile_invoke_handler {
             sync::client::sync_forget_dataset,
             sync::client::pc_pair_start,
             sync::client::pc_pair_reset_identity,
+            // Follower → hub MCP compute call (`docs/design/hub-mcp-compute-offload.md`).
+            sync::client::mcp::hub_mcp_call,
             // Follower → hub dataset push (`docs/design/dataset-push.md`).
             sync::client::dataset_push_preview,
             sync::client::dataset_push_to_hub,

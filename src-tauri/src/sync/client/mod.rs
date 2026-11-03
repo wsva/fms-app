@@ -112,6 +112,7 @@ pub(crate) mod pairing;
 pub(crate) mod hub_identity;
 pub(crate) mod push;
 pub(crate) mod round;
+pub(crate) mod mcp;
 
 pub(crate) use auth::*;
 pub(crate) use availability::*;
