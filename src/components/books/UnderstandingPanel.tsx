@@ -21,13 +21,12 @@ import {
   Check,
   X,
   Loader2,
-  Lightbulb,
   Bot,
   Copy,
   Languages,
 } from "lucide-react";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
-import AgentBadge from "@/components/agent/AgentBadge";
+import ArtifactGenerateButton from "./ArtifactGenerateButton";
 import SpeakToolbar from "./SpeakToolbar";
 import type { useBookData } from "@/hooks/useBookData";
 import type {
@@ -283,7 +282,7 @@ function GeneratedSection({
    *  into the job, so the copy-prompt fallback carries it too. */
   getInstructions?: () => string | undefined;
 }) {
-  const { generating, handleGenerate, handleRequestAgent, handleCancelJob, handleDeleteArtifact, jobs, mobile, bookUUID } = b;
+  const { generating, handleGenerate, handleRequestAgent, handleCancelJob, handleDeleteArtifact, jobs, mobile, bookUUID, understandingModel } = b;
   // The outstanding agent request for this exact scope + kind, if any.
   const job = jobs.find((j) => j.scope_uuid === scopeUuid && j.kind === kind);
   // The fallback, one disclosure down: for an agent that cannot attach on its
@@ -380,36 +379,22 @@ function GeneratedSection({
               <Trash2 size={14} />
             </button>
           )}
-          {/* Delegate to an attached third-party agent. Desktop only: agents
-              attach to the desktop MCP server, so a phone job would never be
-              picked up. Hidden while a request is already outstanding. The badge
-              is the leading icon; "Get Help" is the visible label (the badge is
-              decorative beside it, so it carries no own title). */}
-          {!mobile && !job && (
-            <button
-              title="Ask an attached agent to generate this"
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border border-border-default text-text-secondary hover:bg-bg-hover disabled:opacity-50 cursor-pointer shrink-0"
+          {/* One button, two roads: the label generates with the configured
+              LLM now, the menu also offers the agent mailbox. On a phone the
+              agent road cannot exist (agents attach to the desktop MCP
+              server), so the menu is not shown. Hidden while a request is
+              already outstanding — the job card owns the affordance then. */}
+          {!job && (
+            <ArtifactGenerateButton
+              label={artifact ? "Regenerate" : cta}
+              busy={generating}
               disabled={generating}
-              onClick={() => handleRequestAgent(scopeType, scopeUuid, kind, getInstructions?.())}
-            >
-              <AgentBadge height={11} chip title={null} />
-              Get Help
-            </button>
+              showAgent={!mobile}
+              modelName={understandingModel}
+              onCallLlm={() => handleGenerate(scopeType, scopeUuid, kind, getInstructions?.())}
+              onAskAgent={() => handleRequestAgent(scopeType, scopeUuid, kind, getInstructions?.())}
+            />
           )}
-          <button
-            className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-accent-bg text-white hover:opacity-90 disabled:opacity-50 cursor-pointer"
-            disabled={generating}
-            onClick={() => handleGenerate(scopeType, scopeUuid, kind, getInstructions?.())}
-          >
-            {generating ? (
-              <Loader2 size={13} className="animate-spin" />
-            ) : artifact ? (
-              <RefreshCw size={13} />
-            ) : (
-              <Lightbulb size={13} />
-            )}
-            {artifact ? "Regenerate" : cta}
-          </button>
         </div>
       </div>
       {job && (
@@ -493,7 +478,7 @@ function QuizTab({
   scopeType: ArtifactScopeType;
   scopeUuid: string;
 }) {
-  const { generating, handleGenerate, handleQuizFinish, listCardDatasets, handlePromoteToCard } = b;
+  const { generating, handleGenerate, handleQuizFinish, listCardDatasets, handlePromoteToCard, mobile, understandingModel } = b;
   const questions = useMemo<QuizQuestion[]>(
     () => (artifact ? parseQuiz(artifact.content) : []),
     [artifact]
@@ -518,14 +503,15 @@ function QuizTab({
     return (
       <div className="flex flex-col items-center gap-3 py-8 text-center">
         <p className="text-sm text-text-tertiary">No quiz for this {scopeNoun(scopeType)} yet.</p>
-        <button
-          className="flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium bg-accent-bg text-white hover:opacity-90 disabled:opacity-50 cursor-pointer"
+        <ArtifactGenerateButton
+          label="Generate quiz"
+          busy={generating}
           disabled={generating}
-          onClick={() => handleGenerate(scopeType, scopeUuid, "questions")}
-        >
-          {generating ? <Loader2 size={14} className="animate-spin" /> : <Lightbulb size={14} />}
-          Generate quiz
-        </button>
+          showAgent={!mobile}
+          modelName={understandingModel}
+          onCallLlm={() => handleGenerate(scopeType, scopeUuid, "questions")}
+          onAskAgent={() => b.handleRequestAgent(scopeType, scopeUuid, "questions")}
+        />
       </div>
     );
   }
