@@ -64,8 +64,12 @@ export default function UnderstandingToolbar({ b, onNavigate }: Props) {
     return !!findArtifact(scopeArtifacts, kind)?.stale;
   };
 
+  // The row itself must not scroll: `overflow-x-auto` would compute `overflow-y`
+  // to `auto` as well and clip the model popover, which hangs below this row.
+  // The tab strip is the scroller instead, so it shrinks on a narrow window and
+  // the toggle and the model button keep their place.
   return (
-    <div className="shrink-0 flex items-center gap-1 px-2 py-1 border-b border-border-default overflow-x-auto">
+    <div className="shrink-0 flex items-center gap-1 px-2 py-1 border-b border-border-default">
       {/* Scope toggle: understand the whole chapter instead of the focused
           paragraph. Applies to every content tab at once. */}
       <ToolbarButton
@@ -80,24 +84,26 @@ export default function UnderstandingToolbar({ b, onNavigate }: Props) {
       <div className="w-px h-4 bg-border-default shrink-0 mx-1" />
 
       {/* Tabs — the panel body below renders the active one. */}
-      {UNDERSTANDING_TABS.map((t) => (
-        <button
-          key={t.id}
-          onClick={() => setUnderstandingTab(t.id)}
-          className={`shrink-0 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer transition-colors ${
-            understandingTab === t.id
-              ? "bg-accent-bg text-white"
-              : "text-text-secondary hover:bg-bg-hover"
-          }`}
-        >
-          {t.label}
-          {tabStale(t.id) && <span className="ml-1 align-middle"><Wand2 size={11} className="inline text-amber-500" /></span>}
-        </button>
-      ))}
+      <div className="flex-1 min-w-0 flex items-center gap-1 overflow-x-auto">
+        {UNDERSTANDING_TABS.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setUnderstandingTab(t.id)}
+            className={`shrink-0 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer transition-colors ${
+              understandingTab === t.id
+                ? "bg-accent-bg text-white"
+                : "text-text-secondary hover:bg-bg-hover"
+            }`}
+          >
+            {t.label}
+            {tabStale(t.id) && <span className="ml-1 align-middle"><Wand2 size={11} className="inline text-amber-500" /></span>}
+          </button>
+        ))}
+      </div>
 
       {/* Model picker behind a popover: quick model switch stays here, the
           provider configuration (base URL, keys) lives on the Settings page. */}
-      <div className="relative shrink-0 ml-auto" ref={popoverRef}>
+      <div className="relative shrink-0" ref={popoverRef}>
         <ToolbarButton
           variant="toggleSoft"
           active={modelOpen}
