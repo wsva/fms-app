@@ -14,10 +14,11 @@ use super::proposals::{counts, load_proposals};
 /// Store the spans whose text has no clip yet as their standard audio.
 ///
 /// Nothing is decoded here: a span is three numbers and a recording id, the row
-/// is written, and the clip is cut the first time it is played, scored or packed
-/// (`standard_audio::materialize`). Applying a book is therefore a few hundred
-/// row writes instead of an hour of decoding — and a text nobody practises costs
-/// no disk at all. `limit` bounds the call (`generate_all`'s pattern): an agent
+/// is written, and the clip is cut the first time it is played, scored, served
+/// to a follower on sync or packed (`standard_audio::materialize`). Applying a
+/// book is therefore a few hundred row writes instead of an hour of decoding —
+/// and a text nobody practises costs no disk at all. `limit` bounds the call
+/// (`generate_all`'s pattern): an agent
 /// repeats until `remaining` is 0 rather than holding a request open for an hour.
 ///
 /// A text that **already has** standard audio is skipped, never overwritten. A

@@ -667,12 +667,58 @@ fn sanitize_snapshot_db(path: &Path) {
     }
 }
 
+/// Cut lazy read-aloud span clips into the live tree **before** a follower
+/// reads that tree. A clip may be only a *span* — three numbers and a
+/// recording id — until something needs the audio, and the follower can never
+/// cut it itself: the source recordings stay where the user keeps them and
+/// `align/`, the index that could resolve one, is a derived index that never
+/// ships. Running here (both `/manifest` and `/snapshot`) before the hashes
+/// are computed is what makes one follower sync round converge both planes:
+/// the row arrives through the journal, the bytes ride the very next manifest
+/// diff, and the hash and the file can never disagree (no half-cut wav is
+/// ever listed, because the cut finishes inside this call).
+///
+/// Cheap when there is nothing to cut — one DB query plus an existence check
+/// per row (`cut_missing` stats before it decodes) — so it belongs on the
+/// per-round `/manifest` poll too, not just on the snapshot: the decode pass
+/// happens once per dataset after a bulk save, which is exactly the moment
+/// the sync must not miss the audio. Blocking work, so off the async runtime
+/// — and never on a read-only base.
+async fn materialise_lazy_clips(settings: &SettingsState, dir: &Path) {
+    if datasets::is_under_download_root(settings, dir) {
+        return;
+    }
+    let d = dir.to_path_buf();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        let is_read_aloud =
+            datasets::read_info_opt(&d).is_some_and(|i| i.dataset_type == datasets::DatasetType::Read);
+        if !is_read_aloud {
+            return;
+        }
+        match datasets::read_aloud::standard_audio::materialize_all(&d) {
+            Ok(0) => {}
+            Ok(n) => log::info!(
+                "[sync] {}: cut {n} lazy standard-audio clip(s) for delivery",
+                d.display()
+            ),
+            Err(e) => log::warn!(
+                "[sync] {}: standard-audio materialise failed, serving as-is: {e}",
+                d.display()
+            ),
+        }
+    })
+    .await;
+}
+
 async fn manifest(State(st): State<RestState>, axum::extract::Path(uuid): axum::extract::Path<String>) -> Response {
     let settings = st.app.state::<SettingsState>();
     let (dir, ty) = match datasets::find_dataset_dir_typed(&settings, &uuid) {
         Ok(d) => d,
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
+    // The per-file map must name every byte a follower is owed, so lazy clips
+    // are cut before the walk — see `materialise_lazy_clips`.
+    materialise_lazy_clips(settings.inner(), &dir).await;
     checkpoint_db(&dir);
     let cache = crate::datasets::dictation::open_app_db(&settings).ok();
     let mut m = compute_manifest(&dir, &uuid, cache.as_ref());
@@ -695,36 +741,10 @@ async fn snapshot(State(st): State<RestState>, axum::extract::Path(uuid): axum::
         Err(e) => return json_error(StatusCode::NOT_FOUND, &e),
     };
 
-    // A read-aloud clip may be only a *span* of a recording until something needs
-    // the audio, and this is the moment: the recordings stay where the user keeps
-    // them and `align/` — the index that could resolve one — is a derived index
-    // that never ships, so a follower could not cut the clip either. Cutting here
-    // (before the manifest is computed, so the hash and the bytes agree) costs
-    // one decode pass per recording, once; it is deliberately *not* in
-    // `/manifest`, which is the cheap "is there anything new?" poll. Blocking
-    // work, so off the async runtime — and never on a read-only base.
-    if !datasets::is_under_download_root(&settings, &dir) {
-        let d = dir.clone();
-        let _ = tauri::async_runtime::spawn_blocking(move || {
-            let is_read_aloud =
-                datasets::read_info_opt(&d).is_some_and(|i| i.dataset_type == datasets::DatasetType::Read);
-            if !is_read_aloud {
-                return;
-            }
-            match datasets::read_aloud::standard_audio::materialize_all(&d) {
-                Ok(0) => {}
-                Ok(n) => log::info!(
-                    "[sync] {}: cut {n} lazy standard-audio clip(s) for the snapshot",
-                    d.display()
-                ),
-                Err(e) => log::warn!(
-                    "[sync] {}: standard-audio materialise failed, snapshotting as-is: {e}",
-                    d.display()
-                ),
-            }
-        })
-        .await;
-    }
+    // Lazy span clips must exist as bytes before the tree is hashed and
+    // archived — the recordings they name never travel and a follower cannot
+    // cut them itself. See `materialise_lazy_clips`.
+    materialise_lazy_clips(settings.inner(), &dir).await;
 
     // Read the hub cursor *before* freezing the DB image: a follower records this
     // seq as its cursor, so any change that races in afterwards (seq > this) is

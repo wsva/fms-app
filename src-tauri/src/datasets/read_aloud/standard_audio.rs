@@ -1531,7 +1531,9 @@ pub(crate) fn materialize(dir: &Path, text_uuid: &str) -> Result<usize, String> 
 }
 
 /// Cut every span clip in the dataset that has no file yet — what a dataset
-/// needs before it leaves the machine, because the recordings a span names stay
+/// needs before it leaves the machine or is served to a follower (the sync
+/// manifest and snapshot both materialise first, so the per-file map never
+/// omits a clip a subscriber is owed), because the recordings a span names stay
 /// where the user keeps them and never travel with the package.
 pub(crate) fn materialize_all(dir: &Path) -> Result<usize, String> {
     let conn = open_db(dir)?;
