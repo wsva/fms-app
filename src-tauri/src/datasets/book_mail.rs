@@ -35,7 +35,8 @@ use serde_json::{json, Value};
 
 use super::book::{find_book_dir, find_book_dir_write, open_book_db};
 use super::book_artifacts::{
-    hash_text, save_artifact_row, source_text, ArtifactJob, BookArtifact, GENERATED_KINDS,
+    apply_terms, hash_text, is_requestable, parse_terms_body, requestable_kinds, save_artifact_row,
+    source_text, ArtifactJob, BookArtifact, TERM_KIND,
 };
 use super::row_stamp_at;
 use crate::mail::{self, ClaimRequest, Mail, NewRequest, Refusal};
@@ -233,6 +234,10 @@ pub(crate) fn envelope(settings: &SettingsState, mail: &Mail) -> Option<Value> {
 /// subject supersedes an untaken one (§2.2). A row a live agent is holding is
 /// refused with `claim_required`, which is the panel's cue to offer *Ask again*
 /// rather than silently queueing a second ask.
+///
+/// `terms` is requestable beside the generated kinds: the glossary's batch, whose
+/// delivery is an artifact carrying the JSON array and whose *effect* is the
+/// `book_term` rows ([`TERM_KIND`]).
 pub(crate) fn request_artifact(
     settings: &SettingsState,
     book_uuid: &str,
@@ -242,10 +247,10 @@ pub(crate) fn request_artifact(
     instructions: Option<String>,
     model: Option<String>,
 ) -> Result<ArtifactJob, String> {
-    if !GENERATED_KINDS.contains(&kind) {
+    if !is_requestable(kind) {
         return Err(format!(
             "kind '{kind}' cannot be requested from an agent. Valid kinds: {}",
-            GENERATED_KINDS.join(", ")
+            requestable_kinds().join(", ")
         ));
     }
     let dir = find_book_dir_write(settings, book_uuid)?;
@@ -268,11 +273,23 @@ pub(crate) fn request_artifact(
     let channel = channel_id(book_uuid, scope_uuid);
     let subject = subject_key(book_uuid, scope_uuid, kind);
     let label = subject_label(kind, scope_uuid);
-    let body = format!(
-        "Generate a {kind} for this {scope_type} of the open book. The text is in the \
-         request payload's `data` envelope once you claim it; deliver it with \
-         book_save_artifact, citing job_uuid and claim_id."
-    );
+    // The glossary ask names its output shape, because "a terms artifact" is not
+    // self-explanatory to a reader who has only ever delivered markdown bodies.
+    let body = if kind == TERM_KIND {
+        format!(
+            "Extract the key recurring concepts of this {scope_type} of the open book into its \
+             glossary. The text is in the request payload's `data` envelope once you claim it. \
+             Deliver a JSON array of {{\"term\":…,\"definition\":…}} objects as the artifact \
+             content with book_save_artifact, citing job_uuid and claim_id: the app upserts the \
+             glossary rows it names and leaves the learner's own definitions alone."
+        )
+    } else {
+        format!(
+            "Generate a {kind} for this {scope_type} of the open book. The text is in the \
+             request payload's `data` envelope once you claim it; deliver it with \
+             book_save_artifact, citing job_uuid and claim_id."
+        )
+    };
 
     let mut conn = mail::open(settings)?;
     let request = NewRequest::new(&channel, &subject, &label)
@@ -458,6 +475,19 @@ pub(crate) fn deliver(
         artifact.uuid = target.clone();
     }
 
+    // A `terms` delivery is a glossary batch: the artifact row is its record, the
+    // `book_term` rows its effect. Read before the claim is spent, for the same
+    // reason as the mismatch check above — a body that is not an array of terms
+    // writes nothing, costs no attempt and can be resent.
+    let glossary = if artifact.kind == TERM_KIND {
+        Some(
+            parse_terms_body(&artifact.content)
+                .map_err(|e| format!("malformed_refused: {e}. Nothing was written."))?,
+        )
+    } else {
+        None
+    };
+
     // Which claim guards the write, and how fresh is the text behind it.
     let mut adopted = false;
     let claim = match claim_id {
@@ -558,6 +588,24 @@ pub(crate) fn deliver(
              was written. Claim again for the current state.",
             row.uuid
         ));
+    }
+
+    // The batch fills the glossary through the same rule the app's own extraction
+    // uses ([`apply_terms`]): a definition the learner wrote is left alone.
+    if let Some(items) = &glossary {
+        if let Err(e) = apply_terms(
+            &book,
+            settings,
+            book_uuid,
+            items,
+            &artifact.source,
+            artifact.model.as_deref(),
+        ) {
+            // The record landed but the rows did not: release the lease so the
+            // holder can retry in place (T8) — the upsert is idempotent.
+            let _ = mail::abort_delivery(&app, &row.uuid, &claim, now);
+            return Err(e);
+        }
     }
 
     let closed = mail::finish_delivery(&app, &row.uuid, &claim, &target, now)

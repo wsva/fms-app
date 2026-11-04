@@ -252,11 +252,13 @@ export function useBookData() {
       if (e.payload?.book_uuid && e.payload.book_uuid !== bookUUID) return;
       loadArtifacts();
       loadJobs();
+      // A delivered `terms` artifact filled the glossary rows beside it.
+      loadTerms();
     });
     return () => {
       unlisten.then((f) => f());
     };
-  }, [bookUUID, loadArtifacts, loadJobs]);
+  }, [bookUUID, loadArtifacts, loadJobs, loadTerms]);
 
   // ── Load chapters when book changes ────────────────────────────
   useEffect(() => {
@@ -1072,12 +1074,15 @@ export function useBookData() {
           model: understandingModel.trim() ? understandingModel.trim() : undefined,
         });
         await loadTerms();
+        // The extraction also recorded a `terms` batch artifact for this scope;
+        // the glossary's provenance line reads off it.
+        await loadArtifacts();
       } catch (e) {
         setError(`Extract terms failed: ${e}`);
       }
       setGenerating(false);
     },
-    [bookUUID, loadTerms, understandingModel]
+    [bookUUID, loadTerms, loadArtifacts, understandingModel]
   );
 
   const handleSaveTerm = useCallback(

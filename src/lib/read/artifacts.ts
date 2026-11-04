@@ -16,6 +16,7 @@ import {
   StickyNote,
   ClipboardCheck,
   BookMarked,
+  BookOpen,
   Languages,
   type LucideIcon,
 } from "lucide-react";
@@ -169,6 +170,7 @@ const KIND_META: Record<ArtifactKind, { label: string; icon: LucideIcon }> = {
   argument_map: { label: "Argument", icon: Network },
   questions: { label: "Quiz", icon: HelpCircle },
   translation: { label: "Translate", icon: Languages },
+  terms: { label: "Glossary", icon: BookOpen },
   note: { label: "Note", icon: StickyNote },
   assessment: { label: "Assessment", icon: ClipboardCheck },
 };

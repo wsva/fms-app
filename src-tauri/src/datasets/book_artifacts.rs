@@ -130,6 +130,32 @@ pub(crate) const GENERATED_KINDS: &[&str] = &[
     "translation",
 ];
 
+/// The glossary's batch kind. Not in [`GENERATED_KINDS`] — a glossary is a table,
+/// not one markdown body — but it borrows the artifact row's identity and the
+/// mailbox's delivery contract whole: the content is the JSON array
+/// `[{"term":…, "definition":…}]`, and writing such an artifact also upserts the
+/// `book_term` rows it names. Both roads reach that rule through a write door
+/// ([`save_artifact_inner`] for the app's own extraction and the sync replay,
+/// [`super::book_mail::deliver`] for an agent), so it is stated once here rather
+/// than in either caller.
+pub(crate) const TERM_KIND: &str = "terms";
+
+/// Kinds a mailbox request may name — and therefore kinds whose artifact uuid the
+/// subject derives, so a request and its delivery agree on one row.
+pub(crate) fn is_requestable(kind: &str) -> bool {
+    GENERATED_KINDS.contains(&kind) || kind == TERM_KIND
+}
+
+/// Those kinds as one list, so a refusal and a tool description name exactly what
+/// [`is_requestable`] accepts rather than restating it.
+pub(crate) fn requestable_kinds() -> Vec<&'static str> {
+    GENERATED_KINDS
+        .iter()
+        .copied()
+        .chain(std::iter::once(TERM_KIND))
+        .collect()
+}
+
 /// Kinds that are user-authored or note-derived and therefore never stale.
 fn is_never_stale(kind: &str) -> bool {
     matches!(kind, "note" | "assessment")
@@ -541,8 +567,15 @@ pub(crate) async fn assess_note(
     Ok(artifact)
 }
 
-/// Extract recurring concepts from a scope into the book glossary. A user-edited
-/// definition (`source='user'`) is never overwritten; generated rows are refreshed.
+/// Extract recurring concepts from a scope into the book glossary, recording the
+/// batch as a `terms` artifact of that scope.
+///
+/// The artifact is not a second copy of the data — it is why the glossary has
+/// *provenance*: the same source, model and staleness every other tab shows, and
+/// the very row an agent's delivery writes. Both roads therefore end in one write
+/// door ([`save_artifact_inner`]), which is where "a terms body fills the
+/// glossary" lives. A user-edited definition (`source='user'`) is never
+/// overwritten; generated rows are refreshed.
 pub(crate) async fn extract_terms(
     settings: &SettingsState,
     book_uuid: &str,
@@ -556,6 +589,7 @@ pub(crate) async fn extract_terms(
     if source.trim().is_empty() {
         return Err("the selected scope has no text to work from".into());
     }
+    let hash = hash_text(&source);
     let messages = vec![
         ChatMessage {
             role: "system".into(),
@@ -569,21 +603,96 @@ pub(crate) async fn extract_terms(
         ChatMessage { role: "user".into(), content: source },
     ];
     let resp = llm_complete(settings, model.clone(), messages, 0.3).await?;
-    let arr = extract_json_array(&resp.content).ok_or_else(|| {
+    let items = parse_terms_body(&resp.content).map_err(|_| {
         "the model did not return a valid JSON array of terms — try again or pick a stronger model"
             .to_string()
     })?;
 
-    let now = now_stamp();
-    let model_clean = model.filter(|m| !m.trim().is_empty());
-    let mut out: Vec<BookTerm> = Vec::new();
+    // The batch as one canonical body: what the model actually named, in order,
+    // so the artifact row and the glossary rows can never disagree.
+    let body = serde_json::to_string(
+        &items
+            .iter()
+            .map(|(term, definition)| serde_json::json!({ "term": term, "definition": definition }))
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| e.to_string())?;
+    let artifact = BookArtifact {
+        // An empty uuid is what makes the write door derive it from the subject,
+        // so a re-extraction replaces this scope's batch instead of piling up a
+        // second one — and an open agent request for the same batch is closed by
+        // it, the learner having generated the thing themselves.
+        uuid: String::new(),
+        book_uuid: book_uuid.to_string(),
+        scope_type: scope_type.to_string(),
+        scope_uuid: scope_uuid.to_string(),
+        kind: TERM_KIND.to_string(),
+        content: body,
+        source: "ollama".into(),
+        model: model.filter(|m| !m.trim().is_empty()),
+        parent_uuid: None,
+        content_hash: hash.clone(),
+        mail_uuid: None,
+        delivered_by: None,
+        // Built-in extraction reads the text in the same breath, so its vintage is
+        // provable rather than unknown.
+        source_hash: Some(hash),
+        created_at: String::new(),
+        updated_at: now_stamp(),
+    };
+    save_artifact_inner(settings, book_uuid, artifact, "user")?;
+    // Report what the glossary now holds, not what was asked for: a term the
+    // learner had already defined keeps their wording.
+    let mut out = Vec::with_capacity(items.len());
+    for (term, _) in &items {
+        out.push(query_term_by_name(&conn, book_uuid, term)?);
+    }
+    Ok(out)
+}
+
+/// The glossary entries a `terms` body names: `(term, definition)` pairs in the
+/// order given, entries without a term dropped. `Err` only when the text carries
+/// no JSON array at all — that is a malformed delivery, not an empty batch.
+pub(crate) fn parse_terms_body(text: &str) -> Result<Vec<(String, String)>, String> {
+    let arr = extract_json_array(text).ok_or_else(|| {
+        "terms content must be a JSON array of {\"term\":…, \"definition\":…} objects".to_string()
+    })?;
+    let mut items = Vec::new();
     for item in arr {
         let term = item.get("term").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        let definition = item.get("definition").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         if term.is_empty() {
             continue;
         }
-        // Existing row for (book, term)?
+        let definition = item
+            .get("definition")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        items.push((term, definition));
+    }
+    Ok(items)
+}
+
+/// Upsert parsed glossary entries: a term the book already carries is refreshed
+/// in place, a new one is added, and one the learner wrote keeps their wording.
+/// Journals every row it writes and returns the stored rows.
+///
+/// Called by the two doors that accept a `terms` body — [`save_artifact_inner`]
+/// (the app's own extraction, a plain save, the sync replay) and
+/// [`super::book_mail::deliver`] (a claimed agent delivery) — so the protection
+/// rule has exactly one statement.
+pub(crate) fn apply_terms(
+    conn: &Connection,
+    settings: &SettingsState,
+    book_uuid: &str,
+    items: &[(String, String)],
+    source: &str,
+    model: Option<&str>,
+) -> Result<Vec<BookTerm>, String> {
+    let now = now_stamp();
+    let mut out = Vec::with_capacity(items.len());
+    for (term, definition) in items {
         let existing: Option<(String, String)> = conn
             .query_row(
                 "SELECT uuid, source FROM book_term WHERE book_uuid = ?1 AND term = ?2 LIMIT 1",
@@ -591,20 +700,10 @@ pub(crate) async fn extract_terms(
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .ok();
-        let term_row = match existing {
-            Some((uuid, src)) if src == "user" => {
-                // Never overwrite a user-edited definition.
-                BookTerm {
-                    uuid,
-                    book_uuid: book_uuid.to_string(),
-                    term,
-                    definition,
-                    source: "user".into(),
-                    model: None,
-                    created_at: now.clone(),
-                    updated_at: now.clone(),
-                }
-            }
+        let (row, write) = match existing {
+            // Never overwrite a user-edited definition: return the stored row and
+            // write nothing, so its `updated_at` does not lie about being touched.
+            Some((uuid, src)) if src == "user" => (query_term(conn, &uuid)?, false),
             Some((uuid, _)) => {
                 let created_at = conn
                     .query_row(
@@ -613,42 +712,44 @@ pub(crate) async fn extract_terms(
                         |row| row.get::<_, String>(0),
                     )
                     .unwrap_or_else(|_| now.clone());
-                BookTerm {
-                    uuid,
-                    book_uuid: book_uuid.to_string(),
-                    term,
-                    definition,
-                    source: "ollama".into(),
-                    model: model_clean.clone(),
-                    created_at,
-                    updated_at: now.clone(),
-                }
+                (
+                    BookTerm {
+                        uuid,
+                        book_uuid: book_uuid.to_string(),
+                        term: term.clone(),
+                        definition: definition.clone(),
+                        source: source.to_string(),
+                        model: model.map(str::to_string),
+                        created_at,
+                        updated_at: now.clone(),
+                    },
+                    true,
+                )
             }
-            None => BookTerm {
-                uuid: Uuid::new_v4().to_string(),
-                book_uuid: book_uuid.to_string(),
-                term,
-                definition,
-                source: "ollama".into(),
-                model: model_clean.clone(),
-                created_at: now.clone(),
-                updated_at: now.clone(),
-            },
+            None => (
+                BookTerm {
+                    uuid: Uuid::new_v4().to_string(),
+                    book_uuid: book_uuid.to_string(),
+                    term: term.clone(),
+                    definition: definition.clone(),
+                    source: source.to_string(),
+                    model: model.map(str::to_string),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+                true,
+            ),
         };
-        // For the user-protected case we still return the *stored* definition.
-        let stored = if term_row.source == "user" {
-            query_term(&conn, &term_row.uuid).unwrap_or_else(|_| term_row.clone())
-        } else {
-            save_term_row(&conn, &term_row)?;
+        if write {
+            save_term_row(conn, &row)?;
             let _ = commit_change(
                 settings,
                 "book_term_save",
                 book_uuid,
-                &serde_json::to_value(&term_row).unwrap_or_default(),
+                &serde_json::to_value(&row).unwrap_or_default(),
             );
-            term_row.clone()
-        };
-        out.push(stored);
+        }
+        out.push(row);
     }
     Ok(out)
 }
@@ -687,6 +788,17 @@ fn query_term(conn: &Connection, uuid: &str) -> Result<BookTerm, String> {
     conn.query_row(
         &format!("SELECT {} FROM book_term WHERE uuid = ?1", TERM_COLS),
         [uuid],
+        row_to_term,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// The stored row behind a term's *text* — the book's real identity for a glossary
+/// entry, since an upsert can land on an uuid the caller never knew.
+fn query_term_by_name(conn: &Connection, book_uuid: &str, term: &str) -> Result<BookTerm, String> {
+    conn.query_row(
+        &format!("SELECT {} FROM book_term WHERE book_uuid = ?1 AND term = ?2", TERM_COLS),
+        rusqlite::params![book_uuid, term],
         row_to_term,
     )
     .map_err(|e| e.to_string())
@@ -753,14 +865,15 @@ pub async fn book_list_artifacts(
 // Artifact writes
 // ============================================================
 
-/// Write one artifact row, close any request it satisfies, and journal it.
+/// Write one artifact row, apply it when it is a glossary batch, close any
+/// request it satisfies, and journal it.
 ///
 /// Shared by the built-in generator, the plain save path and the sync replay —
 /// none of which holds a claim, so this path can only *adopt* a free request.
 /// The claimed path is [`super::book_mail::deliver`], where the write is guarded
 /// by the row inside the same statement.
 pub(crate) fn save_artifact_inner(
-    settings: &State<'_, SettingsState>,
+    settings: &SettingsState,
     book_uuid: &str,
     artifact: BookArtifact,
     by: &str,
@@ -769,11 +882,18 @@ pub(crate) fn save_artifact_inner(
     let conn = open_book_db(&dir)?;
     let mut artifact = artifact;
     artifact.book_uuid = book_uuid.to_string();
+    // A `terms` write is also a glossary batch, so its body is read *before*
+    // anything lands: a malformed one writes neither the artifact nor a term.
+    let glossary = if artifact.kind == TERM_KIND {
+        Some(parse_terms_body(&artifact.content)?)
+    } else {
+        None
+    };
     if artifact.uuid.trim().is_empty() {
         // A generated artifact derives its uuid from the subject, so the row a
         // request will land on exists before anyone can deliver into it. A note
         // is not addressed by mail, so it keeps a random one.
-        artifact.uuid = if GENERATED_KINDS.contains(&artifact.kind.as_str()) {
+        artifact.uuid = if is_requestable(&artifact.kind) {
             super::book_mail::target_for(book_uuid, &artifact.scope_uuid, &artifact.kind)
         } else {
             Uuid::new_v4().to_string()
@@ -784,6 +904,16 @@ pub(crate) fn save_artifact_inner(
     }
     artifact.updated_at = now_stamp();
     save_artifact_row(&conn, &artifact)?;
+    if let Some(items) = &glossary {
+        apply_terms(
+            &conn,
+            settings,
+            book_uuid,
+            items,
+            &artifact.source,
+            artifact.model.as_deref(),
+        )?;
+    }
     // An app-side write satisfies any pending request for the same subject —
     // whatever produced it (the built-in generator the user ran instead of
     // waiting, or an artifact pulled from another device). A live claim is left
@@ -1132,13 +1262,7 @@ pub async fn book_save_term(
     term.updated_at = now_stamp();
     save_term_row(&conn, &term)?;
     // Re-read so an ON CONFLICT upsert returns the stored row (its real uuid).
-    let stored = conn
-        .query_row(
-            &format!("SELECT {} FROM book_term WHERE book_uuid = ?1 AND term = ?2", TERM_COLS),
-            rusqlite::params![book_uuid, term.term],
-            row_to_term,
-        )
-        .unwrap_or(term.clone());
+    let stored = query_term_by_name(&conn, &book_uuid, &term.term).unwrap_or(term.clone());
     let _ = commit_change(
         &settings,
         "book_term_save",

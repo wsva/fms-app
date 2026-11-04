@@ -88,6 +88,7 @@ export type ArtifactKind =
   | "argument_map"
   | "questions"
   | "translation"
+  | "terms"
   | "note"
   | "assessment";
 
@@ -99,6 +100,7 @@ export const ARTIFACT_KINDS: ArtifactKind[] = [
   "argument_map",
   "questions",
   "translation",
+  "terms",
   "note",
   "assessment",
 ];
@@ -113,6 +115,14 @@ export const GENERATED_KINDS: ArtifactKind[] = [
   "translation",
 ];
 
+/**
+ * The glossary batch: one `terms` artifact per scope, whose content is the JSON
+ * array `[{'term':…,'definition':…}]` of what that extraction found. Writing one
+ * — by the direct LLM call or by an agent's delivery — fills the book's glossary
+ * rows beside it, and leaves the learner's own definitions alone.
+ */
+export const TERM_KIND: ArtifactKind = "terms";
+
 /** What an artifact is attached to. */
 export type ArtifactScopeType = "paragraph" | "chapter" | "sentence";
 
@@ -124,7 +134,8 @@ export interface BookArtifact {
   /** break-row uuid / chapter uuid / sentence uuid. */
   scope_uuid: string;
   kind: ArtifactKind | string;
-  /** Markdown; for `questions`, a JSON array of `QuizQuestion`. */
+  /** Markdown; for `questions`, a JSON array of `QuizQuestion`; for `terms`, a
+   *  JSON array of `{term, definition}`. */
   content: string;
   /** "ollama" | "agent" | "user". */
   source: string;

@@ -27,7 +27,8 @@ type Props = {
   onNavigate: (tab: TabId) => void;
 };
 
-/** The primary generated artifact a tab's stale wand keys off (null: never stale). */
+/** The artifact a tab's stale wand keys off (null: never stale). The glossary
+ *  keys off its last extraction batch, whichever road wrote that batch. */
 const TAB_STALE_KIND: Record<UnderstandingTab, ArtifactKind | null> = {
   digest: "digest",
   explain: "explanation",
@@ -36,7 +37,7 @@ const TAB_STALE_KIND: Record<UnderstandingTab, ArtifactKind | null> = {
   argument: "argument_map",
   quiz: "questions",
   notes: null,
-  glossary: null,
+  glossary: "terms",
 };
 
 export default function UnderstandingToolbar({ b, onNavigate }: Props) {
