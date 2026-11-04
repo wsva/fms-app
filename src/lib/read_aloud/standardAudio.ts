@@ -145,6 +145,57 @@ export async function generateStandardAudio(params: {
   });
 }
 
+/**
+ * The JSON a batch generate returns — the same body the MCP tool
+ * `read_aloud_standard_audio_generate_all` reports. `dry_run` fills
+ * `would_generate`/`estimate_seconds` and writes nothing; a real run fills
+ * `generated`/`failed`/`remaining`. Progress is read off `remaining` falling.
+ */
+export interface GenerateAllResult {
+  status: string;
+  voice: string;
+  voice_locale: string;
+  voice_source: VoiceResolution["source"];
+  voice_warning?: string | null;
+  hint?: string | null;
+  texts_with_audio: number;
+  texts_total: number;
+  dry_run: boolean;
+  // dry_run only
+  would_generate?: number;
+  estimate_seconds?: number;
+  remaining?: number;
+  // real run only
+  generated?: number;
+  failed?: { text_uuid: string; error: string }[];
+  failed_count?: number;
+}
+
+/**
+ * Synthesise many texts in one bounded call, in `order_num` order — the batch
+ * twin of `generateStandardAudio`, and what the TTS tab walks a dataset with.
+ * `onlyMissing` (default true on the backend) skips texts that already have a
+ * clip, so a repeat is safe; `limit` bounds one call; `dryRun` reports what would
+ * happen and writes nothing. Voice omitted means each text speaks with the voice
+ * the dataset's language resolves to.
+ */
+export async function generateAllStandardAudio(params: {
+  datasetUuid: string;
+  voice?: string;
+  onlyMissing?: boolean;
+  limit?: number;
+  dryRun?: boolean;
+}): Promise<GenerateAllResult> {
+  requireTauri();
+  return invoke<GenerateAllResult>("read_aloud_standard_audio_generate_all", {
+    datasetUuid: params.datasetUuid,
+    voice: params.voice ?? null,
+    onlyMissing: params.onlyMissing ?? null,
+    limit: params.limit ?? null,
+    dryRun: params.dryRun ?? null,
+  });
+}
+
 /** Make one clip the default the scorer reads. */
 export async function setDefaultStandardAudio(
   datasetUuid: string,

@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { FolderOpen, ListChecks } from "lucide-react";
+import { FolderOpen, ListChecks, Volume2 } from "lucide-react";
 import { TabBar, type TabBarItem } from "@/components/ui/toolbar";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
 import { canSave } from "./ClipActions";
 import TextEditor from "./TextEditor";
 import TextQueue, { QUEUE_FILTERS, matchesFilter, type QueueFilter } from "./TextQueue";
 import SourceAudiosTab from "./SourceAudiosTab";
+import TtsBatchTab from "./TtsBatchTab";
 import { Splitter, useSplitWidth } from "./Splitter";
 import { COARSE_STEP, MIN_SPAN, NUDGE_STEP, errorText, roundMs } from "./format";
 import { useAlignSources } from "./useAlignSources";
@@ -50,8 +51,9 @@ const TEXTS_SPLIT = {
 
 type Note = { kind: "ok" | "warn"; text: string };
 
-/** The two jobs, one per tab, in the order they are done. */
-type TabId = "sources" | "texts";
+/** The two jobs, one per tab, in the order they are done — plus the TTS batch
+ *  that speaks every text without a recording in sight. */
+type TabId = "sources" | "texts" | "tts";
 
 type Props = {
   datasetUuid: string;
@@ -300,6 +302,7 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
   const tabItems: TabBarItem<TabId>[] = [
     { id: "sources", label: "Source Audios", icon: FolderOpen, count: sourceList.sources.length },
     { id: "texts", label: "Texts", icon: ListChecks, count: saveable },
+    { id: "tts", label: "TTS", icon: Volume2 },
   ];
 
   // One line under the tabs, always in the same place: what just happened, or
@@ -309,7 +312,9 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
       ? spans.length === 0
         ? "Nothing placed yet: press Guess for all to walk the texts along the recordings."
         : "Space play · ← → nudge the highlighted edge (Shift 100 ms) · ↑ ↓ text · Esc stop · Save stores the span"
-      : "Listen to each file once, read what came back on the right, then save the texts on the Texts tab.";
+      : tab === "tts"
+        ? "Speak the whole dataset at once: generate the first few, listen, then run the batch over the texts still missing a clip."
+        : "Listen to each file once, read what came back on the right, then save the texts on the Texts tab.";
   const busyText =
     busy === "picking"
       ? "Picking the folder…"
@@ -325,7 +330,9 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
                 ? "Saving the span as standard audio…"
                 : busy === "deleting"
                   ? "Deleting the clip…"
-                  : "";
+                  : busy === "tts"
+                    ? "Speaking the texts with Edge TTS…"
+                    : "";
 
   return (
     <div className="flex-1 min-h-0 flex flex-col">
@@ -426,6 +433,15 @@ export default function SourceAlignWorkspace({ datasetUuid, onApplied }: Props) 
               canGuess={sourceList.transcribed > 0}
             />
           </div>
+        </div>
+      ) : tab === "tts" ? (
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 lg:overflow-hidden">
+          <TtsBatchTab
+            datasetUuid={datasetUuid}
+            busy={busy}
+            pipeline={pipeline}
+            onApplied={onApplied}
+          />
         </div>
       ) : (
         <div className="flex-1 min-h-0 overflow-y-auto p-4 lg:overflow-hidden">

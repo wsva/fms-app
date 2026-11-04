@@ -1997,6 +1997,35 @@ pub async fn read_aloud_standard_audio_generate(
     Ok(clip)
 }
 
+/// Synthesise many texts in one bounded call, in `order_num` order — the batch
+/// twin of [`read_aloud_standard_audio_generate`] and the MCP tool of the same
+/// name, through the same [`generate_all`] body. `voice` omitted means each text
+/// speaks with the voice the dataset's language resolves to; `only_missing`
+/// (default true) skips texts that already have a clip, so a repeat is safe; a
+/// `limit` bounds the call and `dry_run` reports what would happen and writes
+/// nothing. The response is the JSON the batch path builds — `{generated, failed,
+/// remaining, texts_with_audio, texts_total, voice, ...}` — so the TTS tab can
+/// walk a whole dataset by calling this until `remaining` is 0.
+#[tauri::command]
+pub async fn read_aloud_standard_audio_generate_all(
+    settings: State<'_, SettingsState>,
+    dataset_uuid: String,
+    voice: Option<String>,
+    only_missing: Option<bool>,
+    limit: Option<i64>,
+    dry_run: Option<bool>,
+) -> Result<Value, String> {
+    generate_all(
+        &settings,
+        &dataset_uuid,
+        voice.as_deref(),
+        only_missing.unwrap_or(true),
+        limit,
+        dry_run.unwrap_or(false),
+    )
+    .await
+}
+
 /// Make one clip the default the scorer reads. Exactly one stays default.
 #[tauri::command]
 pub async fn read_aloud_standard_audio_set_default(
