@@ -52,9 +52,21 @@ type Props = {
  * comes from `Card` (src/components/ui/card) — see docs/design/cards.md.
  *
  * Structure rule: the root is a region, not a click target. The open target is
- * one `<button>` covering the glyph and text, and the pencil is its sibling —
- * never its child, which would be a button inside a button.
+ * one `<button>`, and the pencil is its sibling — never its child, which would
+ * be a button inside a button. The button's own box is only the glyph and text,
+ * but its `::after` stretches over the whole front face (the stretched-link
+ * pattern), so the hit area matches the affordance: the card lifts on hover as
+ * a whole, so the whole face opens it. The pencil sits above that overlay with
+ * `relative z-10` and keeps its own action. See docs/design/cards.md.
  */
+
+// The open button's stretching overlay: its `::after` covers the front face,
+// which is `absolute inset-0`, so the whole card — padding, chips, empty space —
+// responds. `relative` makes the button the containing block; `z-0` keeps it
+// above the face's static siblings while the face's `isolate` caps the ladder,
+// so the overlay never lands on top of a neighbouring card. Actions (the
+// pencil) and the badges opt back above it with `relative z-10`.
+const OPEN = "relative z-0 after:absolute after:inset-0 cursor-pointer";
 export default function DatasetCard({
   variant,
   icon: Icon,
@@ -124,7 +136,7 @@ export default function DatasetCard({
           inert={flipped}
           title={title}
           className={cn(
-            "flip-face-side flip-front absolute inset-0",
+            "flip-face-side flip-front absolute inset-0 isolate",
             variant === "row" ? "flex items-center gap-2 p-3" : "flex flex-col gap-1.5 p-4"
           )}
         >
@@ -134,11 +146,16 @@ export default function DatasetCard({
                 type="button"
                 onClick={onOpen}
                 disabled={!onOpen || disabled}
-                className="flex min-w-0 flex-1 items-center gap-2 text-left disabled:cursor-not-allowed"
+                className={cn(
+                  OPEN,
+                  "flex min-w-0 flex-1 items-center gap-2 text-left disabled:cursor-not-allowed"
+                )}
               >
                 {main}
               </button>
-              {chips && <div className="flex shrink-0 items-center gap-1.5">{chips}</div>}
+              {chips && (
+                <div className="relative z-10 flex shrink-0 items-center gap-1.5">{chips}</div>
+              )}
               {editable && <PencilButton name={name} onClick={() => setFlipped(true)} />}
             </>
           ) : (
@@ -148,13 +165,20 @@ export default function DatasetCard({
                   type="button"
                   onClick={onOpen}
                   disabled={!onOpen || disabled}
-                  className="flex min-w-0 flex-1 items-start gap-2 text-left disabled:cursor-not-allowed"
+                  className={cn(
+                    OPEN,
+                    "flex min-w-0 flex-1 items-start gap-2 text-left disabled:cursor-not-allowed"
+                  )}
                 >
                   {main}
                 </button>
                 {editable && <PencilButton name={name} onClick={() => setFlipped(true)} />}
               </div>
-              {chips && <div className="mt-auto flex flex-wrap items-center gap-1.5">{chips}</div>}
+              {chips && (
+                <div className="relative z-10 mt-auto flex flex-wrap items-center gap-1.5">
+                  {chips}
+                </div>
+              )}
             </>
           )}
         </div>
@@ -193,7 +217,7 @@ function PencilButton({ name, onClick }: { name: string; onClick: () => void }) 
       onClick={onClick}
       aria-label={`Edit ${name}`}
       title="Edit name, description, language and visibility"
-      className="shrink-0 rounded p-1 text-text-tertiary hover:bg-bg-hover hover:text-text-primary cursor-pointer"
+      className="relative z-10 shrink-0 rounded p-1 text-text-tertiary hover:bg-bg-hover hover:text-text-primary cursor-pointer"
     >
       <Pencil size={14} />
     </button>

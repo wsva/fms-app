@@ -55,13 +55,17 @@ truncates.
 ## Two structural rules
 
 1. **A card is a region, not a click target.** `Card` takes no `onClick`, `role`
-   or `tabIndex`. A card that opens something renders one `<button>` covering its
-   main area; the description and chips live inside that button, but nothing
-   interactive does.
+   or `tabIndex`. A card that opens something renders one `<button>`; the
+   description and chips live in its visual area, but nothing interactive does.
+   That button's `::after` stretches over the whole face (the stretched-link
+   pattern), so the hit area matches the `interactive` hover lift: if the card
+   looks like it responds, the whole card responds. The button is still the only
+   semantic target.
 2. **Every action is a sibling of the open button.** A pencil, a menu, a
-   download: outside the button, in the card's own flex row. A control nested
-   inside the open button is a button inside a button — invalid HTML, unreachable
-   by keyboard, and it fires the open handler as a side effect of clicking it.
+   download: outside the button, in the card's own flex row, above the stretched
+   overlay via `relative z-10`. A control nested inside the open button is a
+   button inside a button — invalid HTML, unreachable by keyboard, and it fires
+   the open handler as a side effect of clicking it.
 
 ## In-place editing (flip)
 

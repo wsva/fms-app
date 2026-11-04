@@ -14,10 +14,13 @@ import { cn } from "@/lib/ui/cn";
 //
 // The rule this component exists to protect: **a card is a region, not a click
 // target.** There is deliberately no `onClick`, `role` or `tabIndex` here. A card
-// that opens something puts one `<button>` inside it covering its main area, and
-// puts every action (a pencil, a menu, a download) as a *sibling* of that button.
-// Nesting an action inside the open button produces a button inside a button,
-// which is invalid HTML and traps keyboard users.
+// that opens something puts one `<button>` inside it, and puts every action (a
+// pencil, a menu, a download) as a *sibling* of that button: nesting an action
+// inside the open button produces a button inside a button, which is invalid
+// HTML and traps keyboard users. To make the whole face open, the button's own
+// `::after` stretches over it (the stretched-link pattern in DatasetCard) and
+// the siblings sit above it with `relative z-10` — the hit area matches the
+// `interactive` hover lift without the root becoming a handler.
 // ---------------------------------------------------------------------------
 
 export type CardVariant =
