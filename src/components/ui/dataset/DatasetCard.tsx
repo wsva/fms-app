@@ -15,8 +15,8 @@ const META = "truncate text-xs text-text-tertiary";
 
 /** Fixed heights, so the flip animates without measuring anything at runtime. */
 const HEIGHT: Record<Props["variant"], { front: string; back: string }> = {
-  row: { front: "h-[76px]", back: "h-[220px]" },
-  card: { front: "h-[148px]", back: "h-[268px]" },
+  row: { front: "h-[76px]", back: "h-[268px]" },
+  card: { front: "h-[148px]", back: "h-[288px]" },
 };
 
 type Props = {

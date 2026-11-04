@@ -104,56 +104,57 @@ export default function DatasetEditForm({
         </button>
       </div>
 
-      <label className="flex flex-col gap-0.5">
-        <span className={label}>Name</span>
-        <input
-          className={field}
-          value={draftName}
-          onChange={(e) => setDraftName(e.target.value)}
-          autoFocus
-          spellCheck={false}
-        />
-      </label>
+      {/* Name and Language share one row: both are short, identity-like fields,
+          so pairing them frees the vertical space the Description box needs. */}
+      <div className="flex items-start gap-1.5">
+        <label className="flex min-w-0 flex-[3] flex-col gap-0.5">
+          <span className={label}>Name</span>
+          <input
+            className={field}
+            value={draftName}
+            onChange={(e) => setDraftName(e.target.value)}
+            autoFocus
+            spellCheck={false}
+          />
+        </label>
+
+        {language !== undefined && (
+          <label className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className={label}>Language</span>
+            <LanguageSelect
+              className={field}
+              value={draftLanguage}
+              onChange={setDraftLanguage}
+              placeholder="None"
+              title="The language the texts are written in — what a per-language voice preference is looked up by"
+              aria-label="Dataset language"
+            />
+          </label>
+        )}
+      </div>
 
       <label className="flex min-h-0 flex-1 flex-col gap-0.5">
         <span className={label}>Description</span>
         <textarea
-          className={`${field} min-h-0 flex-1 resize-none`}
+          className={`${field} min-h-[40px] flex-1 resize-none`}
           value={draftDescription}
           onChange={(e) => setDraftDescription(e.target.value)}
         />
       </label>
 
-      {(language !== undefined || visibility !== undefined) && (
-        <div className="flex items-end gap-1.5">
-          {language !== undefined && (
-            <label className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className={label}>Language</span>
-              <LanguageSelect
-                className={field}
-                value={draftLanguage}
-                onChange={setDraftLanguage}
-                placeholder="None"
-                title="The language the texts are written in — what a per-language voice preference is looked up by"
-                aria-label="Dataset language"
-              />
-            </label>
-          )}
-          {visibility !== undefined && (
-            <label className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className={label}>Visibility</span>
-              <select
-                className={field}
-                value={draftVisibility}
-                onChange={(e) => setDraftVisibility(e.target.value)}
-              >
-                <option value="private">private</option>
-                <option value="shared">shared</option>
-                <option value="public">public</option>
-              </select>
-            </label>
-          )}
-        </div>
+      {visibility !== undefined && (
+        <label className="flex flex-col gap-0.5">
+          <span className={label}>Visibility</span>
+          <select
+            className={field}
+            value={draftVisibility}
+            onChange={(e) => setDraftVisibility(e.target.value)}
+          >
+            <option value="private">private</option>
+            <option value="shared">shared</option>
+            <option value="public">public</option>
+          </select>
+        </label>
       )}
 
       {/* A downloaded base is read-only on disk; the save forks a writable overlay
