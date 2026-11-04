@@ -63,7 +63,7 @@ import {
 import type { Card, CardDatasetSummary, CardMedia, CardMediaField } from "@/lib/types";
 import { isMobileApp, isTauri } from "@/lib/platform";
 import { toHTML } from "@/components/wiki/markdown/html";
-import { cardKindOf, cardExtsFor, CARD_IMAGE_EXTS, CARD_AUDIO_EXTS, CARD_VIDEO_EXTS } from "@/lib/media/kind";
+import { cardKindOf, CARD_IMAGE_EXTS, CARD_AUDIO_EXTS, CARD_VIDEO_EXTS } from "@/lib/media/kind";
 import { stripAnchors } from "@/lib/media/anchors";
 import { copyText } from "@/lib/clipboard";
 import { notify, notifyError } from "@/lib/feedback/toast";
@@ -535,7 +535,17 @@ export function CardEditModal({
     }
     if (!m) {
       const effective = restored ? stored.answer : baselineRef.current.answer;
-      setFontScale(effective.length > LONG_ANSWER_CHARS ? "large" : "x2");
+      // A brand-new card is composed, not read. The oversized default was tuned
+      // for glancing at a saved answer; on an empty form it renders the
+      // placeholder 1.6x and semi-bold, which reads as heavy and cramped. New
+      // cards start at normal and let the reader step the size up.
+      setFontScale(
+        !card?.uuid
+          ? "normal"
+          : effective.length > LONG_ANSWER_CHARS
+            ? "large"
+            : "x2"
+      );
     }
   }, [draftKey]);
 
@@ -814,23 +824,6 @@ export function CardEditModal({
     [selectedDataset, cardUuid, insertToken, setFieldEditing]
   );
 
-  const attach = useCallback(
-    async (kind: "image" | "audio" | "video", field?: CardMediaField) => {
-      if (!isTauri()) return;
-      try {
-        const selected = await open({
-          multiple: false,
-          filters: [{ name: kind, extensions: [...cardExtsFor(kind)] }],
-        });
-        const path = Array.isArray(selected) ? selected[0] : selected;
-        if (path) await addMediaFromPath(path, field ?? attachFieldRef.current);
-      } catch (e) {
-        setMediaBanner(`Attach failed: ${e}`);
-      }
-    },
-    [addMediaFromPath]
-  );
-
   const deleteMedia = useCallback(
     async (uuid: string) => {
       const target = media.find((m) => m.uuid === uuid);
@@ -1091,7 +1084,6 @@ export function CardEditModal({
       // until the reader saves or the exit guard asks about it.
       setFieldEditing(field, false);
     },
-    onAttach: (kind, field) => void attach(kind, field),
     onMediaUpload: (field) => void uploadMedia(field),
     onMediaRemove: (uuid) => void deleteMedia(uuid),
     onMediaCopy: (handle) => void copyHandle(handle),

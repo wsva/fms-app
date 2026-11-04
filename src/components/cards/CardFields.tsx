@@ -26,14 +26,10 @@
 
 import { type CSSProperties } from "react";
 import type { CardMedia, CardMediaField } from "@/lib/types";
-import { isTauri } from "@/lib/platform";
 import EditableField from "./EditableField";
 
 /** The four editable values of a card. */
 export type CardFieldValues = Record<CardMediaField, string>;
-
-/** The attachment kinds a field accepts, as the toolbar offers them. */
-export type CardMediaKind = "image" | "audio" | "video";
 
 /** Everything the quartet needs, and nothing about where it comes from. */
 export type CardFieldBinding = {
@@ -62,7 +58,6 @@ export type CardFieldBinding = {
   onStartEdit: (field: CardMediaField) => void;
   /** Close one field — committed or cancelled is the host's distinction. */
   onEndEdit: (field: CardMediaField) => void;
-  onAttach: (kind: CardMediaKind, field: CardMediaField) => void;
   /** Put a file into `field` through the picker (a preview's Upload). */
   onMediaUpload: (field: CardMediaField) => void;
   /** Remove one attachment, and the `{{handle}}` token that points at it. */
@@ -102,6 +97,9 @@ const CHROME: Record<
     singleLine?: boolean;
     placeholder: string;
     textClassName: string;
+    /** A floor for the empty textarea, so a prose field reads as a writing
+     *  area rather than a one-line box. Absent for single-line fields. */
+    minHeightClass?: string;
   }
 > = {
   question: {
@@ -111,12 +109,14 @@ const CHROME: Record<
     // Same size as the answer: the question is the prompt, not a headline, and a
     // 3xl question in a form set every other field at half its weight.
     textClassName: "text-base font-semibold",
+    minHeightClass: "min-h-[2.5rem]",
   },
   answer: {
     label: CARD_FIELD_LABEL.answer,
     mode: "markdown",
     placeholder: "The answer or explanation (Markdown supported)",
     textClassName: "text-base",
+    minHeightClass: "min-h-[6rem]",
   },
   suggestion: {
     label: CARD_FIELD_LABEL.suggestion,
@@ -130,14 +130,11 @@ const CHROME: Record<
     mode: "markdown",
     placeholder: "Additional notes (Markdown supported)",
     textClassName: "text-base",
+    minHeightClass: "min-h-[4rem]",
   },
 };
 
 export default function CardFields({ binding }: { binding: CardFieldBinding }) {
-  // Desktop only: the file pickers need the Tauri dialog plugin, and a phone
-  // has no way to hand a field a local file.
-  const canAttach = isTauri();
-
   return (
     <div className="space-y-6">
       {CARD_FIELD_ORDER.map((field) => (
@@ -150,15 +147,12 @@ export default function CardFields({ binding }: { binding: CardFieldBinding }) {
           dirty={binding.dirty[field]}
           media={binding.media}
           datasetPath={binding.datasetPath}
-          attachTarget={binding.attachField === field}
           dropTarget={binding.dragOver && binding.attachField === field}
-          canAttach={canAttach}
           keepEditing={binding.mediaBusy}
           textStyle={binding.textStyle}
           onChange={(value) => binding.onFieldChange(field, value)}
           onStartEdit={() => binding.onStartEdit(field)}
           onEndEdit={() => binding.onEndEdit(field)}
-          onAttach={(kind) => binding.onAttach(kind, field)}
           mediaTools={{
             upload: () => binding.onMediaUpload(field),
             remove: binding.onMediaRemove,
