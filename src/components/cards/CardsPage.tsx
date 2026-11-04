@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { useIsActiveTab, usePageRefresh } from "@/lib/refresh/page-refresh";
@@ -122,7 +122,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   // turns it into the writer, in the same pane. `index` is the row's position in
   // `cards`, so the arrows walk the list the reader just scrolled rather than a
   // second order.
-  const [level, setLevel] = useState<{ card: Card; index: number } | null>(null);
+  const [level, setLevel] = useState<{ card: Card; index: number; isNew?: boolean } | null>(null);
   const [levelMedia, setLevelMedia] = useState<CardMedia[]>([]);
   // A rating is a write in flight: the scale and the `1`–`5` keys must not fire
   // twice over a card that is already being graded.
@@ -318,7 +318,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   const handleRefresh = useCallback(() => {
     void loadDatasets();
     if (selectedDatasetUuid) void loadCards();
-    if (level) void openLevel(level.card.uuid, level.index);
+    if (level && !level.isNew) void openLevel(level.card.uuid, level.index);
     setLocRefresh((n) => n + 1);
   }, [loadDatasets, loadCards, selectedDatasetUuid, level, openLevel]);
 
@@ -378,6 +378,65 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
       { inline: true }
     );
   }, [level, selectedDatasetUuid, datasets, openCardEditor, loadCards, exitLevel]);
+
+  // Add Card opens the very same in-page editor as Edit, but on a blank card:
+  // the composer sits in the content area under a "New Card" crumb instead of
+  // floating over the page as an overlay. The editor mints the uuid itself, so
+  // the level's card stays empty until the first save adopts the stored row —
+  // which is why `isNew` is tracked explicitly rather than inferred from uuid.
+  const addCard = useCallback(() => {
+    if (!selectedDatasetUuid) return;
+    const name = datasets.find((d) => d.info.uuid === selectedDatasetUuid)?.info.name;
+    const blank: Card = {
+      uuid: "",
+      question: "",
+      suggestion: "",
+      answer: "",
+      note: "",
+      familiarity: 0,
+      question_hash: null,
+      source_card_uuid: null,
+      source_dataset_uuid: null,
+      deleted_at: null,
+      created_at: "",
+      updated_at: "",
+    };
+    setLevel({ card: blank, index: -1, isNew: true });
+    setLevelMedia([]);
+    openCardEditor(
+      selectedDatasetUuid,
+      blank,
+      (saved) => {
+        void loadCards();
+        // Adopt the stored row wholesale and stop calling it new: the crumb now
+        // names the card by its question, and a later refresh can re-read it.
+        setLevel((cur) => (cur ? { ...cur, card: saved, isNew: false } : cur));
+      },
+      // Deleting a just-saved new card takes the level down with it — the row it
+      // was about to become no longer exists.
+      () => {
+        void loadCards();
+        exitLevel();
+      },
+      name,
+      false,
+      undefined,
+      { inline: true }
+    );
+  }, [selectedDatasetUuid, datasets, openCardEditor, loadCards, exitLevel]);
+
+  // A new card closed before its first save has nothing to show: the reading
+  // view would render a blank card that is not on disk. Return to the list when
+  // the session goes from open to closed while the level is still marked new. A
+  // saved new card has `isNew` cleared by its save, so this leaves it open as
+  // the card it became; the open→closed edge (not merely `!session`) is what
+  // keeps the async `openCardEditor` from tripping it before the session mounts.
+  const sessionWasOpen = useRef(false);
+  useEffect(() => {
+    const nowOpen = !!session;
+    if (sessionWasOpen.current && !nowOpen && level?.isNew) exitLevel();
+    sessionWasOpen.current = nowOpen;
+  }, [session, level, exitLevel]);
 
   // Grading from the level, with the deck's own scheduler: `card_test_submit` is
   // what the review page calls, so a card read here counts exactly as much as
@@ -966,9 +1025,12 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
             <Breadcrumb.Sep />
             {/* The card is named the way the tab chip names it: its question,
                 flattened and cut, because a trail crumb is a pointer, not a
-                preview of the answer. */}
-            <Breadcrumb.Current title={stripAnchors(level.card.question)}>
-              {cardSubjectLabel(stripAnchors(level.card.question), 60) || "(empty question)"}
+                preview of the answer. A card not on disk yet has no question to
+                name it by, so it is called what it is — New Card. */}
+            <Breadcrumb.Current title={level.isNew ? "New Card" : stripAnchors(level.card.question)}>
+              {level.isNew
+                ? "New Card"
+                : cardSubjectLabel(stripAnchors(level.card.question), 60) || "(empty question)"}
             </Breadcrumb.Current>
           </>
         )}
@@ -1077,7 +1139,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
                 label="Add Card"
                 title="Add a new card"
                 ariaLabel="Add card"
-                onClick={() => openCardEditor(selectedDatasetUuid, null, () => loadCards())}
+                onClick={addCard}
               />
             )}
           </>
@@ -1144,7 +1206,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
             {mobile && selectedDatasetUuid && activeTab !== "review" && (
               <ToolbarMenuItem
                 icon={Plus}
-                onClick={() => openCardEditor(selectedDatasetUuid, null, () => loadCards())}
+                onClick={addCard}
               >
                 Add Card
               </ToolbarMenuItem>
