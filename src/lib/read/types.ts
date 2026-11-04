@@ -87,6 +87,7 @@ export type ArtifactKind =
   | "digest"
   | "argument_map"
   | "questions"
+  | "translation"
   | "note"
   | "assessment";
 
@@ -97,6 +98,7 @@ export const ARTIFACT_KINDS: ArtifactKind[] = [
   "digest",
   "argument_map",
   "questions",
+  "translation",
   "note",
   "assessment",
 ];
@@ -108,6 +110,7 @@ export const GENERATED_KINDS: ArtifactKind[] = [
   "digest",
   "argument_map",
   "questions",
+  "translation",
 ];
 
 /** What an artifact is attached to. */

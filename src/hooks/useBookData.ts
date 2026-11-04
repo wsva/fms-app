@@ -30,6 +30,11 @@ import type {
 } from "@/lib/read/types";
 import { flattenChapters, groupIntoParagraphs, toDbSentence } from "@/lib/read/types";
 import { groupArtifactsByScope } from "@/lib/read/artifacts";
+import {
+  DEFAULT_UNDERSTANDING_TAB,
+  isUnderstandingTab,
+  type UnderstandingTab,
+} from "@/components/books/understanding_tabs";
 import type { CardDatasetSummary } from "@/lib/types";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
@@ -95,8 +100,31 @@ export function useBookData() {
   // ── Understanding layer ────────────────────────────────────────
   // Split-mode toggle, the focused paragraph (its break-row uuid), the mobile
   // drawer open flag, the loaded artifacts/glossary, and the persisted split.
+  // The active tab and the scope (paragraph vs chapter) live here too: the
+  // understanding sub-toolbar and the panel body are separate components and
+  // must read one state, so it cannot sit in either of them.
   const [understanding, setUnderstanding] = useState(false);
   const [focusParagraph, setFocusParagraphState] = useState<string | null>(null);
+  const [understandingTab, setUnderstandingTabState] = useState<UnderstandingTab>(() => {
+    if (typeof window === "undefined") return DEFAULT_UNDERSTANDING_TAB;
+    const stored = window.localStorage.getItem("book-understanding-tab");
+    return isUnderstandingTab(stored) ? stored : DEFAULT_UNDERSTANDING_TAB;
+  });
+  const setUnderstandingTab = useCallback((tab: UnderstandingTab) => {
+    setUnderstandingTabState(tab);
+    if (typeof window !== "undefined") window.localStorage.setItem("book-understanding-tab", tab);
+  }, []);
+  // Chapter scope: when on, every content tab binds to the whole chapter
+  // instead of the focused paragraph. Persisted like the other panel prefs.
+  const [chapterMode, setChapterModeState] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("book-understanding-chapter-mode") === "1";
+  });
+  const setChapterMode = useCallback((on: boolean) => {
+    setChapterModeState(on);
+    if (typeof window !== "undefined")
+      window.localStorage.setItem("book-understanding-chapter-mode", on ? "1" : "0");
+  }, []);
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
   const [artifacts, setArtifacts] = useState<BookArtifactView[]>([]);
   // Outstanding agent-generation requests for this book (the mailbox the "Ask
@@ -131,6 +159,16 @@ export function useBookData() {
   const chapterArtifacts = useMemo(
     () => artifacts.filter((a) => a.scope_uuid === chapterUUID),
     [artifacts, chapterUUID]
+  );
+  // The scope every content tab binds to: the whole chapter in chapter mode,
+  // the focused paragraph otherwise. `uuid` is "" while nothing is focused —
+  // the panel shows its hint until the learner clicks a paragraph.
+  const scope = useMemo<{ type: ArtifactScopeType; uuid: string }>(
+    () =>
+      chapterMode
+        ? { type: "chapter", uuid: chapterUUID }
+        : { type: "paragraph", uuid: focusParagraph ?? "" },
+    [chapterMode, chapterUUID, focusParagraph]
   );
 
   const loadArtifacts = useCallback(async () => {
@@ -858,8 +896,10 @@ export function useBookData() {
   }, [paragraphs, mobile]);
 
   // ── Understanding: generation + actions ────────────────────────
+  // `instructions` is free-form guidance the backend appends to the prompt (the
+  // Translate tab names its target language there); omit it for plain generate.
   const handleGenerate = useCallback(
-    async (scopeType: ArtifactScopeType, scopeUuid: string, kind: ArtifactKind) => {
+    async (scopeType: ArtifactScopeType, scopeUuid: string, kind: ArtifactKind, instructions?: string) => {
       if (!isTauri() || !bookUUID) return;
       setGenerating(true);
       setError("");
@@ -870,6 +910,7 @@ export function useBookData() {
           scopeUuid,
           kind,
           model: understandingModel.trim() ? understandingModel.trim() : undefined,
+          instructions: instructions?.trim() ? instructions.trim() : undefined,
         });
         await loadArtifacts();
       } catch (e) {
@@ -884,7 +925,7 @@ export function useBookData() {
   // LLM: write a job to the mailbox. The agent picks it up over MCP and delivers
   // through book_save_artifact, which clears the job and fires the reload event.
   const handleRequestAgent = useCallback(
-    async (scopeType: ArtifactScopeType, scopeUuid: string, kind: ArtifactKind) => {
+    async (scopeType: ArtifactScopeType, scopeUuid: string, kind: ArtifactKind, instructions?: string) => {
       if (!isTauri() || !bookUUID) return;
       setError("");
       try {
@@ -894,6 +935,7 @@ export function useBookData() {
           scopeUuid,
           kind,
           model: understandingModel.trim() ? understandingModel.trim() : undefined,
+          instructions: instructions?.trim() ? instructions.trim() : undefined,
         });
         await loadJobs();
       } catch (e) {
@@ -1208,6 +1250,11 @@ export function useBookData() {
     focusParagraph,
     setFocusParagraph,
     selectParagraph,
+    understandingTab,
+    setUnderstandingTab,
+    chapterMode,
+    setChapterMode,
+    scope,
     mobilePanelOpen,
     setMobilePanelOpen,
     splitRatio,

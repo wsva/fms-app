@@ -53,7 +53,7 @@ pub struct BookArtifact {
     pub scope_type: String,
     /// break-row uuid / chapter uuid / sentence uuid.
     pub scope_uuid: String,
-    /// `explanation`|`simplification`|`digest`|`argument_map`|`questions`|`note`|`assessment`.
+    /// `explanation`|`simplification`|`digest`|`argument_map`|`questions`|`translation`|`note`|`assessment`.
     pub kind: String,
     /// Markdown; for `questions` a JSON array of `{type,stem,choices?,correct?,model_answer?,explanation}`.
     pub content: String,
@@ -127,6 +127,7 @@ pub(crate) const GENERATED_KINDS: &[&str] = &[
     "digest",
     "argument_map",
     "questions",
+    "translation",
 ];
 
 /// Kinds that are user-authored or note-derived and therefore never stale.
@@ -357,6 +358,11 @@ fn system_for_kind(kind: &str) -> &'static str {
         "digest" => "You summarise a chapter for a language learner. For argumentative or \
             philosophical texts produce a PREMISE OUTLINE (thesis -> supporting premises -> \
             conclusions) rather than prose. Keep the same language as the text. Return Markdown.",
+        "translation" => "You translate a passage for a language learner into their target \
+            language. The target language is named in the additional instructions; if none is \
+            given, translate into the reader's most likely study language. Preserve the meaning, \
+            paragraph structure and any Markdown formatting. Return ONLY the translated text in \
+            Markdown, no preamble, no commentary.",
         "argument_map" => "You analyse the argument structure of a passage. Extract, in Markdown: \
             the central Claim, the Premises supporting it, any Objection considered, and the \
             Reply. Keep the same language as the passage. Use short labelled bullets.",

@@ -123,7 +123,7 @@ struct BookRequestArtifactParam {
     scope_type: String,
     /// break-row uuid / chapter uuid / sentence uuid.
     scope_uuid: String,
-    /// `explanation`|`simplification`|`digest`|`argument_map`|`questions`.
+    /// `explanation`|`simplification`|`digest`|`argument_map`|`questions`|`translation`.
     kind: String,
     /// Free-form guidance for the fulfilling agent (e.g. output language).
     #[serde(default)]
@@ -155,7 +155,7 @@ struct BookGenerateArtifactParam {
     scope_type: String,
     /// break-row uuid / chapter uuid / sentence uuid.
     scope_uuid: String,
-    /// `explanation`|`simplification`|`digest`|`argument_map`|`questions`.
+    /// `explanation`|`simplification`|`digest`|`argument_map`|`questions`|`translation`.
     kind: String,
     #[serde(default)]
     model: Option<String>,
@@ -952,7 +952,7 @@ impl DatasetMcpServer {
         .unwrap_or_default())
     }
 
-    #[tool(name = "book_request_artifact", description = "Queue a request for a third-party agent to generate an understanding artifact, instead of the built-in LLM. kind: 'explanation'|'simplification'|'digest'|'argument_map'|'questions'; scope_type: 'paragraph'|'chapter'|'sentence'. Idempotent per (scope, kind). An attached agent picks it up via book_list_artifact_jobs and delivers through book_save_artifact. Returns the job (with the source text).")]
+    #[tool(name = "book_request_artifact", description = "Queue a request for a third-party agent to generate an understanding artifact, instead of the built-in LLM. kind: 'explanation'|'simplification'|'digest'|'argument_map'|'questions'|'translation'; scope_type: 'paragraph'|'chapter'|'sentence'. Idempotent per (scope, kind). An attached agent picks it up via book_list_artifact_jobs and delivers through book_save_artifact. Returns the job (with the source text).")]
     async fn book_request_artifact(&self, Parameters(param): Parameters<BookRequestArtifactParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         let job = datasets::book_artifacts::book_request_artifact(
@@ -976,7 +976,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Job cancelled"}).to_string())
     }
 
-    #[tool(name = "book_generate_artifact", description = "Generate an artifact with the LLM for a scope. kind: 'explanation'|'simplification'|'digest'|'argument_map'|'questions'. scope_type: 'paragraph'|'chapter'|'sentence'. Optional model and instructions (e.g. output language) override defaults.")]
+    #[tool(name = "book_generate_artifact", description = "Generate an artifact with the LLM for a scope. kind: 'explanation'|'simplification'|'digest'|'argument_map'|'questions'|'translation'. scope_type: 'paragraph'|'chapter'|'sentence'. Optional model and instructions (e.g. output language) override defaults.")]
     async fn book_generate_artifact(&self, Parameters(param): Parameters<BookGenerateArtifactParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         let artifact = datasets::book_artifacts::book_generate_artifact(

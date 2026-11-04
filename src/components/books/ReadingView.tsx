@@ -32,7 +32,7 @@ export default function ReadingView({ b }: Props) {
 
   const {
     understanding, splitRatio, setSplitRatio, focusParagraph, selectParagraph,
-    setFocusParagraph, mobilePanelOpen, setMobilePanelOpen,
+    setFocusParagraph, mobilePanelOpen, setMobilePanelOpen, chapterMode,
   } = b;
 
   // Reading-pane scroll container — the scroll-spy root and the split's left column.
@@ -40,9 +40,11 @@ export default function ReadingView({ b }: Props) {
   const dragging = useRef(false);
 
   // Scroll-spy: while understanding mode is on (desktop), the paragraph nearest
-  // the top of the reading pane becomes the panel's focus.
+  // the top of the reading pane becomes the panel's focus. In chapter mode the
+  // tabs bind to the whole chapter, so the spy keeps the focus warm but does
+  // not drive the panel.
   useEffect(() => {
-    if (!understanding || mobile) return;
+    if (!understanding || mobile || chapterMode) return;
     const root = leftRef.current;
     if (!root) return;
     const els = Array.from(root.querySelectorAll<HTMLElement>("[data-para-uuid]"));
@@ -59,7 +61,7 @@ export default function ReadingView({ b }: Props) {
     );
     els.forEach((el) => obs.observe(el));
     return () => obs.disconnect();
-  }, [understanding, mobile, paragraphs, setFocusParagraph]);
+  }, [understanding, mobile, chapterMode, paragraphs, setFocusParagraph]);
 
   // Drag splitter: turn a pointer x into the left column's percentage width.
   const onSplitterDown = (e: React.PointerEvent) => {

@@ -1,13 +1,14 @@
 "use client";
 
 /**
- * UnderstandingPanel — the right pane (desktop split) / slide-in drawer (mobile)
- * of the book "Understanding" mode. It shows the artifacts for the focused
- * paragraph across tabs: Explain, Simplify, Argument, Quiz, Notes, and a
- * chapter-scoped Chapter tab (Digest + Glossary).
+ * UnderstandingPanel — the tab body of the book "Understanding" mode: the
+ * right pane (desktop split) / slide-in drawer (mobile). Its scope — the whole
+ * chapter or the focused paragraph — is set by the Chapter toggle on the
+ * understanding sub-toolbar, which also owns the tab strip and the model
+ * picker; this component renders the active tab's content for `b.scope`.
  *
  * All data and mutations come from `useBookData` (passed as `b`); this component
- * only renders and keeps transient UI state (active tab, quiz answers, pickers).
+ * only renders and keeps transient UI state (quiz answers, pickers).
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -23,10 +24,10 @@ import {
   Lightbulb,
   Bot,
   Copy,
+  Languages,
 } from "lucide-react";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import AgentBadge from "@/components/agent/AgentBadge";
-import UnderstandingModelPicker from "./UnderstandingModelPicker";
 import SpeakToolbar from "./SpeakToolbar";
 import type { useBookData } from "@/hooks/useBookData";
 import type {
@@ -47,8 +48,7 @@ import {
   isMcqCorrect,
   sourceLabel,
   type QuizAnswer,
-} from "@/lib/read/artifacts";
-import { buildArtifactJobPrompt } from "@/lib/read/agent-prompt";
+} from "@/lib/read/artifacts";import { buildArtifactJobPrompt } from "@/lib/read/agent-prompt";
 import type { CardDatasetSummary } from "@/lib/types";
 
 type Props = { b: ReturnType<typeof useBookData> };
@@ -57,16 +57,10 @@ type Props = { b: ReturnType<typeof useBookData> };
  *  in the panel stays in sync (one language for the whole chapter). */
 type SpeakCtx = { language: string; onChange: (lang: string) => void };
 
-type Tab = "explain" | "simplify" | "argument" | "quiz" | "notes" | "chapter";
-
-const TABS: { id: Tab; label: string }[] = [
-  { id: "explain", label: "Explain" },
-  { id: "simplify", label: "Simplify" },
-  { id: "argument", label: "Argument" },
-  { id: "quiz", label: "Quiz" },
-  { id: "notes", label: "Notes" },
-  { id: "chapter", label: "Chapter" },
-];
+/** "paragraph" / "chapter" — the noun the current scope reads as, for copy. */
+function scopeNoun(scopeType: ArtifactScopeType): string {
+  return scopeType === "chapter" ? "chapter" : "paragraph";
+}
 
 export default function UnderstandingPanel({ b }: Props) {
   const {
@@ -75,11 +69,11 @@ export default function UnderstandingPanel({ b }: Props) {
     artifactsByScope,
     saving,
     handleParagraphListen,
-    understandingModel,
-    setUnderstandingModel,
+    understandingTab,
+    scope,
+    chapterMode,
+    currentChapter,
   } = b;
-
-  const [tab, setTab] = useState<Tab>("explain");
 
   // Read-aloud language for the Listen buttons. "" means "use the book's own
   // language"; persisted so the choice survives across chapters and books.
@@ -100,29 +94,38 @@ export default function UnderstandingPanel({ b }: Props) {
     () => paragraphs.find((p) => p.breakSentence?.uuid === focusParagraph) ?? null,
     [paragraphs, focusParagraph]
   );
-  const scopeArtifacts = focusParagraph ? artifactsByScope.get(focusParagraph) : undefined;
+  const scopeArtifacts = scope.uuid ? artifactsByScope.get(scope.uuid) : undefined;
 
-  const preview = focusedPara?.sentences.map((s) => s.content).join(" ").trim() ?? "";
-  const hasParagraph = !!focusParagraph;
+  // The header names what the Chapter toggle currently points the tabs at:
+  // the chapter title, or the focused paragraph's opening line.
+  const paraPreview = focusedPara?.sentences.map((s) => s.content).join(" ").trim() ?? "";
+  const hasScope = !!scope.uuid;
+  const scopeLabel = chapterMode
+    ? `Chapter · ${currentChapter?.title ?? ""}`
+    : "Understanding";
+  const scopePreview = chapterMode
+    ? currentChapter?.title ?? ""
+    : paraPreview || "(empty paragraph)";
 
   return (
     <div className="flex flex-col h-full min-h-0 min-w-0 bg-bg-body">
-      {/* Header: focused paragraph preview + Listen */}
+      {/* Header: what the scope currently points at + Listen (paragraph only —
+          the command behind it is addressed by a paragraph's break-row uuid). */}
       <div className="shrink-0 px-3 py-2 border-b border-border-default flex items-start gap-2">
         <div className="flex-1 min-w-0">
           <div className="text-[11px] font-semibold text-text-tertiary tracking-wider uppercase">
-            Understanding
+            {scopeLabel}
           </div>
           <p
             className="text-xs text-text-secondary line-clamp-2 mt-0.5"
-            title={preview}
+            title={scopePreview}
           >
-            {hasParagraph ? preview || "(empty paragraph)" : "Select a paragraph"}
+            {hasScope ? scopePreview : "Select a paragraph"}
           </p>
         </div>
         <button
           title="Listen to this paragraph (Edge TTS)"
-          disabled={!hasParagraph || saving}
+          disabled={!hasScope || chapterMode || saving}
           className="shrink-0 p-2 rounded-md text-text-secondary hover:bg-bg-hover disabled:opacity-40 cursor-pointer"
           onClick={() => focusParagraph && handleParagraphListen(focusParagraph)}
         >
@@ -130,94 +133,80 @@ export default function UnderstandingPanel({ b }: Props) {
         </button>
       </div>
 
-      {/* LLM model picker (one line) */}
-      <UnderstandingModelPicker value={understandingModel} onChange={setUnderstandingModel} />
-
-      {/* Tabs */}
-      <div className="shrink-0 flex items-center gap-1 px-2 py-1.5 border-b border-border-default overflow-x-auto">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`shrink-0 px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer transition-colors ${
-              tab === t.id
-                ? "bg-accent-bg text-white"
-                : "text-text-secondary hover:bg-bg-hover"
-            }`}
-          >
-            {t.label}
-            {tabStale(b, t.id) && <span className="ml-1 align-middle"><Wand2 size={11} className="inline text-amber-500" /></span>}
-          </button>
-        ))}
-      </div>
-
-      {/* Body */}
+      {/* Body — the tab strip and model picker live on the understanding
+          sub-toolbar above the split; this renders the active tab. */}
       <div className="flex-1 min-h-0 overflow-y-auto p-3">
-        {tab === "chapter" ? (
-          <ChapterTab b={b} speak={speak} />
-        ) : !hasParagraph ? (
+        {understandingTab === "glossary" ? (
+          <GlossaryTab b={b} />
+        ) : !hasScope ? (
           <div className="text-sm text-text-tertiary text-center py-8">
             Click a paragraph on the left to understand it.
           </div>
-        ) : tab === "explain" ? (
+        ) : understandingTab === "digest" ? (
+          <GeneratedSection
+            b={b}
+            speak={speak}
+            kind="digest"
+            scopeType={scope.type}
+            scopeUuid={scope.uuid}
+            artifact={findArtifact(scopeArtifacts, "digest")}
+            emptyHint="No premise outline yet."
+            cta={chapterMode ? "Digest chapter" : "Digest this paragraph"}
+          />
+        ) : understandingTab === "explain" ? (
           <GeneratedSection
             b={b}
             speak={speak}
             kind="explanation"
-            scopeType="paragraph"
-            scopeUuid={focusParagraph!}
+            scopeType={scope.type}
+            scopeUuid={scope.uuid}
             artifact={findArtifact(scopeArtifacts, "explanation")}
             emptyHint="No explanation yet."
-            cta="Explain this paragraph"
+            cta={`Explain this ${scopeNoun(scope.type)}`}
           />
-        ) : tab === "simplify" ? (
+        ) : understandingTab === "simplify" ? (
           <GeneratedSection
             b={b}
             speak={speak}
             kind="simplification"
-            scopeType="paragraph"
-            scopeUuid={focusParagraph!}
+            scopeType={scope.type}
+            scopeUuid={scope.uuid}
             artifact={findArtifact(scopeArtifacts, "simplification")}
             emptyHint="No simplified rewrite yet."
-            cta="Simplify this paragraph"
+            cta={`Simplify this ${scopeNoun(scope.type)}`}
           />
-        ) : tab === "argument" ? (
+        ) : understandingTab === "translate" ? (
+          <TranslationTab b={b} speak={speak} scopeArtifacts={scopeArtifacts} />
+        ) : understandingTab === "argument" ? (
           <GeneratedSection
             b={b}
             speak={speak}
             kind="argument_map"
-            scopeType="paragraph"
-            scopeUuid={focusParagraph!}
+            scopeType={scope.type}
+            scopeUuid={scope.uuid}
             artifact={findArtifact(scopeArtifacts, "argument_map")}
             emptyHint="No argument map yet."
             cta="Map the argument"
           />
-        ) : tab === "quiz" ? (
-          <QuizTab b={b} artifact={findArtifact(scopeArtifacts, "questions")} scopeUuid={focusParagraph!} />
+        ) : understandingTab === "quiz" ? (
+          <QuizTab
+            b={b}
+            artifact={findArtifact(scopeArtifacts, "questions")}
+            scopeType={scope.type}
+            scopeUuid={scope.uuid}
+          />
         ) : (
-          <NotesTab b={b} speak={speak} scopeArtifacts={scopeArtifacts} scopeUuid={focusParagraph!} />
+          <NotesTab
+            b={b}
+            speak={speak}
+            scopeArtifacts={scopeArtifacts}
+            scopeType={scope.type}
+            scopeUuid={scope.uuid}
+          />
         )}
       </div>
     </div>
   );
-}
-
-/** A tab shows the stale wand when its primary generated artifact is stale. */
-function tabStale(b: ReturnType<typeof useBookData>, tab: Tab): boolean {
-  const scope = b.focusParagraph ? b.artifactsByScope.get(b.focusParagraph) : undefined;
-  if (tab === "chapter") return !!findArtifact(b.chapterArtifacts, "digest")?.stale;
-  const kind: ArtifactKind | null =
-    tab === "explain"
-      ? "explanation"
-      : tab === "simplify"
-        ? "simplification"
-        : tab === "argument"
-          ? "argument_map"
-          : tab === "quiz"
-            ? "questions"
-            : null;
-  if (!kind) return false;
-  return !!findArtifact(scope, kind)?.stale;
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +268,7 @@ function GeneratedSection({
   artifact,
   emptyHint,
   cta,
+  getInstructions,
 }: {
   b: ReturnType<typeof useBookData>;
   speak: SpeakCtx;
@@ -288,6 +278,10 @@ function GeneratedSection({
   artifact?: BookArtifactView;
   emptyHint: string;
   cta: string;
+  /** One-off guidance appended to the backend prompt at click time (the
+   *  Translate tab names its target language here). Agent requests capture it
+   *  into the job, so the copy-prompt fallback carries it too. */
+  getInstructions?: () => string | undefined;
 }) {
   const { generating, handleGenerate, handleRequestAgent, handleCancelJob, handleDeleteArtifact, jobs, mobile, bookUUID } = b;
   // The outstanding agent request for this exact scope + kind, if any.
@@ -396,7 +390,7 @@ function GeneratedSection({
               title="Ask an attached agent to generate this"
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border border-border-default text-text-secondary hover:bg-bg-hover disabled:opacity-50 cursor-pointer shrink-0"
               disabled={generating}
-              onClick={() => handleRequestAgent(scopeType, scopeUuid, kind)}
+              onClick={() => handleRequestAgent(scopeType, scopeUuid, kind, getInstructions?.())}
             >
               <AgentBadge height={11} chip title={null} />
               Get Help
@@ -405,7 +399,7 @@ function GeneratedSection({
           <button
             className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-accent-bg text-white hover:opacity-90 disabled:opacity-50 cursor-pointer"
             disabled={generating}
-            onClick={() => handleGenerate(scopeType, scopeUuid, kind)}
+            onClick={() => handleGenerate(scopeType, scopeUuid, kind, getInstructions?.())}
           >
             {generating ? (
               <Loader2 size={13} className="animate-spin" />
@@ -491,10 +485,12 @@ function GeneratedSection({
 function QuizTab({
   b,
   artifact,
+  scopeType,
   scopeUuid,
 }: {
   b: ReturnType<typeof useBookData>;
   artifact?: BookArtifactView;
+  scopeType: ArtifactScopeType;
   scopeUuid: string;
 }) {
   const { generating, handleGenerate, handleQuizFinish, listCardDatasets, handlePromoteToCard } = b;
@@ -521,11 +517,11 @@ function QuizTab({
   if (!artifact) {
     return (
       <div className="flex flex-col items-center gap-3 py-8 text-center">
-        <p className="text-sm text-text-tertiary">No quiz for this paragraph yet.</p>
+        <p className="text-sm text-text-tertiary">No quiz for this {scopeNoun(scopeType)} yet.</p>
         <button
           className="flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium bg-accent-bg text-white hover:opacity-90 disabled:opacity-50 cursor-pointer"
           disabled={generating}
-          onClick={() => handleGenerate("paragraph", scopeUuid, "questions")}
+          onClick={() => handleGenerate(scopeType, scopeUuid, "questions")}
         >
           {generating ? <Loader2 size={14} className="animate-spin" /> : <Lightbulb size={14} />}
           Generate quiz
@@ -541,7 +537,7 @@ function QuizTab({
         <button
           className="px-3 py-1.5 rounded-md text-sm font-medium bg-accent-bg text-white hover:opacity-90 disabled:opacity-50 cursor-pointer"
           disabled={generating}
-          onClick={() => handleGenerate("paragraph", scopeUuid, "questions")}
+          onClick={() => handleGenerate(scopeType, scopeUuid, "questions")}
         >
           Regenerate
         </button>
@@ -587,7 +583,7 @@ function QuizTab({
         <button
           className="flex items-center gap-1 px-2 py-1 rounded text-xs text-text-secondary hover:bg-bg-hover cursor-pointer"
           disabled={generating}
-          onClick={() => handleGenerate("paragraph", scopeUuid, "questions")}
+          onClick={() => handleGenerate(scopeType, scopeUuid, "questions")}
         >
           <RefreshCw size={12} /> Regenerate
         </button>
@@ -819,11 +815,13 @@ function NotesTab({
   b,
   speak,
   scopeArtifacts,
+  scopeType,
   scopeUuid,
 }: {
   b: ReturnType<typeof useBookData>;
   speak: SpeakCtx;
   scopeArtifacts?: BookArtifactView[];
+  scopeType: ArtifactScopeType;
   scopeUuid: string;
 }) {
   const { saving, generating, handleSaveNote, handleDeleteArtifact, handleAssessNote } = b;
@@ -839,7 +837,7 @@ function NotesTab({
         </div>
         <textarea
           className="w-full px-3 py-2 rounded-md bg-bg-input border border-border-default text-sm text-text-primary focus:outline-none focus:border-accent min-h-[80px]"
-          placeholder="Write a note about this paragraph…"
+          placeholder={`Write a note about this ${scopeNoun(scopeType)}…`}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
         />
@@ -848,7 +846,7 @@ function NotesTab({
             className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-accent-bg text-white hover:opacity-90 disabled:opacity-50 cursor-pointer"
             disabled={saving || !draft.trim()}
             onClick={async () => {
-              await handleSaveNote("paragraph", scopeUuid, draft);
+              await handleSaveNote(scopeType, scopeUuid, draft);
               setDraft("");
             }}
           >
@@ -910,15 +908,134 @@ function NotesTab({
 }
 
 // ---------------------------------------------------------------------------
-// Chapter tab: digest + glossary
+// Translate tab
 // ---------------------------------------------------------------------------
 
-function ChapterTab({ b, speak }: { b: ReturnType<typeof useBookData>; speak: SpeakCtx }) {
+/** Common targets, named in their own language so a learner recognises them. */
+const TRANSLATE_TARGETS: { value: string; label: string }[] = [
+  { value: "English", label: "English" },
+  { value: "中文（简体）", label: "中文（简体）" },
+  { value: "Deutsch", label: "Deutsch" },
+  { value: "Français", label: "Français" },
+  { value: "Español", label: "Español" },
+  { value: "日本語", label: "日本語" },
+  { value: "한국어", label: "한국어" },
+  { value: "Русский", label: "Русский" },
+];
+
+/** Seed the target from a book `language` code ("de", "zh-CN", …). Unknown
+ *  codes return null — the picker then keeps the generic default. */
+function seedTranslateTarget(language: string | undefined): string | null {
+  const base = language?.trim().toLowerCase().split(/[-_]/)[0];
+  switch (base) {
+    case "en": return "English";
+    case "zh": return "中文（简体）";
+    case "de": return "Deutsch";
+    case "fr": return "Français";
+    case "es": return "Español";
+    case "ja": return "日本語";
+    case "ko": return "한국어";
+    case "ru": return "Русский";
+    default: return null;
+  }
+}
+
+/** The translation tab is a generated section plus the one decision the
+ *  backend prompt cannot make for itself: which language to translate into.
+ *  The choice rides the `instructions` channel both the built-in generator and
+ *  an agent request already carry, and persists like the other panel prefs. */
+function TranslationTab({
+  b,
+  speak,
+  scopeArtifacts,
+}: {
+  b: ReturnType<typeof useBookData>;
+  speak: SpeakCtx;
+  scopeArtifacts?: BookArtifactView[];
+}) {
+  const { scope, selectedBook } = b;
+  const known = (v: string) => TRANSLATE_TARGETS.some((t) => t.value === v);
+  const [targetState, setTargetState] = useState<string>(() => {
+    if (typeof window === "undefined") return "English";
+    return window.localStorage.getItem("book-understanding-translate-lang") || "English";
+  });
+  // A stored value outside the common list is the free-text case.
+  const [custom, setCustom] = useState(() => !known(targetState));
+  // First ever use, still on the generic default: follow the book's own
+  // language when it names one of the targets (the plan's seed), once only —
+  // after that the persisted choice is the learner's.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (window.localStorage.getItem("book-understanding-translate-lang")) return;
+    const seed = seedTranslateTarget(selectedBook?.language);
+    if (seed) setTargetState(seed);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const setTarget = (v: string) => {
+    setTargetState(v);
+    if (typeof window !== "undefined") window.localStorage.setItem("book-understanding-translate-lang", v);
+  };
+  const target = custom ? targetState.trim() : targetState;
+  const getInstructions = () =>
+    target ? `Translate the passage into ${target}.` : undefined;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2 text-xs text-text-tertiary">
+        <Languages size={13} className="shrink-0" />
+        <span className="shrink-0">Target language</span>
+        <select
+          className="min-w-0 max-w-48 px-2 py-1 rounded-md bg-bg-input border border-border-default text-text-primary focus:outline-none focus:border-accent cursor-pointer"
+          value={custom ? "__custom" : targetState}
+          onChange={(e) => {
+            if (e.target.value === "__custom") {
+              setCustom(true);
+              setTarget("");
+            } else {
+              setCustom(false);
+              setTarget(e.target.value);
+            }
+          }}
+        >
+          {TRANSLATE_TARGETS.map((t) => (
+            <option key={t.value} value={t.value}>
+              {t.label}
+            </option>
+          ))}
+          <option value="__custom">Other…</option>
+        </select>
+        {custom && (
+          <input
+            className="w-36 px-2 py-1 rounded-md bg-bg-input border border-border-default text-text-primary focus:outline-none focus:border-accent"
+            placeholder="e.g. Português"
+            value={targetState}
+            onChange={(e) => setTarget(e.target.value)}
+          />
+        )}
+      </div>
+      <GeneratedSection
+        b={b}
+        speak={speak}
+        kind="translation"
+        scopeType={scope.type}
+        scopeUuid={scope.uuid}
+        artifact={findArtifact(scopeArtifacts, "translation")}
+        emptyHint="No translation yet."
+        cta={`Translate this ${scopeNoun(scope.type)}`}
+        getInstructions={getInstructions}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Glossary tab: the book's recurring concepts
+// ---------------------------------------------------------------------------
+
+function GlossaryTab({ b }: { b: ReturnType<typeof useBookData> }) {
   const {
     chapterUUID,
-    currentChapter,
     focusParagraph,
-    chapterArtifacts,
     terms,
     generating,
     saving,
@@ -932,27 +1049,8 @@ function ChapterTab({ b, speak }: { b: ReturnType<typeof useBookData>; speak: Sp
   const [newTerm, setNewTerm] = useState("");
   const [newDef, setNewDef] = useState("");
 
-  const digest = findArtifact(chapterArtifacts, "digest");
-
   return (
     <div className="flex flex-col gap-5">
-      {/* Digest */}
-      <section className="flex flex-col gap-2">
-        <div className="text-[11px] font-semibold text-text-tertiary tracking-wider uppercase">
-          Chapter digest {currentChapter ? `· ${currentChapter.title}` : ""}
-        </div>
-        <GeneratedSection
-          b={b}
-          speak={speak}
-          kind="digest"
-          scopeType="chapter"
-          scopeUuid={chapterUUID}
-          artifact={digest}
-          emptyHint="No premise outline yet."
-          cta="Digest chapter"
-        />
-      </section>
-
       {/* Glossary */}
       <section className="flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2">

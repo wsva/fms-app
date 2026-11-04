@@ -11,6 +11,7 @@ import { LocationsManager } from "@/components/ui/LocationsManager";
 import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import type { TabId } from "@/lib/shell/tabs";
 import CompanionsStrip from "./CompanionsStrip";
+import UnderstandingToolbar from "./UnderstandingToolbar";
 import ReadingView from "./ReadingView";
 import BookManager from "./BookManager";
 import BookAdvanced from "./BookAdvanced";
@@ -267,6 +268,13 @@ export default function BooksPage({ onNavigate }: { onNavigate: (tab: TabId) => 
             </ToolbarOverflow>
           )}
         </Toolbar>
+
+        {/* Understanding sub-toolbar — scope toggle (paragraph vs. chapter),
+            the tabs, and the LLM model picker. Shown only while understanding
+            mode is on, which itself is only reachable on a chapter page. */}
+        {b.understanding && b.view === "read" && b.chapterUUID && (
+          <UnderstandingToolbar b={b} onNavigate={onNavigate} />
+        )}
 
         {/* Companions — the other datasets sharing this book's family key. A
             book-level concern, so it hides on a chapter page (where the toolbar
