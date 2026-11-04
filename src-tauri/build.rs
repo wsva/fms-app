@@ -1,9 +1,114 @@
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::fs;
 
 fn main() {
     emit_git_describe();
     embed_test_manifest();
+    pack_user_manual();
     tauri_build::build()
+}
+
+/// Pack `docs/manual` into `$OUT_DIR/manual.tar.gz` for the crate to embed.
+///
+/// The user manual ships *as app content*, not as a dataset the user imports:
+/// baking the bytes into the binary means the shipped manual is always the
+/// manual of the running app version (so the in-app reader and the agent both
+/// answer from version-matched prose), it needs no `bundle.resources` entry and
+/// no runtime `resource_dir` resolution — which in this project resolves to
+/// `target/debug` under `tauri dev` and would behave differently in every build
+/// mode — and it reaches all five CI targets through the same code path.
+///
+/// The allowlist is the contract: only `info.json` and `*.md` are packed. A
+/// stray `fts5.sqlite3` / `data.sqlite3` from a dev build that scanned the
+/// folder, or a `meta.json` of linked locations, are derived or machine-local
+/// and would otherwise ride in every installer.
+///
+/// A hard failure is deliberate: `include_bytes!` of a stale or empty archive
+/// would ship an app whose manual silently never updates.
+fn pack_user_manual() {
+    // The directory form re-runs on any add/remove inside it; content edits to
+    // the packed files are covered because `rerun-if-changed` on a directory
+    // tracks its mtime, which every write to a child updates.
+    println!("cargo:rerun-if-changed=../docs/manual");
+
+    let src = PathBuf::from("../docs/manual");
+    let info_path = src.join("info.json");
+    let info_raw = fs::read(&info_path).unwrap_or_else(|e| {
+        panic!(
+            "built-in user manual: cannot read {} — the app ships this directory as its own \
+             manual, so it must exist and be readable ({e}).",
+            info_path.display()
+        )
+    });
+    let info: serde_json::Value = serde_json::from_slice(&info_raw)
+        .unwrap_or_else(|e| panic!("built-in user manual: {} is not valid JSON ({e}).", info_path.display()));
+    for key in ["uuid", "updated_at"] {
+        if info.get(key).and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+            panic!(
+                "built-in user manual: {} must carry a non-empty `{key}` — the seed step compares \
+                 it against the copy on disk to decide whether to replace it.",
+                info_path.display()
+            );
+        }
+    }
+
+    let out_dir =
+        PathBuf::from(std::env::var("OUT_DIR").expect("cargo always sets OUT_DIR for build scripts"));
+    let archive = out_dir.join("manual.tar.gz");
+    let file = fs::File::create(&archive)
+        .unwrap_or_else(|e| panic!("built-in user manual: cannot write {}: {e}", archive.display()));
+
+    let mut files = Vec::new();
+    collect_packed(&src, &mut files);
+    if files.len() <= 1 {
+        panic!(
+            "built-in user manual: {} holds no markdown — packing an empty manual would ship an \
+             app with a Wiki page that has nothing in it.",
+            src.display()
+        );
+    }
+    // Sorted so the archive is byte-stable across builds that change nothing.
+    files.sort();
+
+    let enc = flate2::write::GzEncoder::new(file, flate2::Compression::new(6));
+    let mut builder = tar::Builder::new(enc);
+    for path in &files {
+        let rel = path
+            .strip_prefix(&src)
+            .unwrap_or_else(|_| panic!("packed file {} escapes {}", path.display(), src.display()));
+        builder
+            .append_path_with_name(path, rel)
+            .unwrap_or_else(|e| panic!("built-in user manual: cannot pack {}: {e}", path.display()));
+    }
+    let enc = builder
+        .into_inner()
+        .unwrap_or_else(|e| panic!("built-in user manual: archive finalize failed: {e}"));
+    enc
+        .finish()
+        .unwrap_or_else(|e| panic!("built-in user manual: gzip write failed: {e}"));
+}
+
+/// Every file under `dir` that belongs in the shipped manual, recursively.
+fn collect_packed(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if path.is_dir() {
+            collect_packed(&path, out);
+            continue;
+        }
+        if name.starts_with('.') {
+            continue;
+        }
+        let lower = name.to_ascii_lowercase();
+        if name == "info.json" || lower.ends_with(".md") {
+            out.push(path);
+        }
+    }
 }
 
 /// Give `cargo test` harnesses the application manifest the app exe gets from

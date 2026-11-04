@@ -96,6 +96,13 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&datasets).unwrap_or_default())
     }
 
+    #[tool(name = "builtin_manual_get", description = "Get the user manual the app ships — a read-only wiki dataset ({ uuid, name, description, updated, file_count, path, location, is_read_only: true }), or null when the seed never landed. It is the manual of the version the user is running, so answer 'how do I use FmS' / 'what does this mode do' from it rather than from your own guesses. It is deliberately absent from wiki_dataset_list; this call is the one road that names its uuid. Read its content by passing that uuid to the ordinary wiki tools (wiki_dataset_list_dir / wiki_dataset_read_file / wiki_dataset_search). Writes are refused — the next app update replaces it wholesale, so keep the user's own notes in a wiki_dataset_create dataset instead.")]
+    async fn builtin_manual_get(&self) -> Result<String, String> {
+        log::info!("[MCP] builtin_manual_get");
+        let summary = crate::datasets::builtin::manual_summary();
+        Ok(serde_json::to_string_pretty(&summary).unwrap_or_default())
+    }
+
     #[tool(name = "wiki_dataset_create", description = "Create a new empty wiki dataset with the given name under the datasets directory. Pass `family` (see dataset_family) to attach it to the book or dictation set it documents. Returns the new dataset summary including its uuid.")]
     async fn wiki_dataset_create(&self, Parameters(param): Parameters<WikiDatasetCreateParam>) -> Result<String, String> {
         log::info!("[MCP] wiki_dataset_create: name={}", param.name);

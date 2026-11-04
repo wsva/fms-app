@@ -17,6 +17,7 @@
 //! - [`subtitle`] — STT pass and VTT shaping
 //! - [`waveform`] — symphonia peaks
 //! - [`db`] — `data.sqlite3` schema and cue generation
+//! - [`builtin`] — content shipped inside the binary rather than imported (the user manual)
 //!
 //! Everything those modules define is re-exported here, so the rest of the crate
 //! keeps naming `datasets::find_dataset_dir` and friends through this root.
@@ -25,6 +26,7 @@ pub(crate) mod asr_metric;
 pub(crate) mod book;
 pub(crate) mod book_artifacts;
 pub(crate) mod book_mail;
+pub(crate) mod builtin;
 pub(crate) mod cards;
 pub(crate) mod db;
 pub(crate) mod dictation;

@@ -8,7 +8,7 @@ import { emit } from "@tauri-apps/api/event";
 import {
   RefreshCw, ArrowLeft, ArrowRight, Cloud, Download, Pencil, Eye,
   Folder, FolderOpen, FileText, BookMarked, FilePlus, FolderPlus, Plus, Trash2,
-  Save, CircleHelp, Search, ExternalLink, List,
+  Save, CircleHelp, Search, ExternalLink, List, Lock,
 } from "lucide-react";
 import { useIsActiveTab, usePageRefresh } from "@/lib/refresh/page-refresh";
 import { useAgentActions, reqStr } from "@/lib/agent/ui-actions";
@@ -355,11 +355,19 @@ export default function WikiPage() {
     });
   }, []);
 
-  // Load locally stored wiki datasets (downloaded or hub-owned). Cross-platform.
+  // Load locally stored wiki datasets (downloaded or hub-owned), plus the
+  // built-in user manual the app ships. The manual is read-only and lives
+  // outside the discovered dataset roots, so it arrives from its own command
+  // rather than `wiki_dataset_list` — merged in first so it leads the tree.
+  // Cross-platform.
   const loadLocalDatasets = useCallback(async () => {
     if (!isTauri()) return;
     try {
-      setLocalDatasets(await invoke<WikiDatasetSummary[]>("wiki_dataset_list"));
+      const [datasets, manual] = await Promise.all([
+        invoke<WikiDatasetSummary[]>("wiki_dataset_list"),
+        invoke<WikiDatasetSummary | null>("builtin_manual_get"),
+      ]);
+      setLocalDatasets(manual ? [manual, ...datasets] : datasets);
     } catch (err) {
       logError(`Failed to load wiki datasets: ${err instanceof Error ? err.message : String(err)}`, "wiki");
     }
@@ -535,8 +543,14 @@ export default function WikiPage() {
 
   // Whether the current selection is an editable local dataset file. The
   // backend only ever writes .md, so non-markdown files are view-only here.
+  // The built-in manual is a local dataset the app ships read-only (the next
+  // update replaces it wholesale) — `hubMode` is the other, remote read-only
+  // case, so this predicate only carries the local one.
+  const isReadOnlyDataset = (uuid: string | null | undefined): boolean =>
+    !!uuid && localDatasets.some((d) => d.uuid === uuid && d.is_read_only);
+
   const canEdit =
-    !hubMode && selection?.source.kind === "dataset" && selection.source.rel !== "" && fileKind === "markdown";
+    !hubMode && selection?.source.kind === "dataset" && !isReadOnlyDataset(selection.source.uuid) && selection.source.rel !== "" && fileKind === "markdown";
 
   const startEdit = () => {
     // Reopen with the persisted draft when one exists and still differs from
@@ -726,6 +740,12 @@ export default function WikiPage() {
   const activeDatasetName = activeDatasetUuid
     ? treeDatasets.find((d) => d.uuid === activeDatasetUuid)?.name ?? activeDatasetUuid
     : "";
+
+  // The active dataset is read-only either remotely (hub browse) or because it
+  // is the built-in manual the app ships. One flag gates every mutating browse
+  // affordance; `builtinReadOnly` isolates the local case for its own banner.
+  const builtinReadOnly = !hubMode && isReadOnlyDataset(activeDatasetUuid);
+  const activeReadOnly = hubMode || builtinReadOnly;
 
   // Directory path segments shown in the breadcrumb: taken from the open
   // file's parent dirs, or from the directory being browsed.
@@ -991,6 +1011,15 @@ export default function WikiPage() {
             <span>Hub view — read-only. Download a dataset to edit it locally.</span>
           </div>
         )}
+        {/* Built-in manual read-only banner — the local counterpart of the hub
+            one: the dataset ships with the app, so it can be read but never
+            edited (the next update replaces it wholesale). */}
+        {builtinReadOnly && viewMode !== "datasets" && (
+          <div className="px-4 py-1.5 text-xs bg-accent/10 text-accent border-b border-border-default flex items-center gap-2">
+            <Lock size={13} />
+            <span>Built-in manual — read-only. It ships with the app and the next update replaces it. Create your own wiki dataset to keep notes.</span>
+          </div>
+        )}
 
         <div className="relative flex flex-1 min-h-0 overflow-hidden">
           {/* Content column: breadcrumb nav on top, scrollable view below */}
@@ -1220,7 +1249,7 @@ export default function WikiPage() {
                 />
               )}
 
-              {viewMode === "browse" && !hubMode && (
+              {viewMode === "browse" && !activeReadOnly && (
                 <>
                   {!mobile && (
                     <ToolbarButton
@@ -1241,7 +1270,7 @@ export default function WikiPage() {
                 </>
               )}
 
-              {viewMode === "browse" && canMutateRoots && !hubMode && (
+              {viewMode === "browse" && canMutateRoots && !activeReadOnly && (
                 <ToolbarButton
                   variant="danger"
                   icon={Trash2}
@@ -1265,12 +1294,12 @@ export default function WikiPage() {
                   panel is rendered only where it actually has entries: dropping the
                   Refresh item would otherwise leave a dead three-dot on browse and
                   file views. */}
-              {(viewMode === "datasets" && canMutateRoots) || (mobile && viewMode === "browse" && !hubMode) ? (
+              {(viewMode === "datasets" && canMutateRoots) || (mobile && viewMode === "browse" && !activeReadOnly) ? (
                 <ToolbarOverflow>
                   {viewMode === "datasets" && canMutateRoots && (
                     <ToolbarMenuItem icon={FolderOpen} onClick={() => setShowLocations(true)}>Locations</ToolbarMenuItem>
                   )}
-                  {mobile && viewMode === "browse" && !hubMode && (
+                  {mobile && viewMode === "browse" && !activeReadOnly && (
                     <>
                       <ToolbarMenuItem icon={FilePlus} onClick={handleCreateFile}>New File</ToolbarMenuItem>
                       <ToolbarMenuItem icon={FolderPlus} onClick={handleCreateDir}>New Folder</ToolbarMenuItem>
@@ -1591,10 +1620,20 @@ export default function WikiPage() {
                         description={ds.description ?? ""}
                         title={ds.path}
                         onOpen={() => goToDatasetDir(ds.uuid, "")}
-                        // A hub dataset is a remote browse: there is no local
-                        // info.json to write, so it gets no pencil.
+                        // The built-in manual is app content, not user data: badge
+                        // it so the read-only is visible before it is hit.
+                        chips={
+                          ds.is_read_only && !hubMode ? (
+                            <span className="shrink-0 inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded border border-border-light bg-bg-body text-text-secondary">
+                              <Lock size={11} /> built-in
+                            </span>
+                          ) : undefined
+                        }
+                        // A hub dataset is a remote browse (no local info.json to
+                        // write) and the built-in manual ships read-only — neither
+                        // gets the pencil.
                         onSave={
-                          hubMode
+                          hubMode || ds.is_read_only
                             ? undefined
                             : async (patch) => {
                                 await invoke("dataset_update", {

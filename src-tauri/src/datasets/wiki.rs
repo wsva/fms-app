@@ -64,6 +64,12 @@ pub struct WikiDatasetSummary {
     pub path: String,
     /// Root location this dataset was found under.
     pub location: String,
+    /// True when the dataset cannot be edited here: the built-in manual the app
+    /// ships ([`super::builtin`]), whose content is replaced by the next app
+    /// build rather than written to. Mirrors `DatasetSummary::is_read_only`, and
+    /// the page gates its edit affordances on this instead of a second signal.
+    #[serde(default)]
+    pub is_read_only: bool,
 }
 
 /// One entry of a wiki dataset's file tree. `rel_path` is dataset-relative
@@ -168,7 +174,16 @@ fn bump_updated(dir: &Path) {
 }
 
 /// Resolve a wiki dataset directory by UUID across every configured wiki root.
+///
+/// The built-in manual is consulted first: it lives under app data rather than
+/// under any `dataset_roots` entry, so this one seam is what lets every existing
+/// read command and MCP tool (`list_dir`, `read_file`, `search_dataset`) serve
+/// it without a parallel implementation — while discovery, which walks the roots,
+/// stays unaware of it and sync can neither journal nor adopt it.
 pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
+    if let Some(dir) = super::builtin::dir_for(uuid) {
+        return Ok(dir);
+    }
     for root in dataset_roots(settings, DatasetType::Wiki) {
         if !root.exists() {
             continue;
@@ -196,7 +211,31 @@ pub(crate) fn find_dataset_dir(settings: &SettingsState, uuid: &str) -> Result<P
 /// writable overlay (dataset-layers.md §6). Read commands keep using
 /// [`find_dataset_dir`]. The derived FTS index is rebuilt inside the overlay, so
 /// indexing never writes into the app-managed download root.
+///
+/// The built-in manual is refused outright — and refused *before* the fork
+/// branch, because an overlay would freeze that device's manual at whatever
+/// version it first wrote to, silently opting out of every later app update.
 pub(crate) fn find_dataset_dir_write(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
+    if super::builtin::is_builtin(uuid) {
+        return Err(super::builtin::READ_ONLY.to_string());
+    }
+    find_dataset_dir_writable(settings, uuid)
+}
+
+/// Write-resolution for a dataset's **derived** state only — today the `fts5`
+/// index, which [`index_dataset`] builds inside the dataset directory.
+///
+/// Split from [`find_dataset_dir_write`] because the built-in manual must be
+/// searchable even though it is not editable: the index is derived, excluded
+/// from the packed archive, hidden from listings, and wiped by the next version's
+/// re-seed, so writing it into app data is harmless and avoids a second search
+/// implementation. Nothing that a user or an agent could call an edit may use
+/// this road.
+pub(crate) fn find_dataset_dir_derived(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
+    find_dataset_dir_writable(settings, uuid)
+}
+
+fn find_dataset_dir_writable(settings: &SettingsState, uuid: &str) -> Result<PathBuf, String> {
     let dir = find_dataset_dir(settings, uuid)?;
     if is_under_download_root(settings, &dir) {
         return fork_base_to_overlay(settings, &dir, DatasetType::Wiki);
@@ -220,7 +259,7 @@ fn folder_name_for(name: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Recursively count the markdown files under `dir`.
-fn count_markdown(dir: &Path) -> usize {
+pub(crate) fn count_markdown(dir: &Path) -> usize {
     let mut n = 0;
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;
@@ -271,6 +310,7 @@ pub(crate) fn list_datasets(settings: &SettingsState) -> Vec<WikiDatasetSummary>
                 file_count: count_markdown(&path),
                 path: path.to_string_lossy().into_owned(),
                 location: location.clone(),
+                is_read_only: false,
             });
         }
     }
@@ -332,6 +372,7 @@ pub(crate) fn create_dataset(
         file_count: 0,
         path: dir.to_string_lossy().into_owned(),
         location: root.to_string_lossy().into_owned(),
+        is_read_only: false,
     })
 }
 
@@ -395,12 +436,18 @@ pub(crate) fn import_dir(
         file_count: count_markdown(&dir),
         path: dir.to_string_lossy().into_owned(),
         location: type_dir_str,
+        is_read_only: false,
     })
 }
 
 /// Delete a wiki dataset: drop its `meta.json` link when it lives in a linked
 /// directory, then move the whole folder into the shared trash instead of destroying
 /// it, so the operation stays undoable (see [`move_to_trash`]). Returns the trash path.
+///
+/// The built-in manual never reaches the trash: [`find_dataset_dir_write`] refuses
+/// it first, which matters twice over — a restored copy would land in the
+/// writable `wiki/` area as a second, editable manual, and the deletion would
+/// journal a `wiki_file_delete` the next app build then has to undo.
 pub(crate) fn delete_dataset(settings: &SettingsState, uuid: &str) -> Result<String, String> {
     let dir = find_dataset_dir_write(settings, uuid)?;
     let type_dir = settings.datasets_dir().join(DatasetType::Wiki.as_str());
@@ -665,7 +712,7 @@ fn collect_markdown_files(dir: &Path, ds_root: &Path, out: &mut Vec<(PathBuf, St
 
 /// Rebuild the dataset's local FTS index. Returns the number of files indexed.
 pub(crate) fn index_dataset(settings: &SettingsState, uuid: &str) -> Result<u32, String> {
-    let ds_dir = find_dataset_dir_write(settings, uuid)?;
+    let ds_dir = find_dataset_dir_derived(settings, uuid)?;
     let conn = open_fts_db(&ds_dir)?;
 
     let mut files = Vec::new();
@@ -922,4 +969,28 @@ pub async fn wiki_dataset_search(
     keyword: String,
 ) -> Result<Vec<WikiSearchResult>, String> {
     search_dataset(settings.inner(), &uuid, &keyword)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every mutation road must refuse the built-in manual with the shared
+    /// read-only wording, and refuse it *before* touching settings: the check
+    /// only compares against the embedded descriptor, so it holds on a machine
+    /// with nothing configured and before the first seed has run.
+    #[test]
+    fn write_and_delete_roads_refuse_the_builtin_manual() {
+        let settings = SettingsState::new();
+        let uuid = super::super::builtin::manual_uuid()
+            .expect("the embedded manual must carry an id for the resolver to recognise");
+
+        let write = find_dataset_dir_write(&settings, &uuid).unwrap_err();
+        assert_eq!(write, super::super::builtin::READ_ONLY);
+
+        // Deleting routes through the same write resolver, so it must refuse
+        // identically rather than reaching the trash.
+        let delete = delete_dataset(&settings, &uuid).unwrap_err();
+        assert_eq!(delete, super::super::builtin::READ_ONLY);
+    }
 }

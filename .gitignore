@@ -47,6 +47,13 @@ venv/
 learning
 dataset_studio/dataset_exports
 
+# The bundled user manual's authoring source is docs/manual: only info.json and
+# *.md belong in git. A dev build that scanned the folder drops a wiki dataset's
+# derived sqlite there — neither is ever packed by build.rs, and a committed one
+# would ride into every installer.
+docs/manual/fts5.sqlite3
+docs/manual/data.sqlite3
+
 # Release signing material - never commit. Android's keystore, and the
 # updater's minisign keypair (`.signing/updater/`): the public half is already in
 # tauri.conf.json, the private half belongs only in CI secrets plus an offline

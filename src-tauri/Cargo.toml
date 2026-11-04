@@ -18,6 +18,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# The build script packs `docs/manual` into the archive the binary embeds (see
+# `pack_user_manual`): `tar` + `flate2` write the tar.gz and `serde_json` asserts
+# the descriptor carries the stamp the seed step compares against. All three are
+# already in the tree as runtime dependencies at the same versions, so an
+# `--offline` build fetches nothing new.
+flate2 = "1.0"
+serde_json = "1"
+tar = "0.4.44"
 
 # Feature gating so the mobile (aarch64-linux-android) build never pulls in
 # desktop-only native dependencies (file dialogs, screen capture, image

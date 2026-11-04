@@ -35,6 +35,8 @@ const URI_DOCS_PRINCIPLES: &str = "fms://docs/principles";
 const URI_TEMPLATES: &str = "fms://workflows/templates";
 /// The mailbox group contract: six sentences, then the `mail` tool table.
 pub(crate) const URI_MAILBOX: &str = "fms://mailbox";
+/// The built-in user manual's table of contents, read off the seeded directory.
+const URI_DOCS_USER_MANUAL: &str = "fms://docs/user-manual";
 /// Prefix for the per-domain documents; one per entry of [`DOC_DOMAINS`].
 const URI_DOCS_DOMAIN: &str = "fms://docs/domain/";
 /// The one parameterised resource: `<uuid>` is a dataset uuid from `dataset_list`.
@@ -95,6 +97,16 @@ pub(crate) fn list() -> ListResourcesResult {
                  table (the manual inlines the same six sentences without it).",
             )
             .with_mime_type("text/markdown"),
+        Resource::new(URI_DOCS_USER_MANUAL, "docs/user-manual")
+            .with_title("User manual — table of contents")
+            .with_description(
+                "The shipped user manual's map: its uuid, then every page with its first \
+                 heading. Read this before answering a 'how do I use FmS' question, then open \
+                 the page you need with wiki_dataset_read_file (pass the uuid it names). The \
+                 manual is app content — the version the user runs — and is written for the \
+                 learner, not the agent, so this is the only slice rendered as a resource.",
+            )
+            .with_mime_type("text/markdown"),
     ];
 
     for domain in DOC_DOMAINS {
@@ -137,6 +149,7 @@ pub(crate) fn uris() -> Vec<String> {
         URI_DOCS_PRINCIPLES.to_string(),
         URI_TEMPLATES.to_string(),
         URI_MAILBOX.to_string(),
+        URI_DOCS_USER_MANUAL.to_string(),
     ];
     for domain in DOC_DOMAINS {
         out.push(format!("{}{}", URI_DOCS_DOMAIN, domain));
@@ -158,6 +171,7 @@ pub(crate) fn read(app: &AppHandle, uri: &str) -> Result<ReadResourceResult, Mcp
         URI_DOCS_PRINCIPLES => (principles(), "text/markdown"),
         URI_TEMPLATES => (templates_doc(), "application/json"),
         URI_MAILBOX => (mailbox_doc(), "text/markdown"),
+        URI_DOCS_USER_MANUAL => (user_manual_doc(), "text/markdown"),
         other => {
             if let Some(domain) = domain_of(other) {
                 (domain_doc(domain), "text/markdown")
@@ -475,6 +489,62 @@ fn mailbox_doc() -> String {
          just made, and is not a reason to call `mail_list`.\n",
     );
     out
+}
+
+// ---------------------------------------------------------------------------
+// fms://docs/user-manual
+// ---------------------------------------------------------------------------
+
+/// The shipped manual's table of contents: the uuid an agent must pass to the
+/// wiki read tools, then every page and its first heading. Derived at read time
+/// from the seeded directory, so it can never disagree with what the Wiki page
+/// shows or with what `wiki_dataset_search` will find.
+fn user_manual_doc() -> String {
+    use crate::datasets::builtin;
+
+    let mut out = String::new();
+    out.push_str("# User manual\n\n");
+
+    let uuid = builtin::manual_uuid().unwrap_or_default();
+    let dir = builtin::manual_dir();
+    if uuid.is_empty() || !dir.exists() {
+        out.push_str(
+            "The built-in manual is not present on this device yet (it seeds on app start). Nothing to read.\n",
+        );
+        return out;
+    }
+    out.push_str(&format!(
+        "_The manual the app ships — the version the user runs. Read a page with `wiki_dataset_read_file {{ uuid: \"{uuid}\", rel: <path> }}`; search it with `wiki_dataset_search`. It is read-only and does not appear in `wiki_dataset_list`._\n\n",
+    ));
+
+    let mut files = builtin::toc();
+    // `index.md` is the front door: list it first whatever the sort produced.
+    files.sort_by_key(|f| (f != "index.md", f.clone()));
+
+    out.push_str("## Pages\n\n");
+    for rel in files {
+        let heading = first_heading(&dir.join(&rel));
+        out.push_str(&format!("- `{rel}` — {heading}\n"));
+    }
+    out
+}
+
+/// The first markdown heading of a file, or a stand-in when it has none. Reads
+/// only as much as a heading can be — a page's prose belongs to the read tools.
+fn first_heading(path: &Path) -> String {
+    let Ok(text) = fs::read_to_string(path) else {
+        return "(unreadable)".to_string();
+    };
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix('#') {
+            let title = rest.trim_start_matches('#').trim();
+            if !title.is_empty() {
+                return title.to_string();
+            }
+        }
+    }
+    "(no heading)".to_string()
 }
 
 // ---------------------------------------------------------------------------

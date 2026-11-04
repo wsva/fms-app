@@ -35,7 +35,7 @@ use crate::sync::server::{WebServiceConfig, WebServiceState, WebServiceStatus};
 /// as the `read-aloud` domain because `fms://docs/domain/{domain}` is the slice
 /// an agent reads before it starts, and "books" is not a word a read-aloud task
 /// begins with.
-const DOMAIN_PREFIXES: [(&str, &str); 28] = [
+const DOMAIN_PREFIXES: [(&str, &str); 29] = [
     ("dataset_", "datasets"),
     ("subtitle_", "datasets"),
     ("dictation_", "dictation"),
@@ -47,6 +47,9 @@ const DOMAIN_PREFIXES: [(&str, &str); 28] = [
     ("chat_", "ai"),
     ("tts_", "ai"),
     ("wiki_", "wiki"),
+    // The one call that names the shipped manual (`builtin_manual_get`) belongs to
+    // the wiki family it is read through, not to a domain of its own.
+    ("builtin_", "wiki"),
     ("sync_", "sync"),
     ("hub_", "sync"),
     ("market_", "sync"),
@@ -242,6 +245,12 @@ fn capabilities() -> Value {
         "workflow_engine": cfg!(feature = "desktop"),
         "ocr": cfg!(feature = "desktop"),
         "screen_capture": cfg!(feature = "desktop"),
+        // The built-in user manual, addressed by the id this build ships with —
+        // the dataset is invisible to every listing, so this is the one place an
+        // agent learns the uuid it must pass to the wiki read tools. Read, not
+        // declared: derived from the seeded (or embedded) descriptor, so a CI
+        // rewrite of the shipped id needs no change here.
+        "builtin_manual": crate::datasets::builtin::manual_capability(),
         // The readable resources, by uri — the uri template for a dataset layout
         // is included as a template, not a literal uri (see `resources.rs`).
         "mcp_resources": super::resources::uris(),
@@ -314,6 +323,7 @@ pub(crate) fn house_rules() -> Value {
         "Self-update is notify-first and installing one ends the session. app_update_check only reports (current, latest, available, hint); app_update_install is what applies it, and that call never returns: on Windows the installer replaces the running executable, and on Linux the app re-executes itself. Announce it before calling, and never start it while a transcription or a model download is in flight - that work is discarded, which is exactly why the tool refuses then.",
         "To watch a job the app is running (a subtitle pass, a sync push, a workflow step), poll app_events with the `after` cursor instead of asking each domain in turn — it is the same log timeline the log_* tools read. `evicted_since_cursor` is non-zero when you fell behind the 1000-entry ring, and log_read_file_history is the archive.",
         "Before authoring a workflow definition, call workflow_list_actions: the step ids and commands it returns are the vocabulary the app can run, published by its Workflow page. Invented step ids fail workflow_validate, and the dictation templates under workflow_builtin_templates are a known-good starting point.",
+        "This manual documents the tool surface; for how a feature is used, what a practice mode does, or what a term means, read the app's own user manual instead of answering from general knowledge — FmS is a niche app you have no training data for. Its dataset is invisible to wiki_dataset_list, so get its uuid from builtin_manual_get (also capabilities.builtin_manual), search it with wiki_dataset_search and open pages with wiki_dataset_read_file. It is the manual of the version the user runs, so 'how do I…' is answered for their app, offline; 'what's new in the latest version' is out of scope — the updater tells them a newer one exists.",
     ])
 }
 

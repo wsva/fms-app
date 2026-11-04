@@ -12,6 +12,10 @@ export interface WikiDatasetSummary {
   file_count: number;
   path: string;
   location: string;
+  /** True when the dataset cannot be edited here: the built-in manual the app
+   *  ships, whose content the next app update replaces wholesale. Mirrors
+   *  `datasets::wiki::WikiDatasetSummary::is_read_only`. */
+  is_read_only?: boolean;
 }
 
 // Mirrors datasets::wiki::WikiFileEntry

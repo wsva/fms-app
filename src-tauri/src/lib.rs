@@ -450,6 +450,8 @@ pub fn run() {
             logger::log_read_file_history,
             // Wiki datasets (syncable markdown trees) — cross-platform.
             datasets::wiki::wiki_dataset_list,
+            // The manual the app ships (read-only, never discovered, never synced).
+            datasets::builtin::builtin_manual_get,
             datasets::wiki::wiki_dataset_create,
             datasets::wiki::wiki_dataset_import_dir,
             datasets::wiki::wiki_dataset_delete,
@@ -652,6 +654,16 @@ pub fn run() {
             transcribe_cpp::init_logging();
             native_log::install();
             log::info!("Application starting up");
+
+            // Unpack the user manual this binary was built with, unless the copy
+            // on disk already carries the same stamp. Synchronous and cheap in
+            // the steady state (one small file read), and it has to finish before
+            // the webview or the MCP server can resolve a wiki root — the Wiki
+            // page's first render expects the manual to exist. Failing to seed
+            // logs and carries on: a missing manual must not brick a launch.
+            if let Err(e) = datasets::builtin::seed_manual() {
+                log::warn!("[Startup] Built-in manual was not seeded: {}", e);
+            }
 
             // ── Initialize workspaces ──
             {
@@ -946,6 +958,8 @@ macro_rules! mobile_invoke_handler {
             logger::log_read_file_history,
             // Wiki datasets (syncable markdown trees) — cross-platform.
             datasets::wiki::wiki_dataset_list,
+            // The manual the app ships (read-only, never discovered, never synced).
+            datasets::builtin::builtin_manual_get,
             datasets::wiki::wiki_dataset_create,
             datasets::wiki::wiki_dataset_import_dir,
             datasets::wiki::wiki_dataset_delete,
@@ -1152,6 +1166,13 @@ pub fn run() {
             // desktop: nowhere to report to once the process is gone.
             native_log::install();
             log::info!("Application starting up (mobile)");
+
+            // Same built-in manual seed as the desktop path (see the note there);
+            // the thin client reads the manual offline, so it ships in the binary
+            // rather than arriving by sync.
+            if let Err(e) = datasets::builtin::seed_manual() {
+                log::warn!("[Startup] Built-in manual was not seeded: {}", e);
+            }
 
             // ── Initialize workspaces ──
             {
