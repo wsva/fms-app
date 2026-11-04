@@ -22,6 +22,31 @@ You can create and edit documents directly:
 
 Because editing works on plain Markdown, anything you can write in Markdown you can put in a wiki.
 
+## Translating a document
+
+Open a Markdown page and press **Translate** in the toolbar. Pick a language and press
+**Ask agent**. Nothing is translated on the spot: FmS files a request, and an **agent** —
+the same one that drives the rest of the app over MCP (see [Agents](agents.md)) — picks it
+up, reads the document and writes the translation back.
+
+- The answer is a **new file beside the original**: `notes/idea.md` translated into German
+  becomes `notes/idea_de.md`. Your document is never changed.
+- Inside it, every original block is followed by its translation, so you can read side by
+  side. Code blocks, formulas, image paths and link addresses are left exactly as they are.
+- The first line of the new file says which document it came from and when, so an old
+  translation is recognisable as one.
+- Ask again for the same document and language and the agent replaces the existing
+  translation. The old copy goes to the app trash first, so it is undoable.
+
+Watch what happens in the **Agent dock** (Ctrl+Space): the request appears there as soon as
+you ask, and shows *delivered* once the agent reports the file written. If no agent is
+attached, the Translate popover's **Copy** button gives you the whole request to paste into
+one.
+
+One thing to know: FmS does not read the translation to check it. The agent's report is what
+the dock shows you, and the file itself is the proof — open it. If it isn't there, or isn't
+right, nobody silently hid that from you: ask again.
+
 ## Search
 
 Each device builds its own full‑text index over a wiki copy, so **search** finds text inside documents quickly and works even on a freshly downloaded wiki — the index is generated locally on first search and is never transferred.

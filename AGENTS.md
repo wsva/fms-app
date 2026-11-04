@@ -90,6 +90,11 @@ src-tauri/src/
 │   ├── book.rs             # Book chapters/sentences/words and their audio
 │   ├── book_artifacts.rs   # Book "understanding layer": artifacts (explain/simplify/digest/argument_map/
 │   │                       #   questions/note/assessment), glossary terms, quiz→XP results; LLM + Edge-TTS generation
+│   ├── book_mail.rs        # The books' agent road: an artifact request as a mailbox row (`book_mail::request_artifact`)
+│   ├── wiki.rs             # The wiki dataset type: the `.md` files *are* the rows — dirs, read/write, the
+│   │                       #   trash-backed delete, the FTS5 index (own root + `meta.json` linkage)
+│   ├── wiki_translate.rs   # The wiki's one AI road: file a translate request in the mailbox and close it on
+│   │                       #   the worker's report (`reported_done`) — the app never reads the result
 │   ├── read_aloud/         # Read-aloud datasets: recorded takes, STT scoring, XP awards
 │   │   ├── mod.rs          # Dataset dir + DB, sync, the command wrappers, shared path helpers
 │   │   ├── source_align/   # Align page: recording folder → word timings → spans → clips
@@ -166,7 +171,8 @@ src-tauri/src/
 │   ├── books.rs            # book chapters/sentences/words + read-aloud texts & scoring (24)
 │   ├── models.rs           # STT model status/download/load/default/delete/transcribe (7)
 │   ├── ai.rs               # Ollama/cloud chat & model management, provider switch, Edge TTS, cross-device chat (11)
-│   ├── wiki.rs             # wiki dirs, read/write/delete, search, index (9)
+│   ├── wiki.rs             # wiki dirs, read/write/delete, search, index, the translate road — ask and close
+│   │                       #   the ask (16)
 │   ├── sync.rs             # web service, pairing registry, PC scan/connect/pull, incremental sync (15)
 │   ├── system.rs           # settings, auth, logs, OCR, screenshot, app UI control (the `app_*` verbs the
 │   │                       #   dock and the shell listen for), the `app_events` timeline, the trash undo
@@ -209,7 +215,6 @@ src-tauri/src/
 │                           #   a GUI release build otherwise dies silently
 ├── db.rs                   # rusqlite wrappers with write-contention logging, adjustment guard
 ├── audio.rs                # Audio decoding via Symphonia
-├── wiki.rs                 # Wiki documents; own root + `meta.json` linkage (not a dataset type)
 ├── xp.rs                   # XP ledger in the app-level SQLite
 ├── todo.rs                 # Agent TODO list in the app-level SQLite: user-facing tasks an agent or a
 │                           #   workflow `human` step leaves for the learner; workspace-scoped, syncs via

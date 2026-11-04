@@ -44,6 +44,7 @@ pub(crate) mod textsim;
 pub(crate) mod tools;
 pub(crate) mod waveform;
 pub(crate) mod wiki;
+pub(crate) mod wiki_translate;
 
 // The only item left in this file is the desktop Stage-2 orchestrator, so its imports
 // are gated with it.

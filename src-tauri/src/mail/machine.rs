@@ -1,7 +1,7 @@
 //! The agent-mail ledger's state machine — §4.1 of
 //! `docs/design/agent/mailbox.md`, transcribed once.
 //!
-//! The design document states the machine as one transition table (T1–T16).
+//! The design document states the machine as one transition table (T1–T18).
 //! That table is [`TRANSITIONS`] here, and this module is the only place a
 //! move is spelled out: the SQL in `agent_mail` asks [`check`] before it
 //! writes, and the tests at the bottom enumerate every state against every
@@ -112,6 +112,10 @@ pub enum Guard {
     CapacityFree,
     /// `expires_at <= now` and the row's `resource` has room.
     LapsedAndFree,
+    /// `expires_at <= now`, or absent. Unlike [`Guard::LapsedAndFree`] this asks
+    /// nothing of capacity: the report path (T18) consumes no resource, so the
+    /// only thing that may stop it is somebody else holding the row.
+    LeaseNotLive,
     /// Free — `queued`, or `expires_at <= now` — and at the cap.
     FreeAndAtCap,
     /// `expires_at <= now`, and the artifact at `target_uuid` already carries
@@ -136,6 +140,7 @@ impl Guard {
             Guard::ClaimAndParent => f.claim_matches && f.parent_matches,
             Guard::CapacityFree => f.capacity_free,
             Guard::LapsedAndFree => !f.lease_live && f.capacity_free,
+            Guard::LeaseNotLive => !f.lease_live,
             Guard::FreeAndAtCap => (from == Queued || !f.lease_live) && f.attempts_at_cap,
             Guard::LapsedAndArtifact => !f.lease_live && f.artifact_landed,
             Guard::BeforeDeadline => f.before_deadline,
@@ -225,7 +230,7 @@ impl Default for Facts {
 /// One row of §4.1's table.
 #[derive(Debug, Clone, Copy)]
 pub struct Transition {
-    /// `T1`..`T16`, the id every other section cites.
+    /// `T1`..`T18`, the id every other section cites.
     pub id: &'static str,
     /// The states this row can be performed from.
     pub from: &'static [MailState],
@@ -416,6 +421,25 @@ pub const TRANSITIONS: &[Transition] = &[
         to: Failed,
         delta: AttemptDelta::Same,
     },
+    // T18 — the report: the party doing the work says it is done, and there is
+    // nothing the app could read to confirm it. A wiki translation lands as a
+    // markdown file the learner opens, so unlike T7 this row has no artifact the
+    // ledger can reconcile against, and unlike T7 the caller need not hold the
+    // work: claiming is optional on that road, so a report may arrive unclaimed
+    // (`queued`) or after its lease lapsed mid-work (`claimed`/`delivering`) —
+    // and must still land, rather than letting a slow success read as three
+    // expired attempts. Hence `Actor::Agent` and `LeaseNotLive`, not the holder's
+    // claim guard. `waiting_user` is deliberately absent: a row whose agent has
+    // asked the user a question is the user's turn, and an unheld close must not
+    // stamp over an open question.
+    Transition {
+        id: "T18",
+        from: &[Queued, Claimed, Delivering],
+        actor: Actor::Agent,
+        guard: Guard::LeaseNotLive,
+        to: Delivered,
+        delta: AttemptDelta::Same,
+    },
 ];
 
 /// Why a named transition may not be performed.
@@ -531,6 +555,9 @@ mod tests {
             Guard::LapsedAndFree => {
                 f.capacity_free = true;
             }
+            // `Facts::default()` already reports no live lease, which is the
+            // whole guard — a report asks nothing else of the row.
+            Guard::LeaseNotLive => {}
             Guard::CapacityFree => {
                 f.capacity_free = true;
             }

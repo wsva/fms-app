@@ -1,13 +1,17 @@
 //! Wiki datasets: syncable markdown-tree datasets (list, read/write, delete,
-//! search, index) plus read-only browse of the paired hub's datasets.
+//! search, index), the translate road (ask an agent, close the ask), plus
+//! read-only browse of the paired hub's datasets.
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router};
+use rmcp::service::RoleServer;
+use rmcp::{tool, tool_router, Peer};
 use serde::Deserialize;
+use serde_json::json;
 use tauri::Manager;
 
 use crate::settings::SettingsState;
 
+use super::mail::client_label;
 use super::DatasetMcpServer;
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -52,6 +56,29 @@ struct WikiDatasetWriteParam {
 struct WikiDatasetSearchParam {
     uuid: String,
     keyword: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct WikiTranslateRequestParam {
+    uuid: String,
+    /// The document to translate, dataset-relative (`notes/idea.md`).
+    source_rel: String,
+    /// A language tag, lowercase — `de`, or a subtagged `zh-cn`. It becomes part
+    /// of the file name, so it is validated rather than trusted.
+    lang_code: String,
+    /// Display form the learner reads, in the prompt's header line.
+    lang_name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+struct WikiTranslateDoneParam {
+    /// The wiki translate request this work answers.
+    mail_uuid: String,
+    /// Your claim_id, if you claimed the row. Offer it and the row closes as a
+    /// claim-grounded delivery; omit it (or arrive after your lease lapsed) and
+    /// it closes as a report.
+    #[serde(default)]
+    claim_id: Option<String>,
 }
 
 #[tool_router(router = wiki_router, vis = "pub(crate)")]
@@ -165,6 +192,48 @@ impl DatasetMcpServer {
         let state = self.app.state::<SettingsState>();
         let results = crate::datasets::wiki::wiki_dataset_search(state.into(), param.uuid, param.keyword).await?;
         Ok(serde_json::to_string_pretty(&results).unwrap_or_default())
+    }
+
+    // ---------------------------------------------------------------------
+    // The translate road: the app asks, an agent works, the file is the answer.
+    // ---------------------------------------------------------------------
+
+    #[tool(name = "wiki_translate_request", description = "File a request to translate one wiki markdown file into another language, and get back the canonical prompt for it. The app does not translate: an agent (often the one reading this) reads the source, writes a bilingual `<stem>_<lang_code>.md` beside it, and closes the item with `wiki_translate_done`. Returns {mail, prompt, replaced} — `replaced` names the earlier ask this one superseded, and a row another agent is holding is refused with `claim_required`. Pass a bare `lang_code` like `de`; `lang_name` is the form the learner reads.")]
+    async fn wiki_translate_request(&self, Parameters(param): Parameters<WikiTranslateRequestParam>) -> Result<String, String> {
+        log::info!("[MCP] wiki_translate_request: uuid={}, rel={}, lang={}", param.uuid, param.source_rel, param.lang_code);
+        let state = self.app.state::<SettingsState>();
+        let ask = crate::datasets::wiki_translate::request_translation(
+            state.inner(),
+            &param.uuid,
+            &param.source_rel,
+            &param.lang_code,
+            &param.lang_name,
+        )?;
+        Ok(serde_json::to_string_pretty(&ask).unwrap_or_default())
+    }
+
+    #[tool(name = "wiki_translate_done", description = "Close a wiki translate request once the translated file is written. Claiming was optional on this road, so this accepts a `claim_id` and closes through the claim (a delivery like any other) or, without one — or after the lease lapsed mid-work — closes the row as a **report**: it lands `delivered` with `reason: reported_done`, which means the worker vouches for it and the app did not read it. Verify your own write first (`wiki_dataset_list_dir`, then read the file back): nothing here will. Refuses `wrong_subject` for a row that is not a wiki ask — a book artifact delivers with `book_save_artifact`, never here.")]
+    async fn wiki_translate_done(&self, peer: Peer<RoleServer>, Parameters(param): Parameters<WikiTranslateDoneParam>) -> Result<String, String> {
+        log::info!("[MCP] wiki_translate_done: mail_uuid={}", param.mail_uuid);
+        let state = self.app.state::<SettingsState>();
+        let who = client_label(&peer);
+        match crate::datasets::wiki_translate::close_translation(
+            state.inner(),
+            &param.mail_uuid,
+            param.claim_id.as_deref(),
+            &who,
+        ) {
+            Ok(closed) => Ok(serde_json::to_string_pretty(&json!({
+                "ok": true,
+                "outcome": closed.outcome,
+                "mail": closed.mail,
+            }))
+            .unwrap_or_default()),
+            // A ledger refusal carries a code to branch on and a sentence to act
+            // on, so it travels in the mail domain's shape rather than this
+            // domain's plain strings.
+            Err(e) => Err(serde_json::to_string(&json!({ "ok": false, "error": e })).unwrap_or(e)),
+        }
     }
 
     // ---------------------------------------------------------------------

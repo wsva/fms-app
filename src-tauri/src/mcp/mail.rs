@@ -126,7 +126,10 @@ struct MailWaitParam {
 
 /// `clientInfo.name` from the handshake, sanitised. Self-declared, so it is a
 /// label and nothing more — but it is the only source `claimed_by` has.
-fn client_label(peer: &Peer<RoleServer>) -> String {
+///
+/// `pub(crate)` because [`super::wiki`] needs it: a wiki translation is closed
+/// on an agent's word alone, so the word has to be attributed to somebody.
+pub(crate) fn client_label(peer: &Peer<RoleServer>) -> String {
     let raw = peer
         .peer_info()
         .map(|info| info.client_info.name.clone())

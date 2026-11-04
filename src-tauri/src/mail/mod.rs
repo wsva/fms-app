@@ -45,7 +45,8 @@ pub(crate) use machine::{
     Transition, CLAIM_PATH, TRANSITIONS,
 };
 pub(crate) use store::{
-    abort_delivery, answer, answer_question, archive, begin_delivery, close_by_app, finish_delivery,
+    abort_delivery, answer, answer_question, archive, begin_delivery, close_by_app, close_by_report,
+    finish_delivery,
     head, list, mark_handed, mark_read, notice, open_for_ref, open_on_subject, open_on_target, promote,
     read_one, request, sanitise_label, subject_gone, target_uuid, user_cancel, user_takeover, Folder,
     Mail, MailHead, MailQuery, MailSummary, NewNotice, NewRequest, OwedBy, Refusal, RequestReceipt,
@@ -100,6 +101,10 @@ pub(crate) const REASON_ANSWERED_LATE: &str = "answered_late";
 pub(crate) const REASON_UNANSWERED: &str = "unanswered";
 pub(crate) const REASON_SUPERSEDED: &str = "superseded";
 pub(crate) const REASON_ATTEMPTS_EXHAUSTED: &str = "attempts_exhausted";
+/// The report path's word (§4): the row is `delivered` because the party doing
+/// the work said so, not because the app saw anything land. Only a result the
+/// app cannot read earns it — a wiki translation is a file the learner opens.
+pub(crate) const REASON_REPORTED_DONE: &str = "reported_done";
 /// Not stored: the journal's word for "the clock ended this lease" (§4.1).
 pub(crate) const REASON_LEASE_EXPIRED: &str = "lease_expired";
 

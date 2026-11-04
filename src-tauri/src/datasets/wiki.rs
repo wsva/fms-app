@@ -106,7 +106,11 @@ pub struct WikiFileContent {
 /// Normalize + validate a dataset-relative path. Rejects absolute paths and
 /// any `..` component so a request can never escape the dataset directory;
 /// returns the cleaned forward-slash form.
-fn sanitize_rel(rel: &str) -> Result<String, String> {
+///
+/// Shared with [`super::wiki_translate`], which builds an output name from a
+/// source path — and which depends on this refusing `:` inside a component,
+/// because a wiki `channel_id` is `wiki:<uuid>:<rel>` and must stay 3 parts.
+pub(crate) fn sanitize_rel(rel: &str) -> Result<String, String> {
     let unified = rel.replace('\\', "/");
     let mut parts: Vec<&str> = Vec::new();
     for part in unified.split('/') {

@@ -14,6 +14,7 @@ import { useIsActiveTab, usePageRefresh } from "@/lib/refresh/page-refresh";
 import { useAgentActions, reqStr } from "@/lib/agent/ui-actions";
 import { clearDocIfOwned, setUiContext } from "@/lib/agent/ui-context";
 import WikiSearch from "./WikiSearch";
+import WikiTranslate from "./WikiTranslate";
 import MdEditor from "./MdEditor";
 import { insertAround, insertAtLineStart } from "./mdEditorInserts";
 import MarkdownViewer from "./markdown/markdown";
@@ -1120,6 +1121,13 @@ export default function WikiPage() {
                   onClick={() => handleDownload(hubSrc.uuid, hubSrc.rel)}
                   disabled={isLoading}
                   title="Download this dataset to edit locally"
+                />
+              )}
+
+              {viewMode === "file" && canEdit && !editing && selection?.source.kind === "dataset" && (
+                <WikiTranslate
+                  datasetUuid={selection.source.uuid}
+                  sourceRel={selection.source.rel}
                 />
               )}
 

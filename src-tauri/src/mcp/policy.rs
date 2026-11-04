@@ -217,9 +217,16 @@ const HUMAN_HANDOFF: [&str; 2] = [
 /// reports it as `trashed_to`), so the act is undoable where it happened.
 /// Neither name carries a word from [`DESTRUCTIVE_WORDS`].
 ///
-/// Two more deliberate `Write` defaults, recorded so nobody re-litigates them.
-/// Neither carries a destructive word, so neither needs a [`RECOVERABLE`] entry,
-/// and `"enforce"` refuses neither — but both are journalled like everything else.
+/// Three more deliberate `Write` defaults, recorded so nobody re-litigates them.
+/// None carries a destructive word, so none needs a [`RECOVERABLE`] entry, and
+/// `"enforce"` refuses none of them — but all are journalled like everything else.
+///
+/// * `wiki_translate_done` moves one ledger row to `delivered` on the worker's
+///   word alone. It destroys nothing — the file it refers to is written by
+///   `wiki_dataset_write_file`, and the row is a log the app never renders from —
+///   so `Read` would be a lie and `RECOVERABLE` would be over-classification.
+///   Leaving it at `Write` also means `enforce` still lets an agent finish the
+///   asks the wiki page files on its behalf.
 ///
 /// * `sync_reconnect_hub` is *not* a read, despite finding things: it commits the
 ///   address it proved into `pc_url` and reorders `known_hub_urls`. That is

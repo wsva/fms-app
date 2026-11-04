@@ -461,6 +461,7 @@ pub fn run() {
             datasets::wiki::wiki_dataset_delete_file,
             datasets::wiki::wiki_dataset_index,
             datasets::wiki::wiki_dataset_search,
+            datasets::wiki_translate::wiki_translate_request,
             // Workspace management
             workspace::workspace_list,
             workspace::workspace_get_current,
@@ -956,6 +957,7 @@ macro_rules! mobile_invoke_handler {
             datasets::wiki::wiki_dataset_delete_file,
             datasets::wiki::wiki_dataset_index,
             datasets::wiki::wiki_dataset_search,
+            datasets::wiki_translate::wiki_translate_request,
             workspace::workspace_list,
             workspace::workspace_get_current,
             workspace::workspace_get_current_dir,

@@ -15,7 +15,8 @@ use super::machine::MailState;
 use super::{
     AGENT_TO_USER, APP_TO_AGENT, ATTEMPT_CAP, CANCELLED, CLAIMED, DELIVERED, DELIVERING, FAILED,
     KIND_QUESTION, KIND_REQUEST, LEASE_MS, MAX_LABEL, QUEUED, REASON_ATTEMPTS_EXHAUSTED,
-    REASON_SUBJECT_GONE, REASON_SUPERSEDED, REASON_UNANSWERED, WAITING_USER, WRITE_LEASE_MS,
+    REASON_REPORTED_DONE, REASON_SUBJECT_GONE, REASON_SUPERSEDED, REASON_UNANSWERED, WAITING_USER,
+    WRITE_LEASE_MS,
 };
 
 // ============================================================
@@ -920,6 +921,11 @@ pub fn open_for_ref(
 /// arriving from another device). Not a transition an agent may make: the app
 /// holds no claim, so this is the adoption path's terminal move. A live claim
 /// is left alone — that holder's own guarded write and T7 will close it.
+///
+/// The `?2`/`?4` spelling below is a correction, not a change of meaning: this
+/// statement used to name `?4` and `?5` while `params!` counted only four
+/// values, so it bound `result_ref` into `delivered_by` and left `result_ref`
+/// NULL. Nothing read either column, which is why it stayed hidden.
 pub fn close_by_app(
     conn: &Connection,
     uuid: &str,
@@ -930,14 +936,53 @@ pub fn close_by_app(
     conn.execute(
         &format!(
             "UPDATE agent_mail \
-                SET status = '{DELIVERED}', delivered_at = ?3, delivered_by = ?4, \
-                    result_ref = ?5, expires_at = NULL, claim_id = NULL, \
+                SET status = '{DELIVERED}', delivered_at = ?3, delivered_by = ?2, \
+                    result_ref = ?4, expires_at = NULL, claim_id = NULL, \
                     claim_nonce = NULL, updated_at = ?3 \
               WHERE uuid = ?1 \
                 AND status IN ('{QUEUED}', '{CLAIMED}', '{DELIVERING}', '{WAITING_USER}') \
                 AND (status = '{QUEUED}' OR expires_at IS NULL OR expires_at <= ?3)"
         ),
         params![uuid, delivered_by, now, result_ref],
+    )
+}
+
+/// Close a request because the party doing the work **said it is done**, with no
+/// claim behind the word and no artifact the app could have seen land.
+///
+/// Deliberately not [`close_by_app`], which is the app's own move and says so
+/// ("Not a transition an agent may make"): the two mean different things, and
+/// the difference is kept where a reader can see it — this row ends with
+/// `reason = reported_done`, which is the ledger saying *somebody vouches for
+/// this, I did not*. Use it only where the result is not a row the app owns: a
+/// wiki translation lands as a markdown file the learner opens and reads, so the
+/// log has nothing to audit and the agent's report is the whole of what is known.
+///
+/// A live lease is left alone exactly as in [`close_by_app`]: that holder's own
+/// claim path closes the row, and an unheld close must not stamp over it.
+///
+/// `waiting_user` is **not** closable here, which is where this differs from
+/// [`close_by_app`]: an agent that asked the user a question still owes that
+/// answer, and a report must not end the turn the row is waiting on. This is
+/// T18's from-column, stated in the machine rather than inferred from here.
+pub fn close_by_report(
+    conn: &Connection,
+    uuid: &str,
+    reporter: &str,
+    result_ref: &str,
+    now: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        &format!(
+            "UPDATE agent_mail \
+                SET status = '{DELIVERED}', reason = '{REASON_REPORTED_DONE}', \
+                    delivered_at = ?3, delivered_by = ?2, result_ref = ?4, \
+                    expires_at = NULL, claim_id = NULL, claim_nonce = NULL, updated_at = ?3 \
+              WHERE uuid = ?1 \
+                AND status IN ('{QUEUED}', '{CLAIMED}', '{DELIVERING}') \
+                AND (status = '{QUEUED}' OR expires_at IS NULL OR expires_at <= ?3)"
+        ),
+        params![uuid, reporter, now, result_ref],
     )
 }
 
@@ -1940,5 +1985,86 @@ mod tests {
         let q = stmt.query_row([&first.mail.uuid], row_to_mail).unwrap();
         assert!(q.read_at.is_some());
         assert_eq!(q.folder(), Folder::Archive);
+    }
+
+    /// T18: the worker vouches and the app did not see it land. The columns
+    /// the ledger *can* know are set exactly as `close_by_app` would set them;
+    /// the honesty lives in `reason`, which is the whole difference between
+    /// "the app saw this" and "somebody declared this".
+    #[test]
+    fn a_report_closes_an_unheld_request_and_says_who_said_it() {
+        let mut conn = db();
+        let made = request(&mut conn, 1_000, &NewRequest::new("c", "s", "one")).unwrap();
+        let uuid = made.mail.uuid.clone();
+
+        assert_eq!(close_by_report(&conn, &uuid, "goose", "notes/idea_de.md", 2_000).unwrap(), 1);
+
+        let row = read_one(&conn, &uuid).unwrap().unwrap();
+        assert_eq!(row.status, DELIVERED);
+        assert_eq!(row.reason.as_deref(), Some(REASON_REPORTED_DONE));
+        assert_eq!(row.delivered_by.as_deref(), Some("goose"));
+        assert_eq!(row.result_ref.as_deref(), Some("notes/idea_de.md"));
+        assert_eq!(row.delivered_at, Some(2_000));
+        assert_eq!(row.attempts, 0, "a report is not an attempt");
+        assert_eq!(row.folder(), Folder::Inbox, "the user reads it, not the lanes");
+        assert_eq!(row.owed_by(), OwedBy::Nobody);
+
+        // A second report cannot re-attribute a delivered row: `delivered` is
+        // absorbing, so the first voice keeps the record.
+        assert_eq!(close_by_report(&conn, &uuid, "other", "elsewhere.md", 3_000).unwrap(), 0);
+        let row = read_one(&conn, &uuid).unwrap().unwrap();
+        assert_eq!(row.delivered_by.as_deref(), Some("goose"));
+        assert_eq!(row.result_ref.as_deref(), Some("notes/idea_de.md"));
+    }
+
+    /// The two things T18 must not do: stamp over a holder that is still
+    /// working, and end a turn that is waiting on the user's answer. A lapsed
+    /// lease closes all the same — that is the point, or a slow but successful
+    /// translation would read as a failure beside a file that exists.
+    #[test]
+    fn a_report_yields_to_a_live_lease_and_never_ends_the_users_turn() {
+        let mut conn = db();
+        let live = request(&mut conn, 1_000, &NewRequest::new("c", "live", "one")).unwrap();
+        conn.execute(
+            "UPDATE agent_mail SET status = 'claimed', claimed_at = 1000, claim_id = 'cid', \
+                claim_nonce = 'n', expires_at = 601000 WHERE uuid = ?1",
+            [&live.mail.uuid],
+        )
+        .unwrap();
+        assert_eq!(
+            close_by_report(&conn, &live.mail.uuid, "passer-by", "x.md", 2_000).unwrap(),
+            0,
+            "the holder's own claim path closes this row"
+        );
+        assert_eq!(read_one(&conn, &live.mail.uuid).unwrap().unwrap().status, CLAIMED);
+
+        let waiting = request(&mut conn, 1_000, &NewRequest::new("c", "wait", "one")).unwrap();
+        conn.execute(
+            "UPDATE agent_mail SET status = 'waiting_user', expires_at = 99999999 WHERE uuid = ?1",
+            [&waiting.mail.uuid],
+        )
+        .unwrap();
+        assert_eq!(
+            close_by_report(&conn, &waiting.mail.uuid, "goose", "x.md", 2_000).unwrap(),
+            0,
+            "a question still owed an answer is not a delivery"
+        );
+        assert_eq!(
+            read_one(&conn, &waiting.mail.uuid).unwrap().unwrap().status,
+            WAITING_USER
+        );
+
+        // The same lease, now lapsed: the work is done, the row closes.
+        conn.execute(
+            "UPDATE agent_mail SET expires_at = 500 WHERE uuid = ?1",
+            [&live.mail.uuid],
+        )
+        .unwrap();
+        assert_eq!(close_by_report(&conn, &live.mail.uuid, "goose", "x.md", 601_000).unwrap(), 1);
+        let row = read_one(&conn, &live.mail.uuid).unwrap().unwrap();
+        assert_eq!(row.status, DELIVERED);
+        assert_eq!(row.claim_id, None, "the dead lease is released with the row");
+        assert_eq!(row.claim_nonce, None);
+        assert_eq!(row.expires_at, None);
     }
 }

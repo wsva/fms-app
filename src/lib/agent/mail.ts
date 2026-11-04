@@ -221,6 +221,13 @@ export function channelLine(row: MailSummary): string {
   if (parts.length === 3 && parts[0] === "book") {
     return `book ${parts[1].slice(0, 8)} · ${parts[2].slice(0, 8)}`;
   }
+  // `wiki:<dataset_uuid>:<rel>` — three parts exactly, because `sanitize_rel`
+  // refuses `:` inside a path component. The file name is what tells two rows
+  // apart; the uuid only has to separate two datasets.
+  if (parts.length === 3 && parts[0] === "wiki") {
+    const file = parts[2].split("/").pop() ?? parts[2];
+    return `wiki ${parts[1].slice(0, 8)} · ${file.replace(/\.md$/i, "")}`;
+  }
   return row.channel_id;
 }
 
@@ -251,6 +258,8 @@ export function tabFor(row: Pick<MailSummary, "ref_kind">): TabId | null {
   switch (row.ref_kind) {
     case "book":
       return "books";
+    case "wiki":
+      return "wiki";
     default:
       return null;
   }
