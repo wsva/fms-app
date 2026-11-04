@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { Loader2, X } from "lucide-react";
+import LanguageSelect from "./LanguageSelect";
 
 /** The settable slice of `info.json` a card's back face edits. */
 export type DatasetPatch = {
@@ -128,12 +129,13 @@ export default function DatasetEditForm({
           {language !== undefined && (
             <label className="flex min-w-0 flex-1 flex-col gap-0.5">
               <span className={label}>Language</span>
-              <input
+              <LanguageSelect
                 className={field}
                 value={draftLanguage}
-                onChange={(e) => setDraftLanguage(e.target.value)}
-                placeholder="de"
-                spellCheck={false}
+                onChange={setDraftLanguage}
+                placeholder="None"
+                title="The language the texts are written in — what a per-language voice preference is looked up by"
+                aria-label="Dataset language"
               />
             </label>
           )}

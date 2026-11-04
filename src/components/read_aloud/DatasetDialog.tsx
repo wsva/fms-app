@@ -6,6 +6,7 @@ import { X } from "lucide-react";
 import type { ReadAloudMeta } from "@/lib/read_aloud/types";
 import { isTauri } from "@/lib/tauri";
 import { logError } from "@/lib/logger";
+import { LanguageSelect } from "@/components/ui/dataset";
 
 const LOG_MODULE = "read-aloud";
 
@@ -16,15 +17,17 @@ type Props = {
 };
 
 /**
- * Modal to create a read-aloud dataset — only the two fields a new one has.
+ * Modal to create a read-aloud dataset — only the three fields a new one has.
  *
- * There is deliberately no edit mode: renaming and re-describing an existing
- * dataset happen on the dataset card's own back face in the list, and a second
- * form over the same two fields is a second thing to keep in step.
+ * There is deliberately no edit mode: renaming, re-describing and re-picking
+ * the language of an existing dataset happen on the dataset card's own back
+ * face in the list, and a second form over the same fields is a second thing
+ * to keep in step.
  */
 export default function DatasetDialog({ onClose, onSaved }: Props) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [language, setLanguage] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,6 +47,10 @@ export default function DatasetDialog({ onClose, onSaved }: Props) {
       const created = await invoke<ReadAloudMeta>("read_aloud_create", {
         name: name.trim(),
         description: description.trim(),
+        // The tag a per-language voice preference is keyed by — set it here so
+        // a generation resolves the right voice from the first clip, rather
+        // than having to name the language later on the card's back face.
+        language: language.trim(),
       });
       onSaved(created.uuid);
       onClose();
@@ -93,6 +100,18 @@ export default function DatasetDialog({ onClose, onSaved }: Props) {
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="What is this collection about?"
+          />
+        </div>
+
+        <div>
+          <label className={label}>Language (optional)</label>
+          <LanguageSelect
+            className={field}
+            value={language}
+            onChange={setLanguage}
+            placeholder="No language"
+            title="The language the texts are written in — what a per-language voice preference is looked up by"
+            aria-label="Dataset language"
           />
         </div>
 
