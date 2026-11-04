@@ -1,13 +1,12 @@
 /**
  * The update question, asked once and answered everywhere.
  *
- * Three surfaces read it — the About card (Settings → About and the Help >
- * About FmS dialog) and the Help menu's *Check for updates* row — and they used
- * to be one component's private state, which is why the same answer could only
- * be seen by opening Settings. A module store is what lets a menu row and a card
- * share one ask: `app_update_check` answers with a status, and the install lives
- * here too, because a download that starts from a second place would have a
- * second progress bar to get wrong.
+ * Two surfaces read it — the About card, in Settings → About and in the Help >
+ * About FmS dialog — and they used to be one component's private state, which is
+ * why the same answer could only be seen by opening Settings. A module store is
+ * what lets both doors show one ask: `app_update_check` answers with a status,
+ * and the install lives here too, because a download that starts from a second
+ * place would have a second progress bar to get wrong.
  *
  * `describeUpdate` is the other half of "one status, one sentence". The status
  * carries a dozen fields and a given build has half of them true, so a caller
@@ -113,7 +112,7 @@ let inFlight: Promise<void> | null = null;
  * Ask the release manifest. Never downloads.
  *
  * `maxAgeMs` is for a caller that opens onto an answer someone else just fetched
- * (Help > Check for updates, then Help > About FmS a second later): it skips the
+ * (the dialog asked a second ago, then the Settings card mounts): it skips the
  * ask while the state is younger than that, so the card does not blink back to
  * "checking…" for an answer it can already show.
  */

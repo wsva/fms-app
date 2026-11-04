@@ -87,7 +87,8 @@ export default function AboutCard({
   // Ask when the card comes into view. The question is "is there a new release
   // *now*", and the answer used to arrive whenever Settings happened to mount —
   // so a session that opened Settings at launch read a stale one hours later.
-  // A minute of grace keeps Check for updates → About from asking twice.
+  // A minute of grace keeps one card's two doors (the dialog, then Settings) from
+  // asking twice in a row.
   useEffect(() => {
     if (active) void checkForUpdates({ maxAgeMs: 60_000 });
   }, [active]);

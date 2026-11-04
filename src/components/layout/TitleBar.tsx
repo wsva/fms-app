@@ -33,7 +33,6 @@ import {
 import { isTauri } from "@/lib/platform";
 import { CARD_BASE_URL } from "@/lib/cards";
 import { logError } from "@/lib/logger";
-import { checkForUpdates, describeUpdate, UPDATE_TONE_CLASS, useUpdate } from "@/lib/ui/update";
 import { THEMES } from "@/lib/theme";
 import { useAgentActions, oneOf, reqBool, reqNum } from "@/lib/agent/ui-actions";
 import { useTheme } from "@/hooks/useTheme";
@@ -179,10 +178,9 @@ export default function TitleBar({
   const zoom = useZoomLevel();
 
   // The About card, opened from Help. It is owned here because the menu that
-  // opens it is — and the same store feeds the row's trailing slot, so the answer
-  // the menu shows and the answer the card shows are one answer.
+  // opens it is — and the update check lives in the card, so this bar never
+  // has to render an update answer itself.
   const [aboutOpen, setAboutOpen] = useState(false);
-  const updateSummary = describeUpdate(useUpdate());
 
   // The dock's presentation state, mirrored off the same broadcast the status
   // bar listens to, so the View menu can show whether the mailbox is open.
@@ -558,25 +556,11 @@ export default function TitleBar({
             onClick={() => onNavigate("logs")}
           />
           <StatusMenuSep />
-          {/* Two questions, two rows. "About & updates…" was one row, and it
-              opened the Settings page on its *first* section — you asked what
-              version you were running and got the theme picker. */}
+          {/* One row, one question answered in full. "Check for updates" used to
+              sit beside it as a second row with the answer in its trailing slot —
+              but the About card already asks on open and carries the re-check
+              action, so the menu was showing one answer twice. */}
           <StatusMenuRow icon={Info} text="About FmS…" onClick={() => setAboutOpen(true)} />
-          {/* The answer arrives in the trailing slot, worded by `describeUpdate`
-              so this row and the card cannot describe the same state two ways.
-              `keepOpen` because the answer is the point: the row stays up long
-              enough to be read. */}
-          <StatusMenuRow
-            icon={RefreshCw}
-            text="Check for updates"
-            keepOpen
-            trailing={
-              <span className={`shrink-0 text-[11px] ${UPDATE_TONE_CLASS[updateSummary.tone]}`}>
-                {updateSummary.short}
-              </span>
-            }
-            onClick={() => void checkForUpdates()}
-          />
         </StatusItem>
       </div>
 

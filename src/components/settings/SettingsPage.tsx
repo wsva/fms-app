@@ -83,9 +83,9 @@ type ModelUnloadTimeout =
   | { minutes: number };
 
 // The build identity, the update status and their wording live in
-// `lib/ui/update` now: the About card (here and in the Help dialog) and the Help
-// menu's Check for updates row are three readers of one answer, so none of them
-// can own it. This page only renders the card.
+// `lib/ui/update` now: the About card reads it in both its doors (here and in
+// the Help dialog), and neither can own the answer. This page only renders the
+// card.
 
 // ---------------------------------------------------------------------------
 // Shared Tailwind class fragments
