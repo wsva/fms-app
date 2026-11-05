@@ -72,6 +72,24 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "tags", label: "Tags", icon: Tag },
 ];
 
+/** A card as the writer sees it before there is a card: what Add Card opens on
+ *  and what a remount re-adopts an open session onto. No uuid — the editor mints
+ *  one, and the first save is what makes the row exist. */
+const BLANK_CARD: Card = {
+  uuid: "",
+  question: "",
+  suggestion: "",
+  answer: "",
+  note: "",
+  familiarity: 0,
+  question_hash: null,
+  source_card_uuid: null,
+  source_dataset_uuid: null,
+  deleted_at: null,
+  created_at: "",
+  updated_at: "",
+};
+
 export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId) => void }) {
   // Dataset state
   const [datasets, setDatasets] = useState<CardDatasetSummary[]>([]);
@@ -387,20 +405,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   const addCard = useCallback(() => {
     if (!selectedDatasetUuid) return;
     const name = datasets.find((d) => d.info.uuid === selectedDatasetUuid)?.info.name;
-    const blank: Card = {
-      uuid: "",
-      question: "",
-      suggestion: "",
-      answer: "",
-      note: "",
-      familiarity: 0,
-      question_hash: null,
-      source_card_uuid: null,
-      source_dataset_uuid: null,
-      deleted_at: null,
-      created_at: "",
-      updated_at: "",
-    };
+    const blank: Card = { ...BLANK_CARD };
     setLevel({ card: blank, index: -1, isNew: true });
     setLevelMedia([]);
     openCardEditor(
@@ -437,6 +442,23 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
     if (sessionWasOpen.current && !nowOpen && level?.isNew) exitLevel();
     sessionWasOpen.current = nowOpen;
   }, [session, level, exitLevel]);
+
+  // The session belongs to the provider; only its rendering belongs to this page.
+  // So when the pane remounts under a session that never closed — the tab was
+  // replaced or closed and reopened, a reload rebuilt the page — the writer would
+  // otherwise be left homeless: `session` non-null, nothing drawing it, the text
+  // unreachable. Re-adopt it as the level, deck and all; what was typed comes
+  // back through the draft the editor reads on mount.
+  useEffect(() => {
+    if (!session || level) return;
+    if (!selectedDatasetUuid) setSelectedDatasetUuid(session.datasetUuid);
+    const uuid = session.card?.uuid ?? "";
+    setLevel({
+      card: session.card ?? { ...BLANK_CARD },
+      index: uuid ? cards.findIndex((c) => c.uuid === uuid) : -1,
+      isNew: !uuid,
+    });
+  }, [session, level, cards, selectedDatasetUuid]);
 
   // Grading from the level, with the deck's own scheduler: `card_test_submit` is
   // what the review page calls, so a card read here counts exactly as much as

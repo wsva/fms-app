@@ -97,8 +97,12 @@ const EVENT_DEBOUNCE_MS = 400;
  * a tab: the card editor sits above whichever tab the shell is showing (it is
  * reached from the wiki's text-selection menu as much as from the Cards list),
  * so it belongs to no registration and to *all* of them at once.
+ *
+ * `tab` says when that is not true: a surface a page hosts in its own pane
+ * belongs to exactly that instance, and answering for others would let it refuse
+ * a navigation nothing about it is involved in.
  */
-let overlayGuard: (() => boolean) | null = null;
+let overlayGuard: { tab: string | null; clean: () => boolean } | null = null;
 
 /**
  * Let an overlay over the shell participate in the dirty-page policy.
@@ -110,16 +114,26 @@ let overlayGuard: (() => boolean) | null = null;
  * predicate here; every answer then ANDs it in, so a dirty editor over a clean
  * tab blocks the replace and the refresh like a dirty tab would.
  *
+ * `tab` narrows the claim to one instance. A floating overlay can be raised from
+ * any page and covers whichever one is showing, so it names none and answers for
+ * all of them; a page-hosted editor is unmounted with its own pane and with no
+ * other, so it names that tab and answers only for it.
+ *
  * Pass `null` on unmount. The predicate must read through a ref: it is called
  * from event handlers, long after the render that installed it.
  */
-export function setOverlayGuard(fn: (() => boolean) | null): void {
-  overlayGuard = fn;
+export function setOverlayGuard(
+  fn: (() => boolean) | null,
+  tab: string | null = null
+): void {
+  overlayGuard = fn ? { tab, clean: fn } : null;
 }
 
-/** Is whatever is on screen safe to re-read? False only when an overlay says so. */
-function overlayIsClean(): boolean {
-  return overlayGuard ? overlayGuard() : true;
+/** Is whatever is on `id` safe to re-read? False only when its overlay says so. */
+function overlayIsClean(id: string | null): boolean {
+  if (!overlayGuard) return true;
+  if (overlayGuard.tab && overlayGuard.tab !== id) return true;
+  return overlayGuard.clean();
 }
 
 /**
@@ -298,7 +312,7 @@ export function usePageRefresh(tab: string, options: PageRefreshOptions): void {
 export async function refreshActivePage(reason: RefreshReason): Promise<RefreshOutcome> {
   if (!currentTab) return { status: "none", tab: null };
   // An overlay's unsaved work outranks the page beneath it, whatever asked.
-  if (!overlayIsClean()) return { status: "blocked", tab: currentTab };
+  if (!overlayIsClean(currentTab)) return { status: "blocked", tab: currentTab };
   const registration = registry.get(currentTab);
   if (!registration) return { status: "none", tab: currentTab };
   return await registration.run(reason);
@@ -313,11 +327,12 @@ export async function refreshActivePage(reason: RefreshReason): Promise<RefreshO
  * instance id, which equals the `TabId` for every singleton page.
  *
  * A root overlay over the instance is consulted as well: an open card editor
- * with unsaved text answers `false` for *whichever* tab it is drawn on, which is
- * what auto-pins that tab instead of replacing it.
+ * with unsaved text answers `false` for the tab it is drawn on (a page-hosted one
+ * answers only for its own), which is what auto-pins that tab instead of
+ * replacing it.
  */
 export function canRefreshInstance(id: string): boolean {
-  if (!overlayIsClean()) return false;
+  if (!overlayIsClean(id)) return false;
   const registration = registry.get(id);
   if (!registration) return true;
   return registration.canRefresh();

@@ -20,7 +20,9 @@
 //      replace, F5 — goes through the same guard, and the guard's sheet is an
 //      inline panel rather than a native dialog, because a phone must be able to
 //      answer it. A debounced localStorage draft is the backstop for the case no
-//      guard catches: the process being killed.
+//      guard catches: the process being killed, the pane being unmounted. A card
+//      that is not on disk yet is filed under its deck's `new` slot, because the
+//      uuid a blank card is minted with lives only as long as the surface does.
 //   2. Save means save. It writes, re-reads nothing away, keeps the card open
 //      and editable, and says "Saved" in the header — or, inline, where the
 //      header would have been. Closing is the user's act.
@@ -157,8 +159,18 @@ function mintCardUuid(): string {
 /** The persisted shape of an unsaved card, and the wiki draft's twin. */
 type CardDraft = CardFieldValues;
 
-const draftKeyFor = (datasetUuid: string, cardUuid: string) =>
-  `card-draft:${datasetUuid}:${cardUuid}`;
+/**
+ * The slot a card with no row on disk files its draft under, one per deck.
+ *
+ * It cannot be the minted uuid: that is created by the surface that edits the
+ * card, so a remount mints a different one and the draft under the previous copy
+ * is unreachable — the rescue the draft exists for would never happen, and the
+ * key leaks forever. The deck's `new` bucket is the same address next time.
+ */
+const NEW_CARD_SLOT = "new";
+
+const draftKeyFor = (datasetUuid: string, slot: string) =>
+  `card-draft:${datasetUuid}:${slot}`;
 
 function readDraft(key: string): CardDraft | null {
   try {
@@ -408,7 +420,10 @@ export function CardEditModal({
   // re-key the draft mid-session — which would re-run the mount effect below
   // and reset the reader's chosen font size.
   const [openDatasetUuid] = useState(datasetUuid);
-  const draftKey = draftKeyFor(openDatasetUuid, cardUuid);
+  // The draft's slot: the deck's `new` bucket while the card has no row on disk,
+  // its own uuid from the first save onward. Turning over at the save is what
+  // keeps later edits of a real card out of the bucket a blank one reads back.
+  const draftKey = draftKeyFor(openDatasetUuid, saved ? cardUuid : NEW_CARD_SLOT);
 
   const [media, setMedia] = useState<CardMedia[]>([]);
   // Which view is showing. The media view replaces the narrow sidebar this file
@@ -463,6 +478,10 @@ export function CardEditModal({
     suggestion: suggestionRef,
   });
   const primaryRef = useRef<HTMLButtonElement | null>(null);
+  // The font size is seeded once per surface, not once per draft slot: a new
+  // card's slot turns into its uuid at the first save, and re-seeding then would
+  // stamp over a size the reader chose in the meantime.
+  const scaleSeeded = useRef(false);
 
   // Volatile mirrors for the window-level key handler, which must not
   // re-subscribe on every keystroke.
@@ -533,7 +552,8 @@ export function CardEditModal({
       // Everything is open, because the reader needs to see what the draft added.
       setEditing({ question: true, answer: true, note: true, suggestion: true });
     }
-    if (!m) {
+    if (!m && !scaleSeeded.current) {
+      scaleSeeded.current = true;
       const effective = restored ? stored.answer : baselineRef.current.answer;
       // A brand-new card is composed, not read. The oversized default was tuned
       // for glancing at a saved answer; on an empty form it renders the
@@ -552,7 +572,9 @@ export function CardEditModal({
   // The draft safety net — the seam the wiki page proved works: while the text
   // runs ahead of disk, persist it debounced; the moment it matches again, remove
   // the key so a later open never restores a stale draft. Removal also happens on
-  // save and on discard, and a killed process is the case this exists for.
+  // save and on discard, and a killed process or an unmounted pane is the case
+  // this exists for — which is why a card that has no row yet is filed under its
+  // deck rather than under an uuid only this surface knows.
   useEffect(() => {
     if (!dirty) {
       clearDraft(draftKey);
@@ -587,11 +609,16 @@ export function CardEditModal({
   // The overlay is a root, so the shell cannot see it: the tab strip and F5 ask
   // `canRefreshInstance`, which ANDs this in. A dirty editor therefore auto-pins
   // the tab it is drawn on instead of being orphaned by a replace, and refuses a
-  // reload that would remount every page beneath it.
+  // reload that would remount every page beneath it. A page-hosted editor is the
+  // other case: it is unmounted with its own pane and with no other, so it names
+  // that pane's tab and answers only for it. `cards` is the host by construction —
+  // only `CardsPage` spreads a session into its own content area — and naming it
+  // rather than `subjectTab` keeps an agent opening a card from another tab from
+  // pinning *that* tab instead of the one holding the writer.
   useEffect(() => {
-    setOverlayGuard(() => !dirtyRef.current);
+    setOverlayGuard(() => !dirtyRef.current, inline ? "cards" : null);
     return () => setOverlayGuard(null);
-  }, []);
+  }, [inline]);
 
   // The window's Close sits a few pixels above this surface's Done, and getting
   // them mixed up does not close the wrong card — it quits the app mid-sentence.
@@ -1315,9 +1342,13 @@ export function CardEditModal({
               Restored unsaved draft
               <ToolbarButton
                 variant="ghost"
-                label="Revert to saved"
+                label={saved ? "Revert to saved" : "Start from blank"}
                 onClick={() => void discardChanges()}
-                title="Discard the draft and edit the saved card instead"
+                title={
+                  saved
+                    ? "Discard the draft and edit the saved card instead"
+                    : "Throw the draft away and write the card again from nothing"
+                }
               />
             </div>
           )}

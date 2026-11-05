@@ -139,6 +139,18 @@ export default function Home() {
     [titleFor]
   );
 
+  // Closing a tab unmounts its page, and a page can be where the unsaved text
+  // lives: the card editor is drawn *in* the Cards pane rather than over it, so
+  // the ✕ would delete what navigation refuses to. Same question `openTab` asks
+  // before replacing a tab, same seam answering it (§4.4).
+  const closeTab = useCallback((instanceId: string) => {
+    if (!canRefreshInstance(instanceId)) {
+      notify("Not closed: this tab has unsaved edits.");
+      return;
+    }
+    dispatchTabs({ type: "close", instanceId });
+  }, []);
+
   // Check workspace state on mount
   useEffect(() => {
     async function checkWorkspace() {
@@ -437,7 +449,7 @@ export default function Home() {
       tabs={tabs.order}
       focusedId={tabs.focused}
       onFocusTab={(instanceId) => dispatchTabs({ type: "focus", instanceId })}
-      onCloseTab={(instanceId) => dispatchTabs({ type: "close", instanceId })}
+      onCloseTab={closeTab}
       onTogglePin={(instanceId) => dispatchTabs({ type: "togglePin", instanceId })}
       onSpawnTab={(tab) =>
         dispatchTabs({ type: "spawn", tabId: tab, title: titleFor(tab) })
