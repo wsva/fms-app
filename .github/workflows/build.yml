@@ -261,23 +261,6 @@ jobs:
           LOCK_V="$(grep -A1 '^name = "fms-app"' src-tauri/Cargo.lock | tail -1 | tr -d '\r')"
           [ "$LOCK_V" = "version = \"$VER\"" ] && echo "Cargo.lock: $LOCK_V"
 
-      # The built-in user manual is addressed by a fixed id, and only the shipped
-      # packages carry it: the repo copy keeps its real dataset uuid so a dev
-      # build's docs/manual folder stays an ordinary, editable wiki dataset, and
-      # no Rust/TS constant can hold the id (the app reads it back from the seeded
-      # info.json). Unconditional — unlike the version above, a `latest-build`
-      # preview must not ship the hex id, or its seeder would leave an orphan the
-      # later tag build cannot recognize or replace. It lands before the build,
-      # whose build.rs reads docs/manual into the embedded archive. No `$` anchors
-      # (a Windows checkout may carry CRLF); grep doubles as the assertion.
-      - name: Stamp the built-in manual id
-        shell: bash
-        run: |
-          set -euo pipefail
-          sed -i.bak 's/"uuid": "wiki_[0-9a-f]\{12\}"/"uuid": "fms-built-in-user-manual"/' docs/manual/info.json
-          rm -f docs/manual/info.json.bak
-          grep -m1 '"uuid": "fms-built-in-user-manual"' docs/manual/info.json
-
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -430,23 +413,6 @@ jobs:
           grep -m1 "^version = \"$VER\"" src-tauri/Cargo.toml
           LOCK_V="$(grep -A1 '^name = "fms-app"' src-tauri/Cargo.lock | tail -1 | tr -d '\r')"
           [ "$LOCK_V" = "version = \"$VER\"" ] && echo "Cargo.lock: $LOCK_V"
-
-      # The built-in user manual is addressed by a fixed id, and only the shipped
-      # packages carry it: the repo copy keeps its real dataset uuid so a dev
-      # build's docs/manual folder stays an ordinary, editable wiki dataset, and
-      # no Rust/TS constant can hold the id (the app reads it back from the seeded
-      # info.json). Unconditional — unlike the version above, a `latest-build`
-      # preview must not ship the hex id, or its seeder would leave an orphan the
-      # later tag build cannot recognize or replace. It lands before the build,
-      # whose build.rs reads docs/manual into the embedded archive. No `$` anchors
-      # (a Windows checkout may carry CRLF); grep doubles as the assertion.
-      - name: Stamp the built-in manual id
-        shell: bash
-        run: |
-          set -euo pipefail
-          sed -i.bak 's/"uuid": "wiki_[0-9a-f]\{12\}"/"uuid": "fms-built-in-user-manual"/' docs/manual/info.json
-          rm -f docs/manual/info.json.bak
-          grep -m1 '"uuid": "fms-built-in-user-manual"' docs/manual/info.json
 
       # `tauri.settings.gradle` is gitignored and holds absolute paths into this
       # machine's ~/.cargo/registry, so `init` must run on the build machine —

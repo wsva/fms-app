@@ -18,11 +18,14 @@
 //!   last-write-wins river would happily do it. Reads reach it through
 //!   [`crate::datasets::wiki`]'s own resolver, which consults this directory by
 //!   id (see [`crate::datasets::wiki::find_dataset_dir`]).
-//! * **Its id is not a constant.** Release CI rewrites `info.json`'s `uuid`
-//!   (see `docs` of `pack_user_manual` in `build.rs` and the "Stamp the
-//!   built-in manual id" step in `.github/workflows/build.yml`), so the shipped
-//!   id differs from the repo's. Everything here therefore *reads* the id back
-//!   from the data — never compares against a literal.
+//! * **Its id is one constant, stamped at startup.** The packed archive keeps
+//!   the repo's own dataset uuid (`docs/manual/info.json`), so every build —
+//!   dev or CI — embeds the same content, and the repo copy stays an ordinary
+//!   wiki dataset. [`BUILTIN_MANUAL_UUID`] is the identity the *seeded* copy
+//!   carries, written into its `info.json` by [`seed_manual`] whenever it
+//!   (re)extracts the manual. Nothing CI rewrites any more; a machine seeded by
+//!   an older build (the repo uuid, or the id CI used to stamp) is taken over by
+//!   the constant on its first launch of the new version.
 //!
 //! Seeding is not a wiki write: it copies files with plain `fs` calls, so no
 //! `wiki_file_save` is ever journaled and the change log stays unaware of app
@@ -37,7 +40,7 @@ use flate2::read::GzDecoder;
 
 use crate::app_paths;
 use crate::datasets::wiki::WikiDatasetSummary;
-use crate::datasets::{read_info_opt, DatasetInfo, INFO_FILE};
+use crate::datasets::{read_info, read_info_opt, write_info, DatasetInfo, INFO_FILE};
 
 /// The manual as packed at build time: one gzip stream of `info.json` + `*.md`,
 /// with dataset-relative entry names.
@@ -49,6 +52,18 @@ const MANUAL_ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/manual.t
 pub(crate) const READ_ONLY: &str = "The built-in user manual is read-only: it ships with the app \
 and the next update replaces it. To keep your own notes, create a wiki dataset \
 (`wiki_dataset_create`) and write them there.";
+
+/// The seeded manual's dataset id — fixed, every build, dev or CI. Reserved
+/// readable slug in the same shape as [`super::FAVORITES_DATASET_UUID`]
+/// (`<type-slug>-<purpose>`), deliberately outside the `<type>_<family-key>`
+/// grammar so a built-in dataset can never be read as a family member. The
+/// repo's `docs/manual/info.json` keeps its own wiki_* uuid (an ordinary,
+/// editable dataset in the checkout); [`seed_manual`] stamps this id into the
+/// copy under [`builtin_root`] at startup, which is what makes the id a
+/// constant in code without making the packed archive anything but a plain
+/// dataset. Reads, MCP `capabilities.builtin_manual` and the Wiki page all
+/// name this same value.
+pub(crate) const BUILTIN_MANUAL_UUID: &str = "wiki-manual";
 
 /// The reserved parent of every built-in dataset: `<data_root>/builtin`.
 ///
@@ -85,23 +100,19 @@ fn embedded_info() -> Option<&'static DatasetInfo> {
         .as_ref()
 }
 
-/// The manual's id as it exists on this machine, or as this binary means it to
-/// be when nothing is seeded yet. The only source of the id at runtime.
-pub(crate) fn manual_uuid() -> Option<String> {
-    read_info_opt(&manual_dir())
-        .map(|i| i.uuid)
-        .or_else(|| embedded_info().map(|i| i.uuid.clone()))
+/// The manual's id. A constant since the stamp moved to startup: [`seed_manual`]
+/// writes it into the seeded copy whenever it (re)extracts the manual, so the
+/// disk publishes no id of its own and every caller can name it literally.
+pub(crate) fn manual_uuid() -> String {
+    BUILTIN_MANUAL_UUID.to_string()
 }
 
-/// True when `uuid` addresses the built-in manual — either the copy on disk or
-/// the copy this build would seed, so a mutation is refused before the first
-/// launch has seeded anything too.
+/// True when `uuid` addresses the built-in manual. Constant-only: a machine
+/// still holding a legacy copy (the repo uuid, or the id CI used to stamp) is
+/// taken over by [`seed_manual`] before the webview or MCP can ask anything
+/// else of it, so no road may honour the stale id meanwhile.
 pub(crate) fn is_builtin(uuid: &str) -> bool {
-    if embedded_info().map(|i| i.uuid.as_str()) == Some(uuid) {
-        return true;
-    }
-    let seeded = read_info_opt(&manual_dir());
-    seeded.as_ref().map(|i| i.uuid.as_str()) == Some(uuid)
+    uuid == BUILTIN_MANUAL_UUID
 }
 
 /// Ensure the on-disk manual matches the one embedded in this binary.
@@ -112,12 +123,12 @@ pub(crate) fn is_builtin(uuid: &str) -> bool {
 /// hashing, no walk. Anything else (first run, a new app version, a directory
 /// the user edited or half-deleted by hand) replaces the whole tree.
 ///
-/// The id is compared *too*, not just the stamp: CI stamps only the `uuid` of
-/// the same manual content, so a dev-built copy (repo uuid) upgrading to a CI
-/// package (built-in id) would otherwise look current and keep publishing the
-/// dev id forever. There is no trash and no journal: this is app content, and
-/// trashing it on every upgrade would ship the manual to the user's disk once
-/// per version.
+/// The id is compared *too*, not just the stamp: a copy seeded by an older
+/// scheme carries a different one (the repo uuid from a dev build, or the id
+/// CI used to stamp before the stamp moved to startup), and the stamp alone
+/// would call it current and keep publishing the stale id. There is no trash
+/// and no journal: this is app content, and trashing it on every upgrade would
+/// ship the manual to the user's disk once per version.
 pub(crate) fn seed_manual() -> Result<(), String> {
     let dir = manual_dir();
     let want = embedded_info().ok_or_else(|| {
@@ -128,7 +139,7 @@ pub(crate) fn seed_manual() -> Result<(), String> {
     let seeded = read_info_opt(&dir);
     let current = seeded
         .as_ref()
-        .map(|i| i.uuid == want.uuid && i.updated_at == want.updated_at && has_markdown(&dir))
+        .map(|i| i.uuid == BUILTIN_MANUAL_UUID && i.updated_at == want.updated_at && has_markdown(&dir))
         .unwrap_or(false);
     if current {
         return Ok(());
@@ -145,6 +156,10 @@ pub(crate) fn seed_manual() -> Result<(), String> {
     tar::Archive::new(GzDecoder::new(MANUAL_ARCHIVE))
         .unpack(&dir)
         .map_err(|e| format!("could not unpack the built-in manual into {}: {e}", dir.display()))?;
+    // The startup stamp: the packed archive is the repo's own dataset, so the
+    // seeded copy is re-identified as the built-in manual ([`stamp_manual_id`])
+    // — this id is what the resolver, the Wiki page and the agents all name.
+    stamp_manual_id(&dir)?;
 
     log::info!(
         "[Builtin] seeded user manual '{}' ({}) at {}",
@@ -153,6 +168,19 @@ pub(crate) fn seed_manual() -> Result<(), String> {
         dir.display()
     );
     Ok(())
+}
+
+/// Rewrite the freshly-unpacked copy's `info.json` to carry [`BUILTIN_MANUAL_UUID`].
+///
+/// A plain field change through the shared read/write pair, so `extra` keys,
+/// `created_at` and the stamp survive — only the `uuid` moves. Called on the
+/// replace path only: [`seed_manual`] treats a matching on-disk id as part of
+/// "current", so a launch that would re-stamp is already a launch that
+/// re-extracts.
+pub(crate) fn stamp_manual_id(dir: &Path) -> Result<(), String> {
+    let mut info = read_info(dir)?;
+    info.uuid = BUILTIN_MANUAL_UUID.to_string();
+    write_info(dir, &info)
 }
 
 /// The manual as the Wiki page lists it: an ordinary summary, marked read-only.
@@ -227,17 +255,17 @@ fn has_markdown(dir: &Path) -> bool {
 /// `capabilities.builtin_manual`. This is the one place an agent learns the id it
 /// has to pass to the wiki read tools — the dataset is invisible to every
 /// listing, so if this line is absent the manual is undiscoverable, not merely
-/// unlisted. Derived from the seeded descriptor (falling back to the embedded
-/// one before the first seed), never a hand-maintained constant.
+/// unlisted. The id is the constant; name and stamp come from the seeded
+/// descriptor (falling back to the embedded one before the first seed).
 pub(crate) fn manual_capability() -> Option<serde_json::Value> {
-    let (uuid, name, updated_at) = match read_info_opt(&manual_dir()) {
-        Some(info) => (info.uuid, info.name, info.updated_at),
+    let (name, updated_at) = match read_info_opt(&manual_dir()) {
+        Some(info) => (info.name, info.updated_at),
         None => {
             let info = embedded_info()?;
-            (info.uuid.clone(), info.name.clone(), info.updated_at.clone())
+            (info.name.clone(), info.updated_at.clone())
         }
     };
-    Some(serde_json::json!({ "uuid": uuid, "name": name, "updated_at": updated_at }))
+    Some(serde_json::json!({ "uuid": BUILTIN_MANUAL_UUID, "name": name, "updated_at": updated_at }))
 }
 
 /// Report the built-in manual for the Wiki page — the one surface that shows it.
@@ -268,12 +296,17 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The archive `build.rs` packed for this test build is embedded in the
-    /// binary, so these tests exercise the real payload rather than a fixture.
+    /// The repo's descriptor, packed verbatim: it carries a real dataset uuid,
+    /// not the built-in id — stamping that onto the seeded copy is the app's
+    /// startup job (`stamp_manual_id`), no longer CI's build-time one.
     #[test]
     fn embedded_archive_carries_a_stamped_descriptor() {
         let info = embedded_info().expect("the embedded manual must carry a readable info.json");
         assert!(!info.uuid.is_empty(), "manual uuid must be set");
+        assert_ne!(
+            info.uuid, BUILTIN_MANUAL_UUID,
+            "the repo copy must stay an ordinary wiki dataset — a packed built-in id would revive the old scheme"
+        );
         assert!(!info.updated_at.is_empty(), "manual must carry the stamp seed_manual compares");
         assert!(
             !info.name.is_empty(),
@@ -282,11 +315,17 @@ mod tests {
     }
 
     #[test]
-    fn is_builtin_recognises_the_embedded_id() {
-        let uuid = embedded_info().map(|i| i.uuid.clone()).unwrap_or_default();
-        assert!(is_builtin(&uuid));
+    fn is_builtin_recognises_the_constant_id_only() {
+        assert!(is_builtin(BUILTIN_MANUAL_UUID));
+        // The two legacy ids a machine may still hold (the repo's dataset uuid
+        // and the one CI used to stamp) must not be honoured before the seed
+        // has taken them over.
+        assert!(!is_builtin("wiki_eeddf6c5fb24"));
+        assert!(!is_builtin("fms-built-in-user-manual"));
         assert!(!is_builtin("some-other-dataset"));
         assert!(!is_builtin(""));
+        // Reserved slugs stay out of the family grammar — see the constant's doc.
+        assert!(super::super::ids::split(BUILTIN_MANUAL_UUID).is_none());
     }
 
     #[test]
@@ -295,6 +334,11 @@ mod tests {
         let dir = manual_dir();
         seed_manual().expect("seeding the built-in manual must succeed");
         let info = read_info_opt(&dir).expect("the seeded dir must carry info.json");
+        assert_eq!(
+            info.uuid,
+            BUILTIN_MANUAL_UUID,
+            "the startup stamp must put the built-in id on disk"
+        );
         assert_eq!(
             info.updated_at,
             embedded_info().unwrap().updated_at,
@@ -314,27 +358,30 @@ mod tests {
     }
 
     #[test]
-    fn an_id_change_under_the_same_stamp_is_replaced() {
+    fn a_legacy_id_under_the_same_stamp_is_taken_over() {
         let _guard = lock_seed();
         let dir = manual_dir();
         seed_manual().expect("seed first");
-        // The dev-install-upgrading-to-a-CI-package case: same content stamp,
-        // different id (CI stamps only the uuid). The stamp alone would call
-        // this current and keep publishing the stale id.
-        let stale = dir.join(INFO_FILE);
-        let mut info: DatasetInfo = serde_json::from_slice(
-            &fs::read(&stale).expect("seeded info.json"),
-        )
-        .expect("parse seeded info.json");
-        info.uuid = "wiki_000000000000".to_string();
-        fs::write(&stale, serde_json::to_vec_pretty(&info).unwrap())
-            .expect("write the stale id");
-        seed_manual().expect("re-seed must take over the id change");
-        assert_eq!(
-            read_info_opt(&dir).expect("info.json after re-seed").uuid,
-            embedded_info().unwrap().uuid,
-            "a manual whose id differs from the embedded one must be replaced despite a matching stamp"
-        );
+        // The upgrade case: a copy seeded by the old scheme — by a dev build
+        // (the repo's own uuid) or by a CI package (the id CI stamped) — can
+        // carry a stale id while the content stamp still matches. The stamp
+        // alone would call this current and keep publishing the stale id.
+        for stale_id in ["wiki_000000000000", "fms-built-in-user-manual"] {
+            let info_file = dir.join(INFO_FILE);
+            let mut info: DatasetInfo = serde_json::from_slice(
+                &fs::read(&info_file).expect("seeded info.json"),
+            )
+            .expect("parse seeded info.json");
+            info.uuid = stale_id.to_string();
+            fs::write(&info_file, serde_json::to_vec_pretty(&info).unwrap())
+                .expect("write the stale id");
+            seed_manual().expect("re-seed must take over the id change");
+            assert_eq!(
+                read_info_opt(&dir).expect("info.json after re-seed").uuid,
+                BUILTIN_MANUAL_UUID,
+                "a manual whose id differs from the built-in constant must be replaced despite a matching stamp"
+            );
+        }
     }
 
     #[test]

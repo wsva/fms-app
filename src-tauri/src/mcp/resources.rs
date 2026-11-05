@@ -505,9 +505,9 @@ fn user_manual_doc() -> String {
     let mut out = String::new();
     out.push_str("# User manual\n\n");
 
-    let uuid = builtin::manual_uuid().unwrap_or_default();
+    let uuid = builtin::manual_uuid();
     let dir = builtin::manual_dir();
-    if uuid.is_empty() || !dir.exists() {
+    if !dir.exists() {
         out.push_str(
             "The built-in manual is not present on this device yet (it seeds on app start). Nothing to read.\n",
         );

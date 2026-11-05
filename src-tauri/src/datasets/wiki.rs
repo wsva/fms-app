@@ -977,13 +977,12 @@ mod tests {
 
     /// Every mutation road must refuse the built-in manual with the shared
     /// read-only wording, and refuse it *before* touching settings: the check
-    /// only compares against the embedded descriptor, so it holds on a machine
+    /// only compares against the built-in id constant, so it holds on a machine
     /// with nothing configured and before the first seed has run.
     #[test]
     fn write_and_delete_roads_refuse_the_builtin_manual() {
         let settings = SettingsState::new();
-        let uuid = super::super::builtin::manual_uuid()
-            .expect("the embedded manual must carry an id for the resolver to recognise");
+        let uuid = super::super::builtin::manual_uuid();
 
         let write = find_dataset_dir_write(&settings, &uuid).unwrap_err();
         assert_eq!(write, super::super::builtin::READ_ONLY);
