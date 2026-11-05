@@ -1,8 +1,7 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useState, type ComponentType, type ReactNode } from "react";
 import { Pencil } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
 import Card from "@/components/ui/card/Card";
 import { cn } from "@/lib/ui/cn";
 import DatasetEditForm, { type DatasetPatch } from "./DatasetEditForm";
@@ -22,8 +21,9 @@ const HEIGHT: Record<Props["variant"], { front: string; back: string }> = {
 type Props = {
   /** `row` for dense lists, `card` for a grid. */
   variant: "row" | "card";
-  /** The dataset type's glyph (Headphones, Layers, BookOpen, Mic), decorative. */
-  icon: LucideIcon;
+  /** The dataset type's glyph, decorative — a lucide icon or the app's MicGlyph.
+   *  Typed by what is rendered here (`size`/`className`), not by lucide's wrapper. */
+  icon: ComponentType<{ size?: number; className?: string }>;
   name: string;
   description: string;
   /** Rendered on the back face only when supplied — pages pass what their DTO has. */

@@ -25,9 +25,9 @@ import {
   Check,
   AlignLeft,
   LayoutGrid,
-  Mic,
   FileDown,
 } from "lucide-react";
+import { MicGlyph } from "@/components/voice/MicGlyph";
 import { emit } from "@tauri-apps/api/event";
 import MdEditor from "@/components/wiki/MdEditor";
 import NormalizeActions from "./NormalizeActions";
@@ -1576,7 +1576,8 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
               <DatasetCard
                 key={d.uuid}
                 variant="row"
-                icon={Mic}
+                // The app-wide microphone glyph, same as the sidebar's Read Aloud menu icon.
+                icon={MicGlyph}
                 name={d.name}
                 description={d.description}
                 language={d.language || undefined}
