@@ -107,12 +107,17 @@ pub(crate) fn is_builtin(uuid: &str) -> bool {
 /// Ensure the on-disk manual matches the one embedded in this binary.
 ///
 /// The stamp is `info.json`'s `updated_at`, which the pack step guarantees is
-/// present: equal stamps and a non-empty directory mean a no-op return, so the
-/// steady-state cost of a launch is one small file read — no hashing, no walk.
-/// Anything else (first run, a new app version, a directory the user edited or
-/// half-deleted by hand) replaces the whole tree. There is no trash and no
-/// journal: this is app content, and trashing it on every upgrade would ship the
-/// manual to the user's disk once per version.
+/// present: equal stamps, an equal id and a non-empty directory mean a no-op
+/// return, so the steady-state cost of a launch is one small file read — no
+/// hashing, no walk. Anything else (first run, a new app version, a directory
+/// the user edited or half-deleted by hand) replaces the whole tree.
+///
+/// The id is compared *too*, not just the stamp: CI stamps only the `uuid` of
+/// the same manual content, so a dev-built copy (repo uuid) upgrading to a CI
+/// package (built-in id) would otherwise look current and keep publishing the
+/// dev id forever. There is no trash and no journal: this is app content, and
+/// trashing it on every upgrade would ship the manual to the user's disk once
+/// per version.
 pub(crate) fn seed_manual() -> Result<(), String> {
     let dir = manual_dir();
     let want = embedded_info().ok_or_else(|| {
@@ -123,7 +128,7 @@ pub(crate) fn seed_manual() -> Result<(), String> {
     let seeded = read_info_opt(&dir);
     let current = seeded
         .as_ref()
-        .map(|i| i.updated_at == want.updated_at && has_markdown(&dir))
+        .map(|i| i.uuid == want.uuid && i.updated_at == want.updated_at && has_markdown(&dir))
         .unwrap_or(false);
     if current {
         return Ok(());
@@ -306,6 +311,30 @@ mod tests {
             "an up-to-date manual must not be re-extracted"
         );
         let _ = fs::remove_file(&sentinel);
+    }
+
+    #[test]
+    fn an_id_change_under_the_same_stamp_is_replaced() {
+        let _guard = lock_seed();
+        let dir = manual_dir();
+        seed_manual().expect("seed first");
+        // The dev-install-upgrading-to-a-CI-package case: same content stamp,
+        // different id (CI stamps only the uuid). The stamp alone would call
+        // this current and keep publishing the stale id.
+        let stale = dir.join(INFO_FILE);
+        let mut info: DatasetInfo = serde_json::from_slice(
+            &fs::read(&stale).expect("seeded info.json"),
+        )
+        .expect("parse seeded info.json");
+        info.uuid = "wiki_000000000000".to_string();
+        fs::write(&stale, serde_json::to_vec_pretty(&info).unwrap())
+            .expect("write the stale id");
+        seed_manual().expect("re-seed must take over the id change");
+        assert_eq!(
+            read_info_opt(&dir).expect("info.json after re-seed").uuid,
+            embedded_info().unwrap().uuid,
+            "a manual whose id differs from the embedded one must be replaced despite a matching stamp"
+        );
     }
 
     #[test]
