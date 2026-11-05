@@ -242,10 +242,6 @@ export default function WikiPage() {
   // Hub read-only browse + local wiki datasets.
   const [hubMode, setHubMode] = useState(false);
   const [localDatasets, setLocalDatasets] = useState<WikiDatasetSummary[]>([]);
-  // The built-in manual, kept out of `localDatasets` on purpose: it is root-level
-  // bootstrap content (see the `treeDatasets` memo), not a peer of the user's
-  // datasets — merged in, its card answered to every "is a dataset open" check.
-  const [manualDataset, setManualDataset] = useState<WikiDatasetSummary | null>(null);
   const [hubDatasets, setHubDatasets] = useState<WikiDatasetSummary[]>([]);
   const [isHub, setIsHub] = useState(false);
 
@@ -362,9 +358,9 @@ export default function WikiPage() {
   // Load locally stored wiki datasets (downloaded or hub-owned), plus the
   // built-in user manual the app ships. The manual is read-only and lives
   // outside the discovered dataset roots, so it arrives from its own command
-  // rather than `wiki_dataset_list` — and it is kept in its own state, not
-  // merged into the list: it shows only at the wiki's root level, as boot-
-  // strap content while the user has no dataset of their own yet.
+  // rather than `wiki_dataset_list` — merged in first so it leads the tree.
+  // It is then listed, opened and read like any other wiki dataset; only its
+  // mutations are refused (see `isReadOnlyDataset`).
   // Cross-platform.
   const loadLocalDatasets = useCallback(async () => {
     if (!isTauri()) return;
@@ -373,8 +369,7 @@ export default function WikiPage() {
         invoke<WikiDatasetSummary[]>("wiki_dataset_list"),
         invoke<WikiDatasetSummary | null>("builtin_manual_get"),
       ]);
-      setLocalDatasets(datasets);
-      setManualDataset(manual);
+      setLocalDatasets(manual ? [manual, ...datasets] : datasets);
     } catch (err) {
       logError(`Failed to load wiki datasets: ${err instanceof Error ? err.message : String(err)}`, "wiki");
     }
@@ -550,11 +545,11 @@ export default function WikiPage() {
 
   // Whether the current selection is an editable local dataset file. The
   // backend only ever writes .md, so non-markdown files are view-only here.
-  // `hubMode` is the remote read-only case; the local one is exactly the
-  // built-in manual — named by its own uuid, since it no longer sits in
-  // `localDatasets` for the scan to find.
+  // The built-in manual is a local dataset the app ships read-only (the next
+  // update replaces it wholesale) — `hubMode` is the other, remote read-only
+  // case, so this predicate only carries the local one.
   const isReadOnlyDataset = (uuid: string | null | undefined): boolean =>
-    !!uuid && (uuid === manualDataset?.uuid || localDatasets.some((d) => d.uuid === uuid && d.is_read_only));
+    !!uuid && localDatasets.some((d) => d.uuid === uuid && d.is_read_only);
 
   const canEdit =
     !hubMode && selection?.source.kind === "dataset" && !isReadOnlyDataset(selection.source.uuid) && selection.source.rel !== "" && fileKind === "markdown";
@@ -702,22 +697,8 @@ export default function WikiPage() {
     }
   };
 
-  // Dataset tree source: hub datasets while browsing, else local.
-  // The built-in manual joins that list *only* at the wiki's root level, and
-  // only while the user has no wiki dataset of their own — it is bootstrap
-  // content pointing at the New Dataset / hub-download roads below it. Once
-  // a dataset exists the manual is no one's peer and leaves the list (a
-  // deeper view never shows it either); agents still read it via
-  // `builtin_manual_get`. The second guard keeps the manual browsable in the
-  // bootstrap case: opening it must not empty the root list behind it.
-  const treeDatasets = useMemo(() => {
-    if (hubMode) return hubDatasets;
-    const manualOnList =
-      manualDataset != null &&
-      localDatasets.length === 0 &&
-      (datasetBrowse?.uuid === manualDataset.uuid || (selection == null && datasetBrowse == null));
-    return manualOnList ? [manualDataset, ...localDatasets] : localDatasets;
-  }, [hubMode, hubDatasets, localDatasets, manualDataset, datasetBrowse, selection]);
+  // Sidebar dataset tree source: hub datasets while browsing, else local.
+  const treeDatasets = hubMode ? hubDatasets : localDatasets;
 
   // Search is scoped to a dataset: the open file's dataset, else the one being
   // browsed. Null (search disabled) when no dataset is in context.
