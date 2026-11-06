@@ -1851,6 +1851,11 @@ async fn update_recognized_inner(
             .map_err(|_| format!("Attempt {} not found", uuid))?
     };
 
+    // The text's effort size, counted once here for the XP award below. A
+    // missing `read_text` row (deleted text) counts 0 and pays nothing — the
+    // length floor is what a vanished reference cannot paper over.
+    let text_words = content.as_deref().map(|c| c.split_whitespace().count()).unwrap_or(0);
+
     // Score against the effective reference while the text row still exists; a
     // missing row degrades to 0, the same fallback list_attempts applies.
     let reference = content.as_deref().map(|c| effective_reference(c, normalized.as_deref()));
@@ -1966,9 +1971,10 @@ async fn update_recognized_inner(
     );
 
     // XP is awarded for the measured number, so it is earned here — seconds after
-    // the take or days later on a retry, whichever call produced the score.
+    // the take or days later on a retry, whichever call produced the score. The
+    // amount scales with the text's length.
     let (xp_awarded, lifetime_xp, level) =
-        award_xp_for_score(settings, &me, dataset_uuid, &text_uuid, score)?;
+        award_xp_for_score(settings, &me, dataset_uuid, &text_uuid, score, text_words)?;
     if xp_awarded > 0 {
         let _ = app.emit(
             "xp-earned",
@@ -2029,27 +2035,40 @@ fn next_revision(current: Option<&str>) -> String {
     }
 }
 
-/// The scaled XP a measured score earns: +1 for passing, +1 more for a strong
-/// read. Each tier is deduped per text through the XP ledger's reference id, so
-/// repeating a take farms nothing while improving into the next tier still pays.
-/// Returns `(awarded, lifetime_xp, level)`.
+/// The scaled XP a measured score earns. Accuracy decides *whether* the text
+/// pays at all (the score thresholds), length decides *how much*: below
+/// [`MIN_READ_ALOUD_WORDS`] nothing is awarded at any score; a passed text then
+/// earns [`xp_for_words`] (one XP per [`READ_ALOUD_WORDS_PER_XP`] words, floor 1),
+/// and a strong read adds a flat +1 on top. Each tier is deduped per text
+/// through the XP ledger's reference id, so repeating a take farms nothing while
+/// improving into the next tier still pays. Returns `(awarded, lifetime_xp, level)`.
 fn award_xp_for_score(
     settings: &SettingsState,
     user_id: &str,
     dataset_uuid: &str,
     text_uuid: &str,
     score: f64,
+    words: usize,
 ) -> Result<(i64, i64, i64), String> {
+    // The length floor gates every tier — a short text writes no ledger row.
+    let below_floor = words < crate::xp::MIN_READ_ALOUD_WORDS;
     let mut total_awarded = 0i64;
     let mut last: Option<XpAwardResult> = None;
     for (threshold, tier) in [(XP_PASS_SCORE, "pass"), (XP_GOOD_SCORE, "good")] {
-        if score < threshold {
+        if below_floor || score < threshold {
             continue;
         }
+        // The pass tier carries the length-proportional amount; `good` stays
+        // the flat excellence bonus on top of it.
+        let amount = if tier == "pass" {
+            crate::xp::xp_for_words(words, crate::xp::MIN_READ_ALOUD_WORDS, crate::xp::READ_ALOUD_WORDS_PER_XP)
+        } else {
+            1
+        };
         let r = xp_award_internal(
             settings,
             user_id,
-            1,
+            amount,
             "read_aloud",
             &format!("{}:{}", text_uuid, tier),
             Some(dataset_uuid),

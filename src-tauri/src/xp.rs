@@ -1,7 +1,12 @@
 //! XP (Experience Points) system — tracks permanent learning progress.
 //!
 //! XP is earned through learning activities (dictation, reading) and is
-//! non-spendable, non-transferable, and permanent.
+//! non-spendable, non-transferable, and permanent. Awards are proportional to
+//! the words actually processed ([`xp_for_words`]): dictation pays one XP per
+//! [`DICTATION_WORDS_PER_XP`] words (nothing below [`MIN_DICTATION_WORDS`]),
+//! read-aloud one per [`READ_ALOUD_WORDS_PER_XP`] (nothing below
+//! [`MIN_READ_ALOUD_WORDS`]) — listening-and-typing is the heavier per-word
+//! work, so it pays ~10× what speaking the same number of words pays.
 //!
 //! Tables stored in the app-level SQLite (`{workspace_dir}/app.sqlite3`).
 
@@ -57,6 +62,25 @@ pub struct XpAwardResult {
 // ============================================================
 // Helpers
 // ============================================================
+
+/// A dictation cue below this word count earns nothing.
+pub const MIN_DICTATION_WORDS: usize = 6;
+/// One XP per this many dictation words (above the 1 XP baseline).
+pub const DICTATION_WORDS_PER_XP: usize = 10;
+/// A read-aloud text below this word count earns nothing.
+pub const MIN_READ_ALOUD_WORDS: usize = 60;
+/// One XP per this many read-aloud words (above the 1 XP baseline).
+pub const READ_ALOUD_WORDS_PER_XP: usize = 100;
+
+/// Effort-proportional award: 0 below `min_words`, else at least 1 XP,
+/// stepping by `words_per_xp`: `max(1, words / words_per_xp)`.
+pub fn xp_for_words(words: usize, min_words: usize, words_per_xp: usize) -> i64 {
+    if words < min_words {
+        0
+    } else {
+        (words / words_per_xp).max(1) as i64
+    }
+}
 
 /// Open the app-level SQLite and ensure XP tables exist.
 /// Uses the current workspace directory if set, otherwise falls back to global app data dir.
@@ -575,7 +599,8 @@ pub async fn xp_get_history(
     Ok(entries)
 }
 
-/// Award XP for a dictation cue completion.
+/// Award XP for typing a dictation cue correctly. The amount scales with the
+/// cue's word count; a cue below [`MIN_DICTATION_WORDS`] earns nothing at all.
 /// Called from the frontend after successfully completing a cue dictation.
 #[tauri::command]
 pub async fn xp_award_dictation_cue(
@@ -585,12 +610,40 @@ pub async fn xp_award_dictation_cue(
     dataset_uuid: String,
 ) -> Result<XpAwardResult, String> {
     let user_id = workspace_identity(&_settings);
-    log::info!("xp_award_dictation_cue: user={}, cue={}", user_id, cue_id);
-    let result = xp_award_internal(&_settings, &user_id, 1, "dictation_cue", &cue_id, Some(dataset_uuid.as_str()))?;
+    let words = cue_word_count(&_settings, &dataset_uuid, &cue_id);
+    let amount = xp_for_words(words, MIN_DICTATION_WORDS, DICTATION_WORDS_PER_XP);
+    if amount == 0 {
+        // Below the floor: no ledger row, no journal entry, no event — the
+        // totals are read back only so the caller sees unchanged numbers.
+        log::info!("xp_award_dictation_cue: user={}, cue={} — {} word(s), below floor, no award", user_id, cue_id, words);
+        let conn = open_app_db(&_settings)?;
+        ensure_user_row(&conn, &user_id)?;
+        let (lifetime_xp, level) = get_user_xp_from_db(&conn, &user_id)?;
+        return Ok(XpAwardResult { xp_awarded: 0, lifetime_xp, level, is_new: false });
+    }
+    log::info!("xp_award_dictation_cue: user={}, cue={}, words={}, amount={}", user_id, cue_id, words, amount);
+    let result = xp_award_internal(&_settings, &user_id, amount, "dictation_cue", &cue_id, Some(dataset_uuid.as_str()))?;
     if result.is_new {
         let _ = app.emit("xp-earned", &result);
     }
     Ok(result)
+}
+
+/// Word count of one dictation cue, counted from its stored content. Falls
+/// back to a baseline-length cue when the row cannot be read (cue deleted,
+/// favorites edge), so a lookup failure never blocks the award itself.
+fn cue_word_count(settings: &SettingsState, dataset_uuid: &str, cue_id: &str) -> usize {
+    crate::datasets::dictation::open_db(settings, dataset_uuid)
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT content FROM listen_subtitle_cue WHERE uuid = ?1",
+                [cue_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .map(|content| content.unwrap_or_default().split_whitespace().count())
+        .unwrap_or(DICTATION_WORDS_PER_XP)
 }
 
 /// Award XP for completing all cues in a subtitle.
@@ -662,6 +715,22 @@ pub async fn xp_award_reading_chapter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xp_for_words_steps_by_rate_above_the_floor() {
+        // Dictation: nothing below 6 words, 1 XP up to the first 10-word step.
+        assert_eq!(xp_for_words(5, MIN_DICTATION_WORDS, DICTATION_WORDS_PER_XP), 0);
+        assert_eq!(xp_for_words(6, MIN_DICTATION_WORDS, DICTATION_WORDS_PER_XP), 1);
+        assert_eq!(xp_for_words(19, MIN_DICTATION_WORDS, DICTATION_WORDS_PER_XP), 1);
+        assert_eq!(xp_for_words(20, MIN_DICTATION_WORDS, DICTATION_WORDS_PER_XP), 2);
+        assert_eq!(xp_for_words(29, MIN_DICTATION_WORDS, DICTATION_WORDS_PER_XP), 2);
+        assert_eq!(xp_for_words(30, MIN_DICTATION_WORDS, DICTATION_WORDS_PER_XP), 3);
+        // Read-aloud: nothing below 60 words, 1 XP through the first century.
+        assert_eq!(xp_for_words(59, MIN_READ_ALOUD_WORDS, READ_ALOUD_WORDS_PER_XP), 0);
+        assert_eq!(xp_for_words(60, MIN_READ_ALOUD_WORDS, READ_ALOUD_WORDS_PER_XP), 1);
+        assert_eq!(xp_for_words(199, MIN_READ_ALOUD_WORDS, READ_ALOUD_WORDS_PER_XP), 1);
+        assert_eq!(xp_for_words(200, MIN_READ_ALOUD_WORDS, READ_ALOUD_WORDS_PER_XP), 2);
+    }
 
     /// A follower-scoped settings state over a fresh temp dir. Default role is
     /// `follower`, so `commit_change_as` enqueues rather than logging to itself.

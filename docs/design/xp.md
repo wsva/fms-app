@@ -105,11 +105,18 @@ CREATE TABLE xp_earned (
 
 ### XP Sources
 
+Awards are proportional to the words actually processed. Dictation pays one XP
+per 10 cue words (`max(1, words / 10)`, nothing below 6 words); read-aloud pays
+one XP per 100 text words (`max(1, words / 100)`, nothing below 60 words) —
+listening-and-typing is the heavier per-word work, so it pays ~10× what speaking
+the same number of words pays.
+
 | Source | Description | Reference ID |
 |--------|-------------|--------------|
-| `dictation_cue` | Completed a single cue dictation | cue_id |
+| `dictation_cue` | Completed a single cue dictation (amount scales with cue length; < 6 words earns nothing) | cue_id |
 | `dictation_subtitle` | Completed all cues in a subtitle | subtitle_id |
 | `dictation_media` | Completed all subtitles for a media file | media_id |
+| `read_aloud` | Passed (score ≥ 60) / strongly read (score ≥ 80) a text ≥ 60 words; the pass tier carries the length-proportional amount, the good tier a flat +1 | `{text_uuid}:pass` / `{text_uuid}:good` |
 | `reading_sentence` | Typed a sentence correctly | sentence_id |
 | `reading_chapter` | Completed all sentences in a chapter | chapter_id |
 
@@ -123,9 +130,11 @@ CREATE TABLE xp_earned (
    - `xp_award` — award XP for an action (internal use)
    - `xp_get_history` — get recent XP transactions
 3. Hook into existing completion events:
-   - Dictation cue save → award 1 XP
+   - Dictation cue save → award `max(1, words / 10)` XP (no award below 6 words)
    - Dictation subtitle completion → award +2 XP
    - Dictation media completion → award +5 XP
+   - Read-aloud pass (score ≥ 60, text ≥ 60 words) → award `max(1, words / 100)` XP
+   - Read-aloud strong read (score ≥ 80) → award +1 XP
    - Reading sentence save → award 1 XP
    - Reading chapter completion → award +5 XP
 

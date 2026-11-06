@@ -81,7 +81,9 @@ pub struct ListenDictation {
 // ============================================================
 
 /// Open the SQLite database for a given dataset.
-fn open_db(settings: &SettingsState, dataset_uuid: &str) -> Result<Connection, String> {
+/// `pub(crate)` also for the XP cue award, which counts the cue's words from
+/// its stored content before deciding the amount.
+pub(crate) fn open_db(settings: &SettingsState, dataset_uuid: &str) -> Result<Connection, String> {
     let dataset_dir = find_dataset_dir(settings, dataset_uuid)?;
     let db_path = dataset_dir.join("data.sqlite3");
     if !db_path.exists() {

@@ -33,7 +33,7 @@ FmS can keep your datasets and progress in step between a computer and your phon
 
 ## Progress and motivation
 
-As you complete cues, sentences, and recordings you earn **XP** and rise through **levels**, shown next to your name in the sidebar. XP is permanent and can't be bought or traded — it simply records how much you've practiced. Dictation and reading earn XP per completed cue/sentence, with bonuses for finishing a whole subtitle, media file, or chapter.
+As you complete cues, sentences, and recordings you earn **XP** and rise through **levels**, shown next to your name in the sidebar. XP is permanent and can't be bought or traded — it simply records how much you've practiced. XP scales with the length of what you complete: a dictation cue earns roughly one XP per ten words and a read-aloud text one per hundred, while very short cues and texts earn nothing. Finishing a whole subtitle, media file, or chapter still adds its bonus.
 
 ## Built to be automated
 
