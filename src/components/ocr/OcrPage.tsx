@@ -190,11 +190,13 @@ export default function OcrPage() {
     if (mobile && intent === "phone" && resultText) setImageOpen(false);
   }, [mobile, intent, resultText]);
 
-  // The Android client recognizes only via the Hub, which returns plain text —
-  // there is no local Tesseract to run the TSV/hyphen rebuild. Lock the mode to
-  // plain so `resultText` reads the plain result.
+  // The Android client recognizes on the Hub, and the Hub runs the TSV method —
+  // the same paragraph rebuild the desktop page does, in Rust, on the photo. So
+  // the mode is locked to tsv here: not to hide a choice (the switcher is
+  // desktop-only anyway) but because `resultText` reads the field the Hub's
+  // reply is written into.
   useEffect(() => {
-    if (mobile) setMode("plain");
+    if (mobile) setMode("tsv");
   }, [mobile, setMode]);
 
   // Receive end of a follower's "Send to Hub", and of the `ocr_open_image` MCP
@@ -794,8 +796,8 @@ export default function OcrPage() {
             <section className="rounded-xl border border-border-default bg-bg-card flex flex-col min-w-0 min-h-0 overflow-hidden">
               {/* One header row: the mode on the left, that mode's single extra
                   action on the right. Everything else lives in the toolbar. The
-                  Android client has none of these (plain-only, Hub-backed), so
-                  the whole row stays desktop. */}
+                  Android client has no mode to choose — its recognition is the
+                  Hub's TSV call, so it gets a header of its own below. */}
               {!mobile && (
               <div className="shrink-0 flex flex-wrap items-center gap-2 px-3 py-2 border-b border-border-default">
                 <div

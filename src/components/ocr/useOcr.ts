@@ -149,9 +149,9 @@ function errorMessage(e: unknown): string {
 
 /**
  * All OCR page logic: image acquisition (file dialog, native drag-drop,
- * screenshot, camera), recognition (local on the desktop, on the Hub for the
- * Android client), the hand-off of an image to the Hub's own OCR page, and
- * copy. Keeps `OcrPage` presentational.
+ * screenshot, camera), recognition (local on the desktop, the Hub's TSV rebuild
+ * for the Android client), the hand-off of an image to the Hub's own OCR page,
+ * and copy. Keeps `OcrPage` presentational.
  */
 export function useOcr() {
   // ---- Image source (input to the editor) ----
@@ -396,23 +396,28 @@ export function useOcr() {
   const recognize = useCallback(
     async (imageBase64: string, lang?: string) => {
       if (!isTauri()) return;
-      // The Android client has no local Tesseract: recognition is always plain
-      // text from the Hub, with no TSV/hyphen/dictionary passes on the phone.
+      // The Android client has no local Tesseract: recognition is a Hub call,
+      // and it asks for the same TSV rebuild the desktop page runs, because the
+      // Rust paragraph join beats a line-by-line dump on a phone screen.
       const mobile = isMobileApp();
       // Capture the mode: the user may switch tabs while Tesseract runs.
-      const target = mobile ? "plain" : mode;
+      const target = mode;
       setRecognizing(true);
       setError("");
       try {
         if (mobile) {
+          // Only the decided text is kept. The hyphen review, its dictionaries
+          // and the raw dump are desktop surfaces — the panel that offers them
+          // is not rendered here, and installing one calls a command that is not
+          // even compiled into this build.
           const reply = await withHubStage(() =>
             invoke<{ status: string; text?: string }>("hub_mcp_call", {
-              tool: "ocr_recognize",
+              tool: "ocr_recognize_tsv",
               args: { image_base64: imageBase64, lang: lang || "" },
             })
           );
           setLastFailed(null);
-          setPlainText(reply.text ?? "");
+          setTsvText(reply.text ?? "");
         } else if (target === "tsv") {
           const res = await invoke<OcrTsvResult>("ocr_recognize_tsv", {
             imageBase64,
