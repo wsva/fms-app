@@ -20,6 +20,7 @@ import type { AgentAction } from "@/lib/agent/types";
 import type { Card } from "@/lib/types";
 import { setUiContext } from "@/lib/agent/ui-context";
 import { jsonSafeDetail, runUiAction, useAgentActions } from "@/lib/agent/ui-actions";
+import { openInTab } from "@/lib/nav/open-in-tab";
 import { dismissToast, notify, notifyError, useToast } from "@/lib/feedback/toast";
 import { applySubjectToUrl, useTabSubject } from "@/lib/shell/tab-subject";
 import { useOverlayOpen } from "@/lib/shell/overlay";
@@ -221,12 +222,23 @@ export default function Home() {
           openTab("cards");
           void emit("agent-open-review", { dataset_uuid: action.dataset_uuid ?? null });
           break;
-        case "open-ocr":
+        case "open-ocr": {
           // The Hub's receive end of the phone's "Send to Hub": bring the OCR
-          // page forward and hand it the image so its listener loads it.
-          openTab("ocr");
-          void emit("agent-open-ocr", { image: action.image ?? null });
+          // page forward and hand it the image. Through the action registry, not
+          // a re-emitted event — the page only mounts when its tab opens, so an
+          // event fired straight after `openTab` reached no listener and the
+          // photo the phone sent was silently dropped.
+          const image = action.image ?? null;
+          void (async () => {
+            try {
+              await openInTab(openTab, "ocr", "ocr.open-image", { image });
+            } catch (e) {
+              console.error("agent open-ocr failed:", e);
+              notifyError(`Could not open the sent image: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          })();
           break;
+        }
         case "start-dictation": {
           openTab("dictation");
           // Drive the page through the action registry instead of re-emitting an

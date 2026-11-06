@@ -20,8 +20,8 @@ import {
   Send,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
+import { reqStr, useAgentActions } from "@/lib/agent/ui-actions";
 import { tbBase, tbGhost } from "@/lib/ui/toolbar";
 import { PageHeader, Toolbar, ToolbarButton, ToolbarIconButton, ToolbarMenuItem, ToolbarOverflow } from "@/components/ui/toolbar";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -129,32 +129,32 @@ export default function OcrPage() {
     if (mobile) setMode("plain");
   }, [mobile, setMode]);
 
-  // Receive end of a follower's "Send to Hub": the shell re-emits `agent-open-ocr`
-  // with the image once this (the Hub's) OCR page is frontmost. Load it straight
-  // into the image box, the same way CardsPage picks up `agent-open-review`.
-  useEffect(() => {
-    if (!isTauri()) return;
-    let unlisten: (() => void) | null = null;
-    let cancelled = false;
-    listen<{ image: string | null }>("agent-open-ocr", (event) => {
-      const image = event.payload?.image;
-      if (image) {
+  // Receive end of a follower's "Send to Hub", and of the `ocr_open_image` MCP
+  // tool: the shell (or an attached agent) runs this action to load an image
+  // straight into the image box. It is an action rather than an event because
+  // the page mounts with its tab — an event emitted while the tab was still
+  // closed had no listener here, so the image arrived at the Hub and vanished.
+  useAgentActions("ocr", [
+    {
+      id: "ocr.open-image",
+      label:
+        "Load an image into the OCR page's image box, ready for recognition. Nothing is persisted: the image only lives in the rendered page.",
+      kind: "mutate",
+      params_schema: {
+        image: {
+          type: "string",
+          description: "The image as a `data:image/...;base64,` URL — typically a photo a follower device captured.",
+          required: true,
+        },
+      },
+      run: (params) => {
+        const image = reqStr("ocr.open-image", params, "image");
         setError("");
         setSourceImage(image);
-      }
-    })
-      .then((fn) => {
-        if (cancelled) fn();
-        else unlisten = fn;
-      })
-      .catch(() => {
-        /* event unavailable */
-      });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [setSourceImage, setError]);
+        return { loaded: true };
+      },
+    },
+  ]);
 
   // ---- Font size for the result text, remembered across sessions ----
   const [fontSize, setFontSize] = useState(24);

@@ -22,23 +22,22 @@ const POLL_MS = 50;
 const TIMEOUT_MS = 2_000;
 
 /**
- * Open `tab` and run `actionId` against `datasetUuid` once that page can.
+ * Open `tab` and run `actionId` with `params` once that page can.
  *
  * @param navigate The shell's `openTab`, threaded down as `onNavigate`.
  * @param tab The page that owns the action.
- * @param actionId A registered UI action taking `dataset_uuid`.
- * @param datasetUuid Passed as `dataset_uuid`; `extra` is merged over it.
+ * @param actionId A registered UI action.
+ * @param params Passed to the action verbatim.
  * @returns Whatever the action returned.
  * @throws when the action never becomes runnable inside {@link TIMEOUT_MS}. The
  *   message says which of the two it was, because "the page did not mount" and
- *   "the dataset is not in this page" have different fixes.
+ *   "the page refused these parameters" have different fixes.
  */
-export async function openDatasetInTab(
+export async function openInTab(
   navigate: (tab: TabId) => void,
   tab: TabId,
   actionId: string,
-  datasetUuid: string,
-  extra: Record<string, unknown> = {}
+  params: Record<string, unknown> = {}
 ): Promise<unknown> {
   navigate(tab);
 
@@ -50,10 +49,10 @@ export async function openDatasetInTab(
     registered = listUiActions().some((a) => a.id === actionId);
     if (registered) {
       try {
-        return await runUiAction(actionId, { dataset_uuid: datasetUuid, ...extra });
+        return await runUiAction(actionId, params);
       } catch (err) {
         // Most often "the list is still loading", which the action itself
-        // invites a retry for. A genuinely wrong uuid costs at most the
+        // invites a retry for. A genuinely wrong parameter costs at most the
         // remaining deadline, and the message it produced is kept for the throw.
         lastError = err;
       }
@@ -69,5 +68,21 @@ export async function openDatasetInTab(
   }
   throw lastError instanceof Error
     ? lastError
-    : new Error(`'${actionId}' did not accept '${datasetUuid}': ${String(lastError)}`);
+    : new Error(`'${actionId}' did not accept ${JSON.stringify(params)}: ${String(lastError)}`);
+}
+
+/**
+ * Open `tab` and run `actionId` against `datasetUuid` once that page can.
+ *
+ * The {@link openInTab} shape every dataset-opening page action has: a
+ * `dataset_uuid` plus whatever else that page wants.
+ */
+export async function openDatasetInTab(
+  navigate: (tab: TabId) => void,
+  tab: TabId,
+  actionId: string,
+  datasetUuid: string,
+  extra: Record<string, unknown> = {}
+): Promise<unknown> {
+  return openInTab(navigate, tab, actionId, { dataset_uuid: datasetUuid, ...extra });
 }
