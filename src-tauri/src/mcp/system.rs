@@ -49,6 +49,13 @@ struct OcrDictionaryParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct OcrOpenImageParam {
+    /// The image to load into this (the Hub's) OCR page, as a
+    /// `data:image/...;base64,` URL (or bare base64).
+    image_base64: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct LogHistoryParam {
     #[serde(default)]
     limit: Option<usize>,
@@ -248,6 +255,20 @@ impl DatasetMcpServer {
         let state = self.app.state::<OcrState>();
         let langs = ocr::ocr_list_languages(state).await?;
         Ok(serde_json::json!({"status": "ok", "languages": langs}).to_string())
+    }
+
+    #[tool(name = "ocr_open_image", description = "Open this machine's OCR page with an image already loaded into its image box. Pass `image_base64` (a data:image URL, or bare base64) — typically a photo a follower device captured. The image is not persisted anywhere: it is handed straight to the rendered page so a human can run recognition (ocr_recognize / ocr_recognize_tsv) with the desktop TSV and hyphen tooling this machine has. This is the receive end of the Android OCR page's 'Send to Hub' action. It changes no data, only drives the screen, so its policy tier is UI_CONTROL.")]
+    async fn ocr_open_image(&self, Parameters(param): Parameters<OcrOpenImageParam>) -> Result<String, String> {
+        log::info!("[MCP] ocr_open_image");
+        let payload = serde_json::json!({
+            "type": "open-ocr",
+            "image": param.image_base64,
+        });
+        self.app.emit("agent-action", payload).map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "action": "open-ocr",
+        }).to_string())
     }
 
     #[tool(name = "ocr_recognize_tsv", description = "Recognize text in an image using Tesseract's TSV layout output, then rebuild it in Rust: words are grouped into lines and paragraphs (gap, Tesseract ids, indentation) and every line-break hyphen is decided against the downloaded Hunspell dictionaries of the page's language set (Sprach- + verarbeitung joins when German knows 'Sprachverarbeitung'; E- + Mail stays as printed; a word known to any selected language's dictionary joins). No LLM needed. Pass image as base64 (with or without data URL prefix), optional language code (default: 'eng', combine with '+' e.g. 'deu+eng') and optional hyphen_policy 'auto' | 'join' | 'keep'. Returns {text, baseline, tsv, hyphens, dictionaries, uncovered}: the decided text, the same page with all hyphens kept, the raw dump, one entry per hyphen ({left, hyphen, right, joined, decision, reason}), one entry per dictionary of the language set ({code, label, language, installed}) and the selected languages no dictionary exists for. 'dictionaries' tells you which installs would improve the decisions (use ocr_hyphen_dictionary_download); 'hyphens' lets a caller review or override them by re-running with a hyphen_policy. Prefer this over ocr_recognize when paragraph structure and layout fidelity matter.")]

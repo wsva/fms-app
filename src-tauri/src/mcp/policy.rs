@@ -179,7 +179,7 @@ const RECOVERABLE: [&str; 18] = [
 
 /// Drives the user's screen. `ui_invoke_action` is listed ahead of the UI action
 /// registry landing so the tier is already right when it does.
-const UI_CONTROL: [&str; 7] = [
+const UI_CONTROL: [&str; 8] = [
     "app_navigate",
     "app_notify",
     "app_open_review",
@@ -188,6 +188,8 @@ const UI_CONTROL: [&str; 7] = [
     "app_open_workspace_dir",
     "app_start_dictation",
     "capture_screenshot",
+    // Hands an image to the rendered OCR page; drives the screen, changes no data.
+    "ocr_open_image",
     "ui_invoke_action",
 ];
 

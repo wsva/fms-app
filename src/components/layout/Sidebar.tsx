@@ -133,9 +133,11 @@ export const TAB_DEFS: Record<TabId, TabDef> = Object.fromEntries(
   [...rootTabs, ...NAV_GROUPS.flatMap((g) => g.tabs), ...bottomTabs].map((t) => [t.id, t])
 ) as Record<TabId, TabDef>;
 
-// Tabs reachable in the Android thin client. Everything else (OCR,
-// Edge TTS, Logs, Simple Words, Workflow pipeline) is hidden.
-// "models" is enabled to verify local STT (transcribe-rs/ONNX) on Android.
+// Tabs reachable in the Android thin client. Everything else (Edge TTS,
+// Logs, Simple Words, Workflow pipeline) is hidden. "models" is enabled to
+// verify local STT (transcribe-rs/ONNX) on Android. "ocr" is enabled too, but
+// its Android form has no local Tesseract: it captures photos and recognizes
+// via the Hub (plain text) or hands the image to the Hub's own OCR page.
 const MOBILE_VISIBLE_TABS: TabId[] = [
   "dictation",
   "books",
@@ -144,6 +146,7 @@ const MOBILE_VISIBLE_TABS: TabId[] = [
   "tasks",
   "wiki",
   "chat",
+  "ocr",
   "workspaces",
   "datasets-sync",
   "devices-hub",

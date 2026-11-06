@@ -16,6 +16,9 @@ import type { TabId } from "@/components/layout/Sidebar";
 export type AgentAction =
   | { type: "navigate"; tab: TabId }
   | { type: "open-review"; dataset_uuid?: string | null }
+  /** Load an image (a data URL, typically a photo a follower captured) into
+   *  this machine's OCR page. The receive end of the Android "Send to Hub". */
+  | { type: "open-ocr"; image?: string | null }
   | {
       type: "start-dictation";
       dataset_uuid?: string | null;

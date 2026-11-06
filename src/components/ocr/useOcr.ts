@@ -6,6 +6,7 @@ import { type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isTauri } from "@/lib/tauri";
+import { isMobileApp } from "@/lib/platform";
 
 const IMAGE_FILTERS = [
   {
@@ -193,6 +194,12 @@ export function useOcr() {
   // Code of the dictionary being downloaded right now.
   const [installingDictionary, setInstallingDictionary] = useState<string | null>(null);
 
+  // ---- Hub send (Android "Send to Hub") ----
+  // A send is a hub_mcp_call in flight; `sentToHub` is the transient success
+  // flash on the button.
+  const [sending, setSending] = useState(false);
+  const [sentToHub, setSentToHub] = useState(false);
+
   // ---- Shared UI state ----
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
@@ -226,6 +233,55 @@ export function useOcr() {
       if (!msg.toLowerCase().includes("cancelled")) {
         setError(`Screenshot failed: ${msg}`);
       }
+    }
+  }, []);
+
+  // A photo taken by the Android camera (an `<input capture>` result). The
+  // webview owns the camera intent and its permission, so the hook only turns
+  // the picked File into a data URL the editor already accepts.
+  const takePhoto = useCallback((file: File | null | undefined) => {
+    if (!file) return;
+    setError("");
+    const reader = new FileReader();
+    reader.onload = () =>
+      setSourceImage(typeof reader.result === "string" ? reader.result : null);
+    reader.onerror = () => setError("Could not read the photo.");
+    reader.readAsDataURL(file);
+  }, []);
+
+  // Available Tesseract languages. Desktop reads its own install; the Android
+  // client has no local Tesseract, so it asks the Hub over `hub_mcp_call`.
+  const loadLanguages = useCallback(async (): Promise<string[]> => {
+    if (!isTauri()) return [];
+    if (isMobileApp()) {
+      const reply = await invoke<{ status: string; languages?: string[] }>("hub_mcp_call", {
+        tool: "ocr_list_languages",
+        args: {},
+      });
+      return reply.languages ?? [];
+    }
+    return await invoke<string[]>("ocr_list_languages");
+  }, []);
+
+  // Hand the current image to the paired Hub's own OCR page (feature #3): the
+  // Hub opens its page and loads it, where the full desktop tooling runs.
+  const sendToHub = useCallback(async (imageBase64: string) => {
+    if (!isTauri() || !imageBase64) return;
+    setSending(true);
+    setError("");
+    try {
+      await invoke("hub_mcp_call", {
+        tool: "ocr_open_image",
+        args: { image_base64: imageBase64 },
+      });
+      setSentToHub(true);
+      setTimeout(() => setSentToHub(false), 2000);
+    } catch (e) {
+      setError(
+        `Send to Hub failed: ${errorMessage(e)}. The Hub is unreachable or MCP is off — recognize this on the PC instead.`
+      );
+    } finally {
+      setSending(false);
     }
   }, []);
 
@@ -277,12 +333,21 @@ export function useOcr() {
   const recognize = useCallback(
     async (imageBase64: string, lang?: string) => {
       if (!isTauri()) return;
+      // The Android client has no local Tesseract: recognition is always plain
+      // text from the Hub, with no TSV/hyphen/dictionary passes on the phone.
+      const mobile = isMobileApp();
       // Capture the mode: the user may switch tabs while Tesseract runs.
-      const target = mode;
+      const target = mobile ? "plain" : mode;
       setRecognizing(true);
       setError("");
       try {
-        if (target === "tsv") {
+        if (mobile) {
+          const reply = await invoke<{ status: string; text?: string }>("hub_mcp_call", {
+            tool: "ocr_recognize",
+            args: { image_base64: imageBase64, lang: lang || "" },
+          });
+          setPlainText(reply.text ?? "");
+        } else if (target === "tsv") {
           const res = await invoke<OcrTsvResult>("ocr_recognize_tsv", {
             imageBase64,
             lang: lang || null,
@@ -302,8 +367,11 @@ export function useOcr() {
           setPlainText(text);
         }
       } catch (e) {
+        const msg = errorMessage(e);
         setError(
-          `${target === "tsv" ? "TSV recognition" : "Recognition"} failed: ${errorMessage(e)}`
+          mobile
+            ? `Recognition on the Hub failed: ${msg}. The Hub is unreachable or MCP is off — recognize this on the PC instead.`
+            : `${target === "tsv" ? "TSV recognition" : "Recognition"} failed: ${msg}`
         );
       } finally {
         setRecognizing(false);
@@ -428,6 +496,9 @@ Return ONLY the corrected plain text, no explanations.`,
     setSourceImage,
     selectFile,
     captureScreenshot,
+    takePhoto,
+    // languages (Hub-backed on the Android client)
+    loadLanguages,
     // recognition
     recognizing,
     recognize,
@@ -440,6 +511,10 @@ Return ONLY the corrected plain text, no explanations.`,
     copied,
     fixWithLlm,
     fixingText,
+    // Hub send (Android "Send to Hub")
+    sendToHub,
+    sending,
+    sentToHub,
     // hyphen review (TSV mode)
     hyphens,
     dictionaries,

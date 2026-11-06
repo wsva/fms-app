@@ -221,6 +221,12 @@ export default function Home() {
           openTab("cards");
           void emit("agent-open-review", { dataset_uuid: action.dataset_uuid ?? null });
           break;
+        case "open-ocr":
+          // The Hub's receive end of the phone's "Send to Hub": bring the OCR
+          // page forward and hand it the image so its listener loads it.
+          openTab("ocr");
+          void emit("agent-open-ocr", { image: action.image ?? null });
+          break;
         case "start-dictation": {
           openTab("dictation");
           // Drive the page through the action registry instead of re-emitting an

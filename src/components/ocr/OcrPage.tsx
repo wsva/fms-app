@@ -16,8 +16,11 @@ import {
   Type,
   Copy,
   BookOpen,
+  Camera,
+  Send,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@/lib/tauri";
 import { tbBase, tbGhost } from "@/lib/ui/toolbar";
 import { PageHeader, Toolbar, ToolbarButton, ToolbarIconButton, ToolbarMenuItem, ToolbarOverflow } from "@/components/ui/toolbar";
@@ -54,8 +57,11 @@ const FONT_MAX = 40;
 export default function OcrPage() {
   const {
     sourceImage,
+    setSourceImage,
     selectFile,
     captureScreenshot,
+    takePhoto,
+    loadLanguages,
     recognizing,
     recognize,
     mode,
@@ -67,6 +73,9 @@ export default function OcrPage() {
     copied,
     fixWithLlm,
     fixingText,
+    sendToHub,
+    sending,
+    sentToHub,
     hyphens,
     dictionaries,
     uncovered,
@@ -108,6 +117,45 @@ export default function OcrPage() {
   // overflow there so the bar keeps to two rows.
   const mobile = useIsMobile();
 
+  // Hidden input that raises the native camera on Android. `capture=environment`
+  // means the webview handles the camera intent and its permission itself, so
+  // there is no Rust camera code and no new capability.
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+
+  // The Android client recognizes only via the Hub, which returns plain text —
+  // there is no local Tesseract to run the TSV/hyphen rebuild. Lock the mode to
+  // plain so `resultText` reads the plain result.
+  useEffect(() => {
+    if (mobile) setMode("plain");
+  }, [mobile, setMode]);
+
+  // Receive end of a follower's "Send to Hub": the shell re-emits `agent-open-ocr`
+  // with the image once this (the Hub's) OCR page is frontmost. Load it straight
+  // into the image box, the same way CardsPage picks up `agent-open-review`.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    listen<{ image: string | null }>("agent-open-ocr", (event) => {
+      const image = event.payload?.image;
+      if (image) {
+        setError("");
+        setSourceImage(image);
+      }
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {
+        /* event unavailable */
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [setSourceImage, setError]);
+
   // ---- Font size for the result text, remembered across sessions ----
   const [fontSize, setFontSize] = useState(24);
   useEffect(() => {
@@ -120,10 +168,11 @@ export default function OcrPage() {
     localStorage.setItem("ocr_font_size", String(clamped));
   }, []);
 
-  // Fetch available Tesseract languages on mount.
+  // Fetch available Tesseract languages on mount. Desktop reads its own install;
+  // the Android client asks the Hub (see `loadLanguages`).
   useEffect(() => {
     if (!isTauri()) return;
-    invoke<string[]>("ocr_list_languages")
+    loadLanguages()
       .then((langs) => {
         setAvailableLangs(langs);
         // Default to eng+deu if available, otherwise first two.
@@ -137,7 +186,7 @@ export default function OcrPage() {
       .catch(() => {
         // Tesseract not found — leave list empty.
       });
-  }, []);
+  }, [loadLanguages]);
 
   // Close language dropdown on outside click.
   useEffect(() => {
@@ -272,11 +321,21 @@ export default function OcrPage() {
           reach while either pane scrolls. */}
       <Toolbar className="flex-wrap">
         <ToolbarButton icon={ImagePlus} label="Select image" onClick={selectFile} />
-        <ToolbarButton
-          icon={MonitorUp}
-          label="Screenshot"
-          onClick={captureScreenshot}
-        />
+        {mobile && (
+          <ToolbarButton
+            icon={Camera}
+            label="Camera"
+            onClick={() => cameraInputRef.current?.click()}
+            title="Take a photo"
+          />
+        )}
+        {!mobile && (
+          <ToolbarButton
+            icon={MonitorUp}
+            label="Screenshot"
+            onClick={captureScreenshot}
+          />
+        )}
         {!mobile && (
           <ToolbarButton
             icon={X}
@@ -295,9 +354,6 @@ export default function OcrPage() {
               onClick={handleClear}
             >
               Clear image and results
-            </ToolbarMenuItem>
-            <ToolbarMenuItem icon={BookOpen} onClick={() => setShowDictionaries(true)}>
-              Hyphen dictionaries
             </ToolbarMenuItem>
           </ToolbarOverflow>
         )}
@@ -427,7 +483,34 @@ export default function OcrPage() {
           disabled={!resultText}
           title="Copy the result text"
         />
+        {mobile && (
+          <ToolbarButton
+            icon={sending ? Loader2 : Send}
+            iconProps={sending ? { className: "animate-spin" } : undefined}
+            label={sentToHub ? "Sent" : sending ? "Sending…" : "Send to Hub"}
+            onClick={() => editedImage && sendToHub(editedImage)}
+            disabled={!editedImage || sending}
+            title="Open this image in the Hub's OCR page"
+          />
+        )}
       </Toolbar>
+
+      {/* The Android camera affordance: a native capture intent, its result fed
+          to the same editor pipeline as Select image. */}
+      {mobile && (
+        <input
+          ref={cameraInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
+          onChange={(e) => {
+            takePhoto(e.target.files?.[0]);
+            // Reset so taking the same photo twice still fires onChange.
+            e.target.value = "";
+          }}
+        />
+      )}
 
       {error && (
         <div className="shrink-0 mx-4 mt-4 px-4 py-3 rounded-lg bg-error-bg text-error-text text-sm flex items-start gap-2">
@@ -479,7 +562,10 @@ export default function OcrPage() {
             {/* ---- Result pane ---- */}
             <section className="rounded-xl border border-border-default bg-bg-card flex flex-col min-w-0 min-h-0 overflow-hidden">
               {/* One header row: the mode on the left, that mode's single extra
-                  action on the right. Everything else lives in the toolbar. */}
+                  action on the right. Everything else lives in the toolbar. The
+                  Android client has none of these (plain-only, Hub-backed), so
+                  the whole row stays desktop. */}
+              {!mobile && (
               <div className="shrink-0 flex flex-wrap items-center gap-2 px-3 py-2 border-b border-border-default">
                 <div
                   role="group"
@@ -552,6 +638,7 @@ export default function OcrPage() {
                   )}
                 </div>
               </div>
+              )}
 
               <textarea
                 value={resultText}
