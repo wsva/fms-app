@@ -25,6 +25,7 @@ import { reqStr, useAgentActions } from "@/lib/agent/ui-actions";
 import { tbBase, tbGhost } from "@/lib/ui/toolbar";
 import { PageHeader, Toolbar, ToolbarButton, ToolbarIconButton, ToolbarMenuItem, ToolbarOverflow } from "@/components/ui/toolbar";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import HubStatusOverlay from "@/components/read_aloud/HubStatusOverlay";
 import { useOcr } from "./useOcr";
 import ImageEditor from "./ImageEditor";
 import HyphenPanel from "./HyphenPanel";
@@ -76,6 +77,11 @@ export default function OcrPage() {
     sendToHub,
     sending,
     sentToHub,
+    hubStage,
+    hubError,
+    dismissHubStatus,
+    lastFailed,
+    retryLast,
     hyphens,
     dictionaries,
     uncovered,
@@ -98,6 +104,11 @@ export default function OcrPage() {
   const [langDropdownOpen, setLangDropdownOpen] = useState(false);
   const [langFilter, setLangFilter] = useState("");
   const langDropdownRef = useRef<HTMLDivElement>(null);
+  // The Android list is the Hub's, so it costs a remote call. Say so while it is
+  // in flight, and say `Auto` when it cannot be had, rather than showing the
+  // `None` that reads as a broken picker.
+  const [langsLoading, setLangsLoading] = useState(false);
+  const [langsUnavailable, setLangsUnavailable] = useState(false);
 
   // ---- Result pane ----
   // Raw TSV opens as an overlay, not inline: a 100+ row dump inline would shove
@@ -121,6 +132,61 @@ export default function OcrPage() {
   // means the webview handles the camera intent and its permission itself, so
   // there is no Rust camera code and no new capability.
   const cameraInputRef = useRef<HTMLInputElement>(null);
+
+  // ---- Intent (Android only) ----
+  // Two screens behind one entry, because where a photo should go only becomes
+  // clear once the photo exists: `hub` hands it to the Hub's own OCR page, where
+  // the TSV and hyphen tooling lives; `phone` reads the text here. The image is
+  // shared state either way, so switching intent never costs a re-shoot.
+  const [intent, setIntentState] = useState<"hub" | "phone">("hub");
+  // Restored in an effect rather than as lazy initial state, so the prerendered
+  // HTML and the first client paint agree — the same reason `ocr_mode` does it.
+  useEffect(() => {
+    const saved = localStorage.getItem("ocr_intent");
+    if (saved === "hub" || saved === "phone") setIntentState(saved);
+  }, []);
+  const setIntent = useCallback((next: "hub" | "phone") => {
+    setIntentState(next);
+    localStorage.setItem("ocr_intent", next);
+  }, []);
+
+  // ---- Hub reachability (Android only) ----
+  // Every action on the Android page is a Hub call, so the page says up front
+  // whether there is a Hub to call at all. `sync_status` is the same read the
+  // Devices & Hub page makes; only the two fields the chip needs are named here.
+  const [hub, setHub] = useState<{ address: string; reachable: boolean } | null>(null);
+  useEffect(() => {
+    if (!mobile || !isTauri()) return;
+    let alive = true;
+    const load = () =>
+      invoke<{ hub?: { address?: string; reachable?: boolean } | null }>("sync_status")
+        .then((s) => {
+          if (alive) setHub({ address: s.hub?.address ?? "", reachable: s.hub?.reachable === true });
+        })
+        .catch(() => {
+          // No sync layer to ask — treat the Hub as absent, not as broken.
+          if (alive) setHub({ address: "", reachable: false });
+        });
+    load();
+    const timer = setInterval(load, 15000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [mobile]);
+  const hubOnline = hub?.reachable === true;
+  const hubOffline = mobile && hub !== null && !hub.reachable;
+
+  // ---- Stage-driven image pane (Android) ----
+  // One surface in focus at a time: the photo while the user judges whether it
+  // is worth a Hub call, the text once that call has answered. `On the Hub` has
+  // no text to give room to, so its preview stays open (see `imageShown`).
+  useEffect(() => {
+    if (mobile && sourceImage) setImageOpen(true);
+  }, [mobile, sourceImage]);
+  useEffect(() => {
+    if (mobile && intent === "phone" && resultText) setImageOpen(false);
+  }, [mobile, intent, resultText]);
 
   // The Android client recognizes only via the Hub, which returns plain text —
   // there is no local Tesseract to run the TSV/hyphen rebuild. Lock the mode to
@@ -169,11 +235,15 @@ export default function OcrPage() {
   }, []);
 
   // Fetch available Tesseract languages on mount. Desktop reads its own install;
-  // the Android client asks the Hub (see `loadLanguages`).
+  // the Android client asks the Hub (see `loadLanguages`). Re-run when the Hub
+  // arrives: a phone that opened with its Hub asleep would otherwise be left
+  // promising `Auto` forever.
   useEffect(() => {
     if (!isTauri()) return;
+    setLangsLoading(true);
     loadLanguages()
       .then((langs) => {
+        setLangsUnavailable(false);
         setAvailableLangs(langs);
         // Default to eng+deu if available, otherwise first two.
         setSelectedLangs((prev) => {
@@ -184,9 +254,11 @@ export default function OcrPage() {
         });
       })
       .catch(() => {
-        // Tesseract not found — leave list empty.
-      });
-  }, [loadLanguages]);
+        // No Tesseract here (desktop) or no Hub to ask (Android) — empty list.
+        setLangsUnavailable(true);
+      })
+      .finally(() => setLangsLoading(false));
+  }, [loadLanguages, hubOnline]);
 
   // Close language dropdown on outside click.
   useEffect(() => {
@@ -206,6 +278,38 @@ export default function OcrPage() {
   }, []);
 
   const langString = selectedLangs.join("+");
+
+  // What the Android language chip says: the names, or the honest stand-in for
+  // not having them yet.
+  const langChipLabel = langsLoading
+    ? "Loading…"
+    : selectedLangs.length === 0 || langsUnavailable
+      ? "Auto"
+      : `${selectedLangs
+          .slice(0, 2)
+          .map((code) => LANG_LABELS[code] ?? code)
+          .join("+")}${selectedLangs.length > 2 ? ` +${selectedLangs.length - 2}` : ""}`;
+
+  // Whether the image viewer is drawn. `On the Hub` always shows it; desktop
+  // keeps the narrow-layout toggle exactly as it was.
+  const imageShown = mobile ? intent === "hub" || imageOpen : imageOpen;
+
+  // The result pane is the phone's half of the screen once there is something in
+  // it: `On the Hub` never recognizes here, so the box does not exist on that
+  // intent, and before a result arrives the photo (or the invitation) owns the
+  // viewport. Dropping the empty box is what makes the two read as different
+  // screens rather than as one stripped.
+  const showResultPane = !mobile || (intent === "phone" && !!resultText);
+
+  // On a phone the panes own the viewport instead of stacking to a fixed height
+  // over dead space: the hand-off screen gives everything to the photo, the
+  // recognition screen keeps the photo's strip at its own height and grows the
+  // text into the rest. Desktop keeps its two-pane split untouched.
+  const paneGrid = mobile
+    ? showResultPane
+      ? "grid gap-4 flex-1 min-h-0 grid-rows-[auto_minmax(0,1fr)]"
+      : "grid gap-4 flex-1 min-h-0 grid-rows-[minmax(0,1fr)]"
+    : "grid gap-4 lg:flex-1 lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]";
 
   const filteredLangs = useMemo(() => {
     const filter = langFilter.trim().toLowerCase();
@@ -310,17 +414,180 @@ export default function OcrPage() {
     return Math.max(0, rawTsv.trimEnd().split("\n").length - 1);
   }, [rawTsv]);
 
+  // The language picker, held as a value because it has two possible homes: the
+  // toolbar on the desktop, the image header on Android. One instance, same
+  // state and popover either way — only the anchor moves.
+  const languageControl = (
+    <div className="relative shrink-0" ref={langDropdownRef}>
+      <button
+        type="button"
+        onClick={() => {
+          setLangFilter("");
+          setLangDropdownOpen((o) => !o);
+        }}
+        className={`${tbGhost} ${langDropdownOpen ? "bg-bg-hover text-text-primary" : ""}`}
+        title={
+          langsLoading
+            ? "Asking the Hub for its languages"
+            : langString
+              ? `OCR languages: ${langString}`
+              : "OCR languages"
+        }
+        aria-label={`OCR languages: ${selectedLangs.length ? selectedLangs.join(", ") : "none"}`}
+        aria-expanded={langDropdownOpen}
+      >
+        <Languages size={14} />
+        {mobile ? (
+          // Names, or the honest stand-in: `None` read as a broken picker when
+          // the list was merely still arriving from the Hub.
+          <span className="text-xs text-text-secondary truncate max-w-[150px]">
+            {langChipLabel}
+          </span>
+        ) : (
+          <>
+            {/* On a narrow desktop window the chips cost the whole bar a row, so
+                only the count stays visible; the accessible name carries the list. */}
+            <span className="sm:hidden text-xs text-text-secondary">
+              {selectedLangs.length || "None"}
+            </span>
+            <span className="hidden sm:flex items-center gap-1 min-w-0 max-w-[220px] overflow-hidden">
+              {selectedLangs.length === 0 ? (
+                "None"
+              ) : (
+                // Labels rather than codes: `deu+eng` says nothing to most users.
+                // Two fit the bar; the rest collapse into a count.
+                selectedLangs.slice(0, 2).map((code) => (
+                  <span
+                    key={code}
+                    title={code}
+                    className="px-1.5 rounded bg-bg-muted border border-border-default text-xs leading-5 whitespace-nowrap"
+                  >
+                    {LANG_LABELS[code] ?? code}
+                  </span>
+                ))
+              )}
+              {selectedLangs.length > 2 && (
+                <span className="text-xs text-text-tertiary">
+                  +{selectedLangs.length - 2}
+                </span>
+              )}
+            </span>
+          </>
+        )}
+        <ChevronDown size={14} className="text-text-tertiary shrink-0" />
+      </button>
+
+      {langDropdownOpen && (
+        <div className="absolute right-0 top-full mt-1 z-50 w-64 rounded-lg border border-border-default bg-bg-card shadow-xl overflow-hidden">
+          {availableLangs.length > 8 && (
+            <div className="p-1.5 border-b border-border-default">
+              <input
+                autoFocus
+                value={langFilter}
+                onChange={(e) => setLangFilter(e.target.value)}
+                placeholder="Filter languages…"
+                aria-label="Filter languages"
+                className="w-full px-2 py-1 rounded bg-bg-muted border border-border-default text-sm text-text-primary focus:outline-none focus:border-accent"
+              />
+            </div>
+          )}
+          <div className="max-h-64 overflow-y-auto py-1">
+            {filteredLangs.length === 0 && (
+              <div className="px-3 py-2 text-xs text-text-tertiary">
+                {langsLoading ? "Loading…" : langsUnavailable ? "The Hub is offline" : "No languages found"}
+              </div>
+            )}
+            {filteredLangs.map((code) => {
+              const checked = selectedLangs.includes(code);
+              return (
+                <button
+                  key={code}
+                  type="button"
+                  onClick={() => toggleLang(code)}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-text-primary hover:bg-bg-hover transition-colors cursor-pointer"
+                >
+                  <span
+                    className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
+                      checked ? "bg-accent border-accent" : "border-border-default"
+                    }`}
+                  >
+                    {checked && <Check size={12} className="text-white" />}
+                  </span>
+                  <span className="flex-1 text-left">{LANG_LABELS[code] ?? code}</span>
+                  <span className="text-xs text-text-tertiary">{code}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="px-3 py-1.5 border-t border-border-default text-[11px] text-text-tertiary">
+            Toggle to combine — e.g. deu+eng
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <main className="flex-1 flex flex-col h-full min-w-0 min-h-0">
       <PageHeader
         title="OCR"
-        badge={<span className="text-xs text-text-tertiary">Tesseract</span>}
+        badge={
+          mobile ? (
+            hub === null ? undefined : hub.reachable ? (
+              // The Android page runs entirely on the Hub, so it names the one
+              // it is talking to rather than claiming a local engine it has not.
+              <span
+                className="flex items-center gap-1.5 text-xs text-success-text min-w-0"
+                title="Recognition and hand-off both run on this Hub"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-success-text shrink-0" />
+                <span className="truncate max-w-[160px]">{hub.address || "Hub"}</span>
+              </span>
+            ) : (
+              <span
+                className="flex items-center gap-1.5 text-xs text-warning-text"
+                title="The Hub is unreachable — wake it to recognize or send"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-warning-text shrink-0" />
+                Hub offline
+              </span>
+            )
+          ) : (
+            <span className="text-xs text-text-tertiary">Tesseract</span>
+          )
+        }
       />
+
+      {/* Android: the fork the whole screen hangs on — one photo, two
+          destinations. Named for where the work happens, so the button under it
+          never has to repeat the noun. */}
+      {mobile && (
+        <div
+          role="group"
+          aria-label="Where the work happens"
+          className="shrink-0 flex items-stretch gap-1 mx-4 mt-3 p-1 rounded-xl bg-bg-muted border border-border-default"
+        >
+          <IntentTab
+            active={intent === "hub"}
+            onClick={() => setIntent("hub")}
+            label="On the Hub"
+            title="Take a photo and open it on the Hub"
+          />
+          <IntentTab
+            active={intent === "phone"}
+            onClick={() => setIntent("phone")}
+            label="On this phone"
+            title="Take a photo and read the text here"
+          />
+        </div>
+      )}
 
       {/* Page-level actions live here, above the panes, so Recognize stays in
           reach while either pane scrolls. */}
       <Toolbar className="flex-wrap">
-        <ToolbarButton icon={ImagePlus} label="Select image" onClick={selectFile} />
+        {/* The camera is the point on a phone, so the file picker steps back
+            into the overflow: still one tap away, no longer competing with it. */}
+        {!mobile && <ToolbarButton icon={ImagePlus} label="Select image" onClick={selectFile} />}
         {mobile && (
           <ToolbarButton
             icon={Camera}
@@ -347,6 +614,9 @@ export default function OcrPage() {
         )}
         {mobile && (
           <ToolbarOverflow label="More actions">
+            <ToolbarMenuItem icon={ImagePlus} onClick={selectFile}>
+              Select image
+            </ToolbarMenuItem>
             <ToolbarMenuItem
               icon={X}
               danger
@@ -359,97 +629,9 @@ export default function OcrPage() {
         )}
         <div className="flex-1 min-w-0" />
 
-        {/* Languages: the chip row shows the current selection without opening
-            the menu, which the old truncated `eng+deu` string could not. */}
-        <div className="relative shrink-0" ref={langDropdownRef}>
-          <button
-            type="button"
-            onClick={() => {
-              setLangFilter("");
-              setLangDropdownOpen((o) => !o);
-            }}
-            className={`${tbGhost} ${langDropdownOpen ? "bg-bg-hover text-text-primary" : ""}`}
-            title={langString ? `OCR languages: ${langString}` : "OCR languages"}
-            aria-label={`OCR languages: ${selectedLangs.length ? selectedLangs.join(", ") : "none"}`}
-            aria-expanded={langDropdownOpen}
-          >
-            <Languages size={14} />
-            {/* On a phone the chips cost the whole bar a row, so only the count
-                stays visible; the accessible name carries the full list. */}
-            <span className="sm:hidden text-xs text-text-secondary">
-              {selectedLangs.length || "None"}
-            </span>
-            <span className="hidden sm:flex items-center gap-1 min-w-0 max-w-[220px] overflow-hidden">
-              {selectedLangs.length === 0 ? (
-                "None"
-              ) : (
-                // Labels rather than codes: `deu+eng` says nothing to most users.
-                // Two fit the bar; the rest collapse into a count.
-                selectedLangs.slice(0, 2).map((code) => (
-                  <span
-                    key={code}
-                    title={code}
-                    className="px-1.5 rounded bg-bg-muted border border-border-default text-xs leading-5 whitespace-nowrap"
-                  >
-                    {LANG_LABELS[code] ?? code}
-                  </span>
-                ))
-              )}
-              {selectedLangs.length > 2 && (
-                <span className="text-xs text-text-tertiary">
-                  +{selectedLangs.length - 2}
-                </span>
-              )}
-            </span>
-            <ChevronDown size={14} className="text-text-tertiary shrink-0" />
-          </button>
-
-          {langDropdownOpen && (
-            <div className="absolute right-0 top-full mt-1 z-50 w-64 rounded-lg border border-border-default bg-bg-card shadow-xl overflow-hidden">
-              {availableLangs.length > 8 && (
-                <div className="p-1.5 border-b border-border-default">
-                  <input
-                    autoFocus
-                    value={langFilter}
-                    onChange={(e) => setLangFilter(e.target.value)}
-                    placeholder="Filter languages…"
-                    aria-label="Filter languages"
-                    className="w-full px-2 py-1 rounded bg-bg-muted border border-border-default text-sm text-text-primary focus:outline-none focus:border-accent"
-                  />
-                </div>
-              )}
-              <div className="max-h-64 overflow-y-auto py-1">
-                {filteredLangs.length === 0 && (
-                  <div className="px-3 py-2 text-xs text-text-tertiary">No languages found</div>
-                )}
-                {filteredLangs.map((code) => {
-                  const checked = selectedLangs.includes(code);
-                  return (
-                    <button
-                      key={code}
-                      type="button"
-                      onClick={() => toggleLang(code)}
-                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-text-primary hover:bg-bg-hover transition-colors cursor-pointer"
-                    >
-                      <span
-                        className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
-                          checked ? "bg-accent border-accent" : "border-border-default"
-                        }`}
-                      >
-                        {checked && <Check size={12} className="text-white" />}
-                      </span>
-                      <span className="flex-1 text-left">{LANG_LABELS[code] ?? code}</span>
-                      <span className="text-xs text-text-tertiary">{code}</span>
-                    </button>
-                  );
-                })}
-              </div>
-              <div className="px-3 py-1.5 border-t border-border-default text-[11px] text-text-tertiary">
-                Toggle to combine — e.g. deu+eng
-              </div>
-            </div>
-          )}
-        </div>
+        {/* Language is a parameter of recognition, so on Android it leaves the
+            bar altogether and sits with the photo it configures. */}
+        {!mobile && languageControl}
 
         {/* One dictionary per language: installed once, used by every TSV run. */}
         {!mobile && (
@@ -461,36 +643,51 @@ export default function OcrPage() {
           />
         )}
 
-        <ToolbarButton
-          variant="solid"
-          icon={recognizing ? Loader2 : Sparkles}
-          iconProps={recognizing ? { className: "animate-spin" } : undefined}
-          label={recognizing ? "Recognizing…" : "Recognize"}
-          onClick={() => editedImage && recognize(editedImage, langString)}
-          disabled={!canRecognize}
-          title={
-            !editedImage
-              ? "Add an image first"
-              : mode === "tsv"
-                ? "Recognize and rebuild paragraphs in Rust"
-                : "Recognize text"
-          }
-        />
-        <ToolbarButton
-          icon={copied ? Check : Copy}
-          label={copied ? "Copied" : "Copy"}
-          onClick={copyResult}
-          disabled={!resultText}
-          title="Copy the result text"
-        />
-        {mobile && (
+        {/* `On the Hub` has no recognition to run here — its one verb is the
+            send below — so the CTA follows the intent. */}
+        {(!mobile || intent === "phone") && (
           <ToolbarButton
+            variant="solid"
+            icon={recognizing ? Loader2 : Sparkles}
+            iconProps={recognizing ? { className: "animate-spin" } : undefined}
+            label={recognizing ? "Recognizing…" : "Recognize"}
+            onClick={() => editedImage && recognize(editedImage, langString)}
+            disabled={!canRecognize}
+            title={
+              !editedImage
+                ? "Add an image first"
+                : mobile && hubOffline
+                  ? "The Hub is offline — wake it and retry"
+                  : mode === "tsv"
+                    ? "Recognize and rebuild paragraphs in Rust"
+                    : "Recognize text"
+            }
+          />
+        )}
+        {/* Copy belongs with the text it copies, so on Android it lives in the
+            result header and only exists once there is a result. */}
+        {!mobile && (
+          <ToolbarButton
+            icon={copied ? Check : Copy}
+            label={copied ? "Copied" : "Copy"}
+            onClick={copyResult}
+            disabled={!resultText}
+            title="Copy the result text"
+          />
+        )}
+        {mobile && intent === "hub" && (
+          <ToolbarButton
+            variant="solid"
             icon={sending ? Loader2 : Send}
             iconProps={sending ? { className: "animate-spin" } : undefined}
-            label={sentToHub ? "Sent" : sending ? "Sending…" : "Send to Hub"}
+            label={sentToHub ? "Sent to the Hub" : sending ? "Sending…" : "Send this photo"}
             onClick={() => editedImage && sendToHub(editedImage)}
             disabled={!editedImage || sending}
-            title="Open this image in the Hub's OCR page"
+            title={
+              hubOffline
+                ? "The Hub is offline — wake it and retry"
+                : "Open this image in the Hub's OCR page"
+            }
           />
         )}
       </Toolbar>
@@ -515,6 +712,18 @@ export default function OcrPage() {
       {error && (
         <div className="shrink-0 mx-4 mt-4 px-4 py-3 rounded-lg bg-error-bg text-error-text text-sm flex items-start gap-2">
           <span className="flex-1 whitespace-pre-wrap break-words">{error}</span>
+          {/* The one thing the message asks for, as a button: the photo and the
+              language are still exactly as the user left them. */}
+          {mobile && lastFailed && (
+            <button
+              type="button"
+              onClick={retryLast}
+              className="shrink-0 font-medium underline cursor-pointer"
+              title="Run the failed Hub call again with the same image"
+            >
+              Retry
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setError("")}
@@ -530,36 +739,66 @@ export default function OcrPage() {
           two-pane split whose panes scroll internally, so the scan and the text
           are visible together. */}
       <div className="flex-1 min-h-0 overflow-y-auto p-4 lg:overflow-hidden">
-        <div className="flex flex-col gap-4 lg:h-full lg:min-h-0">
-          <div className="grid gap-4 lg:flex-1 lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
+        <div className="flex flex-col gap-4 min-h-full lg:h-full lg:min-h-0">
+          <div className={paneGrid}>
             {/* ---- Image pane ---- */}
             <section className="rounded-xl border border-border-default bg-bg-card flex flex-col min-w-0 min-h-0 overflow-hidden">
-              <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-border-default">
-                <h2 className="text-sm font-semibold text-text-primary flex-1 min-w-0 truncate">
-                  Image
-                </h2>
-                <span className="hidden xl:inline text-xs text-text-tertiary">
-                  Drop a file, or use the toolbar
-                </span>
-                <ToolbarIconButton
-                  className="lg:hidden"
-                  icon={imageOpen ? ChevronUp : ChevronDown}
-                  ariaLabel={imageOpen ? "Collapse image" : "Expand image"}
-                  onClick={() => setImageOpen((v) => !v)}
+              {/* Nothing captured yet: a collapsed `Image` strip would read as an
+                  empty box, so the screen invites the shot instead — and names the
+                  one thing that can stop either intent working. */}
+              {mobile && !sourceImage ? (
+                <EmptyState
+                  onCamera={() => cameraInputRef.current?.click()}
+                  onSelect={selectFile}
+                  hubOffline={hubOffline}
                 />
-              </div>
-              <div
-                className={`p-3 ${imageOpen ? `${NARROW_IMAGE_HEIGHT} min-h-0` : "hidden"} lg:block lg:h-auto lg:flex-1 lg:min-h-0`}
-              >
-                <ImageEditor
-                  src={sourceImage}
-                  onImageReady={handleImageReady}
-                  onError={setError}
-                />
-              </div>
+              ) : (
+                <>
+                  <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-border-default">
+                    <h2 className="text-sm font-semibold text-text-primary flex-1 min-w-0 truncate">
+                      Image
+                    </h2>
+                    <span className="hidden xl:inline text-xs text-text-tertiary">
+                      Drop a file, or use the toolbar
+                    </span>
+                    {/* Language is a parameter of the recognition run *here*, so on
+                        Android it sits with the photo it configures — and only on
+                        the intent that recognizes. */}
+                    {mobile && intent === "phone" && languageControl}
+                    {/* `On the Hub` never collapses: the photo is the whole screen. */}
+                    {!(mobile && intent === "hub") && (
+                      <ToolbarIconButton
+                        className="lg:hidden"
+                        icon={imageOpen ? ChevronUp : ChevronDown}
+                        ariaLabel={imageOpen ? "Collapse image" : "Expand image"}
+                        onClick={() => setImageOpen((v) => !v)}
+                      />
+                    )}
+                  </div>
+                  <div
+                    className={`p-3 min-h-0 ${
+                      imageShown
+                        ? // The photo fills the screen whenever it is the only pane
+                          // (the hand-off intent, or here before a result arrives);
+                          // once the text is on screen it takes the lower half.
+                          showResultPane
+                          ? NARROW_IMAGE_HEIGHT
+                          : "flex-1 min-h-0"
+                        : "hidden"
+                    } lg:block lg:h-auto lg:flex-1 lg:min-h-0`}
+                  >
+                    <ImageEditor
+                      src={sourceImage}
+                      onImageReady={handleImageReady}
+                      onError={setError}
+                    />
+                  </div>
+                </>
+              )}
             </section>
 
             {/* ---- Result pane ---- */}
+            {showResultPane && (
             <section className="rounded-xl border border-border-default bg-bg-card flex flex-col min-w-0 min-h-0 overflow-hidden">
               {/* One header row: the mode on the left, that mode's single extra
                   action on the right. Everything else lives in the toolbar. The
@@ -640,6 +879,25 @@ export default function OcrPage() {
               </div>
               )}
 
+              {/* Android has no mode to switch and no LLM pass to run here, so its
+                  header carries the one action that belongs with the text itself. */}
+              {mobile && resultText && (
+                <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-border-default">
+                  <h2 className="text-sm font-semibold text-text-primary flex-1 min-w-0 truncate">
+                    Text
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={copyResult}
+                    className={`${tbGhost} shrink-0`}
+                    title="Copy the result text"
+                  >
+                    {copied ? <Check size={14} /> : <Copy size={14} />}
+                    {copied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              )}
+
               <textarea
                 value={resultText}
                 onChange={(e) => setResultText(e.target.value)}
@@ -650,7 +908,9 @@ export default function OcrPage() {
                     : "Recognized text appears here. You can edit it before copying."
                 }
                 style={{ fontSize: `${fontSize}px` }}
-                className="flex-1 min-h-[240px] lg:min-h-0 w-full px-3 py-2 bg-transparent text-text-primary resize-y lg:resize-none focus:outline-none"
+                className={`flex-1 w-full px-3 py-2 bg-transparent text-text-primary resize-y focus:outline-none ${
+                  mobile ? "min-h-0" : "min-h-[240px] lg:min-h-0 lg:resize-none"
+                }`}
               />
 
               {/* Line-break hyphens: what the dictionary/heuristic decided, and
@@ -675,6 +935,9 @@ export default function OcrPage() {
                   {recognizing && " · recognizing…"}
                 </p>
                 <span className="flex-1" />
+                {/* The size is a reading-desktop concern (and is still remembered);
+                    on a phone the row is only worth the proof that text came back. */}
+                {!mobile && (
                 <div className="flex items-center gap-0.5">
                   <button
                     type="button"
@@ -698,11 +961,26 @@ export default function OcrPage() {
                     A+
                   </button>
                 </div>
+                )}
               </div>
             </section>
+            )}
           </div>
         </div>
       </div>
+
+      {/* The phase the Hub call is in, on the contract the read-aloud panels use:
+          a cold Tesseract over there is slow over here, and a bare spinner on a
+          phone reads as a broken device rather than a busy Hub. */}
+      {hubStage && (
+        <HubStatusOverlay
+          stage={hubStage}
+          error={hubError}
+          title={intent === "hub" ? "Sending to the Hub" : "Working with the Hub"}
+          errorHint="Nothing was kept on the Hub — retry sends this photo again."
+          onLater={dismissHubStatus}
+        />
+      )}
 
       {showRawTsv && rawTsv && (
         <RawTsvOverlay tsv={rawTsv} rows={tsvRowCount} onClose={() => setShowRawTsv(false)} />
@@ -761,6 +1039,78 @@ function ModeTab({
       {icon}
       {label}
     </button>
+  );
+}
+
+/** One tab of the Android intent switch. Same chrome as the desktop mode
+ *  switcher, but full width: this is the page's one real choice, not another
+ *  button in a row. */
+function IntentTab({
+  active,
+  onClick,
+  label,
+  title,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  title: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      title={title}
+      className={`flex-1 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors cursor-pointer ${
+        active
+          ? "bg-bg-card border border-border-default text-text-primary"
+          : "border border-transparent text-text-secondary"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+/**
+ * The Android starting screen: no photo yet, so every action would be greyed.
+ * One card serves both intents — they begin the same way, with the shot.
+ */
+function EmptyState({
+  onCamera,
+  onSelect,
+  hubOffline,
+}: {
+  onCamera: () => void;
+  onSelect: () => void;
+  hubOffline: boolean;
+}) {
+  return (
+    <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
+      <Camera size={32} className="text-text-tertiary" />
+      <p className="text-sm text-text-secondary">Take a photo to start</p>
+      <button
+        type="button"
+        onClick={onCamera}
+        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent/90 cursor-pointer"
+      >
+        <Camera size={16} />
+        Take a photo
+      </button>
+      <button
+        type="button"
+        onClick={onSelect}
+        className="text-xs text-text-tertiary underline cursor-pointer"
+      >
+        Select from files
+      </button>
+      {hubOffline && (
+        <p className="text-xs text-warning-text">
+          The Hub is offline — wake it to send the photo or read the text.
+        </p>
+      )}
+    </div>
   );
 }
 

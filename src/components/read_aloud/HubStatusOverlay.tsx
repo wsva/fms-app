@@ -15,6 +15,16 @@ type Props = {
   /** The hub's error text, shown when `stage === "error"` (already actionable —
    *  e.g. "no hub configured — set the PC address on Devices & Hub"). */
   error?: string | null;
+  /** The heading. Defaults to the scoring wording the read-aloud panels have
+   *  always shown; another hub-backed feature names its own work here (the OCR
+   *  page says "Working with the Hub" / "Sending to the Hub") so the dialog
+   *  never claims to be scoring something. */
+  title?: string;
+  /** What the failed call says about the work left behind, shown under the
+   *  error. Defaults to the scoring answer (the take is already saved, so
+   *  "Assess again" finishes it later); a feature with nothing persisted says
+   *  so itself rather than promising a retry it does not have. */
+  errorHint?: string;
   /** The one way out, in every phase: stop watching this call and leave the take
    *  as it is. The recording was stored before the call started, so walking away
    *  costs nothing — measuring it later is the attempt row's "Assess again". */
@@ -68,7 +78,13 @@ function Step({ state, label }: { state: StepState; label: string }) {
  * between exactly those two: the choice that started it and the result that
  * follows it.
  */
-export default function HubStatusOverlay({ stage, error, onLater }: Props) {
+export default function HubStatusOverlay({
+  stage,
+  error,
+  title = "Scoring on the Hub",
+  errorHint = "Your recording is saved. Score it later with “Assess again” on its attempt.",
+  onLater,
+}: Props) {
   const sending: StepState =
     stage === "sending" ? "active" : stage === "waiting" || stage === "done" ? "done" : "pending";
   const awaiting: StepState =
@@ -76,17 +92,14 @@ export default function HubStatusOverlay({ stage, error, onLater }: Props) {
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
       <div className="flex w-full max-w-sm flex-col gap-3 rounded-2xl bg-bg-card p-6 shadow-xl">
-        <h3 className="text-base font-semibold text-text-primary">Scoring on the Hub</h3>
+        <h3 className="text-base font-semibold text-text-primary">{title}</h3>
         {stage === "error" ? (
           <>
             <div className="p-3 rounded-lg bg-error-bg text-error-text text-sm break-words min-w-0">
               <div className="font-medium">Error invoking the hub</div>
               <div className="mt-1 text-xs">{error}</div>
             </div>
-            <p className="text-xs text-text-tertiary">
-              Your recording is saved. Score it later with “Assess again” on its
-              attempt.
-            </p>
+            <p className="text-xs text-text-tertiary">{errorHint}</p>
           </>
         ) : (
           <>

@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { type UnlistenFn } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
+import type { HubStage } from "@/components/read_aloud/HubStatusOverlay";
 
 const IMAGE_FILTERS = [
   {
@@ -148,7 +149,9 @@ function errorMessage(e: unknown): string {
 
 /**
  * All OCR page logic: image acquisition (file dialog, native drag-drop,
- * screenshot), recognition, and copy. Keeps `OcrPage` presentational.
+ * screenshot, camera), recognition (local on the desktop, on the Hub for the
+ * Android client), the hand-off of an image to the Hub's own OCR page, and
+ * copy. Keeps `OcrPage` presentational.
  */
 export function useOcr() {
   // ---- Image source (input to the editor) ----
@@ -200,9 +203,60 @@ export function useOcr() {
   const [sending, setSending] = useState(false);
   const [sentToHub, setSentToHub] = useState(false);
 
+  // ---- Hub call staging (Android) ----
+  // The phase the remote call is in, on the same contract the read-aloud panels
+  // use: `sending` while this device is still connecting and uploading, `waiting`
+  // once the backend reports the tool call dispatched, `done` on the reply,
+  // `error` holding the Hub's own text. Without it a cold Tesseract on the Hub
+  // reads as a slow phone.
+  const [hubStage, setHubStage] = useState<HubStage | null>(null);
+  const [hubError, setHubError] = useState<string | null>(null);
+  // The last Hub call that failed, with the arguments it was given, so the
+  // retry the error banner offers is that same call and nothing vaguer.
+  const [lastFailed, setLastFailed] = useState<
+    { kind: "recognize" | "send"; imageBase64: string; lang: string } | null
+  >(null);
+
   // ---- Shared UI state ----
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+
+  /**
+   * Run one Hub call while reporting its phases to `hubStage`, so the caller's
+   * overlay can name the stage instead of holding one spinner over a call that
+   * a cold model on the Hub can stretch into minutes. The `waiting` milestone is
+   * the backend's own (`hub-mcp-phase`, emitted once the tool call is
+   * dispatched), not a guess from this side. A failure leaves the overlay on
+   * `error` holding the Hub's text and rethrows, so each caller still records
+   * its own outcome.
+   */
+  const withHubStage = useCallback(
+    async <T>(run: () => Promise<T>): Promise<T> => {
+      setHubStage("sending");
+      setHubError(null);
+      const subscribed = listen<string>("hub-mcp-phase", (e) => {
+        if (e.payload === "waiting") setHubStage((s) => (s === "sending" ? "waiting" : s));
+      }).catch(() => null);
+      try {
+        const reply = await run();
+        setHubStage("done");
+        // A beat of confirmation, then out of the way — the result is what the
+        // user came for, and the overlay must not linger over it.
+        setTimeout(() => setHubStage((s) => (s === "done" ? null : s)), 600);
+        return reply;
+      } catch (e) {
+        setHubStage("error");
+        setHubError(errorMessage(e));
+        throw e;
+      } finally {
+        // Resolved before the listener is dropped, so a `waiting` that raced the
+        // reply is never delivered to an already-unsubscribed call.
+        const unlisten = await subscribed;
+        unlisten?.();
+      }
+    },
+    []
+  );
 
   // ---- Image acquisition ----
 
@@ -250,7 +304,9 @@ export function useOcr() {
   }, []);
 
   // Available Tesseract languages. Desktop reads its own install; the Android
-  // client has no local Tesseract, so it asks the Hub over `hub_mcp_call`.
+  // client has no local Tesseract, so it asks the Hub over `hub_mcp_call`. The
+  // codes come back as the Hub installed them, which is exactly the set that
+  // Hub's `ocr_recognize` accepts.
   const loadLanguages = useCallback(async (): Promise<string[]> => {
     if (!isTauri()) return [];
     if (isMobileApp()) {
@@ -263,27 +319,34 @@ export function useOcr() {
     return await invoke<string[]>("ocr_list_languages");
   }, []);
 
-  // Hand the current image to the paired Hub's own OCR page (feature #3): the
-  // Hub opens its page and loads it, where the full desktop tooling runs.
-  const sendToHub = useCallback(async (imageBase64: string) => {
-    if (!isTauri() || !imageBase64) return;
-    setSending(true);
-    setError("");
-    try {
-      await invoke("hub_mcp_call", {
-        tool: "ocr_open_image",
-        args: { image_base64: imageBase64 },
-      });
-      setSentToHub(true);
-      setTimeout(() => setSentToHub(false), 2000);
-    } catch (e) {
-      setError(
-        `Send to Hub failed: ${errorMessage(e)}. The Hub is unreachable or MCP is off — recognize this on the PC instead.`
-      );
-    } finally {
-      setSending(false);
-    }
-  }, []);
+  // Hand the current image to the paired Hub's own OCR page: the Hub opens its
+  // page and loads it, where the full desktop TSV and hyphen tooling runs.
+  const sendToHub = useCallback(
+    async (imageBase64: string) => {
+      if (!isTauri() || !imageBase64) return;
+      setSending(true);
+      setError("");
+      try {
+        await withHubStage(() =>
+          invoke("hub_mcp_call", {
+            tool: "ocr_open_image",
+            args: { image_base64: imageBase64 },
+          })
+        );
+        setLastFailed(null);
+        setSentToHub(true);
+        setTimeout(() => setSentToHub(false), 2000);
+      } catch (e) {
+        setLastFailed({ kind: "send", imageBase64, lang: "" });
+        setError(
+          `Send to the Hub failed: ${errorMessage(e)}. The Hub is unreachable or MCP is off — wake it and send again.`
+        );
+      } finally {
+        setSending(false);
+      }
+    },
+    [withHubStage]
+  );
 
   // Native Tauri drag-drop (avoids the HTML5 DnD conflict in the webview).
   useEffect(() => {
@@ -342,10 +405,13 @@ export function useOcr() {
       setError("");
       try {
         if (mobile) {
-          const reply = await invoke<{ status: string; text?: string }>("hub_mcp_call", {
-            tool: "ocr_recognize",
-            args: { image_base64: imageBase64, lang: lang || "" },
-          });
+          const reply = await withHubStage(() =>
+            invoke<{ status: string; text?: string }>("hub_mcp_call", {
+              tool: "ocr_recognize",
+              args: { image_base64: imageBase64, lang: lang || "" },
+            })
+          );
+          setLastFailed(null);
           setPlainText(reply.text ?? "");
         } else if (target === "tsv") {
           const res = await invoke<OcrTsvResult>("ocr_recognize_tsv", {
@@ -368,17 +434,30 @@ export function useOcr() {
         }
       } catch (e) {
         const msg = errorMessage(e);
+        if (mobile) setLastFailed({ kind: "recognize", imageBase64, lang: lang || "" });
         setError(
           mobile
-            ? `Recognition on the Hub failed: ${msg}. The Hub is unreachable or MCP is off — recognize this on the PC instead.`
+            ? `Recognition on the Hub failed: ${msg}. The Hub is unreachable or MCP is off — wake it and retry.`
             : `${target === "tsv" ? "TSV recognition" : "Recognition"} failed: ${msg}`
         );
       } finally {
         setRecognizing(false);
       }
     },
-    [mode]
+    [mode, withHubStage]
   );
+
+  /** Re-run the Hub call the last error came from, with the arguments it was
+   *  given. The retry the offline message asks for — the image and the language
+   *  are still exactly as the user left them. */
+  const retryLast = useCallback(() => {
+    const failed = lastFailed;
+    if (!failed) return;
+    setLastFailed(null);
+    setError("");
+    if (failed.kind === "send") void sendToHub(failed.imageBase64);
+    else void recognize(failed.imageBase64, failed.lang);
+  }, [lastFailed, recognize, sendToHub]);
 
   const copyResult = useCallback(async () => {
     if (!resultText) return;
@@ -487,7 +566,16 @@ Return ONLY the corrected plain text, no explanations.`,
     setDictionaries([]);
     setUncovered([]);
     setEdited(false);
+    setLastFailed(null);
     setError("");
+  }, []);
+
+  /** Drop the staging overlay. The one exit it offers, in every phase: the
+   *  call itself is not cancellable here, but nothing is lost by closing the
+   *  window on it — a send that lands afterwards still reaches the Hub. */
+  const dismissHubStatus = useCallback(() => {
+    setHubStage(null);
+    setHubError(null);
   }, []);
 
   return {
@@ -515,6 +603,13 @@ Return ONLY the corrected plain text, no explanations.`,
     sendToHub,
     sending,
     sentToHub,
+    // Hub call staging (Android): the phase the remote call is in, the text to
+    // show when it fails, and the retry that re-runs it.
+    hubStage,
+    hubError,
+    dismissHubStatus,
+    lastFailed,
+    retryLast,
     // hyphen review (TSV mode)
     hyphens,
     dictionaries,
