@@ -31,8 +31,11 @@ The **Model unload timeout** in Settings controls how long a model stays loaded 
 
 **Where transcription runs.** The **Parakeet** models go through ONNX Runtime; the **Whisper** models
 use the GGML runtime, whose GPU support is compiled in when the app is built rather than chosen at
-run time — so a Whisper model transcribes on the GPU on macOS, and on the CPU on Windows and Linux
-unless that build was configured for Vulkan. The ONNX models run on the CPU everywhere, and that is
+run time — so the released builds carry a GPU path (Metal on macOS, Vulkan on Windows and Linux, from
+the next release onward) and a Whisper model runs on it wherever the machine has one. An older build,
+or one made without the Vulkan SDK, runs Whisper on the CPU instead. Nothing installs with the app for
+this: the Vulkan path needs only the graphics driver's own loader, and a machine without one
+simply runs on the CPU. The ONNX models run on the CPU everywhere, and that is
 a measurement rather than a missing feature: these models are quantized, and a quantized graph spread
 across a GPU and a CPU spends more time carrying values between them than either device spends on
 the audio. The pronunciation model behind read-aloud scoring is the exception: it runs on the GPU

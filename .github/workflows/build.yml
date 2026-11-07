@@ -105,6 +105,10 @@ env:
   # re-fingerprint a build script when a config-file `[env]` value changes: a
   # stale cache would restore objects from the old configure and the fix would
   # never reach the linker.
+  #
+  # The desktop job overrides this per lane to add `-DTRANSCRIBE_VULKAN=ON`, which
+  # is the GPU half of the same build decision; it stays off here so no other lane
+  # is asked to configure a backend its runner cannot supply.
   TRANSCRIBE_CMAKE_ARGS: "-DGGML_NATIVE=OFF"
 
 jobs:
@@ -163,10 +167,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both desktop lanes compile the Vulkan backend in. `Backend::Auto` is
+          # what `models/engine.rs` asks ggml for, so the flag alone is the whole
+          # feature: on an RTX 5070 Ti (2026-11) 30 s of whisper-large speech went
+          # from 20.2 s on the CPU to 0.82 s on Vulkan, byte-identical transcript,
+          # and the load cost 1.4 s rather than 0.8 s. CUDA was the alternative and
+          # lost on distribution, not on speed: it pins the binary to NVIDIA,
+          # needs the toolkit on the lane, and drags cuBLAS/cudart into the
+          # payload, while upstream documents it as "opt-in; Linux + nvcc" and
+          # ships cpu-vulkan as its own release posture. macOS keeps Metal through
+          # the target dependency in Cargo.toml and is not in this matrix.
           - os: windows-latest
             label: Windows
+            cmake_args: "-DGGML_NATIVE=OFF -DTRANSCRIBE_VULKAN=ON"
           - os: ubuntu-24.04
             label: Linux
+            cmake_args: "-DGGML_NATIVE=OFF -DTRANSCRIBE_VULKAN=ON"
 
     runs-on: ${{ matrix.os }}
     # The updater's minisign key. `createUpdaterArtifacts: true` in
@@ -177,6 +193,12 @@ jobs:
     env:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      # Per lane, not the workflow-level value: the Vulkan half of the flag belongs
+      # to the two jobs that install the SDK, and must not reach the macOS or iOS
+      # lanes, where ggml would go looking for MoltenVK that no step provides. The
+      # cache step below names this var, so a lane that changed backends cannot
+      # restore the other one's objects.
+      TRANSCRIBE_CMAKE_ARGS: ${{ matrix.cmake_args }}
     steps:
       - uses: actions/checkout@v4
 
@@ -209,6 +231,16 @@ jobs:
           workspaces: src-tauri -> target
           env-vars: TRANSCRIBE_CMAKE_ARGS
 
+      # ggml's Vulkan backend needs three things at build time and nothing at run
+      # time but the loader. `glslc` compiles the SPIR-V shaders (its own binary
+      # package in noble, from the shaderc source); `libvulkan-dev` is the headers
+      # plus the `libvulkan.so` the link resolves, which CMake's
+      # `find_package(Vulkan COMPONENTS glslc REQUIRED)` reads through pkg-config
+      # and PATH, with no VULKAN_SDK to set. The third is the one that is easy to
+      # miss: ggml-vulkan also does `find_package(SPIRV-Headers CONFIG REQUIRED)`,
+      # a *config-file* probe, and on this distro that file is shipped by
+      # `spirv-headers` (`/usr/share/cmake/SPIRV-Headers`). On Windows the SDK
+      # carries all three itself.
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -223,7 +255,43 @@ jobs:
             libdbus-1-dev \
             libwayland-dev libegl-dev \
             libpipewire-0.3-dev libspa-0.2-dev \
-            libgbm-dev libdrm-dev
+            libgbm-dev libdrm-dev \
+            glslc libvulkan-dev \
+            spirv-headers
+
+      - name: Install the Vulkan SDK
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install vulkan-sdk -y
+
+      # Two variables, and only the first is obvious. `VULKAN_SDK` is what
+      # `find_package(Vulkan COMPONENTS glslc REQUIRED)` reads, and what puts the
+      # SDK's own `Lib/cmake` on the path for the SPIRV-Headers config probe that
+      # follows it; the installer sets it machine-wide, which a job's shell —
+      # started before the install — does not see, so it is resolved off the disk.
+      # `LIB` is what the *Rust* link needs: the Vulkan backend links `vulkan-1`
+      # as a system library, link.exe searches only LIB, and without this the app
+      # dies at LNK1181 "cannot open input file 'vulkan-1.lib'" after the whole
+      # native build succeeded. Each check below is the point: a lane missing part
+      # of its SDK should cost ten seconds here, not twenty minutes of ggml and a
+      # failed release.
+      - name: Point CMake and the linker at the Vulkan SDK
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $sdk = (Get-ChildItem 'C:\VulkanSDK' -Directory |
+                    Sort-Object Name -Descending | Select-Object -First 1).FullName
+          if (-not $sdk) { Write-Error 'no SDK directory under C:\VulkanSDK'; exit 1 }
+          foreach ($part in 'Bin\glslc.exe', 'lib\vulkan-1.lib', 'Include\vulkan\vulkan.h',
+                           'Lib\cmake\SPIRV-Headers') {
+            if (-not (Test-Path (Join-Path $sdk $part))) { Write-Error "$sdk has no $part"; exit 1 }
+          }
+          "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
+          # Prepend, do not replace: whatever the shell already had in LIB stays
+          # reachable, which is how the local repro of this worked.
+          "LIB=$sdk\lib;$($env:LIB)" >> $env:GITHUB_ENV
+          "$sdk\Bin" >> $env:GITHUB_PATH
+          Write-Output "Vulkan SDK in use: $sdk"
 
       - name: Install frontend dependencies
         run: pnpm install

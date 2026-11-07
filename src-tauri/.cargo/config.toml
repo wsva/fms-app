@@ -30,8 +30,12 @@
 # Vulkan backend is compiled by a CMake option, not by a Cargo feature here,
 # because it needs the Vulkan SDK on the build host (`find_package(Vulkan
 # COMPONENTS glslc REQUIRED)`) — baked into the shared feature set it would make
-# that SDK a prerequisite of every `desktop` build and of the release pipeline,
-# with no way out on a host that lacks it. So the GPU stays opt-in per machine:
+# that SDK a prerequisite of every `desktop` build, `cargo check --features
+# desktop` included, with no way out on a host that lacks it. The release
+# pipeline does install it, and passes `-DTRANSCRIBE_VULKAN=ON` on the two
+# desktop lanes: that is what the measurement bought (30 s of whisper-large on an
+# RTX 5070 Ti, 2026-11 — 20.2 s on the CPU against 0.82 s on Vulkan, same
+# transcript). A local build asks the same way it always did:
 #
 #   $env:TRANSCRIBE_CMAKE_ARGS = "-DGGML_NATIVE=OFF -DTRANSCRIBE_VULKAN=ON"
 #
@@ -39,12 +43,14 @@
 # the process environment, which is exactly why the line above works: the shell's
 # value wins over this one. Install the SDK first
 # (https://vulkan.lunarg.com/sdk/home), keep `-DGGML_NATIVE=OFF` in the value,
-# and check the result in the app log — `models/engine.rs::log_compute_device`
-# prints the backends compiled in and the device a model actually got, so a
-# working GPU build reads `via the 'vulkan' backend` instead of `on the CPU`.
-# Runtime needs no SDK: the statically-linked backend loads the `vulkan-1.dll`
-# the graphics driver installs, and `Backend::Auto` falls back to the CPU where
-# there is no loader or no GPU.
+# and add `<sdk>\lib` to `LIB` too — the backend links `vulkan-1` as a system
+# library, link.exe searches only `LIB`, and without that entry the Rust link
+# dies at LNK1181 *after* the whole C++ has built. Then read the app log:
+# `models/engine.rs::log_compute_device` prints the backends compiled in and the
+# device a model actually got, so a working GPU build reads `via the 'Vulkan1'
+# backend` instead of `on the CPU`. Runtime needs no SDK: the statically-linked
+# backend loads the `vulkan-1.dll` the graphics driver installs, and
+# `Backend::Auto` falls back to the CPU where there is no loader or no GPU.
 #
 # CMake caches the option once it has been set, so dropping the environment
 # variable does not drop the backend: an unset value leaves the cached ON in the
@@ -56,6 +62,7 @@ TRANSCRIBE_CMAKE_ARGS = "-DGGML_NATIVE=OFF"
 # Editing a value in this table does not, on its own, re-configure the C++:
 # a dependency build script's `cargo:rerun-if-env-changed` fires on a change in
 # the process environment, not on a config-file edit. After touching the line
-# above, run `cargo clean -p transcribe-cpp-sys`. CI keeps the same value in
-# .github/workflows/build.yml and names it in the rust-cache key, for the same
-# reason: a restored `target/` would otherwise skip the configure.
+# above, run `cargo clean -p transcribe-cpp-sys`. CI keeps its own values in
+# .github/workflows/build.yml — the workflow env here, plus the Vulkan flag on
+# the two desktop lanes — and names the variable in the rust-cache key for the
+# same reason: a restored `target/` would otherwise skip the configure.

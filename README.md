@@ -391,11 +391,14 @@ are desktop-only.
   locations are probed by the app itself.
 - **Screen capture on macOS** asks for *Screen Recording* permission on first use and captures the
   primary monitor — the drag-out-a-region overlay is Windows-only.
-- **Whisper transcribes on the GPU only where the build was configured for one.** The GGML backend
-  compiles its GPU support in at build time: macOS ships with Metal, the Windows and Linux releases
-  do not carry Vulkan because building it needs the Vulkan SDK on the machine that builds. *Logs*
-  names the backend and device each model actually got, and `src-tauri/.cargo/config.toml` says how
-  a source build turns Vulkan on.
+- **Whisper runs on the GPU wherever the build was configured for one.** The GGML backend compiles
+  its GPU support in at build time, so every release lane carries it: Metal on macOS, and Vulkan on
+  Windows and Linux from the next release onward (an earlier build, or one made without the Vulkan
+  SDK, transcribes Whisper on the CPU). Nothing is added to the download for it — the backend loads
+  the Vulkan loader the graphics driver already installed, and falls back to the CPU where there is
+  no GPU. 30 s of `whisper-large` speech measured 20.2 s on the CPU against 0.82 s on Vulkan on an
+  RTX 5070 Ti, with the same words. *Logs* names the backend and device each model actually got, and
+  `src-tauri/.cargo/config.toml` says how a source build turns Vulkan on and off.
 - **The ONNX models run on the CPU by measured choice, not by omission.** Having a GPU is not the
   same as a faster transcription: the int8 exports this app ships split across DirectML into so many
   pieces that copying between the devices costs more than computing on them (10 s of Parakeet v3:

@@ -183,15 +183,18 @@ fn log_registered_devices(chosen: Option<&transcribe_cpp::Device>) {
         names,
         registered.len()
     );
-    // An empty list on Windows or Linux is a build configuration, not a driver
-    // problem, and it is worth saying so where the slow transcription is being
-    // explained: this is the line that answers "why is it on the CPU". Metal is
-    // the macOS answer and is compiled in there; CUDA would need the CUDA
-    // toolkit and an NVIDIA-only binary, which is why the opt-in here is
+    // The two lists answer different questions, and the empty one is not
+    // necessarily the interesting one: `compiled` says what this binary could
+    // have used, `registered` says what the machine handed over. A build with the
+    // backends compiled in rather than loaded as modules registers no devices at
+    // all and reports the backend's own name as the device, so an empty list
+    // beside `vulkan` is the posture, not a driver failure. Metal is the macOS
+    // answer and is compiled in there; CUDA would need the CUDA toolkit and an
+    // NVIDIA-only binary, which is why the lanes that do carry a GPU carry
     // Vulkan, ggml's one vendor-neutral backend.
     if compiled.is_empty() && cfg!(any(target_os = "windows", target_os = "linux")) {
         log::info!(
-            "This build has no GPU backend, so GGML transcription runs on the CPU; building from source can compile the Vulkan one in (\"TRANSCRIBE_CMAKE_ARGS\", src-tauri/.cargo/config.toml)"
+            "This build compiles no GPU backend, so GGML transcription runs on the CPU; the released Windows and Linux builds do carry Vulkan, which means this one was built without the Vulkan SDK (TRANSCRIBE_CMAKE_ARGS and LIB, src-tauri/.cargo/config.toml)"
         );
     }
     for device in registered.iter() {

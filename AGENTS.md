@@ -37,26 +37,45 @@ npx tsc --noEmit
 **GPU for the Whisper (GGML) models.** The code always asks for the best device
 (`Backend::Auto`), so a model that lands on the CPU means the binary has no GPU
 backend compiled in. macOS gets Metal from the target dependency in
-`src-tauri/Cargo.toml`. Windows and Linux build CPU-only by default, because
-Vulkan's CMake probes `find_package(Vulkan COMPONENTS glslc REQUIRED)` — naming
-it in a shared feature would make the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home)
-(`libvulkan-dev glslc spirv-headers` on Linux) a prerequisite of every `desktop`
-build and of CI. It is opt-in per machine instead:
+`src-tauri/Cargo.toml`, and the Windows and Linux release lanes install the
+[Vulkan SDK](https://vulkan.lunarg.com/sdk/home) and add `-DTRANSCRIBE_VULKAN=ON`
+(see the `build-desktop` matrix in `.github/workflows/build.yml`) because the
+measurement paid for that dependency: 30 s of whisper-large on an RTX 5070 Ti
+took **20.2 s on the CPU and 0.82 s on Vulkan**, byte-identical transcript, and
+the load cost 1.4 s rather than 0.8 s. A source build on a machine without the
+SDK stays CPU-only, which is still the default, and opting in is one line:
 
 ```powershell
-# install the Vulkan SDK first, then
+# install the Vulkan SDK first, then, in a shell new enough to have picked up
+# its machine-wide VULKAN_SDK, add its lib dir to the linker's search path and
+# ask for the backend (keep GGML_NATIVE=OFF — see the FindSIMD note below)
+$env:LIB = "$env:VULKAN_SDK\lib;$env:LIB"
 $env:TRANSCRIBE_CMAKE_ARGS = "-DGGML_NATIVE=OFF -DTRANSCRIBE_VULKAN=ON"
 pnpm tauri dev
 ```
 
-`TRANSCRIBE_CMAKE_ARGS` in `src-tauri/.cargo/config.toml` (and in `build.yml`'s
-workflow env) carries `-DGGML_NATIVE=OFF`, and a `[env]` entry without
+The SDK installs `VULKAN_SDK` for the whole machine, so a shell opened after it
+needs only the two lines above; a shell that predates the install has neither
+that variable nor `glslc` on `PATH`, and CI is always such a shell, which is why
+`build.yml` resolves the SDK directory off the disk and exports both. The `LIB`
+line is not decoration: the backend links `vulkan-1` as a system library, link.exe
+searches only `LIB`, and without it the whole C++ builds and the Rust link then
+dies at LNK1181 `cannot open input file 'vulkan-1.lib'`.
+
+`TRANSCRIBE_CMAKE_ARGS` in `src-tauri/.cargo/config.toml` carries
+`-DGGML_NATIVE=OFF`, and a `[env]` entry without
 `force = true` loses to a variable already in the shell — which is how the line
 above reaches CMake. CMake then *caches* the option, so switching back needs an
 explicit `-DTRANSCRIBE_VULKAN=OFF` rather than an unset variable: a cached ON
 keeps failing the configure of a host without the SDK. Verify the result in the
 app log: `models/engine.rs::log_compute_device` prints the backends compiled in,
-every device the machine registered, and the one the model got.
+every device the machine registered, and the one the model got. In a compiled-in
+(static) posture that registered list is empty and the device name is the
+backend's own (`Vulkan1`) — that is the posture, not a driver failure; the
+per-device list only fills in a `dynamic-backends` build. Nothing GPU rides in
+the installer either: the backend needs only the system loader at run time
+(`vulkan-1.dll` ships in System32, `libvulkan.so.1` comes with any Linux GPU
+driver), which the `.deb` does not yet declare as a dependency.
 
 **The GPU is not automatically the faster device, and the ONNX side is where that
 shows.** `transcribe-rs` resolves every ORT session from one global accelerator
