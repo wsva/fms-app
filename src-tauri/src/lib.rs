@@ -799,7 +799,7 @@ pub fn run() {
 // Local STT (the `model_*` commands, ONNX-only via the `stt` feature) is
 // opt-in on mobile through `build.features` in tauri.android.conf.json — it is
 // currently there to verify the ONNX Runtime stack cross-compiles and runs on
-// Android. transcribe-cpp (Whisper GGUF) stays desktop-only.
+// Android. transcribe-cpp (the GGML/GGUF rows) stays desktop-only.
 // ---------------------------------------------------------------------------
 
 // Shared mobile command list. `generate_handler!` cannot contain cfg'd

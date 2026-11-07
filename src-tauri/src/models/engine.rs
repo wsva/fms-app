@@ -16,6 +16,7 @@ use transcribe_rs::onnx::{
 };
 
 use crate::models::catalog_stt::{self, EngineType};
+use crate::models::gguf_meta::GgufProbe;
 use crate::models::index::{make_key, remove_entry, ModelIndexState};
 use crate::models::state::{auto_load_version, ActiveModel, ModelState, ModelStatus};
 
@@ -90,9 +91,9 @@ pub fn load_model_core(state: &ModelState, version: &str) -> Result<String, Stri
         #[cfg(feature = "desktop")]
         EngineType::TranscribeCpp => {
             cpp_isa_supported()?;
-            let model_path = model_dir.join(def.id);
+            let model_path = model_dir.join(def.artifact_name());
             let model = CppModel::load(&model_path)
-                .map_err(|e| format!("Failed to load Whisper model: {}", e))?;
+                .map_err(|e| format!("Failed to load {} via transcribe-cpp: {}", version, e))?;
             let session = model
                 .session()
                 .map_err(|e| format!("Failed to create session: {}", e))?;
@@ -100,7 +101,12 @@ pub fn load_model_core(state: &ModelState, version: &str) -> Result<String, Stri
         }
         #[cfg(not(feature = "desktop"))]
         EngineType::TranscribeCpp => {
-            return Err("Whisper GGUF models are not available in this build (desktop-only). Use an ONNX model such as Parakeet or Moonshine.".to_string());
+            // The GGML/GGUF rows are named after their runtimes, so the refusal
+            // has to name the alternative that actually loads here — the ONNX row
+            // of the same weights, which is a different id, not the same one.
+            return Err(format!(
+                "Model '{version}' needs transcribe-cpp, which is desktop-only in this build. Use an ONNX model such as parakeet-v2 or moonshine-base instead."
+            ));
         }
         EngineType::Parakeet => {
             let m = ParakeetModel::load(&model_dir, &Quantization::Int8)
@@ -139,9 +145,18 @@ pub fn load_model_core(state: &ModelState, version: &str) -> Result<String, Stri
         }
     };
 
+    // Measured while the model is still in hand: a transcription takes it out of
+    // its slot for the whole run, so nothing later can ask it anything. This is
+    // the answer every capability gate in `transcribe` reads.
+    let measured = active_model.engine_capabilities(&def.capabilities);
+
     {
         let mut m = state.model.lock().unwrap();
         *m = Some(active_model);
+    }
+    {
+        let mut a = state.active_capabilities.lock().unwrap();
+        *a = Some(measured);
     }
     {
         let mut a = state.active_version.lock().unwrap();
@@ -175,6 +190,11 @@ pub fn unload_model_core(state: &ModelState) -> Result<(), String> {
         let mut a = state.active_version.lock().unwrap();
         *a = None;
     }
+    {
+        // Whatever was measured belongs to the model that is gone: `None` means
+        // "not measured", and must never be read as an engine's "no".
+        *state.active_capabilities.lock().unwrap() = None;
+    }
 
     log::info!("Model '{}' unloaded successfully", active_name);
     Ok(())
@@ -199,6 +219,11 @@ pub fn delete_model_core(
     if model_dir.exists() {
         std::fs::remove_dir_all(&model_dir)
             .map_err(|e| format!("Failed to delete model directory: {}", e))?;
+    }
+    // Whatever the header of a file at this path claimed is gone with it; a
+    // later download of the same id must be re-read, not believed from cache.
+    if let Some(def) = catalog_stt::find_model(version) {
+        GgufProbe::forget(&model_dir.join(def.artifact_name()));
     }
 
     {

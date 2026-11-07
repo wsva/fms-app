@@ -7,8 +7,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-// Whisper GGUF (transcribe-cpp) is desktop-only; ONNX builds (e.g. the Android
-// `stt` experiment) compile the engine out and reject its models at load time.
+// The transcribe-cpp rows (Whisper `.bin`, GGUF Parakeet) are desktop-only; ONNX
+// builds (e.g. the Android `stt` experiment) compile the engine out and reject
+// their models at load time.
 #[cfg(feature = "desktop")]
 use transcribe_cpp::Session as CppSession;
 use transcribe_rs::onnx::{
@@ -20,7 +21,7 @@ use transcribe_rs::onnx::{
     sense_voice::SenseVoiceModel,
 };
 
-use crate::models::catalog_stt::{self, EngineType};
+use crate::models::catalog_stt::{self, ModelCapabilities};
 use crate::settings::SettingsState;
 
 #[derive(Clone, Serialize, PartialEq)]
@@ -46,6 +47,28 @@ pub(crate) enum ActiveModel {
     Cohere(CohereModel),
 }
 
+/// What the loaded engine itself reported, measured once at load time.
+///
+/// The catalog *advertises*; this is the answer to the same questions from the
+/// side that actually has to produce the audio, and it is what every
+/// capability decision in `transcribe` consults. Kept beside the model it
+/// describes rather than recomputed per call, because a transcription takes the
+/// model out of its slot for the whole run — the caller asking would otherwise
+/// find nothing to ask.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize)]
+pub struct EngineCapabilities {
+    /// Whether word-or-finer rows come back from a transcription call. `false`
+    /// here means the engine will not produce them, which a caller reports
+    /// differently from "not measured yet".
+    pub word_timings: bool,
+    /// The longest audio the engine takes in one call, when it limits one.
+    /// `None` means the engine stated no limit.
+    pub max_chunk_secs: Option<f64>,
+    /// Native live streaming (`Session` fed incrementally), not the chunked
+    /// pseudo-streaming the app does itself.
+    pub streaming: bool,
+}
+
 pub struct ModelState {
     pub download_status: Mutex<HashMap<String, ModelStatus>>,
     pub download_progress: Arc<Mutex<DownloadProgress>>,
@@ -58,6 +81,9 @@ pub struct ModelState {
     /// `transcribe::ModelGuard`); `active_version` still names what it is.
     pub(crate) model: Mutex<Option<ActiveModel>>,
     pub active_version: Mutex<Option<String>>,
+    /// Measured capabilities of the loaded model; `None` while nothing is
+    /// loaded. Written by `engine::load_model_core`, cleared on unload.
+    pub(crate) active_capabilities: Mutex<Option<EngineCapabilities>>,
     pub cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Semaphore to serialize transcription requests and prevent race conditions
     /// where the model is temporarily unavailable during an ongoing transcription.
@@ -96,6 +122,10 @@ pub struct ModelVersionInfo {
     pub accuracy_score: f32,
     pub speed_score: f32,
     pub supports_translation: bool,
+    /// What this artifact is expected to do, from its own header when it has one
+    /// and from the catalog otherwise. Advertised, not measured — see
+    /// [`ModelStatusResponse::active_capabilities`].
+    pub capabilities: ModelCapabilities,
 }
 
 #[derive(Clone, Serialize)]
@@ -105,6 +135,9 @@ pub struct ModelStatusResponse {
     pub default_version: String,
     pub active_version: Option<String>,
     pub active_status: ModelStatus,
+    /// The loaded model's measured capabilities, `None` while nothing is loaded.
+    /// Where the advertised per-row answer disagrees with this, this one is right.
+    pub active_capabilities: Option<EngineCapabilities>,
     pub download_progress: Option<DownloadProgress>,
     pub downloaded_versions: Vec<String>,
     pub hint: String,
@@ -119,14 +152,13 @@ impl ModelState {
             } else {
                 ModelStatus::NotDownloaded
             };
-            download_status.insert(model_def.id.to_string(), status);
+            download_status.insert(model_def.id.clone(), status);
         }
 
-        let selected = catalog_stt::MODELS
-            .iter()
-            .find(|m| cfg!(feature = "desktop") || m.engine != EngineType::TranscribeCpp)
-            .map(|m| m.id.to_string())
-            .unwrap_or_else(|| catalog_stt::MODELS[0].id.to_string());
+        let selected = Self::available_models()
+            .next()
+            .map(|m| m.id.clone())
+            .unwrap_or_default();
 
         Self {
             download_status: Mutex::new(download_status),
@@ -141,6 +173,7 @@ impl ModelState {
             default_version: Mutex::new(String::new()),
             model: Mutex::new(None),
             active_version: Mutex::new(None),
+            active_capabilities: Mutex::new(None),
             cancel_flags: Mutex::new(HashMap::new()),
             transcribe_lock: Mutex::new(()),
         }
@@ -152,13 +185,13 @@ impl ModelState {
 
     /// Whether this model's files are present in the (current) model directory.
     fn downloaded_on_disk(model_def: &catalog_stt::ModelDef) -> bool {
-        let Some(dir) = Self::model_dir(model_def.id) else {
+        let Some(dir) = Self::model_dir(&model_def.id) else {
             return false;
         };
         if model_def.is_directory {
             dir.exists()
         } else {
-            dir.join(model_def.id).exists()
+            dir.join(model_def.artifact_name()).exists()
         }
     }
 
@@ -171,7 +204,7 @@ impl ModelState {
     pub fn reload(&self) {
         let mut statuses = self.download_status.lock().unwrap();
         for model_def in Self::available_models() {
-            if statuses.get(model_def.id) == Some(&ModelStatus::Downloading) {
+            if statuses.get(&model_def.id) == Some(&ModelStatus::Downloading) {
                 continue;
             }
             let status = if Self::downloaded_on_disk(model_def) {
@@ -179,16 +212,15 @@ impl ModelState {
             } else {
                 ModelStatus::NotDownloaded
             };
-            statuses.insert(model_def.id.to_string(), status);
+            statuses.insert(model_def.id.clone(), status);
         }
     }
 
     /// Models loadable in this build. ONNX-only builds (e.g. the Android `stt`
-    /// experiment) hide Whisper GGUF entries since transcribe-cpp is desktop-only.
+    /// experiment) hide every transcribe-cpp row: not unpreferred — unable to
+    /// load, because the C++ stack is not compiled in there at all.
     pub fn available_models() -> impl Iterator<Item = &'static catalog_stt::ModelDef> {
-        catalog_stt::MODELS
-            .iter()
-            .filter(|def| cfg!(feature = "desktop") || def.engine != EngineType::TranscribeCpp)
+        catalog_stt::all().iter().filter(|def| def.loadable_here())
     }
 
     /// Whether a model is present in the model directory (per our cached status).
@@ -219,11 +251,19 @@ impl ModelState {
     }
 }
 
+/// Whether a model id names a row this build can load. Missing rows count as
+/// not loadable: the caller's `is_downloaded` check already turns them into a
+/// fallback.
+fn is_loadable_here(version: &str) -> bool {
+    catalog_stt::find_model(version).is_some_and(|def| def.loadable_here())
+}
+
 /// Version to load when the app needs a model but none is loaded: the user's
-/// default (if still downloaded), otherwise the session selection.
+/// default (if still downloaded and loadable here), otherwise the session
+/// selection.
 pub fn auto_load_version(state: &ModelState) -> String {
     let default = state.default_version.lock().unwrap().clone();
-    if !default.is_empty() && state.is_downloaded(&default) {
+    if !default.is_empty() && state.is_downloaded(&default) && is_loadable_here(&default) {
         return default;
     }
     state.selected_version.lock().unwrap().clone()
@@ -253,7 +293,7 @@ pub fn set_default_version_core(
 
     let def = catalog_stt::find_model(version)
         .ok_or_else(|| format!("Unknown model version: {}", version))?;
-    if !(cfg!(feature = "desktop") || def.engine != EngineType::TranscribeCpp) {
+    if !def.loadable_here() {
         return Err(format!("Model '{}' cannot be loaded in this build", version));
     }
     if !state.is_downloaded(version) {

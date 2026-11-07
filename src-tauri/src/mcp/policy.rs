@@ -238,7 +238,17 @@ const HUMAN_HANDOFF: [&str; 2] = [
 ///   nothing").
 /// * `sync_set_auto_connect` flips one boolean in global settings; its inverse is
 ///   the same call with the other value.
-const READ_TOOLS: [&str; 100] = [
+///
+/// `model_transcribe_detailed` sits here while `model_transcribe` does not, which
+/// looks like an oversight and is not one: the detailed transcript is the
+/// read-only *evidence* half of read-aloud scoring — an agent assembling an
+/// assessment needs it on every attempt and gains nothing from it — whereas
+/// `model_transcribe` is the plain-text convenience call that has no such role.
+/// The detailed one re-loads the user's default model when the idle timeout has
+/// unloaded it, which is memory and not state the app renders from — the reason
+/// `model_transcribe` stays at `Write` is that it has no evidence role to justify
+/// the friction-free tier, not that it changes more.
+const READ_TOOLS: [&str; 101] = [
     "app_audit_get",
     "app_bootstrap",
     "app_events",
@@ -299,6 +309,7 @@ const READ_TOOLS: [&str; 100] = [
     "mail_wait",
     "market_list",
     "model_status",
+    "model_transcribe_detailed",
     "ocr_hyphen_dictionary_status",
     "ocr_list_languages",
     "pairing_list_devices",

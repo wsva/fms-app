@@ -17,6 +17,7 @@ pub(crate) mod download;
 pub(crate) mod download_hf;
 pub(crate) mod download_stt;
 pub(crate) mod engine;
+pub(crate) mod gguf_meta;
 pub(crate) mod index;
 pub(crate) mod state;
 pub(crate) mod transcribe;
@@ -24,6 +25,8 @@ pub(crate) mod transcribe;
 use base64::Engine;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::models::catalog_stt::ModelCapabilities;
+use crate::models::gguf_meta::GgufProbe;
 use crate::models::index::ModelIndexState;
 use crate::settings::SettingsState;
 
@@ -57,22 +60,23 @@ pub async fn model_get_status(state: State<'_, ModelState>) -> Result<ModelStatu
                 .download_status
                 .lock()
                 .unwrap()
-                .get(def.id)
+                .get(&def.id)
                 .map(|s| *s == ModelStatus::Downloaded)
                 .unwrap_or(false);
             ModelVersionInfo {
-                id: def.id.to_string(),
-                label: def.name.to_string(),
-                description: def.description.to_string(),
+                id: def.id.clone(),
+                label: def.name.clone(),
+                description: def.description.clone(),
                 downloaded,
-                languages: def.languages.iter().map(|s| s.to_string()).collect(),
-                size_mb: def.size_mb,
+                languages: def.languages.clone(),
+                size_mb: def.size_mb(),
                 engine_type: def.engine.to_string(),
-                blob_url: def.blob_url.to_string(),
-                hf_repo_url: def.hf_repo_url.to_string(),
-                accuracy_score: def.accuracy_score,
-                speed_score: def.speed_score,
-                supports_translation: def.supports_translation,
+                blob_url: def.blob_url.clone(),
+                hf_repo_url: def.hf_repo_url.clone(),
+                accuracy_score: def.accuracy_score.unwrap_or_default(),
+                speed_score: def.speed_score.unwrap_or_default(),
+                supports_translation: def.capabilities.translate,
+                capabilities: advertised_capabilities(def, downloaded),
             }
         })
         .collect();
@@ -120,8 +124,15 @@ pub async fn model_get_status(state: State<'_, ModelState>) -> Result<ModelStatu
         models,
         selected_version: selected,
         default_version,
-        active_version: active,
+        active_version: active.clone(),
         active_status,
+        // Measured at load time, so it survives a transcription holding the
+        // model out of its slot; `None` alongside `active == None`.
+        active_capabilities: if active.is_some() {
+            *state.active_capabilities.lock().unwrap()
+        } else {
+            None
+        },
         download_progress: if is_downloading {
             Some(progress)
         } else {
@@ -132,13 +143,36 @@ pub async fn model_get_status(state: State<'_, ModelState>) -> Result<ModelStatu
     })
 }
 
+/// What a row advertises, refined by what its bytes on disk say.
+///
+/// A GGUF carries the metadata transcribe-cpp will read at load time, so an
+/// installed row is asked rather than guessed; a `.bin` and an ONNX directory
+/// carry nothing readable here and keep the curated answer. `timestamps` comes
+/// from the catalog either way — granularity is decided by the family's loader,
+/// not by a header key.
+fn advertised_capabilities(def: &catalog_stt::ModelDef, downloaded: bool) -> ModelCapabilities {
+    if !downloaded || !matches!(def.container, catalog_stt::Container::Gguf) {
+        return def.capabilities.clone();
+    }
+    let Some(dir) = ModelState::model_dir(&def.id) else {
+        return def.capabilities.clone();
+    };
+    match GgufProbe::read(&dir.join(def.artifact_name())) {
+        Some(probe) => probe.apply_to(&def.capabilities),
+        // A header we cannot read is not evidence: keep the catalog's answer.
+        None => def.capabilities.clone(),
+    }
+}
+
 #[tauri::command]
 pub async fn model_select_version(
     state: State<'_, ModelState>,
     version: String,
 ) -> Result<(), String> {
-    if catalog_stt::find_model(&version).is_none() {
-        return Err(format!("Unknown model version: {}", version));
+    let def = catalog_stt::find_model(&version)
+        .ok_or_else(|| format!("Unknown model version: {}", version))?;
+    if !def.loadable_here() {
+        return Err(format!("Model '{}' cannot be loaded in this build", version));
     }
     let mut sel = state.selected_version.lock().unwrap();
     *sel = version;

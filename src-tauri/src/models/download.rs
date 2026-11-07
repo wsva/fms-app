@@ -829,6 +829,11 @@ async fn download_single_file_with_progress(
 /// Download a model from a single URL (e.g., blob.handy.computer) with retry/resume.
 /// After download, extract tar.gz if is_directory, otherwise rename to final path.
 /// Verifies SHA256 if provided.
+///
+/// `model_id` names the `.partial` file while downloading; `final_name` is the
+/// name the artifact keeps once it is complete. They differ for a row whose
+/// source gives its file a real name (`parakeet-tdt-0.6b-v3-Q8_0.gguf` inside
+/// the `parakeet-v3-gguf` directory) and are the same for every legacy row.
 pub async fn download_blob_model(
     app: &AppHandle,
     download_progress: &Arc<Mutex<DownloadProgress>>,
@@ -838,6 +843,7 @@ pub async fn download_blob_model(
     is_directory: bool,
     cancel_flag: &Arc<AtomicBool>,
     model_id: &str,
+    final_name: &str,
 ) -> Result<(), String> {
     log::info!("download_blob_model: id={}, url={}, is_dir={}", model_id, blob_url, is_directory);
 
@@ -890,7 +896,7 @@ pub async fn download_blob_model(
         extract_tar_gz(&partial_path, model_dir, model_id)?;
         let _ = std::fs::remove_file(&partial_path);
     } else {
-        let final_path = model_dir.join(model_id);
+        let final_path = model_dir.join(final_name);
         std::fs::rename(&partial_path, &final_path)
             .map_err(|e| format!("Failed to finalize model: {}", e))?;
     }

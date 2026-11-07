@@ -7,10 +7,12 @@ Nvidia 开源的 STT 语音识别模型。
 支持多种欧洲语言。
 支持生成每个单词的时间点，
 因此支持字幕制作，语速计算。
+另有 gguf 格式的同一份权重（parakeet-v3-gguf），走 transcribe-cpp，只有桌面可用；
+它上报 token 粒度，一样能给出单词时间点。两个条目并列，不合并、不互相替换。
 
 # Whisper
-暂不支持生成每个单词的时间点
-尚未测试 android 手机支持
+时间点只到 segment（音频片段）一级，给不出每个单词的时间点，因此不支持语速计算。
+只有桌面支持：whisper 走 transcribe-cpp（GGML），它的构建脚本只认 windows 和 macos，android 上编译不出来。
 其余可替代 Parakeet
 
 # SaT 3L Small

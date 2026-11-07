@@ -32,13 +32,15 @@ struct ModelStatusParam {
 }
 
 /// The keys of a catalogue entry a caller chooses a model with: what it is, whether
-/// it is on disk, what it costs and which languages it knows. Everything else on
-/// `ModelVersionInfo` is page furniture.
-const CHOOSABLE_KEYS: [&str; 5] = ["id", "label", "downloaded", "size_mb", "languages"];
+/// it is on disk, what it costs, which languages it knows and what the artifact
+/// itself advertises it can do. Everything else on `ModelVersionInfo` is page
+/// furniture.
+const CHOOSABLE_KEYS: [&str; 6] =
+    ["id", "label", "downloaded", "size_mb", "languages", "capabilities"];
 
 #[tool_router(router = models_router, vis = "pub(crate)")]
 impl DatasetMcpServer {
-    #[tool(name = "model_status", description = "Get STT model status: downloaded models, loaded model, the user's preferred default (default_version), and an actionable 'hint' field telling you exactly what to do next. If hint says 'Call model_load', do NOT call model_download — the model is already downloaded. Always check model_status before model_download. Each model is trimmed to id/label/downloaded/size_mb/languages unless you pass full=true. Driving a dataset pipeline? Do not call this at all: dataset_full_report already reports the loaded model under stt_model.")]
+    #[tool(name = "model_status", description = "Get STT model status: downloaded models, loaded model, the user's preferred default (default_version), and an actionable 'hint' field telling you exactly what to do next. If hint says 'Call model_load', do NOT call model_download — the model is already downloaded. Always check model_status before model_download. Each model is trimmed to id/label/downloaded/size_mb/languages/capabilities unless you pass full=true; `capabilities` is what the artifact advertises, while top-level `active_capabilities` is what the loaded engine *measured* about itself, and where they disagree the measured one is right. Driving a dataset pipeline? Do not call this at all: dataset_full_report already reports the loaded model under stt_model.")]
     async fn model_status(&self, Parameters(param): Parameters<ModelStatusParam>) -> String {
         log::info!("[MCP] model_status: full={}", param.full);
         let state = self.app.state::<ModelState>();
@@ -144,5 +146,21 @@ impl DatasetMcpServer {
         let state = self.app.state::<ModelState>();
         let result = crate::models::model_transcribe(state, param.path).await?;
         Ok(serde_json::json!({"status": "ok", "transcript": result}).to_string())
+    }
+
+    /// The MCP twin of the `model_transcribe_detailed` command, so an agent can
+    /// supply the fluency evidence `read_aloud_assess` and `read_aloud_submit`
+    /// ask for. The word rows are whatever the loaded engine measured it can do:
+    /// an engine without word timings returns `words: []` and
+    /// `word_timings: false` — an honest "not measured" — rather than failing.
+    #[tool(name = "model_transcribe_detailed", description = "Transcribe base64-encoded 16kHz mono WAV audio and return {text, words:[{text,start,end}], capabilities:{word_timings}} — the word-level timings read_aloud_assess and read_aloud_submit take as fluency evidence. Omit them and fluency is reported as not measured. Whether word rows exist is measured from the loaded engine at load time, not guessed from its model type: read `capabilities.word_timings` in the result (or `active_capabilities` from model_status) before assuming timings are there, and an engine without them returns an empty `words` array instead of an error. Requires a model to be loaded first (use model_load).")]
+    async fn model_transcribe_detailed(
+        &self,
+        Parameters(param): Parameters<ReadFileParam>,
+    ) -> Result<String, String> {
+        log::info!("[MCP] model_transcribe_detailed: base64_len={}", param.path.len());
+        let state = self.app.state::<ModelState>();
+        let result = crate::models::model_transcribe_detailed(state, param.path).await?;
+        serde_json::to_string_pretty(&result).map_err(|e| format!("Could not serialize transcript: {}", e))
     }
 }

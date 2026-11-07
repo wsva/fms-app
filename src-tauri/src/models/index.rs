@@ -188,9 +188,9 @@ pub fn scan_models(root: &Path) -> ModelIndex {
         return index;
     }
 
-    // 1. Scan STT models (known IDs from model_list_stt)
-    for def in catalog_stt::MODELS {
-        let model_dir = root.join(def.id);
+    // 1. Scan STT models (known IDs from the generated catalog)
+    for def in catalog_stt::all() {
+        let model_dir = root.join(&def.id);
         if !model_dir.exists() {
             continue;
         }
@@ -198,16 +198,47 @@ pub fn scan_models(root: &Path) -> ModelIndex {
         let files = collect_files(&model_dir, root);
 
         if !files.is_empty() {
-            let key = make_key("stt", def.id);
+            let key = make_key("stt", &def.id);
             index.models.insert(key, ModelIndexEntry {
                 model_type: "stt".to_string(),
-                id: def.id.to_string(),
-                name: def.name.to_string(),
+                id: def.id.clone(),
+                name: def.name.clone(),
                 downloaded_at: None,
                 provider: Some("cdn".to_string()),
                 files,
             });
         }
+    }
+
+    // 1b. The outer tier: artifacts no catalog row claims. Additive — a row that
+    //     already exists is never shadowed — and reporting-only, since loading
+    //     names a curated row. See [`discover_stt`].
+    for (id, artifact) in discover_stt(root) {
+        let key = make_key("stt", &id);
+        if index.models.contains_key(&key) {
+            continue;
+        }
+        // Ask the bytes what they are; a `.bin`, a corrupt header and a file we
+        // cannot open all fall back to the name on disk rather than a guess.
+        let probed = crate::models::gguf_meta::GgufProbe::read(&artifact);
+        let name = probed
+            .as_ref()
+            .and_then(|p| p.display_name.clone())
+            .filter(|n| !n.trim().is_empty())
+            .or_else(|| probed.as_ref().and_then(|p| p.architecture.clone()))
+            .unwrap_or_else(|| artifact.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(id.clone()));
+        let files = discovered_files(&artifact, root);
+        if files.is_empty() {
+            continue;
+        }
+        index.models.insert(key, ModelIndexEntry {
+            model_type: "stt".to_string(),
+            id,
+            name,
+            downloaded_at: None,
+            provider: Some("local".to_string()),
+            files,
+        });
     }
 
     // 2. Scan HuggingFace models from catalog (candle-ocr, candle-tts, etc.)
@@ -239,6 +270,100 @@ pub fn scan_models(root: &Path) -> ModelIndex {
 
     log::info!("[ModelIndex] Scan complete: found {} models", index.models.len());
     index
+}
+
+/// Extensions a hand-dropped STT artifact can carry. `.gguf` is transcribe-cpp's
+/// current container and `.bin` its GGML one; nothing else on disk is an STT
+/// model recognisable by name alone (ONNX exports are directories of `.onnx`
+/// files and are catalog rows by construction).
+const STT_ARTIFACT_EXTS: &[&str] = &["gguf", "bin"];
+
+/// Directories that hold other catalogs' models. `candle/` is the HuggingFace
+/// layout and `phoneme/` the forced-aligner's, so a `.bin` in either is a
+/// vocabulary or a weight of some other kind, not an STT model.
+const NON_STT_DIRS: &[&str] = &["candle", "phoneme"];
+
+/// Name an STT artifact that no catalog row claims, plus the file it was found
+/// in. `root`'s own layout is ours — `<model_root>/<id>/…` — so a directory's
+/// name is the id and a loose file's stem is the id.
+///
+/// This is the outer tier of discovery and it is deliberately only a report:
+/// loading goes through `catalog_stt::find_model`, and a row is a curated
+/// decision made in `scripts/gen_catalog.py` (with a pinned revision and a hash),
+/// not something a stray file can earn. That is the whole point of listing it
+/// here — a family shows up in the index, somebody runs it, and only then
+/// becomes a row.
+fn discover_stt(root: &Path) -> Vec<(String, PathBuf)> {
+    let mut found = Vec::new();
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return found,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().map(|n| n.to_string_lossy().to_string()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if name.starts_with('.') || NON_STT_DIRS.contains(&name.as_str()) {
+            continue;
+        }
+        // A catalog row's own directory is step 1's business, whether or not the
+        // files inside it passed the integrity check.
+        if catalog_stt::find_model(&name).is_some() {
+            continue;
+        }
+        if path.is_dir() {
+            if let Some(artifact) = first_artifact(&path) {
+                found.push((name, artifact));
+            }
+        } else if is_stt_artifact(&path) {
+            let id = match path.file_stem() {
+                Some(s) => s.to_string_lossy().to_string(),
+                None => continue,
+            };
+            found.push((id, path));
+        }
+    }
+    found
+}
+
+fn is_stt_artifact(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| STT_ARTIFACT_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// The first artifact inside a hand-made directory, in name order so the answer
+/// does not depend on the filesystem's mood.
+fn first_artifact(dir: &Path) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && is_stt_artifact(p))
+        .collect();
+    candidates.sort();
+    candidates.into_iter().next()
+}
+
+/// The files to record for a discovered artifact: the whole directory it sits
+/// in, or the loose file itself when it sits at the root.
+fn discovered_files(artifact: &Path, root: &Path) -> HashMap<String, u64> {
+    let mut map = HashMap::new();
+    if artifact.is_file() && artifact.parent() == Some(root) {
+        if let Ok(rel) = artifact.strip_prefix(root) {
+            if let Ok(meta) = artifact.metadata() {
+                map.insert(rel.to_string_lossy().replace('\\', "/"), meta.len());
+            }
+        }
+        return map;
+    }
+    match artifact.parent() {
+        Some(dir) => collect_files(dir, root),
+        None => map,
+    }
 }
 
 // ---------------------------------------------------------------------------

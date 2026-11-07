@@ -9,6 +9,7 @@ use tauri::AppHandle;
 
 use crate::models::catalog_stt;
 use crate::models::download;
+use crate::models::gguf_meta::GgufProbe;
 use crate::models::index::{self, ModelIndexEntry, ModelIndexState};
 use crate::models::state::{FileDownloadInfo, ModelState, ModelStatus};
 use crate::settings::SettingsState;
@@ -23,7 +24,7 @@ pub async fn model_download_inner(
     let def = catalog_stt::find_model(&version)
         .ok_or_else(|| format!("Unknown model version: {}", version))?;
 
-    log::info!("Starting download of model '{}' ({} MB)", version, def.size_mb);
+    log::info!("Starting download of model '{}' ({} MB)", version, def.size_mb());
     {
         let statuses = state.download_status.lock().unwrap();
         if statuses.values().any(|s| *s == ModelStatus::Downloading) {
@@ -49,11 +50,11 @@ pub async fn model_download_inner(
         p.files = vec![FileDownloadInfo {
             file: def.name.to_string(),
             bytes_downloaded: 0,
-            total_bytes: Some(def.size_mb * 1024 * 1024),
+            total_bytes: Some(def.size_bytes),
             speed: 0,
             eta_seconds: None,
         }];
-        p.overall_total_bytes = def.size_mb * 1024 * 1024;
+        p.overall_total_bytes = def.size_bytes;
         p.overall_bytes_downloaded = 0;
     }
 
@@ -67,11 +68,12 @@ pub async fn model_download_inner(
         &app,
         &state.download_progress,
         &model_dir,
-        def.blob_url,
-        def.sha256,
+        &def.blob_url,
+        def.sha256.as_deref(),
         def.is_directory,
         &cancel_flag,
         &version,
+        def.artifact_name(),
     )
     .await
     {
@@ -91,6 +93,10 @@ pub async fn model_download_inner(
         s.insert(version.clone(), ModelStatus::Downloaded);
     }
 
+    // These bytes did not exist a moment ago, and a probe of the half-written or
+    // missing file may be cached under the very path `model_status` now reads.
+    GgufProbe::forget(&model_dir.join(def.artifact_name()));
+
     // Update unified model index
     let root = index::model_root();
     let files = index::collect_files(&model_dir, &root);
@@ -98,7 +104,7 @@ pub async fn model_download_inner(
     let entry = ModelIndexEntry {
         model_type: "stt".to_string(),
         id: version.clone(),
-        name: def.name.to_string(),
+        name: def.name.clone(),
         downloaded_at: Some(chrono::Utc::now().to_rfc3339()),
         provider: Some("cdn".to_string()),
         files,
