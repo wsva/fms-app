@@ -48,7 +48,7 @@ tar = "0.4.44"
 #   (verified: an android build with `features: ["stt"]` there produced a
 #   binary without the model_* commands). Default-enabled is the only lever
 #   that reliably reaches the Android cargo invocation. transcribe-cpp
-#   (Whisper GGUF) stays desktop-only for now.
+#   (the GGML `.bin` and GGUF rows) stays desktop-only for now.
 # - `server` = the HTTP/MCP web_service, a PC-only subsystem and a dependency of
 #   `desktop`. Android consumes the PC over the network, so it compiles none.
 # - `phoneme` = the CTC phoneme model behind read-aloud pronunciation scoring
@@ -107,7 +107,7 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-transcribe-rs = { version = "0.3.11", features = ["onnx"], optional = true }
+transcribe-rs = { version = "0.3.12", features = ["onnx"], optional = true }
 # Vendored SaT inference. Reuse the exact `ort`/`ndarray`/`half` versions
 # transcribe-rs already resolved (2.0.0-rc.12 / 0.17 / 2.7) so we link against
 # the single statically-provided ONNX Runtime rather than a second, dynamic one.
@@ -117,7 +117,7 @@ half = { version = "2.4", optional = true, features = ["num-traits"] }
 # XLM-RoBERTa subword tokenizer for SaT. Loaded from a local tokenizer.json,
 # so no HTTP/hf-hub feature is needed.
 tokenizers = { version = "0.21", optional = true, default-features = false, features = ["onig"] }
-transcribe-cpp = { version = "0.2.0", default-features = false, optional = true }
+transcribe-cpp = { version = "0.4.1", default-features = false, optional = true }
 tar = "0.4.44"
 flate2 = "1.0"
 sha2 = "0.10"
@@ -199,6 +199,18 @@ tauri-plugin-updater = "2"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 ndk-context = "0.1"
+
+# macOS: the Metal compute backend for the transcribe-cpp path, so a GGUF decode
+# runs on the GPU instead of the CPU. Written as a target dependency rather than
+# `features = ["metal"]` on the shared line because Metal is an Apple-only SDK:
+# the same feature set would have to be compiled out on Windows and Linux.
+# Handy wires it identically, and no CI toolchain changes — the build already
+# targets `MACOSX_DEPLOYMENT_TARGET: 11.0` (`build.yml`), which covers the C++
+# side. Windows Vulkan stays deliberately absent: it needs the Vulkan SDK
+# installed on the runner, `dynamic-backends` so the loader is not baked in, and
+# per-DLL code signing for the shipped bundle.
+[target.'cfg(target_os = "macos")'.dependencies]
+transcribe-cpp = { version = "0.4.1", default-features = false, features = ["metal"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
