@@ -58,6 +58,21 @@ keeps failing the configure of a host without the SDK. Verify the result in the
 app log: `models/engine.rs::log_compute_device` prints the backends compiled in,
 every device the machine registered, and the one the model got.
 
+**The GPU is not automatically the faster device, and the ONNX side is where that
+shows.** `transcribe-rs` resolves every ORT session from one global accelerator
+preference (`set_ort_accelerator`), left at `Auto` — which excludes DirectML by
+design, since that provider needs a sequential session. Keep it that way for STT:
+the shipped ONNX rows are int8 exports, and DirectML partitions an int8 QDQ graph
+so finely that the copies between devices dominate. Measured on an RTX 5070 Ti
+(2026-11), 10 s of Parakeet v3 took **0.55 s on the CPU and 1.37 s on the GPU**,
+and its session took 17 s to build against 1.3 s. The opposite case is real too:
+the fp16 phoneme model is **0.07 s on the GPU against 1.53 s on the CPU**, which
+is why `datasets/read_aloud/phoneme.rs` asks for DirectML itself and rebuilds on
+the CPU when the provider refuses. So `ort/directml` is compiled in for the
+phoneme model and used by nothing else, and "has a GPU" is not a reason to flip
+the STT preference — re-measure a model over synthetic noise before shipping a
+change to it.
+
 ## Architecture Overview
 
 ### Tech Stack

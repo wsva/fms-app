@@ -38,8 +38,10 @@
 //! network's self-attention is quadratic in frames, and one call over a whole
 //! multi-minute recording asked ONNX Runtime for ~20 GB and failed (see
 //! [`WINDOW_SAMPLES`]). Time is why the session is offered to the GPU first on
-//! Windows — see [`execution_providers`] — and the very same code runs on the
-//! CPU when no provider is registered.
+//! Windows — a 20 s window is 0.07 s there against 1.53 s on the CPU, the one
+//! model in this app for which that is true (the int8 STT exports are slower on
+//! a GPU; the measurement and the reason are in `AGENTS.md`) — and the very same
+//! code runs on the CPU when no provider is registered.
 //!
 //! [`super::assess::PronReason`]: the vocabulary of "why not measured".
 

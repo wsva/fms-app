@@ -396,6 +396,12 @@ are desktop-only.
   do not carry Vulkan because building it needs the Vulkan SDK on the machine that builds. *Logs*
   names the backend and device each model actually got, and `src-tauri/.cargo/config.toml` says how
   a source build turns Vulkan on.
+- **The ONNX models run on the CPU by measured choice, not by omission.** Having a GPU is not the
+  same as a faster transcription: the int8 exports this app ships split across DirectML into so many
+  pieces that copying between the devices costs more than computing on them (10 s of Parakeet v3:
+  0.55 s on the CPU against 1.37 s on the GPU, on an RTX 5070 Ti). The pronunciation model behind
+  read-aloud scoring is the fp16 exception — it does use the GPU, and falls back to the CPU whenever
+  the machine will not give it one.
 
 ## License
 

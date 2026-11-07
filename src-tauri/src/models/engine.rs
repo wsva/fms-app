@@ -142,11 +142,17 @@ fn log_compute_device(model: &ActiveModel, version: &str) {
         }
         // An ONNX model's placement is `ort`'s choice and transcribe-rs keeps it:
         // it builds the provider list from a global preference and reports no
-        // device back. So this says what cannot be known instead of claiming the
-        // CPU — the preference is `Auto`, which deliberately excludes the GPU
-        // providers that need sequential execution, but that is a request.
+        // device back. The preference is `Auto`, which excludes the providers that
+        // need a sequential session, and in this build nothing else is compiled in
+        // - so the honest reading is "CPU", and it is a measured choice rather
+        // than a missing feature. The shipped ONNX rows are int8, and DirectML
+        // splits an int8 graph so finely that it loses: one 10 s Parakeet v3 run
+        // took 0.55 s on the CPU and 1.37 s on the GPU, and 17 s to load against
+        // 1.3 s (RTX 5070 Ti, 2026-11). The fp16 phoneme model is the opposite
+        // case, 0.07 s against 1.53 s, and it asks for the GPU for itself in
+        // `datasets/read_aloud/phoneme.rs`.
         _ => log::info!(
-            "Model '{}' is an ONNX model: its runtime chooses the execution providers itself and reports no device back, so its placement is not measurable from here",
+            "Model '{}' is an ONNX model, so it runs on the CPU: this build compiles no GPU provider into its runtime, and an int8 graph is slower partitioned across DirectML than run whole on the CPU (the phoneme model is the fp16 exception, and it asks for the GPU itself)",
             version
         ),
     }
