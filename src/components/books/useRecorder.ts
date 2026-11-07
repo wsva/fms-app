@@ -21,10 +21,16 @@ export type RecorderResult = {
   text: string;
   /**
    * Word-level timings, when the loaded model reports them. Read-aloud scoring
-   * uses them for fluency; a model without timestamps simply omits them and
-   * fluency is reported as not measured.
+   * uses them for fluency; a model that only places phrases omits them and
+   * fills `segments` instead, and a model that stamps nothing at all omits both.
    */
   words?: RecorderWord[];
+  /**
+   * Phrase spans — the coarser fluency evidence of a model whose timestamp
+   * ceiling is a segment (whisper). Absent whenever `words` are there: word
+   * spans are strictly finer, so the phrase list would only muddy the label.
+   */
+  segments?: RecorderSegment[];
   /**
    * Set when the hook was built with `deferTranscribe`: the take ended and the
    * WAV is ready, but nothing was recognized — the caller routes the recording
@@ -36,12 +42,36 @@ export type RecorderResult = {
 /** One word of the transcript with its position in the take, in seconds. */
 export type RecorderWord = { text: string; start: number; end: number };
 
+/** One phrase of it, with the seconds the model placed it over. */
+export type RecorderSegment = { text: string; start: number; end: number };
+
 /** What `model_transcribe_detailed` returns. */
 type DetailedTranscript = {
   text: string;
   words: RecorderWord[];
+  segments: RecorderSegment[];
   capabilities: { word_timings: boolean };
 };
+
+/** The placement a detailed run actually produced, as this hook reports it:
+ *  the finer list when the model placed words, the phrase list when it only
+ *  placed phrases, neither when it stamped nothing. */
+function placement(detailed: DetailedTranscript): Pick<RecorderResult, "words" | "segments"> {
+  return detailed.capabilities?.word_timings && detailed.words?.length
+    ? { words: detailed.words }
+    : detailed.segments?.length
+      ? { segments: detailed.segments }
+      : {};
+}
+
+/** Say what the model actually placed, so a log line never has to be decoded. */
+function describePlacement(timings: Pick<RecorderResult, "words" | "segments">): string {
+  return timings.words
+    ? `${timings.words.length} word timings`
+    : timings.segments
+      ? `${timings.segments.length} phrase timings (the model places no words)`
+      : "no timings";
+}
 
 // ---------------------------------------------------------------------------
 // Live preview segmentation
@@ -95,9 +125,10 @@ function chooseLiveCut(fresh: Float32Array): number {
  *
  * Records audio, converts it to 16kHz mono WAV, runs STT via
  * `model_transcribe_detailed`, and hands back the WAV (base64), the recognized
- * text, and — when the model reports them — per-word timings. The caller
- * persists the audio and shows a diff; read-aloud scoring turns the timings
- * into fluency metrics.
+ * text, and — when the model places the take in time at all — that placement:
+ * per-word timings, or phrase spans for a model whose ceiling is a phrase. The
+ * caller persists the audio and shows a diff; read-aloud scoring turns the
+ * placement into fluency metrics.
  *
  * Capture is delegated to `openMicCapture`, which is what lets this work on the
  * Android WebView as well as on the desktop app.
@@ -159,9 +190,10 @@ export function useRecorder(
   );
 
   /**
-   * The final pass: same model, but asking for word timings as well as text.
-   * Runs once per take (the live preview keeps using the cheap text-only call),
-   * because timings are only meaningful for the whole recording.
+   * The final pass: same model, but answering with the take's placement as well
+   * as the text. Runs once per take (the live preview keeps using the cheap
+   * text-only call), because timings are only meaningful for the whole
+   * recording.
    *
    * Exported as `transcribeTake` for a deferred caller: the local option of
    * the read-aloud scoring choice runs exactly this on-device path.
@@ -328,11 +360,11 @@ export function useRecorder(
           const transcribedAt = Date.now();
           const detailed = await transcribeDetailed(wavBase64);
           const text = detailed.text ?? "";
-          const words = detailed.capabilities?.word_timings ? detailed.words : undefined;
+          const timings = placement(detailed);
           logInfo(
             `recording: model_transcribe_detailed answered after ${
               Date.now() - transcribedAt
-            } ms: "${text}" (${words?.length ?? 0} word timings)`,
+            } ms: "${text}" (${describePlacement(timings)})`,
             LOG_MODULE
           );
           // A silent take is worthless as a recording, so report it. A take with
@@ -345,7 +377,7 @@ export function useRecorder(
                 "virtual microphones from Steam, OBS or Voicemeeter often hold the system default slot."
             );
           }
-          cbRef.current.onResult({ wavBase64, text: (text || "").trim(), words });
+          cbRef.current.onResult({ wavBase64, text: (text || "").trim(), ...timings });
         } catch (err) {
           const msg = describeMicError(err);
           logError(`recording: failed — ${msg}`, LOG_MODULE);
@@ -378,7 +410,7 @@ export function useRecorder(
       const detailed = await transcribeDetailed(wavBase64);
       return {
         text: detailed.text ?? "",
-        words: detailed.capabilities?.word_timings ? detailed.words : undefined,
+        ...placement(detailed),
       };
     },
     [transcribeDetailed]

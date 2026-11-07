@@ -15,12 +15,14 @@ use serde::Serialize;
 use transcribe_cpp::RunOptions as CppRunOptions;
 #[cfg(feature = "desktop")]
 use transcribe_cpp::TimestampKind as CppTimestampKind;
-use transcribe_rs::onnx::parakeet::{ParakeetParams, TimestampGranularity};
+// The parakeet decoder's own knob for *asking* for timings; distinct from the
+// catalog's `TimestampGranularity` below, which is what this app *reports*.
+use transcribe_rs::onnx::parakeet::{ParakeetParams, TimestampGranularity as ParakeetTimestampGranularity};
 use transcribe_rs::{
     SpeechModel, TranscribeOptions, TranscriptionResult, TranscriptionSegment,
 };
 
-use crate::models::catalog_stt::ModelCapabilities;
+use crate::models::catalog_stt::{ModelCapabilities, TimestampGranularity};
 use crate::models::engine::ensure_model_loaded;
 use crate::models::state::{ActiveModel, EngineCapabilities, ModelState};
 
@@ -59,11 +61,27 @@ pub struct TranscriptWord {
     pub end: f32,
 }
 
+/// One phrase the model placed in time. Coarser than [`TranscriptWord`] and
+/// never a substitute for one, but it is enough to say where a *phrase* ended,
+/// which is the question a read-aloud pause label asks and the only placement an
+/// engine without word rows can offer.
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptSegment {
+    pub text: String,
+    pub start: f32,
+    pub end: f32,
+}
+
 /// What the active backend could actually deliver for this call. Reported so a
-/// caller can tell "no pauses" from "pauses were not measurable".
+/// caller can tell "no pauses" from "pauses were not measurable" — and, since
+/// `timestamps`, "no placement at all" from "placement at a phrase's resolution".
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct TranscriptCapabilities {
     pub word_timings: bool,
+    /// The finest placement this run produced. `Some(segment)` alongside
+    /// `word_timings: false` is the whisper shape of the answer: no word rows,
+    /// but `segments` below is populated.
+    pub timestamps: Option<TimestampGranularity>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,16 +89,44 @@ pub struct DetailedTranscript {
     pub text: String,
     /// Empty when the backend has no word-level timestamps.
     pub words: Vec<TranscriptWord>,
+    /// Phrase spans, whenever the backend placed the audio at all. Empty when
+    /// `words` is not: word rows are strictly finer, so nothing is gained by
+    /// sending the coarser list beside them.
+    pub segments: Vec<TranscriptSegment>,
     pub capabilities: TranscriptCapabilities,
 }
 
 impl DetailedTranscript {
-    fn text_only(text: String) -> Self {
+    /// A run that could only place phrases: the text, the spans the engine's
+    /// timestamps did give, and no word rows.
+    fn phrased(result: TranscriptionResult, timestamps: Option<TimestampGranularity>) -> Self {
         Self {
-            text,
+            text: result.text,
             words: Vec::new(),
-            capabilities: TranscriptCapabilities { word_timings: false },
+            segments: result
+                .segments
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| TranscriptSegment { text: s.text, start: s.start, end: s.end })
+                .collect(),
+            capabilities: TranscriptCapabilities { word_timings: false, timestamps },
         }
+    }
+}
+
+/// The engine's own timestamp ceiling, in this app's words.
+///
+/// `Auto` is how the C ABI spells *"the richest this model supports"* without
+/// naming it — a request default, not an answer about a family, so it reports
+/// nothing rather than a guess the caller cannot check.
+#[cfg(feature = "desktop")]
+fn measured_granularity(kind: CppTimestampKind) -> Option<TimestampGranularity> {
+    use CppTimestampKind as K;
+    match kind {
+        K::Word => Some(TimestampGranularity::Word),
+        K::Token => Some(TimestampGranularity::Token),
+        K::Segment => Some(TimestampGranularity::Segment),
+        K::None | K::Auto => None,
     }
 }
 
@@ -102,19 +148,20 @@ impl ActiveModel {
         match self {
             #[cfg(feature = "desktop")]
             ActiveModel::TranscribeCpp(session) => match session.model().capabilities() {
-                Ok(caps) => EngineCapabilities {
-                    word_timings: matches!(
-                        caps.max_timestamp_kind,
-                        CppTimestampKind::Word | CppTimestampKind::Token
-                    ),
-                    // 0 is how the C ABI spells "this family has no window limit"
-                    // — which is exactly the question `long_audio_windows` exists
-                    // to work around, so it is worth reporting rather than
-                    // folding into `None`-means-unknown.
-                    max_chunk_secs: (caps.max_audio_ms > 0)
-                        .then(|| caps.max_audio_ms as f64 / 1000.0),
-                    streaming: caps.supports_streaming,
-                },
+                Ok(caps) => {
+                    let timestamps = measured_granularity(caps.max_timestamp_kind);
+                    EngineCapabilities {
+                        word_timings: timestamps.map(TimestampGranularity::yields_words).unwrap_or_default(),
+                        timestamps,
+                        // 0 is how the C ABI spells "this family has no window limit"
+                        // — which is exactly the question `long_audio_windows` exists
+                        // to work around, so it is worth reporting rather than
+                        // folding into `None`-means-unknown.
+                        max_chunk_secs: (caps.max_audio_ms > 0)
+                            .then(|| caps.max_audio_ms as f64 / 1000.0),
+                        streaming: caps.supports_streaming,
+                    }
+                }
                 Err(e) => {
                     // A metadata read that fails on a loaded model is a bug or a
                     // corrupt file, not an answer: fall back to the catalog and
@@ -122,6 +169,7 @@ impl ActiveModel {
                     log::warn!("Could not read engine capabilities: {e}; using the catalog's");
                     EngineCapabilities {
                         word_timings: advertised.word_timings(),
+                        timestamps: advertised.timestamps,
                         max_chunk_secs: advertised.max_chunk_secs,
                         streaming: advertised.streaming,
                     }
@@ -139,8 +187,14 @@ impl ActiveModel {
                     #[allow(unreachable_patterns)]
                     _ => unreachable!("every ONNX variant is listed above"),
                 };
+                // An ONNX runtime answers with a bool and no granularity, so the
+                // finest the runtime can mean is what the catalog already claimed
+                // for this row — confirmed as reachable, never invented. The word
+                // rows themselves are still asked for explicitly per family.
+                let timestamps = caps.supports_timestamps.then_some(advertised.timestamps).flatten();
                 EngineCapabilities {
                     word_timings: advertised.word_timings() && caps.supports_timestamps,
+                    timestamps,
                     max_chunk_secs: advertised.max_chunk_secs,
                     streaming: caps.supports_streaming,
                 }
@@ -246,7 +300,7 @@ impl ActiveModel {
             ActiveModel::Parakeet(m) => {
                 let params = ParakeetParams {
                     language: None,
-                    timestamp_granularity: Some(TimestampGranularity::Word),
+                    timestamp_granularity: Some(ParakeetTimestampGranularity::Word),
                 };
                 let result = m
                     .transcribe_with(samples, &params)
@@ -417,7 +471,9 @@ pub fn transcribe_samples_detailed(
     let duration = samples.len() as f64 / STT_SAMPLE_RATE as f64;
     let window = if caps.word_timings { caps.max_chunk_secs } else { None };
     match window {
-        Some(w) if duration > w => transcribe_detailed_chunked(guard.model(), samples, duration, w),
+        Some(w) if duration > w => {
+            transcribe_detailed_chunked(guard.model(), samples, duration, w, caps.timestamps)
+        }
         _ => transcribe_detailed_pass(guard.model(), samples, caps),
     }
 }
@@ -432,11 +488,30 @@ fn transcribe_detailed_pass(
         return Ok(DetailedTranscript {
             text,
             words: words.into_iter().filter(|w| !w.text.trim().is_empty()).collect(),
-            capabilities: TranscriptCapabilities { word_timings: true },
+            segments: Vec::new(),
+            capabilities: TranscriptCapabilities { word_timings: true, timestamps: caps.timestamps },
         });
     }
 
-    Ok(DetailedTranscript::text_only(model.transcribe_text(samples)?))
+    // No word rows, but the engine may still know where each *phrase* began and
+    // ended, and that is what a read-aloud pause label is asking. Whisper's
+    // timestamp tokens answer at exactly that granularity, so the spans are kept
+    // instead of folded into the text and dropped.
+    //
+    // Say so either way: this is the branch where a take's fluency axis is
+    // measured coarsely or not at all, and an unprinted number is the one people
+    // end up asking about. The model's own name is in the load log line.
+    let result = model.transcribe_segments(samples, 0.0)?;
+    let transcript = DetailedTranscript::phrased(result, caps.timestamps);
+    if transcript.segments.is_empty() {
+        log::info!("The active model reports no timestamps at all; answering with text only");
+    } else {
+        log::info!(
+            "The active model reports no word-level timestamps; answering with text plus {} phrase span(s)",
+            transcript.segments.len(),
+        );
+    }
+    Ok(transcript)
 }
 
 /// The word-level detailed pass, split for audio longer than the engine's own
@@ -456,6 +531,7 @@ fn transcribe_detailed_chunked(
     samples: &[f32],
     total_duration_secs: f64,
     window_secs: f64,
+    granularity: Option<TimestampGranularity>,
 ) -> Result<DetailedTranscript, String> {
     let windows = audio_windows(samples.len(), window_secs);
     log::info!(
@@ -524,7 +600,10 @@ fn transcribe_detailed_chunked(
     Ok(DetailedTranscript {
         text,
         words,
-        capabilities: TranscriptCapabilities { word_timings: true },
+        // Word rows are the finer placement, so the phrase list stays empty —
+        // the same rule [`DetailedTranscript::segments`] documents.
+        segments: Vec::new(),
+        capabilities: TranscriptCapabilities { word_timings: true, timestamps: granularity },
     })
 }
 

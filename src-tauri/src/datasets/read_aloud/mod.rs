@@ -55,7 +55,7 @@ use crate::datasets::asr_metric::{score_asr, score_value, AsrScoreSummary};
 use crate::xp::{xp_award_internal, XpAwardResult};
 
 use assess::{Assessment, PronEvidence, PronReason};
-use fluency::TimedWord;
+use fluency::{TimedSegment, TimedWord, Timings};
 
 /// Score thresholds for the scaled XP reward.
 const XP_PASS_SCORE: f64 = 60.0;
@@ -1754,6 +1754,7 @@ pub async fn read_aloud_rerecognize(
     uuid: String,
     recognized: String,
     words: Option<Vec<TimedWord>>,
+    segments: Option<Vec<TimedSegment>>,
     assessment: Option<Value>,
     via: Option<String>,
 ) -> Result<ReadAloudSubmitResult, String> {
@@ -1763,7 +1764,7 @@ pub async fn read_aloud_rerecognize(
         &dataset_uuid,
         &uuid,
         &recognized,
-        words.as_deref(),
+        &Timings::from_optional(words.as_deref(), segments.as_deref()),
         assessment,
         via.as_deref(),
     )
@@ -1815,7 +1816,7 @@ async fn update_recognized_inner(
     dataset_uuid: &str,
     uuid: &str,
     recognized: &str,
-    words: Option<&[TimedWord]>,
+    timings: &Timings<'_>,
     assessment: Option<Value>,
     via: Option<&str>,
 ) -> Result<ReadAloudSubmitResult, String> {
@@ -1899,8 +1900,10 @@ async fn update_recognized_inner(
                 "read_aloud: attempt {} — measuring fluency and pronunciation",
                 uuid
             );
-            let assessment =
-                assess_attempt(settings, summary, reference, recognized, &samples, words, &clip).await;
+            let assessment = assess_attempt(
+                settings, summary, reference, recognized, &samples, timings, &clip,
+            )
+            .await;
             log::info!("read_aloud: attempt {} — assessment computed", uuid);
             Some(assessment)
         }
@@ -2530,25 +2533,51 @@ fn decode_samples(wav_base64: &str) -> Result<Vec<f32>, String> {
     crate::audio::decode_wav_pcm(&bytes)
 }
 
+/// One detailed run's placement, in the shape the scorer asks for.
+///
+/// Both lists are handed over as they came: word rows when the engine measured
+/// that it could, phrase spans when it could only place phrases. [`Timings`]
+/// keeps the ladder, so this only converts.
+fn take_timings(
+    detailed: &crate::models::transcribe::DetailedTranscript,
+) -> (Vec<TimedWord>, Vec<TimedSegment>) {
+    let words = detailed
+        .words
+        .iter()
+        .map(|w| TimedWord { text: w.text.clone(), start: w.start as f64, end: w.end as f64 })
+        .collect();
+    let segments = detailed
+        .segments
+        .iter()
+        .map(|s| TimedSegment { text: s.text.clone(), start: s.start as f64, end: s.end as f64 })
+        .collect();
+    (words, segments)
+}
+
 /// The single seam every scoring path goes through: accuracy from the existing
-/// metric, fluency from VAD + word timings, pronunciation from GOP against the
-/// text's standard audio.
+/// metric, fluency from VAD plus whatever placement the STT run had, and
+/// pronunciation from GOP against the text's standard audio.
 async fn assess_attempt(
     settings: &SettingsState,
     summary: &AsrScoreSummary,
     reference: &str,
     recognized: &str,
     samples: &[f32],
-    words: Option<&[TimedWord]>,
+    timings: &Timings<'_>,
     clip: &standard_audio::DefaultClip,
 ) -> Assessment {
     let ref_words = crate::datasets::asr_metric::normalize_words(reference).len();
     let pron = pronunciation_evidence(settings, ref_words, samples, clip).await;
-    assess::assess(summary, reference, recognized, samples, words, pron.evidence())
+    assess::assess(summary, reference, recognized, samples, timings, pron.evidence())
 }
 
 /// Score one attempt without persisting anything: accuracy + fluency +
 /// pronunciation. The preview twin of [`read_aloud_submit`].
+///
+/// `words` and `segments` are the placement from one `model_transcribe_detailed`
+/// run: word rows when the engine measures that it can give them, phrase spans
+/// when it can only place phrases. `segments` is additive — a caller that sends
+/// only words, or neither, is scored exactly as it was before.
 ///
 /// `dataset_uuid` and `text_uuid` are required because pronunciation reads the
 /// text's standard audio — there is no reference to compare against otherwise.
@@ -2561,17 +2590,19 @@ pub async fn read_aloud_assess(
     recognized: String,
     wav_base64: String,
     words: Option<Vec<TimedWord>>,
+    segments: Option<Vec<TimedSegment>>,
 ) -> Result<Assessment, String> {
     let samples = decode_samples(&wav_base64)?;
     let summary = score_asr(&content, &recognized);
     let clip = load_default_clip(&settings, &dataset_uuid, &text_uuid, &content);
+    let timings = Timings::from_optional(words.as_deref(), segments.as_deref());
     Ok(assess_attempt(
         &settings,
         &summary,
         &content,
         &recognized,
         &samples,
-        words.as_deref(),
+        &timings,
         &clip,
     )
     .await)
@@ -2618,12 +2649,7 @@ pub(crate) async fn assess_take(
 
     let samples = decode_samples(wav_base64)?;
     let detailed = crate::models::transcribe::transcribe_samples_detailed(model_state, &samples)?;
-    let words: Vec<TimedWord> = detailed
-        .words
-        .iter()
-        .map(|w| TimedWord { text: w.text.clone(), start: w.start as f64, end: w.end as f64 })
-        .collect();
-    let words = (!words.is_empty()).then_some(words);
+    let (words, segments) = take_timings(&detailed);
     let recognized = detailed.text;
 
     let dir = find_dataset_dir(settings, dataset_uuid)?;
@@ -2648,7 +2674,7 @@ pub(crate) async fn assess_take(
         &reference,
         &recognized,
         &samples,
-        words.as_deref(),
+        &Timings::new(&words, &segments),
         &clip,
     )
     .await;
@@ -2656,11 +2682,12 @@ pub(crate) async fn assess_take(
     // The reply is the shape its own tool description promises (docs/design/
     // hub-mcp-compute-offload.md §4.1): the axes under `assessment`, in exactly
     // the JSON [`read_aloud_submit`] and [`read_aloud_rerecognize`] take back as
-    // a passed measurement, with the transcript and its word timings beside it
-    // for a caller that would rather re-score locally than trust the reply.
+    // a passed measurement, with the transcript and its placement beside it for
+    // a caller that would rather re-score locally than trust the reply.
     Ok(json!({
         "recognized": recognized,
-        "words": words.unwrap_or_default(),
+        "words": words,
+        "segments": segments,
         "headline": assessment.headline(),
         "assessment": assessment.to_value(),
         "provenance": {
@@ -2753,11 +2780,7 @@ pub(crate) async fn assess_standard_audio(
     // what makes the fluency axis measurable for the reference too.
     let detailed =
         crate::models::transcribe::transcribe_samples_detailed(model_state, &stored.samples)?;
-    let words: Vec<TimedWord> = detailed
-        .words
-        .iter()
-        .map(|w| TimedWord { text: w.text.clone(), start: w.start as f64, end: w.end as f64 })
-        .collect();
+    let (words, segments) = take_timings(&detailed);
 
     let summary = score_asr(&reference, &detailed.text);
     let assessment = assess_attempt(
@@ -2766,7 +2789,7 @@ pub(crate) async fn assess_standard_audio(
         &reference,
         &detailed.text,
         &stored.samples,
-        (!words.is_empty()).then_some(words.as_slice()),
+        &Timings::new(&words, &segments),
         &clip,
     )
     .await;
@@ -2991,8 +3014,9 @@ fn save_take_inner(
 /// what this does, in two steps.
 ///
 /// The frontend records + runs STT (via `model_transcribe_detailed`) and passes
-/// the WAV (base64), the recognized text and, when the model gave any, the word
-/// timings here so scoring, storage and XP all happen on the backend.
+/// the WAV (base64), the recognized text and, when the model gave any, its
+/// placement — word rows, or phrase spans for an engine that can only place
+/// phrases — here so scoring, storage and XP all happen on the backend.
 ///
 /// The accuracy score is unchanged by the three-axis work: `score` is still the
 /// WIP number XP and `best_score` have always used.
@@ -3012,6 +3036,7 @@ pub async fn read_aloud_submit(
     wav_base64: String,
     recognized: String,
     words: Option<Vec<TimedWord>>,
+    segments: Option<Vec<TimedSegment>>,
     assessment: Option<Value>,
     via: Option<String>,
 ) -> Result<ReadAloudSubmitResult, String> {
@@ -3022,7 +3047,7 @@ pub async fn read_aloud_submit(
         &dataset_uuid,
         &saved.uuid,
         &recognized,
-        words.as_deref(),
+        &Timings::from_optional(words.as_deref(), segments.as_deref()),
         assessment,
         via.as_deref(),
     )

@@ -12,8 +12,15 @@ import { beginAssessment, finishAssessment, logStep } from "./assessmentLog";
 const NO_RECORDING = "This recording is not on this device, so it cannot be assessed again.";
 
 /** One word with the seconds it occupied — what `model_transcribe_detailed`
- *  reports and fluency is measured from. */
+ *  reports when the model places words, and the finer of the two kinds of
+ *  fluency evidence. */
 export type WordTiming = { text: string; start: number; end: number };
+
+/** One *phrase* with the seconds it occupied — what the same call reports when
+ *  the model's timestamp ceiling is a segment (whisper). Pauses are detected on
+ *  the waveform, so these spans carry the fluency axis; they only say less about
+ *  where inside a phrase a silence fell. */
+export type SegmentTiming = { text: string; start: number; end: number };
 
 /**
  * Make an ended take durable *before* anything measures it: store the recording
@@ -56,6 +63,7 @@ export function measureAttempt({
   uuid,
   recognized,
   words,
+  segments,
   assessment,
   via,
 }: {
@@ -64,6 +72,7 @@ export function measureAttempt({
   uuid: string;
   recognized: string;
   words?: WordTiming[] | null;
+  segments?: SegmentTiming[] | null;
   assessment?: Assessment | null;
   via?: string | null;
 }): Promise<ReadAloudSubmitResult> {
@@ -72,6 +81,7 @@ export function measureAttempt({
     uuid,
     recognized,
     words: words ?? null,
+    segments: segments ?? null,
     // No passed measurement means this device scored it, so nothing is stored as
     // measured and no provenance key is written.
     assessment: assessment ?? null,
@@ -90,14 +100,19 @@ async function readTakeBase64(audioUrl: string): Promise<string> {
 }
 
 /** What the transcript came out as, for the live log — the same line either way. */
-function logTranscript(recognized: string, words: readonly { text: string }[] | null): void {
+function logTranscript(
+  recognized: string,
+  words: readonly { text: string }[] | null,
+  segments?: readonly { text: string }[] | null
+): void {
   const wordCount = recognized ? recognized.split(/\s+/).length : 0;
   const preview = recognized.length > 80 ? `${recognized.slice(0, 80)}…` : recognized;
-  logStep(
-    `Transcript ready: ${wordCount} word${wordCount === 1 ? "" : "s"}` +
-      (words ? `, ${words.length} timed` : ", no word timings") +
-      (preview ? ` — "${preview}"` : "")
-  );
+  const placement = words
+    ? `, ${words.length} timed word${words.length === 1 ? "" : "s"}`
+    : segments?.length
+      ? `, ${segments.length} timed phrase${segments.length === 1 ? "" : "s"} (the model places no words)`
+      : ", no timings";
+  logStep(`Transcript ready: ${wordCount} word${wordCount === 1 ? "" : "s"}${placement}${preview ? ` — "${preview}"` : ""}`);
 }
 
 /**
@@ -131,19 +146,22 @@ export async function rerecognizeAttempt(
     const wavBase64 = await readTakeBase64(attempt.audio_url);
 
     // Detailed (not plain) transcription: the attempt is re-scored, so it needs
-    // the word timings that fluency is measured from as well as the text.
+    // the model's placement as well as the text — word timings when it places
+    // words, phrase spans when it places phrases, either way enough for fluency.
     logStep("Transcribing with the current STT model (the first run also loads it)…");
     const detailed = await invoke<{
       text: string;
       words: WordTiming[];
+      segments: SegmentTiming[];
       capabilities: { word_timings: boolean };
     }>("model_transcribe_detailed", { wavBase64 });
     const recognized = (detailed.text || "").trim();
-    const words = detailed.capabilities?.word_timings ? detailed.words : null;
-    logTranscript(recognized, words);
+    const words = detailed.capabilities?.word_timings && detailed.words?.length ? detailed.words : null;
+    const segments = words?.length ? null : detailed.segments?.length ? detailed.segments : null;
+    logTranscript(recognized, words, segments);
 
     logStep("Scoring accuracy, fluency and pronunciation (the first run loads the phoneme model)…");
-    const result = await measureAttempt({ datasetUuid, uuid: attempt.uuid, recognized, words });
+    const result = await measureAttempt({ datasetUuid, uuid: attempt.uuid, recognized, words, segments });
 
     finishAssessment(
       true,
@@ -217,16 +235,18 @@ export async function measureAttemptOnHub({
     milestones.onReplied?.();
     const recognized = (reply.recognized || "").trim();
     const words = reply.words?.length ? reply.words : null;
-    logTranscript(recognized, words);
+    const segments = words ? null : reply.segments?.length ? reply.segments : null;
+    logTranscript(recognized, words, segments);
 
     logStep("Storing the hub's measurement (nothing is re-scored here)…");
-    // The hub's word timings ride along for symmetry with the local route; with
+    // The hub's placement rides along for symmetry with the local route; with
     // an assessment passed, the backend takes no model pass at all.
     const result = await measureAttempt({
       datasetUuid,
       uuid,
       recognized,
       words,
+      segments,
       assessment: reply.assessment,
       via: "hub",
     });

@@ -114,6 +114,19 @@ pub enum TimestampGranularity {
     Token,
 }
 
+impl TimestampGranularity {
+    /// Whether this granularity places *words*, as opposed to phrases or nothing.
+    ///
+    /// The one place the word-or-not test is written, because three layers ask it
+    /// (the catalog, the loaded engine, a scored take) and a threshold invented
+    /// twice is a threshold that will eventually disagree with itself. A
+    /// `Segment` answer is not a failure — it places the take too, just at a
+    /// phrase's resolution.
+    pub fn yields_words(self) -> bool {
+        matches!(self, Self::Word | Self::Token)
+    }
+}
+
 /// What a row advertises it can do. Populated from the model card of the same
 /// weights (GGUF rows), from the architecture's behaviour in transcribe-cpp
 /// (`.bin` rows), or from the curated ONNX table — and overwritten at load time
@@ -134,10 +147,7 @@ impl ModelCapabilities {
     ///
     /// Note this is the *advertised* answer; only a loaded engine is authority.
     pub fn word_timings(&self) -> bool {
-        matches!(
-            self.timestamps,
-            Some(TimestampGranularity::Word) | Some(TimestampGranularity::Token)
-        )
+        self.timestamps.map(TimestampGranularity::yields_words).unwrap_or_default()
     }
 }
 

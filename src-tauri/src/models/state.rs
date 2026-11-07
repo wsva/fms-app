@@ -21,7 +21,7 @@ use transcribe_rs::onnx::{
     sense_voice::SenseVoiceModel,
 };
 
-use crate::models::catalog_stt::{self, ModelCapabilities};
+use crate::models::catalog_stt::{self, ModelCapabilities, TimestampGranularity};
 use crate::settings::SettingsState;
 
 #[derive(Clone, Serialize, PartialEq)]
@@ -61,6 +61,12 @@ pub struct EngineCapabilities {
     /// here means the engine will not produce them, which a caller reports
     /// differently from "not measured yet".
     pub word_timings: bool,
+    /// The finest placement the engine says it can give: [`TimestampGranularity`]
+    /// names it, so `segment` means *phrase* spans rather than nothing. Read this
+    /// instead of `word_timings` whenever a caller wants to know what evidence it
+    /// *would* get, not just whether words are in it — a phrase span still says
+    /// where a reading paused, which is a question read-aloud scoring asks.
+    pub timestamps: Option<TimestampGranularity>,
     /// The longest audio the engine takes in one call, when it limits one.
     /// `None` means the engine stated no limit.
     pub max_chunk_secs: Option<f64>,

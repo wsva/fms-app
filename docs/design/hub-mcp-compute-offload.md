@@ -88,7 +88,7 @@ Android                                            Hub PC  (/mcp)
    { dataset_uuid, text_uuid, content, wav_base64 } ──► 5. model_transcribe_detailed(wav)
                                                            pronunciation vs the default clip
                                                            accuracy + fluency from the timings
-   ◄── { recognized, words, assessment, headline }   (nothing persisted server-side)
+   ◄── { recognized, words|segments, assessment, headline }   (nothing persisted server-side)
 6. local read_aloud_rerecognize onto the saved
    attempt's uuid, with the pre-computed
    assessment (§4.5) → the same row overwritten in
@@ -128,9 +128,12 @@ the transport is a plain request/reply and the ledger is untouched.
 
 A composition of existing functions, persisting nothing: `model::transcribe_detailed` on the
 decoded WAV, then the body of `read_aloud_assess` fed with its own output. Params mirror
-`ReadAloudAssessParam` minus `recognized`/`words` (it produces them). The reply carries the
-compact `Assessment` (~2 KB, the existing stored-metrics budget), the transcript, the word
-timings, and the `headline` line, so both the page and an agent can render it.
+`ReadAloudAssessParam` minus `recognized`/`words`/`segments` (it produces them). The reply
+carries the compact `Assessment` (~2 KB, the existing stored-metrics budget), the transcript,
+the placement the hub's model produced — word timings, or phrase spans for a model that places
+no words — and the `headline` line, so both the page and an agent can render it. The follower
+feeds whichever list came back into the matching parameter of its own save call, so the hub's
+placement is stored without this device running a model.
 
 - Refuses with an actionable error, in this order: `audio_too_large` (see §6),
   `model_missing` (name which model, point at `model_download`), `no_reference` /

@@ -516,8 +516,9 @@ fn build_evidence(
             ));
         }
         None => out.push_str(
-            "- not measured: the speech model gave no word timings for this take, so pace and \
-             pauses cannot be judged. Say so; do not guess.\n",
+            "- not measured: nothing placed this take in time (the speech model gave neither \
+             word nor phrase timings), so pace and pauses cannot be judged. Say so; do not \
+             guess.\n",
         ),
     }
     out.push('\n');
@@ -608,7 +609,7 @@ fn build_evidence(
             }
         }
         Some(_) => out.push_str("- no pauses were detected\n"),
-        None => out.push_str("- not measured (no word timings for this take)\n"),
+        None => out.push_str("- not measured (nothing placed this take in time)\n"),
     }
     out.push('\n');
 
@@ -1063,7 +1064,7 @@ pub async fn read_aloud_feedback_context(
 #[cfg(test)]
 mod tests {
     use super::super::assess::{assess, PronEvidence};
-    use super::super::fluency::Fluency;
+    use super::super::fluency::{Fluency, Timings};
     use super::*;
 
     fn evidence_for(reference: &str, recognized: &str) -> (AsrScoreSummary, String) {
@@ -1115,7 +1116,7 @@ mod tests {
     #[test]
     fn every_unmeasured_axis_says_so() {
         let (_, evidence) = evidence_for("hallo welt", "hallo welt");
-        assert!(evidence.contains("not measured: the speech model gave no word timings"));
+        assert!(evidence.contains("not measured: nothing placed this take in time"));
         assert!(evidence.contains("not measured: this take has no stored pronunciation result"));
         assert!(evidence.contains("nothing to listen to"));
     }
@@ -1136,7 +1137,7 @@ mod tests {
             reference,
             reference,
             &[],
-            None,
+            &Timings::default(),
             PronEvidence::Unavailable(PronReason::ModelMissing),
         );
         assessment.pronunciation.score = Some(0.63);

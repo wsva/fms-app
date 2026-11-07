@@ -7,7 +7,7 @@ import { Play, RotateCcw, Wand2 } from "lucide-react";
 import type { ReadAloudSubmitResult, ReadAttempt, ReadStandardAudio, ReadText } from "@/lib/read_aloud/types";
 import { GOOD_SCORE, PASS_SCORE, scoreBadgeClasses } from "@/lib/read_aloud/types";
 import { useRecorder } from "@/components/books/useRecorder";
-import { measureAttempt, measureAttemptOnHub, saveTake, type WordTiming } from "@/lib/read_aloud/rerecognize";
+import { measureAttempt, measureAttemptOnHub, saveTake, type SegmentTiming, type WordTiming } from "@/lib/read_aloud/rerecognize";
 import AsrDiff from "@/components/read_aloud/AsrDiff";
 import AssessmentCards from "@/components/read_aloud/AssessmentCards";
 import FeedbackPanel from "@/components/read_aloud/FeedbackPanel";
@@ -220,7 +220,11 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
   // caller — the take is already saved, so a failed measurement only leaves it
   // waiting for "Assess again".
   const measureHere = useCallback(
-    async (held: PendingTake, recognized: string, words?: WordTiming[] | null) => {
+    async (
+      held: PendingTake,
+      recognized: string,
+      placement: { words?: WordTiming[] | null; segments?: SegmentTiming[] | null }
+    ) => {
       setMeasuring(true);
       setError(null);
       try {
@@ -228,9 +232,10 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
           datasetUuid,
           uuid: held.attempt.uuid,
           recognized,
-          // Word timings (when a model reported them) are what fluency is
-          // measured from — without them that axis is reported as not measured.
-          words: words ?? null,
+          // The model's placement is what fluency is measured from — neither
+          // list and that axis is reported as not measured.
+          words: placement.words ?? null,
+          segments: placement.segments ?? null,
         });
         applyResult(res, null);
       } finally {
@@ -249,7 +254,10 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
       setTranscribingLocal(true);
       try {
         const detailed = await recorderRef.current.transcribeTake(held.wavBase64);
-        await measureHere(held, (detailed.text || "").trim(), detailed.words ?? null);
+        await measureHere(held, (detailed.text || "").trim(), {
+          words: detailed.words ?? null,
+          segments: detailed.segments ?? null,
+        });
       } catch (e) {
         const msg = String(e);
         logError(`local scoring failed: ${msg}`, LOG_MODULE);
@@ -330,18 +338,20 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
   // disk and in the attempts list, so a cancelled hub call, a model that fails to
   // load or an app that closes mid-flight never loses a recording — only its
   // numbers, and those are one "Assess again" away. (Without `deferTranscribe`
-  // the hook fills `text`/`words` itself and never sets `captured` — only the
-  // hub role could change mid-take, so handle both shapes.)
+  // the hook fills `text`/`words`/`segments` itself and never sets `captured` —
+  // only the hub role could change mid-take, so handle both shapes.)
   const handleResult = useCallback(
     async ({
       wavBase64,
       text: recognized,
       words,
+      segments,
       captured,
     }: {
       wavBase64: string;
       text: string;
       words?: WordTiming[];
+      segments?: SegmentTiming[];
       captured?: boolean;
     }) => {
       if (!isTauri()) return;
@@ -367,7 +377,10 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
       if (role === "hub" || !captured) {
         // This device has the models and the transcript: measure it right away.
         try {
-          await measureHere(held, transcript, words ?? null);
+          await measureHere(held, transcript, {
+            words: words ?? null,
+            segments: segments ?? null,
+          });
         } catch (e) {
           const msg = String(e);
           logError(`local scoring failed: ${msg}`, LOG_MODULE);

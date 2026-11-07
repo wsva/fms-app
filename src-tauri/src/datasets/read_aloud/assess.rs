@@ -6,7 +6,7 @@
 //! | axis | source | changed by this work? |
 //! |---|---|---|
 //! | accuracy | `asr_metric::score_asr` (WIP × 100) | **no** — byte-identical |
-//! | fluency | energy VAD + STT word timings | new |
+//! | fluency | energy VAD + the STT run's placement (word spans, else phrase spans) | new |
 //! | pronunciation | CTC phoneme GOP against the text's standard audio | new |
 //!
 //! The accuracy number keeps its exact meaning because XP thresholds (60/80),
@@ -24,7 +24,11 @@ use crate::datasets::asr_metric::{
     normalize_tokens, normalize_words, AsrScoreSummary, Verdict,
 };
 
-use super::fluency::{self, Fluency, FluencyConfig, Pause, TimedWord};
+use super::fluency::{self, Fluency, FluencyConfig, Pause, TimingEvidence, Timings};
+// The two timing lists reach this module only wrapped in a `Timings`; the tests
+// still build them by hand.
+#[cfg(test)]
+use super::fluency::{TimedSegment, TimedWord};
 use super::gop::{self, LogPost, PhoneSpan};
 use super::vad::{self, VadConfig};
 
@@ -53,9 +57,17 @@ pub(crate) const MAX_STORED_PAUSES: usize = 24;
 /// measured".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct Capabilities {
-    /// The STT model returned per-word timings, so fluency could be computed.
+    /// The STT model returned per-word timings, so every word has a place on the
+    /// timeline. Not the fluency gate any more: `timing_evidence` says what
+    /// placed the take, and phrase spans measure fluency too.
     #[serde(default)]
     pub word_timings: bool,
+    /// What the fluency numbers were measured from, so a wpm read back months
+    /// later still says what kind of evidence produced it. `None` on a row stored
+    /// before this key existed means per-word, which is what every row that has
+    /// fluency and predates this key was measured from.
+    #[serde(default)]
+    pub timing_evidence: Option<TimingEvidence>,
     /// GOP ran.
     #[serde(default)]
     pub gop: bool,
@@ -161,8 +173,9 @@ pub(crate) struct Assessment {
     #[serde(default)]
     pub capabilities: Capabilities,
     pub accuracy: Accuracy,
-    /// `None` when the STT model produced no word timings — fluency is not
-    /// guessed from transcript gaps.
+    /// `None` when the STT run placed the take nowhere at all — fluency is not
+    /// guessed from transcript gaps, and a phrase-placed take is measured and
+    /// labelled `timing_evidence: "segments"` rather than left out.
     #[serde(default)]
     pub fluency: Option<Fluency>,
     pub pronunciation: Pronunciation,
@@ -185,12 +198,15 @@ pub(crate) enum PronEvidence<'a> {
 }
 
 /// Build the assessment. Pure: everything model-shaped is an argument.
+///
+/// `timings` is the STT run's placement, at whatever resolution it had; both of
+/// its lists being empty is the one case fluency is not measured.
 pub(crate) fn assess(
     summary: &AsrScoreSummary,
     reference: &str,
     recognized: &str,
     wav: &[f32],
-    words: Option<&[TimedWord]>,
+    timings: &Timings,
     pron: PronEvidence<'_>,
 ) -> Assessment {
     let ref_words = normalize_words(reference);
@@ -237,7 +253,7 @@ pub(crate) fn assess(
     };
 
     // --- words -------------------------------------------------------------
-    let timed = words.unwrap_or(&[]);
+    let timed = timings.words();
     let word_list: Vec<WordAssessment> = summary
         .words
         .iter()
@@ -266,13 +282,16 @@ pub(crate) fn assess(
         .collect();
 
     // --- fluency -----------------------------------------------------------
+    // Every number here is detected on the waveform and counted from the
+    // alignment; the STT's placement only labels the pauses. So the gate is
+    // "did anything place this take", not "did it place every word".
     let duration = wav.len() as f64 / vad::SAMPLE_RATE as f64;
-    let (fluency, pauses) = if words.is_some() {
+    let (fluency, pauses) = if !timings.is_empty() {
         let segments = vad::detect(wav, &VadConfig::default());
         let (metrics, pauses) = fluency::compute(
             duration,
             &segments,
-            timed,
+            timings,
             &summary.words,
             &ref_words,
             summary.hits,
@@ -286,7 +305,8 @@ pub(crate) fn assess(
     Assessment {
         schema_version: SCHEMA_VERSION,
         capabilities: Capabilities {
-            word_timings: words.is_some(),
+            word_timings: !timed.is_empty(),
+            timing_evidence: timings.evidence(),
             gop: pronunciation.score.is_some(),
             tts_reference: matches!(pron, PronEvidence::Measured { .. }),
         },
@@ -392,7 +412,7 @@ mod tests {
         ] {
             let summary = score_asr(r, h);
             let assessment = assess(
-                &summary, r, h, &[], None, PronEvidence::Unavailable(PronReason::ModelMissing),
+                &summary, r, h, &[], &Timings::default(), PronEvidence::Unavailable(PronReason::ModelMissing),
             );
             assert_eq!(assessment.accuracy.score, summary.score);
             assert_eq!(assessment.accuracy.lenient_score, summary.lenient_score);
@@ -401,13 +421,14 @@ mod tests {
     }
 
     #[test]
-    fn no_word_timings_means_no_fluency_not_zero_fluency() {
+    fn an_unplaced_take_means_no_fluency_not_zero_fluency() {
         let summary = score_asr("hello world", "hello world");
-        let a = assess(&summary, "hello world", "hello world", &two_bursts(), None,
+        let a = assess(&summary, "hello world", "hello world", &two_bursts(), &Timings::default(),
             PronEvidence::Unavailable(PronReason::ModelMissing));
         assert!(a.fluency.is_none());
         assert!(a.pauses.is_empty());
         assert!(!a.capabilities.word_timings);
+        assert_eq!(a.capabilities.timing_evidence, None);
         assert_eq!(a.pronunciation.unavailable_reason, Some(PronReason::ModelMissing));
         assert!(a.pronunciation.score.is_none());
         assert!(a.headline().contains("fluency not measured"));
@@ -421,10 +442,11 @@ mod tests {
             TimedWord { text: "welt".into(), start: 0.6, end: 0.8 },
         ];
         let summary = score_asr("hallo welt", "hallo welt");
-        let a = assess(&summary, "hallo welt", "hallo welt", &wav, Some(&words),
+        let a = assess(&summary, "hallo welt", "hallo welt", &wav, &Timings::new(&words, &[]),
             PronEvidence::Unavailable(PronReason::ModelMissing));
-        let f = a.fluency.expect("timings present");
+        let f = a.fluency.as_ref().expect("timings present");
         assert!(a.capabilities.word_timings);
+        assert_eq!(a.capabilities.timing_evidence, Some(TimingEvidence::Words));
         assert_eq!(f.pause_count, 1);
         assert!(f.wcpm > 0.0);
         assert_eq!(a.pauses.len(), 1);
@@ -433,10 +455,32 @@ mod tests {
     }
 
     #[test]
+    fn phrase_spans_alone_still_measure_fluency_and_say_so() {
+        // The whisper shape: no word rows, but the take is placed by phrase, and
+        // every number that was never sourced from word timings is still there.
+        // What is honestly missing is the per-word timeline.
+        let wav = two_bursts();
+        let phrases = vec![
+            TimedSegment { text: "hallo".into(), start: 0.0, end: 0.3 },
+            TimedSegment { text: "welt".into(), start: 0.5, end: 0.8 },
+        ];
+        let summary = score_asr("hallo welt", "hallo welt");
+        let a = assess(&summary, "hallo welt", "hallo welt", &wav,
+            &Timings::new(&[], &phrases), PronEvidence::Unavailable(PronReason::ModelMissing));
+        let f = a.fluency.as_ref().expect("phrase placement is placement");
+        assert_eq!(a.capabilities.timing_evidence, Some(TimingEvidence::Segments));
+        assert!(!a.capabilities.word_timings, "no word was ever placed");
+        assert_eq!(f.pause_count, 1, "the silence is on the waveform either way");
+        assert!(f.wcpm > 0.0);
+        assert!(a.headline().contains("wpm"));
+        assert!(a.words.iter().all(|w| w.start.is_none()));
+    }
+
+    #[test]
     fn weakest_words_are_ranked_and_capped() {
         let summary = score_asr("a b c d e f g h i j k l m n", "a b c d e f g h i j k l m n");
         let mut a = assess(&summary, "a b c d e f g h i j k l m n", "a b c d e f g h i j k l m n",
-            &[], Some(&timed(14, 0.5)),
+            &[], &Timings::new(&timed(14, 0.5), &[]),
             PronEvidence::Unavailable(PronReason::ModelMissing));
         // Hand-assign descending scores so the ranking is unambiguous.
         for (i, w) in a.words.iter_mut().enumerate() {
@@ -451,7 +495,7 @@ mod tests {
     #[test]
     fn stored_metrics_stay_small_and_round_trip() {
         let summary = score_asr("hallo welt", "hallo welt");
-        let mut a = assess(&summary, "hallo welt", "hallo welt", &[], None,
+        let mut a = assess(&summary, "hallo welt", "hallo welt", &[], &Timings::default(),
             PronEvidence::Unavailable(PronReason::ModelMissing));
         a.pauses = (0..100)
             .map(|i| Pause {

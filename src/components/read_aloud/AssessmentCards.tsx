@@ -5,14 +5,15 @@ import { GOOD_SCORE, PASS_SCORE } from "@/lib/read_aloud/types";
 
 /**
  * The three-axis result of one take: accuracy (the unchanged WIP score),
- * fluency (VAD + word timings) and pronunciation (CTC phoneme GOP).
+ * fluency (VAD + the STT run's placement — word timings, or phrase spans when
+ * the model places no words) and pronunciation (CTC phoneme GOP).
  *
  * Each axis is rendered independently and may say "not measured" — an absent
  * axis is never replaced by a proxy number. Used by the practice view right
  * after a take is measured, and by the attempts view from the stored `metrics`.
  */
 export default function AssessmentCards({ assessment }: { assessment: Assessment }) {
-  const { accuracy, fluency, pronunciation } = assessment;
+  const { accuracy, fluency, pronunciation, capabilities } = assessment;
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 min-w-0">
@@ -38,7 +39,7 @@ export default function AssessmentCards({ assessment }: { assessment: Assessment
         </p>
       </Card>
 
-      {/* Fluency — needs per-word timings from the STT model. */}
+      {/* Fluency — needs the STT run to have placed the take at all. */}
       <Card title="Fluency" hint="paces pauses from the waveform, not from the transcript">
         {fluency ? (
           <>
@@ -62,11 +63,19 @@ export default function AssessmentCards({ assessment }: { assessment: Assessment
                 {fluency.restart_count === 1 ? "" : "s"}
               </p>
             )}
+            {capabilities.timing_evidence === "segments" && (
+              <p className="text-[11px] text-text-tertiary">
+                Paced from phrase spans — this model places phrases rather than
+                words, so a pause is labelled by phrase and no word carries its
+                own position.
+              </p>
+            )}
           </>
         ) : (
           <p className="text-[11px] text-text-tertiary">
-            Not measured — the loaded speech model reports no word timings. Load a
-            Parakeet model on the Models page, then recognize the take again.
+            Not measured — the loaded speech model gave no timestamps at all, so
+            nothing placed this take in time. Recognize it again with a model
+            that reports them.
           </p>
         )}
       </Card>

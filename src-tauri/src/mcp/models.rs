@@ -150,10 +150,12 @@ impl DatasetMcpServer {
 
     /// The MCP twin of the `model_transcribe_detailed` command, so an agent can
     /// supply the fluency evidence `read_aloud_assess` and `read_aloud_submit`
-    /// ask for. The word rows are whatever the loaded engine measured it can do:
-    /// an engine without word timings returns `words: []` and
-    /// `word_timings: false` — an honest "not measured" — rather than failing.
-    #[tool(name = "model_transcribe_detailed", description = "Transcribe base64-encoded 16kHz mono WAV audio and return {text, words:[{text,start,end}], capabilities:{word_timings}} — the word-level timings read_aloud_assess and read_aloud_submit take as fluency evidence. Omit them and fluency is reported as not measured. Whether word rows exist is measured from the loaded engine at load time, not guessed from its model type: read `capabilities.word_timings` in the result (or `active_capabilities` from model_status) before assuming timings are there, and an engine without them returns an empty `words` array instead of an error. Requires a model to be loaded first (use model_load).")]
+    /// ask for. The placement is whatever the loaded engine measured it can do:
+    /// word rows when it places words, phrase spans when it only places phrases,
+    /// neither when it stamps nothing at all — and `capabilities` says which of
+    /// the three happened, rather than the call failing on an honest "not
+    /// measured".
+    #[tool(name = "model_transcribe_detailed", description = "Transcribe base64-encoded 16kHz mono WAV audio and return {text, words:[{text,start,end}], segments:[{text,start,end}], capabilities:{word_timings,timestamps}} — the placement read_aloud_assess, read_aloud_submit and read_aloud_rerecognize take as fluency evidence. Feed back whichever list is populated: `words` from an engine that places words (Parakeet), `segments` from one whose ceiling is a phrase (whisper). Phrase spans still carry fluency — pauses are detected on the waveform and the spans only say whether a silence fell at a phrase boundary — but per-word positions stay absent, so a stored assessment says `timing_evidence: \"segments\"` instead of `\"words\"`. An engine that stamps nothing returns two empty arrays and `word_timings: false` rather than an error. Read `capabilities` in the result (or `active_capabilities` from model_status) before assuming timings are there: the answer is measured from the loaded engine at load time, never guessed from its model type. Requires a model to be loaded first (use model_load).")]
     async fn model_transcribe_detailed(
         &self,
         Parameters(param): Parameters<ReadFileParam>,

@@ -74,10 +74,10 @@ struct FeedbackFocusWord { word, ipa: Option<String>, hint, score: Option<f64> }
 - the dataset language and the effective reference the scorer used, quoted, with its word count
 - the transcript the recognizer produced, quoted
 - **accuracy**: score, lenient score, WER, reference/correct/near-miss/misread/omitted/inserted/repeated counts, then the alignment runs — `misread: "tag" heard as "tak"`, `never said: "laut"`, `said but not in the text: "ja"` (capped at 12)
-- **fluency**: `wcpm` with its band, articulation rate, pause count (long / mid-phrase share), words between pauses, repeats and restarts, the reading span inside the recording — or an explicit "not measured: the speech model gave no word timings for this take…"
+- **fluency**: `wcpm` with its band, articulation rate, pause count (long / mid-phrase share), words between pauses, repeats and restarts, the reading span inside the recording — or an explicit "not measured: nothing placed this take in time (the speech model gave neither word nor phrase timings)…". A take placed by phrase spans alone gets the full fluency block: the numbers never came from the word list
 - **pronunciation**: score, weak ratio, the stored weakest words with their GOP — or the stored `unavailable_reason`, rendered in words (`describe_reason`)
 - **phone detail**, when it could be recomputed: `"hund" /h u n t/ 0.31 — weak /u/ 0.12 (heard /o/)`
-- **pauses**: length, start, kind, and the reference word each followed
+- **pauses**: length, start, kind, and the reference word each followed — the last omitted for a pause labelled from a phrase boundary, since nothing knows which word came before it
 - the recording: duration and format, and whether this analysis had the audio (it never does, in-app)
 
 Two subtleties worth stating, because both are failure modes that look like data:

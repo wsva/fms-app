@@ -143,10 +143,21 @@ export type PronUnavailableReason =
   | "tts_failed"
   | "too_short";
 
+/** What placed a scored take in time. `"words"` is the finer evidence; a model
+ *  whose timestamp ceiling is a phrase (whisper) reports `"segments"` — same
+ *  fluency numbers, less precise per-word positions. Absent on a row stored
+ *  before the key existed, which means `"words"`. */
+export type TimingEvidence = "words" | "segments";
+
 /** What this attempt's pipeline could actually measure. */
 export interface AssessmentCapabilities {
-  /** The STT model returned per-word timings, so fluency exists. */
+  /** The STT model returned per-word timings, so every word has a place on the
+   *  timeline. Not the fluency gate: `timing_evidence` says what placed the
+   *  take, and phrase spans measure fluency too. */
   word_timings: boolean;
+  /** What the fluency numbers were measured from, so a pace read back months
+   *  later still says what kind of evidence produced it. */
+  timing_evidence?: TimingEvidence | null;
   /** The phoneme GOP pass ran. */
   gop: boolean;
   /** A dataset-owned standard clip supplied the reference phone timeline. */
@@ -199,7 +210,8 @@ export interface Pause {
   after_ref?: number | null;
 }
 
-/** The aggregate fluency picture. Absent when the STT gave no word timings. */
+/** The aggregate fluency picture. Absent when nothing placed the take in time —
+ *  pauses are detected on the waveform, so either kind of placement is enough. */
 export interface FluencyMetrics {
   /** Length of the whole recording, in seconds. */
   duration: number;
@@ -273,8 +285,11 @@ export interface Assessment {
  */
 export interface HubAssessResult {
   recognized: string;
-  /** Word timings when the hub's model gave them; empty means fluency not measured. */
+  /** Word timings when the hub's model placed every word; empty means it did not. */
   words: { text: string; start: number; end: number }[] | null;
+  /** Phrase spans, what a model without word timings places instead. Either
+   *  list is enough to carry fluency; feed back whichever the hub filled. */
+  segments?: { text: string; start: number; end: number }[] | null;
   assessment: Assessment;
 }
 
