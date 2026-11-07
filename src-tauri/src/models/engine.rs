@@ -65,6 +65,132 @@ fn cpp_isa_supported() -> Result<(), String> {
     Ok(())
 }
 
+/// The word a reader recognises for a compute device, so the log says GPU or
+/// CPU instead of naming an enum.
+#[cfg(feature = "desktop")]
+fn device_type_word(kind: transcribe_cpp::DeviceType) -> &'static str {
+    use transcribe_cpp::DeviceType as D;
+    match kind {
+        D::Cpu => "the CPU",
+        D::Gpu => "a GPU",
+        D::Igpu => "the integrated GPU",
+        D::Accel => "a host accelerator",
+        // `#[non_exhaustive]`: a runtime newer than this binding can report a
+        // type we have never seen. Say so rather than guessing which side of the
+        // CPU/GPU line it falls on.
+        _ => "an unrecognised device",
+    }
+}
+
+/// Say what the model just loaded is *actually* running on.
+///
+/// `Backend::Auto` is a request, not an answer: the runtime binds whatever the
+/// machine gave it and CPU is always the floor, so the only honest placement is
+/// the one read back after the load. A machine with two GPUs makes the question
+/// sharper — which one, and why not the other — so the registered device list
+/// and the compiled-in GPU backends go to the log with it. A silent fallback to
+/// the CPU is exactly what made the last slow transcription impossible to
+/// explain from the outside.
+fn log_compute_device(model: &ActiveModel, version: &str) {
+    match model {
+        #[cfg(feature = "desktop")]
+        ActiveModel::TranscribeCpp(session) => {
+            let loaded = session.model();
+            // The *effective* backend after degradation. "cpu" here means a GPU
+            // was wanted and not obtained, which is the whole point of asking.
+            let backend = loaded.backend();
+            let chosen = loaded.device();
+            match chosen.as_ref() {
+                Ok(device) => {
+                    const MIB: u64 = 1024 * 1024;
+                    let name = if device.description.trim().is_empty() {
+                        device.name.as_str()
+                    } else {
+                        device.description.as_str()
+                    };
+                    let mut line = format!(
+                        "Model '{}' is running on {} '{}' via the '{}' backend",
+                        version,
+                        device_type_word(device.device_type),
+                        name,
+                        backend
+                    );
+                    // A PCI bus id is what tells two identical cards apart; only
+                    // PCI devices report one (Metal reports none).
+                    if let Some(id) = device.device_id.as_deref() {
+                        line.push_str(&format!(" (id {})", id));
+                    }
+                    if device.memory_total > 0 {
+                        line.push_str(&format!(
+                            " - {} MiB of {} MiB free",
+                            device.memory_free / MIB,
+                            device.memory_total / MIB
+                        ));
+                    }
+                    log::info!("{}", line);
+                }
+                // No resolved device is a real answer, not a missing one: the
+                // backend string still says what the run is on.
+                Err(e) => log::warn!(
+                    "Model '{}' is running on the '{}' backend, which reported no device: {}",
+                    version,
+                    backend,
+                    e
+                ),
+            }
+            log_registered_devices(chosen.as_ref().ok());
+        }
+        // An ONNX model's placement is `ort`'s choice and transcribe-rs keeps it:
+        // it builds the provider list from a global preference and reports no
+        // device back. So this says what cannot be known instead of claiming the
+        // CPU — the preference is `Auto`, which deliberately excludes the GPU
+        // providers that need sequential execution, but that is a request.
+        _ => log::info!(
+            "Model '{}' is an ONNX model: its runtime chooses the execution providers itself and reports no device back, so its placement is not measurable from here",
+            version
+        ),
+    }
+}
+
+/// What this binary could have run on, and what the machine offered. Two
+/// different absences, worth telling apart in the log: a backend that is not
+/// compiled in is a build fact, a device that is not registered is a driver or
+/// hardware fact.
+#[cfg(feature = "desktop")]
+fn log_registered_devices(chosen: Option<&transcribe_cpp::Device>) {
+    use transcribe_cpp::{backend_available, devices, Backend};
+
+    let compiled: Vec<&str> = [
+        (Backend::Metal, "metal"),
+        (Backend::Vulkan, "vulkan"),
+        (Backend::Cuda, "cuda"),
+        (Backend::Rocm, "rocm"),
+    ]
+    .into_iter()
+    .filter(|(backend, _)| backend_available(*backend))
+    .map(|(_, name)| name)
+    .collect();
+    let registered = devices();
+    let names = if compiled.is_empty() { "none".to_string() } else { compiled.join(", ") };
+    log::info!(
+        "GPU backends compiled into this build: {}; {} compute device(s) registered",
+        names,
+        registered.len()
+    );
+    for device in registered.iter() {
+        // `Device` compares by handle, so this marks the one the model got.
+        let mark = if Some(device) == chosen { " [in use]" } else { "" };
+        log::info!(
+            "  device: {} - {} (kind {}, type {}){}",
+            device.name,
+            device.description,
+            device.kind,
+            device_type_word(device.device_type),
+            mark
+        );
+    }
+}
+
 pub fn load_model_core(state: &ModelState, version: &str) -> Result<String, String> {
     log::info!("Loading model '{}'", version);
     {
@@ -149,6 +275,7 @@ pub fn load_model_core(state: &ModelState, version: &str) -> Result<String, Stri
     // its slot for the whole run, so nothing later can ask it anything. This is
     // the answer every capability gate in `transcribe` reads.
     let measured = active_model.engine_capabilities(&def.capabilities);
+    log_compute_device(&active_model, version);
 
     {
         let mut m = state.model.lock().unwrap();
