@@ -43,24 +43,24 @@ backend compiled in. macOS gets Metal from the target dependency in
 measurement paid for that dependency: 30 s of whisper-large on an RTX 5070 Ti
 took **20.2 s on the CPU and 0.82 s on Vulkan**, byte-identical transcript, and
 the load cost 1.4 s rather than 0.8 s. A source build on a machine without the
-SDK stays CPU-only, which is still the default, and opting in is one line:
+SDK stays CPU-only, which is still the default, and opting in is one variable:
 
 ```powershell
-# install the Vulkan SDK first, then, in a shell new enough to have picked up
-# its machine-wide VULKAN_SDK, add its lib dir to the linker's search path and
-# ask for the backend (keep GGML_NATIVE=OFF — see the FindSIMD note below)
-$env:LIB = "$env:VULKAN_SDK\lib;$env:LIB"
+# install the Vulkan SDK first (then restart the shell — CMake's configure
+# reads VULKAN_SDK and `glslc`, which the installer sets machine-wide), and
+# keep GGML_NATIVE=OFF: see the FindSIMD note below
 $env:TRANSCRIBE_CMAKE_ARGS = "-DGGML_NATIVE=OFF -DTRANSCRIBE_VULKAN=ON"
 pnpm tauri dev
 ```
 
-The SDK installs `VULKAN_SDK` for the whole machine, so a shell opened after it
-needs only the two lines above; a shell that predates the install has neither
-that variable nor `glslc` on `PATH`, and CI is always such a shell, which is why
-`build.yml` resolves the SDK directory off the disk and exports both. The `LIB`
-line is not decoration: the backend links `vulkan-1` as a system library, link.exe
-searches only `LIB`, and without it the whole C++ builds and the Rust link then
-dies at LNK1181 `cannot open input file 'vulkan-1.lib'`.
+One variable, because the *link* is handled for you: ggml's install manifest
+names `vulkan-1` as a system library, link.exe searches `LIB` and `/LIBPATH`
+and never `VULKAN_SDK`, so `src-tauri/build.rs` puts `<sdk>\lib` on the search
+path itself — the SDK read from `VULKAN_SDK`, else off the default
+`C:\VulkanSDK` root, newest first. Ask by hand instead and the GPU build
+compiles the entire C++ and then dies at LNK1181 `cannot open input file
+'vulkan-1.lib'`. CI is a shell that predates every install, which is why
+`build.yml` resolves the SDK off the disk and exports the values there too.
 
 `TRANSCRIBE_CMAKE_ARGS` in `src-tauri/.cargo/config.toml` carries
 `-DGGML_NATIVE=OFF`, and a `[env]` entry without

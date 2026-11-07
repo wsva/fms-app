@@ -5,8 +5,59 @@ use std::fs;
 fn main() {
     emit_git_describe();
     embed_test_manifest();
+    point_linker_at_vulkan_sdk();
     pack_user_manual();
     tauri_build::build()
+}
+
+/// Put the Vulkan SDK's import library on the linker's search path.
+///
+/// The GPU backend is a build-time decision (`TRANSCRIBE_VULKAN`), and ggml's
+/// install manifest then emits `cargo:rustc-link-lib=dylib=vulkan-1` for
+/// whatever it compiled (`transcribe-install.cmake`). link.exe searches the MSVC
+/// directories it derives itself plus `LIB` and `/LIBPATH` — never
+/// `VULKAN_SDK` — so a build that asked for the backend compiled the entire C++
+/// and then died at `LNK1181: cannot open input file 'vulkan-1.lib'`, which
+/// names a library nobody typed and reads like a broken dependency.
+///
+/// The SDK installer already sets `VULKAN_SDK` machine-wide, but a process
+/// started before the install — an open IDE, a CI job's shell — does not have
+/// it, so the value is taken from the environment when present and otherwise
+/// off the default install root, newest directory first. That is the same two
+/// sources `build.yml` resolves from.
+///
+/// Only a *search path* is added, never a library: a CPU-only configuration
+/// puts no `vulkan-1` on the link line, so this is inert there; and a machine
+/// with the SDK nowhere expected still gets the plain LNK1181, which
+/// `src-tauri/.cargo/config.toml` explains.
+fn point_linker_at_vulkan_sdk() {
+    println!("cargo:rerun-if-env-changed=VULKAN_SDK");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    // Every candidate, environment first, then the default install root.
+    let from_env = std::env::var("VULKAN_SDK")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let mut installed: Vec<PathBuf> = fs::read_dir(r"C:\VulkanSDK")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("lib").join("vulkan-1.lib").is_file())
+        .collect();
+    // Newest first, by name: NTFS hands back directory entries in no promised
+    // order, and several SDKs side by side is the normal state of a dev machine.
+    installed.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    let lib = from_env
+        .into_iter()
+        .chain(installed)
+        .map(|root| root.join("lib"))
+        .find(|lib| lib.is_dir());
+    if let Some(lib) = lib {
+        println!("cargo:rustc-link-search=native={}", lib.display());
+    }
 }
 
 /// Pack `docs/manual` into `$OUT_DIR/manual.tar.gz` for the crate to embed.

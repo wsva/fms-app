@@ -42,10 +42,13 @@
 # A `[env]` entry without `force = true` does not override a variable already in
 # the process environment, which is exactly why the line above works: the shell's
 # value wins over this one. Install the SDK first
-# (https://vulkan.lunarg.com/sdk/home), keep `-DGGML_NATIVE=OFF` in the value,
-# and add `<sdk>\lib` to `LIB` too — the backend links `vulkan-1` as a system
-# library, link.exe searches only `LIB`, and without that entry the Rust link
-# dies at LNK1181 *after* the whole C++ has built. Then read the app log:
+# (https://vulkan.lunarg.com/sdk/home) and restart the shell before configuring:
+# `find_package` reads `VULKAN_SDK` and `glslc`, and the installer publishes both
+# machine-wide, which a running shell never picked up. The *link* needs nothing
+# from you — `build.rs` puts `<sdk>\lib` on the linker's search path, since
+# link.exe reads `LIB` and `/LIBPATH` and never `VULKAN_SDK`, and without it a
+# GPU build compiles the whole C++ and dies at LNK1181. Keep
+# `-DGGML_NATIVE=OFF` in the value, then read the app log:
 # `models/engine.rs::log_compute_device` prints the backends compiled in and the
 # device a model actually got, so a working GPU build reads `via the 'Vulkan1'
 # backend` instead of `on the CPU`. Runtime needs no SDK: the statically-linked

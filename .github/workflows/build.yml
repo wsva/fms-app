@@ -270,11 +270,12 @@ jobs:
       # follows it; the installer sets it machine-wide, which a job's shell —
       # started before the install — does not see, so it is resolved off the disk.
       # `LIB` is what the *Rust* link needs: the Vulkan backend links `vulkan-1`
-      # as a system library, link.exe searches only LIB, and without this the app
-      # dies at LNK1181 "cannot open input file 'vulkan-1.lib'" after the whole
-      # native build succeeded. Each check below is the point: a lane missing part
-      # of its SDK should cost ten seconds here, not twenty minutes of ggml and a
-      # failed release.
+      # as a system library and link.exe searches only LIB and /LIBPATH. The
+      # app's own `build.rs` now adds that directory from the same two sources,
+      # so this export is the explicit twin rather than the only way — kept
+      # because a release should not depend on a heuristic finding the SDK.
+      # Each check below is the point: a lane missing part of its SDK should cost
+      # ten seconds here, not twenty minutes of ggml and a failed release.
       - name: Point CMake and the linker at the Vulkan SDK
         if: runner.os == 'Windows'
         shell: pwsh
