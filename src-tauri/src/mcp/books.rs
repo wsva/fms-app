@@ -410,6 +410,13 @@ struct ReadAloudRerecognizeParam {
     /// `assessment`.
     #[serde(default)]
     via: Option<String>,
+    /// Which speech model produced `recognized` (the `model` field of
+    /// `model_transcribe_detailed`, or the `provenance.stt_model` of a hub's
+    /// `read_aloud_assess_take`). Every model's measurement of one attempt is
+    /// kept under its own name, so omitting it files this one as `unrecorded`
+    /// rather than confusing it with a named engine's answer.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -574,6 +581,11 @@ struct ReadAloudSubmitParam {
     /// `assessment`.
     #[serde(default)]
     via: Option<String>,
+    /// Which speech model produced `recognized` — see the note on
+    /// [`ReadAloudRerecognizeParam::model`]. Omit it and the measurement is filed
+    /// as `unrecorded`.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
@@ -1310,7 +1322,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Text deleted"}).to_string())
     }
 
-    #[tool(name = "read_aloud_list_attempts", description = "List all recorded attempts for a text (newest first) with score, transcript, resolved audio URL, and the stored assessment (`metrics`: accuracy counts, fluency, pronunciation, weakest words, pauses) when one was computed. Metrics are absent for takes whose recording is gone or that predate assessment.")]
+    #[tool(name = "read_aloud_list_attempts", description = "List all recorded attempts for a text (newest first) with score, transcript, resolved audio URL, and the stored assessment (`metrics`: accuracy counts, fluency, pronunciation, weakest words, pauses) when one was computed. Metrics are absent for takes whose recording is gone or that predate assessment. Each attempt's `measurements` is every speech model that has measured it — `{model, score, wcpm, pronunciation, via, measured_at}` best score first — and `score` is the best of them, the attempt's final score. The list is absent when nothing comparable has been measured: a take recorded before per-model scoring, or one measured against a reference text since edited, shows its one headline number and no breakdown.")]
     async fn read_aloud_list_attempts(&self, Parameters(param): Parameters<ReadAloudTextRefParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         let items = datasets::read_aloud::read_aloud_list_attempts(settings, param.dataset_uuid, param.text_uuid).await?;
@@ -1324,7 +1336,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Attempt deleted"}).to_string())
     }
 
-    #[tool(name = "read_aloud_rerecognize", description = "Measure an existing attempt: overwrite its transcript with a freshly recognized one, score it against the current reference, store the three axes and award the scaled XP the new score earns (+1 at score >= 60, +1 more at >= 80, each tier deduped per text), all in place. The recording is left untouched — pass the transcript produced by re-transcribing the attempt's device-local WAV (via model_transcribe_detailed, whose `words` go straight into this tool's `words` parameter and whose `segments` into its `segments` — pass whichever the model produced; phrase spans still measure fluency, they only place it less finely) with the loaded STT model. This is both the UI's 'Assess again' and the scoring half of a fresh take saved by read_aloud_save_take, so it is how an attempt that was stored unmeasured gets its numbers. Pass `assessment` (the `assessment` field of a hub's read_aloud_assess_take reply) with `via` to measure from a take measured elsewhere: this device then skips its own model passes and journals provenance with the attempt. Returns the same result shape as read_aloud_submit (score, summary, attempt, assessment, XP awarded).")]
+    #[tool(name = "read_aloud_rerecognize", description = "Measure an existing attempt: overwrite its transcript with a freshly recognized one, score it against the current reference, store the three axes and award the scaled XP the new score earns (+1 at score >= 60, +1 more at >= 80, each tier deduped per text), all in place. The recording is left untouched — pass the transcript produced by re-transcribing the attempt's device-local WAV (via model_transcribe_detailed, whose `words` go straight into this tool's `words` parameter and whose `segments` into its `segments` — pass whichever the model produced; phrase spans still measure fluency, they only place it less finely) with the loaded STT model. This is both the UI's 'Assess again' and the scoring half of a fresh take saved by read_aloud_save_take, so it is how an attempt that was stored unmeasured gets its numbers. Pass `assessment` (the `assessment` field of a hub's read_aloud_assess_take reply) with `via` to measure from a take measured elsewhere: this device then skips its own model passes and journals provenance with the attempt. Returns the same result shape as read_aloud_submit (score, summary, attempt, assessment, XP awarded). Pass `model` (the `model` field of `model_transcribe_detailed`) so this measurement is filed under the engine that produced it: every model's number for one attempt is kept, and the attempt's final score and XP follow the best of them rather than the newest — a weaker model adds a row to the attempt's `measurements` and takes nothing away, while a better one takes over the headline. Omit it and the measurement is filed as `unrecorded`.")]
     async fn read_aloud_rerecognize(&self, Parameters(param): Parameters<ReadAloudRerecognizeParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_rerecognize: dataset={}, attempt={}", param.dataset_uuid, param.uuid);
         let settings = self.app.state::<SettingsState>();
@@ -1338,6 +1350,7 @@ impl DatasetMcpServer {
             timed_segments(param.segments),
             param.assessment.map(serde_json::Value::from),
             param.via,
+            param.model,
         )
         .await?;
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
@@ -1500,7 +1513,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&value).unwrap_or_default())
     }
 
-    #[tool(name = "read_aloud_submit", description = "Submit a reading attempt as one call: save the take, then measure it — read_aloud_save_take followed by read_aloud_rerecognize over the same bodies, for a caller that wants one atomic call rather than two. Stores the (optional) recording, scores the recognized transcript against the reference text with the WIP-based ASR metric, assesses fluency and pronunciation from the stored WAV, and awards scaled XP (1 XP at score >= 60, +1 more at >= 80). Pass `words` (or `segments`, the phrase spans a model without word timings produces) from model_transcribe_detailed to get the fluency axis. Pass `assessment` (the reply of a hub's read_aloud_assess_take) with `via` to store a take measured elsewhere: this device then skips its own model passes and journals provenance with the attempt. Returns the score, the full scoring summary (alignment chunks included), the three-axis `assessment`, the saved attempt (with `metrics`), and XP awarded. Prefer the two-step route when measuring can fail or take minutes: a take saved by read_aloud_submit is only stored once its measurement succeeded, so an abandoned hub call loses it.")]
+    #[tool(name = "read_aloud_submit", description = "Submit a reading attempt as one call: save the take, then measure it — read_aloud_save_take followed by read_aloud_rerecognize over the same bodies, for a caller that wants one atomic call rather than two. Stores the (optional) recording, scores the recognized transcript against the reference text with the WIP-based ASR metric, assesses fluency and pronunciation from the stored WAV, and awards scaled XP (1 XP at score >= 60, +1 more at >= 80). Pass `words` (or `segments`, the phrase spans a model without word timings produces) from model_transcribe_detailed to get the fluency axis. Pass `assessment` (the reply of a hub's read_aloud_assess_take) with `via` to store a take measured elsewhere: this device then skips its own model passes and journals provenance with the attempt. Returns the score, the full scoring summary (alignment chunks included), the three-axis `assessment`, the saved attempt (with `metrics`), and XP awarded. Pass `model` to name the speech model behind `recognized`: every model's measurement is kept on the attempt and its final score is the best of them, so measuring with a weaker model adds a row rather than replacing a better score. Prefer the two-step route when measuring can fail or take minutes: a take saved by read_aloud_submit is only stored once its measurement succeeded, so an abandoned hub call loses it.")]
     async fn read_aloud_submit(&self, Parameters(param): Parameters<ReadAloudSubmitParam>) -> Result<String, String> {
         log::info!("[MCP] read_aloud_submit: dataset={}, text={}", param.dataset_uuid, param.text_uuid);
         let settings = self.app.state::<SettingsState>();
@@ -1515,6 +1528,7 @@ impl DatasetMcpServer {
             timed_segments(param.segments),
             param.assessment.map(serde_json::Value::from),
             param.via,
+            param.model,
         )
         .await?;
         Ok(serde_json::to_string_pretty(&result).unwrap_or_default())

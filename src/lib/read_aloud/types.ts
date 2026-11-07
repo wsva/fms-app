@@ -58,8 +58,19 @@ export interface ReadAttempt {
   audio_url?: string | null;
   /** STT transcript of the recording. */
   recognized: string;
-  /** WIP-based ASR score 0-100 against the reference text. */
+  /** WIP-based ASR score 0-100 against the reference text. The attempt's final
+   *  score: the best of every model that has measured it (see `measurements`),
+   *  not simply the newest answer. */
   score: number;
+  /**
+   * Every speech model that has measured this take, best score first — the
+   * breakdown behind `score`. The same recording scored by two models does not
+   * give two versions of one number, so both are kept and the best one is final.
+   * Absent when nothing comparable has been measured: a take recorded before
+   * per-model scoring, or one measured against a reference text since edited,
+   * shows its one headline number and no breakdown.
+   */
+  measurements?: AttemptMeasurement[] | null;
   /**
    * The stored three-axis assessment, when one was computed. Absent for attempts
    * recorded before assessment existed and for attempts whose recording is gone.
@@ -73,6 +84,25 @@ export interface ReadAttempt {
    */
   feedback?: FeedbackReport | null;
   created_at: string;
+}
+
+/**
+ * One speech model's measurement of one attempt. `model` is the STT engine's
+ * catalog id, or `"unrecorded"` for a measurement taken before the engine was
+ * named. The three numbers are the axes the attempt card shows; only the score
+ * decides which measurement is the attempt's final one.
+ */
+export interface AttemptMeasurement {
+  model: string;
+  /** Accuracy 0-100. */
+  score: number;
+  /** Correct words per minute, when something placed the take in time. */
+  wcpm?: number | null;
+  /** Pronunciation 0-100, when the phoneme pass ran. */
+  pronunciation?: number | null;
+  /** `"hub"` when another device ran the model. */
+  via?: string | null;
+  measured_at: string;
 }
 
 /** The kind of one alignment run between reference and transcript. */
@@ -118,6 +148,11 @@ export interface ReadAloudSubmitResult {
    *  `metrics` either, and the UI shows it as unmeasured. */
   summary: AsrScoreSummary | null;
   attempt: ReadAttempt;
+  /** What *this* call measured, named after the model that produced it — kept
+   *  apart because it is not always the headline: measuring with a weaker model
+   *  reports its own number while the attempt's final score stays the best one
+   *  already earned. It is the row this call added to `attempt.measurements`. */
+  measurement?: AttemptMeasurement | null;
   /** Accuracy (the same number as `score`), fluency and pronunciation. Absent
    *  for the same reason as `summary`. */
   assessment: Assessment | null;
@@ -291,6 +326,10 @@ export interface HubAssessResult {
    *  list is enough to carry fluency; feed back whichever the hub filled. */
   segments?: { text: string; start: number; end: number }[] | null;
   assessment: Assessment;
+  /** Which model on the hub measured the take. Feed it back as the `model` of
+   *  the measurement this device stores, so the breakdown names the engine that
+   *  actually produced the number. */
+  provenance?: { stt_model?: string | null, schema_version?: number } | null;
 }
 
 /**

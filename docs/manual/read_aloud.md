@@ -2,7 +2,7 @@
 
 Read Aloud is a speaking exercise: you record yourself reading a text aloud, and FmS uses speech‑to‑text to score how closely what you said matches the written words. It's designed to build pronunciation and fluency, and to let you track improvement over time.
 
-Three words are used throughout, with one meaning each: an **attempt** is one submission (recording plus transcript plus scores), a **recording** is the audio that attempt captured, and a **standard audio** is a reference clip the *dataset* owns, which pronunciation is measured against.
+Three words are used throughout, with one meaning each: an **attempt** is one submission (recording plus transcript plus scores), a **measurement** is one speech model's scoring of that attempt, a **recording** is the audio that attempt captured, and a **standard audio** is a reference clip the *dataset* owns, which pronunciation is measured against.
 
 ## Getting set up
 
@@ -48,6 +48,15 @@ Clips belong to the dataset, so they travel with it: another device that syncs t
 
 The **diff view** lines up the written text against what was recognised from your recording, so you can see exactly which words you missed or mispronounced rather than just getting a single number. This is the most useful part of the exercise — it turns a score into concrete feedback.
 
+## Every model's score, and the one that counts
+
+The score depends on the speech model that heard you: the same take transcribed by two models can come out tens of points apart, because the comparison is against whichever transcript that model produced. That is information, not noise, so FmS keeps all of it. Each attempt carries one **measurement** per model — its score, and where relevant its pace and pronunciation — and lists them under the result, best first. Your **final score is the best** of those measurements, and that is the number XP is awarded on.
+
+Two consequences are worth knowing:
+
+- **Measuring with a weaker model cannot lower your score.** Running **Assess again** on another model adds a row to the list; it never replaces a better number you already earned. Right after a take, the badge beside the diff is the number *that* model gave — so it can read lower than the attempt's final score, which is the best of the list and what the history and XP use. The list under the result names every model that has heard the take and marks the best.
+- **Edit the text and the list starts over.** Scores measured against the old words are not comparable to scores measured against the new ones, so changing a text's reference clears its breakdown rather than ranking numbers that mean different things.
+
 ## Attempts and history
 
 Every recording you make is saved as an **attempt** — saved the moment you press **Stop**, before anything is scored, so nothing you recorded can be lost to a failed or abandoned measurement. The **attempts panel** lists your previous attempts for a text so you can:
@@ -55,7 +64,7 @@ Every recording you make is saved as an **attempt** — saved the moment you pre
 - Read all three scores — accuracy, fluency and pronunciation — straight off each card, without opening the attempt. A score that could not be measured reads `—`, never a stand‑in number; hover it for the reason. A take whose measurement is still outstanding — you chose **Not now**, or the scoring did not finish — carries a **not measured** chip, and its transcript reads **not transcribed yet** until something runs over it.
 - Play back earlier recordings and compare them to now.
 - Watch your scores trend upward as you repeat a text.
-- **Assess again** an earlier take: it re‑transcribes the recording and recomputes its accuracy, fluency and pronunciation in place — the same measurement a fresh take gets, so it is also how a **not measured** attempt finally gets its numbers. The recording travels to your other devices via sync (the `attempt_audio` plane), so once a sync round has delivered it the action works wherever the attempt is — if it is still missing, run a sync to fetch the take. The new result syncs back too: after a round, the re-assessed score and metrics appear on every device that holds the attempt, the newest assessment winning. An **Ask agent** feedback report rides the same row, so it reaches your other devices as well — and because it quotes the numbers it was written from, re-assessing a take clears the now-stale report on every device (asking again is one click).
+- **Assess again** an earlier take: it re‑transcribes the recording and recomputes its accuracy, fluency and pronunciation in place — the same measurement a fresh take gets, so it is also how a **not measured** attempt finally gets its numbers. It is also how you score a take with a *different* model: each model's measurement is kept beside the others, and the best of them stays the attempt's final score. The recording travels to your other devices via sync (the `attempt_audio` plane), so once a sync round has delivered it the action works wherever the attempt is — if it is still missing, run a sync to fetch the take. The new result syncs back too: after a round, the re-assessed score and metrics appear on every device that holds the attempt, the newest assessment winning. An **Ask agent** feedback report rides the same row, so it reaches your other devices as well — and because it quotes the numbers it was written from, re-assessing a take clears the now-stale report on every device (asking again is one click).
 - Navigate between attempts and, where relevant, navigate to the sentences that most need work.
 
 Assessment can take a while (transcription first, then the phoneme model). An **assessment log** docked at the bottom of the attempts page tails each stage as it runs, so the wait is never silent; collapse it to a single line or close it once the run finishes.

@@ -94,6 +94,12 @@ pub struct DetailedTranscript {
     /// sending the coarser list beside them.
     pub segments: Vec<TranscriptSegment>,
     pub capabilities: TranscriptCapabilities,
+    /// The catalog id of the model that produced this, so a transcript can be
+    /// attributed once the audio is scored. Set by
+    /// [`transcribe_samples_detailed`] from what is actually loaded, which is
+    /// the answer to a question the caller cannot ask reliably: the idle
+    /// timeout unloads a model and the auto-load may bring back another one.
+    pub model: Option<String>,
 }
 
 impl DetailedTranscript {
@@ -110,6 +116,7 @@ impl DetailedTranscript {
                 .map(|s| TranscriptSegment { text: s.text, start: s.start, end: s.end })
                 .collect(),
             capabilities: TranscriptCapabilities { word_timings: false, timestamps },
+            model: None,
         }
     }
 }
@@ -470,12 +477,17 @@ pub fn transcribe_samples_detailed(
     // one call, and an engine with no word rows is not on this path at all.
     let duration = samples.len() as f64 / STT_SAMPLE_RATE as f64;
     let window = if caps.word_timings { caps.max_chunk_secs } else { None };
-    match window {
+    let mut transcript = match window {
         Some(w) if duration > w => {
-            transcribe_detailed_chunked(guard.model(), samples, duration, w, caps.timestamps)
+            transcribe_detailed_chunked(guard.model(), samples, duration, w, caps.timestamps)?
         }
-        _ => transcribe_detailed_pass(guard.model(), samples, caps),
-    }
+        _ => transcribe_detailed_pass(guard.model(), samples, caps)?,
+    };
+    // Named after the run, from the loaded model rather than the selected one:
+    // read-aloud scoring files the score under this name, so a wrong or blank
+    // name is a breakdown that blames the wrong model.
+    transcript.model = state.active_version.lock().unwrap().clone();
+    Ok(transcript)
 }
 
 fn transcribe_detailed_pass(
@@ -490,6 +502,7 @@ fn transcribe_detailed_pass(
             words: words.into_iter().filter(|w| !w.text.trim().is_empty()).collect(),
             segments: Vec::new(),
             capabilities: TranscriptCapabilities { word_timings: true, timestamps: caps.timestamps },
+            model: None,
         });
     }
 
@@ -604,6 +617,7 @@ fn transcribe_detailed_chunked(
         // the same rule [`DetailedTranscript::segments`] documents.
         segments: Vec::new(),
         capabilities: TranscriptCapabilities { word_timings: true, timestamps: granularity },
+        model: None,
     })
 }
 

@@ -18,7 +18,11 @@ import type { ReadAttempt, ReadText, StandardAudioAssessment } from "@/lib/read_
 import { assessStandardAudio } from "@/lib/read_aloud/standardAudio";
 import { textReference, type AssessAgain } from "@/components/read_aloud/useAssessAgain";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
-import AssessmentCards, { PauseRibbon, ScoreAxes } from "@/components/read_aloud/AssessmentCards";
+import AssessmentCards, {
+  ModelScores,
+  PauseRibbon,
+  ScoreAxes,
+} from "@/components/read_aloud/AssessmentCards";
 import AssessmentLogPanel from "@/components/read_aloud/AssessmentLogPanel";
 import FeedbackPanel from "@/components/read_aloud/FeedbackPanel";
 import { highlightDifferences } from "@/components/books/diff";
@@ -642,6 +646,12 @@ export default function AttemptsPanel({
                 size="md"
               />
             )}
+
+            {/* Which model heard what. The take's score is the best of these and
+                the cards above are the best measurement's, so this is the part
+                of the picture a single number cannot tell: the same recording
+                measured differently by every engine that has run over it. */}
+            <ModelScores measurements={selectedAttempt.measurements} />
 
             {/* What to do about those numbers. A stored report is shown as it
                 was saved; with none, the button asks for one. The report is

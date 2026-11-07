@@ -66,6 +66,7 @@ export function measureAttempt({
   segments,
   assessment,
   via,
+  model,
 }: {
   datasetUuid: string;
   /** The saved attempt being measured. */
@@ -75,6 +76,11 @@ export function measureAttempt({
   segments?: SegmentTiming[] | null;
   assessment?: Assessment | null;
   via?: string | null;
+  /** Which speech model produced `recognized`. Every model's measurement of one
+   *  take is kept under its own name and the attempt's final score is the best
+   *  of them, so naming it is what lets a weaker model add a row without taking
+   *  a score away. */
+  model?: string | null;
 }): Promise<ReadAloudSubmitResult> {
   return invoke<ReadAloudSubmitResult>("read_aloud_rerecognize", {
     datasetUuid,
@@ -86,6 +92,7 @@ export function measureAttempt({
     // measured and no provenance key is written.
     assessment: assessment ?? null,
     via: via ?? null,
+    model: model ?? null,
   });
 }
 
@@ -154,6 +161,8 @@ export async function rerecognizeAttempt(
       words: WordTiming[];
       segments: SegmentTiming[];
       capabilities: { word_timings: boolean };
+      /** The catalog id of the model that just ran. */
+      model?: string | null;
     }>("model_transcribe_detailed", { wavBase64 });
     const recognized = (detailed.text || "").trim();
     const words = detailed.capabilities?.word_timings && detailed.words?.length ? detailed.words : null;
@@ -161,7 +170,7 @@ export async function rerecognizeAttempt(
     logTranscript(recognized, words, segments);
 
     logStep("Scoring accuracy, fluency and pronunciation (the first run loads the phoneme model)…");
-    const result = await measureAttempt({ datasetUuid, uuid: attempt.uuid, recognized, words, segments });
+    const result = await measureAttempt({ datasetUuid, uuid: attempt.uuid, recognized, words, segments, model: detailed.model });
 
     finishAssessment(
       true,
@@ -249,6 +258,9 @@ export async function measureAttemptOnHub({
       segments,
       assessment: reply.assessment,
       via: "hub",
+      // The hub names the engine it measured with; this device files the number
+      // under that name rather than under "whoever ran it last".
+      model: reply.provenance?.stt_model,
     });
 
     finishAssessment(

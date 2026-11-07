@@ -287,7 +287,9 @@ pub(crate) fn clip_path(dir: &Path, text_uuid: &str, audio_uuid: &str) -> PathBu
 
 /// sha256 of the effective reference — the exact string the phones are built
 /// from, which is what makes staleness a comparison instead of a migration.
-fn text_digest(reference: &str) -> String {
+/// Shared with [`super::measurement`], whose per-model scores are only
+/// comparable to each other while the reference they were scored against holds.
+pub(crate) fn text_digest(reference: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(reference.as_bytes());
     hasher

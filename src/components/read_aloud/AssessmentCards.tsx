@@ -1,6 +1,12 @@
 "use client";
 
-import type { Assessment, Pause, PronUnavailableReason, RateBand } from "@/lib/read_aloud/types";
+import type {
+  Assessment,
+  AttemptMeasurement,
+  Pause,
+  PronUnavailableReason,
+  RateBand,
+} from "@/lib/read_aloud/types";
 import { GOOD_SCORE, PASS_SCORE } from "@/lib/read_aloud/types";
 
 /**
@@ -235,6 +241,92 @@ type ScoreAxis = {
   tone: string;
   title: string;
 };
+
+/**
+ * Every speech model's measurement of one take, best score first.
+ *
+ * The same recording heard by two models does not give two versions of one
+ * number: it gives two numbers, often tens of points apart, and a lone `92`
+ * cannot say that another model would have heard `61`. So the attempt keeps one
+ * row per model and its final score is the best of them — this is that list.
+ *
+ * Nothing is measured or invented here: the three columns are the accuracy,
+ * fluency and pronunciation [`ScoreAxes`] shows, read per model instead of only
+ * for the headline. It renders for a single measurement too, because a take
+ * should always say who measured it.
+ */
+export function ModelScores({
+  measurements,
+  className = "",
+}: {
+  measurements?: AttemptMeasurement[] | null;
+  className?: string;
+}) {
+  if (!measurements?.length) return null;
+  const best = measurements[0].score;
+  return (
+    <section className={`flex flex-col gap-1 min-w-0 ${className}`}>
+      <h3 className="text-xs font-medium text-text-secondary">
+        Measured by {measurements.length} model{measurements.length === 1 ? "" : "s"} · the best is the
+        final score
+      </h3>
+      <ul className="flex flex-col gap-1 min-w-0">
+        {measurements.map((m) => (
+          <li key={m.model} className="flex items-center gap-2 text-xs min-w-0">
+            <span className="flex-1 min-w-0 truncate text-text-primary" title={m.model}>
+              {modelLabel(m.model)}
+            </span>
+            {m.via === "hub" && (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded-full bg-bg-muted text-text-tertiary shrink-0"
+                title="Measured on the hub, not on this device"
+              >
+                hub
+              </span>
+            )}
+            <span
+              className={`w-12 text-right font-semibold tabular-nums ${percentTone(m.score)}`}
+              title="Accuracy"
+            >
+              {Math.round(m.score)}%
+            </span>
+            <span
+              className="w-20 text-right tabular-nums text-text-secondary"
+              title="Correct words per minute"
+            >
+              {m.wcpm != null ? `${Math.round(m.wcpm)} wcpm` : "—"}
+            </span>
+            <span
+              className={`w-10 text-right tabular-nums ${
+                m.pronunciation != null ? percentTone(m.pronunciation) : "text-text-tertiary"
+              }`}
+              title="Pronunciation"
+            >
+              {m.pronunciation != null ? `${Math.round(m.pronunciation)}%` : "—"}
+            </span>
+            {m.score === best && (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded-full bg-success-bg text-success-text font-semibold shrink-0"
+                title="The best measurement, so the score this attempt keeps and the XP it earned"
+              >
+                best
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** The part of a catalog id a learner recognises rather than its packaging:
+ *  `gguf::whisper-large-v3` reads `whisper-large-v3`. A measurement taken before
+ *  the engine was named says so in words instead of showing a placeholder id. */
+function modelLabel(model: string): string {
+  const separator = model.lastIndexOf("::");
+  const name = separator >= 0 ? model.slice(separator + 2) : model;
+  return name === "unrecorded" ? "Model not recorded" : name;
+}
 
 /** Number colour for a 0–100 score: the badge thresholds, as text. */
 function percentTone(value: number | null): string {

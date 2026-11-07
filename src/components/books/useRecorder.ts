@@ -32,6 +32,12 @@ export type RecorderResult = {
    */
   segments?: RecorderSegment[];
   /**
+   * The catalog id of the model that produced the transcript. Read-aloud scoring
+   * files its measurement under that name, so the attempt can show what each
+   * model heard instead of only what the last one said.
+   */
+  model?: string | null;
+  /**
    * Set when the hook was built with `deferTranscribe`: the take ended and the
    * WAV is ready, but nothing was recognized — the caller routes the recording
    * (transcribe on-device via `transcribeTake`, or score it elsewhere).
@@ -51,17 +57,23 @@ type DetailedTranscript = {
   words: RecorderWord[];
   segments: RecorderSegment[];
   capabilities: { word_timings: boolean };
+  /** The catalog id of the model that just ran. */
+  model?: string | null;
 };
 
 /** The placement a detailed run actually produced, as this hook reports it:
  *  the finer list when the model placed words, the phrase list when it only
- *  placed phrases, neither when it stamped nothing. */
-function placement(detailed: DetailedTranscript): Pick<RecorderResult, "words" | "segments"> {
+ *  placed phrases, neither when it stamped nothing — and either way the name of
+ *  the model that produced it. */
+function placement(
+  detailed: DetailedTranscript
+): Pick<RecorderResult, "words" | "segments" | "model"> {
+  const model = detailed.model ?? null;
   return detailed.capabilities?.word_timings && detailed.words?.length
-    ? { words: detailed.words }
+    ? { words: detailed.words, model }
     : detailed.segments?.length
-      ? { segments: detailed.segments }
-      : {};
+      ? { segments: detailed.segments, model }
+      : { model };
 }
 
 /** Say what the model actually placed, so a log line never has to be decoded. */

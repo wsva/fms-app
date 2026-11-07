@@ -20,6 +20,7 @@ pub(crate) mod feedback;
 pub(crate) mod fluency;
 pub(crate) mod gop;
 pub(crate) mod import;
+pub(crate) mod measurement;
 pub(crate) mod normalize;
 #[cfg(feature = "phoneme")]
 pub(crate) mod phoneme;
@@ -56,6 +57,7 @@ use crate::xp::{xp_award_internal, XpAwardResult};
 
 use assess::{Assessment, PronEvidence, PronReason};
 use fluency::{TimedSegment, TimedWord, Timings};
+use measurement::{Measurement, Measurements, UNRECORDED_MODEL};
 
 /// Score thresholds for the scaled XP reward.
 const XP_PASS_SCORE: f64 = 60.0;
@@ -237,6 +239,14 @@ pub struct ReadAttempt {
     pub recognized: String,
     /// WIP-based ASR score 0-100 against the reference text.
     pub score: f64,
+    /// Every model that has measured this take, best score first — the
+    /// breakdown behind `score`, which is the best of them
+    /// (see [`measurement`]). Absent when nothing comparable has been measured:
+    /// a take recorded before per-model scoring, and a take whose numbers were
+    /// scored against a reference that has since been edited, both show their
+    /// one headline number and no list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurements: Option<Vec<Measurement>>,
     /// The stored assessment (accuracy + fluency + pronunciation), when one was
     /// computed. `None` for attempts recorded before assessment existed and for
     /// attempts whose recording is gone. Additive: peers that do not know the key
@@ -263,6 +273,11 @@ pub struct ReadAloudSubmitResult {
     /// it as unmeasured rather than inventing a picture.
     pub summary: Option<AsrScoreSummary>,
     pub attempt: ReadAttempt,
+    /// What *this* call measured, named and stamped — the row it just added to
+    /// [`ReadAttempt::measurements`]. Kept apart because it is not always the
+    /// headline: measuring with a weaker model reports its own number while the
+    /// attempt's final score stays the best one already earned.
+    pub measurement: Option<Measurement>,
     /// Accuracy (unchanged WIP), fluency and pronunciation for this attempt. The
     /// accuracy number is byte-identical to `score` — see `assess.rs`. Absent for
     /// the same reason as `summary`.
@@ -442,6 +457,11 @@ struct AttemptEvent {
     /// it (the report quotes the numbers it was derived from). An old peer
     /// ignores the key, so no `PROTOCOL_VERSION` bump.
     feedback: Option<String>,
+    /// Every model's measurement of this attempt, as the JSON text of
+    /// [`Measurements`]. Optional payload key on the same precedent as
+    /// `metrics`: it rides the row it describes, so a breakdown reaches every
+    /// device that holds the attempt and an old peer drops it.
+    measurements: Option<String>,
     created_at: String,
     /// Revision stamp for last-write-wins propagation. A new attempt sets it to
     /// `created_at`; a re-assessment bumps it to now, so the newer result reaches
@@ -464,6 +484,7 @@ fn ensure_attempt_schema(conn: &Connection) -> Result<(), String> {
             score        REAL NOT NULL DEFAULT 0,
             metrics_json TEXT,
             feedback_json TEXT,
+            measurements_json TEXT,
             created_at   TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_rae_owner_text
@@ -531,6 +552,19 @@ fn ensure_attempt_schema(conn: &Connection) -> Result<(), String> {
         .unwrap_or(false);
     if !has_updated {
         conn.execute("ALTER TABLE read_attempt_event ADD COLUMN updated_at TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
+
+    // And for the per-model breakdown: one row's worth of small objects, null
+    // until a second model measures the same take. A legacy row simply has no
+    // list, which every read treats as "nothing comparable yet" — never as a
+    // zero, and never as a reason to refuse the attempt.
+    let has_measurements: bool = conn
+        .prepare("SELECT 1 FROM PRAGMA_table_info('read_attempt_event') WHERE name = 'measurements_json'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if !has_measurements {
+        conn.execute("ALTER TABLE read_attempt_event ADD COLUMN measurements_json TEXT", [])
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -842,9 +876,9 @@ fn append_attempt_event(conn: &Connection, ev: &AttemptEvent) -> Result<bool, St
     let changed = conn
         .execute(
             "INSERT OR IGNORE INTO read_attempt_event \
-             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![ev.uuid, ev.user_id, ev.dataset_uuid, ev.text_uuid, ev.audio_path, ev.recognized, ev.score, ev.metrics, ev.created_at, ev.updated_at],
+             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, measurements_json, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![ev.uuid, ev.user_id, ev.dataset_uuid, ev.text_uuid, ev.audio_path, ev.recognized, ev.score, ev.metrics, ev.measurements, ev.created_at, ev.updated_at],
         )
         .map_err(|e| e.to_string())?;
     Ok(changed > 0)
@@ -864,16 +898,17 @@ fn upsert_attempt_event(conn: &Connection, ev: &AttemptEvent) -> Result<bool, St
     let changed = conn
         .execute(
             "INSERT INTO read_attempt_event \
-             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, feedback_json, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+             (uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, feedback_json, measurements_json, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
              ON CONFLICT(uuid) DO UPDATE SET \
              recognized = excluded.recognized, \
              score = excluded.score, \
              metrics_json = excluded.metrics_json, \
              feedback_json = excluded.feedback_json, \
+             measurements_json = excluded.measurements_json, \
              updated_at = excluded.updated_at \
              WHERE excluded.updated_at > COALESCE(read_attempt_event.updated_at, read_attempt_event.created_at)",
-            params![ev.uuid, ev.user_id, ev.dataset_uuid, ev.text_uuid, ev.audio_path, ev.recognized, ev.score, ev.metrics, ev.feedback, ev.created_at, ev.updated_at],
+            params![ev.uuid, ev.user_id, ev.dataset_uuid, ev.text_uuid, ev.audio_path, ev.recognized, ev.score, ev.metrics, ev.feedback, ev.measurements, ev.created_at, ev.updated_at],
         )
         .map_err(|e| e.to_string())?;
     Ok(changed > 0)
@@ -903,6 +938,9 @@ fn attempt_payload(ev: &AttemptEvent) -> Value {
         // A newer feedback write overwrites an older one on every device; a
         // re-assessment (which sends no `feedback`) clears it.
         "feedback": ev.feedback,
+        // Optional key (same precedent): the per-model breakdown, so a second
+        // device sees which model produced which number, not only the best one.
+        "measurements": ev.measurements,
     })
 }
 
@@ -928,7 +966,7 @@ pub(crate) fn rows_for_user(
     let conn = open_app_attempts(settings)?;
     let mut stmt = conn
         .prepare(
-            "SELECT rowid, uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at, COALESCE(updated_at, created_at), feedback_json \
+            "SELECT rowid, uuid, user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at, COALESCE(updated_at, created_at), feedback_json, measurements_json \
              FROM read_attempt_event WHERE user_id = ?1 AND rowid > ?2 ORDER BY rowid ASC LIMIT ?3",
         )
         .map_err(|e| e.to_string())?;
@@ -951,6 +989,9 @@ pub(crate) fn rows_for_user(
                 // Optional key: the feedback report, so a backfilled device also
                 // recovers the agent's advice, not just the numbers.
                 "feedback": row.get::<_, Option<String>>(11)?,
+                // Optional key: the per-model breakdown, so the list of which
+                // model said what survives a reinstall alongside the scores.
+                "measurements": row.get::<_, Option<String>>(12)?,
             });
             Ok((rowid, value))
         })
@@ -1023,6 +1064,14 @@ pub(crate) fn apply_remote_save(
         // Same treatment as `metrics`: the feedback report is kept as the JSON
         // text it travelled as, so a re-read yields the identical report.
         feedback: payload.get("feedback").and_then(|v| match v {
+            Value::String(s) if !s.is_empty() => Some(s.clone()),
+            Value::Null | Value::String(_) => None,
+            other => Some(other.to_string()),
+        }),
+        // And the same for the per-model breakdown: a payload from an older peer
+        // carries none, which leaves this device's own list alone only because
+        // the whole row is its newest write — see `upsert_attempt_event`.
+        measurements: payload.get("measurements").and_then(|v| match v {
             Value::String(s) if !s.is_empty() => Some(s.clone()),
             Value::Null | Value::String(_) => None,
             other => Some(other.to_string()),
@@ -1646,7 +1695,7 @@ pub async fn read_aloud_list_attempts(
         .conn
         .prepare(
             "SELECT a.uuid, a.text_uuid, a.user_id, a.audio_path, a.recognized, a.score, a.created_at, \
-                    t.content, t.normalized_content, a.metrics_json, a.feedback_json \
+                    t.content, t.normalized_content, a.metrics_json, a.feedback_json, a.measurements_json \
              FROM app.read_attempt_event a LEFT JOIN read_text t ON t.uuid = a.text_uuid \
              WHERE a.text_uuid = ?1 AND a.user_id = ?2 ORDER BY a.created_at DESC",
         )
@@ -1659,11 +1708,12 @@ pub async fn read_aloud_list_attempts(
             // Re-score against the effective reference (normalized when present)
             // with the current metric so history is comparable across metric
             // changes; fall back to the stored value if the text row is gone.
-            let score = match row.get::<_, Option<String>>(7)? {
-                Some(content) => score_value(
-                    &effective_reference(&content, row.get::<_, Option<String>>(8)?.as_deref()),
-                    &recognized,
-                ),
+            let normalized: Option<String> = row.get(8)?;
+            let reference = row
+                .get::<_, Option<String>>(7)?
+                .map(|content| effective_reference(&content, normalized.as_deref()));
+            let score = match &reference {
+                Some(reference) => score_value(reference, &recognized),
                 None => stored_score,
             };
             let audio_url = resolve_audio_url(&ctx.dataset_dir, &ctx.audio_dir, &audio_path);
@@ -1675,6 +1725,10 @@ pub async fn read_aloud_list_attempts(
                 audio_path,
                 recognized,
                 score,
+                measurements: comparable_measurements(
+                    row.get::<_, Option<String>>(11)?,
+                    reference_digest(reference.as_deref()).as_deref(),
+                ),
                 metrics: stored_metrics(row.get::<_, Option<String>>(9)?),
                 feedback: stored_metrics(row.get::<_, Option<String>>(10)?),
                 created_at: row.get(6)?,
@@ -1744,8 +1798,9 @@ fn delete_attempt_inner(settings: &SettingsState, dataset_uuid: &str, uuid: &str
 /// [`read_aloud_submit`] does: this device skips its own model passes and stores
 /// the measurement as taken, journalling the provenance with the attempt.
 ///
-/// This is where XP is awarded: the number that earns it is the one measured
-/// here, whether that lands seconds after the take or days later on a retry.
+/// This is where XP is awarded: the number that earns it is the attempt's final
+/// score, the best every model has measured — whether that lands seconds after
+/// the take or days later on a retry.
 #[tauri::command]
 pub async fn read_aloud_rerecognize(
     app: tauri::AppHandle,
@@ -1757,6 +1812,7 @@ pub async fn read_aloud_rerecognize(
     segments: Option<Vec<TimedSegment>>,
     assessment: Option<Value>,
     via: Option<String>,
+    model: Option<String>,
 ) -> Result<ReadAloudSubmitResult, String> {
     update_recognized_inner(
         &app,
@@ -1767,6 +1823,7 @@ pub async fn read_aloud_rerecognize(
         &Timings::from_optional(words.as_deref(), segments.as_deref()),
         assessment,
         via.as_deref(),
+        model.as_deref(),
     )
     .await
 }
@@ -1797,10 +1854,27 @@ fn stored_recording(
     }
 }
 
+/// The headline picture an attempt row holds before this measurement is filed:
+/// read so a measurement that is *not* the best can leave it exactly as it was
+/// (see [`Measurements::record`]).
+struct StoredAttempt {
+    recognized: String,
+    score: f64,
+    metrics: Option<String>,
+    feedback: Option<String>,
+    measurements: Option<String>,
+}
+
 /// Shared body of [`read_aloud_rerecognize`]: measure one of my attempt events —
 /// overwrite its transcript, score it against the effective reference, store the
 /// three axes, award the XP the new number earns, and re-journal the save. Never
 /// touches the dataset directory or the recording.
+///
+/// One measurement is not the attempt's only picture: `model` names the speech
+/// engine that produced this transcript, and every engine's number is kept (see
+/// [`measurement`]). The attempt's headline — transcript, score, stored card —
+/// belongs to the *best* of them, so a weaker model adds information without
+/// taking a score away.
 ///
 /// This is the scoring half of both flows: the fresh take calls it after
 /// [`read_aloud_save_take`] made the recording durable, "Assess again" calls it
@@ -1810,6 +1884,7 @@ fn stored_recording(
 /// The read and the write take their own short-lived connections: the
 /// assessment in between is async, and a `rusqlite::Connection` must not be
 /// held across an await point.
+#[allow(clippy::too_many_arguments)]
 async fn update_recognized_inner(
     app: &tauri::AppHandle,
     settings: &SettingsState,
@@ -1819,24 +1894,29 @@ async fn update_recognized_inner(
     timings: &Timings<'_>,
     assessment: Option<Value>,
     via: Option<&str>,
+    model: Option<&str>,
 ) -> Result<ReadAloudSubmitResult, String> {
     let me = workspace_identity(settings);
 
-    // Load the event (must belong to me) plus its text's reference for scoring.
-    // `updated_at` comes along because the revision this write stamps must be
-    // strictly newer than it — see [`next_revision`].
-    let (text_uuid, audio_path, created_at, current_rev, content, normalized): (
+    // Load the event (must belong to me) plus its text's reference for scoring,
+    // and the picture it already holds — a measurement that turns out not to be
+    // the best leaves that picture alone. `updated_at` comes along because the
+    // revision this write stamps must be strictly newer than it — see
+    // [`next_revision`].
+    let (text_uuid, audio_path, created_at, current_rev, content, normalized, stored): (
         String,
         Option<String>,
         String,
         Option<String>,
         Option<String>,
         Option<String>,
+        StoredAttempt,
     ) = {
         let ctx = open_attempts(settings, dataset_uuid)?;
         ctx.conn
             .query_row(
-                "SELECT a.text_uuid, a.audio_path, a.created_at, a.updated_at, t.content, t.normalized_content \
+                "SELECT a.text_uuid, a.audio_path, a.created_at, a.updated_at, t.content, t.normalized_content, \
+                        a.recognized, a.score, a.metrics_json, a.feedback_json, a.measurements_json \
                  FROM app.read_attempt_event a LEFT JOIN read_text t ON t.uuid = a.text_uuid \
                  WHERE a.uuid = ?1 AND a.user_id = ?2",
                 params![uuid, &me],
@@ -1847,6 +1927,13 @@ async fn update_recognized_inner(
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    StoredAttempt {
+                        recognized: row.get(6)?,
+                        score: row.get(7)?,
+                        metrics: row.get(8)?,
+                        feedback: row.get(9)?,
+                        measurements: row.get(10)?,
+                    },
                 )),
             )
             .map_err(|_| format!("Attempt {} not found", uuid))?
@@ -1909,30 +1996,76 @@ async fn update_recognized_inner(
         }
         _ => None,
     };
-    let metrics = measured
+    let fresh_metrics = measured
         .as_ref()
-        .and_then(|a| stored_metrics(Some(metrics_with_provenance(a, via))));
+        .map(|a| metrics_with_provenance(a, via));
 
     // Bump the revision so this newer result wins the last-write-wins comparison
     // on every device that already holds the attempt (§17.7). `created_at` stays
     // put — history ordering depends on it.
     let revised_at = next_revision(current_rev.as_deref());
+
+    // File this measurement with the ones already taken. Without a reference
+    // there is nothing to compare and nothing to file: the row then behaves
+    // exactly as it did before the breakdown existed.
+    let digest = reference_digest(reference.as_deref());
+    let mut measurements = Measurements::parse(stored.measurements.as_deref());
+    if let Some(digest) = digest.as_deref() {
+        // A row written before per-model scoring has a headline score with no
+        // idea which engine produced it. Seeding it once is what keeps "the best
+        // is final" true across the upgrade, rather than letting this — possibly
+        // worse — measurement quietly replace a score already earned.
+        measurements.seed(digest, stored.score, &created_at);
+    }
+    let fresh = Measurement {
+        model: model.unwrap_or(UNRECORDED_MODEL).to_string(),
+        score,
+        wcpm: measured.as_ref().and_then(|a| a.fluency.as_ref()).map(|f| f.wcpm),
+        pronunciation: measured.as_ref().and_then(|a| a.pronunciation.score).map(|s| s * 100.0),
+        via: via.map(str::trim).filter(|v| !v.is_empty()).map(str::to_string),
+        measured_at: revised_at.clone(),
+    };
+    // `None` reference: nothing to rank, so this call keeps the headline as the
+    // plain overwrite it always was and the stored list is written back untouched.
+    let wins = match digest.as_deref() {
+        Some(digest) => measurements.record(digest, fresh.clone()),
+        None => true,
+    };
+    let breakdown = measurements.to_text();
+    // The attempt's final score, and the row as it now stands: this call's
+    // picture when it is the best one, otherwise exactly what was stored —
+    // feedback included, since the report still quotes the headline it describes.
+    // When this call does take the headline the report goes with the numbers it
+    // was written for.
+    let final_score = match digest.as_deref() {
+        Some(digest) => measurements.best_score(digest).unwrap_or(score),
+        None => score,
+    };
+    let (headline_recognized, headline_score, headline_metrics, headline_feedback) = if wins {
+        (recognized.to_string(), score, fresh_metrics.clone(), None)
+    } else {
+        (
+            stored.recognized.clone(),
+            stored.score,
+            stored.metrics.clone(),
+            stored.feedback.clone(),
+        )
+    };
     {
         let conn = open_app_attempts(settings)?;
         conn.execute(
-            // `feedback_json` is cleared with the transcript it was derived from:
-            // the report quotes the old numbers, so keeping it would show advice
-            // that no longer describes this attempt. "Ask again" is one click.
             "UPDATE read_attempt_event SET recognized = ?1, score = ?2, metrics_json = ?3, \
-             feedback_json = NULL, updated_at = ?6 \
-             WHERE uuid = ?4 AND user_id = ?5",
+             feedback_json = ?4, measurements_json = ?5, updated_at = ?6 \
+             WHERE uuid = ?7 AND user_id = ?8",
             params![
-                recognized,
-                score,
-                metrics.as_ref().map(|v| v.to_string()),
+                headline_recognized,
+                headline_score,
+                headline_metrics,
+                headline_feedback,
+                breakdown,
+                &revised_at,
                 uuid,
-                &me,
-                &revised_at
+                &me
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -1947,13 +2080,13 @@ async fn update_recognized_inner(
         dataset_uuid: dataset_uuid.to_string(),
         text_uuid: text_uuid.clone(),
         audio_path: audio_path.clone(),
-        recognized: recognized.to_string(),
-        score,
-        metrics: metrics.as_ref().map(|v| v.to_string()),
-        // A re-assess clears the feedback (the UPDATE sets `feedback_json = NULL`:
-        // the report quoted the old numbers), and journaling `None` propagates that
-        // clear to every device.
-        feedback: None,
+        recognized: headline_recognized.clone(),
+        score: headline_score,
+        metrics: headline_metrics.clone(),
+        // Journalled with whatever the headline now is: `None` propagates the
+        // clear this call caused, a preserved report propagates itself.
+        feedback: headline_feedback.clone(),
+        measurements: breakdown.clone(),
         created_at: canonical_stamp(&created_at),
         updated_at: revised_at,
     };
@@ -1969,15 +2102,16 @@ async fn update_recognized_inner(
     );
 
     log::info!(
-        "read_aloud: attempt {} — assessment stored (score {:.1})",
-        uuid, score
+        "read_aloud: attempt {} — {} measured {:.1}, final {:.1}",
+        uuid, fresh.model, score, final_score
     );
 
-    // XP is awarded for the measured number, so it is earned here — seconds after
-    // the take or days later on a retry, whichever call produced the score. The
-    // amount scales with the text's length.
+    // XP is awarded on the final score — the best measurement of the take — so it
+    // is earned here, seconds after the take or days later on a retry. The amount
+    // scales with the text's length, and every tier is deduped per text, so a
+    // later model can neither claw XP back nor earn a tier twice.
     let (xp_awarded, lifetime_xp, level) =
-        award_xp_for_score(settings, &me, dataset_uuid, &text_uuid, score, text_words)?;
+        award_xp_for_score(settings, &me, dataset_uuid, &text_uuid, final_score, text_words)?;
     if xp_awarded > 0 {
         let _ = app.emit(
             "xp-earned",
@@ -1991,19 +2125,24 @@ async fn update_recognized_inner(
     }
 
     Ok(ReadAloudSubmitResult {
+        // This call's own measurement, so the axes beside it are the ones just
+        // produced. The attempt's final score is `attempt.score`: the best every
+        // model has measured.
         score,
         summary,
         assessment: measured,
+        measurement: Some(fresh),
         attempt: ReadAttempt {
             uuid: uuid.to_string(),
             text_uuid,
             user_id: me,
             audio_url,
             audio_path,
-            recognized: recognized.to_string(),
-            score,
-            metrics,
-            feedback: None,
+            recognized: headline_recognized,
+            score: final_score,
+            measurements: comparable_measurements(breakdown, digest.as_deref()),
+            metrics: stored_metrics(headline_metrics),
+            feedback: stored_metrics(headline_feedback),
             created_at,
         },
         xp_awarded,
@@ -2115,6 +2254,9 @@ pub(crate) fn save_attempt_row(
         // A fresh take has no feedback yet; a later feedback write re-journals the
         // row with it (§17.7).
         feedback: None,
+        // Nor a breakdown: the measure step writes one, and only it knows the
+        // reference digest the list is stamped with.
+        measurements: None,
         created_at: created_at.clone(),
         updated_at: created_at,
     };
@@ -2143,10 +2285,10 @@ pub(crate) fn journal_feedback(
 ) -> Result<(), String> {
     let me = workspace_identity(settings);
     let conn = open_app_attempts(settings)?;
-    let (user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics, created_at): (
-        String, String, String, Option<String>, String, f64, Option<String>, String,
+    let (user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics, measurements, created_at): (
+        String, String, String, Option<String>, String, f64, Option<String>, Option<String>, String,
     ) = conn.query_row(
-        "SELECT user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, created_at \
+        "SELECT user_id, dataset_uuid, text_uuid, audio_path, recognized, score, metrics_json, measurements_json, created_at \
          FROM read_attempt_event WHERE uuid = ?1 AND user_id = ?2",
         params![attempt_uuid, &me],
         |r| Ok((
@@ -2157,7 +2299,8 @@ pub(crate) fn journal_feedback(
             r.get::<_, String>(4)?,
             r.get::<_, f64>(5)?,
             r.get::<_, Option<String>>(6)?,
-            r.get::<_, String>(7)?,
+            r.get::<_, Option<String>>(7)?,
+            r.get::<_, String>(8)?,
         )),
     )
     .map_err(|_| format!(
@@ -2182,6 +2325,9 @@ pub(crate) fn journal_feedback(
         recognized,
         score,
         metrics,
+        // Re-sent unchanged: a feedback write must not ship a breakdown older
+        // than the one this device holds, or it would erase a peer's rows.
+        measurements,
         feedback: Some(feedback_json.to_string()),
         created_at: canonical_stamp(&created_at),
         updated_at: revised_at,
@@ -2222,6 +2368,23 @@ pub async fn read_aloud_score(content: String, recognized: String) -> Result<Asr
 /// treated as absent rather than failing the whole attempt list.
 fn stored_metrics(raw: Option<String>) -> Option<Value> {
     serde_json::from_str(raw.as_deref()?).ok()
+}
+
+/// The stamp a measurement list is comparable within: the digest of the
+/// reference it was scored against. `None` when there is no reference at all (a
+/// deleted text) — nothing is comparable then, so nothing is filed against it.
+fn reference_digest(reference: Option<&str>) -> Option<String> {
+    reference.map(standard_audio::text_digest)
+}
+
+/// The attempt's per-model breakdown as a reader sees it: the stored list, but
+/// only the entries measured against the reference now in force. An empty list
+/// reads as `None` rather than an empty array, so a take measured before
+/// per-model scoring — or against an edited text — shows its one headline number
+/// and no table.
+fn comparable_measurements(raw: Option<String>, digest: Option<&str>) -> Option<Vec<Measurement>> {
+    let entries = Measurements::parse(raw.as_deref()).comparable(digest?).to_vec();
+    (!entries.is_empty()).then_some(entries)
 }
 
 // ============================================================
@@ -2987,6 +3150,7 @@ fn save_take_inner(
         // a 0% read. list_attempts re-scores the transcript on read anyway.
         recognized: recognized.to_string(),
         score: 0.0,
+        measurements: None,
         metrics: None,
         feedback: None,
         created_at: now_row_stamp(),
@@ -3039,6 +3203,7 @@ pub async fn read_aloud_submit(
     segments: Option<Vec<TimedSegment>>,
     assessment: Option<Value>,
     via: Option<String>,
+    model: Option<String>,
 ) -> Result<ReadAloudSubmitResult, String> {
     let saved = save_take_inner(&settings, &dataset_uuid, &text_uuid, &wav_base64, &recognized)?;
     update_recognized_inner(
@@ -3050,6 +3215,7 @@ pub async fn read_aloud_submit(
         &Timings::from_optional(words.as_deref(), segments.as_deref()),
         assessment,
         via.as_deref(),
+        model.as_deref(),
     )
     .await
 }
@@ -3149,6 +3315,7 @@ mod tests {
             audio_url: None,
             recognized: "hello world".into(),
             score,
+            measurements: None,
             metrics: None,
             feedback: None,
             created_at: now_row_stamp(),

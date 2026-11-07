@@ -9,7 +9,7 @@ import { GOOD_SCORE, PASS_SCORE, scoreBadgeClasses } from "@/lib/read_aloud/type
 import { useRecorder } from "@/components/books/useRecorder";
 import { measureAttempt, measureAttemptOnHub, saveTake, type SegmentTiming, type WordTiming } from "@/lib/read_aloud/rerecognize";
 import AsrDiff from "@/components/read_aloud/AsrDiff";
-import AssessmentCards from "@/components/read_aloud/AssessmentCards";
+import AssessmentCards, { ModelScores } from "@/components/read_aloud/AssessmentCards";
 import FeedbackPanel from "@/components/read_aloud/FeedbackPanel";
 import ProgressOverlay from "@/components/read_aloud/ProgressOverlay";
 import HubStatusOverlay, { type HubStage } from "@/components/read_aloud/HubStatusOverlay";
@@ -223,7 +223,7 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
     async (
       held: PendingTake,
       recognized: string,
-      placement: { words?: WordTiming[] | null; segments?: SegmentTiming[] | null }
+      placement: { words?: WordTiming[] | null; segments?: SegmentTiming[] | null; model?: string | null }
     ) => {
       setMeasuring(true);
       setError(null);
@@ -236,6 +236,9 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
           // list and that axis is reported as not measured.
           words: placement.words ?? null,
           segments: placement.segments ?? null,
+          // Named, so this number is filed under the model that produced it and
+          // an earlier, better measurement of the same take is not replaced.
+          model: placement.model ?? null,
         });
         applyResult(res, null);
       } finally {
@@ -257,6 +260,7 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
         await measureHere(held, (detailed.text || "").trim(), {
           words: detailed.words ?? null,
           segments: detailed.segments ?? null,
+          model: detailed.model ?? null,
         });
       } catch (e) {
         const msg = String(e);
@@ -346,12 +350,14 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
       text: recognized,
       words,
       segments,
+      model,
       captured,
     }: {
       wavBase64: string;
       text: string;
       words?: WordTiming[];
       segments?: SegmentTiming[];
+      model?: string | null;
       captured?: boolean;
     }) => {
       if (!isTauri()) return;
@@ -380,6 +386,7 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
           await measureHere(held, transcript, {
             words: words ?? null,
             segments: segments ?? null,
+            model: model ?? null,
           });
         } catch (e) {
           const msg = String(e);
@@ -562,6 +569,12 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
               <AssessmentCards assessment={result.assessment} />
             </div>
           )}
+
+          {/* What this model measured next to what the others measured. The
+              number above is this take's answer; the attempt's final score is
+              the best of every model that has heard it, which is worth seeing
+              when another engine heard something quite different. */}
+          <ModelScores measurements={result.attempt.measurements} className="mt-1" />
 
           {/* The numbers above say *which* words were wrong; this says what to
               do about them. Asked for explicitly — a low score is exactly when
