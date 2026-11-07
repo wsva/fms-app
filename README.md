@@ -391,6 +391,11 @@ are desktop-only.
   locations are probed by the app itself.
 - **Screen capture on macOS** asks for *Screen Recording* permission on first use and captures the
   primary monitor — the drag-out-a-region overlay is Windows-only.
+- **Whisper transcribes on the GPU only where the build was configured for one.** The GGML backend
+  compiles its GPU support in at build time: macOS ships with Metal, the Windows and Linux releases
+  do not carry Vulkan because building it needs the Vulkan SDK on the machine that builds. *Logs*
+  names the backend and device each model actually got, and `src-tauri/.cargo/config.toml` says how
+  a source build turns Vulkan on.
 
 ## License
 

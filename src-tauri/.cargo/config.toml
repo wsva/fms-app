@@ -25,6 +25,32 @@
 # The other end of the dial is -DTRANSCRIBE_X86_CONSERVATIVE=ON: SSE2 baseline,
 # runs on any x86-64 at all, noticeably slower Whisper. -DGGML_NATIVE=ON is the
 # one value that must never come back.
+#
+# The same table is also how a Windows or Linux build asks for the GPU. ggml's
+# Vulkan backend is compiled by a CMake option, not by a Cargo feature here,
+# because it needs the Vulkan SDK on the build host (`find_package(Vulkan
+# COMPONENTS glslc REQUIRED)`) — baked into the shared feature set it would make
+# that SDK a prerequisite of every `desktop` build and of the release pipeline,
+# with no way out on a host that lacks it. So the GPU stays opt-in per machine:
+#
+#   $env:TRANSCRIBE_CMAKE_ARGS = "-DGGML_NATIVE=OFF -DTRANSCRIBE_VULKAN=ON"
+#
+# A `[env]` entry without `force = true` does not override a variable already in
+# the process environment, which is exactly why the line above works: the shell's
+# value wins over this one. Install the SDK first
+# (https://vulkan.lunarg.com/sdk/home), keep `-DGGML_NATIVE=OFF` in the value,
+# and check the result in the app log — `models/engine.rs::log_compute_device`
+# prints the backends compiled in and the device a model actually got, so a
+# working GPU build reads `via the 'vulkan' backend` instead of `on the CPU`.
+# Runtime needs no SDK: the statically-linked backend loads the `vulkan-1.dll`
+# the graphics driver installs, and `Backend::Auto` falls back to the CPU where
+# there is no loader or no GPU.
+#
+# CMake caches the option once it has been set, so dropping the environment
+# variable does not drop the backend: an unset value leaves the cached ON in the
+# `transcribe-cpp-sys` build tree and the configure keeps failing. Switch back
+# the way you switched on, with an explicit `-DTRANSCRIBE_VULKAN=OFF` — that
+# costs seconds of reconfigure, not a rebuild of the C++.
 TRANSCRIBE_CMAKE_ARGS = "-DGGML_NATIVE=OFF"
 
 # Editing a value in this table does not, on its own, re-configure the C++:

@@ -29,6 +29,12 @@ Models are largely from the Parakeet family and run locally through an ONNX runt
 
 The **Model unload timeout** in Settings controls how long a model stays loaded after use (immediately, after N minutes, or never). Keep it loaded if you process many files in a row; unload sooner if memory is tight.
 
+**Where transcription runs.** The **Parakeet** models go through ONNX Runtime; the **Whisper** models
+use the GGML runtime, whose GPU support is compiled in when the app is built rather than chosen at
+run time — so a Whisper model transcribes on the GPU on macOS, and on the CPU on Windows and Linux
+unless that build was configured for Vulkan. The **Logs** page says which backend and device each
+model got, which is where to look when a long audiobook takes longer than you expected.
+
 ## Download sources
 
 Models come from a catalogue of hosts. When downloading a HuggingFace‑catalog model you can choose the source:

@@ -206,12 +206,26 @@ ndk-context = "0.1"
 # the same feature set would have to be compiled out on Windows and Linux.
 # Handy wires it identically, and no CI toolchain changes — the build already
 # targets `MACOSX_DEPLOYMENT_TARGET: 11.0` (`build.yml`), which covers the C++
-# side. Windows Vulkan stays deliberately absent: it needs the Vulkan SDK
-# installed on the runner, `dynamic-backends` so the loader is not baked in, and
-# per-DLL code signing for the shipped bundle.
+# side.
+#
+# Windows and Linux get no line here, and the reason is the build host rather
+# than the runtime. Metal arrives with Xcode, which the macOS job already needs;
+# the vendor-neutral equivalent here is ggml's Vulkan backend, whose CMake probes
+# `find_package(Vulkan COMPONENTS glslc REQUIRED)` — so naming it in a Cargo
+# feature would make the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home)
+# (Windows) or `libvulkan-dev glslc spirv-headers` (Linux) a prerequisite of
+# every `desktop` build, CI included, with no way to compile it back out on a
+# host that lacks it. A GPU that has to be present at build time is a different
+# bargain from one that only has to be present at run time, so it stays opt-in:
+# `src-tauri/.cargo/config.toml` carries the dial and what it costs. Either way
+# the shipped bundle gains nothing to sign — a statically-linked Vulkan backend
+# loads `vulkan-1.dll`, which the graphics driver installs system-wide, and
+# `Backend::Auto` degrades to the CPU wherever there is no loader or no GPU.
+# `models/engine.rs::log_compute_device` prints the backends compiled in, the
+# devices the machine registered and the one the model got, which is how the two
+# absences are told apart.
 [target.'cfg(target_os = "macos")'.dependencies]
 transcribe-cpp = { version = "0.4.1", default-features = false, features = ["metal"] }
-
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
