@@ -127,6 +127,11 @@ pub struct ReadText {
     /// Best score across all attempts (computed/stored, null if never attempted).
     #[serde(default)]
     pub best_score: Option<f64>,
+    /// The three-axis total (`assess::total_score`) of the best scored attempt:
+    /// accuracy gated by its weakest delivery axis. Computed on read from my
+    /// own attempts, never persisted and never synced — display only.
+    #[serde(default)]
+    pub total_score: Option<f64>,
     /// Number of recorded attempts (computed on read, not persisted).
     #[serde(default)]
     pub attempt_count: i64,
@@ -181,6 +186,7 @@ impl TextDraft {
                 .normalized_content
                 .filter(|s| !s.trim().is_empty()),
             best_score: self.best_score,
+            total_score: None,
             attempt_count: 0,
             created_at: self
                 .created_at
@@ -208,6 +214,8 @@ pub struct TextSummary {
     pub chars: i64,
     pub attempt_count: i64,
     pub best_score: Option<f64>,
+    /// The gated three-axis total beside `best_score`, same derivation.
+    pub total_score: Option<f64>,
     /// The text has at least one standard-audio row — what a generate run would
     /// otherwise have to derive by cross-referencing two listings.
     pub has_standard_audio: bool,
@@ -1394,6 +1402,7 @@ pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result
                 content: row.get(5)?,
                 normalized_content: row.get(6)?,
                 best_score: row.get(7)?,
+                total_score: None,
                 attempt_count: 0,
                 created_at: row.get(8)?,
                 updated_at: row.get(9)?,
@@ -1403,29 +1412,35 @@ pub(crate) fn list_texts(settings: &SettingsState, dataset_uuid: &str) -> Result
         .filter_map(|r| r.ok())
         .collect();
 
-    let (count, best) = attempt_stats(&ctx);
+    let (count, best, totals) = attempt_stats(&ctx);
     for text in &mut items {
         text.attempt_count = count.get(&text.uuid).copied().unwrap_or(0);
         // Best is mine alone: a text I have never attempted shows no score, even
         // if the row carried a publisher's cached `best_score`.
         text.best_score = best.get(&text.uuid).copied();
+        text.total_score = totals.get(&text.uuid).copied();
     }
     Ok(items)
 }
 
 /// Attempt count and best score per text, recomputed from *my* stored
 /// transcripts with the current metric so an attempt scored under an older
-/// scale never surfaces. Shared by the full and the summary listings.
+/// scale never surfaces. Also the per-text best three-axis total: each
+/// attempt's own axes combine, and the best attempt's total wins — mixing
+/// each axis's best across separate attempts would invent a performance
+/// nobody gave. Shared by the full and the summary listings.
 fn attempt_stats(
     ctx: &AttemptCtx,
 ) -> (
     std::collections::HashMap<String, i64>,
     std::collections::HashMap<String, f64>,
+    std::collections::HashMap<String, f64>,
 ) {
     let mut count: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut best: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let mut totals: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     if let Ok(mut stmt) = ctx.conn.prepare(
-        "SELECT a.text_uuid, a.recognized, t.content, t.normalized_content \
+        "SELECT a.text_uuid, a.recognized, t.content, t.normalized_content, a.metrics_json \
          FROM app.read_attempt_event a JOIN read_text t ON t.uuid = a.text_uuid \
          WHERE a.user_id = ?1",
     ) {
@@ -1435,20 +1450,38 @@ fn attempt_stats(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         }) {
-            for (text_uuid, recognized, content, normalized) in rows.flatten() {
+            for (text_uuid, recognized, content, normalized, metrics_json) in rows.flatten() {
                 *count.entry(text_uuid.clone()).or_insert(0) += 1;
                 let reference = effective_reference(&content, normalized.as_deref());
                 let s = score_value(&reference, &recognized);
-                let e = best.entry(text_uuid).or_insert(s);
+                let e = best.entry(text_uuid.clone()).or_insert(s);
                 if s > *e {
                     *e = s;
+                }
+                // The total rides on this attempt's own stored axes, against the
+                // accuracy as re-scored today. Legacy metrics without the
+                // fluency score simply gate on what was measured.
+                if let Some(m) = metrics_json
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<Assessment>(raw).ok())
+                {
+                    let t = assess::total_score(
+                        s,
+                        m.fluency.as_ref().and_then(|f| f.score),
+                        m.pronunciation.score.map(|p| p * 100.0),
+                    );
+                    let e = totals.entry(text_uuid).or_insert(t);
+                    if t > *e {
+                        *e = t;
+                    }
                 }
             }
         }
     }
-    (count, best)
+    (count, best, totals)
 }
 
 /// The listing a caller wants when it is orienting itself rather than reading:
@@ -1477,16 +1510,18 @@ pub(crate) fn list_text_summaries(
                 chars: row.get(3)?,
                 attempt_count: 0,
                 best_score: None,
+                total_score: None,
                 has_standard_audio: row.get(4)?,
             })
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
-    let (count, best) = attempt_stats(&ctx);
+    let (count, best, totals) = attempt_stats(&ctx);
     for text in &mut items {
         text.attempt_count = count.get(&text.uuid).copied().unwrap_or(0);
         text.best_score = best.get(&text.uuid).copied();
+        text.total_score = totals.get(&text.uuid).copied();
     }
     Ok(items)
 }
@@ -1515,6 +1550,7 @@ pub(crate) fn get_text(
                     content: row.get(5)?,
                     normalized_content: row.get(6)?,
                     best_score: row.get(7)?,
+                    total_score: None,
                     attempt_count: 0,
                     created_at: row.get(8)?,
                     updated_at: row.get(9)?,
@@ -1522,9 +1558,10 @@ pub(crate) fn get_text(
             },
         )
         .map_err(|_| format!("Text {} not found in this dataset", uuid))?;
-    let (count, best) = attempt_stats(&ctx);
+    let (count, best, totals) = attempt_stats(&ctx);
     text.attempt_count = count.get(uuid).copied().unwrap_or(0);
     text.best_score = best.get(uuid).copied();
+    text.total_score = totals.get(uuid).copied();
     Ok(text)
 }
 
@@ -3291,6 +3328,7 @@ pub(crate) mod tests_support {
                 content: content.into(),
                 normalized_content: None,
                 best_score: None,
+                total_score: None,
                 attempt_count: 0,
                 created_at: now.clone(),
                 updated_at: now,

@@ -1555,8 +1555,21 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
                     <span className="text-[11px] text-text-tertiary truncate">{t.note}</span>
                   )}
                 </div>
-                <span className={scoreBadgeClasses(t.best_score)} title="Best score">
-                  {t.best_score != null ? `${Math.round(t.best_score)}%` : "—"}
+                {/* The badge is the total when any take has delivery axes:
+                    accuracy gates, the weakest axis discounts — it can never
+                    read above the best accuracy it replaced. */}
+                <span
+                  className={scoreBadgeClasses(t.total_score ?? t.best_score)}
+                  title={
+                    t.total_score != null && t.best_score != null
+                      ? `Total of the best take — accuracy ${Math.round(t.best_score)}%, gated by its weakest delivery axis (fluency, pronunciation)`
+                      : "Best score"
+                  }
+                >
+                  {(() => {
+                    const s = t.total_score ?? t.best_score;
+                    return s != null ? `${Math.round(s)}%` : "—";
+                  })()}
                 </span>
                 <span className="text-[10px] text-text-tertiary tabular-nums shrink-0" title="Attempts">
                   ×{t.attempt_count}

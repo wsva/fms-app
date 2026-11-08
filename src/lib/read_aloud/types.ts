@@ -41,6 +41,11 @@ export interface ReadText {
   normalized_content: string | null;
   /** Best score across attempts (null if never attempted). */
   best_score: number | null;
+  /** The three-axis total of the best scored attempt: accuracy gated by its
+   *  weakest delivery axis (fluency, pronunciation — min of the measured
+   *  ones). Computed on read, so it is null exactly when no attempt of mine
+   *  has stored any delivery axes. */
+  total_score?: number | null;
   /** Number of recorded attempts (computed on read). */
   attempt_count: number;
   created_at: string;

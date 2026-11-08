@@ -197,6 +197,31 @@ pub(crate) enum PronEvidence<'a> {
     },
 }
 
+/// The one composite number, when a surface asks for it (the text card's
+/// badge): accuracy gates, and the *weakest* measured delivery axis is the
+/// only discount.
+///
+/// `total = accuracy · (0.5 + 0.5 · min(fluency, pronunciation) / 100)`
+///
+/// - The total never exceeds accuracy: fluency and pronunciation can only
+///   erode the accuracy credit, never invent a number nobody scored. The
+///   card's badge therefore stays comparable with the best-score display it
+///   replaced.
+/// - An unmeasured axis drops out of the minimum rather than counting as
+///   zero — the same no-substitute rule as every other axis. With neither
+///   delivery axis measured the total is the accuracy alone.
+///
+/// `fluency` and `pronunciation_pct` are 0-100 (the pronunciation GOP arrives
+/// 0-1; callers scale it). Display-only: XP, `best_score` and sync payloads
+/// keep riding on the accuracy axis alone — the axes above are deliberately
+/// not combined anywhere else.
+pub(crate) fn total_score(accuracy: f64, fluency: Option<f64>, pronunciation_pct: Option<f64>) -> f64 {
+    match [fluency, pronunciation_pct].into_iter().flatten().min_by(f64::total_cmp) {
+        Some(weakest) => accuracy * (0.5 + 0.5 * weakest.clamp(0.0, 100.0) / 100.0),
+        None => accuracy,
+    }
+}
+
 /// Build the assessment. Pure: everything model-shaped is an argument.
 ///
 /// `timings` is the STT run's placement, at whatever resolution it had; both of
@@ -423,6 +448,22 @@ mod tests {
             assert_eq!(assessment.accuracy.lenient_score, summary.lenient_score);
             assert_eq!(assessment.schema_version, 1);
         }
+    }
+
+    #[test]
+    fn the_total_gates_on_accuracy_and_follows_the_weakest_axis() {
+        // Both delivery axes measured: the weaker one alone discounts.
+        assert!((total_score(95.0, Some(95.0), Some(30.0)) - 61.75).abs() < 1e-9);
+        // The stronger axis buys nothing back once the weaker one is known.
+        assert!((total_score(95.0, Some(95.0), Some(95.0)) - 92.625).abs() < 1e-9);
+        // Two perfect axes leave the accuracy whole; that is the ceiling.
+        assert!((total_score(95.0, Some(100.0), Some(100.0)) - 95.0).abs() < 1e-9);
+        // One axis missing discounts by the other; both missing leaves the
+        // accuracy untouched — never a stand-in zero.
+        assert!((total_score(80.0, Some(60.0), None) - 64.0).abs() < 1e-9);
+        assert_eq!(total_score(80.0, None, None), 80.0);
+        // Never above the accuracy, whatever the axes say.
+        assert!(total_score(50.0, Some(100.0), Some(100.0)) <= 50.0);
     }
 
     #[test]

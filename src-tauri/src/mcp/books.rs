@@ -1150,7 +1150,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"status": "ok", "message": "Dataset moved to trash", "trashed_to": trashed_to}).to_string())
     }
 
-    #[tool(name = "read_aloud_list_texts", description = "List a dataset's texts. Default: every row in full, ordered — every `content` on the wire, so prefer `summary` when you only need to orient yourself. `summary: true` returns `{count, total_chars, with_standard_audio, without_standard_audio, texts: [{uuid, order_num, title, chars, attempt_count, best_score, has_standard_audio}]}` with no content. `limit`/`offset` page either shape in `order_num` order (the same order `read_aloud_standard_audio_generate_all` walks); `include_content: false` drops `content` from the full shape.")]
+    #[tool(name = "read_aloud_list_texts", description = "List a dataset's texts. Default: every row in full, ordered — every `content` on the wire, so prefer `summary` when you only need to orient yourself. `summary: true` returns `{count, total_chars, with_standard_audio, without_standard_audio, texts: [{uuid, order_num, title, chars, attempt_count, best_score, total_score, has_standard_audio}]}` with no content; `total_score` is the three-axis total of the best scored take (accuracy gated by its weakest delivery axis), derived on read and null until an attempt carries measured delivery axes. `limit`/`offset` page either shape in `order_num` order (the same order `read_aloud_standard_audio_generate_all` walks); `include_content: false` drops `content` from the full shape.")]
     async fn read_aloud_list_texts(&self, Parameters(param): Parameters<ReadAloudDatasetParam>) -> Result<String, String> {
         let settings = self.app.state::<SettingsState>();
         if param.summary {
