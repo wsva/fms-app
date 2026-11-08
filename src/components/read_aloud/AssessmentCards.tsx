@@ -51,12 +51,15 @@ export default function AssessmentCards({ assessment }: { assessment: Assessment
           <>
             <div className="flex items-baseline gap-1.5">
               <span className="text-2xl font-bold tabular-nums text-text-primary">
-                {Math.round(fluency.wcpm)}
+                {fluency.score != null ? `${Math.round(fluency.score)}%` : Math.round(fluency.wcpm)}
               </span>
-              <span className="text-[11px] text-text-tertiary">correct words/min</span>
+              <span className="text-[11px] text-text-tertiary">
+                {fluency.score != null ? "fluency score" : "correct words/min"}
+              </span>
               <BandChip band={fluency.band} />
             </div>
             <p className="text-[11px] text-text-tertiary tabular-nums">
+              {fluency.score != null ? `${Math.round(fluency.wcpm)} correct wpm · ` : ""}
               {Math.round(fluency.articulation_rate)} wpm speaking · {fluency.pause_count} pause
               {fluency.pause_count === 1 ? "" : "s"}
               {fluency.long_pause_count > 0 ? ` (${fluency.long_pause_count} long)` : ""} ·{" "}
@@ -201,11 +204,21 @@ export function ScoreAxes({
     {
       key: "fluency",
       label: "Fluency",
-      value: fluency ? String(Math.round(fluency.wcpm)) : "—",
-      unit: fluency ? "wcpm" : undefined,
-      tone: fluency ? bandTone(fluency.band) : "text-text-tertiary",
+      // The score is the axis's number; a take stored before it existed shows
+      // the raw wcpm it would have been derived from, unit and all.
+      value: fluency ? String(Math.round(fluency.score ?? fluency.wcpm)) : "—",
+      unit: fluency ? (fluency.score != null ? "%" : "wcpm") : undefined,
+      tone: fluency
+        ? fluency.score != null
+          ? percentTone(fluency.score)
+          : bandTone(fluency.band)
+        : "text-text-tertiary",
       title: fluency
-        ? `${Math.round(fluency.wcpm)} correct words per minute (${fluency.band} pace) · ${fluency.pause_count} pause${fluency.pause_count === 1 ? "" : "s"} · reading ${Math.round(fluency.speaking_time)} s of ${Math.round(fluency.duration)} s`
+        ? `${fluency.score != null ? `Fluency score ${Math.round(fluency.score)} — pace less hesitations · ` : ""}${Math.round(
+            fluency.wcpm
+          )} correct words per minute (${fluency.band} pace) · ${fluency.pause_count} pause${
+            fluency.pause_count === 1 ? "" : "s"
+          } · reading ${Math.round(fluency.speaking_time)} s of ${Math.round(fluency.duration)} s`
         : unmeasured,
     },
     {

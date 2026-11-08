@@ -500,6 +500,13 @@ fn build_evidence(
                 band_word(f.band),
                 f.articulation_rate
             ));
+            if let Some(score) = f.score {
+                out.push_str(&format!(
+                    "- fluency score {:.1} of 100 — the pace above, discounted by the \
+                     hesitations and repairs below\n",
+                    score
+                ));
+            }
             out.push_str(&format!(
                 "- {} pauses ({} long, {:.0}% mid-phrase) · {:.1} words between pauses · \
                  {} single-word repeats, {} restarts\n",
@@ -1147,6 +1154,7 @@ mod tests {
             duration: 4.0,
             speaking_time: 3.2,
             wcpm: 84.0,
+            score: Some(44.8),
             speech_rate: 90.0,
             articulation_rate: 122.0,
             pause_count: 2,
@@ -1167,6 +1175,7 @@ mod tests {
             &AudioFacts { duration: Some(4.0), available: true, format: "wav".into(), ..Default::default() },
         );
         assert!(evidence.contains("84 correct words per minute (slow)"));
+        assert!(evidence.contains("fluency score 44.8 of 100"));
         assert!(evidence.contains("score 63.0 of 100"));
         assert!(evidence.contains("weakest words"));
         assert!(evidence.contains("4.0 s WAV"));

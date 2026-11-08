@@ -254,6 +254,12 @@ export interface FluencyMetrics {
   speaking_time: number;
   /** Correct words per minute. */
   wcpm: number;
+  /** The fluency axis's own 0-100 score: the pace curve over `wcpm`
+   *  (100 → 60, 150 → 90, 180 → 100), discounted for long pauses,
+   *  mid-phrase hesitations, restarts and stutters (capped at 35%). Absent
+   *  on attempts stored before it was measured — the UI shows the raw
+   *  `wcpm` instead of inventing a score. */
+  score?: number | null;
   /** Spoken words per minute over the reading span (includes pauses). */
   speech_rate: number;
   /** Spoken words per minute excluding pauses. */

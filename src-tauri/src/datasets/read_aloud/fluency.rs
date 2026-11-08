@@ -253,6 +253,12 @@ pub(crate) struct Fluency {
     /// only *correct* words, so misread words cost twice: fewer in the
     /// numerator, same denominator.
     pub wcpm: f64,
+    /// The fluency axis's own 0-100 score: [`pace_score`] of `wcpm`, discounted
+    /// by [`disfluency_penalty`]. `None` on rows stored before the number
+    /// existed — the reader falls back to showing the raw `wcpm` rather than
+    /// inventing a score nobody measured.
+    #[serde(default)]
+    pub score: Option<f64>,
     /// Spoken words per minute over the reading span (includes pauses).
     pub speech_rate: f64,
     /// Spoken words per minute excluding pauses.
@@ -280,6 +286,42 @@ fn per_minute(count: usize, secs: f64) -> f64 {
     } else {
         count as f64 / (secs / 60.0)
     }
+}
+
+/// The pace half of the fluency score, 0-100: a piecewise linear curve over
+/// wcpm through 100 → 60, 150 → 90, saturating at 100 by [`PACE_FULL_WCPM`]
+/// (an adult native reading pace). The plateau above it is deliberate —
+/// racing earns no extra credit, and a too-fast-to-be-intelligible take is
+/// punished by pauses and repairs, not by the curve.
+fn pace_score(wcpm: f64) -> f64 {
+    const PACE_FULL_WCPM: f64 = 180.0;
+    if wcpm <= 0.0 {
+        0.0
+    } else if wcpm <= 150.0 {
+        wcpm * 0.6
+    } else {
+        (90.0 + (wcpm - 150.0) * 10.0 / (PACE_FULL_WCPM - 150.0)).min(100.0)
+    }
+}
+
+/// The smoothness discount on [`pace_score`], in [0, 0.35]: each long pause,
+/// mid-phrase hesitation, restart and stutter costs a fixed share of the pace
+/// credit. Breathing at punctuation is free — only a pause at or beyond
+/// [`FluencyConfig::long_pause_secs`] counts as losing one's place. The cap
+/// keeps a disastrous delivery from wiping out a genuinely good pace: the
+/// worst possible score is 65% of it, which still says "your speed is real,
+/// your fluency isn't".
+fn disfluency_penalty(
+    long_pause_count: usize,
+    within_phrase_count: usize,
+    restart_count: usize,
+    repetition_count: usize,
+) -> f64 {
+    (0.05 * long_pause_count as f64
+        + 0.04 * within_phrase_count as f64
+        + 0.05 * restart_count as f64
+        + 0.02 * repetition_count as f64)
+        .min(0.35)
 }
 
 /// `hyp_index → ref_index`, derived from the alignment.
@@ -438,11 +480,26 @@ pub(crate) fn compute(
 
     let (repetition_count, restart_count) = count_repeats(verdicts);
 
+    // The axis's own number: pace discounted by disfluency. Derived from
+    // measurements that are all stored beside it, so a reader can always
+    // re-explain the score from the wcpm and the pause/repair counts.
+    let score = if reading_span <= 1e-6 {
+        None
+    } else {
+        Some(pace_score(wcpm) * (1.0 - disfluency_penalty(
+            long_pause_count,
+            within_phrase,
+            restart_count,
+            repetition_count,
+        )))
+    };
+
     (
         Fluency {
             duration,
             speaking_time,
             wcpm,
+            score,
             speech_rate,
             articulation_rate,
             pause_count,
@@ -648,9 +705,33 @@ mod tests {
             for v in [
                 f.duration, f.speaking_time, f.wcpm, f.speech_rate, f.articulation_rate,
                 f.within_phrase_pause_ratio, f.mean_length_of_run,
+                f.score.unwrap_or(0.0),
             ] {
                 assert!(v.is_finite(), "non-finite metric: {v:?}");
             }
         }
+    }
+
+    #[test]
+    fn pace_score_follows_the_anchors() {
+        assert_eq!(pace_score(0.0), 0.0);
+        assert!((pace_score(100.0) - 60.0).abs() < 1e-9);
+        assert!((pace_score(150.0) - 90.0).abs() < 1e-9);
+        assert!((pace_score(175.0) - 98.333).abs() < 0.01);
+        assert!((pace_score(180.0) - 100.0).abs() < 1e-9);
+        // The plateau: racing earns nothing extra, and never exceeds 100.
+        assert!((pace_score(250.0) - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn disfluency_penalty_costs_shares_and_caps() {
+        assert_eq!(disfluency_penalty(0, 0, 0, 0), 0.0);
+        // 2 long + 4 mid-phrase + 1 restart = 0.10 + 0.16 + 0.05.
+        assert!((disfluency_penalty(2, 4, 1, 0) - 0.31).abs() < 1e-9);
+        // The cap: 0.54 of charges still only costs 0.35.
+        assert_eq!(disfluency_penalty(4, 6, 2, 0), 0.35);
+        // Breathing at punctuation is free: an at-punctuation pause is neither
+        // long nor within-phrase, so it reaches neither argument.
+        assert_eq!(disfluency_penalty(0, 0, 0, 0), 0.0);
     }
 }

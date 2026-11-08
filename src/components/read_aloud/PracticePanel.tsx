@@ -201,7 +201,13 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
         `measured: score=${res.score.toFixed(1)} xp=+${res.xp_awarded} via=${via ?? "local"}` +
           ` recognized="${res.attempt.recognized}"` +
           (a
-            ? ` fluency=${a.fluency ? `${Math.round(a.fluency.wcpm)} wcpm` : "not measured"}` +
+            ? ` fluency=${
+                a.fluency
+                  ? `${Math.round(a.fluency.wcpm)} wcpm${
+                      a.fluency.score != null ? ` (${Math.round(a.fluency.score)}%)` : ""
+                    }`
+                  : "not measured"
+              }` +
               ` pron=${a.pronunciation.score != null ? Math.round(a.pronunciation.score * 100) : "not measured"}`
             : " no assessment"),
         LOG_MODULE

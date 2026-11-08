@@ -352,7 +352,12 @@ impl Assessment {
     pub(crate) fn headline(&self) -> String {
         let mut parts = vec![format!("accuracy {:.1}", self.accuracy.score)];
         if let Some(f) = &self.fluency {
-            parts.push(format!("{} wpm", f.wcpm.round() as i64));
+            // The headline number is the score; the wcpm it was built from
+            // stays in the line so the two readings of fluency never diverge.
+            match f.score {
+                Some(score) => parts.push(format!("fluency {:.0} ({} wpm)", score, f.wcpm.round() as i64)),
+                None => parts.push(format!("{} wpm", f.wcpm.round() as i64)),
+            }
             parts.push(format!("{} pause(s)", f.pause_count));
         } else {
             parts.push("fluency not measured".to_string());
