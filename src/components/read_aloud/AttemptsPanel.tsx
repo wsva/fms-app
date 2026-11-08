@@ -339,10 +339,10 @@ function SentenceCompare({ reference, recognized }: { reference: string; recogni
 /**
  * One recorded take, as a card.
  *
- * Its four columns are the card's subject — the model that measured the take,
- * then accuracy, fluency and pronunciation side by side — so the history can be
- * read down the list without opening a take. The recording's own actions sit in
- * the header.
+ * Its columns are the card's subject — the take's total, the model that
+ * measured it, then accuracy, fluency and pronunciation side by side — so the
+ * history can be read down the list without opening a take. The recording's
+ * own actions sit in the header.
  */
 function AttemptCard({
   attempt,
@@ -441,8 +441,8 @@ function AttemptCard({
         <ChevronRight size={16} className="text-text-tertiary shrink-0" />
       </div>
 
-      {/* The point of the card: the measuring model and all three scores,
-          whatever was measurable. */}
+      {/* The point of the card: the total, the measuring model and all three
+          scores, whatever was measurable. */}
       <ScoreAxes
         score={attempt.score}
         metrics={attempt.metrics}
@@ -455,9 +455,10 @@ function AttemptCard({
 
 /**
  * A dedicated page listing every recorded attempt at one text. Each card shows
- * the measuring model and the take's three scores; clicking it opens the detail —
- * the full recognized text at reading size, plus the stored three-axis
- * assessment in depth. Reached from the practice view's toolbar ("Attempts").
+ * the take's total, the measuring model and its three scores; clicking it opens
+ * the detail — the full recognized text at reading size, plus the stored
+ * three-axis assessment in depth. Reached from the practice view's toolbar
+ * ("Attempts").
  */
 export default function AttemptsPanel({
   datasetUuid,

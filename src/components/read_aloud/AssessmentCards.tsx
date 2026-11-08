@@ -3,6 +3,7 @@
 import type {
   Assessment,
   AttemptMeasurement,
+  FluencyMetrics,
   Pause,
   PronUnavailableReason,
   RateBand,
@@ -118,9 +119,28 @@ export default function AssessmentCards({ assessment }: { assessment: Assessment
 export type ScoreAxesSize = "sm" | "md";
 
 /**
- * The scores of one take as a single strip: accuracy, fluency, pronunciation —
- * the same three [`AssessmentCards`] breaks down, optionally preceded by the
- * model that produced them (`model`, as the attempts list cards show).
+ * The one composite number of a take — the frontend mirror of the backend's
+ * `assess::total_score`, kept in step with it:
+ * `accuracy · (0.5 + 0.5 · min(weakest measured delivery axis) / 100)`.
+ * An axis nobody measured drops out of the minimum instead of counting as
+ * zero; with neither delivery axis measured the total is the accuracy alone.
+ * Returns null when there is no stored assessment to derive it from, so the
+ * strip shows the gap rather than a number computed from nothing.
+ */
+function totalScore(score: number, fluency: FluencyMetrics | null, pronPercent: number | null): number | null {
+  const axes = [fluency?.score ?? null, pronPercent].filter((v): v is number => v != null);
+  if (axes.length === 0) return null;
+  const weakest = Math.min(...axes);
+  return score * (0.5 + (0.5 * Math.max(0, Math.min(100, weakest))) / 100);
+}
+
+/**
+ * The scores of one take as a single strip: total, accuracy, fluency,
+ * pronunciation — the same axes [`AssessmentCards`] breaks down, optionally
+ * preceded by the model that produced them (`model`, as the attempts list
+ * cards show). The total is the composite of the three (`totalScore`, the
+ * text card's badge for one take) and joins the strip whenever an assessment
+ * was stored to derive it from.
  *
  * The attempts list shows it on every card, so a take is scanned by its numbers
  * instead of only its accuracy; an attempt with no stored assessment shows what
@@ -164,6 +184,10 @@ export function ScoreAxes({
   // default 0 would be exactly the stand-in number this strip promises never to
   // invent.
   const hasAccuracy = metrics != null || Boolean(recognized?.trim());
+  // The composite rides on the stored axes only: an unmeasured take has no
+  // delivery axis to gate the accuracy with, so the column is a gap, not the
+  // accuracy wearing a different label.
+  const total = totalScore(score, fluency, pronPercent);
   // A take with no assessment at all has no per-axis reason to give, only the
   // way to measure one.
   const unmeasured =
@@ -172,6 +196,20 @@ export function ScoreAxes({
     "Assess again to measure it.";
 
   const axes: ScoreAxis[] = [
+    ...(total != null
+      ? [
+          {
+            key: "total",
+            label: "Total",
+            value: String(Math.round(total)),
+            unit: "%",
+            tone: percentTone(total),
+            title: `Total of this take — accuracy ${Math.round(
+              score,
+            )}% gated by its weakest delivery axis (fluency, pronunciation); an unmeasured axis drops out instead of counting as zero`,
+          },
+        ]
+      : []),
     ...(model !== undefined
       ? [
           {
@@ -240,7 +278,13 @@ export function ScoreAxes({
 
   return (
     <div
-      className={`grid ${model !== undefined ? "grid-cols-4" : "grid-cols-3"} gap-1.5 min-w-0 ${className}`}
+      className={`grid ${
+        (model !== undefined ? 1 : 0) + (total != null ? 1 : 0) === 2
+          ? "grid-cols-5"
+          : model !== undefined || total != null
+          ? "grid-cols-4"
+          : "grid-cols-3"
+      } gap-1.5 min-w-0 ${className}`}
     >
       {axes.map((axis) => (
         <div
