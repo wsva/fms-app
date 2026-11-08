@@ -115,12 +115,13 @@ export default function AssessmentCards({ assessment }: { assessment: Assessment
 export type ScoreAxesSize = "sm" | "md";
 
 /**
- * The three scores of one take as a single strip: accuracy, fluency,
- * pronunciation — the same three [`AssessmentCards`] breaks down.
+ * The scores of one take as a single strip: accuracy, fluency, pronunciation —
+ * the same three [`AssessmentCards`] breaks down, optionally preceded by the
+ * model that produced them (`model`, as the attempts list cards show).
  *
- * The attempts list shows it on every card, so a take is scanned by its three
- * numbers instead of only its accuracy; an attempt with no stored assessment
- * shows what it can and reads "—" for the rest, never a substitute number.
+ * The attempts list shows it on every card, so a take is scanned by its numbers
+ * instead of only its accuracy; an attempt with no stored assessment shows what
+ * it can and reads "—" for the rest, never a substitute number.
  * Accuracy is the one axis re-derived from the transcript on read, so a take
  * with a transcript has a real accuracy even unmeasured — and a take with *no*
  * transcript has none, and reads "—" rather than a 0% nobody measured.
@@ -130,6 +131,7 @@ export function ScoreAxes({
   score,
   metrics,
   recognized,
+  model,
   size = "sm",
   className = "",
 }: {
@@ -142,6 +144,11 @@ export function ScoreAxes({
   /** The take's transcript. Without one there is nothing accuracy was computed
    *  from, so accuracy shows the gap instead of `score`. */
   recognized?: string | null;
+  /** The speech model that produced these numbers, shown as the leading column
+   *  (the best measurement, same as the headline `score`). Pass null when the
+   *  take predates per-model scoring. Omit the prop for the plain three-axis
+   *  strip. */
+  model?: string | null;
   size?: ScoreAxesSize;
   className?: string;
 }) {
@@ -162,6 +169,21 @@ export function ScoreAxes({
     "Assess again to measure it.";
 
   const axes: ScoreAxis[] = [
+    ...(model !== undefined
+      ? [
+          {
+            key: "model",
+            label: "Model",
+            value: model != null ? modelLabel(model) : "—",
+            tone: "text-text-primary",
+            small: true,
+            title:
+              model != null
+                ? `Measured by ${model}${model === "unrecorded" ? "" : ` (catalog id ${model})`}`
+                : "This take was measured before per-model scoring existed, so no model is recorded.",
+          },
+        ]
+      : []),
     {
       key: "accuracy",
       label: "Accuracy",
@@ -204,7 +226,9 @@ export function ScoreAxes({
   ];
 
   return (
-    <div className={`grid grid-cols-3 gap-1.5 min-w-0 ${className}`}>
+    <div
+      className={`grid ${model !== undefined ? "grid-cols-4" : "grid-cols-3"} gap-1.5 min-w-0 ${className}`}
+    >
       {axes.map((axis) => (
         <div
           key={axis.key}
@@ -216,8 +240,10 @@ export function ScoreAxes({
           </span>
           <span className="flex items-baseline gap-0.5 min-w-0">
             <span
-              className={`font-semibold tabular-nums leading-none ${axis.tone} ${
-                size === "md" ? "text-2xl" : "text-lg"
+              className={`leading-none min-w-0 ${axis.tone} ${
+                axis.small
+                  ? "text-xs font-medium truncate"
+                  : `font-semibold tabular-nums ${size === "md" ? "text-2xl" : "text-lg"}`
               }`}
             >
               {axis.value}
@@ -240,6 +266,8 @@ type ScoreAxis = {
   unit?: string;
   tone: string;
   title: string;
+  /** Render the value as small text (a name, not a number). */
+  small?: boolean;
 };
 
 /**
