@@ -12,6 +12,12 @@
 //! superscripts, so every answer goes through [`clean`] before it is handed
 //! back — see that module for the rules.
 //!
+//! A generation that will not stop is a failure mode of its own. Some `glm-ocr`
+//! builds repeat their answer instead of ending it, and Ollama aborts the run
+//! rather than hand the loop back (its repeat limit is not settable through the
+//! API yet). So one retry goes out with repetition damping, and a second failure
+//! is reported as the loop it is — see [`Failure`].
+//!
 //! Models run one request at a time here: Ollama serialises them anyway, and a
 //! vision model on the CPU is slow enough that a second concurrent page would
 //! only make the first slower.
@@ -97,6 +103,56 @@ struct ReplyMessage {
     content: String,
 }
 
+/// Why one request failed.
+///
+/// Typed rather than a formatted string because exactly one of these failures is
+/// worth another attempt, and only the body of the reply says which it was.
+enum Failure {
+    /// Nothing came back: no server, a timeout, an unreadable body.
+    Transport(String),
+    /// Ollama answered with a status of its own, and this body.
+    Status(u16, String),
+    /// A 2xx with no text in it — a model that cannot see.
+    Silent,
+}
+
+/// Ollama's own words when it gives up on a runaway generation.
+const REPEAT_ABORT: &str = "token repeat limit";
+
+impl Failure {
+    /// True for the one failure a second attempt can fix.
+    ///
+    /// Ollama decides on its own that a repetitive answer is a runaway and
+    /// aborts the run with this error. The limit is not settable through the API
+    /// yet (ollama#14523 is open), so the reply's own body is all there is to go
+    /// on — there is no flag to raise.
+    fn is_repeat_abort(&self) -> bool {
+        matches!(self, Failure::Status(_, detail) if detail.to_ascii_lowercase().contains(REPEAT_ABORT))
+    }
+
+    fn message(&self, model: &str) -> String {
+        match self {
+            Failure::Transport(detail) => detail.clone(),
+            Failure::Silent => format!(
+                "{} returned no text — is it a vision model? (pull one that accepts images, e.g. glm-ocr)",
+                model
+            ),
+            Failure::Status(status, detail) if self.is_repeat_abort() => format!(
+                "{} repeated its own answer until Ollama aborted the run ({}, {}). \
+                 Some glm-ocr builds loop on a page they cannot finish, and repetition \
+                 damping did not break it. Try the page again, try another model, and \
+                 update both (`ollama pull glm-ocr`) — the loop is a defect on their side.",
+                model,
+                status,
+                detail.trim()
+            ),
+            Failure::Status(status, detail) => {
+                format!("Ollama OCR failed ({}): {}", status, detail.trim())
+            }
+        }
+    }
+}
+
 /// Run one page through `model` and return the cleaned text.
 ///
 /// `instructions` replaces [`DEFAULT_INSTRUCTIONS`] for callers that know their
@@ -125,50 +181,27 @@ pub async fn recognize(
         .timeout(Duration::from_secs(600))
         .build()
         .map_err(|e| e.to_string())?;
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{
-            "role": "user",
-            "content": prompt,
-            // Ollama takes bare base64, not a data URL.
-            "images": [bare_base64(image_base64)],
-        }],
-        "stream": false,
-        "options": {
-            // A transcription is not a creative act: sampling can only invent words.
-            "temperature": 0,
-            // See `NUM_CTX`: below this, image + page does not fit.
-            "num_ctx": NUM_CTX,
-        },
-    });
+    let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
 
     let started = std::time::Instant::now();
-    let resp = client
-        .post(format!("{}/api/chat", base_url.trim_end_matches('/')))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to reach Ollama at {}: {}", base_url, e))?;
 
-    let status = resp.status();
-    if !status.is_success() {
-        let detail = resp.text().await.unwrap_or_default();
-        return Err(format!("Ollama OCR failed ({}): {}", status, detail.trim()));
-    }
-
-    let reply: ChatReply = resp
-        .json()
-        .await
-        .map_err(|e| format!("Unreadable reply from Ollama: {}", e))?;
-
-    let raw = reply.message.map(|m| m.content).unwrap_or_default();
-    if raw.trim().is_empty() {
-        return Err(format!(
-            "{} returned no text — is it a vision model? (pull one that accepts images, e.g. glm-ocr)",
-            model
-        ));
-    }
+    // Two attempts at most. The first is the one that reads the page best, since
+    // greedy decoding invents nothing; the second exists only to get past a
+    // model that would not stop, and would otherwise leave the page unread.
+    let (raw, retried) = match ask(&client, &url, model, prompt, image_base64, false).await {
+        Ok(text) => (text, false),
+        Err(failure) if failure.is_repeat_abort() => {
+            log::warn!(
+                "[OCR] ollama {} looped on this page; retrying with repetition damping",
+                model
+            );
+            let text = ask(&client, &url, model, prompt, image_base64, true)
+                .await
+                .map_err(|failure| failure.message(model))?;
+            (text, true)
+        }
+        Err(failure) => return Err(failure.message(model)),
+    };
 
     let Cleaned {
         text,
@@ -177,13 +210,18 @@ pub async fn recognize(
     } = clean::clean(&raw);
 
     log::info!(
-        "[OCR] ollama {}: {} raw chars, {} output chars, {} references and {} markup marks removed in {:.1}s",
+        "[OCR] ollama {}: {} raw chars, {} output chars, {} references and {} markup marks removed in {:.1}s{}",
         model,
         raw.chars().count(),
         text.chars().count(),
         references,
         markup,
-        started.elapsed().as_secs_f32()
+        started.elapsed().as_secs_f32(),
+        if retried {
+            " (second attempt: the first repeated itself)"
+        } else {
+            ""
+        }
     );
 
     Ok(OllamaOcrResult {
@@ -193,6 +231,78 @@ pub async fn recognize(
         markup,
         model: model.to_string(),
     })
+}
+
+/// One request, one answer — the raw text, or why there is none.
+async fn ask(
+    client: &reqwest::Client,
+    url: &str,
+    model: &str,
+    prompt: &str,
+    image_base64: &str,
+    damped: bool,
+) -> Result<String, Failure> {
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": prompt,
+            // Ollama takes bare base64, not a data URL.
+            "images": [bare_base64(image_base64)],
+        }],
+        "stream": false,
+        "options": sampling(damped),
+    });
+
+    let resp = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| Failure::Transport(format!("Failed to reach Ollama at {}: {}", url, e)))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(Failure::Status(status.as_u16(), detail));
+    }
+
+    let reply: ChatReply = resp
+        .json()
+        .await
+        .map_err(|e| Failure::Transport(format!("Unreadable reply from Ollama: {}", e)))?;
+
+    let content = reply.message.map(|m| m.content).unwrap_or_default();
+    if content.trim().is_empty() {
+        return Err(Failure::Silent);
+    }
+    Ok(content)
+}
+
+/// The sampling options for one attempt.
+///
+/// `damped` is the second attempt, the one that follows a run aborted for
+/// repeating itself. The escape is repetition control rather than noise, and it
+/// has to be wide: Ollama's penalty looks back over 64 tokens by default, while
+/// the block a looping model repeats is a whole paragraph, so the window is
+/// opened past it. A little temperature keeps the retry from being the identical
+/// trajectory that already failed.
+fn sampling(damped: bool) -> serde_json::Value {
+    if damped {
+        serde_json::json!({
+            "temperature": 0.2,
+            // See `NUM_CTX`: below this, image + page does not fit.
+            "num_ctx": NUM_CTX,
+            "repeat_penalty": 1.3,
+            "repeat_last_n": 512,
+        })
+    } else {
+        serde_json::json!({
+            // A transcription is not a creative act: sampling can only invent words.
+            "temperature": 0,
+            "num_ctx": NUM_CTX,
+        })
+    }
 }
 
 /// The base64 payload of an image, whether it arrived as a data URL or bare.
@@ -205,7 +315,7 @@ fn bare_base64(image_base64: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_prompt_for, DEFAULT_INSTRUCTIONS, GLM_TASK_TEXT};
+    use super::{default_prompt_for, sampling, Failure, DEFAULT_INSTRUCTIONS, GLM_TASK_TEXT};
 
     #[test]
     fn glm_ocr_gets_its_task_phrase() {
@@ -217,5 +327,31 @@ mod tests {
     fn any_other_model_gets_the_prose_prompt() {
         assert_eq!(default_prompt_for("qwen2.5vl:7b"), DEFAULT_INSTRUCTIONS);
         assert_eq!(default_prompt_for("llava"), DEFAULT_INSTRUCTIONS);
+    }
+
+    #[test]
+    fn the_runaway_abort_is_recognised_and_explained() {
+        let failure = Failure::Status(
+            500,
+            r#"{"error":"prediction aborted, token repeat limit reached"}"#.to_string(),
+        );
+        assert!(failure.is_repeat_abort());
+        assert!(failure.message("glm-ocr:bf16").contains("repeated its own answer"));
+    }
+
+    #[test]
+    fn any_other_status_is_reported_as_it_came() {
+        let failure = Failure::Status(500, "model requires more system memory".to_string());
+        assert!(!failure.is_repeat_abort());
+        assert!(failure.message("glm-ocr").starts_with("Ollama OCR failed (500)"));
+    }
+
+    #[test]
+    fn the_retry_damps_repetition_across_a_wide_window() {
+        let damped = sampling(true);
+        assert_eq!(damped["repeat_last_n"], 512);
+        assert!(damped["repeat_penalty"].as_f64().unwrap() > 1.0);
+        // The first attempt stays greedy: sampling can only invent words.
+        assert_eq!(sampling(false)["temperature"], 0);
     }
 }
