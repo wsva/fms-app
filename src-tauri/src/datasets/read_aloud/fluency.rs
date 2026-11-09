@@ -17,6 +17,16 @@
 //! throwing away. Per-phrase spans can only say whether a boundary of the model
 //! fell inside the silence, so the label gets coarser and the word it followed
 //! stays unreported — [`Pause::after_ref`] is `None`, not guessed.
+//!
+//! Both halves of the score are judged against the text's **standard audio**
+//! ([`ReferenceProfile`]), not against a published reading norm. The pace is a
+//! ratio to the reference's own words per minute, and a silence costs only when
+//! the reference speaker did not take it — or took a materially shorter one at
+//! that point. A published norm describes a different text, language and genre:
+//! measured against the 36 reference clips of a German C1 dataset, a flawless
+//! professional reading scored 46-57, because 100 wcpm worth of credit was
+//! withheld (the norm sat at 180) and the pauses it was entitled to take were
+//! charged as hesitations.
 
 use serde::{Deserialize, Serialize};
 
@@ -158,6 +168,119 @@ impl<'a> Timings<'a> {
     }
 }
 
+/// One silence the reference speaker took, in the form a learner's pause can be
+/// matched against.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RefPause {
+    /// Reference word the silence followed, when the clip's evidence named one.
+    /// A TTS clip's word boundaries do; an uploaded clip's do not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_ref: Option<usize>,
+    /// Where the silence sat in the reading, `0..1` of the clip's span. The
+    /// position that survives a different speaker at a different pace, and the
+    /// only way to match a pause when the evidence is phrase-only.
+    pub at: f64,
+    /// How long the reference held it.
+    pub secs: f64,
+}
+
+/// The pace and pause shape of a text's **standard audio** — what a take is
+/// judged against.
+///
+/// This is the measurement that makes the score mean something for *this* text:
+/// a three-minute dialogue breathes between turns, a poem is read slowly, a
+/// German audiobook runs at 105-150 wcpm. A norm table has to be right for all
+/// of them; the clip only has to be right for itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ReferenceProfile {
+    /// The reference reader's words per minute over its reading span.
+    pub wcpm: f64,
+    /// The silences it took, so the same pause from a learner is free.
+    #[serde(default)]
+    pub pauses: Vec<RefPause>,
+}
+
+impl ReferenceProfile {
+    /// The reference pause a learner's pause corresponds to, if any.
+    ///
+    /// A word index is exact evidence and wins *when it agrees with where the
+    /// silence actually fell*: a clip whose boundaries split one written word
+    /// into two (a number, a hyphenated compound) shifts every later index by
+    /// one, so an index that claims a pause far from the measured position is a
+    /// shifted index, not a match. Position is the fallback and the tie-breaker,
+    /// because that is all phrase-only placement (and an uploaded clip) offers.
+    fn matching(
+        &self,
+        pause: &Pause,
+        span_start: f64,
+        reading_span: f64,
+        cfg: &FluencyConfig,
+    ) -> Option<&RefPause> {
+        if reading_span <= 1e-6 {
+            return None;
+        }
+        let at = ((pause.start - span_start) / reading_span).clamp(0.0, 1.0);
+        if let Some(index) = pause.after_ref {
+            if let Some(found) = self.pauses.iter().find(|r| r.after_ref == Some(index)) {
+                if (found.at - at).abs() <= cfg.pause_index_trust_span {
+                    return Some(found);
+                }
+            }
+        }
+        self.pauses
+            .iter()
+            .map(|r| ((r.at - at).abs(), r))
+            .filter(|(delta, _)| *delta <= cfg.pause_match_tolerance)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, r)| r)
+    }
+}
+
+/// The reference profile of one clip, from evidence the clip already carries:
+/// its VAD segments and, for a synthesis, its per-word boundaries.
+///
+/// `ref_words` is how many words the reference text has; it is the numerator of
+/// the pace, so a clip that does not say the text would be caught by accuracy,
+/// not hidden here. `None` when the clip holds nothing measurable — no speech
+/// segment, or a span too short to divide by.
+pub(crate) fn reference_profile(
+    speech_spans: &[Segment],
+    words: &[TimedWord],
+    ref_words: usize,
+    cfg: &FluencyConfig,
+) -> Option<ReferenceProfile> {
+    let first = speech_spans.first()?;
+    let last = speech_spans.last()?;
+    if ref_words == 0 {
+        return None;
+    }
+    // Word boundaries are the reader's own edges; the VAD's are padded by a few
+    // frames on each side and would report every rate slightly slower. Where
+    // there are none (an aligned or uploaded clip) the segments are all there is.
+    let (span_start, span_end) = match (words.first(), words.last()) {
+        (Some(f), Some(l)) if l.end > f.start => (f.start, l.end),
+        _ => (first.start, last.end),
+    };
+    let reading_span = span_end - span_start;
+    if reading_span <= 1e-6 {
+        return None;
+    }
+
+    let pauses = speech_spans
+        .windows(2)
+        .filter_map(|pair| {
+            let secs = pair[1].start - pair[0].end;
+            (secs >= cfg.min_pause_secs).then(|| RefPause {
+                after_ref: word_before(pair[0].end, words, cfg.attribution_tolerance_secs),
+                at: ((pair[0].end - span_start) / reading_span).clamp(0.0, 1.0),
+                secs,
+            })
+        })
+        .collect();
+
+    Some(ReferenceProfile { wcpm: per_minute(ref_words, reading_span), pauses })
+}
+
 /// Every threshold and band edge, in one place.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FluencyConfig {
@@ -166,10 +289,16 @@ pub(crate) struct FluencyConfig {
     /// A pause this long is reported separately — it usually means the reader
     /// lost their place rather than breathed.
     pub long_pause_secs: f64,
-    /// Below this words-per-minute the reading is `slow`.
-    pub slow_wcpm: f64,
-    /// Above this words-per-minute it is `fast`.
-    pub target_wcpm: f64,
+    /// Read this much slower than the reference and the band says `slow`.
+    pub slow_ratio: f64,
+    /// Read this much faster than the reference and the band says `fast`.
+    pub fast_ratio: f64,
+    /// The pace ratio a take is scored against when the text has no usable
+    /// standard clip. The median reference pace of the 36 clips measured in
+    /// German C1 audiobook material (105-149 wcpm); a fallback describes the
+    /// material this app is used with, not reading research, and is labelled as
+    /// such wherever it surfaces.
+    pub fallback_ref_wcpm: f64,
     /// How far past a word's `end` a pause may start and still be attributed
     /// to it (word timings are not sample-accurate).
     pub attribution_tolerance_secs: f64,
@@ -178,6 +307,30 @@ pub(crate) struct FluencyConfig {
     /// tolerance: a segment timestamp is the model's guess at a phrase edge, and
     /// whisper's own boundaries drift by a few hundred milliseconds.
     pub phrase_boundary_tolerance_secs: f64,
+    /// How near, as a fraction of the reading span, a learner's pause must start
+    /// to count as the same pause the reference speaker took. Two percent of a
+    /// two-minute take is ~2.4 s, of a 20 s take ~0.4 s — the tolerance scales
+    /// with the material because placement error does too.
+    pub pause_match_tolerance: f64,
+    /// How far from the position it claims a matched word index may sit before
+    /// it is read as a shifted index rather than a match. Wider than
+    /// `pause_match_tolerance` because the index is exact evidence *when* the
+    /// clip's word sequence equals the text's, and it earns the benefit of the
+    /// doubt up to here.
+    pub pause_index_trust_span: f64,
+    /// A matched pause costs only what it exceeds: this multiple of the
+    /// reference pause, or `pause_extra_secs` if that is larger. Breathing is
+    /// not the offence — holding the breath twice as long as the reader who
+    /// showed you how is.
+    pub pause_length_factor: f64,
+    /// Slack on top of a matched pause, so a slightly longer breath is free.
+    pub pause_extra_secs: f64,
+    /// Without a reference profile, a mid-phrase silence this long is a
+    /// hesitation.
+    pub fallback_hesitation_secs: f64,
+    /// Without a reference profile, a silence at punctuation is free up to this
+    /// length — past it the reader most likely lost their place.
+    pub fallback_punctuation_pause_secs: f64,
 }
 
 impl Default for FluencyConfig {
@@ -185,10 +338,17 @@ impl Default for FluencyConfig {
         Self {
             min_pause_secs: 0.25,
             long_pause_secs: 1.0,
-            slow_wcpm: 80.0,
-            target_wcpm: 140.0,
+            slow_ratio: 0.75,
+            fast_ratio: 1.15,
+            fallback_ref_wcpm: 130.0,
             attribution_tolerance_secs: 0.08,
             phrase_boundary_tolerance_secs: 0.6,
+            pause_match_tolerance: 0.02,
+            pause_index_trust_span: 0.08,
+            pause_length_factor: 1.8,
+            pause_extra_secs: 0.4,
+            fallback_hesitation_secs: 0.4,
+            fallback_punctuation_pause_secs: 1.6,
         }
     }
 }
@@ -253,12 +413,18 @@ pub(crate) struct Fluency {
     /// only *correct* words, so misread words cost twice: fewer in the
     /// numerator, same denominator.
     pub wcpm: f64,
-    /// The fluency axis's own 0-100 score: [`pace_score`] of `wcpm`, discounted
-    /// by [`disfluency_penalty`]. `None` on rows stored before the number
-    /// existed — the reader falls back to showing the raw `wcpm` rather than
-    /// inventing a score nobody measured.
+    /// The fluency axis's own 0-100 score: [`pace_score_ratio`] of the take's
+    /// pace against the reference's, discounted by [`disfluency_penalty`].
+    /// `None` on rows stored before the number existed — the reader falls back
+    /// to showing the raw `wcpm` rather than inventing a score nobody measured.
     #[serde(default)]
     pub score: Option<f64>,
+    /// The pace the score was judged against, when it came from the text's own
+    /// standard clip. Absent means the fallback norm answered
+    /// ([`FluencyConfig::fallback_ref_wcpm`]), so the number still says what
+    /// produced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_wcpm: Option<f64>,
     /// Spoken words per minute over the reading span (includes pauses).
     pub speech_rate: f64,
     /// Spoken words per minute excluding pauses.
@@ -288,40 +454,108 @@ fn per_minute(count: usize, secs: f64) -> f64 {
     }
 }
 
-/// The pace half of the fluency score, 0-100: a piecewise linear curve over
-/// wcpm through 100 → 60, 150 → 90, saturating at 100 by [`PACE_FULL_WCPM`]
-/// (an adult native reading pace). The plateau above it is deliberate —
-/// racing earns no extra credit, and a too-fast-to-be-intelligible take is
-/// punished by pauses and repairs, not by the curve.
-fn pace_score(wcpm: f64) -> f64 {
-    const PACE_FULL_WCPM: f64 = 180.0;
-    if wcpm <= 0.0 {
+/// The pace half of the fluency score, 0-100, as a curve over the take's pace
+/// *ratio* to the reference's: `0.6 → 55`, `1.0 → 95`, saturating at 100 by
+/// `1.25`.
+///
+/// Reading at the pace of the clip the learner was shown scores 95, not 100: a
+/// take is being compared against one rendition, and matching it is not the same
+/// as being unimprovable. The plateau above 1.25 is deliberate — racing earns no
+/// extra credit, and a too-fast-to-be-intelligible take is punished by pauses
+/// and repairs, not by the curve.
+pub(crate) fn pace_score_ratio(ratio: f64) -> f64 {
+    const FLOOR: f64 = 0.6;
+    const FLOOR_SCORE: f64 = 55.0;
+    const TARGET_SCORE: f64 = 95.0;
+    const FULL: f64 = 1.25;
+    if !(ratio > 0.0) || !ratio.is_finite() {
         0.0
-    } else if wcpm <= 150.0 {
-        wcpm * 0.6
+    } else if ratio < FLOOR {
+        ratio / FLOOR * FLOOR_SCORE
+    } else if ratio <= 1.0 {
+        FLOOR_SCORE + (ratio - FLOOR) * (TARGET_SCORE - FLOOR_SCORE) / (1.0 - FLOOR)
     } else {
-        (90.0 + (wcpm - 150.0) * 10.0 / (PACE_FULL_WCPM - 150.0)).min(100.0)
+        (TARGET_SCORE + (ratio - 1.0) * (100.0 - TARGET_SCORE) / (FULL - 1.0)).min(100.0)
     }
 }
 
-/// The smoothness discount on [`pace_score`], in [0, 0.35]: each long pause,
-/// mid-phrase hesitation, restart and stutter costs a fixed share of the pace
-/// credit. Breathing at punctuation is free — only a pause at or beyond
-/// [`FluencyConfig::long_pause_secs`] counts as losing one's place. The cap
-/// keeps a disastrous delivery from wiping out a genuinely good pace: the
-/// worst possible score is 65% of it, which still says "your speed is real,
+/// The smoothness discount on [`pace_score_ratio`], in [0, `PENALTY_CAP`].
+///
+/// The charges are **per hundred words**, not per take. `0.05` for a hesitation
+/// reproduces the previous calibration at the ~100-word take the old formula was
+/// tuned on, and a four-hundred-word text no longer collects four times the
+/// penalty for the same delivery — with a cap, a fixed per-take count stopped
+/// measuring anything at all past about a minute of audio, which is how every
+/// reference clip in a C1 dataset scored the flat maximum.
+///
+/// The cap keeps a disastrous delivery from wiping out a genuinely good pace:
+/// the worst possible score is 65% of it, which still says "your speed is real,
 /// your fluency isn't".
 fn disfluency_penalty(
-    long_pause_count: usize,
-    within_phrase_count: usize,
+    hesitation_count: usize,
+    overrun_count: usize,
     restart_count: usize,
     repetition_count: usize,
+    spoken_words: usize,
 ) -> f64 {
-    (0.05 * long_pause_count as f64
-        + 0.04 * within_phrase_count as f64
+    const PENALTY_CAP: f64 = 0.35;
+    let per_hundred = 100.0 / spoken_words.max(1) as f64;
+    ((0.05 * hesitation_count as f64
+        + 0.03 * overrun_count as f64
         + 0.05 * restart_count as f64
         + 0.02 * repetition_count as f64)
-        .min(0.35)
+        * per_hundred)
+        .min(PENALTY_CAP)
+}
+
+/// Split the reading pauses into the two kinds that cost anything.
+///
+/// *A hesitation* is a silence in a place the reference did not pause — the
+/// reader stopped to think. *An overrun* is a pause in a place the reference did
+/// pause, held materially longer (`pause_length_factor`, plus
+/// `pause_extra_secs` of slack). Everything else is delivery: the reference
+/// speaker took the same breath at the same point, and the learner is entitled
+/// to it.
+///
+/// Without a reference profile the rule falls back to punctuation: a mid-phrase
+/// silence is a hesitation once it passes `fallback_hesitation_secs`, and one at
+/// punctuation is free until `fallback_punctuation_pause_secs`. Cruder, but it is
+/// the same idea — a breath is not an error — and it never invents a comparison
+/// it does not have.
+fn pause_charges(
+    pauses: &[&Pause],
+    reference: Option<&ReferenceProfile>,
+    span_start: f64,
+    reading_span: f64,
+    cfg: &FluencyConfig,
+) -> (usize, usize) {
+    let (mut hesitations, mut overruns) = (0usize, 0usize);
+    for pause in pauses {
+        let secs = pause.duration();
+        match reference {
+            Some(profile) => match profile.matching(pause, span_start, reading_span, cfg) {
+                Some(ref_pause) => {
+                    let allowed =
+                        (cfg.pause_length_factor * ref_pause.secs).max(cfg.pause_extra_secs);
+                    if secs > allowed {
+                        overruns += 1;
+                    }
+                }
+                None => hesitations += 1,
+            },
+            None => {
+                let tolerated = if pause.kind == PauseKind::AtPunctuation {
+                    cfg.fallback_punctuation_pause_secs
+                } else {
+                    cfg.fallback_hesitation_secs
+                };
+                if secs >= tolerated {
+                    hesitations += 1;
+                }
+            }
+        }
+    }
+    (hesitations, overruns)
 }
 
 /// `hyp_index → ref_index`, derived from the alignment.
@@ -391,12 +625,16 @@ fn ends_phrase(word: Option<&NormWord>) -> bool {
 /// Pure: no I/O, no model, no clock. Every division is guarded, so an empty
 /// recording, a one-word recording and a recording the STT returned nothing for
 /// numbers instead of `NaN`.
+///
+/// `reference` is the text's own standard audio when the device has a fresh
+/// clip for it; `None` falls back to the punctuation rule and the fallback norm.
 pub(crate) fn compute(
     duration: f64,
     speech_spans: &[Segment],
     timings: &Timings,
     verdicts: &[WordVerdict],
     ref_words: &[NormWord],
+    reference: Option<&ReferenceProfile>,
     correct_words: usize,
     cfg: &FluencyConfig,
 ) -> (Fluency, Vec<Pause>) {
@@ -468,11 +706,20 @@ pub(crate) fn compute(
         spoken_words as f64 / (pause_count + 1) as f64
     };
 
+    // The bar this take is measured against. A profile that cannot be divided by
+    // (an empty clip) is not a bar, so it is dropped here rather than scored
+    // against: the fallback then answers and `ref_wcpm` stays absent.
+    let measured_ref = reference.map(|r| r.wcpm).filter(|w| *w > 1e-6);
+    let ratio = match measured_ref {
+        Some(ref_wcpm) => wcpm / ref_wcpm,
+        None => wcpm / cfg.fallback_ref_wcpm,
+    };
+
     let band = if reading_span <= 1e-6 {
         RateBand::Target
-    } else if wcpm < cfg.slow_wcpm {
+    } else if ratio < cfg.slow_ratio {
         RateBand::Slow
-    } else if wcpm > cfg.target_wcpm {
+    } else if ratio > cfg.fast_ratio {
         RateBand::Fast
     } else {
         RateBand::Target
@@ -480,18 +727,24 @@ pub(crate) fn compute(
 
     let (repetition_count, restart_count) = count_repeats(verdicts);
 
-    // The axis's own number: pace discounted by disfluency. Derived from
-    // measurements that are all stored beside it, so a reader can always
-    // re-explain the score from the wcpm and the pause/repair counts.
+    // The axis's own number: pace against the reference, discounted by the
+    // disfluencies the reference did not commit. Derived from measurements that
+    // are all stored beside it, so a reader can always re-explain the score
+    // from `wcpm`, `ref_wcpm` and the pause/repair counts.
     let score = if reading_span <= 1e-6 {
         None
     } else {
-        Some(pace_score(wcpm) * (1.0 - disfluency_penalty(
-            long_pause_count,
-            within_phrase,
-            restart_count,
-            repetition_count,
-        )))
+        let (hesitations, overruns) =
+            pause_charges(&reading_pauses, reference, span_start, reading_span, cfg);
+        Some(pace_score_ratio(ratio)
+            * (1.0
+                - disfluency_penalty(
+                    hesitations,
+                    overruns,
+                    restart_count,
+                    repetition_count,
+                    spoken_words,
+                )))
     };
 
     (
@@ -500,6 +753,7 @@ pub(crate) fn compute(
             speaking_time,
             wcpm,
             score,
+            ref_wcpm: measured_ref,
             speech_rate,
             articulation_rate,
             pause_count,
@@ -549,7 +803,7 @@ mod tests {
         let words = vec![word("a", 0.0, 0.4), word("b", 0.45, 0.9)];
         let segments = vec![seg(0.0, 0.9)];
         let (f, pauses) = compute(
-            0.9, &segments, &Timings::new(&words, &[]), &perfect_verdicts(2), &normalize_words("a b"), 2,
+            0.9, &segments, &Timings::new(&words, &[]), &perfect_verdicts(2), &normalize_words("a b"), None, 2,
             &FluencyConfig::default(),
         );
         assert_eq!(f.pause_count, 0);
@@ -562,7 +816,7 @@ mod tests {
         let words = vec![word("hallo", 0.0, 0.4), word("welt", 1.0, 1.4)];
         let segments = vec![seg(0.0, 0.45), seg(0.95, 1.45)];
         let (f, pauses) = compute(
-            1.45, &segments, &Timings::new(&words, &[]), &perfect_verdicts(2), &normalize_words("hallo welt"), 2,
+            1.45, &segments, &Timings::new(&words, &[]), &perfect_verdicts(2), &normalize_words("hallo welt"), None, 2,
             &FluencyConfig::default(),
         );
         assert_eq!(f.pause_count, 1);
@@ -581,7 +835,7 @@ mod tests {
         let segments = vec![seg(0.0, 0.45), seg(1.15, 1.65)];
         let (_, pauses) = compute(
             1.65, &segments, &Timings::new(&words, &[]), &perfect_verdicts(2),
-            &normalize_words("hallo, welt"), 2, &FluencyConfig::default(),
+            &normalize_words("hallo, welt"), None, 2, &FluencyConfig::default(),
         );
         assert_eq!(pauses[0].kind, PauseKind::AtPunctuation);
         assert_eq!(pauses[0].after_ref, Some(0));
@@ -596,7 +850,7 @@ mod tests {
         let segments = vec![seg(0.0, 0.45), seg(0.95, 1.45)];
         let (f, pauses) = compute(
             1.45, &segments, &Timings::new(&[], &phrases), &perfect_verdicts(4),
-            &normalize_words("hallo welt und tschuss"), 4, &FluencyConfig::default(),
+            &normalize_words("hallo welt und tschuss"), None, 4, &FluencyConfig::default(),
         );
         assert_eq!(pauses.len(), 1);
         assert_eq!(pauses[0].kind, PauseKind::AtPunctuation);
@@ -616,7 +870,7 @@ mod tests {
         let segments = vec![seg(0.0, 0.85), seg(1.35, 2.0)];
         let (_, pauses) = compute(
             2.0, &segments, &Timings::new(&[], &phrases), &perfect_verdicts(4),
-            &normalize_words("hallo und tschuss welt"), 4, &FluencyConfig::default(),
+            &normalize_words("hallo und tschuss welt"), None, 4, &FluencyConfig::default(),
         );
         assert_eq!(pauses[0].kind, PauseKind::WithinPhrase);
     }
@@ -630,7 +884,7 @@ mod tests {
         let segments = vec![seg(0.0, 0.45), seg(0.95, 1.45)];
         let (_, pauses) = compute(
             1.45, &segments, &Timings::new(&words, &phrases), &perfect_verdicts(2),
-            &normalize_words("hallo welt"), 2, &FluencyConfig::default(),
+            &normalize_words("hallo welt"), None, 2, &FluencyConfig::default(),
         );
         assert_eq!(pauses[0].kind, PauseKind::WithinPhrase);
         assert_eq!(pauses[0].after_ref, Some(0));
@@ -641,7 +895,7 @@ mod tests {
         let words = vec![word("hi", 0.5, 0.8)];
         let segments = vec![seg(0.45, 0.85)];
         let (f, pauses) = compute(
-            1.5, &segments, &Timings::new(&words, &[]), &perfect_verdicts(1), &normalize_words("hi"), 1,
+            1.5, &segments, &Timings::new(&words, &[]), &perfect_verdicts(1), &normalize_words("hi"), None, 1,
             &FluencyConfig::default(),
         );
         assert_eq!(f.pause_count, 0, "margins are not reading pauses");
@@ -659,14 +913,14 @@ mod tests {
         // One word in 0.3 s of reading span = 200 wcpm → fast.
         let words = vec![word("schnell", 1.0, 1.3)];
         let (fast, _) = compute(1.3, &[seg(1.0, 1.3)], &Timings::new(&words, &[]), &perfect_verdicts(1),
-            &normalize_words("schnell"), 1, &cfg);
+            &normalize_words("schnell"), None, 1, &cfg);
         assert_eq!(fast.band, RateBand::Fast);
 
         // 10 words in 10 s = 60 wcpm → slow.
         let words: Vec<TimedWord> =
             (0..10).map(|i| word("wort", i as f64, i as f64 + 0.5)).collect();
         let (slow, _) = compute(10.0, &[seg(0.0, 10.0)], &Timings::new(&words, &[]), &perfect_verdicts(10),
-            &normalize_words("wort wort wort wort wort wort wort wort wort wort"), 10, &cfg);
+            &normalize_words("wort wort wort wort wort wort wort wort wort wort"), None, 10, &cfg);
         assert_eq!(slow.band, RateBand::Slow);
     }
 
@@ -685,7 +939,7 @@ mod tests {
         let words: Vec<TimedWord> = (0..6)
             .map(|i| word("w", i as f64 * 0.5, i as f64 * 0.5 + 0.4))
             .collect();
-        let (f, _) = compute(3.0, &[seg(0.0, 3.0)], &Timings::new(&words, &[]), &verdicts, &normalize_words("w w w"), 3,
+        let (f, _) = compute(3.0, &[seg(0.0, 3.0)], &Timings::new(&words, &[]), &verdicts, &normalize_words("w w w"), None, 3,
             &FluencyConfig::default());
         assert_eq!(f.repetition_count, 1);
         assert_eq!(f.restart_count, 1);
@@ -701,7 +955,7 @@ mod tests {
             (0.0, vec![seg(0.0, 0.0)], Vec::new()),
             (0.5, vec![seg(0.2, 0.2)], vec![word("a", 0.2, 0.2)]),
         ] {
-            let (f, _) = compute(duration, &segments, &Timings::new(&words, &[]), &[], &[], 0, &cfg);
+            let (f, _) = compute(duration, &segments, &Timings::new(&words, &[]), &[], &[], None, 0, &cfg);
             for v in [
                 f.duration, f.speaking_time, f.wcpm, f.speech_rate, f.articulation_rate,
                 f.within_phrase_pause_ratio, f.mean_length_of_run,
@@ -714,24 +968,116 @@ mod tests {
 
     #[test]
     fn pace_score_follows_the_anchors() {
-        assert_eq!(pace_score(0.0), 0.0);
-        assert!((pace_score(100.0) - 60.0).abs() < 1e-9);
-        assert!((pace_score(150.0) - 90.0).abs() < 1e-9);
-        assert!((pace_score(175.0) - 98.333).abs() < 0.01);
-        assert!((pace_score(180.0) - 100.0).abs() < 1e-9);
+        assert_eq!(pace_score_ratio(0.0), 0.0);
+        assert!((pace_score_ratio(0.6) - 55.0).abs() < 1e-9);
+        assert!((pace_score_ratio(1.0) - 95.0).abs() < 1e-9);
+        assert!((pace_score_ratio(1.25) - 100.0).abs() < 1e-9);
+        // Monotone through the middle: half-way between the floor and the
+        // reference pace is half-way between their scores.
+        assert!((pace_score_ratio(0.8) - 75.0).abs() < 1e-9);
         // The plateau: racing earns nothing extra, and never exceeds 100.
-        assert!((pace_score(250.0) - 100.0).abs() < 1e-9);
+        assert!((pace_score_ratio(2.5) - 100.0).abs() < 1e-9);
     }
 
     #[test]
     fn disfluency_penalty_costs_shares_and_caps() {
-        assert_eq!(disfluency_penalty(0, 0, 0, 0), 0.0);
-        // 2 long + 4 mid-phrase + 1 restart = 0.10 + 0.16 + 0.05.
-        assert!((disfluency_penalty(2, 4, 1, 0) - 0.31).abs() < 1e-9);
-        // The cap: 0.54 of charges still only costs 0.35.
-        assert_eq!(disfluency_penalty(4, 6, 2, 0), 0.35);
-        // Breathing at punctuation is free: an at-punctuation pause is neither
-        // long nor within-phrase, so it reaches neither argument.
-        assert_eq!(disfluency_penalty(0, 0, 0, 0), 0.0);
+        assert_eq!(disfluency_penalty(0, 0, 0, 0, 100), 0.0);
+        // 2 hesitations + 4 overruns + 1 restart = 0.10 + 0.12 + 0.05.
+        assert!((disfluency_penalty(2, 4, 1, 0, 100) - 0.27).abs() < 1e-9);
+        // The cap: 0.47 of charges at 40 words still only costs 0.35.
+        assert_eq!(disfluency_penalty(4, 6, 2, 0, 40), 0.35);
+    }
+
+    #[test]
+    fn a_long_take_is_not_penalised_for_being_long() {
+        // The same delivery density: 1 hesitation per 100 words, twice the
+        // text. Under the old per-take counts the second one collected double.
+        let short = disfluency_penalty(2, 0, 0, 0, 200);
+        let long = disfluency_penalty(8, 0, 0, 0, 800);
+        assert!((short - long).abs() < 1e-9, "{short} vs {long}");
+    }
+
+    #[test]
+    fn a_reference_scores_against_itself_without_a_penalty() {
+        let cfg = FluencyConfig::default();
+        // Ten words at half a second each, read straight through with one 1.2 s
+        // breath after the fifth. The clip the profile describes is the take
+        // being scored, so everything matches: the pace ratio is 1.0 and no
+        // silence is a hesitation.
+        let words: Vec<TimedWord> = (0..10)
+            .map(|i| word("wort", i as f64 * 0.5, i as f64 * 0.5 + 0.5))
+            .collect();
+        let mut segments: Vec<Segment> =
+            (0..5).map(|i| seg(i as f64 * 0.5, i as f64 * 0.5 + 0.5)).collect();
+        segments.extend((0..5).map(|i| seg(3.7 + i as f64 * 0.5, 4.2 + i as f64 * 0.5)));
+
+        let profile = reference_profile(&segments, &words, 10, &cfg).expect("profile");
+        assert!((profile.wcpm - per_minute(10, 5.0)).abs() < 1e-6);
+        assert_eq!(profile.pauses.len(), 1);
+        assert_eq!(profile.pauses[0].after_ref, Some(4));
+
+        let (f, _) = compute(
+            6.2, &segments, &Timings::new(&words, &[]), &perfect_verdicts(10),
+            &normalize_words("wort wort wort wort wort wort wort wort wort wort"),
+            Some(&profile), 10, &cfg,
+        );
+        assert_eq!(f.ref_wcpm, Some(profile.wcpm));
+        assert!(f.score.expect("score") > 94.0, "{}", f.score.unwrap());
+    }
+
+    #[test]
+    fn a_pause_the_reference_took_is_free_and_an_inserted_one_is_not() {
+        let cfg = FluencyConfig::default();
+        let reference_words: Vec<TimedWord> = (0..10)
+            .map(|i| word("wort", i as f64 * 0.6, i as f64 * 0.6 + 0.5))
+            .collect();
+        let mut ref_segments: Vec<Segment> =
+            (0..5).map(|i| seg(i as f64 * 0.6, i as f64 * 0.6 + 0.5)).collect();
+        ref_segments.extend((0..5).map(|i| seg(3.4 + i as f64 * 0.6, 3.9 + i as f64 * 0.6)));
+        let profile = reference_profile(&ref_segments, &reference_words, 10, &cfg).expect("profile");
+        let text = normalize_words("wort wort wort wort wort wort wort wort wort wort");
+
+        // Same pause, same place: the learner took the breath the reference took.
+        let (free, _) = compute(
+            6.4, &ref_segments, &Timings::new(&reference_words, &[]), &perfect_verdicts(10),
+            &text, Some(&profile), 10, &cfg,
+        );
+
+        // The reference's pause kept, plus one it never took: the reader stopped
+        // for 0.7 s between 4.5 s and 5.2 s, where the reference ran on.
+        let hesitating = vec![
+            seg(0.0, 0.5), seg(0.6, 1.1), seg(1.2, 1.7), seg(1.8, 2.3), seg(2.4, 2.9),
+            seg(3.4, 3.9), seg(4.0, 4.5),
+            seg(5.2, 5.7), seg(5.8, 6.3), seg(6.4, 6.9), seg(7.0, 7.5),
+        ];
+        let (charged, pauses) = compute(
+            7.5, &hesitating, &Timings::new(&reference_words, &[]), &perfect_verdicts(10),
+            &text, Some(&profile), 10, &cfg,
+        );
+
+        let free_score = free.score.expect("score");
+        let charged_score = charged.score.expect("score");
+        assert_eq!(pauses.iter().filter(|p| p.kind.is_reading_pause()).count(), 2);
+        // Ten words is a short text: one hesitation is half a point of penalty
+        // per hundred words, so the cap is what it costs here.
+        assert!(
+            (charged_score - free_score * 0.65).abs() < 1e-6,
+            "{charged_score} vs {free_score}"
+        );
+    }
+
+    #[test]
+    fn without_a_profile_the_punctuation_rule_still_tolerates_a_breath() {
+        let cfg = FluencyConfig::default();
+        let words = vec![word("hallo", 0.0, 0.4), word("welt", 1.6, 2.0)];
+        // A 1.2 s silence after a comma: long, but punctuation entitles it.
+        let segments = vec![seg(0.0, 0.45), seg(1.55, 2.0)];
+        let (f, _) = compute(
+            2.0, &segments, &Timings::new(&words, &[]), &perfect_verdicts(2),
+            &normalize_words("hallo, welt"), None, 2, &cfg,
+        );
+        assert_eq!(f.ref_wcpm, None, "the fallback answered, so say so");
+        // 2 words / 2 s = 60 wcpm → ratio 0.46 of the 130 fallback norm.
+        assert!(f.score.expect("score") > 40.0, "{}", f.score.unwrap());
     }
 }

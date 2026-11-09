@@ -1145,6 +1145,7 @@ mod tests {
             reference,
             &[],
             &Timings::default(),
+            None,
             PronEvidence::Unavailable(PronReason::ModelMissing),
         );
         assessment.pronunciation.score = Some(0.63);
@@ -1155,6 +1156,7 @@ mod tests {
             speaking_time: 3.2,
             wcpm: 84.0,
             score: Some(44.8),
+            ref_wcpm: None,
             speech_rate: 90.0,
             articulation_rate: 122.0,
             pause_count: 2,

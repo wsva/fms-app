@@ -205,7 +205,7 @@ export default function PracticePanel({ datasetUuid, text, standardAudio, showNo
                 a.fluency
                   ? `${Math.round(a.fluency.wcpm)} wcpm${
                       a.fluency.score != null ? ` (${Math.round(a.fluency.score)}%)` : ""
-                    }`
+                    }${a.fluency.ref_wcpm != null ? ` vs ref ${Math.round(a.fluency.ref_wcpm)}` : ""}`
                   : "not measured"
               }` +
               ` pron=${a.pronunciation.score != null ? Math.round(a.pronunciation.score * 100) : "not measured"}`

@@ -56,8 +56,9 @@ use crate::datasets::asr_metric::{score_asr, score_value, AsrScoreSummary};
 use crate::xp::{xp_award_internal, XpAwardResult};
 
 use assess::{Assessment, PronEvidence, PronReason};
-use fluency::{TimedSegment, TimedWord, Timings};
+use fluency::{FluencyConfig, ReferenceProfile, TimedSegment, TimedWord, Timings};
 use measurement::{Measurement, Measurements, UNRECORDED_MODEL};
+use vad::VadConfig;
 
 /// Score thresholds for the scaled XP reward.
 const XP_PASS_SCORE: f64 = 60.0;
@@ -2767,8 +2768,58 @@ async fn assess_attempt(
     clip: &standard_audio::DefaultClip,
 ) -> Assessment {
     let ref_words = crate::datasets::asr_metric::normalize_words(reference).len();
+    let profile = clip_profile(clip, ref_words);
     let pron = pronunciation_evidence(settings, ref_words, samples, clip).await;
-    assess::assess(summary, reference, recognized, samples, timings, pron.evidence())
+    assess::assess(
+        summary,
+        reference,
+        recognized,
+        samples,
+        timings,
+        profile.as_ref(),
+        pron.evidence(),
+    )
+}
+
+/// The clip's own pace and pauses, measured exactly the way the take is — the
+/// same VAD, the same span, the same thresholds — so the comparison fluency
+/// makes is like for like.
+///
+/// Derived per score rather than cached: the only expensive part of the
+/// pronunciation reference is the phoneme model, which is what
+/// `read_aloud_phones` caches. A VAD pass over a clip is milliseconds of RMS
+/// over its samples, so a cache here would buy nothing and would owe an
+/// invalidation rule of its own. `Missing` and `Stale` carry no samples, so
+/// there is nothing to measure and the fallback norm answers instead.
+fn clip_profile(
+    clip: &standard_audio::DefaultClip,
+    ref_words: usize,
+) -> Option<ReferenceProfile> {
+    let standard_audio::DefaultClip::Ready(stored) = clip else {
+        return None;
+    };
+    let words: Vec<TimedWord> = stored
+        .boundaries
+        .iter()
+        .map(|b| TimedWord { text: b.text.clone(), start: b.start, end: b.start + b.duration })
+        .collect();
+    let segments = vad::detect(&stored.samples, &VadConfig::default());
+    let profile = fluency::reference_profile(
+        &segments,
+        &words,
+        ref_words,
+        &FluencyConfig::default(),
+    );
+    if let Some(profile) = &profile {
+        log::debug!(
+            "read_aloud reference: clip {} — {:.1} wcpm, {} pauses over {:.1}s",
+            stored.uuid,
+            profile.wcpm,
+            profile.pauses.len(),
+            stored.seconds(),
+        );
+    }
+    profile
 }
 
 /// Score one attempt without persisting anything: accuracy + fluency +

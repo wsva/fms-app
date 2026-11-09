@@ -47,7 +47,7 @@ export default function AssessmentCards({ assessment }: { assessment: Assessment
       </Card>
 
       {/* Fluency — needs the STT run to have placed the take at all. */}
-      <Card title="Fluency" hint="paces pauses from the waveform, not from the transcript">
+      <Card title="Fluency" hint="paces pauses from the waveform, judged against the text's own audio">
         {fluency ? (
           <>
             <div className="flex items-baseline gap-1.5">
@@ -60,7 +60,11 @@ export default function AssessmentCards({ assessment }: { assessment: Assessment
               <BandChip band={fluency.band} />
             </div>
             <p className="text-[11px] text-text-tertiary tabular-nums">
-              {fluency.score != null ? `${Math.round(fluency.wcpm)} correct wpm · ` : ""}
+              {fluency.score != null
+                ? `${Math.round(fluency.wcpm)} correct wpm${
+                    fluency.ref_wcpm != null ? ` against ${Math.round(fluency.ref_wcpm)}` : ""
+                  } · `
+                : ""}
               {Math.round(fluency.articulation_rate)} wpm speaking · {fluency.pause_count} pause
               {fluency.pause_count === 1 ? "" : "s"}
               {fluency.long_pause_count > 0 ? ` (${fluency.long_pause_count} long)` : ""} ·{" "}
@@ -252,7 +256,15 @@ export function ScoreAxes({
           : bandTone(fluency.band)
         : "text-text-tertiary",
       title: fluency
-        ? `${fluency.score != null ? `Fluency score ${Math.round(fluency.score)} — pace less hesitations · ` : ""}${Math.round(
+        ? `${
+            fluency.score != null
+              ? `Fluency score ${Math.round(fluency.score)} — pace against the reference${
+                  fluency.ref_wcpm != null
+                    ? ` (${Math.round(fluency.ref_wcpm)} wpm)`
+                    : " (fallback norm)"
+                }, less pauses the reference did not take · `
+              : ""
+          }${Math.round(
             fluency.wcpm
           )} correct words per minute (${fluency.band} pace) · ${fluency.pause_count} pause${
             fluency.pause_count === 1 ? "" : "s"

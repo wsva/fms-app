@@ -232,7 +232,7 @@ export interface Accuracy {
   counts: AccuracyCounts;
 }
 
-/** Reading-speed band, from words per minute. */
+/** Reading-speed band, from the ratio of the take's pace to the reference's. */
 export type RateBand = "slow" | "target" | "fast";
 
 /** Where a silence fell, relative to the reference text. */
@@ -259,12 +259,15 @@ export interface FluencyMetrics {
   speaking_time: number;
   /** Correct words per minute. */
   wcpm: number;
-  /** The fluency axis's own 0-100 score: the pace curve over `wcpm`
-   *  (100 → 60, 150 → 90, 180 → 100), discounted for long pauses,
-   *  mid-phrase hesitations, restarts and stutters (capped at 35%). Absent
-   *  on attempts stored before it was measured — the UI shows the raw
-   *  `wcpm` instead of inventing a score. */
+  /** The fluency axis's own 0-100 score: the pace curve over the take's pace
+   *  *ratio* to the text's standard audio (0.6 → 55, 1.0 → 95, ≥1.25 → 100),
+   *  discounted for pauses the reference speaker did not take (per 100 words,
+   *  capped at 35%). Absent on attempts stored before it was measured — the UI
+   *  shows the raw `wcpm` instead of inventing a score. */
   score?: number | null;
+  /** The pace the score was judged against, when it came from the text's own
+   *  standard clip. Absent means a fallback norm answered instead. */
+  ref_wcpm?: number | null;
   /** Spoken words per minute over the reading span (includes pauses). */
   speech_rate: number;
   /** Spoken words per minute excluding pauses. */

@@ -24,7 +24,7 @@ use crate::datasets::asr_metric::{
     normalize_tokens, normalize_words, AsrScoreSummary, Verdict,
 };
 
-use super::fluency::{self, Fluency, FluencyConfig, Pause, TimingEvidence, Timings};
+use super::fluency::{self, Fluency, FluencyConfig, Pause, ReferenceProfile, TimingEvidence, Timings};
 // The two timing lists reach this module only wrapped in a `Timings`; the tests
 // still build them by hand.
 #[cfg(test)]
@@ -226,12 +226,19 @@ pub(crate) fn total_score(accuracy: f64, fluency: Option<f64>, pronunciation_pct
 ///
 /// `timings` is the STT run's placement, at whatever resolution it had; both of
 /// its lists being empty is the one case fluency is not measured.
+///
+/// `clip_profile` is the text's standard audio measured the same way this take
+/// is, and it is the bar fluency is judged against (see
+/// [`crate::datasets::read_aloud::fluency::ReferenceProfile`]). `None` means the
+/// device has no fresh clip for the text, and fluency then falls back to the
+/// published norm — the same score, with a bar the take did not choose.
 pub(crate) fn assess(
     summary: &AsrScoreSummary,
     reference: &str,
     recognized: &str,
     wav: &[f32],
     timings: &Timings,
+    clip_profile: Option<&ReferenceProfile>,
     pron: PronEvidence<'_>,
 ) -> Assessment {
     let ref_words = normalize_words(reference);
@@ -319,6 +326,7 @@ pub(crate) fn assess(
             timings,
             &summary.words,
             &ref_words,
+            clip_profile,
             summary.hits,
             &FluencyConfig::default(),
         );
@@ -442,7 +450,8 @@ mod tests {
         ] {
             let summary = score_asr(r, h);
             let assessment = assess(
-                &summary, r, h, &[], &Timings::default(), PronEvidence::Unavailable(PronReason::ModelMissing),
+                &summary, r, h, &[], &Timings::default(), None,
+                PronEvidence::Unavailable(PronReason::ModelMissing),
             );
             assert_eq!(assessment.accuracy.score, summary.score);
             assert_eq!(assessment.accuracy.lenient_score, summary.lenient_score);
@@ -470,7 +479,7 @@ mod tests {
     fn an_unplaced_take_means_no_fluency_not_zero_fluency() {
         let summary = score_asr("hello world", "hello world");
         let a = assess(&summary, "hello world", "hello world", &two_bursts(), &Timings::default(),
-            PronEvidence::Unavailable(PronReason::ModelMissing));
+            None, PronEvidence::Unavailable(PronReason::ModelMissing));
         assert!(a.fluency.is_none());
         assert!(a.pauses.is_empty());
         assert!(!a.capabilities.word_timings);
@@ -489,7 +498,7 @@ mod tests {
         ];
         let summary = score_asr("hallo welt", "hallo welt");
         let a = assess(&summary, "hallo welt", "hallo welt", &wav, &Timings::new(&words, &[]),
-            PronEvidence::Unavailable(PronReason::ModelMissing));
+            None, PronEvidence::Unavailable(PronReason::ModelMissing));
         let f = a.fluency.as_ref().expect("timings present");
         assert!(a.capabilities.word_timings);
         assert_eq!(a.capabilities.timing_evidence, Some(TimingEvidence::Words));
@@ -512,7 +521,7 @@ mod tests {
         ];
         let summary = score_asr("hallo welt", "hallo welt");
         let a = assess(&summary, "hallo welt", "hallo welt", &wav,
-            &Timings::new(&[], &phrases), PronEvidence::Unavailable(PronReason::ModelMissing));
+            &Timings::new(&[], &phrases), None, PronEvidence::Unavailable(PronReason::ModelMissing));
         let f = a.fluency.as_ref().expect("phrase placement is placement");
         assert_eq!(a.capabilities.timing_evidence, Some(TimingEvidence::Segments));
         assert!(!a.capabilities.word_timings, "no word was ever placed");
@@ -526,7 +535,7 @@ mod tests {
     fn weakest_words_are_ranked_and_capped() {
         let summary = score_asr("a b c d e f g h i j k l m n", "a b c d e f g h i j k l m n");
         let mut a = assess(&summary, "a b c d e f g h i j k l m n", "a b c d e f g h i j k l m n",
-            &[], &Timings::new(&timed(14, 0.5), &[]),
+            &[], &Timings::new(&timed(14, 0.5), &[]), None,
             PronEvidence::Unavailable(PronReason::ModelMissing));
         // Hand-assign descending scores so the ranking is unambiguous.
         for (i, w) in a.words.iter_mut().enumerate() {
@@ -542,7 +551,7 @@ mod tests {
     fn stored_metrics_stay_small_and_round_trip() {
         let summary = score_asr("hallo welt", "hallo welt");
         let mut a = assess(&summary, "hallo welt", "hallo welt", &[], &Timings::default(),
-            PronEvidence::Unavailable(PronReason::ModelMissing));
+            None, PronEvidence::Unavailable(PronReason::ModelMissing));
         a.pauses = (0..100)
             .map(|i| Pause {
                 start: i as f64,

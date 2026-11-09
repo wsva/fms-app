@@ -106,6 +106,39 @@ fn frame_rate(cfg: &VadConfig) -> f64 {
     SAMPLE_RATE as f64 / cfg.frame_samples.max(1) as f64
 }
 
+/// Which of the three bounds produced the speech threshold. Reported because the
+/// three mean different things: only `NoiseFloor` is a measurement of this
+/// recording, and a dataset of studio-clean clips lands on `Absolute` — where
+/// the threshold is a constant and every breath the speaker takes shows up as a
+/// silence, which is the pause count, not a defect of the detector.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ThresholdBasis {
+    /// `floor * floor_multiplier`: the usual case on real recordings.
+    NoiseFloor,
+    /// `loud * max_threshold_ratio`: the recording is nearly all speech.
+    LoudCeiling,
+    /// `absolute_floor`: the recording is quieter than the fixed floor.
+    Absolute,
+}
+
+/// The threshold and the bound that decided it.
+fn threshold_of(loudness: &[f32], cfg: &VadConfig) -> (f32, ThresholdBasis) {
+    let floor = percentile(loudness, cfg.floor_percentile);
+    let loud = percentile(loudness, 0.90);
+    let from_floor = floor * cfg.floor_multiplier;
+    let from_loud = loud * cfg.max_threshold_ratio;
+    let (value, basis) = if from_floor <= from_loud {
+        (from_floor, ThresholdBasis::NoiseFloor)
+    } else {
+        (from_loud, ThresholdBasis::LoudCeiling)
+    };
+    if value < cfg.absolute_floor {
+        (cfg.absolute_floor, ThresholdBasis::Absolute)
+    } else {
+        (value, basis)
+    }
+}
+
 /// The speech/silence verdict per frame of an already-computed loudness track.
 ///
 /// `loudness` is one level per frame in any consistent unit — frame RMS for a
@@ -120,13 +153,14 @@ pub(crate) fn speech_frames(loudness: &[f32], frame_secs: f64, cfg: &VadConfig) 
         return Vec::new();
     }
 
-    let floor = percentile(loudness, cfg.floor_percentile);
-    let loud = percentile(loudness, 0.90);
-    // Two-sided: above the noise, but never above half the loud level — a
-    // speech-only recording has no silence to estimate a floor from.
-    let threshold = (floor * cfg.floor_multiplier)
-        .min(loud * cfg.max_threshold_ratio)
-        .max(cfg.absolute_floor);
+    let (threshold, basis) = threshold_of(loudness, cfg);
+    log::debug!(
+        "read_aloud vad: {} frames of {:.3}s, threshold {:.5} from {:?}",
+        loudness.len(),
+        frame_secs,
+        threshold,
+        basis,
+    );
     let mut flags: Vec<bool> = loudness.iter().map(|level| *level > threshold).collect();
 
     let rate = 1.0 / frame_secs;
