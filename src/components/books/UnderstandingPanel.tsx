@@ -22,11 +22,15 @@ import {
   X,
   Loader2,
   Languages,
+  Mic,
+  Copy,
 } from "lucide-react";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import ArtifactGenerateButton from "./ArtifactGenerateButton";
 import AgentJobCard, { JobStatusChip } from "./AgentJobCard";
 import SpeakToolbar from "./SpeakToolbar";
+import { BG_COLORS } from "./utils";
+import { parseLineRows, matchRows } from "./bookLines";
 import type { useBookData } from "@/hooks/useBookData";
 import type {
   ArtifactJob,
@@ -55,14 +59,18 @@ type Props = { b: ReturnType<typeof useBookData> };
  *  in the panel stays in sync (one language for the whole chapter). */
 type SpeakCtx = { language: string; onChange: (lang: string) => void };
 
-/** "paragraph" / "chapter" — the noun the current scope reads as, for copy. */
+/** "paragraph" / "chapter" / "sentence" — the noun the current scope reads
+ *  as, for copy. */
 function scopeNoun(scopeType: ArtifactScopeType): string {
-  return scopeType === "chapter" ? "chapter" : "paragraph";
+  if (scopeType === "chapter") return "chapter";
+  if (scopeType === "sentence") return "sentence";
+  return "paragraph";
 }
 
 export default function UnderstandingPanel({ b }: Props) {
   const {
     focusParagraph,
+    focusSentence,
     paragraphs,
     artifactsByScope,
     saving,
@@ -71,6 +79,7 @@ export default function UnderstandingPanel({ b }: Props) {
     scope,
     chapterMode,
     currentChapter,
+    paraIndexOf,
   } = b;
 
   // Read-aloud language for the Listen buttons. "" means "use the book's own
@@ -92,43 +101,134 @@ export default function UnderstandingPanel({ b }: Props) {
     () => paragraphs.find((p) => p.breakSentence?.uuid === focusParagraph) ?? null,
     [paragraphs, focusParagraph]
   );
+  // The focused sentence's row (panel label + copy/color/delete commands).
+  const focusedSent = useMemo(
+    () => paragraphs.flatMap((p) => p.sentences).find((s) => s.uuid === focusSentence) ?? null,
+    [paragraphs, focusSentence]
+  );
   const scopeArtifacts = scope.uuid ? artifactsByScope.get(scope.uuid) : undefined;
 
-  // The header names what the Chapter toggle currently points the tabs at:
-  // the chapter title, or the focused paragraph's opening line.
+  // The header names what the scope segment currently points the tabs at:
+  // the chapter title, the focused sentence, or the focused paragraph's
+  // opening line.
   const paraPreview = focusedPara?.sentences.map((s) => s.content).join(" ").trim() ?? "";
   const hasScope = !!scope.uuid;
+  const sentPi = paraIndexOf(focusSentence);
+  const sentNo =
+    sentPi === null || !focusedSent
+      ? null
+      : (paragraphs[sentPi]?.sentences.findIndex((s) => s.uuid === focusedSent.uuid) ?? -1) + 1;
   const scopeLabel = chapterMode
     ? `Chapter · ${currentChapter?.title ?? ""}`
-    : "Understanding";
+    : scope.type === "sentence" && sentPi !== null && sentNo !== null
+      ? `Sentence · ¶ ${sentPi + 1} · ${sentNo}`
+      : "Understanding";
   const scopePreview = chapterMode
     ? currentChapter?.title ?? ""
-    : paraPreview || "(empty paragraph)";
+    : scope.type === "sentence"
+      ? focusedSent?.content || "(empty sentence)"
+      : paraPreview || "(empty paragraph)";
 
   return (
     <div className="flex flex-col h-full min-h-0 min-w-0 bg-bg-body">
       {/* Header: what the scope currently points at + Listen (paragraph only —
           the command behind it is addressed by a paragraph's break-row uuid). */}
-      <div className="shrink-0 px-3 py-2 border-b border-border-default flex items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <div className="text-[11px] font-semibold text-text-tertiary tracking-wider uppercase">
-            {scopeLabel}
+      <div className="shrink-0 px-3 py-2 border-b border-border-default flex flex-col gap-1.5">
+        <div className="flex items-start gap-2">
+          <div className="flex-1 min-w-0">
+            <div className="text-[11px] font-semibold text-text-tertiary tracking-wider uppercase">
+              {scopeLabel}
+            </div>
+            <p
+              className="text-xs text-text-secondary line-clamp-2 mt-0.5"
+              title={scopePreview}
+            >
+              {hasScope ? scopePreview : "Select a sentence or paragraph"}
+            </p>
           </div>
-          <p
-            className="text-xs text-text-secondary line-clamp-2 mt-0.5"
-            title={scopePreview}
+          <button
+            title="Listen to this paragraph (Edge TTS)"
+            disabled={!hasScope || chapterMode || scope.type !== "paragraph" || saving}
+            className="shrink-0 p-2 rounded-md text-text-secondary hover:bg-bg-hover disabled:opacity-40 cursor-pointer"
+            onClick={() => focusParagraph && handleParagraphListen(focusParagraph)}
           >
-            {hasScope ? scopePreview : "Select a paragraph"}
-          </p>
+            {saving ? <Loader2 size={16} className="animate-spin" /> : <Volume2 size={16} />}
+          </button>
         </div>
-        <button
-          title="Listen to this paragraph (Edge TTS)"
-          disabled={!hasScope || chapterMode || saving}
-          className="shrink-0 p-2 rounded-md text-text-secondary hover:bg-bg-hover disabled:opacity-40 cursor-pointer"
-          onClick={() => focusParagraph && handleParagraphListen(focusParagraph)}
-        >
-          {saving ? <Loader2 size={16} className="animate-spin" /> : <Volume2 size={16} />}
-        </button>
+        {/* Sentence command row — the drawer chrome's replacement on desktop:
+            identity, both copy roads, highlight color, dictation, delete. */}
+        {scope.type === "sentence" && focusedSent && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              title={`Click to copy the uuid (${focusedSent.uuid})`}
+              className="text-[10px] font-mono text-text-tertiary hover:text-text-secondary cursor-pointer"
+              onClick={() => void navigator.clipboard.writeText(focusedSent.uuid)}
+            >
+              {focusedSent.uuid.slice(0, 8)}
+            </button>
+            <button
+              title="Copy content"
+              className="p-1 rounded text-text-secondary hover:bg-bg-hover cursor-pointer"
+              onClick={() => void navigator.clipboard.writeText(focusedSent.content)}
+            >
+              <Copy size={12} />
+            </button>
+            <button
+              title="Copy content with uuid"
+              className="px-1.5 py-0.5 rounded text-[10px] text-text-secondary hover:bg-bg-hover cursor-pointer"
+              onClick={() =>
+                void navigator.clipboard.writeText(`${focusedSent.content}\n[${focusedSent.uuid}]`)
+              }
+            >
+              +uuid
+            </button>
+            <span className="flex items-center gap-1">
+              {BG_COLORS.map((c) => (
+                <button
+                  key={c.key}
+                  title={`${c.label} — ${c.description}`}
+                  className={`w-4 h-4 rounded-full ${c.swatch} cursor-pointer ${
+                    focusedSent.bg_color === c.key ? "ring-2 ring-accent" : "opacity-70 hover:opacity-100"
+                  }`}
+                  onClick={() =>
+                    void b.handleCommitSentenceEdit(
+                      focusedSent.uuid,
+                      focusedSent.content,
+                      focusedSent.bg_color === c.key ? null : c.key
+                    )
+                  }
+                />
+              ))}
+              <button
+                title="None"
+                className={`w-4 h-4 rounded-full border border-border-default text-[9px] leading-none text-text-tertiary cursor-pointer ${
+                  !focusedSent.bg_color ? "ring-2 ring-accent" : "opacity-70 hover:opacity-100"
+                }`}
+                onClick={() =>
+                  focusedSent.bg_color &&
+                  void b.handleCommitSentenceEdit(focusedSent.uuid, focusedSent.content, null)
+                }
+              >
+                ×
+              </button>
+            </span>
+            <button
+              title="Dictate into this sentence"
+              disabled={b.recorder.recording || b.recorder.processing || b.recorder.preparing}
+              className="p-1 rounded text-text-secondary hover:bg-bg-hover disabled:opacity-40 cursor-pointer"
+              onClick={b.recorder.toggle}
+            >
+              <Mic size={12} />
+            </button>
+            <button
+              title="Delete this sentence"
+              className="p-1 rounded text-red-500 hover:bg-bg-hover cursor-pointer"
+              onClick={b.handleDelete}
+            >
+              <Trash2 size={12} />
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Body — the tab strip and model picker live on the understanding
@@ -138,8 +238,18 @@ export default function UnderstandingPanel({ b }: Props) {
           <GlossaryTab b={b} />
         ) : !hasScope ? (
           <div className="text-sm text-text-tertiary text-center py-8">
-            Click a paragraph on the left to understand it.
+            Click a sentence or paragraph on the left to understand it.
           </div>
+        ) : understandingTab === "edit" ? (
+          scope.type === "paragraph" ? (
+            <EditSection b={b} />
+          ) : (
+            <div className="text-sm text-text-tertiary text-center py-8">
+              {scope.type === "sentence"
+                ? "A sentence edits in place — click it and type."
+                : "Edit binds to a paragraph; leave Chapter scope to edit one."}
+            </div>
+          )
         ) : understandingTab === "digest" ? (
           <GeneratedSection
             b={b}
@@ -202,6 +312,101 @@ export default function UnderstandingPanel({ b }: Props) {
             scopeUuid={scope.uuid}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Edit — the paragraph as the edit unit (desktop; replaced Add Sentence)
+// ---------------------------------------------------------------------------
+
+/**
+ * Rewrite the focused paragraph's whole text in one textarea. One line is
+ * one sentence; a line equal to an existing sentence keeps its row (uuid,
+ * audio, color, artifacts), an empty line splits the paragraph in two. The
+ * write road is `handleParagraphReflow` — the same line grammar as Import.
+ */
+function EditSection({ b }: { b: ReturnType<typeof useBookData> }) {
+  const { focusParagraph, paragraphs, paraIndexOf } = b;
+  const pi = paraIndexOf(b.focusSentence) ?? paragraphs.findIndex((p) => p.breakSentence?.uuid === focusParagraph);
+  const para = pi === null || pi === -1 ? null : paragraphs[pi];
+  const [draft, setDraft] = useState("");
+  // Re-seed when a different paragraph comes into focus.
+  useEffect(() => {
+    setDraft((para?.sentences ?? []).map((s) => s.content).join("\n"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusParagraph]);
+  if (!para) {
+    return (
+      <div className="text-sm text-text-tertiary text-center py-8">Focus a paragraph to edit it.</div>
+    );
+  }
+  const dirty =
+    draft.trim() !== para.sentences.map((s) => s.content.trim()).join("\n").trim();
+  // Rows a save would remove (and cascade their artifacts with them).
+  const pendingRemoved = matchRows(
+    parseLineRows(draft.split("\n")).filter((d) => !d.isBreak),
+    para.sentences.map((s) => ({ uuid: s.uuid, content: s.content, isBreak: false }))
+  ).removed;
+  const lostArtifacts = b.removedArtifactCount(pendingRemoved);
+  const save = () => {
+    if (pi === null || pi === -1) return;
+    void b.handleParagraphReflow(pi, draft);
+  };
+  return (
+    <div className="flex flex-col gap-2">
+      <textarea
+        className="w-full px-3 py-2 rounded-md bg-bg-input border border-border-default text-sm text-text-primary font-mono focus:outline-none focus:border-accent min-h-[160px]"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder={"One line = one sentence\n\nEmpty line = paragraph break"}
+      />
+      <p className="text-xs text-text-tertiary">
+        A line that still matches a sentence keeps its uuid, audio and
+        artifacts. An empty line splits the paragraph in two.
+      </p>
+      {pendingRemoved.length > 0 && (
+        <p className="text-xs text-red-500">
+          Saving removes {pendingRemoved.length} sentence(s)
+          {lostArtifacts > 0 ? ` and ${lostArtifacts} generated artifact(s)` : ""}.
+        </p>
+      )}
+      <div className="flex items-center justify-end gap-2">
+        <button
+          title="Dictate — the transcript is appended as new lines"
+          disabled={b.recorder.recording || b.recorder.processing || b.recorder.preparing}
+          className="flex items-center gap-1 px-2 py-1 rounded text-sm text-text-secondary hover:bg-bg-hover disabled:opacity-40 cursor-pointer"
+          onClick={b.recorder.toggle}
+        >
+          <Mic size={14} />
+          {b.recorder.recording
+            ? "Listening…"
+            : b.recorder.processing || b.recorder.preparing
+              ? "Recognizing…"
+              : "Dictate"}
+        </button>
+        <button
+          className="px-2 py-1 rounded text-sm text-text-secondary hover:bg-bg-hover cursor-pointer"
+          onClick={() =>
+            setDraft(para.sentences.map((s) => s.content).join("\n"))
+          }
+          disabled={!dirty || b.saving}
+        >
+          Revert
+        </button>
+        <button
+          className="px-3 py-1 rounded text-sm font-medium bg-accent-bg text-white hover:opacity-90 cursor-pointer disabled:opacity-50"
+          disabled={!dirty || b.saving}
+          onClick={() => {
+            if (pendingRemoved.length > 0 && lostArtifacts > 0) {
+              b.allowReflowDelete();
+            }
+            save();
+          }}
+        >
+          Save paragraph
+        </button>
       </div>
     </div>
   );

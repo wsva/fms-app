@@ -310,7 +310,7 @@ export default function BooksPage({ onNavigate }: { onNavigate: (tab: TabId) => 
         {/* Content — all three views stay mounted to preserve state. */}
         <div className={`${showLocations ? "hidden" : ""} flex-1 flex flex-col min-h-0 overflow-hidden min-w-0`}>
           <div style={{ display: b.view === "read" ? "flex" : "none" }} className="flex-1 min-h-0 overflow-hidden min-w-0">
-            <ReadingView b={b} />
+            <ReadingView b={b} onNavigate={onNavigate} />
           </div>
           <div style={{ display: b.view === "manage" ? "flex" : "none" }} className="flex-1 min-h-0 overflow-hidden p-4 min-w-0 flex flex-col">
             <BookManager books={b.books} bookUUID={b.bookUUID} setBookUUID={b.setBookUUID} onBooksChanged={b.loadBooks} />

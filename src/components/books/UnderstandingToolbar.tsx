@@ -12,7 +12,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, Cpu, Settings2, Wand2 } from "lucide-react";
+import { Cpu, Settings2, Wand2 } from "lucide-react";
 import { ToolbarButton } from "@/components/ui/toolbar";
 import UnderstandingModelPicker from "./UnderstandingModelPicker";
 import { UNDERSTANDING_TABS, type UnderstandingTab } from "./understanding_tabs";
@@ -37,11 +37,15 @@ const TAB_STALE_KIND: Record<UnderstandingTab, ArtifactKind | null> = {
   argument: "argument_map",
   quiz: "questions",
   notes: null,
+  edit: null,
   glossary: "terms",
 };
 
 export default function UnderstandingToolbar({ b, onNavigate }: Props) {
-  const { understandingTab, setUnderstandingTab, chapterMode, setChapterMode, scope } = b;
+  const {
+    understandingTab, setUnderstandingTab, chapterMode, setChapterMode,
+    scope, focusSentence, selectParagraph,
+  } = b;
   const [modelOpen, setModelOpen] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
 
@@ -71,16 +75,52 @@ export default function UnderstandingToolbar({ b, onNavigate }: Props) {
   // the toggle and the model button keep their place.
   return (
     <div className="shrink-0 flex items-center gap-1 px-2 py-1 border-b border-border-default">
-      {/* Scope toggle: understand the whole chapter instead of the focused
-          paragraph. Applies to every content tab at once. */}
-      <ToolbarButton
-        variant="toggle"
-        active={chapterMode}
-        icon={BookOpen}
-        label="Chapter"
-        title="Understand the whole chapter instead of the focused paragraph"
-        onClick={() => setChapterMode(!chapterMode)}
-      />
+      {/* Scope segment: the selection level the tabs bind to. Sentence is only
+          selectable while one is focused (a click or keyboard walk focuses
+          it); Paragraph drops back from chapter mode and sentence focus;
+          Chapter understands the whole chapter at once. */}
+      <div className="flex items-center gap-0.5 shrink-0 rounded-md border border-border-default p-0.5">
+        {(["sentence", "paragraph", "chapter"] as const).map((lv) => {
+          const disabled = lv === "sentence" && !focusSentence;
+          const active = chapterMode
+            ? lv === "chapter"
+            : lv === (scope.type === "sentence" ? "sentence" : "paragraph");
+          return (
+            <button
+              key={lv}
+              disabled={disabled}
+              title={
+                lv === "sentence"
+                  ? focusSentence
+                    ? "Bind the tabs to the focused sentence"
+                    : "Click a sentence to select one"
+                  : lv === "paragraph"
+                    ? "Bind the tabs to the focused paragraph"
+                    : "Understand the whole chapter instead of the focused part"
+              }
+              className={`px-2 py-0.5 rounded text-xs font-medium capitalize transition-colors ${
+                active
+                  ? "bg-accent-bg text-white"
+                  : disabled
+                    ? "text-text-tertiary opacity-50"
+                    : "text-text-secondary hover:bg-bg-hover cursor-pointer"
+              }`}
+              onClick={() => {
+                if (lv === "chapter") {
+                  setChapterMode(true);
+                } else if (lv === "sentence") {
+                  setChapterMode(false);
+                } else {
+                  setChapterMode(false);
+                  selectParagraph(b.focusParagraph);
+                }
+              }}
+            >
+              {lv}
+            </button>
+          );
+        })}
+      </div>
 
       <div className="w-px h-4 bg-border-default shrink-0 mx-1" />
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Play, Square, Copy, Upload, Trash2, Plus, FileDown, Brain } from "lucide-react";
 import type { Paragraph, SentenceClient } from "@/lib/read/types";
 import { useMediaPlay } from "@/hooks/useMediaPlay";
@@ -15,9 +15,19 @@ type Props = {
   understanding?: boolean;
   /** The focused paragraph's break-row uuid, if any. */
   focusParagraph?: string | null;
+  /** The focused sentence's uuid, if any — it gets the ring and, on desktop,
+   *  becomes the inline-edit target. */
+  focusSentence?: string | null;
+  /** The sentence currently rendered as contentEditable (desktop inline edit). */
+  editingSentence?: string | null;
+  /** Commit an inline edit (Enter / blur-with-changes) to the book DB. */
+  onCommitEdit?: (uuid: string, content: string) => void;
   onFocusParagraph?: (uuid: string | null) => void;
-  onEditSentence: (s: SentenceClient) => void;
-  onAddSentence: (para: Paragraph) => void;
+  /** One click road for both platforms: the hook opens the drawer on a phone
+   *  and focuses (desktop) otherwise. */
+  onSelectSentence: (s: SentenceClient) => void;
+  /** Mobile keeps the drawer's add-sentence road; desktop uses the Edit tab. */
+  onAddSentence?: (para: Paragraph) => void;
   onDeleteParagraph: (para: Paragraph) => void;
   onParagraphAudio: (para: Paragraph) => void;
   onImport: (para: Paragraph, text: string) => void;
@@ -53,6 +63,126 @@ function ParagraphAudioButton({
   );
 }
 
+/**
+ * One sentence in the reading pane. Plain text to click everywhere; when it is
+ * the inline-edit target (desktop) the same element becomes contentEditable:
+ * Enter (or blur with changes) commits, Escape reverts. This replaced the
+ * drawer as the PC edit surface.
+ */
+function SentenceAnchor({
+  s,
+  block,
+  editable,
+  focused,
+  understanding,
+  onSelect,
+  onCommit,
+}: {
+  s: SentenceClient;
+  /** Line view lays sentences out one per line; inline flows them. */
+  block: boolean;
+  editable: boolean;
+  focused: boolean;
+  understanding: boolean;
+  onSelect: () => void;
+  onCommit: (text: string) => void;
+}) {
+  const ref = useRef<HTMLElement | null>(null);
+
+  const classes = [
+    block ? "block w-full text-left py-0.5 px-2" : "inline px-0.5",
+    "cursor-pointer rounded transition-colors text-text-primary",
+    s.modified
+      ? "bg-bg-hover"
+      : sentenceBgClass(s.bg_color) || "hover:bg-bg-hover",
+    block
+      ? s.audio_path || s.hasLocalAudio
+        ? "border-l-2 border-accent"
+        : ""
+      : s.audio_path || s.hasLocalAudio
+        ? "underline decoration-accent decoration-2"
+        : "",
+    understanding && focused ? "ring-2 ring-accent/50" : "",
+  ].join(" ");
+
+  // Entering edit mode (a click on another sentence) moves the caret here.
+  useEffect(() => {
+    if (!editable) return;
+    const id = requestAnimationFrame(() => {
+      const el = ref.current;
+      if (!el) return;
+      el.focus();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    });
+    return () => cancelAnimationFrame(id);
+  }, [editable]);
+
+  const commitText = () => {
+    const el = ref.current;
+    if (!el) return;
+    const text = (el.textContent ?? "").trim();
+    if (text !== s.content.trim()) onCommit(text);
+  };
+
+  if (!editable) {
+    return (
+      <a
+        ref={(el) => {
+          ref.current = el;
+        }}
+        data-sentence-uuid={s.uuid}
+        onClick={onSelect}
+        className={classes}
+      >
+        {s.content}
+        {block ? "" : " "}
+      </a>
+    );
+  }
+
+  return (
+    <span
+      ref={(el) => {
+        ref.current = el;
+      }}
+      data-sentence-uuid={s.uuid}
+      role="textbox"
+      className={classes}
+      contentEditable
+      suppressContentEditableWarning
+      // The click that lands here also selects the sentence through the
+      // parent's delegation; suppress the extra fire so focus churn stays
+      // to one road.
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          // Enter commits and moves on; Shift+Enter keeps a manual line break
+          // inside the sentence (rare, but free to keep).
+          if (e.shiftKey) return;
+          e.preventDefault();
+          commitText();
+          ref.current?.blur();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          if (ref.current) ref.current.textContent = s.content;
+          ref.current?.blur();
+        }
+      }}
+      onBlur={commitText}
+    >
+      {s.content}
+    </span>
+  );
+}
+
 export default function ParagraphList({
   paragraphs,
   viewMode,
@@ -60,8 +190,11 @@ export default function ParagraphList({
   mobile = false,
   understanding = false,
   focusParagraph = null,
+  focusSentence = null,
+  editingSentence = null,
+  onCommitEdit,
   onFocusParagraph,
-  onEditSentence,
+  onSelectSentence,
   onAddSentence,
   onDeleteParagraph,
   onParagraphAudio,
@@ -154,42 +287,19 @@ export default function ParagraphList({
           {/* Sentences */}
           {para.sentences.length === 0 ? (
             <p className="text-sm text-text-tertiary italic">empty paragraph</p>
-          ) : viewMode === "inline" ? (
-            <p className="text-xl leading-relaxed text-text-primary">
-              {para.sentences.map((s) => (
-                <a
-                  key={s.uuid}
-                  onClick={() => onEditSentence(s)}
-                  className={[
-                    "inline cursor-pointer rounded px-0.5 transition-colors",
-                    s.modified
-                      ? "bg-bg-hover"
-                      : sentenceBgClass(s.bg_color) || "hover:bg-bg-hover",
-                    s.audio_path || s.hasLocalAudio
-                      ? "underline decoration-accent decoration-2"
-                      : "",
-                  ].join(" ")}
-                >
-                  {s.content}{" "}
-                </a>
-              ))}
-            </p>
           ) : (
-            <div className="flex flex-col gap-1">
+            <div className={viewMode === "line" ? "flex flex-col gap-1" : "text-xl leading-relaxed"}>
               {para.sentences.map((s) => (
-                <a
+                <SentenceAnchor
                   key={s.uuid}
-                  onClick={() => onEditSentence(s)}
-                  className={[
-                    "text-left text-xl cursor-pointer rounded px-2 py-0.5 transition-colors text-text-primary",
-                    s.modified
-                      ? "bg-bg-hover"
-                      : sentenceBgClass(s.bg_color) || "hover:bg-bg-hover",
-                    s.audio_path || s.hasLocalAudio ? "border-l-2 border-accent" : "",
-                  ].join(" ")}
-                >
-                  {s.content}
-                </a>
+                  s={s}
+                  block={viewMode === "line"}
+                  editable={!mobile && editingSentence === s.uuid}
+                  focused={focusSentence === s.uuid}
+                  understanding={understanding}
+                  onSelect={() => onSelectSentence(s)}
+                  onCommit={(text) => onCommitEdit?.(s.uuid, text)}
+                />
               ))}
             </div>
           )}
@@ -227,7 +337,8 @@ export default function ParagraphList({
             </div>
           )}
 
-          {/* Add Sentence + Import buttons */}
+          {/* Import stays; Add Sentence retired to mobile — on desktop the
+              panel's Edit tab reflows the paragraph as a whole. */}
           <div className="flex justify-end gap-1">
             <button
               className={`flex items-center gap-1 ${textBtnPad} rounded text-sm text-text-secondary hover:bg-bg-hover cursor-pointer`}
@@ -239,13 +350,15 @@ export default function ParagraphList({
               <FileDown size={14} />
               {importIdx === pi ? "Cancel" : "Import"}
             </button>
-            <button
-              className={`flex items-center gap-1 ${textBtnPad} rounded text-sm text-text-secondary hover:bg-bg-hover cursor-pointer`}
-              onClick={() => onAddSentence(para)}
-            >
-              <Plus size={14} />
-              Add Sentence
-            </button>
+            {mobile && (
+              <button
+                className={`flex items-center gap-1 ${textBtnPad} rounded text-sm text-text-secondary hover:bg-bg-hover cursor-pointer`}
+                onClick={() => onAddSentence?.(para)}
+              >
+                <Plus size={14} />
+                Add Sentence
+              </button>
+            )}
           </div>
         </div>
       ))}

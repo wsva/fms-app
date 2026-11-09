@@ -7,7 +7,7 @@
  * presentational drill-down (books list -> chapter list -> reading pane).
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useImmer } from "use-immer";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -35,6 +35,7 @@ import {
   isUnderstandingTab,
   type UnderstandingTab,
 } from "@/components/books/understanding_tabs";
+import { parseLineRows, matchRows } from "@/components/books/bookLines";
 import type { CardDatasetSummary } from "@/lib/types";
 import { isTauri } from "@/lib/tauri";
 import { isMobileApp } from "@/lib/platform";
@@ -94,6 +95,25 @@ export function useBookData() {
   const [drawerContent, setDrawerContent] = useState("");
   const [drawerBgColor, setDrawerBgColor] = useState<string | null>(null);
 
+  // Latest-value mirrors for callbacks that must not be re-created per render
+  // (the recorder's result sink fires from an async transcription path).
+  const drawerRef = useRef(drawer);
+  drawerRef.current = drawer;
+  const drawerContentRef = useRef(drawerContent);
+  drawerContentRef.current = drawerContent;
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  // The write body, mirrored for the sink before its definition site below.
+  const saveSentenceInnerRef = useRef<(
+    sentence: SentenceClient,
+    newContent: string,
+    bgColor: string | null
+  ) => Promise<void>>(async () => {});
+
+  // The sentence the reading pane renders as contentEditable on desktop —
+  // inline editing is what retired the drawer from the PC edit surface.
+  const [editingSentence, setEditingSentence] = useState<string | null>(null);
+
   const flatChapters = useMemo(() => flattenChapters(chaptersFlat), [chaptersFlat]);
   const paragraphs = useMemo(() => groupIntoParagraphs(data), [data]);
 
@@ -103,8 +123,26 @@ export function useBookData() {
   // The active tab and the scope (paragraph vs chapter) live here too: the
   // understanding sub-toolbar and the panel body are separate components and
   // must read one state, so it cannot sit in either of them.
-  const [understanding, setUnderstanding] = useState(false);
+  // Understanding opens by default on desktop (the left-right split); the
+  // preference persists under its own key so the e-reader style full-width
+  // pane stays one click away. `mobile` is false during SSR/first paint, so
+  // phones (and the prerendered HTML) start plain.
+  const [understanding, setUnderstanding] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("book-understanding-default") !== "0";
+  });
   const [focusParagraph, setFocusParagraphState] = useState<string | null>(null);
+  // The focused sentence, if any: it deepens the paragraph scope down to a
+  // sentence for the panel. Click/keyboard-driven only — never the scroll-spy
+  // — so generated sentence artifacts don't shift under the reader.
+  const [focusSentence, setFocusSentenceState] = useState<string | null>(null);
+  // Kept in step with every sentence-focus write (applySentenceFocus is the
+  // only other road), so the recorder's sink can read it without a re-bind.
+  const focusSentenceRef = useRef<string | null>(null);
+  const setFocusSentenceBoth = useCallback((uuid: string | null) => {
+    focusSentenceRef.current = uuid;
+    setFocusSentenceState(uuid);
+  }, []);
   const [understandingTab, setUnderstandingTabState] = useState<UnderstandingTab>(() => {
     if (typeof window === "undefined") return DEFAULT_UNDERSTANDING_TAB;
     const stored = window.localStorage.getItem("book-understanding-tab");
@@ -122,9 +160,12 @@ export function useBookData() {
   });
   const setChapterMode = useCallback((on: boolean) => {
     setChapterModeState(on);
+    // The chapter scope overrides sentence focus; drop it so returning to
+    // paragraph/sentence mode lands where the reader can see it.
+    if (on) setFocusSentenceBoth(null);
     if (typeof window !== "undefined")
       window.localStorage.setItem("book-understanding-chapter-mode", on ? "1" : "0");
-  }, []);
+  }, [setFocusSentenceBoth]);
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
   const [artifacts, setArtifacts] = useState<BookArtifactView[]>([]);
   // Outstanding agent-generation requests for this book (the mailbox the "Ask
@@ -161,14 +202,17 @@ export function useBookData() {
     [artifacts, chapterUUID]
   );
   // The scope every content tab binds to: the whole chapter in chapter mode,
-  // the focused paragraph otherwise. `uuid` is "" while nothing is focused —
-  // the panel shows its hint until the learner clicks a paragraph.
+  // the focused sentence when one is selected, the focused paragraph
+  // otherwise. `uuid` is "" while nothing is focused — the panel shows its
+  // hint until the learner clicks a sentence or paragraph.
   const scope = useMemo<{ type: ArtifactScopeType; uuid: string }>(
     () =>
       chapterMode
         ? { type: "chapter", uuid: chapterUUID }
-        : { type: "paragraph", uuid: focusParagraph ?? "" },
-    [chapterMode, chapterUUID, focusParagraph]
+        : focusSentence
+          ? { type: "sentence", uuid: focusSentence }
+          : { type: "paragraph", uuid: focusParagraph ?? "" },
+    [chapterMode, chapterUUID, focusSentence, focusParagraph]
   );
 
   const loadArtifacts = useCallback(async () => {
@@ -224,12 +268,14 @@ export function useBookData() {
     }
   }, [bookUUID]);
 
-  // Load artifacts when a chapter opens and drop the previous paragraph focus.
+  // Load artifacts when a chapter opens and drop the previous focus.
   useEffect(() => {
     setFocusParagraphState(null);
+    setFocusSentenceBoth(null);
+    setEditingSentence(null);
     loadArtifacts();
     loadJobs();
-  }, [chapterUUID, loadArtifacts, loadJobs]);
+  }, [chapterUUID, loadArtifacts, loadJobs, setFocusSentenceBoth]);
 
   // Load the glossary when a book opens.
   useEffect(() => {
@@ -311,8 +357,26 @@ export function useBookData() {
         setError("No speech recognized — speak a little closer and try again.");
         return;
       }
-      setDrawerContent((c) => (c.trim() ? `${c.trimEnd()} ${text.trim()}` : text.trim()));
+      // With the drawer open (the mobile road) the transcript still lands in
+      // its content field; on desktop it appends into the focused sentence,
+      // the same way the chat composer folds a transcript into its input.
+      if (drawerRef.current) {
+        const cur = drawerContentRef.current;
+        setDrawerContent(cur.trim() ? `${cur.trimEnd()} ${text.trim()}` : text.trim());
+        return;
+      }
+      const uuid = focusSentenceRef.current;
+      if (!uuid) {
+        setError("Select a sentence to dictate into.");
+        return;
+      }
+      const s = dataRef.current.find((x) => x.uuid === uuid);
+      if (!s) return;
+      void saveSentenceInnerRef.current(s, `${s.content.trimEnd()} ${text.trim()}`.trim(), s.bg_color);
     },
+    // saveSentenceInner/`data` are read through refs (defined below) so this
+    // sink stays identity-stable for useRecorder.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     []
   );
 
@@ -437,18 +501,23 @@ export function useBookData() {
   };
 
   // ── Save edit ──────────────────────────────────────────────────
-  const handleSaveEdit = async () => {
-    if (drawer?.mode !== "edit" || !isTauri()) return;
+  // The write body behind every sentence edit: the drawer's Save button and
+  // the desktop inline commit both run it, so XP, ordering and the stale
+  // artifact refresh stay on one road. Whatever audio and transcript the
+  // sentence already carried ride the spread untouched.
+  const saveSentenceInner = async (
+    sentence: SentenceClient,
+    newContent: string,
+    bgColor: string | null
+  ) => {
+    if (!isTauri()) return;
     setSaving(true);
     setError("");
-    const sentence = drawer.sentence;
     try {
-      // Whatever audio and transcript the sentence already carried ride the
-      // spread untouched — the drawer edits text and color only.
       const updated: SentenceClient = {
         ...sentence,
-        content: drawerContent,
-        bg_color: drawerBgColor,
+        content: newContent,
+        bg_color: bgColor,
         updated_at: nowIso(),
         hasLocalAudio: false,
         modified: sentence.modified,
@@ -464,26 +533,50 @@ export function useBookData() {
         const idx = d.findIndex((s) => s.uuid === sentence.uuid);
         if (idx !== -1) d[idx] = updated;
       });
-      setDrawer(null);
-      setDrawerContent("");
-      setDrawerBgColor(null);
     } catch (e) {
       setError(`Save failed: ${e}`);
     }
     setSaving(false);
   };
+  saveSentenceInnerRef.current = saveSentenceInner;
+
+  const handleSaveEdit = async () => {
+    if (drawer?.mode !== "edit" || !isTauri()) return;
+    await saveSentenceInner(drawer.sentence, drawerContent, drawerBgColor);
+    setDrawer(null);
+    setDrawerContent("");
+    setDrawerBgColor(null);
+  };
+
+  // The inline commit from the reading pane's contentEditable. The drawer path
+  // closes over its own fields, so the write body takes them explicitly.
+  const handleCommitSentenceEdit = useCallback(
+    async (uuid: string, content: string, bgColor?: string | null) => {
+      const s = data.find((x) => x.uuid === uuid);
+      if (!s) return;
+      if (!content.trim()) {
+        setError("Content is empty");
+        return;
+      }
+      await saveSentenceInner(s, content, bgColor === undefined ? s.bg_color : bgColor);
+    },
+    [data, saveSentenceInner]
+  );
 
   // ── Delete single sentence (from drawer) ───────────────────────
   const handleDelete = () => {
-    if (drawer?.mode !== "edit") return;
+    if (drawer?.mode !== "edit" && !focusSentence) return;
     setConfirmDeleteSentence(true);
   };
 
   const doDeleteSentence = async () => {
-    if (drawer?.mode !== "edit" || !isTauri()) return;
+    const sentence =
+      drawer?.mode === "edit"
+        ? drawer.sentence
+        : data.find((s) => s.uuid === focusSentence) ?? null;
+    if (!sentence || !isTauri()) return;
     setSaving(true);
     setError("");
-    const sentence = drawer.sentence;
     try {
       await invoke("book_delete_sentence", { bookUuid: bookUUID, uuid: sentence.uuid });
       updateData((d) => {
@@ -495,6 +588,7 @@ export function useBookData() {
       });
       setNeedSave(true);
       setDrawer(null);
+      if (focusSentence === sentence.uuid) applySentenceFocus(null);
     } catch (e) {
       setError(`Delete failed: ${e}`);
     }
@@ -564,61 +658,182 @@ export function useBookData() {
 
   const handleNewParagraph = () => insertParagraph(null);
 
+  // ── Paragraph reflow (the panel's Edit tab) ──────────────────────
+  // Rewrite one paragraph's text: lines re-segment its rows, a line equal to
+  // an existing sentence keeps that row (uuid, audio, color, sentence-scoped
+  // artifacts), unmatched rows are deleted through book_delete_sentence (which
+  // cascades their artifacts), and an empty line splits the paragraph in two —
+  // the old break row moves to the split so the first half keeps its anchors,
+  // a fresh break terminates the second. Rows are written immediately (the
+  // Import road), so no "Save Order" flush is needed.
+  const handleParagraphReflow = async (paraIndex: number, text: string) => {
+    if (!chapterUUID || !isTauri()) return;
+    const para = paragraphs[paraIndex];
+    if (!para) return;
+    const desired = parseLineRows(text.split("\n"));
+    const { rows: matched, removed } = matchRows(
+      desired,
+      [
+        ...para.sentences.map((s) => ({ uuid: s.uuid, content: s.content, isBreak: false })),
+        ...(para.breakSentence
+          ? [{ uuid: para.breakSentence.uuid, content: "", isBreak: true }]
+          : []),
+      ]
+    );
+    if (removed.length > 0 && !reflowAllowDelete.current) {
+      setError("Removing sentences also removes their generated artifacts — confirm to proceed.");
+      return;
+    }
+    reflowAllowDelete.current = false;
+    setSaving(true);
+    setError("");
+    const now = nowIso();
+    const oldEnd = para.breakSentence
+      ? data.findIndex((s) => s.uuid === para.breakSentence!.uuid)
+      : data.length - 1;
+    if (oldEnd < 0) {
+      setSaving(false);
+      return;
+    }
+    // The paragraph's first row follows the previous break (the last
+    // paragraph_break before this one), or starts the chapter.
+    const prevBreak =
+      data.slice(0, oldEnd).map((s) => s.sentence_type).lastIndexOf("paragraph_break");
+    const oldStart = prevBreak + 1;
+    // Build the replacement rows; the old break (if the chapter has one) is
+    // reused as the terminating break, so a split never orphans its audio.
+    const rows: SentenceClient[] = [];
+    let oldBreakUsed = false;
+    for (let i = 0; i < matched.length; i++) {
+      const m = matched[i];
+      const isTermBreak = i === matched.length - 1 && m.isBreak;
+      const uuid =
+        isTermBreak && para.breakSentence && !oldBreakUsed
+          ? para.breakSentence.uuid
+          : m.uuid;
+      if (uuid === para.breakSentence?.uuid) oldBreakUsed = true;
+      const old = m.reused ? data.find((s) => s.uuid === uuid) ?? null : null;
+      if (m.isBreak) {
+        rows.push(
+          old
+            ? { ...old, order_num: 0, updated_at: nowIso(), modified: false }
+            : {
+                uuid,
+                chapter_uuid: chapterUUID,
+                user_id: "",
+                order_num: 0,
+                content: "",
+                sentence_type: "paragraph_break",
+                audio_path: null,
+                audio_url: null,
+                recognized: null,
+                bg_color: null,
+                created_at: now,
+                updated_at: now,
+                modified: false,
+                hasLocalAudio: false,
+              }
+        );
+      } else {
+        rows.push({
+          uuid,
+          chapter_uuid: chapterUUID,
+          user_id: "",
+          order_num: 0,
+          content: m.text,
+          sentence_type: "text",
+          audio_path: old?.audio_path ?? null,
+          audio_url: old?.audio_url ?? null,
+          recognized: old?.recognized ?? null,
+          bg_color: old?.bg_color ?? null,
+          created_at: old?.created_at ?? now,
+          updated_at: old && old.content.trim() === m.text ? old.updated_at : now,
+          modified: false,
+          hasLocalAudio: false,
+        });
+      }
+    }
+    try {
+      for (const uuid of removed) {
+        await invoke("book_delete_sentence", { bookUuid: bookUUID, uuid });
+      }
+      // Sequential order_num at write time, mirroring handleImport.
+      const ordered = rows.map((s, i) => ({ ...s, order_num: oldStart + 1 + i }));
+      await invoke("book_save_sentences", {
+        bookUuid: bookUUID,
+        sentences: ordered.map(toDbSentence),
+      });
+      const tailStart = oldStart + ordered.length;
+      if (tailStart < data.length) {
+        const shifted = data
+          .slice(oldEnd + 1)
+          .map((s, j) => toDbSentence({ ...s, order_num: tailStart + 1 + j }));
+        await invoke("book_save_sentences", { bookUuid: bookUUID, sentences: shifted });
+      }
+      updateData((d) => {
+        d.splice(oldStart, oldEnd - oldStart + 1, ...ordered);
+        for (let i = 0; i < d.length; i++) {
+          d[i] = { ...d[i], order_num: i + 1, modified: false };
+        }
+      });
+      // Sentence focus belonged to the rewritten text; drop it when its row
+      // is gone or the paragraph was split in two.
+      const fs = focusSentenceRef.current;
+      if (fs && !ordered.some((s) => s.uuid === fs)) applySentenceFocus(null);
+      else if (ordered.some((s) => s.sentence_type === "paragraph_break") && para.breakSentence) {
+        setFocusParagraph(para.breakSentence.uuid);
+      }
+    } catch (e) {
+      setError(`Save failed: ${e}`);
+    }
+    setSaving(false);
+  };
+
+  // One-pass confirmation for a reflow that deletes sentences (their artifacts
+  // cascade away with them); the Edit tab arms it after removedArtifactCount
+  // has explained what is at stake.
+  const reflowAllowDelete = useRef(false);
+  const allowReflowDelete = useCallback(() => {
+    reflowAllowDelete.current = true;
+  }, []);
+
+  // How many generated artifacts hang off sentences a reflow is about to
+  // remove — the Edit tab's one-line confirm reads this before arming.
+  const removedArtifactCount = useCallback(
+    (removedUuids: string[]) => {
+      if (removedUuids.length === 0) return 0;
+      let n = 0;
+      for (const u of removedUuids) n += artifactsByScope.get(u)?.length ?? 0;
+      return n;
+    },
+    [artifactsByScope]
+  );
+
   // ── Import sentences from text (each line = sentence, empty line = paragraph break) ─
   const handleImport = async (para: Paragraph, text: string) => {
     if (!text.trim() || !chapterUUID || !isTauri()) return;
     setSaving(true);
     setError("");
 
-    const lines = text.split("\n");
     const now = nowIso();
-    const toSave: SentenceClient[] = [];
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (line === "") {
-        // Skip leading empty lines
-        if (toSave.length === 0) continue;
-        // Skip trailing empty lines
-        const remaining = lines.slice(i + 1).some((l) => l.trim() !== "");
-        if (!remaining) break;
-        // Collapse consecutive empty lines into a single paragraph break
-        if (toSave[toSave.length - 1].sentence_type === "paragraph_break") continue;
-        toSave.push({
-          uuid: getUUID(),
-          chapter_uuid: chapterUUID,
-          user_id: "",
-          order_num: 0,
-          content: "",
-          sentence_type: "paragraph_break",
-          audio_path: null,
-          audio_url: null,
-          recognized: null,
-          bg_color: null,
-          created_at: now,
-          updated_at: now,
-          modified: false,
-          hasLocalAudio: false,
-        });
-      } else {
-        toSave.push({
-          uuid: getUUID(),
-          chapter_uuid: chapterUUID,
-          user_id: "",
-          order_num: 0,
-          content: line,
-          sentence_type: "text",
-          audio_path: null,
-          audio_url: null,
-          recognized: null,
-          bg_color: null,
-          created_at: now,
-          updated_at: now,
-          modified: false,
-          hasLocalAudio: false,
-        });
-      }
-    }
+    // The shared line grammar (one line = sentence, empty line = break);
+    // every imported row is new, so reflow's match-by-text keeps nothing.
+    const toSave: SentenceClient[] = parseLineRows(text.split("\n")).map((d) => ({
+      uuid: getUUID(),
+      chapter_uuid: chapterUUID,
+      user_id: "",
+      order_num: 0,
+      content: d.text,
+      sentence_type: d.isBreak ? "paragraph_break" : "text",
+      audio_path: null,
+      audio_url: null,
+      recognized: null,
+      bg_color: null,
+      created_at: now,
+      updated_at: now,
+      modified: false,
+      hasLocalAudio: false,
+    }));
 
     if (toSave.length === 0) {
       setSaving(false);
@@ -866,22 +1081,68 @@ export function useBookData() {
     }
   }, []);
 
+  const applySentenceFocus = useCallback(
+    (uuid: string | null) => {
+      setFocusSentenceBoth(uuid);
+      setEditingSentence(uuid);
+    },
+    [setFocusSentenceBoth]
+  );
+
   const setFocusParagraph = useCallback((uuid: string | null) => {
-    setFocusParagraphState(uuid);
-  }, []);
+    // Sentence focus belongs to a paragraph; moving to another one drops it
+    // (re-clicking the same paragraph keeps the selected sentence). Read the
+    // current value from state rather than computing inside the updater.
+    if (focusParagraph !== uuid) {
+      setEditingSentence(null);
+      setFocusParagraphState(uuid);
+    }
+  }, [focusParagraph]);
 
   // Tapping a paragraph focuses it and, on a phone, slides the panel in.
   const selectParagraph = useCallback(
     (uuid: string | null) => {
-      setFocusParagraphState(uuid);
+      setFocusParagraph(uuid);
       if (mobile && uuid) setMobilePanelOpen(true);
     },
-    [mobile]
+    [mobile, setFocusParagraph]
+  );
+
+  // Selecting a sentence deepens the panel's scope to it. On desktop inline
+  // editing replaces the drawer; on a phone the drawer stays the edit surface
+  // (with the panel following via the paragraph focus).
+  const selectSentence = useCallback(
+    (s: SentenceClient) => {
+      if (mobile) {
+        applySentenceFocus(null);
+        openEditDrawer(s);
+        return;
+      }
+      const owner = paragraphs.find((p) => p.sentences.some((x) => x.uuid === s.uuid));
+      if (owner) setFocusParagraph(owner.breakSentence?.uuid ?? null);
+      applySentenceFocus(s.uuid);
+    },
+    [mobile, paragraphs, setFocusParagraph, applySentenceFocus]
+  );
+
+  // The paragraph a sentence belongs to ("¶ N · sentence M" in the panel).
+  const paraIndexOf = useCallback(
+    (uuid: string | null): number | null => {
+      if (!uuid) return null;
+      const i = paragraphs.findIndex((p) => p.sentences.some((s) => s.uuid === uuid));
+      return i === -1 ? null : i;
+    },
+    [paragraphs]
   );
 
   const toggleUnderstanding = useCallback(() => {
     setUnderstanding((prev) => {
       const next = !prev;
+      try {
+        window.localStorage.setItem("book-understanding-default", next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
       if (next) {
         // Focus the first paragraph that has an anchor so the panel has a scope.
         setFocusParagraphState((cur) => {
@@ -1237,6 +1498,7 @@ export function useBookData() {
     discardDrawer,
     handleSaveAdd,
     handleSaveEdit,
+    handleParagraphReflow,
     handleDelete,
     doDeleteSentence,
     handleSaveOrder,
@@ -1255,6 +1517,13 @@ export function useBookData() {
     focusParagraph,
     setFocusParagraph,
     selectParagraph,
+    focusSentence,
+    selectSentence,
+    editingSentence,
+    setEditingSentence,
+    handleCommitSentenceEdit,
+    allowReflowDelete,
+    removedArtifactCount,
     understandingTab,
     setUnderstandingTab,
     chapterMode,
@@ -1262,6 +1531,7 @@ export function useBookData() {
     scope,
     mobilePanelOpen,
     setMobilePanelOpen,
+    paraIndexOf,
     splitRatio,
     setSplitRatio,
     artifacts,

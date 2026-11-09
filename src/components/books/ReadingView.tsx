@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { BookOpen, Check, Library, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { BookOpen, Check, Library, Settings2, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import type { useBookData } from "@/hooks/useBookData";
@@ -10,8 +10,15 @@ import ParagraphList from "./ParagraphList";
 import SentenceDrawer from "./SentenceDrawer";
 import ConfirmDialog from "./ConfirmDialog";
 import UnderstandingPanel from "./UnderstandingPanel";
+import CompanionsStrip from "./CompanionsStrip";
+import { useBookKeynav } from "./useBookKeynav";
+import type { TabId } from "@/lib/shell/tabs";
 
-type Props = { b: ReturnType<typeof useBookData> };
+type Props = {
+  b: ReturnType<typeof useBookData>;
+  /** The shell's openTab, forwarded to the book panel's companions strip. */
+  onNavigate?: (tab: TabId) => void;
+};
 
 /**
  * Presentational drill-down for the "Books" mode. All state and handlers
@@ -21,28 +28,33 @@ type Props = { b: ReturnType<typeof useBookData> };
  *   book, no chap -> chapter list
  *   chapter       -> reading pane (paragraphs + sentence drawer)
  */
-export default function ReadingView({ b }: Props) {
+export default function ReadingView({ b, onNavigate }: Props) {
   const {
     bookUUID, chapterUUID, flatChapters, mobile,
     loading, saving, error, setError, viewMode, paragraphs,
-    drawer, drawerContent, drawerBgColor, recorder,
     deleteTarget, setDeleteTarget, confirmDeleteSentence, setConfirmDeleteSentence,
-    editSentence, nextUUID,
+    drawer, drawerContent, drawerBgColor, recorder, editSentence, nextUUID,
   } = b;
 
   const {
     understanding, splitRatio, setSplitRatio, focusParagraph, selectParagraph,
-    setFocusParagraph, mobilePanelOpen, setMobilePanelOpen, chapterMode,
+    setFocusParagraph, focusSentence, selectSentence, editingSentence,
+    mobilePanelOpen, setMobilePanelOpen, chapterMode,
   } = b;
 
   // Reading-pane scroll container — the scroll-spy root and the split's left column.
   const leftRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
 
+  // A sentence focus reached by keyboard walking scrolls its line back into
+  // view; a click needs no help, so the click road leaves the flag unset.
+  const [keepSentenceInScope, setKeepSentenceInScope] = useState(false);
+
   // Scroll-spy: while understanding mode is on (desktop), the paragraph nearest
   // the top of the reading pane becomes the panel's focus. In chapter mode the
   // tabs bind to the whole chapter, so the spy keeps the focus warm but does
-  // not drive the panel.
+  // not drive the panel. It leans on setFocusParagraph, which drops sentence
+  // focus only when the spy crosses into another paragraph.
   useEffect(() => {
     if (!understanding || mobile || chapterMode) return;
     const root = leftRef.current;
@@ -62,6 +74,32 @@ export default function ReadingView({ b }: Props) {
     els.forEach((el) => obs.observe(el));
     return () => obs.disconnect();
   }, [understanding, mobile, chapterMode, paragraphs, setFocusParagraph]);
+
+  // Keyboard walking: ↑/↓ (or j/k) step through sentences, p/n through
+  // paragraphs, driven off the focused selection.
+  const flatSentences = useMemo(
+    () => paragraphs.flatMap((p) => p.sentences),
+    [paragraphs]
+  );
+  useBookKeynav(!!chapterUUID && !mobile, paragraphs, focusSentence, focusParagraph, {
+    goToSentence: (i) => {
+      const s = flatSentences[i];
+      if (!s) return;
+      setKeepSentenceInScope(true);
+      selectSentence(s);
+    },
+    goToParagraph: (i) => {
+      const uuid = paragraphs[i]?.breakSentence?.uuid;
+      if (uuid) selectParagraph(uuid);
+    },
+  });
+  useEffect(() => {
+    if (!keepSentenceInScope || !focusSentence) return;
+    document
+      .querySelector(`[data-sentence-uuid="${focusSentence}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+    setKeepSentenceInScope(false);
+  }, [keepSentenceInScope, focusSentence]);
 
   // Drag splitter: turn a pointer x into the left column's percentage width.
   const onSplitterDown = (e: React.PointerEvent) => {
@@ -124,8 +162,8 @@ export default function ReadingView({ b }: Props) {
 
   // ── Level 2: chapter list ──────────────────────────────────────
   if (!chapterUUID) {
-    return (
-      <div className="flex-1 min-h-0 overflow-y-auto p-4 min-w-0">
+    const chapterList = (
+      <>
         <div className="flex items-center gap-2 mb-3">
           <BookOpen size={16} className="text-text-tertiary" />
           <span className="text-xs font-semibold text-text-tertiary tracking-wider truncate">
@@ -159,11 +197,48 @@ export default function ReadingView({ b }: Props) {
             })}
           </div>
         )}
-      </div>
+      </>
+    );
+
+    // Selecting a book points the right panel at book-level maintenance: the
+    // dataset family (companions) and the chapters editor. Same split posture
+    // as the reading pane; the level is a short list, so no splitter yet.
+    if (understanding && !mobile) {
+      return (
+        <div className="flex-1 min-w-0 min-h-0 flex flex-row overflow-hidden">
+          <div
+            className="min-w-0 overflow-y-auto p-4 flex flex-col gap-4"
+            style={{ flexBasis: `${splitRatio}%`, flexGrow: 0, flexShrink: 0 }}
+          >
+            {chapterList}
+          </div>
+          <div className="min-w-0 flex-1 overflow-y-auto p-4 flex flex-col gap-4 border-l border-border-default bg-bg-body">
+            <div className="text-[11px] font-semibold text-text-tertiary tracking-wider uppercase">
+              Book
+            </div>
+            <button
+              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-bg-card hover:bg-bg-hover text-left text-sm text-text-primary cursor-pointer border border-border-default"
+              onClick={() => b.setView("manage")}
+            >
+              <Settings2 size={16} className="text-text-secondary shrink-0" />
+              <span className="flex-1">Manage chapters&hellip;</span>
+            </button>
+            <CompanionsStrip
+              bookUuid={b.bookUUID}
+              bookName={b.selectedBook?.name ?? ""}
+              onNavigate={onNavigate ?? (() => {})}
+            />
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex-1 min-h-0 overflow-y-auto p-4 min-w-0">{chapterList}</div>
     );
   }
 
-  // ── Level 3: reading pane ──────────────────────────────────────
+  // ── Level 3: reading pane ──────────────────────────────────
   // The reading content is shared by the plain pane and the split's left column.
   const readingContent = (
     <>
@@ -188,8 +263,11 @@ export default function ReadingView({ b }: Props) {
           mobile={mobile}
           understanding={understanding}
           focusParagraph={focusParagraph}
+          focusSentence={focusSentence}
+          editingSentence={editingSentence}
+          onCommitEdit={b.handleCommitSentenceEdit}
           onFocusParagraph={selectParagraph}
-          onEditSentence={b.openEditDrawer}
+          onSelectSentence={selectSentence}
           onAddSentence={b.openAddDrawer}
           onDeleteParagraph={b.handleDeleteParagraph}
           onParagraphAudio={b.handleParagraphAudio}
@@ -259,32 +337,36 @@ export default function ReadingView({ b }: Props) {
         </div>
       )}
 
-      {/* Sentence drawer. It keeps one busy flag: preparing (the model preload)
-          used to ride inside `processing`; folded back in so Voice input still
-          disables and reads "Recognizing…" while the recorder opens. */}
-      <SentenceDrawer
-        drawer={drawer}
-        content={drawerContent}
-        onContentChange={b.setDrawerContent}
-        bgColor={drawerBgColor}
-        onBgColorChange={b.setDrawerBgColor}
-        bookUUID={bookUUID}
-        terms={b.terms}
-        saving={saving}
-        recording={recorder.recording}
-        processing={recorder.processing || recorder.preparing}
-        onClose={b.closeDrawer}
-        onClear={b.clearDrawer}
-        onDiscard={b.discardDrawer}
-        onVoiceInput={recorder.toggle}
-        onSaveAdd={b.handleSaveAdd}
-        onSaveEdit={b.handleSaveEdit}
-        onDelete={b.handleDelete}
-        onInsertBefore={() => editSentence && b.openInsertDrawer(editSentence.uuid)}
-        onInsertAfter={() => b.openInsertDrawer(nextUUID)}
-        onParagraphBefore={() => editSentence && b.insertParagraph(editSentence.uuid)}
-        onParagraphAfter={() => b.insertParagraph(nextUUID)}
-      />
+      {/* Sentence drawer — retired on desktop, where the focused sentence is
+          edited inline and the panel carries the label/copy/color commands.
+          It keeps one busy flag: preparing (the model preload) used to ride
+          inside `processing`; folded back in so Voice input still disables
+          and reads "Recognizing…" while the recorder opens. */}
+      {mobile && (
+        <SentenceDrawer
+          drawer={drawer}
+          content={drawerContent}
+          onContentChange={b.setDrawerContent}
+          bgColor={drawerBgColor}
+          onBgColorChange={b.setDrawerBgColor}
+          bookUUID={bookUUID}
+          terms={b.terms}
+          saving={saving}
+          recording={recorder.recording}
+          processing={recorder.processing || recorder.preparing}
+          onClose={b.closeDrawer}
+          onClear={b.clearDrawer}
+          onDiscard={b.discardDrawer}
+          onVoiceInput={recorder.toggle}
+          onSaveAdd={b.handleSaveAdd}
+          onSaveEdit={b.handleSaveEdit}
+          onDelete={b.handleDelete}
+          onInsertBefore={() => editSentence && b.openInsertDrawer(editSentence.uuid)}
+          onInsertAfter={() => b.openInsertDrawer(nextUUID)}
+          onParagraphBefore={() => editSentence && b.insertParagraph(editSentence.uuid)}
+          onParagraphAfter={() => b.insertParagraph(nextUUID)}
+        />
+      )}
 
       <ConfirmDialog
         request={
