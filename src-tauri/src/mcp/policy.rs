@@ -248,7 +248,7 @@ const HUMAN_HANDOFF: [&str; 2] = [
 /// unloaded it, which is memory and not state the app renders from — the reason
 /// `model_transcribe` stays at `Write` is that it has no evidence role to justify
 /// the friction-free tier, not that it changes more.
-const READ_TOOLS: [&str; 101] = [
+const READ_TOOLS: [&str; 104] = [
     "app_audit_get",
     "app_bootstrap",
     "app_events",
@@ -312,6 +312,11 @@ const READ_TOOLS: [&str; 101] = [
     "model_transcribe_detailed",
     "ocr_hyphen_dictionary_status",
     "ocr_list_languages",
+    // Recognition reads an image and returns text: nothing on this machine
+    // changes, so all three engines are reads.
+    "ocr_recognize",
+    "ocr_recognize_ollama",
+    "ocr_recognize_tsv",
     "pairing_list_devices",
     "pc_sync_status",
     "read_aloud_align_proposals",

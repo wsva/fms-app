@@ -19,6 +19,7 @@ import {
   BookOpen,
   Camera,
   Send,
+  Bot,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
@@ -62,7 +63,7 @@ export default function OcrPage() {
     setSourceImage,
     selectFile,
     captureScreenshot,
-    takePhoto,
+    loadImageFile,
     loadLanguages,
     recognizing,
     recognize,
@@ -75,6 +76,12 @@ export default function OcrPage() {
     copied,
     fixWithLlm,
     fixingText,
+    models,
+    ollamaModel,
+    setOllamaModel,
+    llmModel,
+    setLlmModel,
+    ollamaReport,
     sendToHub,
     sending,
     sentToHub,
@@ -133,6 +140,13 @@ export default function OcrPage() {
   // means the webview handles the camera intent and its permission itself, so
   // there is no Rust camera code and no new capability.
   const cameraInputRef = useRef<HTMLInputElement>(null);
+
+  // The gallery half of the same idea, and the reason `Open` does not call
+  // `selectFile` here: the dialog plugin answers a phone with a `content://`
+  // URI, which the asset protocol cannot read, so an image picked that way
+  // never rendered. Without `capture` this raises the file chooser instead of
+  // the camera.
+  const galleryInputRef = useRef<HTMLInputElement>(null);
 
   // ---- Intent (Android only) ----
   // Two screens behind one entry, because where a photo should go only becomes
@@ -325,47 +339,8 @@ export default function OcrPage() {
     );
   }, [availableLangs, langFilter]);
 
-  // LLM model for the plain path's text fixing. The pick is cached under
-  // `llm_selected_model`, which the text-selection menu's Ask-the-model actions
-  // also read (lib/llm/ask.ts), so one choice serves every LLM feature.
-  const [llmModel, setLlmModelState] = useState("");
-  const setLlmModel = useCallback((model: string) => {
-    setLlmModelState(model);
-    if (typeof window !== "undefined" && model) {
-      localStorage.setItem("llm_selected_model", model);
-    }
-  }, []);
-
-  // Restore cached model on mount (client-side only).
-  useEffect(() => {
-    const cached = localStorage.getItem("llm_selected_model");
-    if (cached) setLlmModelState(cached);
-  }, []);
-
-  const [installedModels, setInstalledModels] = useState<string[]>([]);
-
-  // Fetch installed Ollama models on mount.
-  useEffect(() => {
-    if (!isTauri()) return;
-    invoke<{ installed: { name: string }[] }>("llm_list_models")
-      .then((res) => {
-        const names = res.installed.map((m) => m.name).sort();
-        setInstalledModels(names);
-        // Prefer cached model if still installed; otherwise first model.
-        const cached = localStorage.getItem("llm_selected_model");
-        if (names.length > 0) {
-          const stillInstalled = cached && names.includes(cached);
-          if (!cached || !stillInstalled) {
-            setLlmModel(names[0]);
-          } else if (cached && names.includes(cached)) {
-            setLlmModelState(cached);
-          }
-        }
-      })
-      .catch(() => {
-        // Ollama not running — ignore.
-      });
-  }, [setLlmModel]);
+  // LLM model for the plain path's text fixing and for the Ollama engine come
+  // from the hook: one `llm_list_models` call fills both selectors.
 
   const handleImageReady = useCallback((dataUrl: string | null) => {
     setEditedImage(dataUrl);
@@ -386,7 +361,8 @@ export default function OcrPage() {
     [editedImage, installDictionary, recognize, langString]
   );
 
-  const canRecognize = !!editedImage && !recognizing;
+  const canRecognize =
+    !!editedImage && !recognizing && (mode !== "ollama" || !!ollamaModel);
 
   // Ctrl/Cmd+Enter runs recognition, Ctrl/Cmd+Shift+C copies the result — the
   // same habit as the dictation page's shortcuts. The raw-TSV overlay owns the
@@ -538,7 +514,11 @@ export default function OcrPage() {
         badge={
           // The Android page runs on the Hub rather than on a local engine, and
           // says whether that Hub is reachable under the toolbar instead.
-          mobile ? undefined : <span className="text-xs text-text-tertiary">Tesseract</span>
+          mobile ? undefined : (
+            <span className="text-xs text-text-tertiary">
+              {mode === "ollama" ? ollamaModel || "Ollama" : "Tesseract"}
+            </span>
+          )
         }
       />
 
@@ -559,7 +539,7 @@ export default function OcrPage() {
             <ToolbarButton
               icon={FolderOpen}
               label="Open"
-              onClick={selectFile}
+              onClick={() => galleryInputRef.current?.click()}
               title="Open an image file"
             />
           </>
@@ -611,9 +591,11 @@ export default function OcrPage() {
                 ? "Add an image first"
                 : mobile && hubOffline
                   ? "The Hub is not connected — wake it and retry"
-                  : mode === "tsv"
-                    ? "Recognize and rebuild paragraphs in Rust"
-                    : "Recognize text"
+                  : mode === "ollama"
+                    ? "Read the image with the selected Ollama model"
+                    : mode === "tsv"
+                      ? "Recognize and rebuild paragraphs in Rust"
+                      : "Recognize text"
             }
           />
         )}
@@ -690,21 +672,33 @@ export default function OcrPage() {
         </div>
       )}
 
-      {/* The Android camera affordance: a native capture intent, its result fed
-          to the same editor pipeline as Select image. */}
+      {/* The Android file affordances: a native capture intent and the gallery
+          chooser, both fed to the same editor pipeline as Select image. */}
       {mobile && (
-        <input
-          ref={cameraInputRef}
-          type="file"
-          accept="image/*"
-          capture="environment"
-          className="hidden"
-          onChange={(e) => {
-            takePhoto(e.target.files?.[0]);
-            // Reset so taking the same photo twice still fires onChange.
-            e.target.value = "";
-          }}
-        />
+        <>
+          <input
+            ref={cameraInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            className="hidden"
+            onChange={(e) => {
+              loadImageFile(e.target.files?.[0]);
+              // Reset so taking the same photo twice still fires onChange.
+              e.target.value = "";
+            }}
+          />
+          <input
+            ref={galleryInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              loadImageFile(e.target.files?.[0]);
+              e.target.value = "";
+            }}
+          />
+        </>
       )}
 
       {error && (
@@ -802,7 +796,7 @@ export default function OcrPage() {
               <div className="shrink-0 flex flex-wrap items-center gap-2 px-3 py-2 border-b border-border-default">
                 <div
                   role="group"
-                  aria-label="Recognition mode"
+                  aria-label="Recognition engine"
                   className="flex items-center gap-0.5 p-0.5 rounded-lg bg-bg-muted border border-border-default"
                 >
                   {/* TSV leads because it is the default; the active tab is the
@@ -821,11 +815,22 @@ export default function OcrPage() {
                     label="Plain"
                     title="Tesseract plain text — better for multi-column and right-to-left pages, lines re-joined by an LLM on request"
                   />
+                  {/* The other engine: a model rather than a layout pass, for
+                      the pages Tesseract cannot read at all. */}
+                  <ModeTab
+                    active={mode === "ollama"}
+                    onClick={() => setMode("ollama")}
+                    icon={<Bot size={14} />}
+                    label="Ollama"
+                    title="A vision model in Ollama reads the image — what a photographed or ornate page needs; its reference marks are stripped afterwards"
+                  />
                 </div>
                 <p className="hidden xl:block flex-1 min-w-0 truncate text-xs text-text-tertiary">
                   {mode === "plain"
                     ? "Tesseract text → optional LLM cleanup"
-                    : "Tesseract TSV → paragraphs, line joins and dash spacing in Rust"}
+                    : mode === "ollama"
+                      ? "Vision model → text, footnote marks stripped in Rust"
+                      : "Tesseract TSV → paragraphs, line joins and dash spacing in Rust"}
                 </p>
                 {/* On a narrow pane the actions get their own line instead of
                     squeezing "Fix with LLM" into two words per line. */}
@@ -846,20 +851,20 @@ export default function OcrPage() {
                         )}
                         {fixingText ? "Fixing…" : "Fix with LLM"}
                       </button>
-                      <select
+                      <ModelSelect
                         value={llmModel}
-                        onChange={(e) => setLlmModel(e.target.value)}
-                        className="min-w-0 max-w-[160px] px-2 py-1 rounded-md bg-bg-muted border border-border-default text-xs text-text-primary hover:bg-bg-hover transition-colors appearance-none cursor-pointer"
+                        models={models}
+                        onChange={setLlmModel}
                         title="LLM model for text fixing"
-                      >
-                        {installedModels.length === 0 && <option value="">No models found</option>}
-                        {installedModels.map((name) => (
-                          <option key={name} value={name}>
-                            {name}
-                          </option>
-                        ))}
-                      </select>
+                      />
                     </>
+                  ) : mode === "ollama" ? (
+                    <ModelSelect
+                      value={ollamaModel}
+                      models={models}
+                      onChange={setOllamaModel}
+                      title="The Ollama model that reads the image — glm-ocr for a page Tesseract cannot"
+                    />
                   ) : (
                     <ToolbarButton
                       icon={Table2}
@@ -899,7 +904,9 @@ export default function OcrPage() {
                 placeholder={
                   mode === "tsv"
                     ? "Recognized text appears here — paragraphs rebuilt from Tesseract's TSV. You can edit it before copying."
-                    : "Recognized text appears here. You can edit it before copying."
+                    : mode === "ollama"
+                      ? "Recognized text appears here — read by the selected model, with its reference marks and markdown stripped. You can edit it before copying."
+                      : "Recognized text appears here. You can edit it before copying."
                 }
                 style={{ fontSize: `${fontSize}px` }}
                 className={`flex-1 w-full px-3 py-2 bg-transparent text-text-primary resize-y focus:outline-none ${
@@ -926,6 +933,9 @@ export default function OcrPage() {
                 <p className="text-xs text-text-tertiary">
                   {resultText.length} characters · {words} words
                   {mode === "tsv" && tsvRowCount > 0 ? ` · ${tsvRowCount} TSV rows` : ""}
+                  {mode === "ollama" && ollamaReport
+                    ? ` · ${ollamaReport.references} references stripped`
+                    : ""}
                   {recognizing && " · recognizing…"}
                 </p>
                 <span className="flex-1" />
@@ -1033,6 +1043,37 @@ function ModeTab({
       {icon}
       {label}
     </button>
+  );
+}
+
+/** The installed Ollama models as a picker. One component, two homes: the
+ *  engine's own model, and the plain path's text fixer. */
+function ModelSelect({
+  value,
+  models,
+  onChange,
+  title,
+}: {
+  value: string;
+  models: string[];
+  onChange: (model: string) => void;
+  title: string;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      className="min-w-0 max-w-[180px] px-2 py-1 rounded-md bg-bg-muted border border-border-default text-xs text-text-primary hover:bg-bg-hover transition-colors appearance-none cursor-pointer"
+      title={title}
+      aria-label={title}
+    >
+      {models.length === 0 && <option value="">No models found</option>}
+      {models.map((name) => (
+        <option key={name} value={name}>
+          {name}
+        </option>
+      ))}
+    </select>
   );
 }
 

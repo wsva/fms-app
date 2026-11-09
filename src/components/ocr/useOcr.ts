@@ -17,11 +17,31 @@ const IMAGE_FILTERS = [
 ];
 
 /**
- * Result post-processing mode:
- * - `plain` — Tesseract plain text, re-joined afterwards by an LLM on request.
+ * What produces the text:
  * - `tsv` — Tesseract TSV layout, rebuilt into paragraphs in Rust (no model).
+ * - `plain` — Tesseract plain text, re-joined afterwards by an LLM on request.
+ * - `ollama` — a vision model served by Ollama (`glm-ocr` and friends): what
+ *   reads a photographed or ornate page Tesseract cannot, with its markdown and
+ *   LaTeX reference marks stripped in Rust afterwards.
  */
-export type OcrMode = "plain" | "tsv";
+export type OcrMode = "tsv" | "plain" | "ollama";
+
+/** What each engine is called when a run fails. */
+const ENGINE_LABEL: Record<OcrMode, string> = {
+  tsv: "TSV recognition",
+  plain: "Recognition",
+  ollama: "Ollama OCR",
+};
+
+/**
+ * Names that read as an OCR or vision model, so the engine defaults to one that
+ * can see instead of to whatever sorts first in the installed list.
+ */
+const VISION_MODEL_HINT = /(ocr|vl|vision|llava|minicpm|moondream)/i;
+
+function preferredOcrModel(names: string[]): string {
+  return names.find((name) => VISION_MODEL_HINT.test(name)) ?? names[0];
+}
 
 /** One line-break hyphen of a TSV result, with the decision the rebuild made. */
 export interface OcrHyphen {
@@ -75,6 +95,19 @@ interface OcrTsvResult {
   dictionaries: OcrDictionary[];
   /** Selected Tesseract codes with no dictionary at all (CJK, Arabic, …). */
   uncovered: string[];
+}
+
+/** Tauri command result of `ocr_recognize_ollama`. */
+interface OcrOllamaResult {
+  /** The answer after the Rust cleanup: what the user keeps. */
+  text: string;
+  /** The model's own answer, before the cleanup. */
+  raw: string;
+  /** Reference/footnote marks the cleanup removed. */
+  references: number;
+  /** Other markup the cleanup unwrapped or dropped. */
+  markup: number;
+  model: string;
 }
 
 /**
@@ -172,7 +205,7 @@ export function useOcr() {
   // prerendered HTML and the first client paint agree.
   useEffect(() => {
     const saved = localStorage.getItem("ocr_mode");
-    if (saved === "plain" || saved === "tsv") setModeState(saved);
+    if (saved === "plain" || saved === "tsv" || saved === "ollama") setModeState(saved);
   }, []);
   const setMode = useCallback((next: OcrMode) => {
     setModeState(next);
@@ -180,6 +213,12 @@ export function useOcr() {
   }, []);
   const [plainText, setPlainText] = useState("");
   const [tsvText, setTsvText] = useState("");
+  // The vision model's text, and what the cleanup stripped from its answer.
+  const [ollamaText, setOllamaText] = useState("");
+  const [ollamaReport, setOllamaReport] = useState<{
+    references: number;
+    markup: number;
+  } | null>(null);
   // Raw Tesseract TSV behind the last TSV-mode recognition.
   const [rawTsv, setRawTsv] = useState("");
   // Line-break hyphens of the last TSV result. `baseline` is the same page with
@@ -216,6 +255,45 @@ export function useOcr() {
   const [lastFailed, setLastFailed] = useState<
     { kind: "recognize" | "send"; imageBase64: string; lang: string } | null
   >(null);
+
+  // ---- Ollama models ----
+  // One list, two jobs: the OCR engine's model and the plain path's text fixer.
+  // The fixer's pick is cached under `llm_selected_model`, which the
+  // text-selection menu's Ask-the-model actions also read (lib/llm/ask.ts), so
+  // one choice serves every LLM feature. The OCR model keeps its own key: an
+  // OCR model is not a chat model, and swapping one must not swap the other.
+  const [models, setModels] = useState<string[]>([]);
+  const [llmModel, setLlmModelState] = useState("");
+  const [ollamaModel, setOllamaModelState] = useState("");
+
+  const setLlmModel = useCallback((model: string) => {
+    setLlmModelState(model);
+    if (model) localStorage.setItem("llm_selected_model", model);
+  }, []);
+
+  const setOllamaModel = useCallback((model: string) => {
+    setOllamaModelState(model);
+    if (model) localStorage.setItem("ocr_ollama_model", model);
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    // Read the cache here rather than relying on the state the mount effect
+    // restores, so this needs no dependency on either selection.
+    const cachedFix = localStorage.getItem("llm_selected_model");
+    const cachedOcr = localStorage.getItem("ocr_ollama_model");
+    invoke<{ installed: { name: string }[] }>("llm_list_models")
+      .then((res) => {
+        const names = res.installed.map((m) => m.name).sort();
+        setModels(names);
+        if (names.length === 0) return;
+        setLlmModel(names.find((name) => name === cachedFix) ?? names[0]);
+        setOllamaModel(names.find((name) => name === cachedOcr) ?? preferredOcrModel(names));
+      })
+      .catch(() => {
+        // Ollama not running — the engine selector then has nothing to offer.
+      });
+  }, [setLlmModel, setOllamaModel]);
 
   // ---- Shared UI state ----
   const [error, setError] = useState("");
@@ -290,10 +368,15 @@ export function useOcr() {
     }
   }, []);
 
-  // A photo taken by the Android camera (an `<input capture>` result). The
-  // webview owns the camera intent and its permission, so the hook only turns
-  // the picked File into a data URL the editor already accepts.
-  const takePhoto = useCallback((file: File | null | undefined) => {
+  // A photo the Android webview produced: a camera capture or a gallery pick.
+  // Both arrive as a `File` — the webview owns the intent and its permission —
+  // so the hook only turns it into the data URL the editor already accepts.
+  //
+  // This is the mobile twin of `selectFile`, and it is the reason the phone does
+  // not use `selectFile`: `plugin-dialog`'s `open` answers with a `content://`
+  // URI there, and `convertFileSrc` can only serve a filesystem path, so the
+  // picker would return an image that never renders.
+  const loadImageFile = useCallback((file: File | null | undefined) => {
     if (!file) return;
     setError("");
     const reader = new FileReader();
@@ -380,15 +463,16 @@ export function useOcr() {
 
   // ---- Recognition ----
 
-  const resultText = mode === "plain" ? plainText : tsvText;
+  const resultText =
+    mode === "tsv" ? tsvText : mode === "plain" ? plainText : ollamaText;
 
   const setResultText = useCallback(
     (text: string) => {
-      if (mode === "plain") setPlainText(text);
-      else {
+      if (mode === "tsv") {
         setTsvText(text);
         setEdited(true);
-      }
+      } else if (mode === "plain") setPlainText(text);
+      else setOllamaText(text);
     },
     [mode]
   );
@@ -418,6 +502,15 @@ export function useOcr() {
           );
           setLastFailed(null);
           setTsvText(reply.text ?? "");
+        } else if (target === "ollama") {
+          // The cleanup (reference marks, markdown) runs in Rust, so `text` is
+          // already the page and `raw` is only kept for the log.
+          const res = await invoke<OcrOllamaResult>("ocr_recognize_ollama", {
+            imageBase64,
+            model: ollamaModel,
+          });
+          setOllamaText(res.text);
+          setOllamaReport({ references: res.references, markup: res.markup });
         } else if (target === "tsv") {
           const res = await invoke<OcrTsvResult>("ocr_recognize_tsv", {
             imageBase64,
@@ -443,13 +536,13 @@ export function useOcr() {
         setError(
           mobile
             ? `Recognition on the Hub failed: ${msg}. The Hub is unreachable or MCP is off — wake it and retry.`
-            : `${target === "tsv" ? "TSV recognition" : "Recognition"} failed: ${msg}`
+            : `${ENGINE_LABEL[target]} failed: ${msg}`
         );
       } finally {
         setRecognizing(false);
       }
     },
-    [mode, withHubStage]
+    [mode, ollamaModel, withHubStage]
   );
 
   /** Re-run the Hub call the last error came from, with the arguments it was
@@ -565,6 +658,8 @@ Return ONLY the corrected plain text, no explanations.`,
     setSourceImage(null);
     setPlainText("");
     setTsvText("");
+    setOllamaText("");
+    setOllamaReport(null);
     setRawTsv("");
     setHyphens([]);
     setBaseline("");
@@ -589,7 +684,7 @@ Return ONLY the corrected plain text, no explanations.`,
     setSourceImage,
     selectFile,
     captureScreenshot,
-    takePhoto,
+    loadImageFile,
     // languages (Hub-backed on the Android client)
     loadLanguages,
     // recognition
@@ -604,6 +699,14 @@ Return ONLY the corrected plain text, no explanations.`,
     copied,
     fixWithLlm,
     fixingText,
+    // Ollama: the installed models, the OCR engine's model, and what the
+    // cleanup stripped from the last answer.
+    models,
+    ollamaModel,
+    setOllamaModel,
+    llmModel,
+    setLlmModel,
+    ollamaReport,
     // Hub send (Android "Send to Hub")
     sendToHub,
     sending,

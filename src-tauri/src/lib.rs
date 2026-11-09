@@ -410,6 +410,7 @@ pub fn run() {
             datasets::read_aloud::read_aloud_assess_take,
             ocr::ocr_recognize,
             ocr::ocr_recognize_tsv,
+            ocr::ocr_recognize_ollama,
             ocr::ocr_list_languages,
             ocr::ocr_hyphen_dictionary_status,
             ocr::ocr_hyphen_dictionary_download,

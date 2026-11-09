@@ -1,13 +1,18 @@
-//! Tesseract OCR. Desktop-only (see the `desktop` feature gate in `lib.rs`).
+//! OCR. Desktop-only (see the `desktop` feature gate in `lib.rs`).
 //!
-//! Two recognition paths share one Tesseract install:
-//! - `ocr_recognize` dumps plain text (`<base>.txt`). Layout is lost there, so
-//!   re-joining broken lines is left to an LLM pass in the UI.
+//! Three recognition paths:
+//! - `ocr_recognize` dumps Tesseract plain text (`<base>.txt`). Layout is lost
+//!   there, so re-joining broken lines is left to an LLM pass in the UI.
 //! - `ocr_recognize_tsv` asks Tesseract for its TSV layout dump and rebuilds the
 //!   paragraphs in Rust (`tsv`): words → lines → paragraphs. Line-break hyphens
 //!   are then decided by `hyphen` against the downloaded Hunspell dictionaries
 //!   of the page's language set (`deu+eng` = German + English). No model
 //!   involved.
+//! - `ocr_recognize_ollama` hands the image to a vision model in Ollama (`ollama`)
+//!   — what reads a photographed, angled or ornate page Tesseract cannot. The
+//!   model answers in markdown, so `clean` strips its reference marks and
+//!   formatting before the text is returned; no language or hyphen machinery is
+//!   involved on that path.
 //!
 //! The dictionaries are fetched on demand (`ocr_hyphen_dictionary_*`) rather
 //! than bundled: they are data under their own licences (0.5–19 MB each), and
@@ -21,7 +26,9 @@ use tauri::State;
 
 use hyphen::{HyphenState, Policy};
 
+pub(crate) mod clean;
 pub(crate) mod hyphen;
+pub(crate) mod ollama;
 pub(crate) mod tsv;
 
 // ---------------------------------------------------------------------------
@@ -303,6 +310,34 @@ pub async fn ocr_recognize_tsv(
     cleanup(&input_path, &output_base, &["tsv"]);
 
     result
+}
+
+/// Recognize text with a vision model served by Ollama (`ollama`).
+///
+/// The model is named by the caller so a better one drops in without a build:
+/// `glm-ocr` is the current answer for photographed book pages, but any model
+/// that accepts images works. The reply is cleaned before it is returned, and
+/// the counts of what was stripped come back with it.
+///
+/// `instructions` replaces the default transcription prompt for callers that
+/// know their page (a table, a form, two columns).
+#[tauri::command]
+pub async fn ocr_recognize_ollama(
+    settings: State<'_, crate::settings::SettingsState>,
+    image_base64: String,
+    model: String,
+    instructions: Option<String>,
+) -> Result<ollama::OllamaOcrResult, String> {
+    // The OCR page talks to the Ollama the rest of the app talks to; there is no
+    // second endpoint to configure.
+    let base_url = settings.settings.lock().unwrap().ollama_url.clone();
+    ollama::recognize(
+        &base_url,
+        model.trim(),
+        &image_base64,
+        instructions.as_deref(),
+    )
+    .await
 }
 
 /// Hunspell dictionaries available for line-break hyphen repair, with their

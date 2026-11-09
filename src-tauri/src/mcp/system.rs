@@ -49,6 +49,16 @@ struct OcrDictionaryParam {
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Default)]
+struct OcrRecognizeOllamaParam {
+    image_base64: String,
+    /// A model installed in Ollama that accepts images.
+    model: String,
+    /// Replaces the default transcription prompt for a known page layout.
+    #[serde(default)]
+    instructions: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Default)]
 struct OcrOpenImageParam {
     /// The image to load into this (the Hub's) OCR page, as a
     /// `data:image/...;base64,` URL (or bare base64).
@@ -286,6 +296,28 @@ impl DatasetMcpServer {
             "hyphens": result.hyphens,
             "dictionaries": result.dictionaries,
             "uncovered": result.uncovered,
+        })
+        .to_string())
+    }
+
+    #[tool(name = "ocr_recognize_ollama", description = "Recognize text in an image with a vision model served by Ollama — the engine for a photographed, angled or ornate page that Tesseract mangles. Pass the image as base64 (with or without data URL prefix), the model name as installed in Ollama (`llm_list_models` lists them; `glm-ocr` is the OCR specialist, any image-capable model also works) and optional `instructions` to replace the default transcription prompt for a known layout (a table, a form, two columns). The answer is cleaned in Rust before it is returned: reference/footnote marks the model renders as LaTeX superscripts (`$ ^{179} $`), markdown headings and emphasis, and `\\text{}` wrappers are stripped, and the counts come back as `references`/`markup` beside `raw`. Returns {status, text, raw, references, markup, model}. The text is what to keep; call this instead of ocr_recognize when the page is a photo rather than a scan.")]
+    async fn ocr_recognize_ollama(&self, Parameters(param): Parameters<OcrRecognizeOllamaParam>) -> Result<String, String> {
+        log::info!("[MCP] ocr_recognize_ollama: model={:?}", param.model);
+        let settings = self.app.state::<crate::settings::SettingsState>();
+        let result = ocr::ocr_recognize_ollama(
+            settings,
+            param.image_base64,
+            param.model,
+            param.instructions,
+        )
+        .await?;
+        Ok(serde_json::json!({
+            "status": "ok",
+            "text": result.text,
+            "raw": result.raw,
+            "references": result.references,
+            "markup": result.markup,
+            "model": result.model,
         })
         .to_string())
     }

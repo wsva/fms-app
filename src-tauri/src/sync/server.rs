@@ -1054,6 +1054,7 @@ Connect AI agents via Streamable HTTP at <code>/mcp</code>. Built with <strong>r
 <div class="tool-item"><div class="name">tts_synthesize</div><div class="desc">Synthesize text to audio file</div></div>
 <div class="tool-item"><div class="name">ocr_recognize</div><div class="desc">Tesseract OCR on base64 image</div></div>
 <div class="tool-item"><div class="name">ocr_recognize_tsv</div><div class="desc">Tesseract TSV OCR, paragraphs rebuilt in Rust</div></div>
+<div class="tool-item"><div class="name">ocr_recognize_ollama</div><div class="desc">OCR / VLM read of an image, reference marks stripped</div></div>
 <div class="tool-item"><div class="name">ocr_list_languages</div><div class="desc">List installed Tesseract languages</div></div>
 <div class="tool-item"><div class="name">capture_screenshot</div><div class="desc">Screen capture (unattended, or snip with minimize)</div></div>
 <div class="tool-item"><div class="name">web_service_get_status</div><div class="desc">Get web service status and URLs</div></div>

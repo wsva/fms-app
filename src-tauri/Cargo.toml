@@ -138,6 +138,10 @@ futures-util = "0.3"
 bytes = "1"
 base64 = "0.22"
 urlencoding = "2"
+# The OCR cleanup pass (ocr/clean.rs): a vision model answers in markdown and
+# LaTeX superscripts, which are stripped by pattern. Already in the tree
+# transitively (rmcp, goose-sdk), so this adds no new fetches.
+regex = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 symphonia = { version = "0.5", features = ["all", "opt-simd"] }
