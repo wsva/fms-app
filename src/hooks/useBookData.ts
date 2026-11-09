@@ -32,6 +32,7 @@ import { flattenChapters, groupIntoParagraphs, toDbSentence } from "@/lib/read/t
 import { groupArtifactsByScope } from "@/lib/read/artifacts";
 import {
   DEFAULT_UNDERSTANDING_TAB,
+  UNDERSTANDING_TABS,
   isUnderstandingTab,
   type UnderstandingTab,
 } from "@/components/books/understanding_tabs";
@@ -136,6 +137,11 @@ export function useBookData() {
   // sentence for the panel. Click/keyboard-driven only — never the scroll-spy
   // — so generated sentence artifacts don't shift under the reader.
   const [focusSentence, setFocusSentenceState] = useState<string | null>(null);
+  // Which level the tabs bind to while chapter mode is off. focusSentence and
+  // focusParagraph are positions that stay warm across level switches, so
+  // returning to a level (Alt+S, the toolbar segment, leaving chapter mode)
+  // lands back on the last sentence/paragraph, not on a cleared slate.
+  const [sentenceLevel, setSentenceLevel] = useState(false);
   // Kept in step with every sentence-focus write (applySentenceFocus is the
   // only other road), so the recorder's sink can read it without a re-bind.
   const focusSentenceRef = useRef<string | null>(null);
@@ -152,6 +158,13 @@ export function useBookData() {
     setUnderstandingTabState(tab);
     if (typeof window !== "undefined") window.localStorage.setItem("book-understanding-tab", tab);
   }, []);
+  // Alt+D walks the tab strip forward (digest -> explain -> ... -> glossary),
+  // the same order the toolbar renders, persisting the pick like a click.
+  const cycleTab = useCallback(() => {
+    const i = UNDERSTANDING_TABS.findIndex((t) => t.id === understandingTab);
+    const next = UNDERSTANDING_TABS[(i + 1) % UNDERSTANDING_TABS.length];
+    setUnderstandingTab(next ? next.id : DEFAULT_UNDERSTANDING_TAB);
+  }, [understandingTab, setUnderstandingTab]);
   // Chapter scope: when on, every content tab binds to the whole chapter
   // instead of the focused paragraph. Persisted like the other panel prefs.
   const [chapterMode, setChapterModeState] = useState<boolean>(() => {
@@ -160,12 +173,11 @@ export function useBookData() {
   });
   const setChapterMode = useCallback((on: boolean) => {
     setChapterModeState(on);
-    // The chapter scope overrides sentence focus; drop it so returning to
-    // paragraph/sentence mode lands where the reader can see it.
-    if (on) setFocusSentenceBoth(null);
+    // Chapter mode overrides the scope but keeps the sentence/paragraph
+    // positions, so leaving it returns exactly where the reader left off.
     if (typeof window !== "undefined")
       window.localStorage.setItem("book-understanding-chapter-mode", on ? "1" : "0");
-  }, [setFocusSentenceBoth]);
+  }, []);
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
   const [artifacts, setArtifacts] = useState<BookArtifactView[]>([]);
   // Outstanding agent-generation requests for this book (the mailbox the "Ask
@@ -202,17 +214,17 @@ export function useBookData() {
     [artifacts, chapterUUID]
   );
   // The scope every content tab binds to: the whole chapter in chapter mode,
-  // the focused sentence when one is selected, the focused paragraph
-  // otherwise. `uuid` is "" while nothing is focused — the panel shows its
-  // hint until the learner clicks a sentence or paragraph.
+  // the focused sentence while the panel sits on the sentence level, the
+  // focused paragraph otherwise. `uuid` is "" while nothing is focused — the
+  // panel shows its hint until the learner clicks a sentence or paragraph.
   const scope = useMemo<{ type: ArtifactScopeType; uuid: string }>(
     () =>
       chapterMode
         ? { type: "chapter", uuid: chapterUUID }
-        : focusSentence
+        : sentenceLevel && focusSentence
           ? { type: "sentence", uuid: focusSentence }
           : { type: "paragraph", uuid: focusParagraph ?? "" },
-    [chapterMode, chapterUUID, focusSentence, focusParagraph]
+    [chapterMode, chapterUUID, sentenceLevel, focusSentence, focusParagraph]
   );
 
   const loadArtifacts = useCallback(async () => {
@@ -272,6 +284,7 @@ export function useBookData() {
   useEffect(() => {
     setFocusParagraphState(null);
     setFocusSentenceBoth(null);
+    setSentenceLevel(false);
     setEditingSentence(null);
     loadArtifacts();
     loadJobs();
@@ -1084,9 +1097,14 @@ export function useBookData() {
   const applySentenceFocus = useCallback(
     (uuid: string | null) => {
       setFocusSentenceBoth(uuid);
+      setSentenceLevel(uuid !== null);
       setEditingSentence(uuid);
+      // Focusing a sentence is the sentence level: clicking (or walking to)
+      // one while chapter mode is on drops back to it — the click is the
+      // selection. Clearing focus leaves the level alone.
+      if (uuid) setChapterMode(false);
     },
-    [setFocusSentenceBoth]
+    [setFocusSentenceBoth, setChapterMode]
   );
 
   const setFocusParagraph = useCallback((uuid: string | null) => {
@@ -1096,8 +1114,19 @@ export function useBookData() {
     if (focusParagraph !== uuid) {
       setEditingSentence(null);
       setFocusParagraphState(uuid);
+      setFocusSentenceBoth(null);
+      setSentenceLevel(false);
     }
-  }, [focusParagraph]);
+  }, [focusParagraph, setFocusSentenceBoth]);
+
+  // The scroll spy's own road: it keeps the paragraph position warm while
+  // the reader scrolls, but it must never touch the level or the remembered
+  // sentence — those follow clicks and keys only. Identity-stable (state
+  // updater, no closure deps) so the spy's observer does not re-bind on every
+  // focus change and re-fire its initial intersection.
+  const spyFocusParagraph = useCallback((uuid: string | null) => {
+    setFocusParagraphState((prev) => (prev === uuid ? prev : uuid));
+  }, []);
 
   // Tapping a paragraph focuses it and, on a phone, slides the panel in.
   const selectParagraph = useCallback(
@@ -1107,6 +1136,57 @@ export function useBookData() {
     },
     [mobile, setFocusParagraph]
   );
+
+  // Land the tabs on the sentence level, then the paragraph level. Each one
+  // leaves the other's position intact, so walking back with Alt+S or a
+  // segment click returns to the last sentence/paragraph the reader had.
+  const selectSentenceLevel = useCallback(() => {
+    setChapterMode(false);
+    setSentenceLevel(true);
+    setEditingSentence(null);
+  }, [setChapterMode]);
+  const selectParagraphLevel = useCallback(() => {
+    setChapterMode(false);
+    setSentenceLevel(false);
+    setEditingSentence(null);
+  }, [setChapterMode]);
+
+  // Alt+S walks the toolbar's scope segment forward: sentence -> paragraph ->
+  // chapter -> sentence. Each level lands on its remembered position; only
+  // the sentence step with nothing remembered falls back (like the keyboard
+  // walk) to the focused paragraph's first sentence.
+  const cycleScope = useCallback(() => {
+    const current: "sentence" | "paragraph" | "chapter" = chapterMode
+      ? "chapter"
+      : sentenceLevel && focusSentence
+        ? "sentence"
+        : "paragraph";
+    if (current === "sentence") {
+      selectParagraphLevel();
+      return;
+    }
+    if (current === "paragraph") {
+      setChapterMode(true);
+      return;
+    }
+    if (!focusSentence) {
+      const first =
+        paragraphs.find((p) => p.breakSentence?.uuid === focusParagraph)
+          ?.sentences[0]?.uuid ?? null;
+      if (first) setFocusSentenceBoth(first);
+    }
+    selectSentenceLevel();
+  }, [
+    chapterMode,
+    sentenceLevel,
+    focusSentence,
+    focusParagraph,
+    paragraphs,
+    setChapterMode,
+    setFocusSentenceBoth,
+    selectParagraphLevel,
+    selectSentenceLevel,
+  ]);
 
   // Selecting a sentence deepens the panel's scope to it. On desktop inline
   // editing replaces the drawer; on a phone the drawer stays the edit surface
@@ -1516,9 +1596,13 @@ export function useBookData() {
     toggleUnderstanding,
     focusParagraph,
     setFocusParagraph,
+    spyFocusParagraph,
     selectParagraph,
     focusSentence,
     selectSentence,
+    cycleScope,
+    selectSentenceLevel,
+    selectParagraphLevel,
     editingSentence,
     setEditingSentence,
     handleCommitSentenceEdit,
@@ -1526,6 +1610,7 @@ export function useBookData() {
     removedArtifactCount,
     understandingTab,
     setUnderstandingTab,
+    cycleTab,
     chapterMode,
     setChapterMode,
     scope,

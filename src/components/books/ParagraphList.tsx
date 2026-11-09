@@ -214,6 +214,13 @@ export default function ParagraphList({
         <div
           key={pi}
           data-para-uuid={para.breakSentence?.uuid}
+          onClick={(e) => {
+            // Blank space (anything that is not a sentence or a control)
+            // selects this paragraph, so the reader never has to hunt for
+            // the Brain button. Sentence picks stop their own click here.
+            if ((e.target as HTMLElement).closest("a,button,[contenteditable]")) return;
+            if (para.breakSentence) onFocusParagraph?.(para.breakSentence.uuid);
+          }}
           className={`flex flex-col gap-2 p-3 rounded-lg border border-border-default ${
             pi % 2 === 0 ? "bg-bg-card" : "bg-bg-muted"
           } ${

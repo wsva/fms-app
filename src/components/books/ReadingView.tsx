@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { BookOpen, Check, Library, Settings2, X } from "lucide-react";
+import { BookOpen, Check, Library, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import type { useBookData } from "@/hooks/useBookData";
@@ -10,14 +10,10 @@ import ParagraphList from "./ParagraphList";
 import SentenceDrawer from "./SentenceDrawer";
 import ConfirmDialog from "./ConfirmDialog";
 import UnderstandingPanel from "./UnderstandingPanel";
-import CompanionsStrip from "./CompanionsStrip";
 import { useBookKeynav } from "./useBookKeynav";
-import type { TabId } from "@/lib/shell/tabs";
 
 type Props = {
   b: ReturnType<typeof useBookData>;
-  /** The shell's openTab, forwarded to the book panel's companions strip. */
-  onNavigate?: (tab: TabId) => void;
 };
 
 /**
@@ -28,7 +24,7 @@ type Props = {
  *   book, no chap -> chapter list
  *   chapter       -> reading pane (paragraphs + sentence drawer)
  */
-export default function ReadingView({ b, onNavigate }: Props) {
+export default function ReadingView({ b }: Props) {
   const {
     bookUUID, chapterUUID, flatChapters, mobile,
     loading, saving, error, setError, viewMode, paragraphs,
@@ -38,7 +34,8 @@ export default function ReadingView({ b, onNavigate }: Props) {
 
   const {
     understanding, splitRatio, setSplitRatio, focusParagraph, selectParagraph,
-    setFocusParagraph, focusSentence, selectSentence, editingSentence,
+    focusSentence, selectSentence, editingSentence, cycleScope,
+    cycleTab, spyFocusParagraph, scope,
     mobilePanelOpen, setMobilePanelOpen, chapterMode,
   } = b;
 
@@ -53,8 +50,10 @@ export default function ReadingView({ b, onNavigate }: Props) {
   // Scroll-spy: while understanding mode is on (desktop), the paragraph nearest
   // the top of the reading pane becomes the panel's focus. In chapter mode the
   // tabs bind to the whole chapter, so the spy keeps the focus warm but does
-  // not drive the panel. It leans on setFocusParagraph, which drops sentence
-  // focus only when the spy crosses into another paragraph.
+  // not drive the panel. It takes the spy's own road, which only moves the
+  // paragraph position — clicks and keys own the level and the sentence —
+  // and whose stable identity keeps the observer from re-binding (and
+  // re-firing its initial intersection) on every focus change.
   useEffect(() => {
     if (!understanding || mobile || chapterMode) return;
     const root = leftRef.current;
@@ -67,13 +66,13 @@ export default function ReadingView({ b, onNavigate }: Props) {
           .filter((e) => e.isIntersecting)
           .sort((a, c) => a.boundingClientRect.top - c.boundingClientRect.top);
         const uuid = visible[0]?.target.getAttribute("data-para-uuid");
-        if (uuid) setFocusParagraph(uuid);
+        if (uuid) spyFocusParagraph(uuid);
       },
       { root, rootMargin: "-8% 0px -78% 0px", threshold: 0 }
     );
     els.forEach((el) => obs.observe(el));
     return () => obs.disconnect();
-  }, [understanding, mobile, chapterMode, paragraphs, setFocusParagraph]);
+  }, [understanding, mobile, chapterMode, paragraphs, spyFocusParagraph]);
 
   // Keyboard walking: ↑/↓ (or j/k) step through sentences, p/n through
   // paragraphs, driven off the focused selection.
@@ -92,6 +91,8 @@ export default function ReadingView({ b, onNavigate }: Props) {
       const uuid = paragraphs[i]?.breakSentence?.uuid;
       if (uuid) selectParagraph(uuid);
     },
+    cycleScope,
+    cycleTab,
   });
   useEffect(() => {
     if (!keepSentenceInScope || !focusSentence) return;
@@ -200,39 +201,6 @@ export default function ReadingView({ b, onNavigate }: Props) {
       </>
     );
 
-    // Selecting a book points the right panel at book-level maintenance: the
-    // dataset family (companions) and the chapters editor. Same split posture
-    // as the reading pane; the level is a short list, so no splitter yet.
-    if (understanding && !mobile) {
-      return (
-        <div className="flex-1 min-w-0 min-h-0 flex flex-row overflow-hidden">
-          <div
-            className="min-w-0 overflow-y-auto p-4 flex flex-col gap-4"
-            style={{ flexBasis: `${splitRatio}%`, flexGrow: 0, flexShrink: 0 }}
-          >
-            {chapterList}
-          </div>
-          <div className="min-w-0 flex-1 overflow-y-auto p-4 flex flex-col gap-4 border-l border-border-default bg-bg-body">
-            <div className="text-[11px] font-semibold text-text-tertiary tracking-wider uppercase">
-              Book
-            </div>
-            <button
-              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-bg-card hover:bg-bg-hover text-left text-sm text-text-primary cursor-pointer border border-border-default"
-              onClick={() => b.setView("manage")}
-            >
-              <Settings2 size={16} className="text-text-secondary shrink-0" />
-              <span className="flex-1">Manage chapters&hellip;</span>
-            </button>
-            <CompanionsStrip
-              bookUuid={b.bookUUID}
-              bookName={b.selectedBook?.name ?? ""}
-              onNavigate={onNavigate ?? (() => {})}
-            />
-          </div>
-        </div>
-      );
-    }
-
     return (
       <div className="flex-1 min-h-0 overflow-y-auto p-4 min-w-0">{chapterList}</div>
     );
@@ -263,7 +231,9 @@ export default function ReadingView({ b, onNavigate }: Props) {
           mobile={mobile}
           understanding={understanding}
           focusParagraph={focusParagraph}
-          focusSentence={focusSentence}
+          // The ring marks the live scope; a remembered sentence at another
+          // level stays unmarked (keyboard walking still resumes from it).
+          focusSentence={scope.type === "sentence" ? focusSentence : null}
           editingSentence={editingSentence}
           onCommitEdit={b.handleCommitSentenceEdit}
           onFocusParagraph={selectParagraph}
@@ -396,7 +366,7 @@ export default function ReadingView({ b, onNavigate }: Props) {
             {readingContent}
           </div>
           <div
-            className="w-1.5 shrink-0 cursor-col-resize bg-border-default hover:bg-accent/40"
+            className="relative w-3 shrink-0 cursor-col-resize hover:bg-accent/10 after:absolute after:inset-y-0 after:left-1/2 after:w-0.5 after:-translate-x-1/2 after:bg-border-default hover:after:bg-accent/60"
             onPointerDown={onSplitterDown}
             onPointerMove={onSplitterMove}
             onPointerUp={onSplitterUp}

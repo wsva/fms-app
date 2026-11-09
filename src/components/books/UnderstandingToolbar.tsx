@@ -44,7 +44,7 @@ const TAB_STALE_KIND: Record<UnderstandingTab, ArtifactKind | null> = {
 export default function UnderstandingToolbar({ b, onNavigate }: Props) {
   const {
     understandingTab, setUnderstandingTab, chapterMode, setChapterMode,
-    scope, focusSentence, selectParagraph,
+    scope, focusSentence, selectSentenceLevel, selectParagraphLevel,
   } = b;
   const [modelOpen, setModelOpen] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -75,10 +75,11 @@ export default function UnderstandingToolbar({ b, onNavigate }: Props) {
   // the toggle and the model button keep their place.
   return (
     <div className="shrink-0 flex items-center gap-1 px-2 py-1 border-b border-border-default">
-      {/* Scope segment: the selection level the tabs bind to. Sentence is only
-          selectable while one is focused (a click or keyboard walk focuses
-          it); Paragraph drops back from chapter mode and sentence focus;
-          Chapter understands the whole chapter at once. */}
+      {/* Scope segment: the selection level the tabs bind to. Sentence is
+          selectable while one is remembered (a click or keyboard walk picks
+          it); Paragraph and Sentence keep their last position, so coming
+          back returns where the reader left; Chapter understands the whole
+          chapter at once. */}
       <div className="flex items-center gap-0.5 shrink-0 rounded-md border border-border-default p-0.5">
         {(["sentence", "paragraph", "chapter"] as const).map((lv) => {
           const disabled = lv === "sentence" && !focusSentence;
@@ -109,10 +110,9 @@ export default function UnderstandingToolbar({ b, onNavigate }: Props) {
                 if (lv === "chapter") {
                   setChapterMode(true);
                 } else if (lv === "sentence") {
-                  setChapterMode(false);
+                  selectSentenceLevel();
                 } else {
-                  setChapterMode(false);
-                  selectParagraph(b.focusParagraph);
+                  selectParagraphLevel();
                 }
               }}
             >
