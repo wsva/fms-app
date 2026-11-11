@@ -62,11 +62,3 @@ add a STT page:
 2, speak and show content
 
 on read-aloud page, on manage page, after upload a audio, cannot use whisper, it says whisper doesn't support word-timing
-
-on card dataset page, after click add card button, and after save and close, return to a new add card page.
-
-on dataset card, on edit view, add a new button "join family", then select another dataset. after select, change the uuid of this dataset. add a warning to the user. So the user can do this manually.
-
-in context menu, remove the "ask the model" section
-
-in context menu, when add card, set the dataset to family card dataset

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Plus, Search, Wand2, X } from "lucide-react";
+import { Layers, Loader2, Pencil, Plus, Search, Wand2, X } from "lucide-react";
 import { useCardEditor } from "./CardEditorContext";
 import { notify, notifyError } from "@/lib/feedback/toast";
 import { invoke } from "@tauri-apps/api/core";
@@ -11,12 +11,15 @@ import { askAboutSelection } from "@/lib/llm/ask";
 import { useContextMenuEnabled } from "@/lib/ui/context-menu";
 import { isTauri } from "@/lib/platform";
 import { replayTaskTarget } from "@/lib/agent/tasks";
+import { openInTab } from "@/lib/nav/open-in-tab";
+import type { TabId } from "@/lib/shell/tabs";
 import {
   buildCapture,
   captureDetail,
   captureTarget,
   captureTitle,
   pickCaptureDeck,
+  pickFamilyDeck,
   type CaptureContext,
 } from "@/lib/cards/capture";
 
@@ -34,7 +37,9 @@ import {
  *   (the app deliberately has no chat page of its own)
  * - A search button to find existing cards with matching questions
  * - Search results displayed as clickable links to jump to existing cards
- * - An "Add to Card" button to create a new card
+ * - Three ways to add the selection as a card: to Tasks (a todo to write
+ *   later), straight into the family's card dataset (question only), or into
+ *   that dataset's composer on the Cards page
  *
  * Mounted once in the app shell. Renders nothing until a selection is made, so
  * the initial server/client trees match (no hydration mismatch).
@@ -113,7 +118,32 @@ function readBlock(range: Range): CaptureContext {
   };
 }
 
-export default function CardContextMenu() {
+/** A card the editor has not minted yet: what a write with nothing but a
+ *  question sends, and what the composer opens on when it is prefilled. */
+function questionOnlyCard(question: string): Card {
+  return {
+    uuid: "",
+    question,
+    suggestion: "",
+    answer: "",
+    note: "",
+    familiarity: 0,
+    question_hash: null,
+    source_card_uuid: null,
+    source_dataset_uuid: null,
+    deleted_at: null,
+    created_at: "",
+    updated_at: "",
+  };
+}
+
+export default function CardContextMenu({
+  onOpenBeside,
+}: {
+  /** The shell's open-beside verb: the page opens next to the tab the selection
+   *  was made in, and that tab is pinned rather than recycled. */
+  onOpenBeside: (tab: TabId) => void;
+}) {
   const [anchor, setAnchor] = useState<MenuAnchor | null>(null);
   const [selectedText, setSelectedText] = useState("");
   // The paragraph and heading around the selection, snapshotted at mouseup:
@@ -327,6 +357,85 @@ export default function CardContextMenu() {
     }
   }
 
+  /**
+   * "Add to card (family)" writes the card itself.
+   *
+   * The deck is the family's card dataset — the deck that belongs to the work
+   * being read — and the question is the selection with the answer left for
+   * later. No todo is filed: the reader asked for the card, not for a note about
+   * it, and the composer is one menu entry away when they do want to write.
+   */
+  async function handleAddFamilyCard() {
+    const text = (searchQuery || selectedText).trim();
+    setAnchor(null);
+    setCaptureCtx(null);
+    if (!text) return;
+
+    if (!isTauri()) {
+      notifyError("Adding a card needs the desktop app.");
+      return;
+    }
+
+    const deck = await pickFamilyDeck();
+    if (!deck) {
+      notifyError(
+        "No card dataset in this dataset's family — join one on the Cards page, or use Add to card (todo)."
+      );
+      return;
+    }
+
+    try {
+      await invoke<Card>("card_save", {
+        datasetUuid: deck.uuid,
+        card: questionOnlyCard(text),
+      });
+      notify(`Card added to “${deck.name}”`);
+    } catch (err) {
+      notifyError(`Failed to add the card to “${deck.name}”: ${err}`);
+    }
+  }
+
+  /**
+   * "Add to card and edit (family)": the same deck and the same question, but
+   * the writing happens on the Cards page, whose composer is part of that tab —
+   * the page's editor, not the overlay this menu belongs to.
+   *
+   * The composer opens beside the tab the selection was made in, and that tab is
+   * pinned first (`onOpenBeside`), so the document is still there — and still
+   * one click away — once the card is written.
+   *
+   * Nothing is written here: a card saved before the reader has seen it would
+   * leave an empty answer behind every cancel.
+   */
+  async function handleAddFamilyCardAndEdit() {
+    const text = (searchQuery || selectedText).trim();
+    setAnchor(null);
+    setCaptureCtx(null);
+    if (!text) return;
+
+    if (!isTauri()) {
+      notifyError("Adding a card needs the desktop app.");
+      return;
+    }
+
+    const deck = await pickFamilyDeck();
+    if (!deck) {
+      notifyError(
+        "No card dataset in this dataset's family — join one on the Cards page, or use Add to card (todo)."
+      );
+      return;
+    }
+
+    try {
+      await openInTab(onOpenBeside, "cards", "cards.add-card", {
+        dataset_uuid: deck.uuid,
+        question: text,
+      });
+    } catch (err) {
+      notifyError(`Could not open the card composer in “${deck.name}”: ${err}`);
+    }
+  }
+
   async function handleAsk(templateId: string) {
     const text = (searchQuery || selectedText).trim();
     if (!text) return;
@@ -478,7 +587,21 @@ export default function CardContextMenu() {
           className="w-full text-left px-3 py-1.5 text-sm text-text-primary hover:bg-mid-gray/20 transition-colors cursor-pointer flex items-center gap-2 rounded"
         >
           <Plus size={14} className="shrink-0" />
-          Add as new card
+          Add to card (todo)
+        </button>
+        <button
+          onClick={handleAddFamilyCard}
+          className="w-full text-left px-3 py-1.5 text-sm text-text-primary hover:bg-mid-gray/20 transition-colors cursor-pointer flex items-center gap-2 rounded"
+        >
+          <Layers size={14} className="shrink-0" />
+          Add to card (family)
+        </button>
+        <button
+          onClick={handleAddFamilyCardAndEdit}
+          className="w-full text-left px-3 py-1.5 text-sm text-text-primary hover:bg-mid-gray/20 transition-colors cursor-pointer flex items-center gap-2 rounded"
+        >
+          <Pencil size={14} className="shrink-0" />
+          Add to card and edit (family)
         </button>
       </div>
     </div>

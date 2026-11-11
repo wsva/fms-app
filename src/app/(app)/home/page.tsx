@@ -140,6 +140,34 @@ export default function Home() {
     [titleFor]
   );
 
+  // Opening a page *beside* the focused tab. The pin is dispatched first, in the
+  // same batch as the add, so the reducer protects the tab before appending —
+  // `openTab` above cannot do this, because `planOpen` reads `tabsRef`, which is
+  // a render behind and would still see the tab unpinned and recycle it.
+  //
+  // The verb exists for navigation that is *not* browsing: a selection turned
+  // into a card composer must not cost the document the reader took it from.
+  const openBeside = useCallback(
+    (tabId: TabId) => {
+      const state = tabsRef.current;
+      const existing = state.order.find((i) => i.tabId === tabId);
+      if (existing) {
+        dispatchTabs({ type: "focus", instanceId: existing.instanceId });
+        return;
+      }
+      if (state.order.length >= MAX_OPEN_TABS) {
+        notify("Too many tabs open — close one first.");
+        return;
+      }
+      const focused = state.order.find((i) => i.instanceId === state.focused);
+      if (focused && !focused.pinned) {
+        dispatchTabs({ type: "togglePin", instanceId: focused.instanceId });
+      }
+      dispatchTabs({ type: "add", tabId, title: titleFor(tabId) });
+    },
+    [titleFor]
+  );
+
   // Closing a tab unmounts its page, and a page can be where the unsaved text
   // lives: the card editor is drawn *in* the Cards pane rather than over it, so
   // the ✕ would delete what navigation refuses to. Same question `openTab` asks
@@ -529,8 +557,10 @@ export default function Home() {
 
       {mobile && <BottomNav activeTab={activeTab} onTabChange={openTab} />}
 
-      {/* Global text-selection → "Add to Card" menu */}
-      <CardContextMenu />
+      {/* Global text-selection → "Add to Card" menu. It navigates through the
+          shell's open-beside verb, because one entry lands on the Cards page's
+          composer and must not replace the tab the selection was made in. */}
+      <CardContextMenu onOpenBeside={openBeside} />
 
       {/* Always-accessible mailbox (desktop only) — overlays the content area
           on the right, toggled by the floating Bot button or Ctrl+Space. It

@@ -26,6 +26,7 @@ import { cardSubjectLabel } from "@/lib/shell/tab-subject";
 import { TAB_DEFS } from "@/components/layout/Sidebar";
 import type { TabId } from "@/lib/shell/tabs";
 import type { CardDatasetSummary } from "@/lib/types";
+import type { FamilyMember, FamilyReport } from "@/lib/datasets/family";
 
 /** Caps, in characters. */
 const MAX_QUESTION = 2000;
@@ -192,6 +193,43 @@ function rememberDeck(uuid: string): void {
     window.localStorage.setItem(DECK_KEY, uuid);
   } catch {
     // A full or blocked storage costs the memory, not the capture.
+  }
+}
+
+/**
+ * The dataset the reader is in — what a family question is asked about.
+ *
+ * Two sources, because no page publishes both keys: Dictation and Cards report
+ * `active_dataset_uuid`; the document pages report `active_doc` (`<kind>:`
+ * `<dataset>:<ref>`) and nothing else. Reading the second segment of `active_doc`
+ * is the only place outside `sourceDisplay` that splits it, and it does so for
+ * the one thing the grammar guarantees.
+ */
+function currentDatasetUuid(): string | null {
+  const ctx = getUiContext();
+  if (ctx.active_dataset_uuid) return ctx.active_dataset_uuid;
+  const doc = ctx.active_doc;
+  return doc ? splitDoc(doc)[1] || null : null;
+}
+
+/**
+ * The card dataset of the family the reader is reading in, or `null` when there
+ * is none — a selection in an unaffiliated dataset, or in an app surface with no
+ * dataset at all.
+ *
+ * Unlike {@link pickCaptureDeck} this asks the backend about one family instead
+ * of choosing among decks: "add to this work's cards" has exactly one right
+ * answer, and guessing another deck would file the card somewhere the reader
+ * cannot find it from the text they took it out of.
+ */
+export async function pickFamilyDeck(): Promise<FamilyMember | null> {
+  const uuid = currentDatasetUuid();
+  if (!uuid) return null;
+  try {
+    const report = await invoke<FamilyReport>("dataset_family", { uuidOrKey: uuid });
+    return report.members.find((m) => m.dataset_type === "card") ?? null;
+  } catch {
+    return null;
   }
 }
 

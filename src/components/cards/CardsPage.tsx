@@ -428,35 +428,50 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   // `adding` says where a Close goes: adding cards is a run, so the composer
   // outlives each finished card (see `closeSession`), and it is why the flag is
   // not the same thing as `isNew` — a save clears that one.
+  //
+  // `openNewCard` is the one body, because the context menu's "Add to card and
+  // edit (family)" lands on this same composer through `cards.add-card`, with
+  // the selection already in the question field and no card written yet.
+  const openNewCard = useCallback(
+    (datasetUuid: string, question = "") => {
+      if (!datasetUuid) return;
+      const name = datasets.find((d) => d.info.uuid === datasetUuid)?.info.name;
+      const blank: Card = { ...BLANK_CARD, question };
+      setSearchOpen(false);
+      setSelectedDatasetUuid(datasetUuid);
+      setActiveTab("cards");
+      setLevel({ card: blank, index: -1, isNew: true, adding: true });
+      setLevelMedia([]);
+      composerSavedRef.current = "";
+      openCardEditor(
+        datasetUuid,
+        blank,
+        (saved) => {
+          void loadCards();
+          // Adopt the stored row wholesale and stop calling it new: the crumb now
+          // names the card by its question, and a later refresh can re-read it.
+          composerSavedRef.current = saved.uuid;
+          setLevel((cur) => (cur ? { ...cur, card: saved, isNew: false } : cur));
+        },
+        // Deleting a just-saved new card takes the level down with it — the row it
+        // was about to become no longer exists.
+        () => {
+          void loadCards();
+          exitLevel();
+        },
+        name,
+        false,
+        undefined,
+        { inline: true }
+      );
+    },
+    [datasets, openCardEditor, loadCards, exitLevel]
+  );
+
   const addCard = useCallback(() => {
     if (!selectedDatasetUuid) return;
-    const name = datasets.find((d) => d.info.uuid === selectedDatasetUuid)?.info.name;
-    const blank: Card = { ...BLANK_CARD };
-    setLevel({ card: blank, index: -1, isNew: true, adding: true });
-    setLevelMedia([]);
-    composerSavedRef.current = "";
-    openCardEditor(
-      selectedDatasetUuid,
-      blank,
-      (saved) => {
-        void loadCards();
-        // Adopt the stored row wholesale and stop calling it new: the crumb now
-        // names the card by its question, and a later refresh can re-read it.
-        composerSavedRef.current = saved.uuid;
-        setLevel((cur) => (cur ? { ...cur, card: saved, isNew: false } : cur));
-      },
-      // Deleting a just-saved new card takes the level down with it — the row it
-      // was about to become no longer exists.
-      () => {
-        void loadCards();
-        exitLevel();
-      },
-      name,
-      false,
-      undefined,
-      { inline: true }
-    );
-  }, [selectedDatasetUuid, datasets, openCardEditor, loadCards, exitLevel]);
+    openNewCard(selectedDatasetUuid);
+  }, [selectedDatasetUuid, openNewCard]);
 
   // Where the editor's Close lands. It is not always `closeCardEditor`, because
   // what closing means depends on how the writer got in: a composer whose card
@@ -758,11 +773,12 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   }, []);
 
   // ── Agent-drivable actions ──
-  // The same three things the toolbar offers, reached generically: open a
-  // dataset, start a review session, search across all of them. `start-review`
+  // What the toolbar offers, reached generically: open a dataset, start a card,
+  // start a review session, search across all of them. `start-review`
   // is the registry twin of the `agent-open-review` handler above — one body
   // would be nicer, but that handler is an event listener for a legacy tool and
-  // this one has to return a result, so they stay side by side.
+  // this one has to return a result, so they stay side by side. `add-card` is
+  // also how the context menu's family entry reaches this page's composer.
   useAgentActions("cards", [
     {
       id: "cards.select-dataset",
@@ -790,6 +806,39 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
         setSelectedDatasetUuid(uuid);
         setActiveTab("cards");
         return { opened: uuid, name: found.info.name };
+      },
+    },
+    {
+      id: "cards.add-card",
+      label:
+        "Open the in-page composer on a blank card in this dataset, with the question prefilled. Nothing is written until the composer is saved.",
+      kind: "read",
+      params_schema: {
+        dataset_uuid: {
+          type: "string",
+          description: "The card dataset uuid, from dataset_list.",
+          required: true,
+        },
+        question: {
+          type: "string",
+          description:
+            "The question to prefill. The answer stays empty; the writer or the agent fills it in the composer.",
+        },
+      },
+      run: (params) => {
+        const uuid = reqStr("cards.add-card", params, "dataset_uuid");
+        const question = optStr("cards.add-card", params, "question") ?? "";
+        const found = datasets.find((x) => x.info.uuid === uuid);
+        if (!found) {
+          throw new Error(
+            `no card dataset with uuid '${uuid}' is loaded on this page. Loaded: ${
+              datasets.map((x) => `${x.info.name} (${x.info.uuid})`).join(", ") ||
+              "(none yet — the list may still be loading; retry once)"
+            }. dataset_list has the full set across every kind.`
+          );
+        }
+        openNewCard(uuid, question);
+        return { opened: uuid, name: found.info.name, wrote: false };
       },
     },
     {
