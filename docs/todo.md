@@ -55,23 +55,18 @@ add a buuton in toolbar, to practice speaking at anytime
 open a bottom window
 
 on books page:
-1, remove sentence drawer on PC, keep it on android
-2, make select a sentence, a paragraph and a chapter more convenient
-3, on PC, remove add sentence button, use paragraph as an edit unit
-4, books page is not designed for any book, it's only for philosophy books. Difficult, need to read sentence by sentence, need lots of help from AI. For easy books, you should use an E-reader.
-5, use left-right layout by default
-6, use the right part to edit content
-7, when click sentence, in right part: edit, words (link to cards), color, grammer tree, simplification, explain ...
-8, when click paragraph, in right part: edit, words (collect from sentences), explain ...
-9, when select chapter, in right part: edit, words (collect from sentences), explain ...
-10, when select book, in right part: maintain chapters, matain dataset family
-11, design a sentence editor:
-label: uuid, line num
-content
-copy content: only copy content
-copy all: copy content with uuid
-as table, three columns?
+1, don't switch paragraph when scrolling
 
 add a STT page:
 1, two modes: live mode and batch mode
 2, speak and show content
+
+on read-aloud page, on manage page, after upload a audio, cannot use whisper, it says whisper doesn't support word-timing
+
+on card dataset page, after click add card button, and after save and close, return to a new add card page.
+
+on dataset card, on edit view, add a new button "join family", then select another dataset. after select, change the uuid of this dataset. add a warning to the user. So the user can do this manually.
+
+in context menu, remove the "ask the model" section
+
+in context menu, when add card, set the dataset to family card dataset
