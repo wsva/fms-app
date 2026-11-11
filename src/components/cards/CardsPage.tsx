@@ -140,7 +140,18 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   // turns it into the writer, in the same pane. `index` is the row's position in
   // `cards`, so the arrows walk the list the reader just scrolled rather than a
   // second order.
-  const [level, setLevel] = useState<{ card: Card; index: number; isNew?: boolean } | null>(null);
+  const [level, setLevel] = useState<{
+    card: Card;
+    index: number;
+    isNew?: boolean;
+    /** Opened by Add Card. A composer closes onto the next blank one once its
+     *  card is on disk — see `closeSession`. */
+    adding?: boolean;
+  } | null>(null);
+  // The uuid the composer last put on disk, written by its own `onSave` instead
+  // of read off `level`: "Save & close" answers its exit in the same task as the
+  // write, one render ahead of the state that records the saved row.
+  const composerSavedRef = useRef("");
   const [levelMedia, setLevelMedia] = useState<CardMedia[]>([]);
   // A rating is a write in flight: the scale and the `1`–`5` keys must not fire
   // twice over a card that is already being graded.
@@ -336,9 +347,12 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   const handleRefresh = useCallback(() => {
     void loadDatasets();
     if (selectedDatasetUuid) void loadCards();
-    if (level && !level.isNew) void openLevel(level.card.uuid, level.index);
+    // A card open for writing is not re-read from under the editor: its own save
+    // is what adopts the stored row, and replacing the level here would also
+    // drop the composer flag that decides where its Close goes.
+    if (level && !level.isNew && !session) void openLevel(level.card.uuid, level.index);
     setLocRefresh((n) => n + 1);
-  }, [loadDatasets, loadCards, selectedDatasetUuid, level, openLevel]);
+  }, [loadDatasets, loadCards, selectedDatasetUuid, level, session, openLevel]);
 
   // Keep the dataset/card lists current without a toolbar button: the shared
   // hook re-reads on activation, on app resume and on `dataset-list-changed`.
@@ -402,12 +416,16 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   // floating over the page as an overlay. The editor mints the uuid itself, so
   // the level's card stays empty until the first save adopts the stored row —
   // which is why `isNew` is tracked explicitly rather than inferred from uuid.
+  // `adding` says where a Close goes: adding cards is a run, so the composer
+  // outlives each finished card (see `closeSession`), and it is why the flag is
+  // not the same thing as `isNew` — a save clears that one.
   const addCard = useCallback(() => {
     if (!selectedDatasetUuid) return;
     const name = datasets.find((d) => d.info.uuid === selectedDatasetUuid)?.info.name;
     const blank: Card = { ...BLANK_CARD };
-    setLevel({ card: blank, index: -1, isNew: true });
+    setLevel({ card: blank, index: -1, isNew: true, adding: true });
     setLevelMedia([]);
+    composerSavedRef.current = "";
     openCardEditor(
       selectedDatasetUuid,
       blank,
@@ -415,6 +433,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
         void loadCards();
         // Adopt the stored row wholesale and stop calling it new: the crumb now
         // names the card by its question, and a later refresh can re-read it.
+        composerSavedRef.current = saved.uuid;
         setLevel((cur) => (cur ? { ...cur, card: saved, isNew: false } : cur));
       },
       // Deleting a just-saved new card takes the level down with it — the row it
@@ -430,12 +449,42 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
     );
   }, [selectedDatasetUuid, datasets, openCardEditor, loadCards, exitLevel]);
 
+  // Where the editor's Close lands. It is not always `closeCardEditor`, because
+  // what closing means depends on how the writer got in: a composer whose card
+  // is now on disk opens the next blank one — you are adding cards, so the run
+  // continues and the card just written is in the list behind it. An empty
+  // composer has nothing to hand back, so it steps out to the list. From a saved
+  // card's Edit, closing is still just closing.
+  //
+  // The two facts come from different places on purpose. The uuid is read off a
+  // ref that `addCard`'s own `onSave` writes, because the guard's "Save & close"
+  // captures `onClose` before it saves and calls it in the same task as the
+  // write: state would still say "no uuid" there, so a stale read would send a
+  // saved card's composer back to the list. `adding` can come from state — it
+  // does not change while the composer is open, so even a render behind, it is
+  // the same answer. `addCard` opens the next composer over the live session
+  // rather than closing first: the surface is keyed on `sessionKey`, so it
+  // simply remounts.
+  const levelRef = useRef(level);
+  levelRef.current = level;
+  const closeSession = useCallback(() => {
+    if (!levelRef.current?.adding) {
+      closeCardEditor();
+    } else if (composerSavedRef.current) {
+      addCard();
+    } else {
+      exitLevel();
+    }
+  }, [closeCardEditor, addCard, exitLevel]);
+
   // A new card closed before its first save has nothing to show: the reading
   // view would render a blank card that is not on disk. Return to the list when
   // the session goes from open to closed while the level is still marked new. A
   // saved new card has `isNew` cleared by its save, so this leaves it open as
   // the card it became; the open→closed edge (not merely `!session`) is what
   // keeps the async `openCardEditor` from tripping it before the session mounts.
+  // The editor's own closes arrive through `closeSession`; this is what a
+  // session closed from elsewhere falls back on.
   const sessionWasOpen = useRef(false);
   useEffect(() => {
     const nowOpen = !!session;
@@ -1359,8 +1408,9 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
       {level && session ? (
         // The card is open for writing. This is the same editor the overlay
         // raises; only the surface differs — the page's content area instead of
-        // a scrim over it.
-        <CardEditModal key={session.sessionKey} {...session} />
+        // a scrim over it. Close is the page's call here, because the page is
+        // what knows whether the writer is adding cards or reading one.
+        <CardEditModal key={session.sessionKey} {...session} onClose={closeSession} />
       ) : level ? (
         // The card owns the content area, the way a dataset owns it from the list.
         <CardLevel
