@@ -388,7 +388,7 @@ export default function CardContextMenu({
     }
 
     // Same snapshot the todo path takes, so both routes file the same note: the
-    // `source:` line is what lets a later answer be written from the original
+    // provenance line is what lets a later answer be written from the original
     // text instead of from the question alone.
     const capture = buildCapture(text, ctx ?? { block: text }, deck.uuid, await captureOrigin());
 

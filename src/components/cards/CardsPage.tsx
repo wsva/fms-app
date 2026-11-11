@@ -827,7 +827,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
         note: {
           type: "string",
           description:
-            "The note to prefill — a capture passes its provenance block here, ending in the `source:` line that names the dataset uuid and the item the text came from.",
+            "The note to prefill — a capture passes its provenance line here, naming the text and the dataset with the ids that locate them.",
         },
       },
       run: (params) => {

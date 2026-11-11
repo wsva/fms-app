@@ -226,7 +226,7 @@ impl DatasetMcpServer {
         Ok(serde_json::json!({"cards": items, "total": total}).to_string())
     }
 
-    #[tool(name = "card_get", description = "Get full details of a single card by dataset UUID and card UUID. A card captured from a document (book, wiki page, dictation cue, read-aloud text) ends its note with a `source:` line — `dataset=<uuid> type=<type>` plus `chapter=<uuid>`, `path=<rel>`, `text=<uuid>` or `media=<uuid> cue=<n>` — which names the item the text came from. Read that item to answer from the original context instead of from the question alone.")]
+    #[tool(name = "card_get", description = "Get full details of a single card by dataset UUID and card UUID. A card captured from a document (book, wiki page, dictation cue, read-aloud text) starts its note with a line like `From \"Chapter 1\" (uuid=<item>) of dataset \"Harry Potter\" (kind=read_aloud, uuid=<dataset>)`, followed by the paragraph the text was selected in. The id after the item is a chapter, read-aloud text or media uuid (or the wiki file's dataset-relative path under `path=`); read that item with book_list_sentences / read_aloud_list_texts / wiki_dataset_read_file / dataset_list_subtitles+dataset_list_cues to answer from the original context instead of from the question alone.")]
     async fn card_get(&self, Parameters(param): Parameters<CardGetParam>) -> Result<String, String> {
         log::info!("[MCP] card_get: dataset={}, card={}", param.dataset_uuid, param.card_uuid);
         let settings = self.app.state::<SettingsState>();
@@ -234,7 +234,7 @@ impl DatasetMcpServer {
         Ok(serde_json::to_string_pretty(&card).unwrap_or_default())
     }
 
-    #[tool(name = "card_save", description = "Create or update a card in a dataset. Pass card as JSON with fields: uuid (empty for new), question, suggestion, answer, note. Returns the saved card. A note that came from a capture ends with a `source:` line naming the dataset uuid and the item the text was selected in — keep it when rewriting the note, it is what locates the original context.")]
+    #[tool(name = "card_save", description = "Create or update a card in a dataset. Pass card as JSON with fields: uuid (empty for new), question, suggestion, answer, note. Returns the saved card. A note that came from a capture opens with a `From \"<text>\" (uuid=…) of dataset \"<name>\" (kind=…, uuid=…)` line — keep it when rewriting the note, it is what locates the original context.")]
     async fn card_save(&self, Parameters(param): Parameters<CardSaveParam>) -> Result<String, String> {
         log::info!("[MCP] card_save: dataset={}", param.dataset_uuid);
         let settings = self.app.state::<SettingsState>();

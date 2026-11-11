@@ -16,15 +16,15 @@
 // snapshot is capped rather than complete. The paragraph is context for reading
 // a quote out of its sentence, not a copy of the file.
 //
-// The card keeps what the todo could not: `sourceNote` writes a provenance block
-// into the note — names for the learner, a `source:` line with the dataset and
-// item uuids for an agent — so an answer can still be written from the original
-// text on a device that has neither.
+// The card keeps what the todo could not: `sourceNote` writes a provenance line
+// into the note — the text's name and uuid, then the dataset's name, kind and
+// uuid — so an answer can still be written from the original text on a device
+// that has neither.
 // ---------------------------------------------------------------------------
 
 import { invoke } from "@tauri-apps/api/core";
 
-import { getUiContext, type UiContextPatch } from "@/lib/agent/ui-context";
+import { getUiContext } from "@/lib/agent/ui-context";
 import type { OpenCardAction } from "@/lib/agent/types";
 import { getActiveTabId } from "@/lib/refresh/page-refresh";
 import { cardSubjectLabel } from "@/lib/shell/tab-subject";
@@ -65,12 +65,15 @@ export type CaptureSource = {
 };
 
 /**
- * Where a selection came from, in the two halves its two readers need.
+ * Where a selection came from, in the one line both of its readers can use:
  *
- * The names are what a learner recognises in the note; the uuids are what an
- * agent feeds straight back into `wiki_dataset_read_file`, `book_list_sentences`
- * or the read-aloud tools to answer from the original context. Both are read at
- * capture time — a later lookup would describe a different document.
+ *   From “Chapter 1 · The Boy Who Lived · part 1/11” (uuid=acb5…) of dataset
+ *   “Harry Potter and the Philosopher's Stone” (kind=read_aloud, uuid=card…)
+ *
+ * The names are what the learner recognises; the ids are what an agent feeds
+ * straight back into `book_list_sentences`, `wiki_dataset_read_file`, the
+ * read-aloud tools or the cue tools to answer from the original context. Both
+ * are read at capture time — a later lookup would describe another document.
  */
 export type CaptureOrigin = {
   /** The dataset's uuid — the one thing needed to open it again. */
@@ -79,10 +82,18 @@ export type CaptureOrigin = {
   name: string;
   /** Dataset type slug (`book`, `wiki`, `read_aloud`, `dictation`). */
   type: string;
-  /** The text inside the dataset: chapter title, wiki file, read-aloud text. */
-  title: string | null;
-  /** `chapter=<uuid>` | `path=<rel>` | `text=<uuid>` | `media=<uuid> cue=<n>`. */
-  locator: string | null;
+  /** The item the selection sits in, when the page addresses one. */
+  item: CaptureItem | null;
+};
+
+/** The text inside the dataset: a book chapter, wiki file, read-aloud text or media. */
+export type CaptureItem = {
+  /** The noun for an unnamed item: `chapter`, `text`, `file`, `media`, `item`. */
+  noun: string;
+  /** Its title; null when the page only knows it by id. */
+  name: string | null;
+  /** The parenthetical: `uuid=<id>`, `uuid=<id>, cue=<n>`, or `path=<rel>`. */
+  where: string;
 };
 
 export type Capture = {
@@ -178,17 +189,18 @@ export function buildCapture(
 }
 
 /**
- * The provenance block a captured card carries in its note.
+ * The provenance line a captured card carries in its note, plus the paragraph
+ * it came out of:
  *
- *   From “Kapitel 3” in “German Stories” · § 2.3
- *   > Der Satz, in dem die Auswahl steht.
- *   source: dataset=german_stories type=book chapter=9f0c…
+ *   From “Chapter 1 · The Boy Who Lived · part 1/11” (uuid=acb5…) of dataset
+ *   “Harry Potter and the Philosopher's Stone” (kind=read_aloud, uuid=card…)
+ *   > …the sentence, as it stood when the card was taken…
  *
- * The prose line above is what a learner recognises a week later; the last line
- * is the frozen locator an agent parses — `dataset` and `type` open the dataset,
- * and the pair that follows names the item inside it (`chapter`, `path`, `text`,
- * or `media` with a `cue`). A value runs to the next ` key=` and the last one to
- * the end of the line, so a wiki path may contain spaces.
+ * One line, two readers: the quotes name the text and the dataset the way the
+ * reader knows them, and the parentheticals carry the ids an agent needs to open
+ * the very same item — the item as `uuid=` (chapter, text, media with a `cue`)
+ * or `path=` (a wiki file), the dataset as `kind=` + `uuid=`. Both halves are
+ * frozen at capture time; a later lookup would describe another document.
  *
  * The quoted paragraph is deliberately a copy: the note has to answer "what did
  * this come from" on a device that never had the dataset, and after the
@@ -200,26 +212,24 @@ export function sourceNote(
   question: string
 ): string {
   if (!origin) return "";
-  const work = origin.name ? `“${clip(origin.name, MAX_NOTE_TITLE)}”` : `dataset ${origin.uuid}`;
-  const title = origin.title ? clip(origin.title, MAX_NOTE_TITLE) : null;
-  const heading = ctx.heading ? clip(ctx.heading, MAX_NOTE_TITLE) : null;
-  const head = title ? `From “${title}” in ${work}` : `From ${work}`;
-  // The heading is the same name as the chapter when the chapter title *is* the
-  // heading above the paragraph — saying it twice would read like two places.
-  const section = heading && heading !== title ? ` · § ${heading}` : "";
+  const kind = origin.type || "unknown";
+  const work = origin.name
+    ? `dataset “${clip(origin.name, MAX_NOTE_TITLE)}” (kind=${kind}, uuid=${origin.uuid})`
+    : `dataset (kind=${kind}, uuid=${origin.uuid})`;
 
-  const lines = [`${head}${section}`];
+  const item = origin.item;
+  // A page that publishes the item but not its title still had a heading above
+  // the selection; that is the closest thing to a name there is.
+  const label = item?.name ?? (ctx.heading ? clip(ctx.heading, MAX_NOTE_TITLE) : null);
+  const head = !item
+    ? `From ${work}`
+    : label
+      ? `From “${label}” (${item.where}) of ${work}`
+      : `From the ${item.noun} (${item.where}) of ${work}`;
+
+  const lines = [head];
   const quote = clip(ctx.block, MAX_NOTE_CONTEXT);
   if (quote && quote !== clip(question, MAX_NOTE_CONTEXT)) lines.push(`> ${quote}`);
-
-  const machine = [
-    `dataset=${origin.uuid}`,
-    origin.type ? `type=${origin.type}` : "",
-    origin.locator ?? "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  lines.push(`source: ${machine}`);
   return lines.join("\n");
 }
 
@@ -227,18 +237,19 @@ export function sourceNote(
  * Where the selection came from, named and located.
  *
  * Two lookups, both at capture time: the dataset's own `info.json` (name + type)
- * and, when a document page publishes one, the text inside it by uuid — a book
- * chapter and a read-aloud text are addressed by uuid, so their names are not on
- * screen to read. A wiki `ref` *is* a path, so its stem is the name.
+ * and, when a document page publishes one, the title of the item inside it — a
+ * book chapter and a read-aloud text are addressed by uuid, so their titles are
+ * not on screen to read. A wiki `ref` *is* a path, so its stem is the name.
  *
  * Every failure is survivable: a moved, deleted or unreadable dataset costs the
- * friendly name, never the locator, because the note exists to be *re-found*.
+ * friendly name, never the id, because the note exists to be *re-found*.
  */
 export async function captureOrigin(): Promise<CaptureOrigin | null> {
   const uuid = currentDatasetUuid();
   if (!uuid) return null;
 
-  const [kind, , ref] = splitDoc(getUiContext().active_doc ?? "");
+  const ctx = getUiContext();
+  const [kind, , ref] = splitDoc(ctx.active_doc ?? "");
   let name = "";
   let type = "";
   try {
@@ -251,48 +262,41 @@ export async function captureOrigin(): Promise<CaptureOrigin | null> {
     type = kind;
   }
 
-  let title: string | null = null;
-  try {
-    if (kind === "book" && ref) {
-      const chapters = await invoke<{ uuid: string; title: string }[]>("book_list_chapters", {
-        bookUuid: uuid,
-      });
-      title = chapters.find((c) => c.uuid === ref)?.title.trim() || null;
-    } else if (kind === "read_aloud" && ref) {
-      const texts = await invoke<{ uuid: string; title: string }[]>("read_aloud_list_texts", {
-        datasetUuid: uuid,
-      });
-      title = texts.find((t) => t.uuid === ref)?.title.trim() || null;
-    } else if (kind === "wiki" && ref) {
-      title = fileStem(ref);
+  // The item first without its title: the id is what must survive a lookup that
+  // fails, so it is built before the invoke that can throw.
+  let item: CaptureItem | null = ref
+    ? {
+        noun: kind === "book" ? "chapter" : kind === "read_aloud" ? "text" : kind === "wiki" ? "file" : "item",
+        name: kind === "wiki" ? fileStem(ref) : null,
+        where: kind === "wiki" ? `path=${ref}` : `uuid=${ref}`,
+      }
+    : null;
+
+  if (item && (kind === "book" || kind === "read_aloud")) {
+    try {
+      if (kind === "book") {
+        const chapters = await invoke<{ uuid: string; title: string }[]>("book_list_chapters", {
+          bookUuid: uuid,
+        });
+        item.name = chapters.find((c) => c.uuid === ref)?.title.trim() || null;
+      } else {
+        const texts = await invoke<{ uuid: string; title: string }[]>("read_aloud_list_texts", {
+          datasetUuid: uuid,
+        });
+        item.name = texts.find((t) => t.uuid === ref)?.title.trim() || null;
+      }
+    } catch {
+      // The heading the page showed stands in for the title.
     }
-  } catch {
-    // The heading the page showed stands in for the name.
   }
 
-  return { uuid, name, type, title, locator: locatorFor(getUiContext(), kind, ref) };
-}
+  // Dictation has no `active_doc`: the media item and the cue are its locator.
+  if (!item && ctx.active_media_uuid) {
+    const cue = typeof ctx.cue_index === "number" ? `, cue=${ctx.cue_index}` : "";
+    item = { noun: "media", name: null, where: `uuid=${ctx.active_media_uuid}${cue}` };
+  }
 
-/**
- * The item inside the dataset, as `key=value` for the note's `source:` line.
- *
- * The key names the *thing*, not the page: `chapter`, `path`, `text` and
- * `media` are the nouns the MCP tools take, so an agent reads the line and knows
- * which tool to call without a mapping table. A selection on a plain app surface
- * has no item — the dataset alone is then the whole locator.
- */
-function locatorFor(ctx: UiContextPatch, kind: string, ref: string): string | null {
-  if (ref) {
-    if (kind === "book") return `chapter=${ref}`;
-    if (kind === "wiki") return `path=${ref}`;
-    if (kind === "read_aloud") return `text=${ref}`;
-    return `ref=${ref}`;
-  }
-  if (ctx.active_media_uuid) {
-    const cue = typeof ctx.cue_index === "number" ? ` cue=${ctx.cue_index}` : "";
-    return `media=${ctx.active_media_uuid}${cue}`;
-  }
-  return null;
+  return { uuid, name, type, item };
 }
 
 /** The todo's title: what the card will be about, not "Add card". */
@@ -357,19 +361,26 @@ function rememberDeck(uuid: string): void {
 }
 
 /**
- * The dataset the reader is in — what a family question is asked about.
+ * The dataset the reader is in — what a family question is asked about, and what
+ * the note's `dataset` half names.
  *
  * Two sources, because no page publishes both keys: Dictation and Cards report
  * `active_dataset_uuid`; the document pages report `active_doc` (`<kind>:`
- * `<dataset>:<ref>`) and nothing else. Reading the second segment of `active_doc`
- * is the only place outside `sourceDisplay` that splits it, and it does so for
- * the one thing the grammar guarantees.
+ * `<dataset>:<ref>`). `active_doc` wins whenever it is set: it is published by
+ * the page that has a document on screen, and its second segment *is* that
+ * document's dataset. `active_dataset_uuid` is shared with the card editor and
+ * the Cards page, which cannot clear a deck they no longer have selected — a
+ * leftover value there must never outvote the document the selection was taken
+ * from.
  */
 function currentDatasetUuid(): string | null {
   const ctx = getUiContext();
-  if (ctx.active_dataset_uuid) return ctx.active_dataset_uuid;
   const doc = ctx.active_doc;
-  return doc ? splitDoc(doc)[1] || null : null;
+  if (doc) {
+    const uuid = splitDoc(doc)[1];
+    if (uuid) return uuid;
+  }
+  return ctx.active_dataset_uuid ?? null;
 }
 
 /**
