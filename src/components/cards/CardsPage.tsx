@@ -433,10 +433,10 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
   // edit (family)" lands on this same composer through `cards.add-card`, with
   // the selection already in the question field and no card written yet.
   const openNewCard = useCallback(
-    (datasetUuid: string, question = "") => {
+    (datasetUuid: string, question = "", note = "") => {
       if (!datasetUuid) return;
       const name = datasets.find((d) => d.info.uuid === datasetUuid)?.info.name;
-      const blank: Card = { ...BLANK_CARD, question };
+      const blank: Card = { ...BLANK_CARD, question, note };
       setSearchOpen(false);
       setSelectedDatasetUuid(datasetUuid);
       setActiveTab("cards");
@@ -824,10 +824,16 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
           description:
             "The question to prefill. The answer stays empty; the writer or the agent fills it in the composer.",
         },
+        note: {
+          type: "string",
+          description:
+            "The note to prefill — a capture passes its provenance block here, ending in the `source:` line that names the dataset uuid and the item the text came from.",
+        },
       },
       run: (params) => {
         const uuid = reqStr("cards.add-card", params, "dataset_uuid");
         const question = optStr("cards.add-card", params, "question") ?? "";
+        const note = optStr("cards.add-card", params, "note") ?? "";
         const found = datasets.find((x) => x.info.uuid === uuid);
         if (!found) {
           throw new Error(
@@ -837,7 +843,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
             }. dataset_list has the full set across every kind.`
           );
         }
-        openNewCard(uuid, question);
+        openNewCard(uuid, question, note);
         return { opened: uuid, name: found.info.name, wrote: false };
       },
     },

@@ -16,6 +16,7 @@ import type { TabId } from "@/lib/shell/tabs";
 import {
   buildCapture,
   captureDetail,
+  captureOrigin,
   captureTarget,
   captureTitle,
   pickCaptureDeck,
@@ -39,7 +40,8 @@ import {
  * - Search results displayed as clickable links to jump to existing cards
  * - Three ways to add the selection as a card: to Tasks (a todo to write
  *   later), straight into the family's card dataset (question only), or into
- *   that dataset's composer on the Cards page
+ *   that dataset's composer on the Cards page. All three carry the same
+ *   provenance note — see `sourceNote` in `lib/cards/capture`.
  *
  * Mounted once in the app shell. Renders nothing until a selection is made, so
  * the initial server/client trees match (no hydration mismatch).
@@ -120,13 +122,13 @@ function readBlock(range: Range): CaptureContext {
 
 /** A card the editor has not minted yet: what a write with nothing but a
  *  question sends, and what the composer opens on when it is prefilled. */
-function questionOnlyCard(question: string): Card {
+function questionOnlyCard(question: string, note: string): Card {
   return {
     uuid: "",
     question,
     suggestion: "",
     answer: "",
-    note: "",
+    note,
     familiarity: 0,
     question_hash: null,
     source_card_uuid: null,
@@ -332,7 +334,7 @@ export default function CardContextMenu({
         similar = 0;
       }
 
-      const capture = buildCapture(text, ctx ?? { block: text }, deck.info.uuid);
+      const capture = buildCapture(text, ctx ?? { block: text }, deck.info.uuid, await captureOrigin());
       const target = captureTarget(capture, deck.info.name);
 
       const created = await invoke<{ uuid: string }>("todo_add", {
@@ -367,6 +369,7 @@ export default function CardContextMenu({
    */
   async function handleAddFamilyCard() {
     const text = (searchQuery || selectedText).trim();
+    const ctx = captureCtx;
     setAnchor(null);
     setCaptureCtx(null);
     if (!text) return;
@@ -384,10 +387,15 @@ export default function CardContextMenu({
       return;
     }
 
+    // Same snapshot the todo path takes, so both routes file the same note: the
+    // `source:` line is what lets a later answer be written from the original
+    // text instead of from the question alone.
+    const capture = buildCapture(text, ctx ?? { block: text }, deck.uuid, await captureOrigin());
+
     try {
       await invoke<Card>("card_save", {
         datasetUuid: deck.uuid,
-        card: questionOnlyCard(text),
+        card: questionOnlyCard(capture.question, capture.note),
       });
       notify(`Card added to “${deck.name}”`);
     } catch (err) {
@@ -409,6 +417,7 @@ export default function CardContextMenu({
    */
   async function handleAddFamilyCardAndEdit() {
     const text = (searchQuery || selectedText).trim();
+    const ctx = captureCtx;
     setAnchor(null);
     setCaptureCtx(null);
     if (!text) return;
@@ -426,10 +435,13 @@ export default function CardContextMenu({
       return;
     }
 
+    const capture = buildCapture(text, ctx ?? { block: text }, deck.uuid, await captureOrigin());
+
     try {
       await openInTab(onOpenBeside, "cards", "cards.add-card", {
         dataset_uuid: deck.uuid,
-        question: text,
+        question: capture.question,
+        note: capture.note,
       });
     } catch (err) {
       notifyError(`Could not open the card composer in “${deck.name}”: ${err}`);

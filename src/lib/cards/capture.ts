@@ -15,11 +15,16 @@
 // Size discipline: todos sync to every device through the change log, so the
 // snapshot is capped rather than complete. The paragraph is context for reading
 // a quote out of its sentence, not a copy of the file.
+//
+// The card keeps what the todo could not: `sourceNote` writes a provenance block
+// into the note — names for the learner, a `source:` line with the dataset and
+// item uuids for an agent — so an answer can still be written from the original
+// text on a device that has neither.
 // ---------------------------------------------------------------------------
 
 import { invoke } from "@tauri-apps/api/core";
 
-import { getUiContext } from "@/lib/agent/ui-context";
+import { getUiContext, type UiContextPatch } from "@/lib/agent/ui-context";
 import type { OpenCardAction } from "@/lib/agent/types";
 import { getActiveTabId } from "@/lib/refresh/page-refresh";
 import { cardSubjectLabel } from "@/lib/shell/tab-subject";
@@ -34,6 +39,10 @@ const MAX_CONTEXT = 2000;
 const MAX_DETAIL = 160;
 /** Detail width kept for the "— «quote»" half, leaving room for the tail. */
 const MAX_DETAIL_BODY = 120;
+/** The containing paragraph kept in a card's note. */
+const MAX_NOTE_CONTEXT = 600;
+/** Title/heading width kept in the note's first line. */
+const MAX_NOTE_TITLE = 80;
 
 /** Where the last capture went, so the next one does not have to ask. */
 const DECK_KEY = "cards.capture-deck";
@@ -55,11 +64,36 @@ export type CaptureSource = {
   display: string;
 };
 
+/**
+ * Where a selection came from, in the two halves its two readers need.
+ *
+ * The names are what a learner recognises in the note; the uuids are what an
+ * agent feeds straight back into `wiki_dataset_read_file`, `book_list_sentences`
+ * or the read-aloud tools to answer from the original context. Both are read at
+ * capture time — a later lookup would describe a different document.
+ */
+export type CaptureOrigin = {
+  /** The dataset's uuid — the one thing needed to open it again. */
+  uuid: string;
+  /** Display name; "" when the dataset could not be read (moved, deleted). */
+  name: string;
+  /** Dataset type slug (`book`, `wiki`, `read_aloud`, `dictation`). */
+  type: string;
+  /** The text inside the dataset: chapter title, wiki file, read-aloud text. */
+  title: string | null;
+  /** `chapter=<uuid>` | `path=<rel>` | `text=<uuid>` | `media=<uuid> cue=<n>`. */
+  locator: string | null;
+};
+
 export type Capture = {
   question: string;
   /** The containing paragraph; "" when it is the question itself. */
   context: string;
   source: CaptureSource;
+  /** Named and located origin; null on a page that is not inside a dataset. */
+  origin: CaptureOrigin | null;
+  /** What the card's note gets — see {@link sourceNote}. */
+  note: string;
   datasetUuid: string;
   capturedAt: string;
 };
@@ -87,6 +121,11 @@ function docLabel(doc: string | null): string | null {
   if (!doc) return null;
   const [, , ref] = splitDoc(doc);
   if (!ref || !ref.includes("/")) return null;
+  return fileStem(ref);
+}
+
+/** A wiki `ref`'s last path segment, extension dropped. */
+function fileStem(ref: string): string | null {
   const base = ref.split("/").pop() ?? "";
   const stem = base.replace(/\.[a-z0-9]+$/i, "");
   return stem || null;
@@ -119,7 +158,8 @@ export function sourceDisplay(
 export function buildCapture(
   selection: string,
   ctx: CaptureContext,
-  datasetUuid: string
+  datasetUuid: string,
+  origin: CaptureOrigin | null = null
 ): Capture {
   const question = clip(selection, MAX_QUESTION);
   const block = clip(ctx.block, MAX_CONTEXT);
@@ -130,9 +170,129 @@ export function buildCapture(
     // A one-sentence paragraph keeps no extra context worth carrying twice.
     context: block && block !== question ? block : "",
     source: { kind: tab ?? "other", doc, display: sourceDisplay(tab, doc, ctx.heading) },
+    origin,
+    note: sourceNote(origin, ctx, question),
     datasetUuid,
     capturedAt: new Date().toISOString(),
   };
+}
+
+/**
+ * The provenance block a captured card carries in its note.
+ *
+ *   From “Kapitel 3” in “German Stories” · § 2.3
+ *   > Der Satz, in dem die Auswahl steht.
+ *   source: dataset=german_stories type=book chapter=9f0c…
+ *
+ * The prose line above is what a learner recognises a week later; the last line
+ * is the frozen locator an agent parses — `dataset` and `type` open the dataset,
+ * and the pair that follows names the item inside it (`chapter`, `path`, `text`,
+ * or `media` with a `cue`). A value runs to the next ` key=` and the last one to
+ * the end of the line, so a wiki path may contain spaces.
+ *
+ * The quoted paragraph is deliberately a copy: the note has to answer "what did
+ * this come from" on a device that never had the dataset, and after the
+ * document has been edited or deleted.
+ */
+export function sourceNote(
+  origin: CaptureOrigin | null,
+  ctx: CaptureContext,
+  question: string
+): string {
+  if (!origin) return "";
+  const work = origin.name ? `“${clip(origin.name, MAX_NOTE_TITLE)}”` : `dataset ${origin.uuid}`;
+  const title = origin.title ? clip(origin.title, MAX_NOTE_TITLE) : null;
+  const heading = ctx.heading ? clip(ctx.heading, MAX_NOTE_TITLE) : null;
+  const head = title ? `From “${title}” in ${work}` : `From ${work}`;
+  // The heading is the same name as the chapter when the chapter title *is* the
+  // heading above the paragraph — saying it twice would read like two places.
+  const section = heading && heading !== title ? ` · § ${heading}` : "";
+
+  const lines = [`${head}${section}`];
+  const quote = clip(ctx.block, MAX_NOTE_CONTEXT);
+  if (quote && quote !== clip(question, MAX_NOTE_CONTEXT)) lines.push(`> ${quote}`);
+
+  const machine = [
+    `dataset=${origin.uuid}`,
+    origin.type ? `type=${origin.type}` : "",
+    origin.locator ?? "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  lines.push(`source: ${machine}`);
+  return lines.join("\n");
+}
+
+/**
+ * Where the selection came from, named and located.
+ *
+ * Two lookups, both at capture time: the dataset's own `info.json` (name + type)
+ * and, when a document page publishes one, the text inside it by uuid — a book
+ * chapter and a read-aloud text are addressed by uuid, so their names are not on
+ * screen to read. A wiki `ref` *is* a path, so its stem is the name.
+ *
+ * Every failure is survivable: a moved, deleted or unreadable dataset costs the
+ * friendly name, never the locator, because the note exists to be *re-found*.
+ */
+export async function captureOrigin(): Promise<CaptureOrigin | null> {
+  const uuid = currentDatasetUuid();
+  if (!uuid) return null;
+
+  const [kind, , ref] = splitDoc(getUiContext().active_doc ?? "");
+  let name = "";
+  let type = "";
+  try {
+    const detail = await invoke<{ info: { name: string; type: string } }>("dataset_get", {
+      uuid,
+    });
+    name = detail.info.name;
+    type = detail.info.type;
+  } catch {
+    type = kind;
+  }
+
+  let title: string | null = null;
+  try {
+    if (kind === "book" && ref) {
+      const chapters = await invoke<{ uuid: string; title: string }[]>("book_list_chapters", {
+        bookUuid: uuid,
+      });
+      title = chapters.find((c) => c.uuid === ref)?.title.trim() || null;
+    } else if (kind === "read_aloud" && ref) {
+      const texts = await invoke<{ uuid: string; title: string }[]>("read_aloud_list_texts", {
+        datasetUuid: uuid,
+      });
+      title = texts.find((t) => t.uuid === ref)?.title.trim() || null;
+    } else if (kind === "wiki" && ref) {
+      title = fileStem(ref);
+    }
+  } catch {
+    // The heading the page showed stands in for the name.
+  }
+
+  return { uuid, name, type, title, locator: locatorFor(getUiContext(), kind, ref) };
+}
+
+/**
+ * The item inside the dataset, as `key=value` for the note's `source:` line.
+ *
+ * The key names the *thing*, not the page: `chapter`, `path`, `text` and
+ * `media` are the nouns the MCP tools take, so an agent reads the line and knows
+ * which tool to call without a mapping table. A selection on a plain app surface
+ * has no item — the dataset alone is then the whole locator.
+ */
+function locatorFor(ctx: UiContextPatch, kind: string, ref: string): string | null {
+  if (ref) {
+    if (kind === "book") return `chapter=${ref}`;
+    if (kind === "wiki") return `path=${ref}`;
+    if (kind === "read_aloud") return `text=${ref}`;
+    return `ref=${ref}`;
+  }
+  if (ctx.active_media_uuid) {
+    const cue = typeof ctx.cue_index === "number" ? ` cue=${ctx.cue_index}` : "";
+    return `media=${ctx.active_media_uuid}${cue}`;
+  }
+  return null;
 }
 
 /** The todo's title: what the card will be about, not "Add card". */
@@ -171,7 +331,7 @@ export function captureTarget(capture: Capture, datasetName?: string): OpenCardA
       question: capture.question,
       answer: "",
       suggestion: "",
-      note: "",
+      note: capture.note,
     },
     context: capture.context,
     source: { display: capture.source.display },
