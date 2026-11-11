@@ -41,6 +41,8 @@ type Props = {
   onOpen?: () => void;
   /** Omit to make the card read-only (no pencil). */
   onSave?: (patch: DatasetPatch) => Promise<void>;
+  /** Omit to hide the edit view's "Join family" button. */
+  onJoinFamily?: () => void;
 };
 
 /**
@@ -81,6 +83,7 @@ export default function DatasetCard({
   title,
   onOpen,
   onSave,
+  onJoinFamily,
 }: Props) {
   const [flipped, setFlipped] = useState(false);
   const height = HEIGHT[variant];
@@ -198,6 +201,7 @@ export default function DatasetCard({
               visibility={visibility}
               readOnly={readOnly}
               onCancel={() => setFlipped(false)}
+              onJoinFamily={onJoinFamily}
               onSave={async (patch) => {
                 await onSave(patch);
                 setFlipped(false);

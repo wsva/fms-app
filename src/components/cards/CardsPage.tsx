@@ -40,7 +40,7 @@ import type {
 import { isMobileApp, isTauri } from "@/lib/platform";
 import { LocationsManager } from "@/components/ui/LocationsManager";
 import PromptDialog from "@/components/ui/PromptDialog";
-import { DatasetCard } from "@/components/ui/dataset";
+import { DatasetCard, JoinFamilyDialog } from "@/components/ui/dataset";
 import PendingWritebackBanner from "@/components/ui/PendingWritebackBanner";
 import {
   Toolbar,
@@ -259,6 +259,9 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
 
   // Error display
   const [error, setError] = useState<string | null>(null);
+
+  // The dataset whose "Join family" picker is open, from its edit view.
+  const [joining, setJoining] = useState<CardDatasetSummary | null>(null);
 
   // Deferred platform flag (SSR-safe) for collapsing toolbar button labels on mobile.
   const [mobile, setMobile] = useState(false);
@@ -1553,6 +1556,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
                     await emit("dataset-list-changed", {});
                     await loadDatasets();
                   }}
+                  onJoinFamily={() => setJoining(ds)}
                   chips={
                     <span
                       className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${
@@ -1858,6 +1862,27 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
 
           </div>
         </>
+      )}
+
+      {joining && (
+        <JoinFamilyDialog
+          uuid={joining.info.uuid}
+          name={joining.info.name}
+          datasetType={joining.info.type}
+          onCancel={() => setJoining(null)}
+          onJoined={async () => {
+            setJoining(null);
+            await emit("dataset-list-changed", {});
+            await loadDatasets();
+            // Cross-dataset search keys its rows by dataset id, so the rows
+            // written under the old id now point at nothing. Rebuild rather
+            // than leave hits that fail to open. Not awaited: the dialog is
+            // already gone, and the list is what the user is looking at.
+            invoke<number>("card_fts_rebuild", { location: null })
+              .then((n) => notify(`Joined family. Search index rebuilt (${n} cards).`))
+              .catch((e) => setError(`Joined family, but the search index is stale: ${e}`));
+          }}
+        />
       )}
 
       {promptKind === "dataset" && (

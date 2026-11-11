@@ -2,6 +2,7 @@
 //! the configured locations, import/update/delete, and the base/overlay layer
 //! handover.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -464,6 +465,217 @@ fn report_from(family: Option<String>, members: Vec<FamilyMember>) -> FamilyRepo
     FamilyReport { family, members, anchor, display_name }
 }
 
+/// One family a dataset could join, as the "Join family" picker asks for it:
+/// the key, what the family already holds, and one addressable member to name
+/// the row by.
+#[derive(Clone, Serialize)]
+pub struct FamilyCandidate {
+    pub family: String,
+    /// The member the row is labelled by — the book when there is one, else the
+    /// alphabetically-first member, the same rule [`report_from`] names a family
+    /// with.
+    pub uuid: String,
+    pub name: String,
+    pub dataset_type: String,
+    /// Every type the family holds, in `DatasetType::ALL` order.
+    pub member_types: Vec<String>,
+}
+
+/// Every dataset on this machine, deduped by uuid.
+///
+/// Not [`list_datasets`]: that one scans the dictation root alone and surfaces
+/// raw media folders for the UI, neither of which can be joined to anything.
+/// A family spans types by definition, so this walks every type's roots. The
+/// directory stays the routing authority, exactly as in
+/// [`find_dataset_dir_typed`]: a dataset declaring a type other than the tree it
+/// sits in is skipped rather than trusted.
+fn every_dataset(settings: &SettingsState) -> Vec<(DatasetInfo, DatasetType)> {
+    let mut out = Vec::new();
+    for ty in DatasetType::ALL {
+        for root in dataset_roots(settings, ty) {
+            let Ok(entries) = fs::read_dir(&root) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let Some(info) = read_info_opt(&path) else { continue };
+                if info.uuid.is_empty() || info.dataset_type != ty {
+                    continue;
+                }
+                out.push((info, ty));
+            }
+        }
+    }
+    // Root order puts a writable copy before its downloaded base, so keeping the
+    // first hides the base behind the copy it was forked into.
+    dedup_by_uuid_first(out, |(info, _)| info.uuid.as_str())
+}
+
+/// The families `uuid`'s dataset could join.
+///
+/// One row per family, because joining is a relation: two members of one family
+/// would be two names for the same outcome. A family that already holds a
+/// dataset of this one's type is left out — the grammar mints one dataset per
+/// type per family, and a second `card_<key>` would be shadowed by the first on
+/// every lookup (see [`super::ids`]).
+pub(crate) fn family_candidates(
+    settings: &SettingsState,
+    uuid: &str,
+) -> Result<Vec<FamilyCandidate>, String> {
+    let (_dir, ty) = find_dataset_dir_typed(settings, uuid)?;
+    let own_key = family_of(uuid).map(str::to_string);
+
+    let mut groups: BTreeMap<String, Vec<(DatasetType, DatasetInfo)>> = BTreeMap::new();
+    for (info, found) in every_dataset(settings) {
+        if info.uuid == uuid {
+            continue;
+        }
+        let Some(key) = family_of(&info.uuid) else { continue };
+        // The family it is already in would be a no-op join.
+        if own_key.as_deref() == Some(key) {
+            continue;
+        }
+        groups.entry(key.to_string()).or_default().push((found, info));
+    }
+
+    let mut out = Vec::new();
+    for (family, mut members) in groups {
+        if members.iter().any(|(found, _)| *found == ty) {
+            continue;
+        }
+        members.sort_by(|a, b| {
+            (a.0 != DatasetType::Book, a.1.name.to_lowercase())
+                .cmp(&(b.0 != DatasetType::Book, b.1.name.to_lowercase()))
+        });
+        let (rep_ty, rep) = &members[0];
+        out.push(FamilyCandidate {
+            family,
+            uuid: rep.uuid.clone(),
+            name: rep.name.clone(),
+            dataset_type: rep_ty.as_str().to_string(),
+            member_types: members
+                .iter()
+                .map(|(found, _)| found.as_str().to_string())
+                .collect(),
+        });
+    }
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(out)
+}
+
+/// Re-key `uuid`'s dataset into `target_uuid`'s family: its id becomes
+/// `<its type>_<the target's key>`, which *is* the whole of what a family is
+/// (see [`super::ids`]). This is the one manual way to build a family, for the
+/// pairs the ids alone cannot prove — the book and the deck someone made from it
+/// separately, with nothing in either name to say so.
+///
+/// Only `info.json`'s uuid changes. The directory keeps its name (the id, not the
+/// folder, is what the app and the sync protocol address) and no content is
+/// touched. Practice state that hangs off a card or a user — review schedules,
+/// XP totals — is keyed by those, not by this dataset, so it survives. What does
+/// not follow is everything that *addresses* the dataset by id: its sync state,
+/// dictation progress, the card search index, and any copy outside the app still
+/// holding the old id. The UI warns about exactly that before calling this.
+///
+/// Refused where re-keying back could not undo it: a read-only base, an overlay
+/// (its id is its base's), a target that carries no key, a family that already
+/// holds this type, and a target id something else answers to.
+pub(crate) fn join_family(
+    settings: &SettingsState,
+    uuid: &str,
+    target_uuid: &str,
+) -> Result<DatasetInfo, String> {
+    let (dir, ty) = find_dataset_dir_typed(settings, uuid)?;
+    let mut info = read_info(&dir)?;
+
+    if uuid == target_uuid {
+        return Err(format!(
+            "'{}' is this dataset itself — pick another one to join",
+            info.name
+        ));
+    }
+    let (_target_dir, target_ty) = find_dataset_dir_typed(settings, target_uuid)?;
+
+    if is_under_download_root(settings, &dir) {
+        return Err(format!(
+            "'{}' is a downloaded copy and stays read-only — join a family from one of your own datasets",
+            info.name
+        ));
+    }
+    if info.layer.is_some() {
+        return Err(format!(
+            "'{}' is an overlay of a downloaded copy, so its id is its base's — flatten it first, then join a family",
+            info.name
+        ));
+    }
+
+    let Some(key) = family_of(target_uuid) else {
+        return Err(format!(
+            "'{}' (the {} you picked) has an id from before the family scheme, so it has no key to share",
+            target_uuid,
+            target_ty.as_str()
+        ));
+    };
+    if family_of(&info.uuid) == Some(key) {
+        return Err(format!(
+            "'{}' already belongs to family '{}'",
+            info.name, key
+        ));
+    }
+    // Same rule `mint_into` enforces on creation, from the other side: a family
+    // holds one dataset per type, or lookups would only ever find the first.
+    if let Some((_, existing, path)) = resolve_family(settings, key)
+        .into_iter()
+        .find(|(found, ..)| *found == ty)
+    {
+        return Err(format!(
+            "Family '{}' already holds a {} dataset ('{}' at '{}') — one dataset per type per family",
+            key,
+            ty.as_str(),
+            existing,
+            path.display()
+        ));
+    }
+
+    let new_id = super::ids::mint(ty, key);
+    assert_uuid_free(settings, &new_id)?;
+
+    let old_id = std::mem::replace(&mut info.uuid, new_id);
+    info.updated_at = now_stamp();
+    write_info(&dir, &info)?;
+    log::info!(
+        "[Dataset] Joined family '{}': '{}' -> '{}' at '{}'",
+        key,
+        old_id,
+        info.uuid,
+        dir.display()
+    );
+    Ok(info)
+}
+
+/// The families a dataset could join, for the edit form's picker.
+#[tauri::command]
+pub async fn dataset_family_candidates(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+) -> Result<Vec<FamilyCandidate>, String> {
+    family_candidates(&settings, &uuid)
+}
+
+/// Re-key a dataset into another dataset's family. Destructive to the *id* — the
+/// sync state, dictation progress and the search index address the dataset by
+/// it — so the caller asks first (the Cards page's Join family dialog carries the
+/// warning).
+#[tauri::command]
+pub async fn dataset_join_family(
+    settings: State<'_, SettingsState>,
+    uuid: String,
+    target_uuid: String,
+) -> Result<DatasetInfo, String> {
+    join_family(&settings, &uuid, &target_uuid)
+}
+
 /// Layer / read-only status of a dataset, for status-before-acting checks
 /// (dataset-layers.md §6). `role` comes from `info.layer`; `is_read_only` /
 /// `downloaded` come from the dataset's *location* under the reserved download
@@ -642,4 +854,96 @@ pub async fn dataset_delete(
     let trashed = move_to_trash(&path)?;
     log::info!("Dataset {} moved to trash '{}'", uuid, trashed.display());
     Ok(trashed.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_settings(tag: &str) -> (SettingsState, PathBuf) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fms-family-test-{tag}-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let settings = SettingsState::new();
+        settings.set_workspace_dir(Some(dir.clone()));
+        (settings, dir)
+    }
+
+    /// A dataset is a directory with an `info.json`; the family lookups read
+    /// nothing else, so nothing else is created.
+    fn put(
+        settings: &SettingsState,
+        ty: DatasetType,
+        dir_name: &str,
+        uuid: &str,
+        name: &str,
+    ) -> PathBuf {
+        let dir = datasets_dir(settings).join(ty.as_str()).join(dir_name);
+        fs::create_dir_all(&dir).unwrap();
+        let info = DatasetInfo::new(uuid.to_string(), ty, FORMAT_DICTATION, name.to_string());
+        write_info(&dir, &info).unwrap();
+        dir
+    }
+
+    /// One row per family, the family it already belongs to left out, and every
+    /// family that could not take another dataset of this type left out with it.
+    #[test]
+    fn candidates_offer_one_row_per_family_that_can_take_this_type() {
+        let (settings, _dir) = temp_settings("candidates");
+        put(&settings, DatasetType::Card, "alphas", "card_111111111111", "Alpha deck");
+        put(&settings, DatasetType::Book, "alpha", "book_111111111111", "Alpha book");
+        put(&settings, DatasetType::Book, "beta", "book_222222222222", "Beta book");
+        put(&settings, DatasetType::Card, "gamma deck", "card_333333333333", "Gamma deck");
+        put(&settings, DatasetType::Book, "gamma", "book_333333333333", "Gamma book");
+        // A legacy id carries no key to share, so nothing can join onto it.
+        put(
+            &settings,
+            DatasetType::Book,
+            "legacy",
+            "b76a0a93-20e0-4d1a-bd16-ab6f18197952",
+            "Legacy book",
+        );
+
+        let got = family_candidates(&settings, "card_111111111111").unwrap();
+        let names: Vec<&str> = got.iter().map(|c| c.name.as_str()).collect();
+        // Its own family (`1111…`) is a no-op, and `3333…` already holds a card.
+        assert_eq!(names, vec!["Beta book"], "only Beta can take a card");
+        assert_eq!(got[0].family, "222222222222");
+        assert_eq!(got[0].member_types, vec![DatasetType::Book.as_str().to_string()]);
+    }
+
+    /// The re-key is the descriptor alone: the folder keeps its name, the new id
+    /// resolves, the old one stops, and the family then refuses a second dataset
+    /// of the type that just joined — the same rule `mint_into` enforces from the
+    /// creation side.
+    #[test]
+    fn joining_rekeys_the_descriptor_and_keeps_the_directory() {
+        let (settings, _dir) = temp_settings("join");
+        let legacy = "b76a0a93-20e0-4d1a-bd16-ab6f18197952";
+        let dir = put(&settings, DatasetType::Card, "my deck", legacy, "My deck");
+        put(&settings, DatasetType::Book, "the book", "book_abcd1234ef01", "The book");
+
+        let joined = join_family(&settings, legacy, "book_abcd1234ef01").unwrap();
+        assert_eq!(joined.uuid, "card_abcd1234ef01");
+        assert_eq!(
+            joined.dataset_type,
+            DatasetType::Card,
+            "the prefix follows the directory that holds it, not the target"
+        );
+        assert!(dir.exists(), "the folder is not renamed — only the id is an address");
+        assert_eq!(read_info(&dir).unwrap().uuid, "card_abcd1234ef01", "written to disk");
+        assert!(find_dataset_dir_typed(&settings, "card_abcd1234ef01").is_ok());
+        assert!(find_dataset_dir_typed(&settings, legacy).is_err(), "the old id is gone");
+
+        put(&settings, DatasetType::Card, "other deck", "f00d", "Other deck");
+        let err = join_family(&settings, "f00d", "book_abcd1234ef01").unwrap_err();
+        assert!(err.contains("one dataset per type per family"), "{err}");
+        assert!(
+            family_candidates(&settings, "f00d").unwrap().is_empty(),
+            "a family that cannot take the dataset is not offered"
+        );
+    }
 }

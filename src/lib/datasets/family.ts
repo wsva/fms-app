@@ -43,6 +43,22 @@ export interface FamilyReport {
   display_name: string | null;
 }
 
+/** One family a dataset could join. Mirrors `datasets::registry::FamilyCandidate`.
+ *  One row per family, not per dataset: joining is a relation, so two members of
+ *  one family would be two names for the same outcome. */
+export interface FamilyCandidate {
+  /** The key both datasets will share once the join lands. */
+  family: string;
+  /** The member the row is labelled by — the book when the family has one. */
+  uuid: string;
+  name: string;
+  /** The label member's type, which is also what the row is previewed by. */
+  dataset_type: DatasetTypeSlug;
+  /** Every type the family already holds; a family at this dataset's type is
+   *  never offered, since the grammar allows one dataset per type per family. */
+  member_types: DatasetTypeSlug[];
+}
+
 /** The member of `report` whose type is `slug`, when the family has one. */
 export function familyMember(
   report: FamilyReport | null | undefined,

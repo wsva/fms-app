@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { Loader2, X } from "lucide-react";
+import { Loader2, Users, X } from "lucide-react";
 import LanguageSelect from "./LanguageSelect";
 
 /** The settable slice of `info.json` a card's back face edits. */
@@ -25,6 +25,11 @@ type Props = {
   onCancel: () => void;
   /** Rejecting keeps the form open with the message inline; resolving flips back. */
   onSave: (patch: DatasetPatch) => Promise<void>;
+  /**
+   * Opens the Join family picker. Omitted by pages that do not manage families,
+   * so the button only appears where it can do something.
+   */
+  onJoinFamily?: () => void;
 };
 
 const label = "text-[10px] font-medium uppercase tracking-wide text-text-tertiary";
@@ -48,6 +53,7 @@ export default function DatasetEditForm({
   readOnly = false,
   onCancel,
   onSave,
+  onJoinFamily,
 }: Props) {
   const [draftName, setDraftName] = useState(name);
   const [draftDescription, setDraftDescription] = useState(description);
@@ -175,6 +181,20 @@ export default function DatasetEditForm({
       )}
 
       <div className="flex items-center justify-end gap-1.5">
+        {/* Identity, not content: kept out of the Save/Cancel pair on the left so
+            it cannot be mistaken for a way to apply the form. */}
+        {onJoinFamily && (
+          <button
+            type="button"
+            onClick={onJoinFamily}
+            disabled={busy}
+            title="Make another dataset a companion of this one"
+            className="mr-auto inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs text-text-tertiary hover:bg-bg-hover hover:text-text-primary cursor-pointer disabled:opacity-50"
+          >
+            <Users size={12} />
+            Join family
+          </button>
+        )}
         <button
           type="button"
           onClick={onCancel}
