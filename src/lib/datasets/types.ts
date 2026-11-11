@@ -2,7 +2,11 @@
 // Types
 // ---------------------------------------------------------------------------
 
+import type { ComponentType } from "react";
+import { BookOpen, BookOpenText, Headphones, Layers } from "lucide-react";
 import type { DatasetInfo } from "@/lib/types";
+import { MicGlyph } from "@/components/voice/MicGlyph";
+import type { DatasetTypeSlug } from "./family";
 
 // One descriptor for every dataset type — defined once in `@/lib/types` (which
 // mirrors the Rust `datasets::info::DatasetInfo`) and re-exported here so the
@@ -152,3 +156,24 @@ export const btnSmPrimary = `${btnSm} bg-accent-bg text-white hover:bg-accent-bg
 export const btnSmDanger = `${btnSm} bg-error-text text-white hover:bg-error-hover`;
 export const btnSmSecondary = `${btnSm} bg-transparent border border-border-light text-text-primary hover:bg-bg-hover`;
 export const actionLabel = "text-sm text-text-tertiary shrink-0 whitespace-nowrap";
+
+// ---------------------------------------------------------------------------
+// Glyphs
+// ---------------------------------------------------------------------------
+
+/** A dataset type's glyph, typed by what the surfaces render it with — `size` and
+ *  `className` — rather than by lucide's wrapper, so the app's own `MicGlyph` can
+ *  stand for a type alongside lucide icons. */
+export type DatasetTypeIcon = ComponentType<{ size?: number; className?: string }>;
+
+/** How each dataset type is drawn, everywhere it is drawn: the sidebar's
+ *  vocabulary, so a type reads the same on a nav entry, a dataset card, a
+ *  workflow tile and a family chip, and a new surface has nothing to choose.
+ *  Read Aloud is `MicGlyph` — the app-wide microphone glyph — not lucide's `Mic`. */
+export const DATASET_TYPE_ICONS: Record<DatasetTypeSlug, DatasetTypeIcon> = {
+  dictation: Headphones,
+  card: Layers,
+  book: BookOpen,
+  read_aloud: MicGlyph,
+  wiki: BookOpenText,
+};

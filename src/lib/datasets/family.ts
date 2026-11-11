@@ -66,3 +66,16 @@ export function familyMember(
 ): FamilyMember | undefined {
   return report?.members.find((m) => m.dataset_type === slug);
 }
+
+/** What a member's type is called on a surface that lists a family — the same
+ *  wording the sidebar and the companions strip use, not the directory slug. */
+export function familyTypeLabel(slug: DatasetTypeSlug): string {
+  const labels: Record<DatasetTypeSlug, string> = {
+    dictation: "Dictation",
+    card: "Cards",
+    book: "Book",
+    read_aloud: "Read Aloud",
+    wiki: "Wiki",
+  };
+  return labels[slug] ?? slug;
+}

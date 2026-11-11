@@ -1,9 +1,11 @@
 "use client";
 
-import { useState, type ComponentType, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Pencil } from "lucide-react";
 import Card from "@/components/ui/card/Card";
 import { cn } from "@/lib/ui/cn";
+import { btnSmSecondary, DATASET_TYPE_ICONS, type DatasetTypeIcon } from "@/lib/datasets/types";
+import { familyTypeLabel, type FamilyMember } from "@/lib/datasets/family";
 import DatasetEditForm, { type DatasetPatch } from "./DatasetEditForm";
 
 // One constant per type slice — the app's card type scale (docs/design/cards.md).
@@ -12,18 +14,21 @@ const TITLE = "truncate text-sm font-semibold text-text-primary";
 const DESC = "text-xs text-text-secondary";
 const META = "truncate text-xs text-text-tertiary";
 
-/** Fixed heights, so the flip animates without measuring anything at runtime. */
-const HEIGHT: Record<Props["variant"], { front: string; back: string }> = {
-  row: { front: "h-[76px]", back: "h-[268px]" },
-  card: { front: "h-[148px]", back: "h-[288px]" },
+/** Fixed heights, so the flip animates without measuring anything at runtime.
+ *  `family` is the front's height once the card lists a family: one extra strip at
+ *  the bottom edge, whose height is the companions sub-toolbar's — the same
+ *  paddings, the same chip, one line that scrolls sideways. */
+const HEIGHT: Record<Props["variant"], { front: string; back: string; family: string }> = {
+  row: { front: "h-[76px]", back: "h-[268px]", family: "h-[116px]" },
+  card: { front: "h-[148px]", back: "h-[288px]", family: "h-[188px]" },
 };
 
 type Props = {
   /** `row` for dense lists, `card` for a grid. */
   variant: "row" | "card";
-  /** The dataset type's glyph, decorative — a lucide icon or the app's MicGlyph.
-   *  Typed by what is rendered here (`size`/`className`), not by lucide's wrapper. */
-  icon: ComponentType<{ size?: number; className?: string }>;
+  /** The dataset type's glyph — see `DATASET_TYPE_ICONS`; a lucide icon or the
+   *  app's own `MicGlyph`. */
+  icon: DatasetTypeIcon;
   name: string;
   description: string;
   /** Rendered on the back face only when supplied — pages pass what their DTO has. */
@@ -33,6 +38,12 @@ type Props = {
   chips?: ReactNode;
   /** A line of tertiary text, page-owned (a count, a path). */
   meta?: string;
+  /** The *other* datasets of this one's family, as `dataset_family_siblings`
+   *  answers it. Rendered as a strip along the bottom edge: the books page's
+   *  companions sub-toolbar, one chip per sibling. Omit it — or pass an empty
+   *  list — when there is no family; the front then keeps its short height rather
+   *  than reserving a strip for nothing. */
+  siblings?: FamilyMember[];
   /** A downloaded base: the back face says saving forks an editable copy. */
   readOnly?: boolean;
   disabled?: boolean;
@@ -78,6 +89,7 @@ export default function DatasetCard({
   visibility,
   chips,
   meta,
+  siblings,
   readOnly = false,
   disabled = false,
   title,
@@ -88,6 +100,7 @@ export default function DatasetCard({
   const [flipped, setFlipped] = useState(false);
   const height = HEIGHT[variant];
   const editable = !!onSave && !disabled;
+  const family = siblings && siblings.length > 0 ? siblings : null;
 
   // The glyph belongs to the name, not to the block under it: it sits on the
   // title line, and the description and meta keep the full content width — in
@@ -126,7 +139,7 @@ export default function DatasetCard({
         // fixed per density, so it must never be a flex-shrink candidate.
         "flip-perspective relative shrink-0 overflow-hidden p-0",
         "transition-[height,background-color] duration-200",
-        flipped ? height.back : height.front
+        flipped ? height.back : family ? height.family : height.front
       )}
     >
       <div
@@ -134,56 +147,63 @@ export default function DatasetCard({
         data-flipped={flipped}
         style={{ transform: flipped ? "rotateY(180deg)" : "rotateY(0deg)" }}
       >
-        {/* Front */}
+        {/* Front — a column whose last row is the family strip, when there is a
+            family: the strip is full-bleed like the companions sub-toolbar it
+            copies, so the padding sits on the content above it. */}
         <div
           inert={flipped}
           title={title}
-          className={cn(
-            "flip-face-side flip-front absolute inset-0 isolate",
-            variant === "row" ? "flex items-center gap-2 p-3" : "flex flex-col gap-1.5 p-4"
-          )}
+          className="flip-face-side flip-front absolute inset-0 isolate flex flex-col"
         >
-          {variant === "row" ? (
-            <>
-              <button
-                type="button"
-                onClick={onOpen}
-                disabled={!onOpen || disabled}
-                className={cn(
-                  OPEN,
-                  "flex min-w-0 flex-1 items-center gap-2 text-left disabled:cursor-not-allowed"
-                )}
-              >
-                {main}
-              </button>
-              {chips && (
-                <div className="relative z-10 flex shrink-0 items-center gap-1.5">{chips}</div>
-              )}
-              {editable && <PencilButton name={name} onClick={() => setFlipped(true)} />}
-            </>
-          ) : (
-            <>
-              <div className="flex min-w-0 items-start gap-2">
+          <div
+            className={cn(
+              "flex min-w-0 flex-1",
+              variant === "row" ? "items-center gap-2 p-3" : "flex-col gap-1.5 p-4"
+            )}
+          >
+            {variant === "row" ? (
+              <>
                 <button
                   type="button"
                   onClick={onOpen}
                   disabled={!onOpen || disabled}
                   className={cn(
                     OPEN,
-                    "flex min-w-0 flex-1 items-start gap-2 text-left disabled:cursor-not-allowed"
+                    "flex min-w-0 flex-1 items-center gap-2 text-left disabled:cursor-not-allowed"
                   )}
                 >
                   {main}
                 </button>
+                {chips && (
+                  <div className="relative z-10 flex shrink-0 items-center gap-1.5">{chips}</div>
+                )}
                 {editable && <PencilButton name={name} onClick={() => setFlipped(true)} />}
-              </div>
-              {chips && (
-                <div className="relative z-10 mt-auto flex flex-wrap items-center gap-1.5">
-                  {chips}
+              </>
+            ) : (
+              <>
+                <div className="flex min-w-0 items-start gap-2">
+                  <button
+                    type="button"
+                    onClick={onOpen}
+                    disabled={!onOpen || disabled}
+                    className={cn(
+                      OPEN,
+                      "flex min-w-0 flex-1 items-start gap-2 text-left disabled:cursor-not-allowed"
+                    )}
+                  >
+                    {main}
+                  </button>
+                  {editable && <PencilButton name={name} onClick={() => setFlipped(true)} />}
                 </div>
-              )}
-            </>
-          )}
+                {chips && (
+                  <div className="relative z-10 mt-auto flex flex-wrap items-center gap-1.5">
+                    {chips}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          {family && <FamilyStrip members={family} />}
         </div>
 
         {/* Back — mounted only while flipped, so the draft cannot go stale. */}
@@ -211,6 +231,38 @@ export default function DatasetCard({
         </div>
       </div>
     </Card>
+  );
+}
+
+/**
+ * The other datasets of this one's family, as the books page's companions
+ * sub-toolbar draws them: a label and one chip per sibling, on one line that
+ * scrolls sideways when a family is wide. The chips carry the type's glyph only
+ * (the sub-toolbar does the same), so a family of four still fits.
+ *
+ * `z-10` puts the strip above the open button's stretching overlay, which is
+ * what lets it scroll at all: under the overlay the wheel would land on the
+ * button. The price is that the strip is not an open target — it reads as a band
+ * of its own, like the sub-toolbar it copies.
+ */
+function FamilyStrip({ members }: { members: FamilyMember[] }) {
+  return (
+    <div className="no-scrollbar relative z-10 flex shrink-0 items-center gap-1.5 overflow-x-auto border-t border-border-default px-3 py-1.5">
+      <span className="shrink-0 text-xs text-text-tertiary">Family</span>
+      {members.map((member) => {
+        const Icon = DATASET_TYPE_ICONS[member.dataset_type];
+        return (
+          <span
+            key={member.uuid}
+            title={`${familyTypeLabel(member.dataset_type)} · ${member.name}`}
+            className={cn(btnSmSecondary, "flex shrink-0 items-center gap-1.5")}
+          >
+            <Icon size={13} className="shrink-0 opacity-70" aria-hidden />
+            <span className="max-w-[140px] truncate">{member.name}</span>
+          </span>
+        );
+      })}
+    </div>
   );
 }
 

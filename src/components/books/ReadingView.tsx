@@ -2,9 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, Check, Library, X } from "lucide-react";
+import { DATASET_TYPE_ICONS } from "@/lib/datasets/types";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import type { useBookData } from "@/hooks/useBookData";
+import { useDatasetSiblings } from "@/hooks/useDatasetSiblings";
 import { DatasetCard } from "@/components/ui/dataset";
 import ParagraphList from "./ParagraphList";
 import SentenceDrawer from "./SentenceDrawer";
@@ -42,6 +44,10 @@ export default function ReadingView({ b }: Props) {
   // Reading-pane scroll container — the scroll-spy root and the split's left column.
   const leftRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
+
+  // Each book's family, for the row's bottom strip. Read at this level because
+  // the list is what has the ids; the level below shows one book, not a family.
+  const siblings = useDatasetSiblings(b.books.map((book) => book.uuid));
 
   // A sentence focus reached by keyboard walking scrolls its line back into
   // view; a click needs no help, so the click road leaves the flag unset.
@@ -143,10 +149,11 @@ export default function ReadingView({ b }: Props) {
               <DatasetCard
                 key={book.uuid}
                 variant="row"
-                icon={BookOpen}
+                icon={DATASET_TYPE_ICONS.book}
                 name={book.name}
                 description={book.description}
                 language={book.language || undefined}
+                siblings={siblings[book.uuid]}
                 onOpen={() => b.setBookUUID(book.uuid)}
                 onSave={async (patch) => {
                   await invoke("dataset_update", { uuid: book.uuid, ...patch });

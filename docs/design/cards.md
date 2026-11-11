@@ -74,8 +74,9 @@ user edits stays the object they clicked. The mechanism lives with its first
 consumer, `DatasetCard`; promote it to `ui/card` when a second family needs it.
 
 - The two faces are absolutely positioned inside a `preserve-3d` wrapper that
-  rotates 180°; the wrapper's height transitions between two fixed per-density
-  tokens, so nothing is measured at runtime.
+  rotates 180°; the wrapper's height transitions between fixed per-density
+  tokens, so nothing is measured at runtime. A third token per density covers a
+  front that carries a family strip (see below).
 - Because both faces are absolute, the wrapper's min-content height is 0: it
   carries `shrink-0`, or any flex column that lists the cards squashes every row
   to a few pixels (the Read Aloud list lost its padding and clipped its names
@@ -84,6 +85,25 @@ consumer, `DatasetCard`; promote it to `ui/card` when a second family needs it.
 - Entry is a pencil on the front; Esc cancels, Enter submits, a failed save keeps
   the back face open with an inline error.
 - `prefers-reduced-motion` drops the rotation and keeps the cross-fade.
+
+## The Family strip
+
+A dataset card ends with the other datasets of its family — the siblings the
+`<type>_<family key>` ids relate — in a strip that is the books page's
+companions sub-toolbar, moved to the card's bottom edge: the same `px-3 py-1.5`,
+the same `Family` label in `text-xs text-text-tertiary`, the same `btnSmSecondary`
+chip with the type's glyph and the sibling's name on one line that scrolls
+sideways. Both densities carry it; only the label and the chips live in the card,
+because the strip *is* the card's (a page that has a family to show passes the
+members, not rows of its own).
+
+The strip sits above the open button's stretching overlay (`z-10`), which is what
+lets it scroll at all — under the overlay the wheel lands on the button. The
+price is that the strip is not an open target: it reads as a band of its own,
+which is how the sub-toolbar it copies reads too.
+
+A page that has no family to show passes nothing, and the card keeps its short
+height rather than reserving a strip for an empty family.
 
 ## Related
 

@@ -8,7 +8,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore, useLayoutEffect } from "react";
 
 import { ProgressCircle, Select, ListBox, Label, Button, Tooltip } from "@heroui/react";
-import { Trash2, Target, CheckCircle, FolderOpen, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown, Captions, Headphones } from "lucide-react";
+import { Trash2, Target, CheckCircle, FolderOpen, Folder, Link2, Pencil, Save, HelpCircle, ChevronsDownUp, ChevronsUpDown, ArrowUp, ArrowDown, Captions } from "lucide-react";
 import CueEditor from "./components/CueEditor";
 import WaveformCanvas from "./components/WaveformCanvas";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
@@ -16,10 +16,11 @@ import { FAVORITES_DATASET_UUID, type Cue } from "@/lib/types";
 import { useDictationData } from "@/hooks/useDictationData";
 import { usePageRefresh } from "@/lib/refresh/page-refresh";
 import { useDatasetFamily } from "@/hooks/useDatasetFamily";
+import { useDatasetSiblings } from "@/hooks/useDatasetSiblings";
 import { openDatasetInTab } from "@/lib/nav/open-in-tab";
 import type { TabId } from "@/lib/shell/tabs";
 import { isAudio } from "@/lib/listen/utils";
-import { datasetStatusLabel, datasetStatusBadgeClasses, type DatasetStatus } from "@/lib/datasets/types";
+import { datasetStatusLabel, datasetStatusBadgeClasses, DATASET_TYPE_ICONS, type DatasetStatus } from "@/lib/datasets/types";
 import { tbGhost } from "@/lib/ui/toolbar";
 import {
     Toolbar,
@@ -264,6 +265,8 @@ export default function DictationPage({ active = true, onNavigate }: { active?: 
 
     // Group ready datasets by their root location for the datasets view.
     type DatasetItem = (typeof d.datasets)[number];
+    // Each listed dataset's family, for the row's bottom strip.
+    const siblings = useDatasetSiblings(d.datasets.map((ds) => ds.info.uuid));
     const datasetsByLocation = useMemo(() => {
         const map = new Map<string, DatasetItem[]>();
         for (const ds of d.datasets) {
@@ -288,9 +291,10 @@ export default function DictationPage({ active = true, onNavigate }: { active?: 
             <DatasetCard
                 key={ds.path}
                 variant="row"
-                icon={Headphones}
+                icon={DATASET_TYPE_ICONS.dictation}
                 name={ds.info.name}
                 description={ds.info.description}
+                siblings={siblings[ds.info.uuid]}
                 readOnly={ds.is_read_only}
                 disabled={!ready}
                 title={ready ? undefined : "Not ready — generate the database in the Workflow page first"}

@@ -19,11 +19,11 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
-import { BookMarked, Copy, Headphones, Mic, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 
 import { isTauri } from "@/lib/tauri";
 import { logError } from "@/lib/logger";
-import { btnSm, btnSmSecondary } from "@/lib/datasets/types";
+import { btnSm, btnSmSecondary, DATASET_TYPE_ICONS } from "@/lib/datasets/types";
 import { familyMember, type DatasetTypeSlug } from "@/lib/datasets/family";
 import { useDatasetFamily } from "@/hooks/useDatasetFamily";
 import { openDatasetInTab } from "@/lib/nav/open-in-tab";
@@ -31,11 +31,12 @@ import type { TabId } from "@/lib/shell/tabs";
 
 /** One companion slot: what to call it, which page owns it, and how to make one.
  *  The `book` type is absent because the book is the anchor, not its own
- *  companion. Order is the order the chips render in. */
+ *  companion. Order is the order the chips render in; the glyph is the type's
+ *  own, from `DATASET_TYPE_ICONS`, so the chip cannot drift from the card it
+ *  opens. */
 interface CompanionDef {
   slug: DatasetTypeSlug;
   label: string;
-  icon: typeof Headphones;
   tab: TabId;
   /** The page's "open this dataset" UI action, run after the tab is opened. */
   action: string;
@@ -47,7 +48,6 @@ const COMPANIONS: readonly CompanionDef[] = [
   {
     slug: "dictation",
     label: "Dictation",
-    icon: Headphones,
     tab: "dictation",
     action: "dictation.open-dataset",
     command: "dataset_create",
@@ -55,7 +55,6 @@ const COMPANIONS: readonly CompanionDef[] = [
   {
     slug: "card",
     label: "Cards",
-    icon: Copy,
     tab: "cards",
     action: "cards.select-dataset",
     command: "card_dataset_create",
@@ -63,7 +62,6 @@ const COMPANIONS: readonly CompanionDef[] = [
   {
     slug: "read_aloud",
     label: "Read Aloud",
-    icon: Mic,
     tab: "read-aloud",
     action: "read-aloud.open-dataset",
     command: "read_aloud_create",
@@ -71,7 +69,6 @@ const COMPANIONS: readonly CompanionDef[] = [
   {
     slug: "wiki",
     label: "Wiki",
-    icon: BookMarked,
     tab: "wiki",
     action: "wiki.open-dataset",
     command: "wiki_dataset_create",
@@ -138,7 +135,7 @@ export default function CompanionsStrip({ bookUuid, bookName, onNavigate }: Comp
       <span className="text-xs text-text-tertiary shrink-0">Companions</span>
       {COMPANIONS.map((def) => {
         const member = familyMember(report, def.slug);
-        const Icon = def.icon;
+        const Icon = DATASET_TYPE_ICONS[def.slug];
         if (member) {
           return (
             <button

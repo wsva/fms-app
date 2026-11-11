@@ -7,6 +7,7 @@ import { useIsActiveTab, usePageRefresh } from "@/lib/refresh/page-refresh";
 import { clearDatasetUuid, getUiContext, setUiContext } from "@/lib/agent/ui-context";
 import { useDatasetFamily } from "@/hooks/useDatasetFamily";
 import { openDatasetInTab } from "@/lib/nav/open-in-tab";
+import { DATASET_TYPE_ICONS } from "@/lib/datasets/types";
 // Aliased: this file already has its own `TabId` for the cards/review/tags modes.
 import type { TabId as ShellTabId } from "@/lib/shell/tabs";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -38,6 +39,7 @@ import type {
   CrossDatasetCard,
 } from "@/lib/types";
 import { isMobileApp, isTauri } from "@/lib/platform";
+import { useDatasetSiblings } from "@/hooks/useDatasetSiblings";
 import { LocationsManager } from "@/components/ui/LocationsManager";
 import PromptDialog from "@/components/ui/PromptDialog";
 import { DatasetCard, JoinFamilyDialog } from "@/components/ui/dataset";
@@ -262,6 +264,10 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
 
   // The dataset whose "Join family" picker is open, from its edit view.
   const [joining, setJoining] = useState<CardDatasetSummary | null>(null);
+
+  // Each listed dataset's family, for the cards' bottom strip. A grid asks about
+  // all of them at once — a per-card read would re-walk every root per card.
+  const siblings = useDatasetSiblings(datasets.map((d) => d.info.uuid));
 
   // Deferred platform flag (SSR-safe) for collapsing toolbar button labels on mobile.
   const [mobile, setMobile] = useState(false);
@@ -1538,7 +1544,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
                 <DatasetCard
                   key={ds.info.uuid}
                   variant="card"
-                  icon={Layers}
+                  icon={DATASET_TYPE_ICONS.card}
                   name={ds.info.name}
                   description={ds.info.description}
                   visibility={ds.info.sharing.visibility}
@@ -1557,6 +1563,7 @@ export default function CardsPage({ onNavigate }: { onNavigate: (tab: ShellTabId
                     await loadDatasets();
                   }}
                   onJoinFamily={() => setJoining(ds)}
+                  siblings={siblings[ds.info.uuid]}
                   chips={
                     <span
                       className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${

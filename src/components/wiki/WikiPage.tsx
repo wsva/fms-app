@@ -7,11 +7,13 @@ import { openPath } from "@tauri-apps/plugin-opener";
 import { emit } from "@tauri-apps/api/event";
 import {
   RefreshCw, ArrowLeft, ArrowRight, Cloud, Download, Pencil, Eye,
-  Folder, FolderOpen, FileText, BookOpenText, FilePlus, FolderPlus, Plus, Trash2,
+  Folder, FolderOpen, FileText, FilePlus, FolderPlus, Plus, Trash2,
   Save, CircleHelp, Search, ExternalLink, List, Lock,
 } from "lucide-react";
 import { useIsActiveTab, usePageRefresh } from "@/lib/refresh/page-refresh";
+import { DATASET_TYPE_ICONS } from "@/lib/datasets/types";
 import { useAgentActions, reqStr } from "@/lib/agent/ui-actions";
+import { useDatasetSiblings } from "@/hooks/useDatasetSiblings";
 import { clearDocIfOwned, setUiContext } from "@/lib/agent/ui-context";
 import WikiSearch from "./WikiSearch";
 import WikiTranslate from "./WikiTranslate";
@@ -699,6 +701,10 @@ export default function WikiPage() {
 
   // Sidebar dataset tree source: hub datasets while browsing, else local.
   const treeDatasets = hubMode ? hubDatasets : localDatasets;
+
+  // Each listed dataset's family, for the row's bottom strip. A hub dataset is a
+  // remote browse with no local `info.json`, so it answers with no siblings.
+  const siblings = useDatasetSiblings(treeDatasets.map((ds) => ds.uuid));
 
   // Search is scoped to a dataset: the open file's dataset, else the one being
   // browsed. Null (search disabled) when no dataset is in context.
@@ -1618,9 +1624,10 @@ export default function WikiPage() {
                         key={ds.uuid}
                         variant="row"
                         // Same glyph as the sidebar's Wiki menu entry.
-                        icon={BookOpenText}
+                        icon={DATASET_TYPE_ICONS.wiki}
                         name={ds.name}
                         description={ds.description ?? ""}
+                        siblings={siblings[ds.uuid]}
                         title={ds.path}
                         onOpen={() => goToDatasetDir(ds.uuid, "")}
                         // The built-in manual is app content, not user data: badge

@@ -13,7 +13,10 @@ type MicGlyphProps = {
  * The app's microphone glyph: lucide's `Rss` icon rotated 45deg clockwise
  * (a positive CSS angle is clockwise) around its center. Used everywhere a
  * microphone is depicted — recording buttons, the Read Aloud nav entry, and
- * the Microphone settings section — so the metaphor stays consistent.
+ * the Microphone settings section — so the metaphor stays consistent. It is
+ * also the Read Aloud dataset type's glyph, through
+ * `DATASET_TYPE_ICONS.read_aloud` in `@/lib/datasets/types`, so a dataset card,
+ * a workflow tile, a family chip and the nav entry draw the same picture.
  *
  * Accepts the same `size` / `width` / `height` / `className` props lucide
  * icons do, so it drops into both direct JSX (`<MicGlyph size={16} />`) and

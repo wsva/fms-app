@@ -2,7 +2,7 @@
 //! the configured locations, import/update/delete, and the base/overlay layer
 //! handover.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -488,8 +488,9 @@ pub struct FamilyCandidate {
 /// A family spans types by definition, so this walks every type's roots. The
 /// directory stays the routing authority, exactly as in
 /// [`find_dataset_dir_typed`]: a dataset declaring a type other than the tree it
-/// sits in is skipped rather than trusted.
-fn every_dataset(settings: &SettingsState) -> Vec<(DatasetInfo, DatasetType)> {
+/// sits in is skipped rather than trusted. The directory comes back with each row
+/// because a [`FamilyMember`] carries it and the batch reader below needs it.
+fn every_dataset(settings: &SettingsState) -> Vec<(DatasetInfo, DatasetType, PathBuf)> {
     let mut out = Vec::new();
     for ty in DatasetType::ALL {
         for root in dataset_roots(settings, ty) {
@@ -503,13 +504,13 @@ fn every_dataset(settings: &SettingsState) -> Vec<(DatasetInfo, DatasetType)> {
                 if info.uuid.is_empty() || info.dataset_type != ty {
                     continue;
                 }
-                out.push((info, ty));
+                out.push((info, ty, path));
             }
         }
     }
     // Root order puts a writable copy before its downloaded base, so keeping the
     // first hides the base behind the copy it was forked into.
-    dedup_by_uuid_first(out, |(info, _)| info.uuid.as_str())
+    dedup_by_uuid_first(out, |(info, ..)| info.uuid.as_str())
 }
 
 /// The families `uuid`'s dataset could join.
@@ -527,7 +528,7 @@ pub(crate) fn family_candidates(
     let own_key = family_of(uuid).map(str::to_string);
 
     let mut groups: BTreeMap<String, Vec<(DatasetType, DatasetInfo)>> = BTreeMap::new();
-    for (info, found) in every_dataset(settings) {
+    for (info, found, _path) in every_dataset(settings) {
         if info.uuid == uuid {
             continue;
         }
@@ -674,6 +675,49 @@ pub async fn dataset_join_family(
     target_uuid: String,
 ) -> Result<DatasetInfo, String> {
     join_family(&settings, &uuid, &target_uuid)
+}
+
+/// The *other* members of each dataset's family, keyed by the id that was asked
+/// about, for a listing that shows every dataset at once (a grid of cards).
+///
+/// [`family_report`] answers one dataset — or a bare key — and a per-card call
+/// would re-walk every root for each one, so this reads the disk once. A dataset
+/// with no family key, or an id this scan cannot find, maps to an empty list:
+/// a family of one has no siblings to list.
+pub(crate) fn family_siblings(
+    settings: &SettingsState,
+    uuids: &[String],
+) -> HashMap<String, Vec<FamilyMember>> {
+    let all = every_dataset(settings);
+    uuids
+        .iter()
+        .map(|uuid| {
+            let siblings: Vec<FamilyMember> = all
+                .iter()
+                .find(|(info, ..)| info.uuid == *uuid)
+                .and_then(|(info, ..)| family_of(&info.uuid))
+                .map(|key| {
+                    all.iter()
+                        // `DatasetType::ALL` order, the same one `members_of`
+                        // yields, so siblings keep a stable sequence.
+                        .filter(|(info, ..)| info.uuid != *uuid && family_of(&info.uuid) == Some(key))
+                        .map(|(info, ty, path)| member_of(settings, info, *ty, path))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (uuid.clone(), siblings)
+        })
+        .collect()
+}
+
+/// The other datasets sharing this one's family key. A batch of [`dataset_family`]
+/// for surfaces that list many datasets.
+#[tauri::command]
+pub async fn dataset_family_siblings(
+    settings: State<'_, SettingsState>,
+    uuids: Vec<String>,
+) -> Result<HashMap<String, Vec<FamilyMember>>, String> {
+    Ok(family_siblings(&settings, &uuids))
 }
 
 /// Layer / read-only status of a dataset, for status-before-acting checks
@@ -945,5 +989,30 @@ mod tests {
             family_candidates(&settings, "f00d").unwrap().is_empty(),
             "a family that cannot take the dataset is not offered"
         );
+    }
+
+    /// The grid's batch read: every id asked about answers, the answer holds the
+    /// *other* members only, and an id with no family — or no directory — answers
+    /// empty rather than missing, so the caller needs no special case.
+    #[test]
+    fn siblings_list_the_other_members_only() {
+        let (settings, _dir) = temp_settings("siblings");
+        put(&settings, DatasetType::Book, "the book", "book_abcd1234ef01", "The book");
+        put(&settings, DatasetType::Card, "the deck", "card_abcd1234ef01", "The deck");
+        put(&settings, DatasetType::Dictation, "audio", "dictation_abcd1234ef01", "The audio");
+        let lonely = "b76a0a93-20e0-4d1a-bd16-ab6f18197952";
+        put(&settings, DatasetType::Card, "lonely", lonely, "Lonely deck");
+
+        let got = family_siblings(
+            &settings,
+            &["card_abcd1234ef01".to_string(), lonely.to_string(), "nope".to_string()],
+        );
+        let names: Vec<&str> = got["card_abcd1234ef01"]
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["The audio", "The book"], "DatasetType::ALL order, self left out");
+        assert!(got[lonely].is_empty(), "a family of one has no siblings");
+        assert!(got["nope"].is_empty(), "an id the scan cannot find answers empty");
     }
 }

@@ -22,9 +22,9 @@ import {
   X,
   Loader2,
   Languages,
-  Mic,
   Copy,
 } from "lucide-react";
+import { MicGlyph } from "@/components/voice/MicGlyph";
 import MarkdownViewer from "@/components/wiki/markdown/markdown";
 import ArtifactGenerateButton from "./ArtifactGenerateButton";
 import AgentJobCard, { JobStatusChip } from "./AgentJobCard";
@@ -218,7 +218,7 @@ export default function UnderstandingPanel({ b }: Props) {
               className="p-1 rounded text-text-secondary hover:bg-bg-hover disabled:opacity-40 cursor-pointer"
               onClick={b.recorder.toggle}
             >
-              <Mic size={12} />
+              <MicGlyph size={12} />
             </button>
             <button
               title="Delete this sentence"
@@ -379,7 +379,7 @@ function EditSection({ b }: { b: ReturnType<typeof useBookData> }) {
           className="flex items-center gap-1 px-2 py-1 rounded text-sm text-text-secondary hover:bg-bg-hover disabled:opacity-40 cursor-pointer"
           onClick={b.recorder.toggle}
         >
-          <Mic size={14} />
+          <MicGlyph size={14} />
           {b.recorder.recording
             ? "Listening…"
             : b.recorder.processing || b.recorder.preparing

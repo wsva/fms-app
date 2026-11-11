@@ -27,7 +27,7 @@ import {
   LayoutGrid,
   FileDown,
 } from "lucide-react";
-import { MicGlyph } from "@/components/voice/MicGlyph";
+import { DATASET_TYPE_ICONS } from "@/lib/datasets/types";
 import { emit } from "@tauri-apps/api/event";
 import MdEditor from "@/components/wiki/MdEditor";
 import NormalizeActions from "./NormalizeActions";
@@ -48,6 +48,7 @@ import { clearDocIfOwned, setUiContext } from "@/lib/agent/ui-context";
 import { DatasetCard } from "@/components/ui/dataset";
 import { useAgentActions, reqStr } from "@/lib/agent/ui-actions";
 import { useDatasetFamily } from "@/hooks/useDatasetFamily";
+import { useDatasetSiblings } from "@/hooks/useDatasetSiblings";
 import { openDatasetInTab } from "@/lib/nav/open-in-tab";
 import type { TabId } from "@/lib/shell/tabs";
 import { useAssessAgain, textReference } from "@/components/read_aloud/useAssessAgain";
@@ -183,6 +184,9 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
   const [selectedDataset, setSelectedDataset] = useState<string>("");
   const [texts, setTexts] = useState<ReadText[]>([]);
   const [selectedText, setSelectedText] = useState<string | null>(null);
+
+  // Each listed dataset's family, for the row's bottom strip.
+  const siblings = useDatasetSiblings(datasets.map((d) => d.uuid));
 
   // `isMobileApp()` is false during prerender (no navigator) and only turns true
   // inside the webview, so resolve it in an effect to avoid a hydration mismatch.
@@ -1589,11 +1593,12 @@ export default function ReadAloudPage({ onNavigate }: { onNavigate: (tab: TabId)
               <DatasetCard
                 key={d.uuid}
                 variant="row"
-                // The app-wide microphone glyph, same as the sidebar's Read Aloud menu icon.
-                icon={MicGlyph}
+                // The type's glyph, same as the sidebar's Read Aloud menu icon.
+                icon={DATASET_TYPE_ICONS.read_aloud}
                 name={d.name}
                 description={d.description}
                 language={d.language || undefined}
+                siblings={siblings[d.uuid]}
                 title={d.path}
                 onOpen={() => {
                   setSelectedDataset(d.uuid);

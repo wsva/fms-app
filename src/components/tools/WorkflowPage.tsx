@@ -53,9 +53,10 @@ import type { CardDatasetSummary } from "@/lib/types";
 import {
   RefreshCw, Workflow as WorkflowIcon, Play, RotateCcw, SkipForward, Check, Copy, Plus,
   FileJson, Save, Eye, Pencil, FolderOpen, Trash2, X, ListChecks,
-  Headphones, BookOpen, Layers, Mic, AlertTriangle, ChevronDown, ChevronRight, Info,
+  AlertTriangle, ChevronDown, ChevronRight, Info,
   type LucideIcon,
 } from "lucide-react";
+import { DATASET_TYPE_ICONS, type DatasetTypeIcon } from "@/lib/datasets/types";
 
 // react-flow touches browser layout APIs on mount; keep it out of the SSG pass.
 const WorkflowGraph = dynamic(() => import("./WorkflowGraph"), { ssr: false });
@@ -191,26 +192,26 @@ type WorkflowCategory = "dictation" | "book" | "read_aloud" | "card";
 
 const KIND_ORDER: WorkflowCategory[] = ["dictation", "book", "read_aloud", "card"];
 
-const KIND_META: Record<WorkflowCategory, { label: string; blurb: string; icon: LucideIcon }> = {
+const KIND_META: Record<WorkflowCategory, { label: string; blurb: string; icon: DatasetTypeIcon }> = {
   dictation: {
     label: "Dictation",
     blurb: "Import a raw folder, generate subtitles / waveforms / the cue DB, then align and adjust cue times.",
-    icon: Headphones,
+    icon: DATASET_TYPE_ICONS.dictation,
   },
   book: {
     label: "Book",
     blurb: "Create a book, author chapters / sentences, attach audio, build the vocabulary. Agent-facing.",
-    icon: BookOpen,
+    icon: DATASET_TYPE_ICONS.book,
   },
   read_aloud: {
     label: "Read aloud",
     blurb: "Import texts from a book you extracted, probe one clip for a human to listen to, then fill in the rest. Agent-facing.",
-    icon: Mic,
+    icon: DATASET_TYPE_ICONS.read_aloud,
   },
   card: {
     label: "Card",
     blurb: "Create a card dataset, author cards / tags, rebuild the full-text index, sync online. Agent-facing.",
-    icon: Layers,
+    icon: DATASET_TYPE_ICONS.card,
   },
 };
 

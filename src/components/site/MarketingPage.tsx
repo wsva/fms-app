@@ -11,16 +11,12 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Headphones,
-  BookOpen,
-  Layers,
-  Mic,
-  NotebookPen,
   Bot,
   Code2,
   ArrowRight,
   ShieldCheck,
 } from "lucide-react";
+import { DATASET_TYPE_ICONS, type DatasetTypeIcon } from "@/lib/datasets/types";
 import { isTauri } from "@/lib/platform";
 import { useLocale, LOCALES, type DictKey } from "@/lib/i18n";
 import DownloadSection from "./DownloadSection";
@@ -36,17 +32,20 @@ const MANUAL_URL = `${REPO_URL}/blob/main/docs/manual`;
 const useIsomorphicLayoutEffect =
   typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
+// The five dataset tiles take their glyph from `DATASET_TYPE_ICONS` — the same
+// map the sidebar and the dataset cards read — so the landing page can never
+// advertise a type with a picture the app does not use for it.
 const FEATURES: {
   titleKey: DictKey;
   descKey: DictKey;
-  icon: typeof Headphones;
+  icon: DatasetTypeIcon;
   learn: string;
 }[] = [
-  { titleKey: "features.dictation.title", descKey: "features.dictation.desc", icon: Headphones, learn: "dictation.md" },
-  { titleKey: "features.books.title", descKey: "features.books.desc", icon: BookOpen, learn: "books.md" },
-  { titleKey: "features.readaloud.title", descKey: "features.readaloud.desc", icon: Mic, learn: "read_aloud.md" },
-  { titleKey: "features.cards.title", descKey: "features.cards.desc", icon: Layers, learn: "cards.md" },
-  { titleKey: "features.wiki.title", descKey: "features.wiki.desc", icon: NotebookPen, learn: "wiki.md" },
+  { titleKey: "features.dictation.title", descKey: "features.dictation.desc", icon: DATASET_TYPE_ICONS.dictation, learn: "dictation.md" },
+  { titleKey: "features.books.title", descKey: "features.books.desc", icon: DATASET_TYPE_ICONS.book, learn: "books.md" },
+  { titleKey: "features.readaloud.title", descKey: "features.readaloud.desc", icon: DATASET_TYPE_ICONS.read_aloud, learn: "read_aloud.md" },
+  { titleKey: "features.cards.title", descKey: "features.cards.desc", icon: DATASET_TYPE_ICONS.card, learn: "cards.md" },
+  { titleKey: "features.wiki.title", descKey: "features.wiki.desc", icon: DATASET_TYPE_ICONS.wiki, learn: "wiki.md" },
   { titleKey: "features.agent.title", descKey: "features.agent.desc", icon: Bot, learn: "agents.md" },
 ];
 

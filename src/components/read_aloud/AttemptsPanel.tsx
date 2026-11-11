@@ -9,12 +9,12 @@ import {
   History,
   ChevronRight,
   Loader2,
-  Mic,
   RefreshCw,
   Award,
   AudioLines,
 } from "lucide-react";
 import type { ReadAttempt, ReadText, StandardAudioAssessment } from "@/lib/read_aloud/types";
+import { MicGlyph } from "@/components/voice/MicGlyph";
 import { assessStandardAudio } from "@/lib/read_aloud/standardAudio";
 import { textReference, type AssessAgain } from "@/components/read_aloud/useAssessAgain";
 import ConfirmDialog, { type ConfirmRequest } from "@/components/books/ConfirmDialog";
@@ -761,7 +761,7 @@ export default function AttemptsPanel({
 
             {attempts.length === 0 ? (
               <div className="flex flex-col items-center gap-1.5 p-8 rounded-xl border border-dashed border-border-default text-center">
-                <Mic size={20} className="text-text-tertiary" />
+                <MicGlyph size={20} className="text-text-tertiary" />
                 <p className="text-sm text-text-secondary">No attempts yet</p>
                 <p className="text-xs text-text-tertiary max-w-sm break-words">
                   Record yourself reading in the practice view. Every take is scored on
